@@ -316,6 +316,32 @@ fn named_with_expressions_and_parenthesized_variables_preserve_results() {
     assert_eq!(implicit.canonical_bytes(), explicit.canonical_bytes());
 }
 
+/// IS [NOT] NULL over a vertex binding, in a graph RETURN and over a carried
+/// WITH column, observes only whether the element is NULL (TCK Return3 [1]).
+#[test]
+fn a_vertex_binding_answers_is_null() {
+    let values = [1, 2, 2, 3].map(CanonicalScalar::Int);
+    for (text, expected) in [
+        ("MATCH (n) RETURN n IS NOT NULL AS present", true),
+        ("MATCH (n) RETURN n IS NULL AS absent", false),
+        (
+            "MATCH (n) WITH n RETURN n IS NULL OR n.p > 9 AS absent",
+            false,
+        ),
+    ] {
+        let query = prepare(text);
+        let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+        assert_eq!(rows.len(), 4, "{text}");
+        for row in &rows {
+            assert_eq!(
+                row.get(0).unwrap().as_scalar(),
+                Some(&CanonicalScalar::Bool(expected)),
+                "{text}"
+            );
+        }
+    }
+}
+
 /// An UNWIND right after MATCH or WITH reads the carried vertex's properties
 /// through the same hidden boundary columns as a WITH's own scope. They end
 /// right after the UNWIND, which keeps its unwound column (TCK Graph8 reads

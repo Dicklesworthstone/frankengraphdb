@@ -795,6 +795,41 @@ fn implicit_optional_grouping_keeps_null_extended_rows() {
     }
 }
 
+/// `r IS NULL` over an OPTIONAL edge is a computed key: rows group by
+/// whether the edge matched, not by the edge (TCK Match7 [29] to [31]).
+#[test]
+fn an_optional_element_null_test_groups_by_its_boolean() {
+    use fgdb_gql::GraphAggregateValue;
+
+    let result = prepare(
+        "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) \
+         RETURN r IS NULL AS unmatched, COUNT(*) AS rows ORDER BY unmatched",
+    )
+    .execute_governed(
+        4,
+        [VId(1), VId(2), VId(3)],
+        [(VId(1), RelationId(1), VId(2))],
+        |_, _| Ok::<_, ()>(true),
+        |_, _| Ok(None),
+        policy(),
+        || Ok::<_, ()>(()),
+    )
+    .unwrap();
+    assert_eq!(result.value.len(), 2);
+    for (row, (unmatched, rows)) in result.value.iter().zip([(false, 1), (true, 2)]) {
+        let cells: Vec<_> = (row.keys().iter().cloned().map(GraphAggregateValue::Value))
+            .chain(row.values().iter().cloned())
+            .collect();
+        assert_eq!(
+            cells,
+            vec![
+                GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(unmatched))),
+                GraphAggregateValue::Count(rows),
+            ]
+        );
+    }
+}
+
 /// ORDER BY sorts the rows RETURN produces and never groups them (openCypher
 /// InvalidAggregation, TCK ReturnOrderBy2 [14]). An aggregate only in ORDER
 /// BY is refused at its own offset, before any catalog access. GROUP BY,

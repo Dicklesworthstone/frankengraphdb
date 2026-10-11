@@ -1699,6 +1699,8 @@ impl<'a> Parser<'a> {
             .map_err(expression_error)?;
             self.read_value_template(operand, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
+            // `n IS NULL` is a scalar predicate over the element, which the
+            // scalar compiler reads (element_null_operand).
             let bare = matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
                     && (self.syntax.variables.iter().any(|name| name.text == word)
@@ -1707,7 +1709,9 @@ impl<'a> Parser<'a> {
                 && !matches!(
                     self.lexer.clone().next()?.kind,
                     TokenKind::Punct(b'.' | b'(')
-                );
+                )
+                && !matches!(self.lexer.clone().next()?.kind,
+                    TokenKind::Word(next) if next.eq_ignore_ascii_case("IS"));
             if bare {
                 let variable = self.any_variable()?;
                 ReadValueTemplate::Column(self.mutation_projection(columns, variable, None)?)

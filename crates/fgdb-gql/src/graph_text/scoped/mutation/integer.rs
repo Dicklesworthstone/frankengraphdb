@@ -1262,6 +1262,9 @@ impl<'a> Parser<'a> {
                 at,
             );
         }
+        if self.element_null_operand(columns, program, at)? {
+            return Ok(());
+        }
         let operand = match columns {
             ExpressionColumns::Graph(columns) => self.mutation_operand(columns)?,
             ExpressionColumns::Row(schema) => self.row_operand(schema)?,
@@ -1271,6 +1274,65 @@ impl<'a> Parser<'a> {
             },
         };
         emit(program, ParsedOp::Atom(operand, at), at)
+    }
+
+    /// The operand of `x IS [NOT] NULL` when `x` names a vertex or edge
+    /// (openCypher `RETURN a IS NOT NULL`, `s IS NULL` for an OPTIONAL edge).
+    /// The element itself never enters the scalar stack: its identity column
+    /// stands in, as text so a wide identity cannot overflow, and the IS NULL
+    /// test the caller applies next consumes it, so only NULL-ness is ever
+    /// observed. False, with nothing consumed, when the operand here is not
+    /// such a binding. Out of line: integer_unary repeats once per nested
+    /// parenthesis.
+    #[inline(never)]
+    fn element_null_operand(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        if self.elements.contains(&word)
+            || !matches!(self.lexer.clone().next()?.kind,
+                TokenKind::Word(next) if next.eq_ignore_ascii_case("IS"))
+        {
+            return Ok(false);
+        }
+        let graph = self.syntax.variables.iter().any(|name| name.text == word)
+            || self.syntax.visible_edge(word).is_some();
+        let column = match columns {
+            ExpressionColumns::Graph(columns) if graph => {
+                let variable = self.any_variable()?;
+                self.mutation_projection(columns, variable, None)?
+            }
+            ExpressionColumns::Row(schema) => {
+                let visible = self.visible_width(schema);
+                let Some(column) = schema[..visible].iter().position(|(name, kind)| {
+                    name.text == word
+                        && matches!(
+                            kind,
+                            crate::GraphSetColumnType::Vertex | crate::GraphSetColumnType::Edge
+                        )
+                }) else {
+                    return Ok(false);
+                };
+                self.advance()?;
+                column
+            }
+            ExpressionColumns::Resolved(resolve) if graph => match resolve(self)? {
+                Some(column) => column,
+                None => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        emit(
+            program,
+            ParsedOp::Bound(GraphIntegerOp::IdentityColumn { column, text: true }),
+            at,
+        )?;
+        Ok(true)
     }
 
     pub(super) fn row_operand(

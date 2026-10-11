@@ -599,4 +599,30 @@ fn a_leading_optional_match_returns_whole_predicate_items() {
         found.contains(&flags(&[Some(false), Some(true)])),
         "{found:?}"
     );
+    // IS [NOT] NULL over the optional element itself (TCK Match7 [29] to
+    // [31], Return3 [1]): only its NULL-ness is observed.
+    assert_eq!(
+        rows("OPTIONAL MATCH (a {score: 70}) RETURN a IS NULL AS absent, a IS NOT NULL AS present"),
+        vec![flags(&[Some(true), Some(false)])]
+    );
+    // Vertex 4 has no outgoing R: its NULL-extended row's edge is NULL.
+    let scored = |score: i64, unmatched: bool| {
+        GraphValueRow::from_owned_values(vec![
+            GraphValue::Scalar(CanonicalScalar::Int(score)),
+            GraphValue::Scalar(CanonicalScalar::Bool(unmatched)),
+        ])
+    };
+    assert_eq!(
+        rows(
+            "MATCH (a) WITH a, a.score AS score OPTIONAL MATCH (a)-[r:R]->(b) \
+             RETURN score, r IS NULL AS unmatched ORDER BY score"
+        ),
+        vec![
+            scored(10, false),
+            scored(10, false),
+            scored(20, false),
+            scored(30, false),
+            scored(40, true),
+        ]
+    );
 }
