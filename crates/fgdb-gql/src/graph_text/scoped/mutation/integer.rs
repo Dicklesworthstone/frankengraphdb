@@ -26,6 +26,8 @@ enum ExpressionBoundary {
     Whole,
     Predicate,
     Operand,
+    /// One operand of a `+`/`-` chain: a product, stopping at `+` and `-`.
+    Product,
 }
 enum ParsedOp {
     Atom(Operand, usize),
@@ -287,6 +289,74 @@ impl<'a> Parser<'a> {
         let nesting = self.let_base + depth + 1;
         let value = self.composite_value(columns, nesting, at)?;
         self.let_slot(program, value, at)
+    }
+
+    /// Whether the `+`/`-` chain here has a list operand, which the value
+    /// language reads whole (fgdb-c4i0d). Out of line: integer_sum repeats
+    /// once per nested parenthesis.
+    #[inline(never)]
+    fn sum_has_list(
+        &self,
+        columns: &ExpressionColumns<'_, 'a>,
+    ) -> Result<bool, GraphMutationTextError> {
+        let row = match columns {
+            ExpressionColumns::Row(schema) => Some(*schema),
+            _ => None,
+        };
+        Ok(self.list_chain_follows(row)?)
+    }
+
+    /// openCypher list concatenation: a `+`/`-` chain with a list operand
+    /// (sum_has_list), read whole in the value language as one let slot.
+    /// Each operand is a list value or a scalar product, left-associative,
+    /// so `+` keeps binding looser than `*` and tighter than comparisons.
+    #[inline(never)]
+    fn list_sum(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<(), GraphMutationTextError> {
+        let at = self.current.at;
+        let nesting = self.let_base + depth + 1;
+        let mut value = self.sum_operand(columns, nesting, at)?;
+        loop {
+            let function = if self.take(b'+')? {
+                crate::GraphValueFunction::Add
+            } else if self.take(b'-')? {
+                crate::GraphValueFunction::Subtract
+            } else {
+                break;
+            };
+            let right = self.sum_operand(columns, nesting, at)?;
+            value = ReadValueTemplate::Function {
+                function,
+                argument: Box::new(ReadValueTemplate::List(vec![value, right])),
+            };
+        }
+        self.let_slot(program, value, at)
+    }
+
+    /// One operand of a list sum: a list value with its postfix reads, or a
+    /// scalar product with its own let slots.
+    fn sum_operand(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        nesting: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        let row = match columns {
+            ExpressionColumns::Row(schema) => Some(*schema),
+            _ => None,
+        };
+        if self.list_operand_here(row)? {
+            return self.composite_value(columns, nesting, at);
+        }
+        let base = core::mem::replace(&mut self.let_base, nesting);
+        let parsed = self.checked_expression_scoped(columns, ExpressionBoundary::Product, true);
+        self.let_base = base;
+        let (operand, slots) = parsed?;
+        Ok(self.scalar_let_value(operand, slots, at)?)
     }
 
     /// Whether a lone operand (a number or text literal, a parameter, a
@@ -578,6 +648,7 @@ impl<'a> Parser<'a> {
             ExpressionBoundary::Predicate => self.scalar_negation(columns, 0, &mut parsed)?,
             // HAVING owns comparisons and Boolean operators around each operand.
             ExpressionBoundary::Operand => self.scalar_concat(columns, 0, &mut parsed)?,
+            ExpressionBoundary::Product => self.integer_product(columns, 0, &mut parsed)?,
         }
         // A lone list element is a one-instruction program, not an atom.
         if parsed.len() == 1 && matches!(parsed[0], ParsedOp::Atom(..)) {
@@ -1003,6 +1074,9 @@ impl<'a> Parser<'a> {
         depth: usize,
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
+        if self.lets.is_some() && self.sum_has_list(columns)? {
+            return self.list_sum(columns, depth, program);
+        }
         self.integer_product(columns, depth, program)?;
         loop {
             let at = self.current.at;

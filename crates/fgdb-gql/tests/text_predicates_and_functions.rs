@@ -2252,6 +2252,76 @@ fn reverse_and_split_over_lists_and_text() {
     }
 }
 
+/// openCypher list concatenation (TCK List4, Precedence3 [1] to [3];
+/// fgdb-c4i0d). Two lists concatenate, a list and another value append or
+/// prepend it, and NULL in either operand is NULL. Element access and `*`
+/// bind tighter than `+`, the chain is left-associative, and two scalars in
+/// it keep the scalar rules: numbers add, texts concatenate.
+#[test]
+fn plus_concatenates_lists_and_appends_or_prepends_values() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let value = |expression: &str| {
+        execute(
+            &prepare(&format!("MATCH (n) RETURN {expression} AS value")),
+            &text("ab"),
+            policy(),
+        )
+        .unwrap_or_else(|error| panic!("{expression}: {error:?}"))
+        .value[0]
+            .values()[0]
+            .clone()
+    };
+    let int = |value: i64| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let word = |value: &str| GraphValue::Scalar(text(value));
+    let truth = |value: bool| GraphValue::Scalar(CanonicalScalar::Bool(value));
+    let list = |values: Vec<GraphValue>| GraphValue::List(values.into());
+    let ints = |values: &[i64]| list(values.iter().map(|value| int(*value)).collect());
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    for (expression, expected) in [
+        ("[1, 10, 100] + [4, 5]", ints(&[1, 10, 100, 4, 5])),
+        (
+            "[false, true] + false",
+            list(vec![truth(false), truth(true), truth(false)]),
+        ),
+        ("0 + [1, 2]", ints(&[0, 1, 2])),
+        ("[] + []", list(Vec::new())),
+        ("[1] + [null]", list(vec![int(1), null.clone()])),
+        ("[1] + null", null.clone()),
+        ("null + [1]", null.clone()),
+        ("[1] + 2 * 3", ints(&[1, 6])),
+        ("1 + 2 + [3]", ints(&[3, 3])),
+        ("[1] + 2 + 3", ints(&[1, 2, 3])),
+        ("n.text + 'c' + [1]", list(vec![word("abc"), int(1)])),
+        (
+            "[[1], [2, 3]] + [5, [6, 7], 10][1]",
+            list(vec![ints(&[1]), ints(&[2, 3]), int(6), int(7)]),
+        ),
+        (
+            "[[1], [2, 3]] + ([5, [6, 7], 10][1])",
+            list(vec![ints(&[1]), ints(&[2, 3]), int(6), int(7)]),
+        ),
+        (
+            "[[1], [2, 3]] + [5, [6, 7], 10][1..3]",
+            list(vec![ints(&[1]), ints(&[2, 3]), ints(&[6, 7]), int(10)]),
+        ),
+        ("reverse([1, 2]) + 3", ints(&[2, 1, 3])),
+        ("[1] + reverse([2, 3])", ints(&[1, 3, 2])),
+        ("size([1] + [2, 3])", int(3)),
+        ("size(reverse([1, 2])) + 1", int(3)),
+    ] {
+        assert_eq!(value(expression), expected, "{expression}");
+    }
+    // A list never subtracts.
+    for expression in ["[1] - 1", "1 - [1]", "[1] + 2 - 3"] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        assert!(
+            execute(&query, &text("ab"), policy()).is_err(),
+            "{expression}"
+        );
+    }
+}
+
 /// openCypher toBoolean (TCK TypeConversion1): a Boolean is itself, the text
 /// `true` or `false` in any case converts, other text is NULL untrimmed, and
 /// NULL stays NULL. An integer is FALSE only at zero. A float is a typed

@@ -368,6 +368,34 @@ fn an_unwind_after_match_or_with_reads_carried_properties() {
     );
 }
 
+/// `+` concatenates list-typed WITH columns (openCypher Unwind1 [3],
+/// fgdb-c4i0d), in a RETURN item and as an UNWIND source.
+#[test]
+fn plus_concatenates_list_columns_after_with() {
+    use fgdb_gql::algebra::GraphValue;
+    let values = [1, 2].map(CanonicalScalar::Int);
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let query = prepare(
+        "MATCH (n) WITH [n.p] AS first, [n.p, 9] AS second \
+         RETURN first + second AS joined ORDER BY joined",
+    );
+    let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+    let joined: Vec<_> = rows.iter().map(|row| row.get(0).unwrap().clone()).collect();
+    assert_eq!(
+        joined,
+        [
+            GraphValue::List(vec![int(1), int(1), int(9)].into()),
+            GraphValue::List(vec![int(2), int(2), int(9)].into()),
+        ]
+    );
+    let query = prepare(
+        "MATCH (n) WITH [n.p] AS first, [n.p + 10] AS second \
+         UNWIND (first + second) AS x RETURN x ORDER BY x",
+    );
+    let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+    assert_eq!(ints(&rows, 0), [1, 2, 11, 12].map(Some));
+}
+
 /// A grouping or DISTINCT WITH's own ORDER BY may repeat one of its items'
 /// expressions, which then is that item's output (openCypher, TCK
 /// WithOrderBy2 [22] to [24] and WithOrderBy4 [16] to [18]): `n.p` after

@@ -169,6 +169,14 @@ pub enum GraphValueFunction {
     /// list of text; an empty delimiter gives each Unicode scalar. NULL in
     /// either argument is NULL.
     Split,
+    /// openCypher `left + right` where an operand may be a list
+    /// (fgdb-c4i0d): two lists concatenate, and a list and another value
+    /// append or prepend it. Two scalars add as the scalar `+` does, texts
+    /// concatenating. NULL in either operand is NULL. No call spells it.
+    Add,
+    /// `left - right` in the same chain: two scalars subtract as the scalar
+    /// `-` does; a list operand is a typed error. NULL is NULL.
+    Subtract,
 }
 
 impl GraphValueFunction {
@@ -177,6 +185,8 @@ impl GraphValueFunction {
         match self {
             Self::Reverse => 1,
             Self::Split => 2,
+            Self::Add => 3,
+            Self::Subtract => 4,
         }
     }
 
@@ -184,7 +194,7 @@ impl GraphValueFunction {
     pub(crate) const fn arity(self) -> usize {
         match self {
             Self::Reverse => 1,
-            Self::Split => 2,
+            Self::Split | Self::Add | Self::Subtract => 2,
         }
     }
 
@@ -724,12 +734,14 @@ fn admit(
             admit(argument, types, column, depth + 1, nodes, locals)?;
             GraphSetColumnType::Any
         }
-        // reverse() is a list or a text, so dynamically typed; split() is a
-        // list.
+        // reverse() is a list or a text, and a sum with a list operand a list
+        // or a scalar, so both are dynamically typed; split() is a list.
         GraphSetValue::Function { function, argument } => {
             admit(argument, types, column, depth + 1, nodes, locals)?;
             match function {
-                GraphValueFunction::Reverse => GraphSetColumnType::Any,
+                GraphValueFunction::Reverse
+                | GraphValueFunction::Add
+                | GraphValueFunction::Subtract => GraphSetColumnType::Any,
                 GraphValueFunction::Split => GraphSetColumnType::List,
             }
         }
@@ -1770,7 +1782,91 @@ pub(crate) fn value_function<E>(
             }
             Ok(GraphValue::List(pieces.into_boxed_slice()))
         }
+        GraphValueFunction::Add | GraphValueFunction::Subtract => {
+            let Some([left, right]) = argument
+                .as_list()
+                .and_then(|arguments| <&[GraphValue; 2]>::try_from(arguments).ok())
+            else {
+                return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+            };
+            sum_value(
+                function == GraphValueFunction::Add,
+                left,
+                right,
+                column,
+                control,
+            )
+        }
     }
+}
+
+/// `left + right` (`add`) or `left - right` over values that may be lists
+/// (fgdb-c4i0d). NULL in either operand is NULL. Two scalars run the scalar
+/// VM's own `+` or `-`, with `||` when either is text, so numbers, texts and
+/// temporal values keep exactly the scalar rules. Lists only concatenate.
+fn sum_value<E>(
+    add: bool,
+    left: &GraphValue,
+    right: &GraphValue,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValue, ProjectionFailure<E>> {
+    use crate::{GraphIntegerBinary, GraphIntegerErrorKind, GraphIntegerOp};
+    let failure = |kind| ProjectionFailure::Arithmetic {
+        column,
+        error: GraphIntegerError {
+            instruction: 0,
+            kind,
+        },
+    };
+    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+    if left.is_null() || right.is_null() {
+        return Ok(GraphValue::Scalar(CanonicalScalar::Null));
+    }
+    let (prefix, suffix) = match (left.as_list(), right.as_list()) {
+        (None, None) => {
+            let (GraphValue::Scalar(a), GraphValue::Scalar(b)) = (left, right) else {
+                return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+            };
+            let text =
+                matches!(a, CanonicalScalar::Text(_)) || matches!(b, CanonicalScalar::Text(_));
+            let op = match (add, text) {
+                (true, true) => GraphIntegerOp::Concat,
+                (true, false) => GraphIntegerOp::Binary(GraphIntegerBinary::Add),
+                (false, _) => GraphIntegerOp::Binary(GraphIntegerBinary::Subtract),
+            };
+            let program = GraphIntegerExpression::prepare_scalar(&[
+                GraphIntegerOp::ScalarColumn(0),
+                GraphIntegerOp::ScalarColumn(1),
+                op,
+            ])
+            .map_err(|_| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
+            let operands = [
+                copy_value(left, control).map_err(ProjectionFailure::Control)?,
+                copy_value(right, control).map_err(ProjectionFailure::Control)?,
+            ];
+            return program
+                .evaluate_scalar_with_control(&operands, control)
+                .map(GraphValue::Scalar)
+                .map_err(|error| match error {
+                    GraphIntegerEvaluationError::Value(error) => {
+                        ProjectionFailure::Arithmetic { column, error }
+                    }
+                    GraphIntegerEvaluationError::Control(error) => {
+                        ProjectionFailure::Control(error)
+                    }
+                });
+        }
+        _ if !add => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
+        (Some(left), Some(right)) => (left, right),
+        (Some(left), None) => (left, core::slice::from_ref(right)),
+        (None, Some(right)) => (core::slice::from_ref(left), right),
+    };
+    let mut values = Vec::with_capacity(prefix.len() + suffix.len());
+    for value in prefix.iter().chain(suffix) {
+        values.push(copy_value(value, control).map_err(ProjectionFailure::Control)?);
+    }
+    Ok(GraphValue::List(values.into_boxed_slice()))
 }
 
 /// Merge two canonical key sequences once. The row and exact aggregate

@@ -146,6 +146,73 @@ fn after_postfix<'t>(lexer: &mut Lexer<'t>) -> Result<Token<'t>, GraphPatternTex
     }
 }
 
+/// The first token after the factor `token` starts, with `lexer` just past
+/// `token`: a group, a CASE ... END, a call, a name or literal, each with
+/// its postfix reads. Any other token is returned unread.
+fn skip_factor<'t>(
+    token: Token<'t>,
+    lexer: &mut Lexer<'t>,
+) -> Result<Token<'t>, GraphPatternTextError> {
+    match token.kind {
+        TokenKind::Punct(b'(' | b'[' | b'{') => skip_group(lexer)?,
+        TokenKind::Word(word) if word.eq_ignore_ascii_case("CASE") => {
+            let mut depth = 1_usize;
+            while depth > 0 {
+                match lexer.next()?.kind {
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("CASE") => depth += 1,
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("END") => depth -= 1,
+                    TokenKind::End => break,
+                    _ => {}
+                }
+            }
+        }
+        TokenKind::Word(_) => {
+            if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(')) {
+                lexer.next()?;
+                skip_group(lexer)?;
+            }
+        }
+        TokenKind::Digits(_) => {
+            // A float literal spans `digits . digits`.
+            let mut ahead = lexer.clone();
+            if matches!(ahead.next()?.kind, TokenKind::Punct(b'.'))
+                && matches!(ahead.next()?.kind, TokenKind::Digits(_))
+            {
+                *lexer = ahead;
+            }
+        }
+        TokenKind::Quoted(_) | TokenKind::Parameter(_) | TokenKind::DelimitedKeyword(_) => {}
+        _ => return Ok(token),
+    }
+    after_postfix(lexer)
+}
+
+/// Whether `token` (with `lexer` just past it) starts a list operand of a
+/// `+` chain (fgdb-c4i0d): a list literal or comprehension, a call of a
+/// list-valued function (reverse, split, tail, range, keys), or a
+/// list-typed row column read whole.
+fn list_operand_at(
+    token: Token<'_>,
+    lexer: &Lexer<'_>,
+    row: Option<&[(Name<'_>, GraphSetColumnType)]>,
+) -> Result<bool, GraphPatternTextError> {
+    match token.kind {
+        TokenKind::Punct(b'[') => Ok(true),
+        TokenKind::Word(word) => Ok(match lexer.clone().next()?.kind {
+            TokenKind::Punct(b'(') => ["REVERSE", "SPLIT", "TAIL", "RANGE", "KEYS"]
+                .iter()
+                .any(|name| word.eq_ignore_ascii_case(name)),
+            TokenKind::Punct(b'.' | b'[') => false,
+            _ => row.is_some_and(|schema| {
+                schema
+                    .iter()
+                    .any(|(name, kind)| name.text == word && *kind == GraphSetColumnType::List)
+            }),
+        }),
+        _ => Ok(false),
+    }
+}
+
 /// The column domain of one graph input: a property is a scalar, a bare
 /// variable its element, a path function its own result.
 fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
@@ -1354,6 +1421,17 @@ impl<'a> Parser<'a> {
         if self.starts_composite_comparison()? {
             return Ok(true);
         }
+        // A list literal in a `+` or `-` chain (fgdb-c4i0d).
+        if self.is_punct(b'[') {
+            let mut lexer = self.lexer.clone();
+            skip_group(&mut lexer)?;
+            if matches!(
+                after_postfix(&mut lexer)?.kind,
+                TokenKind::Punct(b'+' | b'-')
+            ) {
+                return Ok(true);
+            }
+        }
         let size = self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
         if !size && !self.starts_let_operand()? {
@@ -1398,6 +1476,49 @@ impl<'a> Parser<'a> {
             TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
             _ => false,
         })
+    }
+
+    /// Whether the chain starting here joins two or more operands with `+`
+    /// or `-` and one of them is a list (list_operand_at), with nothing
+    /// consumed: the lookahead steps over each product of the chain
+    /// (fgdb-c4i0d). A lone list operand keeps its own reading.
+    pub(super) fn list_chain_follows(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut list = false;
+        let mut joined = false;
+        loop {
+            while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
+                token = lexer.next()?;
+            }
+            list |= list_operand_at(token, &lexer, row)?;
+            loop {
+                token = skip_factor(token, &mut lexer)?;
+                if !matches!(token.kind, TokenKind::Punct(b'*' | b'/' | b'%' | b'^')) {
+                    break;
+                }
+                token = lexer.next()?;
+                while matches!(token.kind, TokenKind::Punct(b'-' | b'+')) {
+                    token = lexer.next()?;
+                }
+            }
+            if !matches!(token.kind, TokenKind::Punct(b'+' | b'-')) {
+                return Ok(list && joined);
+            }
+            joined = true;
+            token = lexer.next()?;
+        }
+    }
+
+    /// Whether a list operand of a `+` chain starts here (list_operand_at).
+    pub(super) fn list_operand_here(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<bool, GraphPatternTextError> {
+        list_operand_at(self.current, &self.lexer, row)
     }
 
     #[allow(clippy::type_complexity)]

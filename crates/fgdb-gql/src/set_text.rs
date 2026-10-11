@@ -248,9 +248,12 @@ impl ReadValueTemplate {
             | Self::MapGet { .. }
             | Self::Temporal { .. } => GraphSetColumnType::Any,
             Self::Keys(_) => GraphSetColumnType::List,
-            // reverse() is a list or a text; split() is a list.
+            // reverse() is a list or a text; split() is a list; a sum with a
+            // list operand is a list or, over scalars, a scalar.
             Self::Function { function, .. } => match function {
-                crate::GraphValueFunction::Reverse => GraphSetColumnType::Any,
+                crate::GraphValueFunction::Reverse
+                | crate::GraphValueFunction::Add
+                | crate::GraphValueFunction::Subtract => GraphSetColumnType::Any,
                 crate::GraphValueFunction::Split => GraphSetColumnType::List,
             },
             Self::Let { body, .. } => body.column_type(input, parameters),
