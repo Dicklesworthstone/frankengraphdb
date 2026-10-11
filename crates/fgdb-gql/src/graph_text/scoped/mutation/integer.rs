@@ -422,6 +422,24 @@ impl<'a> Parser<'a> {
         Ok(self.scalar_let_value(operand, slots, at)?)
     }
 
+    /// Whether a list or map literal (starts_composite_comparison) or a
+    /// list-typed row column (list_column_compared) is compared here. Out of
+    /// line: integer_unary repeats once per nested parenthesis.
+    #[inline(never)]
+    fn composite_comparison_follows(
+        &self,
+        columns: &ExpressionColumns<'_, 'a>,
+    ) -> Result<bool, GraphMutationTextError> {
+        if self.starts_composite_comparison()? {
+            return Ok(true);
+        }
+        let row = match columns {
+            ExpressionColumns::Row(schema) => Some(*schema),
+            _ => None,
+        };
+        Ok(self.list_column_compared(row)?)
+    }
+
     /// Whether the `+`/`-` chain here has a list operand, which the value
     /// language reads whole (fgdb-c4i0d).
     fn sum_has_list(
@@ -577,10 +595,11 @@ impl<'a> Parser<'a> {
         let left = if lone_operand {
             self.membership_operand(columns, nesting, at)?
         } else {
-            self.composite_value(columns, nesting, at)?
+            // A literal, or a list-typed row column read as its value.
+            self.list_operand_value(columns, nesting, at)?
         };
         let (value, negate) = if self.take_word("IN")? {
-            let list = self.composite_value(columns, nesting, at)?;
+            let list = self.list_operand_value(columns, nesting, at)?;
             let value = ReadValueTemplate::In {
                 value: Box::new(left),
                 list: Box::new(list),
@@ -588,12 +607,12 @@ impl<'a> Parser<'a> {
             (value, false)
         } else {
             let comparison = self.comparison()?;
-            let mut right = self.composite_value(columns, nesting, at)?;
+            let mut right = self.list_operand_value(columns, nesting, at)?;
             // IN binds tighter than a comparison, as in the scalar grammar:
             // `[1, 2] = [3, 4] IN l` compares with the membership
             // (openCypher Precedence3 [6]).
             while self.take_word("IN")? {
-                let list = self.composite_value(columns, nesting, at)?;
+                let list = self.list_operand_value(columns, nesting, at)?;
                 right = ReadValueTemplate::In {
                     value: Box::new(right),
                     list: Box::new(list),
@@ -1413,7 +1432,7 @@ impl<'a> Parser<'a> {
         }
         // A list or map literal compared with `=`, `<>`, `!=` or IN is one
         // three-valued comparison in the value language (fgdb-9cawv).
-        if self.lets.is_some() && self.starts_composite_comparison()? {
+        if self.lets.is_some() && self.composite_comparison_follows(columns)? {
             return self.composite_comparison(columns, depth, program, at, false);
         }
         // A composite operand evaluates as a let slot of this expression

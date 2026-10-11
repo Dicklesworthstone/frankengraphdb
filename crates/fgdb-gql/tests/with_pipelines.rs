@@ -368,6 +368,45 @@ fn an_unwind_after_match_or_with_reads_carried_properties() {
     );
 }
 
+/// A list-typed WITH column compared with `=` or an ordering operator is
+/// one value-language comparison, as a list literal's is (fgdb-9cawv): TCK
+/// WithOrderBy1 [45] ends `RETURN orderedX = range(0, numOfValues - 1)`.
+#[test]
+fn list_columns_compare_in_the_value_language() {
+    let values = [1, 2].map(CanonicalScalar::Int);
+    let query = prepare(
+        "MATCH (n) WITH n.p AS p, [n.p, n.p + 1] AS l \
+         RETURN p, l = range(p, p + 1) AS same, l < [p, p + 2] AS before, \
+         l > [p, p + 2] AS after ORDER BY p",
+    );
+    let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        let flags: Vec<_> = (1..4)
+            .map(|at| row.get(at).unwrap().as_scalar().cloned())
+            .collect();
+        assert_eq!(
+            flags,
+            [true, true, false].map(|flag| Some(CanonicalScalar::Bool(flag)))
+        );
+    }
+    // The TCK sort-consistency shape: x counts the values below each value,
+    // so collecting x in value order gives 0..n-1.
+    let equal = prepare(
+        "WITH [3, 1, 2] AS values WITH values, size(values) AS numOfValues \
+         UNWIND values AS value \
+         WITH size([x IN values WHERE x < value]) AS x, value, numOfValues ORDER BY value \
+         WITH numOfValues, collect(x) AS orderedX \
+         RETURN orderedX = range(0, numOfValues - 1) AS equal",
+    );
+    let rows = run(&equal, &values, wide(), &mut || Ok(())).unwrap().value;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get(0).unwrap().as_scalar(),
+        Some(&CanonicalScalar::Bool(true))
+    );
+}
+
 /// `+` concatenates list-typed WITH columns (openCypher Unwind1 [3],
 /// fgdb-c4i0d), in a RETURN item and as an UNWIND source.
 #[test]

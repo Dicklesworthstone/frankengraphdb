@@ -1578,6 +1578,27 @@ impl<'a> Parser<'a> {
             .position(|(name, kind)| name.text == word && *kind == GraphSetColumnType::List))
     }
 
+    /// Whether a list-typed row column (row_list_column) is compared here
+    /// with `=`, `<>`, `!=`, `<`, `<=`, `>`, `>=` or IN, as in TCK
+    /// WithOrderBy1 [45] `orderedX = range(0, n - 1)` (fgdb-9cawv): one
+    /// comparison in the value language, as a list literal's is.
+    pub(super) fn list_column_compared(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<bool, GraphPatternTextError> {
+        if self.row_list_column(row)?.is_none() {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        Ok(match lexer.next()?.kind {
+            TokenKind::Punct(b'=') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
+            TokenKind::Punct(b'<' | b'>') => true,
+            TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
+            TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
+            _ => false,
+        })
+    }
+
     /// starts_let_operand, or a list literal read through a subscript or
     /// slice (`[5, [6, 7], 10][1]`), whose element may be a list or a scalar
     /// (fgdb-c4i0d). A literal compared with `=` or IN was already taken by
