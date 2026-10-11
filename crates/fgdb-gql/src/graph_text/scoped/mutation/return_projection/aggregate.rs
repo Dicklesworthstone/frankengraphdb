@@ -155,7 +155,12 @@ impl<'a> Parser<'a> {
             return Ok((F::CountRows, None));
         }
         let at = self.current.at;
-        let column = inputs.read(self, schema)?;
+        // The call's own argument: rand() there is a non-constant expression
+        // (Return6 [15]), as in the graph aggregate's arguments.
+        let outer = core::mem::replace(&mut self.aggregate_argument, true);
+        let column = inputs.read(self, schema);
+        self.aggregate_argument = outer;
+        let column = column?;
         self.punct(b')', "one row expression as the aggregate argument")?;
         if matches!(function, F::SumInt | F::AverageInt)
             && !matches!(

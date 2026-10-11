@@ -397,7 +397,9 @@ mod tests {
         for relationship in [
             "-[:R]->{}",
             "-[:R]->{,}",
-            "-[:R]->{1,}",
+            // `{1,}` is unbounded and valid under the default DIFFERENT EDGES
+            // (match_modes unbounded_quantifiers_end_by_their_repetition_rule
+            // keeps its REPEATABLE ELEMENTS refusal).
             "-[:R]->{3,2}",
             "-[:R]->{1,1025}",
             "-[:R]->{4294967296}",

@@ -198,7 +198,6 @@ fn parameters_bind_once_and_unsupported_restrictions_refuse_before_resolution() 
     for text in [
         "MATCH TRAIL (a) RETURN a",
         "MATCH TRAIL (a)-[:R]->(b) RETURN b",
-        "MATCH TRAIL (a)-[:R*1..]->(b) RETURN b",
         "MATCH TRAIL (a)-[:R*1025]->(b) RETURN b",
         "MATCH TRAIL (a)-[:R*3..2]->(b) RETURN b",
         "MATCH TRAIL (a)-[:R*1]->(b)-[:R*1]->(c) RETURN c",
@@ -216,6 +215,8 @@ fn parameters_bind_once_and_unsupported_restrictions_refuse_before_resolution() 
             "{text}"
         );
     }
+    // A TRAIL cannot reuse an edge, so an unbounded one ends by itself.
+    assert!(PreparedGraphText::prepare("MATCH TRAIL (a)-[:R*1..]->(b) RETURN b", symbols).is_ok());
     // Contextual mode words do not prohibit ordinary variable names.
     assert!(PreparedGraphText::prepare("MATCH (trail) RETURN trail", symbols).is_ok());
 }

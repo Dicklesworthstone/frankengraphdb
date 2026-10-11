@@ -549,15 +549,35 @@ fn rand_draws_unit_floats_keyed_by_row_site_and_element() {
     );
     // openCypher refuses rand() inside an aggregate's argument at compile
     // time (Return6 [15], NonConstantExpression); an aggregate over a value
-    // drawn by an earlier stage is ordinary.
+    // drawn by an earlier stage is ordinary. As the native dispatcher does,
+    // a statement is accepted when any read front end accepts it, and a
+    // refused one names the non-constant argument as the reason.
+    let fronts = |text: &str| -> (bool, String) {
+        let results = [
+            PreparedGraphSetText::prepare(text, symbols)
+                .map(drop)
+                .map_err(|error| format!("{error:?}")),
+            fgdb_gql::PreparedGraphAggregateText::prepare(text, symbols)
+                .map(drop)
+                .map_err(|error| format!("{error:?}")),
+            fgdb_gql::PreparedGraphPipelineAggregateText::prepare(text, symbols)
+                .map(drop)
+                .map_err(|error| format!("{error:?}")),
+        ];
+        let accepted = results.iter().any(Result::is_ok);
+        let errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+        (accepted, errors.join(" | "))
+    };
     for text in [
         "RETURN count(rand()) AS c",
         "MATCH (n) RETURN count(rand()) AS c",
         "MATCH (n) RETURN sum(n.p * rand()) AS s",
     ] {
+        let (accepted, errors) = fronts(text);
+        assert!(!accepted, "{text}");
         assert!(
-            PreparedGraphSetText::prepare(text, symbols).is_err(),
-            "{text}"
+            errors.contains("non-constant expression"),
+            "{text}: {errors}"
         );
     }
     for text in [
@@ -565,10 +585,7 @@ fn rand_draws_unit_floats_keyed_by_row_site_and_element() {
         "MATCH (n) RETURN sum(n.p) AS s",
         "MATCH (n) WITH rand() AS r RETURN count(r) AS c",
     ] {
-        assert!(
-            PreparedGraphSetText::prepare(text, symbols).is_ok(),
-            "{text}"
-        );
+        assert!(fronts(text).0, "{text}: {}", fronts(text).1);
     }
 }
 
