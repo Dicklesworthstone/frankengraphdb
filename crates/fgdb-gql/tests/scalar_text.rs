@@ -484,6 +484,40 @@ fn optional_and_existential_children_share_scalar_lowering_and_aggregate_null_ru
         .unwrap()
         .with_duplicates()
     );
+    // openCypher ExistentialSubquery1 [1] to [4] leave out the body's MATCH:
+    // the same plan as the MATCH spelling.
+    let prepared = |statement: &str| {
+        PreparedGraphText::prepare(statement, symbols)
+            .unwrap_or_else(|error| panic!("{statement}: {error}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    for (bare, spelled) in [
+        (
+            "MATCH (n) WHERE NOT EXISTS { (n)-[:R]->(c) WHERE c.p = TRUE } RETURN n",
+            "MATCH (n) WHERE NOT EXISTS { MATCH (n)-[:R]->(c) WHERE c.p = TRUE } RETURN n",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { (n)-[:R]->() } RETURN n",
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->() } RETURN n",
+        ),
+    ] {
+        assert_eq!(prepared(bare), prepared(spelled), "{bare}");
+    }
+    assert_eq!(
+        prepared("MATCH (n) WHERE NOT EXISTS { (n)-[:R]->(c) WHERE c.p = TRUE } RETURN n"),
+        absent
+    );
+    // OPTIONAL keeps its MATCH, and an existential body binds no path.
+    for statement in [
+        "MATCH (n) OPTIONAL (n)-[:R]->(c) RETURN n",
+        "MATCH (n) WHERE EXISTS { p = (n)-[:R]->() } RETURN n",
+    ] {
+        assert!(
+            PreparedGraphText::prepare(statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
 }
 
 #[test]

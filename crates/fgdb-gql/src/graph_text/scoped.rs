@@ -1021,7 +1021,11 @@ impl<'a> Parser<'a> {
         let clause = form == ScopeForm::Clause;
         let parsed = (|| {
             if clause {
-                self.word("MATCH")?;
+                // openCypher `EXISTS { (n)-->() }` leaves out the MATCH of
+                // `EXISTS { MATCH (n)-->() }`; the body is otherwise the same.
+                if kind.exports_bindings() || !self.is_punct(b'(') {
+                    self.word("MATCH")?;
+                }
                 self.syntax.match_mode = self.match_mode()?;
             }
             if self.starts_path_binding()? {
