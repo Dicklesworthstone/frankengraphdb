@@ -260,6 +260,42 @@ impl<'a> Parser<'a> {
         Ok(Some((name, token.at)))
     }
 
+    /// How many parentheses wrap a lone name here, as in `((n))`, when no
+    /// operator, subscript or entry read follows the last one; `None` for
+    /// anything else, which keeps its scalar reading (`(x) + 1`, `(n.p)`).
+    fn parenthesized_name(&self) -> Result<Option<usize>, GraphPatternTextError> {
+        if !self.is_punct(b'(') {
+            return Ok(None);
+        }
+        let mut lexer = self.lexer.clone();
+        let mut parentheses = 1_usize;
+        let mut token = lexer.next()?;
+        while matches!(token.kind, TokenKind::Punct(b'(')) {
+            if parentheses == 64 {
+                return Ok(None);
+            }
+            parentheses += 1;
+            token = lexer.next()?;
+        }
+        if !matches!(token.kind, TokenKind::Word(_)) {
+            return Ok(None);
+        }
+        for _ in 0..parentheses {
+            if !matches!(lexer.next()?.kind, TokenKind::Punct(b')')) {
+                return Ok(None);
+            }
+        }
+        let after = lexer.next()?;
+        let continues = match after.kind {
+            TokenKind::Punct(byte) => b"=<>!+-*/%^.[".contains(&byte),
+            TokenKind::Word(word) => ["AND", "OR", "XOR", "IS", "IN", "STARTS", "ENDS", "CONTAINS"]
+                .iter()
+                .any(|operator| word.eq_ignore_ascii_case(operator)),
+            _ => false,
+        };
+        Ok((!continues).then_some(parentheses))
+    }
+
     fn property_map_projection(
         &self,
         columns: &mut Vec<Projection<'a>>,
@@ -1564,6 +1600,25 @@ impl<'a> Parser<'a> {
                 function,
                 argument: Box::new(argument),
             }
+        } else if let Some(parentheses) = self.parenthesized_name()? {
+            // `(n)`, `((n))`: parentheses around a lone name that no operator
+            // follows group nothing, so the name is read as it would be bare
+            // (a vertex is an element, not a scalar operand; a grouped name
+            // still resolves as a key).
+            for _ in 0..parentheses {
+                self.advance()?;
+            }
+            let inner = self.read_value_inner(
+                inputs.as_deref_mut(),
+                schema,
+                resolve,
+                depth + 1,
+                operators,
+            )?;
+            for _ in 0..parentheses {
+                self.punct(b')', ")")?;
+            }
+            inner
         } else if matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
                     && (self.syntax.variables.iter().any(|name| name.text == word)
