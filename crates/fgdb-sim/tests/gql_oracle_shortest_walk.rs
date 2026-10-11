@@ -215,6 +215,14 @@ fn engine_pairs(rows: &[GraphValueRow]) -> Vec<(VId, VId)> {
         .collect()
 }
 
+/// The oracle counts walks, reused edges included, so each query reads
+/// REPEATABLE ELEMENTS. Under the DIFFERENT EDGES default (fgdb-vexfr) an
+/// undirected or long shortest walk may not reuse an edge, which this oracle
+/// does not model; the match-mode laws cover that.
+fn walk_semantics(text: &str) -> String {
+    text.replacen("MATCH", "MATCH REPEATABLE ELEMENTS", 1)
+}
+
 fn compare(
     db: &Database<MemVfs>,
     cx: &QueryCx,
@@ -222,7 +230,7 @@ fn compare(
     text: &str,
     mut expected: Vec<(VId, VId)>,
 ) {
-    let prepared = PreparedGraphText::prepare(text, symbols)
+    let prepared = PreparedGraphText::prepare(&walk_semantics(text), symbols)
         .unwrap_or_else(|e| panic!("seed={seed:#x} {text}: {e:?}"))
         .bind_parameters(&GqlParameters::new())
         .unwrap();
@@ -244,7 +252,7 @@ fn compare_at(
     basis: CommitSeq,
     mut expected: Vec<(VId, VId)>,
 ) {
-    let prepared = PreparedGraphText::prepare(text, symbols)
+    let prepared = PreparedGraphText::prepare(&walk_semantics(text), symbols)
         .unwrap_or_else(|e| panic!("seed={seed:#x} {text}: {e:?}"))
         .bind_parameters(&GqlParameters::new())
         .unwrap();
