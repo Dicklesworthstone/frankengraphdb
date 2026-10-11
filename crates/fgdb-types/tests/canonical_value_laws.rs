@@ -1805,3 +1805,66 @@ fn property_aggregate_size_is_enforced_before_the_looser_nesting_bound()
     );
     Ok(())
 }
+
+/// fgdb-k3nub: the profile-free storage bytes. A scalar value encodes to
+/// exactly its scalar bytes, so a durable container whose element type widens
+/// from CanonicalScalar to CanonicalPropertyValue stays byte-identical while
+/// it holds only scalars. Lists and Maps round-trip without a resolver and
+/// keep byte order equal to value order. The required scalar profile is that
+/// of the most demanding scalar at any depth.
+#[test]
+fn profile_free_property_bytes_keep_scalar_bytes_and_round_trip_collections() {
+    for scalar in scalar_corpus() {
+        let value = scalar_value(scalar.clone());
+        let bytes = scalar.encode().unwrap();
+        assert_eq!(value.encode().unwrap(), bytes, "{scalar:?}");
+        assert_eq!(value.canonical_encoded_len().unwrap(), bytes.len());
+        assert_eq!(CanonicalPropertyValue::decode(&bytes).unwrap(), value);
+        assert_eq!(value.as_scalar(), Some(&scalar));
+        assert!(!value.is_collection());
+        assert_eq!(
+            value.required_scalar_profile(),
+            ScalarProfileVersion::required_for(&scalar)
+        );
+    }
+    let date = scalar_value(CanonicalScalar::Date(
+        CanonicalDate::from_civil(2026, 10, 11).unwrap(),
+    ));
+    let list = |values: Vec<CanonicalPropertyValue>| {
+        CanonicalPropertyValue::List(CanonicalList::try_new(values).unwrap())
+    };
+    let values = [
+        list(vec![]),
+        list(vec![scalar_value(CanonicalScalar::Int(1))]),
+        list(vec![
+            scalar_value(CanonicalScalar::Int(1)),
+            scalar_value(CanonicalScalar::Int(2)),
+        ]),
+        list(vec![list(vec![date.clone()])]),
+        map_value(vec![]),
+        map_value(vec![("a", scalar_value(CanonicalScalar::Null))]),
+        map_value(vec![("a", list(vec![])), ("b", date.clone())]),
+    ];
+    let required = [1, 1, 1, 2, 1, 1, 2];
+    for (value, version) in values.iter().zip(required) {
+        let bytes = value.encode().unwrap();
+        assert_eq!(value.canonical_encoded_len().unwrap(), bytes.len());
+        assert_eq!(&CanonicalPropertyValue::decode(&bytes).unwrap(), value);
+        assert_eq!(value.as_scalar(), None);
+        assert!(value.is_collection());
+        assert_eq!(value.required_scalar_profile() as u16, version, "{value:?}");
+    }
+    for left in &values {
+        for right in &values {
+            assert_eq!(
+                left.encode().unwrap().cmp(&right.encode().unwrap()),
+                left.cmp(right),
+                "{left:?} vs {right:?}"
+            );
+        }
+    }
+    assert_eq!(
+        CanonicalPropertyValue::decode(&[]),
+        Err(CanonicalPropertyValueError::EmptyEncoding)
+    );
+}

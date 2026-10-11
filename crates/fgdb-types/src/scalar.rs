@@ -532,7 +532,7 @@ impl CanonicalScalar {
         Self::decode_inner(bytes, Some(resolver))
     }
 
-    fn decode_inner(
+    pub(crate) fn decode_inner(
         bytes: &[u8],
         resolver: Option<&dyn CanonicalScalarResolver>,
     ) -> Result<Self, ScalarDecodeError> {

@@ -689,6 +689,85 @@ impl From<CanonicalScalar> for CanonicalPropertyValue {
     }
 }
 
+/// Profile-free storage bytes, the counterpart of [`CanonicalScalar::encode`]
+/// and [`CanonicalScalar::decode`] that durable property formats use. A
+/// scalar's bytes are exactly its scalar encoding, so a container that holds
+/// only scalars stays byte-identical when its element type widens to this
+/// one. Lists and Maps take the new leading tags 0x08 and 0x09. Profile
+/// admission, where a host needs it, stays [`CanonicalScalarProfile`]'s.
+impl CanonicalPropertyValue {
+    /// The scalar, if this value is one.
+    #[must_use]
+    pub const fn as_scalar(&self) -> Option<&CanonicalScalar> {
+        match self {
+            Self::Scalar(scalar) => Some(scalar),
+            Self::List(_) | Self::Map(_) => None,
+        }
+    }
+
+    /// Whether this value is a List or a Map, which no format that predates
+    /// stored collections can hold.
+    #[must_use]
+    pub const fn is_collection(&self) -> bool {
+        !matches!(self, Self::Scalar(_))
+    }
+
+    /// The lowest scalar profile that admits every scalar this value holds,
+    /// at any depth. Map keys are text and need no more than version 1.
+    #[must_use]
+    pub fn required_scalar_profile(&self) -> crate::ScalarProfileVersion {
+        match self {
+            Self::Scalar(scalar) => crate::ScalarProfileVersion::required_for(scalar),
+            Self::List(list) => (list.values.iter())
+                .map(Self::required_scalar_profile)
+                .max()
+                .unwrap_or(crate::ScalarProfileVersion::V1),
+            Self::Map(map) => (map.entries().iter())
+                .map(|entry| entry.value().required_scalar_profile())
+                .max()
+                .unwrap_or(crate::ScalarProfileVersion::V1),
+        }
+    }
+
+    /// The complete canonical bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, CanonicalPropertyValueError> {
+        self.encode_canonical()
+    }
+
+    /// The complete canonical byte length, without encoding.
+    pub fn canonical_encoded_len(&self) -> Result<usize, CanonicalPropertyValueError> {
+        self.canonical_encoded_size()
+    }
+
+    /// Decodes one complete value. Artifact-bound text and timestamps are
+    /// read as [`CanonicalScalar::decode`] reads them.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CanonicalPropertyValueError> {
+        Self::decode_with(bytes, None)
+    }
+
+    /// Decodes one complete value against an explicit artifact resolver, as
+    /// [`CanonicalScalar::decode_with_resolver`] does for a scalar.
+    pub fn decode_with_resolver(
+        bytes: &[u8],
+        resolver: &dyn CanonicalScalarResolver,
+    ) -> Result<Self, CanonicalPropertyValueError> {
+        Self::decode_with(bytes, Some(resolver))
+    }
+
+    fn decode_with(
+        bytes: &[u8],
+        resolver: Option<&dyn CanonicalScalarResolver>,
+    ) -> Result<Self, CanonicalPropertyValueError> {
+        if bytes.len() > MAX_PROPERTY_VALUE_BYTES {
+            return Err(CanonicalPropertyValueError::EncodedValueTooLarge {
+                actual: bytes.len(),
+                maximum: MAX_PROPERTY_VALUE_BYTES,
+            });
+        }
+        decode_property_value(bytes, resolver, 0)
+    }
+}
+
 impl CanonicalPropertyValue {
     fn nesting_depth(&self) -> usize {
         match self {
@@ -728,13 +807,7 @@ impl CanonicalPropertyValue {
         bytes: &[u8],
         resolver: &R,
     ) -> Result<Self, CanonicalPropertyValueError> {
-        if bytes.len() > MAX_PROPERTY_VALUE_BYTES {
-            return Err(CanonicalPropertyValueError::EncodedValueTooLarge {
-                actual: bytes.len(),
-                maximum: MAX_PROPERTY_VALUE_BYTES,
-            });
-        }
-        decode_property_value(bytes, resolver, 0)
+        Self::decode_with(bytes, Some(resolver))
     }
 }
 
@@ -1069,9 +1142,9 @@ impl PropertyValueWriter {
     }
 }
 
-fn decode_property_value<R: CanonicalScalarResolver>(
+fn decode_property_value(
     bytes: &[u8],
-    resolver: &R,
+    resolver: Option<&dyn CanonicalScalarResolver>,
     depth: usize,
 ) -> Result<CanonicalPropertyValue, CanonicalPropertyValueError> {
     check_nesting_depth(depth)?;
@@ -1079,7 +1152,7 @@ fn decode_property_value<R: CanonicalScalarResolver>(
         .split_first()
         .ok_or(CanonicalPropertyValueError::EmptyEncoding)?;
     match tag {
-        tag if is_scalar_tag(tag) => CanonicalScalar::decode_with_resolver(bytes, resolver)
+        tag if is_scalar_tag(tag) => CanonicalScalar::decode_inner(bytes, resolver)
             .map(CanonicalPropertyValue::Scalar)
             .map_err(CanonicalPropertyValueError::ScalarDecode),
         TAG_LIST => {
@@ -1121,7 +1194,7 @@ fn decode_property_value<R: CanonicalScalarResolver>(
                         }
                     }
                 }
-                let key = match CanonicalScalar::decode_with_resolver(&field, resolver)
+                let key = match CanonicalScalar::decode_inner(&field, resolver)
                     .map_err(CanonicalPropertyValueError::ScalarDecode)?
                 {
                     CanonicalScalar::Text(text) => text,
