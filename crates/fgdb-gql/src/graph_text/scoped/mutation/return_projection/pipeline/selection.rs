@@ -644,9 +644,12 @@ mod tests {
             error.kind,
             GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::UnknownVariable)
         ));
+        // A plain WITH's own WHERE may read `n.p` of a binding it drops
+        // (openCypher), but the RETURN after it may not: refused before any
+        // catalog access.
         let mut calls = 0;
         let result = PreparedGraphSetText::prepare(
-            "MATCH (n) WITH n.p AS value WHERE n.p + 1 > 1 RETURN value",
+            "MATCH (n) WITH n.p AS value WHERE n.p + 1 > 1 RETURN n.p",
             |_, _| {
                 calls += 1;
                 None

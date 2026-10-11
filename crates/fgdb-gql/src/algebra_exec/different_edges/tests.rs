@@ -157,8 +157,11 @@ fn disjoint_fixed_relation_types_keep_the_existing_identity_free_path() {
 #[test]
 fn compiled_expansion_constraint_and_ordering_tags_cannot_collide() {
     let mut pattern = builder(&["a", "b"]);
+    // A plain WALK can repeat an edge, so DIFFERENT EDGES keeps its check
+    // operator here. An ACYCLIC walk needs none (walk_can_repeat_an_edge) and
+    // would leave only two of the three tags this law compares.
     pattern
-        .acyclic_walk(
+        .walk(
             "a",
             R,
             GlaDirection::Forward,
