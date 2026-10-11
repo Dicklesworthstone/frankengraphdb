@@ -801,14 +801,16 @@ fn implicit_optional_grouping_keeps_null_extended_rows() {
 fn an_optional_element_null_test_groups_by_its_boolean() {
     use fgdb_gql::GraphAggregateValue;
 
+    // Grouping by the relationship captures it, so the source identifies
+    // its edges.
     let result = prepare(
         "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) \
          RETURN r IS NULL AS unmatched, COUNT(*) AS rows ORDER BY unmatched",
     )
-    .execute_governed(
+    .execute_governed_with_identified_properties(
         4,
         [VId(1), VId(2), VId(3)],
-        [(VId(1), RelationId(1), VId(2))],
+        [(fgdb_types::EId(1), VId(1), RelationId(1), VId(2))],
         |_, _| Ok::<_, ()>(true),
         |_, _| Ok(None),
         policy(),

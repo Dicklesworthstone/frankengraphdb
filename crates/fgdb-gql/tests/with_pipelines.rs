@@ -419,14 +419,16 @@ fn a_grouping_or_distinct_with_orders_by_a_repeat_of_its_item() {
              RETURN p, c",
             vec![(Some(2), Some(2))],
         ),
+        // RETURN without ORDER BY gives canonical order, so a WITH's ORDER BY
+        // shows in the rows its LIMIT keeps: p - c is 2, 0, 0 for p = 3, 1, 2.
         (
-            "MATCH (n) WITH n.p AS p, count(*) AS c ORDER BY p - count(*) DESC, p \
+            "MATCH (n) WITH n.p AS p, count(*) AS c ORDER BY p - count(*) DESC, p LIMIT 2 \
              RETURN p, c",
-            vec![(Some(3), Some(1)), (Some(1), Some(1)), (Some(2), Some(2))],
+            vec![(Some(1), Some(1)), (Some(3), Some(1))],
         ),
         (
-            "MATCH (n) WITH DISTINCT n.p AS p, 0 AS c ORDER BY n.p DESC RETURN p, c",
-            vec![(Some(3), Some(0)), (Some(2), Some(0)), (Some(1), Some(0))],
+            "MATCH (n) WITH DISTINCT n.p AS p, 0 AS c ORDER BY n.p DESC LIMIT 2 RETURN p, c",
+            vec![(Some(2), Some(0)), (Some(3), Some(0))],
         ),
     ] {
         let query = prepare(text);

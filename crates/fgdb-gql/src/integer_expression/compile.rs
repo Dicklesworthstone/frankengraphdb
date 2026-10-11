@@ -273,7 +273,8 @@ fn prepare_root(
             | Op::StartsWith
             | Op::EndsWith
             | Op::Contains
-            | Op::Matches(_) => Kind::Boolean,
+            | Op::Matches(_)
+            | Op::ToBoolean => Kind::Boolean,
             Op::Upper | Op::Lower | Op::Trim | Op::Substring | Op::Concat | Op::ToText => {
                 Kind::Text
             }

@@ -8,7 +8,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
     GraphSymbol, GraphSymbolKind, PreparedGraphSet, PreparedGraphSetText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::cell::{Cell, RefCell};
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -82,6 +82,45 @@ fn bind(text: &str) -> PreparedGraphSet {
 }
 fn rows(text: &str) -> Vec<GraphValueRow> {
     run(&bind(text), wide(), None, &Cell::new(0), || Ok(()))
+        .unwrap()
+        .value
+}
+/// `rows` over the same fixture with each edge occurrence's identity, for a
+/// plan that captures a relationship.
+fn identified_rows(text: &str) -> Vec<GraphValueRow> {
+    let props: Vec<_> = (1..=4)
+        .map(|id| vec![(P, CanonicalScalar::Int(id * 10))])
+        .collect();
+    bind(text)
+        .execute_governed(
+            wide(),
+            |pattern, remaining| {
+                pattern.plan().execute_governed_with_identified_properties(
+                    8,
+                    (1..=4).map(VId),
+                    EDGES
+                        .iter()
+                        .enumerate()
+                        .map(|(at, &(source, relation, target))| {
+                            (EId(at as u128 + 1), source, relation, target)
+                        }),
+                    |vid, predicates| {
+                        Ok::<_, usize>(predicates.iter().all(|predicate| {
+                            predicate.matches(&[LabelId(1)], &props[vid.0 as usize - 1])
+                        }))
+                    },
+                    |vid, key| {
+                        Ok(props[vid.0 as usize - 1]
+                            .iter()
+                            .find(|(candidate, _)| *candidate == key)
+                            .map(|(_, value)| value))
+                    },
+                    remaining,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            || Ok::<_, usize>(()),
+        )
         .unwrap()
         .value
 }
@@ -591,13 +630,13 @@ fn a_carried_relationship_matches_itself_again() {
         vec![Some(3), Some(3)],
     ];
     assert_eq!(
-        pairs(&rows(
+        pairs(&identified_rows(
             "MATCH (a)-[r:R]->(b) WITH r, a MATCH (a)-[r:R]->(c) RETURN a, c"
         )),
         all
     );
     assert_eq!(
-        pairs(&rows(
+        pairs(&identified_rows(
             "MATCH (a)-[r:R]->(b) WITH r AS s MATCH (x)-[s:R]->(y) RETURN x, y"
         )),
         all
@@ -605,13 +644,13 @@ fn a_carried_relationship_matches_itself_again() {
     // Reversed, only the self-loop is the same relationship; OPTIONAL keeps
     // every carried row and NULL-extends the rest.
     assert_eq!(
-        pairs(&rows(
+        pairs(&identified_rows(
             "MATCH (a)-[r:R]->(b) WITH r, a MATCH (a)<-[r:R]-(c) RETURN a, c"
         )),
         vec![vec![Some(3), Some(3)]]
     );
     assert_eq!(
-        pairs(&rows(
+        pairs(&identified_rows(
             "MATCH (a)-[r:R]->(b) WITH r, a OPTIONAL MATCH (a)<-[r:R]-(c) RETURN a, c"
         )),
         vec![
@@ -685,7 +724,7 @@ fn a_leading_optional_match_returns_whole_predicate_items() {
         ])
     };
     assert_eq!(
-        rows(
+        identified_rows(
             "MATCH (a) WITH a, a.score AS score OPTIONAL MATCH (a)-[r:R]->(b) \
              RETURN score, r IS NULL AS unmatched ORDER BY score"
         ),

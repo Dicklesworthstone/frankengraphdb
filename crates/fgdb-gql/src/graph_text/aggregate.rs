@@ -1178,6 +1178,23 @@ impl<'a> Parser<'a> {
                             computed: None,
                         })
                     } else if matches!(parser.current.kind, TokenKind::Word(word)
+                        if parser.syntax.visible_edge(word)
+                            .is_some_and(|(edge, _)| edge.walk.is_none()))
+                        && !matches!(
+                            parser.lexer.clone().next()?.kind,
+                            TokenKind::Punct(b'.' | b'(')
+                        )
+                    {
+                        // A bare relationship groups by its identity, so
+                        // `r IS NULL` after an OPTIONAL MATCH is a key.
+                        let variable = parser.edge_variable()?;
+                        OutputLeaf::Group(Expression {
+                            variable,
+                            property: None,
+                            path: column_path(&parser.syntax, variable),
+                            computed: None,
+                        })
+                    } else if matches!(parser.current.kind, TokenKind::Word(word)
                 if parser.syntax.variables.iter().any(|variable| variable.text == word))
                     {
                         let variable = parser.variable()?;
