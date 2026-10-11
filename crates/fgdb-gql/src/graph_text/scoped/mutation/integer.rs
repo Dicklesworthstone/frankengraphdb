@@ -291,10 +291,25 @@ impl<'a> Parser<'a> {
         self.let_slot(program, value, at)
     }
 
-    /// Whether the `+`/`-` chain here has a list operand, which the value
-    /// language reads whole (fgdb-c4i0d). Out of line: integer_sum repeats
-    /// once per nested parenthesis.
+    /// A `+`/`-` chain with a list operand (sum_has_list), read whole by
+    /// list_sum; false, with nothing consumed, for any other chain. Out of
+    /// line: integer_sum repeats once per nested parenthesis.
     #[inline(never)]
+    fn list_sum_here(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<bool, GraphMutationTextError> {
+        if !self.sum_has_list(columns)? {
+            return Ok(false);
+        }
+        self.list_sum(columns, depth, program)?;
+        Ok(true)
+    }
+
+    /// Whether the `+`/`-` chain here has a list operand, which the value
+    /// language reads whole (fgdb-c4i0d).
     fn sum_has_list(
         &self,
         columns: &ExpressionColumns<'_, 'a>,
@@ -883,6 +898,28 @@ impl<'a> Parser<'a> {
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
         self.scalar_predicate(columns, depth, program)?;
+        if matches!(
+            self.current.kind,
+            TokenKind::Punct(b'=' | b'!' | b'<' | b'>')
+        ) {
+            self.comparison_tail(columns, depth, program)?;
+        }
+        Ok(())
+    }
+
+    // The operator loops of the levels below are out of line, each entered
+    // only at its operator: these levels repeat once per nested parenthesis
+    // up to MAX_INTEGER_NESTING, and a loop's locals and temporaries would
+    // widen every frame of a deeply parenthesized operand.
+
+    /// The comparisons after a comparison level's first operand.
+    #[inline(never)]
+    fn comparison_tail(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<(), GraphMutationTextError> {
         // Where the previous comparison's right operand starts, once one has
         // been read: a chained comparison reads it again as its left operand.
         let mut previous = None;
@@ -951,6 +988,23 @@ impl<'a> Parser<'a> {
         if !self.operand_membership(columns, depth, program)? {
             self.scalar_concat(columns, depth, program)?;
         }
+        if matches!(
+            self.current.kind,
+            TokenKind::Word(_) | TokenKind::Punct(b'=')
+        ) {
+            self.predicate_tail(columns, depth, program)?;
+        }
+        Ok(())
+    }
+
+    /// The string, list and null predicates after a predicate level's operand.
+    #[inline(never)]
+    fn predicate_tail(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<(), GraphMutationTextError> {
         loop {
             let at = self.current.at;
             let op = if self.take_word("STARTS")? {
@@ -1054,6 +1108,20 @@ impl<'a> Parser<'a> {
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
         self.integer_sum(columns, depth, program)?;
+        if self.is_punct(b'|') {
+            self.concat_tail(columns, depth, program)?;
+        }
+        Ok(())
+    }
+
+    /// The `||` concatenations after a concatenation level's operand.
+    #[inline(never)]
+    fn concat_tail(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<(), GraphMutationTextError> {
         // Only `||` continues an expression. A lone `|` ends it: it separates
         // a list comprehension's predicate from its projection (fgdb-20foe).
         while self.is_punct(b'|')
@@ -1074,10 +1142,24 @@ impl<'a> Parser<'a> {
         depth: usize,
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
-        if self.lets.is_some() && self.sum_has_list(columns)? {
-            return self.list_sum(columns, depth, program);
+        if self.lets.is_some() && self.list_sum_here(columns, depth, program)? {
+            return Ok(());
         }
         self.integer_product(columns, depth, program)?;
+        if matches!(self.current.kind, TokenKind::Punct(b'+' | b'-')) {
+            self.sum_tail(columns, depth, program)?;
+        }
+        Ok(())
+    }
+
+    /// The `+` and `-` operands after a sum level's first product.
+    #[inline(never)]
+    fn sum_tail(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<(), GraphMutationTextError> {
         loop {
             let at = self.current.at;
             let op = if self.take(b'+')? {
@@ -1113,6 +1195,20 @@ impl<'a> Parser<'a> {
         if self.is_punct(b'^') {
             self.power_tail(columns, depth, program)?;
         }
+        if matches!(self.current.kind, TokenKind::Punct(b'*' | b'/' | b'%')) {
+            self.product_tail(columns, depth, program)?;
+        }
+        Ok(())
+    }
+
+    /// The `*`, `/` and `%` operands after a product level's first factor.
+    #[inline(never)]
+    fn product_tail(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+    ) -> Result<(), GraphMutationTextError> {
         loop {
             let at = self.current.at;
             let op = if self.take(b'*')? {
