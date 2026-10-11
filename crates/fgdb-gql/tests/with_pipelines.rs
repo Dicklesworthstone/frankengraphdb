@@ -1349,3 +1349,37 @@ fn coalesce_over_lists_is_the_first_non_null_argument() {
         assert_eq!(first(text), expected, "{text}");
     }
 }
+
+/// A parenthesized operand IN a list value (TCK Precedence1: `(a = b) IN c`
+/// with `c` a list column) is one membership in the value language, as a
+/// name IN a list column is: three-valued, NULL members included.
+#[test]
+fn a_parenthesized_operand_in_a_list_column_is_a_membership() {
+    use fgdb_gql::algebra::GraphValue;
+    let query = prepare(
+        "UNWIND [true] AS a UNWIND [true] AS b UNWIND [[true], [false], [], [null]] AS c \
+         RETURN (a = b) IN c AS r",
+    );
+    let mut rows = run(&query, &[], wide(), &mut || Ok(())).unwrap().value;
+    // RETURN without ORDER BY is canonical order, so compare as a bag.
+    let count = |rows: &[GraphValueRow], value: Option<bool>| {
+        let expected =
+            GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Bool));
+        rows.iter()
+            .filter(|row| row.get(0) == Some(&expected))
+            .count()
+    };
+    assert_eq!(
+        [Some(true), Some(false), None].map(|value| count(&rows, value)),
+        [1, 2, 1]
+    );
+    // The same answer as reading the comparison first through a WITH.
+    let named = prepare(
+        "UNWIND [true] AS a UNWIND [true] AS b UNWIND [[true], [false], [], [null]] AS c \
+         WITH a = b AS x, c RETURN x IN c AS r",
+    );
+    let mut named_rows = run(&named, &[], wide(), &mut || Ok(())).unwrap().value;
+    rows.sort();
+    named_rows.sort();
+    assert_eq!(rows, named_rows);
+}

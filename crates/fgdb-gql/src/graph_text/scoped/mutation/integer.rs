@@ -507,12 +507,18 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether a lone operand (a number or text literal, a parameter, a
-    /// name with optional `.key` reads, or TRUE/FALSE/NULL) stands here
-    /// directly before IN, and the list after IN is not a `[` literal.
+    /// name with optional `.key` reads, TRUE/FALSE/NULL, or a parenthesized
+    /// expression such as `(a = b)`) stands here directly before IN, and the
+    /// list after IN is not a `[` literal.
     fn starts_operand_membership(&self) -> Result<bool, GraphPatternTextError> {
         let mut lexer = self.lexer.clone();
         let after = match self.current.kind {
             TokenKind::Digits(_) | TokenKind::Quoted(_) | TokenKind::Parameter(_) => {
+                lexer.next()?
+            }
+            // TCK Precedence1: `(a = b) IN c` over a list column.
+            TokenKind::Punct(b'(') => {
+                super::return_projection::skip_group(&mut lexer)?;
                 lexer.next()?
             }
             TokenKind::Word(_) => {
