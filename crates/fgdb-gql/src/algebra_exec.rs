@@ -451,7 +451,9 @@ enum Enumeration<'i> {
     Scan { at: usize },
     Candidates(join::Candidates<'i>),
     Walk(WalkExpansion<'i>),
-    Identified(trail::IdentifiedExpansion<'i>),
+    // Boxed: the different-edges cursors (7d752d17) made this the one large
+    // arm, and every Continuation::Enumerate carried its full size.
+    Identified(Box<trail::IdentifiedExpansion<'i>>),
 }
 
 impl Enumeration<'_> {
@@ -902,7 +904,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                                 &mut self.control,
                             )?
                         };
-                        Enumeration::Identified(cursor)
+                        Enumeration::Identified(Box::new(cursor))
                     } else if matches!(operator, GlaOperator::VarLengthExpand { .. }) {
                         Enumeration::Walk(WalkExpansion::new(
                             search,
