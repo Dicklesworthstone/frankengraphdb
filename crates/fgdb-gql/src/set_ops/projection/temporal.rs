@@ -7,8 +7,9 @@ use crate::GraphIntegerErrorKind;
 use crate::GraphIntegerErrorKind::TemporalConstruction as Invalid;
 use crate::algebra::GraphValue;
 use fgdb_types::{
-    CanonicalDate, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar, CanonicalTime,
-    CanonicalTimestamp, NANOS_PER_DAY, format_utc_offset, parse_utc_offset,
+    CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar,
+    CanonicalTime, CanonicalTimestamp, DurationUnit, NANOS_PER_DAY, format_utc_offset,
+    parse_utc_offset,
 };
 
 /// The calendar fields a map may name, in the order `date_from_fields`
@@ -150,6 +151,101 @@ pub(crate) fn construct(
         GraphTemporalFunction::FromEpoch | GraphTemporalFunction::FromEpochMillis => {
             from_epoch_call(function, arguments(argument)?)
         }
+        GraphTemporalFunction::Duration => duration(argument).map(CanonicalScalar::Duration),
+    }
+}
+
+/// `duration(x)`: ISO 8601 text, a duration, or a map of counts of years,
+/// quarters, months, weeks, days, hours, minutes, seconds, milliseconds,
+/// microseconds and nanoseconds, each an integer or a float whose fraction
+/// cascades into the smaller units (`{months: 0.75}` is P22DT19H51M49.5S).
+fn duration(argument: &GraphValue) -> Result<CanonicalDuration, GraphIntegerErrorKind> {
+    use DurationUnit as U;
+    match argument {
+        GraphValue::Scalar(CanonicalScalar::Text(text)) => {
+            CanonicalDuration::parse_iso(text.as_str()).map_err(|_| Invalid)
+        }
+        GraphValue::Scalar(CanonicalScalar::Duration(value)) => Ok(*value),
+        GraphValue::Map { keys, values } => {
+            let mut parts = Vec::with_capacity(keys.len());
+            for (key, value) in keys.iter().zip(values.iter()) {
+                let (unit, factor) = match &**key {
+                    "years" => (U::Years, 1),
+                    "quarters" => (U::Months, 3),
+                    "months" => (U::Months, 1),
+                    "weeks" => (U::Weeks, 1),
+                    "days" => (U::Days, 1),
+                    "hours" => (U::Hours, 1),
+                    "minutes" => (U::Minutes, 1),
+                    "seconds" => (U::Seconds, 1),
+                    "milliseconds" => (U::Milliseconds, 1),
+                    "microseconds" => (U::Microseconds, 1),
+                    "nanoseconds" => (U::Nanoseconds, 1),
+                    _ => return Err(Invalid),
+                };
+                let (whole, fraction) = count(value)?;
+                // Three months a quarter: whole months of a quarter's
+                // fraction stay calendar months (truncating keeps the sign).
+                let scaled = fraction * factor;
+                parts.push((
+                    unit,
+                    whole * factor + scaled / 1_000_000_000,
+                    scaled % 1_000_000_000,
+                ));
+            }
+            CanonicalDuration::from_parts(parts).map_err(|_| Invalid)
+        }
+        _ => Err(Invalid),
+    }
+}
+
+/// A count as a whole number and a fraction in 10^-9 of the same sign: an
+/// integer exactly, a finite float to the nearest 10^-9.
+fn count(value: &GraphValue) -> Result<(i128, i128), GraphIntegerErrorKind> {
+    match value {
+        GraphValue::Scalar(CanonicalScalar::Int(number)) => Ok((i128::from(*number), 0)),
+        GraphValue::Scalar(CanonicalScalar::Float(number)) => {
+            let number = number.get();
+            if !number.is_finite() || number.abs() >= 9.0e18 {
+                return Err(Invalid);
+            }
+            let whole = number.trunc();
+            let fraction = ((number - whole) * 1e9).round();
+            // The casts are exact: both are integral and within i64.
+            Ok((whole as i128, fraction as i128))
+        }
+        _ => Err(Invalid),
+    }
+}
+
+/// A duration's openCypher fields: the whole count in each unit, and the
+/// count of a unit within the next larger one (`monthsOfYear`,
+/// `secondsOfMinute`, ...), each truncated toward zero.
+fn duration_field(value: CanonicalDuration, key: &str) -> Option<i64> {
+    let (months, days, nanos) = (value.months(), value.days(), value.nanos());
+    let nanos_in = |unit: i128| i64::try_from(nanos / unit).ok();
+    match key {
+        "years" => Some(months / 12),
+        "quarters" => Some(months / 3),
+        "months" => Some(months),
+        "weeks" => Some(days / 7),
+        "days" => Some(days),
+        "hours" => nanos_in(3_600 * NANOS_PER_SECOND),
+        "minutes" => nanos_in(60 * NANOS_PER_SECOND),
+        "seconds" => nanos_in(NANOS_PER_SECOND),
+        "milliseconds" => nanos_in(1_000_000),
+        "microseconds" => nanos_in(1_000),
+        "nanoseconds" => nanos_in(1),
+        "quartersOfYear" => Some(months % 12 / 3),
+        "monthsOfQuarter" => Some(months % 3),
+        "monthsOfYear" => Some(months % 12),
+        "daysOfWeek" => Some(days % 7),
+        "minutesOfHour" => nanos_in(60 * NANOS_PER_SECOND).map(|minutes| minutes % 60),
+        "secondsOfMinute" => nanos_in(NANOS_PER_SECOND).map(|seconds| seconds % 60),
+        "millisecondsOfSecond" => nanos_in(1_000_000).map(|millis| millis % 1_000),
+        "microsecondsOfSecond" => nanos_in(1_000).map(|micros| micros % 1_000_000),
+        "nanosecondsOfSecond" => i64::try_from(nanos % NANOS_PER_SECOND).ok(),
+        _ => None,
     }
 }
 
@@ -820,6 +916,13 @@ pub(crate) fn field(
     value: &CanonicalScalar,
     key: &str,
 ) -> Option<Result<CanonicalScalar, GraphIntegerErrorKind>> {
+    if let CanonicalScalar::Duration(value) = value {
+        return Some(
+            duration_field(*value, key)
+                .map(CanonicalScalar::Int)
+                .ok_or(GraphIntegerErrorKind::TemporalField),
+        );
+    }
     let (date, time, offset, timestamp) = match value {
         CanonicalScalar::Date(day) => (Some(*day), None, None, None),
         CanonicalScalar::LocalTime(time) => (None, Some(*time), None, None),

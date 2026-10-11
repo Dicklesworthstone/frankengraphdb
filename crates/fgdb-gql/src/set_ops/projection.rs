@@ -169,6 +169,9 @@ pub enum GraphTemporalFunction {
     FromEpoch,
     /// `datetime.fromepochmillis(milliseconds)`, at UTC.
     FromEpochMillis,
+    /// `duration(x)`: from a map of counts, ISO 8601 text, a duration, or
+    /// NULL.
+    Duration,
 }
 
 impl GraphTemporalFunction {
@@ -187,6 +190,7 @@ impl GraphTemporalFunction {
             Self::TruncateDateTime => 10,
             Self::FromEpoch => 11,
             Self::FromEpochMillis => 12,
+            Self::Duration => 13,
         }
     }
 
@@ -198,6 +202,7 @@ impl GraphTemporalFunction {
             ("TIME", Self::Time),
             ("LOCALDATETIME", Self::LocalDateTime),
             ("DATETIME", Self::DateTime),
+            ("DURATION", Self::Duration),
         ]
         .into_iter()
         .find_map(|(spelling, function)| name.eq_ignore_ascii_case(spelling).then_some(function))
@@ -211,7 +216,8 @@ impl GraphTemporalFunction {
                 Self::LocalTime => Self::TruncateLocalTime,
                 Self::Time => Self::TruncateTime,
                 Self::LocalDateTime => Self::TruncateLocalDateTime,
-                _ => Self::TruncateDateTime,
+                Self::DateTime => Self::TruncateDateTime,
+                _ => return None,
             }
         } else if name.eq_ignore_ascii_case("DATETIME")
             && operation.eq_ignore_ascii_case("FROMEPOCH")
@@ -238,9 +244,12 @@ impl GraphTemporalFunction {
             | Self::TruncateDateTime => Some((2, 3)),
             Self::FromEpoch => Some((2, 2)),
             Self::FromEpochMillis => Some((1, 1)),
-            Self::Date | Self::LocalTime | Self::Time | Self::LocalDateTime | Self::DateTime => {
-                None
-            }
+            Self::Date
+            | Self::LocalTime
+            | Self::Time
+            | Self::LocalDateTime
+            | Self::DateTime
+            | Self::Duration => None,
         }
     }
 }

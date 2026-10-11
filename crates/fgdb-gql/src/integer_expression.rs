@@ -430,6 +430,7 @@ impl ExpressionCell<'_> {
                         | CanonicalScalar::Time(_)
                         | CanonicalScalar::LocalDateTime(_)
                         | CanonicalScalar::Timestamp(_)
+                        | CanonicalScalar::Duration(_)
                 ) =>
             {
                 Err(GraphIntegerErrorKind::NonScalar)
@@ -1283,6 +1284,7 @@ fn convert<E>(
             | CanonicalScalar::Time(_)
             | CanonicalScalar::LocalDateTime(_)
             | CanonicalScalar::Timestamp(_)
+            | CanonicalScalar::Duration(_)
                 if to_text =>
             {
                 // At most a zone's 255 bytes past the fixed temporal text;
@@ -1294,6 +1296,7 @@ fn convert<E>(
                     CanonicalScalar::LocalTime(value) => value.to_string(),
                     CanonicalScalar::Time(value) => value.to_string(),
                     CanonicalScalar::LocalDateTime(value) => value.to_string(),
+                    CanonicalScalar::Duration(value) => value.to_string(),
                     CanonicalScalar::Timestamp(value) => {
                         crate::set_ops::timestamp_text(value).map_err(failure)?
                     }
@@ -1518,6 +1521,16 @@ fn compare_scalars<E>(
             instruction,
             kind: GraphIntegerErrorKind::IncompatibleOperands,
         }));
+    }
+    // openCypher orders no duration against another (P1M against P30D has
+    // no answer): only = and <> compare them; the rest are NULL.
+    if matches!(left, CanonicalScalar::Duration(_))
+        && !matches!(
+            comparison,
+            IntegerComparison::Equal | IntegerComparison::NotEqual
+        )
+    {
+        return Ok(None);
     }
     // Reserve variable-size scans before invoking the shared comparator.
     charge_payload(scalar_payload_bytes(left), false, control)?;

@@ -1504,6 +1504,148 @@ fn truncation_and_epoch_calls_follow_the_tck() {
     }
 }
 
+/// fgdb-txbg9: duration(...) builds months, days and a time part from a map
+/// of counts (fractions cascading down, a month as the average month) or ISO
+/// 8601 text, prints openCypher's text with a sign per component, reads its
+/// fields, and compares only for equality: P1M against P30D has no order,
+/// so `<` is NULL. Expected texts are the TCK's (Temporal1 [12], Temporal2
+/// [7], Temporal5 [7], Temporal6 [6], Temporal7 [6]).
+#[test]
+fn durations_build_print_read_and_compare_only_for_equality() {
+    let x = text("x");
+    let as_text = |expression: &str| scalar(&format!("toString({expression})"), &x);
+    for (expression, expected) in [
+        (
+            "duration({days: 14, hours: 16, minutes: 12})",
+            "P14DT16H12M",
+        ),
+        ("duration({months: 5, days: 1.5})", "P5M1DT12H"),
+        ("duration({months: 0.75})", "P22DT19H51M49.5S"),
+        ("duration({weeks: 2.5})", "P17DT12H"),
+        (
+            "duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70})",
+            "P12Y5M14DT16H13M10S",
+        ),
+        (
+            "duration({days: 14, seconds: 70, milliseconds: 1})",
+            "P14DT1M10.001S",
+        ),
+        (
+            "duration({days: 14, seconds: 70, nanoseconds: 1})",
+            "P14DT1M10.000000001S",
+        ),
+        ("duration({minutes: 1.5, seconds: 1})", "PT1M31S"),
+        ("duration({quarters: 1})", "P3M"),
+        ("duration('P5M1.5D')", "P5M1DT12H"),
+        ("duration('PT0.75M')", "PT45S"),
+        (
+            "duration('P2012-02-02T14:37:21.545')",
+            "P2012Y2M2DT14H37M21.545S",
+        ),
+        (
+            "duration({years: 12, months: 5, days: -14, hours: 16})",
+            "P12Y5M-14DT16H",
+        ),
+        ("duration({minutes: 12, seconds: -60})", "PT11M"),
+        ("duration({seconds: -2, milliseconds: 1})", "PT-1.999S"),
+        ("duration({seconds: -60, milliseconds: -1})", "PT-1M-0.001S"),
+        ("duration({})", "PT0S"),
+        ("duration(duration('P1D'))", "P1D"),
+    ] {
+        assert_eq!(as_text(expression), text(expected), "{expression}");
+    }
+    assert_eq!(scalar("duration(null)", &x), CanonicalScalar::Null);
+
+    // Temporal5 [7]: every field of 1 year 4 months 10 days 1:01:01.111111111.
+    let int = CanonicalScalar::Int;
+    let sample = "duration({years: 1, months: 4, days: 10, hours: 1, minutes: 1, seconds: 1, \
+                  nanoseconds: 111111111})";
+    for (field, expected) in [
+        ("years", 1),
+        ("quarters", 5),
+        ("months", 16),
+        ("weeks", 1),
+        ("days", 10),
+        ("hours", 1),
+        ("minutes", 61),
+        ("seconds", 3_661),
+        ("milliseconds", 3_661_111),
+        ("microseconds", 3_661_111_111),
+        ("nanoseconds", 3_661_111_111_111),
+        ("quartersOfYear", 1),
+        ("monthsOfQuarter", 1),
+        ("monthsOfYear", 4),
+        ("daysOfWeek", 3),
+        ("minutesOfHour", 1),
+        ("secondsOfMinute", 1),
+        ("millisecondsOfSecond", 111),
+        ("microsecondsOfSecond", 111_111),
+        ("nanosecondsOfSecond", 111_111_111),
+    ] {
+        assert_eq!(
+            scalar(&format!("{sample}.{field}"), &x),
+            int(expected),
+            "{field}"
+        );
+    }
+
+    // Temporal6 [6] round trip, Temporal7 [6] equality, and no order.
+    let truth = |value: bool| CanonicalScalar::Bool(value);
+    let x12 = "duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70})";
+    for (expression, expected) in [
+        (format!("duration(toString({x12})) = {x12}"), truth(true)),
+        (
+            format!(
+                "{x12} = duration({{years: 12, months: 5, days: 14, hours: 16, minutes: 13, \
+                 seconds: 10}})"
+            ),
+            truth(true),
+        ),
+        (
+            format!(
+                "{x12} = duration({{years: 12, months: 5, days: 13, hours: 40, minutes: 13, \
+                 seconds: 10}})"
+            ),
+            truth(false),
+        ),
+        (
+            "duration('P1M') <> duration('P30D')".to_owned(),
+            truth(true),
+        ),
+        (
+            "duration('P1D') = duration('PT24H')".to_owned(),
+            truth(false),
+        ),
+        (
+            "duration('P1M') < duration('P30D')".to_owned(),
+            CanonicalScalar::Null,
+        ),
+        (
+            "duration('PT1S') >= duration('PT1S')".to_owned(),
+            CanonicalScalar::Null,
+        ),
+    ] {
+        assert_eq!(scalar(&expression, &x), expected, "{expression}");
+    }
+
+    for expression in [
+        "duration({fortnights: 1})",
+        "duration({days: '1'})",
+        "duration('P')",
+        "duration('P1D1M')",
+        "duration(1)",
+        "duration(date('2015-07-21'))",
+        "duration('P1D').year",
+    ] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        let error = execute(&query, &x, policy()).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("Temporal"),
+            "{expression}: {error:?}"
+        );
+    }
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,
