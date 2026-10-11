@@ -5,6 +5,8 @@
 //! in-process messages, NOT a new wire format or an authority to serve data.
 //! Ordinary Raft traffic still establishes the follower's published leader.
 
+mod batch;
+
 use fgdb_order::{ReadIndexAck, ReadIndexError, ReadIndexProbe};
 
 use super::{PendingRead, ReadIndexId, ReadIndexReady, Replica, quorum};
