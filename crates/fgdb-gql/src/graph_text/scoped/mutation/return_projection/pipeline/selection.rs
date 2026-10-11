@@ -268,10 +268,30 @@ impl<'a> Parser<'a> {
                     // Double NOT checks the Boolean domain without changing
                     // TRUE/FALSE/UNKNOWN. Comparing an unchecked cell to TRUE
                     // would silently turn non-Boolean inputs into false.
-                    let mut program = scalar_program(value, at)?;
-                    program.push(MutationIntegerTemplateOp::Bound(GraphIntegerOp::Not));
-                    program.push(MutationIntegerTemplateOp::Bound(GraphIntegerOp::Not));
-                    let value = ReadValueTemplate::Integer { program, at };
+                    let not = MutationIntegerTemplateOp::Bound(GraphIntegerOp::Not);
+                    let value = match value {
+                        value @ (ReadValueTemplate::Column(_)
+                        | ReadValueTemplate::Parameter { .. }
+                        | ReadValueTemplate::Integer { .. }) => {
+                            let mut program = scalar_program(value, at)?;
+                            program.extend([not.clone(), not]);
+                            ReadValueTemplate::Integer { program, at }
+                        }
+                        // A composite Boolean (a quantifier, a list CASE) has
+                        // no scalar program: it is the one let slot of the
+                        // check, in the same private cell (TCK Quantifier11 [3]).
+                        composite => ReadValueTemplate::Let {
+                            values: vec![composite],
+                            body: Box::new(ReadValueTemplate::Integer {
+                                program: vec![
+                                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::Local(0)),
+                                    not.clone(),
+                                    not,
+                                ],
+                                at,
+                            }),
+                        },
+                    };
                     ReadFilterOp::Compare {
                         left: self.selection_cell(schema, selection, value, at)?,
                         comparison: IntegerComparison::Equal,

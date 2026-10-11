@@ -1486,3 +1486,39 @@ fn a_case_returning_a_dynamic_entry_is_typed_per_row() {
         expected
     );
 }
+
+/// A list quantifier is a Boolean row predicate in a WITH's WHERE, alone,
+/// negated or under AND and OR (TCK Quantifier11 [3]). It is checked for
+/// the Boolean domain like any scalar predicate: a composite that is not a
+/// Boolean fails, never filters silently.
+#[test]
+fn a_with_where_filters_by_list_quantifiers() {
+    let kept = |text: &str| {
+        let rows = run(&prepare(text), &[], wide(), &mut || Ok(()))
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value;
+        let mut values = ints(&rows, 0);
+        values.sort();
+        values
+    };
+    let lists = "UNWIND [[2], [1, 2], [3]] AS list WITH list, size(list) AS n";
+    for (filter, expected) in [
+        ("single(x IN list WHERE x = 2)", vec![Some(1), Some(2)]),
+        ("NOT any(x IN list WHERE x = 2)", vec![Some(1)]),
+        (
+            "single(x IN list WHERE x = 2) OR all(x IN list WHERE x = 3)",
+            vec![Some(1), Some(1), Some(2)],
+        ),
+        ("any(x IN list WHERE x = 2) AND n > 1", vec![Some(2)]),
+        ("none(x IN list WHERE x > 0)", vec![]),
+    ] {
+        let text = format!("{lists} WHERE {filter} RETURN n");
+        assert_eq!(kept(&text), expected, "{text}");
+    }
+    let text = format!("{lists} WHERE [x IN list | x] RETURN n");
+    let failed = PreparedGraphSetText::prepare(&text, symbols)
+        .ok()
+        .and_then(|query| query.bind_parameters(&GqlParameters::new()).ok())
+        .is_none_or(|query| run(&query, &[], wide(), &mut || Ok(())).is_err());
+    assert!(failed, "{text}");
+}
