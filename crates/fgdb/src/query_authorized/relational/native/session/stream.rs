@@ -17,7 +17,7 @@ use std::sync::{Mutex, MutexGuard};
 
 #[path = "stream/aggregate.rs"]
 mod aggregate;
-pub use aggregate::AuthorizedAggregateCursor;
+pub use aggregate::{AuthorizedAggregateCursor, AuthorizedSendAggregateCursor};
 
 // Synchronization is local to ONE cursor's sequential callbacks. No guard is
 // held across a source call or suspension. Keeping the actual borrowed clock

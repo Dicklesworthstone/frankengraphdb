@@ -377,17 +377,17 @@ pub(in super::super) fn row_driver<'q, C: FnMut() -> u64>(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn build<'q, C: FnMut() -> u64>(
+pub(super) fn aggregate_driver<'q, C: FnMut() -> u64>(
     plan: EdgeAggregatePlan,
     at: CommitSeq,
-    columns: Vec<String>,
-    layout: Layout,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
-) -> Opened<'q, GraphAggregateRow, Layout> {
+) -> Result<
+    impl FnMut() -> Result<(Option<GraphAggregateRow>, bool), QueryError> + use<'q, C>,
+    QueryError,
+> {
     // Both factories borrow the SAME view and cut; neither can refresh from a
     // writer. Constructing these cheap pin owners scans no graph candidates.
     let edges = view.edge_scan_source(cx, at).map_err(QueryError::Read)?;
@@ -405,12 +405,11 @@ pub(super) fn build<'q, C: FnMut() -> u64>(
         control.borrow_mut().checkpoint()
     });
     execution.borrow_mut().checkpoint()?;
-    let driver: Pull<'q, GraphAggregateRow> = Box::new(move || {
+    Ok(move || {
         let row = cursor.next().transpose().map_err(error)?;
         execution.borrow_mut().deliver(usize::from(row.is_some()))?;
         Ok((row, cursor.state() != EdgeScanState::Open))
-    });
-    Ok((AuthorizedRowCursor::new(driver, columns, at), layout))
+    })
 }
 
 #[cfg(test)]

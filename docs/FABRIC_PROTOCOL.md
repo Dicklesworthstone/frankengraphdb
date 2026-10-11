@@ -324,27 +324,41 @@ application output is admitted.
   source. The immutable generation, native source position and one signed
   execution allowance stay attached through every pause. The writer lock is
   released before delivery. Recovery and live authority guards fence source
-  pulls and physical output; cancellation or disconnect drops the cursor
-  without reading the remaining graph. A late error is an ERROR after the
-  previously delivered prefix, never a successful END or an automatic retry.
+  pulls and physical output; at cursor pauses, cancellation or disconnect
+  drops the cursor without reading the remaining graph. A late error is an
+  ERROR after the previously delivered prefix, never a successful END or an
+  automatic retry.
 
   The supported row profile is the native cursor's identity-leading order:
   vertex rows begin with the scanned vertex; fixed-edge rows begin with the
   captured root edge and its root-source vertex, followed by additional edge
   identities for connected fixed joins. Admitted masked scalar columns and
   native existence probes, DISTINCT and SKIP/LIMIT retain their normal cursor
-  semantics. Unsupported projections, orders, aggregate/compound facades and
-  source shapes return a statement refusal before candidate reads. Ordinary
-  `Read` and prepared reads retain their broader eager execution semantics.
+  semantics. Vertex and fixed-edge aggregates also use the native cursor:
+  the first credited demand consumes the complete authorized input and later
+  demands move completed groups out. Grouping, HAVING, aggregate expressions,
+  DISTINCT, ordering, paging and admitted historical reads retain their native
+  semantics. Count, wide integer sum and exact rational average values retain
+  their wire types. Only delivered groups spend the signed row allowance;
+  source work, scratch and node limits still govern the entire input, including
+  an aggregate with LIMIT 0. Input failures precede all aggregate output.
+  The first aggregate pull is synchronous: transport QUERY_CANCEL is handled
+  again when that pull returns; native context and budget checkpoints remain
+  active throughout accumulation.
+  Unsupported projections, orders, compound facades and source shapes return
+  a statement refusal before candidate reads. Ordinary `Read` and prepared
+  reads retain their broader eager execution semantics.
   Using a row callback with those modes changes delivery, not source execution.
 
   The adapter retains at most a negotiated frame of rows and one pending row
   whose encoded size is known but awaits byte credit. A row exceeding the frame
-  bound is refused. Native source/probe scratch and the pinned generation have
-  their existing separate policy/lifetime bounds. With zero row credit, no
-  source pull occurs, including an EOF probe. A LIMIT-exhausted cursor can send
-  END with byte credit alone; natural exhaustion may need one further row
-  grant after an exact full window. Raw clients must replenish consumed row
+  bound is refused. Native source/probe scratch, aggregate group state and the
+  pinned generation have their existing separate policy/lifetime bounds.
+  Aggregate argument DISTINCT and COLLECT retain governed in-memory state;
+  the frame bound does not bound their total accumulator memory. With zero row
+  credit, no source pull occurs, including an EOF probe. A LIMIT-exhausted cursor
+  can send END with byte credit alone; natural exhaustion may need one further
+  row grant after an exact full window. Raw clients must replenish consumed row
   credit until END or ERROR. The Rust client does this automatically:
 
   ```rust

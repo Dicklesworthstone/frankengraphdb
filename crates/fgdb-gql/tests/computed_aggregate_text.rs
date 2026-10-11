@@ -88,6 +88,14 @@ fn aggregate_collections_bind_nested_element_scopes_and_preserve_occurrences() {
             list(&[2, 6, 6, 9]),
         ),
         (
+            "MATCH (n) RETURN [x IN collect(n.p) | x + count(n)] AS value",
+            list(&[2, 6, 6, 9]),
+        ),
+        (
+            "MATCH (n) RETURN [x IN collect(n.p) | size(collect([y IN [1, 2] | y]))] AS value",
+            list(&[4, 4, 4, 4]),
+        ),
+        (
             "MATCH (n) RETURN [x IN collect(DISTINCT n.p) | x] AS value",
             list(&[-2, 2, 5]),
         ),
@@ -145,6 +153,36 @@ fn aggregate_collections_bind_nested_element_scopes_and_preserve_occurrences() {
         );
     }
     assert_eq!(rows.len(), 3);
+
+    let text = "MATCH (n) RETURN n AS node, [x IN collect(n.p) | id(n) + x] AS values GROUP BY n ORDER BY n";
+    let rows = run(&prepare(text), &vertices, &[], &props).unwrap().value;
+    for (row, (vertex, expected)) in rows.iter().zip(vertices.into_iter().zip([-1, 4, 5, 9])) {
+        assert_eq!(
+            row.values(),
+            &[
+                GraphAggregateValue::Value(GraphValue::Vertex(vertex)),
+                GraphAggregateValue::Value(list(&[expected])),
+            ]
+        );
+    }
+    assert_eq!(rows.len(), 4);
+}
+
+#[test]
+fn aggregate_arguments_cannot_depend_on_output_element_scopes() {
+    for text in [
+        "MATCH (n) RETURN [x IN collect(n.p) | sum(x+1)] AS values",
+        "MATCH (n) RETURN [x IN collect(n.p) | collect([x])] AS values",
+        "MATCH (n) RETURN [x IN collect(n.p) | collect([y IN [1, 2] | x+y])] AS values",
+        "MATCH (n) RETURN reduce(total=0, x IN collect(n.p) | sum(total+1)) AS value",
+    ] {
+        assert!(
+            PreparedGraphAggregateText::prepare(text, symbols)
+                .and_then(|template| template.bind_parameters(&GqlParameters::new()))
+                .is_err(),
+            "{text}"
+        );
+    }
 }
 
 #[test]
@@ -869,6 +907,16 @@ fn malformed_computation_and_grouping_refuse_before_catalog_resolution() {
         "MATCH (n) RETURN [n IN collect(n.p) | id(n)] AS values GROUP BY n",
         "MATCH (n) RETURN [n IN collect(n.p) | elementId(n)] AS values GROUP BY n",
         "MATCH (n) RETURN reduce(n = 0, x IN collect(n.p) | id(n)) AS values GROUP BY n",
+        "MATCH (n) RETURN [n IN collect(n.p) | count(n)] AS values",
+        "MATCH (n) RETURN [n IN collect(n.p) | sum(id(n))] AS values",
+        "MATCH (n) RETURN [n IN collect(n.p) | count(elementId(n))] AS values",
+        "MATCH (n) RETURN [n IN collect(n.p) | count(labels(n))] AS values",
+        "MATCH (n) RETURN [n IN collect(n.p) | count(n{.p})] AS values",
+        "MATCH (a)-[r:R]->(b) RETURN [r IN collect(a.p) | count(r)] AS values",
+        "MATCH (a)-[r:R]->(b) RETURN [r IN collect(a.p) | count(type(r))] AS values",
+        "MATCH (a)-[r:R]->(b) RETURN [r IN collect(a.p) | count(startNode(r))] AS values",
+        "MATCH p=(a)-[:R]->(b) RETURN [p IN collect(a.p) | count(p)] AS values",
+        "MATCH p=(a)-[:R]->(b) RETURN [p IN collect(a.p) | count(nodes(p))] AS values",
     ] {
         let calls = Cell::new(0);
         assert!(

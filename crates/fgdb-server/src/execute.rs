@@ -118,27 +118,64 @@ pub(crate) struct ReadSession<'a> {
 /// enters the retained recovery generation; no generation guard or writer
 /// lock remains held while the connection waits for client credit.
 pub(crate) struct ReadCursor<'q> {
-    native: fgdb::AuthorizedSendRowCursor<'q>,
+    native: ReadSource<'q>,
     generation: Generation,
+}
+
+enum ReadSource<'q> {
+    Rows(fgdb::AuthorizedSendRowCursor<'q>),
+    Aggregate(fgdb::AuthorizedSendAggregateCursor<'q>),
 }
 
 impl ReadCursor<'_> {
     pub(crate) fn columns(&self) -> &[String] {
-        self.native.columns()
+        match &self.native {
+            ReadSource::Rows(cursor) => cursor.columns(),
+            ReadSource::Aggregate(cursor) => cursor.columns(),
+        }
     }
     pub(crate) fn snapshot_seq(&self) -> u64 {
-        self.native.snapshot_seq().0
+        match &self.native {
+            ReadSource::Rows(cursor) => cursor.snapshot_seq().0,
+            ReadSource::Aggregate(cursor) => cursor.snapshot_seq().0,
+        }
     }
     pub(crate) fn exhausted(&self) -> bool {
-        self.native.state() == fgdb_gql::stream::VertexScanState::Exhausted
+        let state = match &self.native {
+            ReadSource::Rows(cursor) => cursor.state(),
+            ReadSource::Aggregate(cursor) => cursor.state(),
+        };
+        state == fgdb_gql::stream::VertexScanState::Exhausted
     }
     pub(crate) fn next(&mut self) -> Result<Option<Vec<WireValue>>, Refusal> {
         let _operation = self.generation.enter().map_err(Refusal::from)?;
-        let result = self.native.next().transpose();
+        let result = match &mut self.native {
+            ReadSource::Rows(cursor) => cursor
+                .next()
+                .transpose()
+                .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect())),
+            ReadSource::Aggregate(cursor) => cursor.next().transpose().map(|row| {
+                row.map(|row| {
+                    // The native compiler validates these RETURN ordinals before
+                    // opening a source. Preserve exact aggregate domains and
+                    // repeated keys without a lossy row-value intermediate.
+                    cursor
+                        .output_slots()
+                        .iter()
+                        .map(|slot| match *slot {
+                            fgdb_gql::GraphAggregateTextSlot::GroupKey(at) => {
+                                convert::graph(&row.keys()[at])
+                            }
+                            fgdb_gql::GraphAggregateTextSlot::Aggregate(at) => {
+                                convert::cell(&row.values()[at])
+                            }
+                        })
+                        .collect()
+                })
+            }),
+        };
         self.generation.check().map_err(Refusal::from)?;
-        result
-            .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect()))
-            .map_err(query_refusal)
+        result.map_err(query_refusal)
     }
 }
 
@@ -183,7 +220,20 @@ impl ReadSession<'_> {
         let prepared = self.native.prepare(cx, text, parameters);
         generation.check().map_err(Refusal::from)?;
         let prepared = prepared.map_err(query_refusal)?;
-        let cursor = self.native.stream_send(cx, &prepared, parameters);
+        // Classification selects exactly one existing physical compiler. A
+        // refused aggregate profile never falls back to eager materialization.
+        let cursor = match prepared.facade_class() {
+            fgdb::NativeReadClass::Aggregate
+            | fgdb::NativeReadClass::TemporalAggregate
+            | fgdb::NativeReadClass::PipelineAggregate => self
+                .native
+                .stream_aggregate_send(cx, &prepared, parameters)
+                .map(ReadSource::Aggregate),
+            _ => self
+                .native
+                .stream_send(cx, &prepared, parameters)
+                .map(ReadSource::Rows),
+        };
         generation.check().map_err(Refusal::from)?;
         Ok(ReadCursor {
             native: cursor.map_err(query_refusal)?,
@@ -640,16 +690,23 @@ pub(crate) fn query_refusal(error: impl Into<SessionError>) -> Refusal {
         QueryError::Set(e) if gql_budget(e) => ErrorCode::Budget,
         QueryError::Stream(e) if gql_budget(e) => ErrorCode::Budget,
         QueryError::EdgeStream(e) if gql_budget(e) => ErrorCode::Budget,
+        QueryError::AggregateStream(e) if gql_budget(e) => ErrorCode::Budget,
+        QueryError::EdgeAggregateStream(e) if gql_budget(e) => ErrorCode::Budget,
         QueryError::Pattern(GqlQueryError::Interrupted(_))
         | QueryError::Aggregate(GqlQueryError::Interrupted(_))
         | QueryError::Set(GqlQueryError::Interrupted(_))
         | QueryError::Stream(GqlQueryError::Interrupted(_))
-        | QueryError::EdgeStream(GqlQueryError::Interrupted(_)) => ErrorCode::Cancelled,
+        | QueryError::EdgeStream(GqlQueryError::Interrupted(_))
+        | QueryError::AggregateStream(GqlQueryError::Interrupted(_))
+        | QueryError::EdgeAggregateStream(GqlQueryError::Interrupted(_)) => ErrorCode::Cancelled,
         QueryError::Stream(GqlQueryError::Source(fgdb_gql::stream::VertexScanError::Plan(_)))
         | QueryError::EdgeStream(GqlQueryError::Source(
             fgdb_gql::edge_stream::EdgeScanError::Plan(_),
         )) => ErrorCode::Statement,
-        QueryError::Stream(_) | QueryError::EdgeStream(_) => ErrorCode::Execution,
+        QueryError::Stream(_)
+        | QueryError::EdgeStream(_)
+        | QueryError::AggregateStream(_)
+        | QueryError::EdgeAggregateStream(_) => ErrorCode::Execution,
         QueryError::Set(e) if procedure_statement(e) => ErrorCode::Statement,
         QueryError::Pattern(_) | QueryError::Aggregate(_) | QueryError::Set(_) => {
             ErrorCode::Execution

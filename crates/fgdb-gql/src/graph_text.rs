@@ -775,8 +775,22 @@ impl<'a> Parser<'a> {
         self.advance()?;
         Ok(name)
     }
+    /// Graph-only operand shortcuts must respect the same element scopes as
+    /// the scalar compiler. A shadowed name denotes the local value; it must
+    /// never silently rebind to a graph entity in id(), COUNT(), or metadata.
+    fn require_unshadowed_graph_binding(
+        &self,
+        name: Name<'a>,
+    ) -> Result<(), GraphPatternTextError> {
+        if self.elements.contains(&name.text) {
+            return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
+        }
+        Ok(())
+    }
+
     fn variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
+        self.require_unshadowed_graph_binding(name)?;
         if !self
             .syntax
             .variables
@@ -788,6 +802,7 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
     fn require_property_variable(&self, name: Name<'a>) -> Result<(), GraphPatternTextError> {
+        self.require_unshadowed_graph_binding(name)?;
         if self
             .syntax
             .variables
@@ -1349,6 +1364,7 @@ impl<'a> Parser<'a> {
 
     fn vertex_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
+        self.require_unshadowed_graph_binding(name)?;
         if !self.syntax.variables.iter().any(|v| v.text == name.text) {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
@@ -1357,6 +1373,7 @@ impl<'a> Parser<'a> {
 
     fn edge_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
+        self.require_unshadowed_graph_binding(name)?;
         if self.syntax.visible_edge(name.text).is_none() {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
@@ -1407,6 +1424,7 @@ impl<'a> Parser<'a> {
 
     fn path_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
+        self.require_unshadowed_graph_binding(name)?;
         if !self.syntax.path.is_some_and(|path| path.text == name.text) {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
@@ -1417,6 +1435,7 @@ impl<'a> Parser<'a> {
         &mut self,
     ) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
+        self.require_unshadowed_graph_binding(name)?;
         if !self.syntax.variables.iter().any(|v| v.text == name.text)
             && !self.syntax.path.is_some_and(|path| path.text == name.text)
             && self.syntax.visible_edge(name.text).is_none()

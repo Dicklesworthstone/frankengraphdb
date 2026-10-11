@@ -826,9 +826,10 @@ pub enum ExecuteMode {
     /// `SUBSCRIBE TO <read>`: a baseline, then one delta batch per change,
     /// pushed as SUBSCRIPTION_BATCH frames until the client cancels.
     Subscribe,
-    /// Demand drives the authorized native source cursor. Only its admitted
-    /// identity-leading row plans are supported; no eager fallback is allowed.
-    /// Result framing is the ordinary chunk/end protocol.
+    /// Demand drives the authorized native source cursor. Admitted profiles
+    /// include identity-leading rows and vertex/fixed-edge aggregates. An
+    /// aggregate consumes its input on first demand and then yields completed
+    /// groups. No eager fallback is allowed; result framing is unchanged.
     ReadStream,
 }
 

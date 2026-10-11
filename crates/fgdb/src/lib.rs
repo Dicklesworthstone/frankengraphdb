@@ -162,13 +162,14 @@ pub use gql_cert::{
 pub use gql_exec::source::{SnapshotEdgeSource, SnapshotVertexSource};
 pub use query::{
     AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendRowCursor,
-    ExplainRow, HYBRID_SEARCH_OUTPUTS, HybridCallError, NativeAggregateCursor,
-    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
-    NativeAggregateSpoolRow, NativeExplainCertificate, NativeResultCertificate, NativeResultSpool,
-    NativeSpoolCursor, NativeSpoolError, PinnedIndex, PreparedBufferedAggregate,
-    PreparedBufferedOrder, PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue,
-    QueryWriteError, RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
+    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, ExplainRow, HYBRID_SEARCH_OUTPUTS,
+    HybridCallError, NativeAggregateCursor, NativeAggregateSpool, NativeAggregateSpoolCursor,
+    NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeExplainCertificate,
+    NativeResultCertificate, NativeResultSpool, NativeSpoolCursor, NativeSpoolError, PinnedIndex,
+    PreparedBufferedAggregate, PreparedBufferedOrder, PreparedNativeRead, ProcedureError,
+    QueryError, QueryResult, QueryValue, QueryWriteError, RefreshReport, ReplayRefusal,
+    ResidentIndex, ResidentIndexError,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,

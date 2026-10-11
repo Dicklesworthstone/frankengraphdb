@@ -103,7 +103,10 @@ fn scalar(value: i64) -> QueryValue {
 fn null() -> QueryValue {
     QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
 }
-fn rows(cursor: &mut AuthorizedAggregateCursor<'_>) -> Vec<Vec<QueryValue>> {
+fn rows<Driver>(cursor: &mut AuthorizedAggregateCursor<'_, Driver>) -> Vec<Vec<QueryValue>>
+where
+    Driver: FnMut() -> Result<(Option<GraphAggregateRow>, bool), QueryError>,
+{
     let slots = cursor.output_slots().to_vec();
     cursor
         .by_ref()
@@ -206,6 +209,15 @@ fn scoped_edges_and_fixed_joins_aggregate_only_admitted_topology_and_fields() {
         let mut cursor = session.stream_aggregate(&cx, &prepared, &params).unwrap();
         assert_eq!(rows(&mut cursor), expected, "{text}");
         assert_eq!(eager, expected, "eager: {text}");
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(cursor.next().is_none());
+        drop(cursor);
+        let mut cursor = session
+            .stream_aggregate_send(&cx, &prepared, &params)
+            .unwrap();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&cursor);
+        assert_eq!(rows(&mut cursor), expected, "Send: {text}");
         assert_eq!(cursor.state(), VertexScanState::Exhausted);
         assert!(cursor.next().is_none());
     }

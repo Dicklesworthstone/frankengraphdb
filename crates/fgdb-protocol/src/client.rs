@@ -470,9 +470,11 @@ impl Client {
     /// returning that error, leaving the connection ready for another request.
     /// `ReadStream` additionally makes flow credit drive the server's actual
     /// native source, retaining one pinned generation and execution allowance.
-    /// It requires the native cursor's identity-leading projection/order profile
-    /// and refuses unsupported plans. `Read` retains its broader eager execution
-    /// semantics; callbacks alone do not make that server source lazy.
+    /// It accepts the native cursor's identity-leading row profile or admitted
+    /// vertex/fixed-edge aggregates. Aggregate input is consumed on first demand
+    /// and only complete groups are delivered. Unsupported plans refuse.
+    /// `Read` retains its broader eager execution semantics; callbacks alone
+    /// do not make that server source lazy.
     /// The client replenishes an exactly exhausted row window before waiting
     /// for END, allowing a native source to discover natural EOF without an
     /// unauthorized pull at zero credit. No automatic query retry occurs.
