@@ -405,11 +405,12 @@ fn is_aggregate(prepared: &PreparedNativeRead) -> bool {
 
 /// Bind and admit the external physical definition before storage opens. The
 /// native statement class selects one compiler; errors never trigger retries.
-/// The ordered definition is boxed: at 384 bytes it would size every
-/// prepared buffered query, including the streaming ones.
+/// Both definitions are boxed: the ordered one is 384 bytes and the
+/// aggregate one 232 (since an edge relation may carry an alternation), and
+/// either would size every prepared buffered query, the streaming ones too.
 pub(super) enum PreparedBuffered {
     Ordered(Box<PreparedBufferedOrder>),
-    Aggregate(PreparedBufferedAggregate),
+    Aggregate(Box<PreparedBufferedAggregate>),
 }
 
 pub(super) fn prepare_buffered(options: &Options) -> Result<PreparedBuffered, Failure> {
@@ -418,7 +419,7 @@ pub(super) fn prepare_buffered(options: &Options) -> Result<PreparedBuffered, Fa
     if is_aggregate(&prepared) {
         prepared
             .prepare_buffered_aggregate(&options.params)
-            .map(PreparedBuffered::Aggregate)
+            .map(|aggregate| PreparedBuffered::Aggregate(Box::new(aggregate)))
             .map_err(execution_failure)
     } else {
         prepared
