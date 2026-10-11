@@ -808,6 +808,73 @@ fn date_builds_from_fields_text_and_a_base_and_reads_its_fields() {
     }
 }
 
+/// fgdb-txbg9: a date is an operand of the scalar operators around it.
+/// Dates compare chronologically, NULL propagates, toString gives the ISO
+/// text, a field reads as an integer, and ORDER BY puts NULL last. A date
+/// compared with a number is a typed error, never a guess.
+#[test]
+fn dates_compare_convert_and_order_as_values() {
+    let x = text("x");
+    let truth = CanonicalScalar::Bool;
+    for (expression, expected) in [
+        ("date('2015-07-21') < date('2015-07-22')", truth(true)),
+        ("date('2015-07-21') > date('1984-10-11')", truth(true)),
+        (
+            "date('2015-07-21') = date({year: 2015, month: 7, day: 21})",
+            truth(true),
+        ),
+        ("date('2015-07-21') <> date('2015-W30-2')", truth(false)),
+        ("date(null) < date('2015-07-21')", CanonicalScalar::Null),
+        (
+            "toString(date({year: 1984, week: 10, dayOfWeek: 3}))",
+            text("1984-03-07"),
+        ),
+        ("toString(date({year: 10000}))", text("+10000-01-01")),
+        (
+            "toString(date({year: -1, month: 7, day: 21}))",
+            text("-0001-07-21"),
+        ),
+        (
+            "date({year: 1984, month: 10, day: 11}).year + 1",
+            CanonicalScalar::Int(1985),
+        ),
+        (
+            "coalesce(null, date('2015-07-21'))",
+            CanonicalScalar::Date(fgdb_types::CanonicalDate::from_civil(2015, 7, 21).unwrap()),
+        ),
+    ] {
+        assert_eq!(scalar(expression, &x), expected, "{expression}");
+    }
+    let query = prepare("MATCH (n) RETURN date('2015-07-21') < 1 AS value");
+    let error = execute(&query, &x, policy()).unwrap_err();
+    assert!(
+        format!("{error:?}").contains("IncompatibleOperands"),
+        "{error:?}"
+    );
+
+    let ordered = execute(
+        &prepare(
+            "UNWIND [date('2015-07-21'), null, date('1984-10-11'), date('-0001-12-31')] AS d \
+             RETURN d ORDER BY d",
+        ),
+        &x,
+        policy(),
+    )
+    .unwrap();
+    let rendered: Vec<String> = ordered
+        .value
+        .iter()
+        .map(|row| match row.values()[0].as_scalar().unwrap() {
+            CanonicalScalar::Date(day) => day.to_string(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        rendered,
+        ["-0001-12-31", "1984-10-11", "2015-07-21", "Null"]
+    );
+}
+
 /// fgdb-j687q: openCypher toString / toInteger over the scalar domain. NULL
 /// stays NULL. toInteger parses text as a number and truncates a fraction
 /// toward zero, as the openCypher TCK expects (TypeConversion2 [4] '1.7' is 1,

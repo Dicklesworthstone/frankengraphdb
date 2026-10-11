@@ -425,6 +425,7 @@ impl ExpressionCell<'_> {
                         | CanonicalScalar::Float(_)
                         | CanonicalScalar::Bool(_)
                         | CanonicalScalar::Text(_)
+                        | CanonicalScalar::Date(_)
                 ) =>
             {
                 Err(GraphIntegerErrorKind::NonScalar)
@@ -1270,6 +1271,13 @@ fn convert<E>(
                         Err(_) => Ok(CanonicalScalar::Null),
                     }
                 };
+            }
+            // toString(date) is its ISO 8601 calendar text (fgdb-txbg9); a
+            // date is not a number.
+            CanonicalScalar::Date(value) if to_text => {
+                control(GlaExecutionEvent::ScratchEntry)
+                    .map_err(GraphIntegerEvaluationError::Control)?;
+                return make_text(&value.to_string(), instruction, control);
             }
             _ => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
         },

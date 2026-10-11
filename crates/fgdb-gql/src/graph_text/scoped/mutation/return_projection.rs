@@ -1179,9 +1179,9 @@ impl<'a> Parser<'a> {
 
     /// Whether a composite value starts here that a scalar expression reads
     /// through a let slot (fgdb-o5o9t): a list comprehension or quantifier,
-    /// head/last/tail/range/reduce, keys(), or size() of a list literal, a
-    /// parameter or a name. The scalar SIZE keeps a property read and every
-    /// literal.
+    /// head/last/tail/range/reduce, keys(), date(...), or size() of a list
+    /// literal, a parameter or a name. The scalar SIZE keeps a property read
+    /// and every literal.
     pub(super) fn starts_let_operand(&self) -> Result<bool, GraphPatternTextError> {
         let mut lexer = self.lexer.clone();
         if self.is_punct(b'[') {
@@ -1193,6 +1193,10 @@ impl<'a> Parser<'a> {
             return Ok(true);
         }
         let call = matches!(lexer.next()?.kind, TokenKind::Punct(b'('));
+        // A date (fgdb-txbg9) is compared, converted and read in a slot.
+        if call && self.is_word("DATE") {
+            return Ok(true);
+        }
         if !call || !(self.is_word("KEYS") || self.is_word("SIZE")) {
             return Ok(false);
         }
