@@ -1281,6 +1281,10 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 return Ok(Operand::Column(column));
             }
+            // An alias wins; then a grouping WITH's own item expression.
+            if let Some(column) = self.projected_source(schema.len())? {
+                return Ok(Operand::Column(column));
+            }
             if !(word.eq_ignore_ascii_case("TRUE")
                 || word.eq_ignore_ascii_case("FALSE")
                 || word.eq_ignore_ascii_case("NULL"))

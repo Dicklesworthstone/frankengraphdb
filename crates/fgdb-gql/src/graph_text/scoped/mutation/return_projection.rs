@@ -805,6 +805,10 @@ impl<'a> Parser<'a> {
         }
         let mut inputs = Vec::<Projection<'a>>::new();
         let mut outputs = Vec::<(Name<'a>, ReadValueTemplate)>::new();
+        // A DISTINCT WITH's own ORDER BY may repeat an item's expression, as
+        // a grouping WITH's may (`WITH DISTINCT a.name AS name ORDER BY
+        // a.name`).
+        let mut repeatable = Vec::new();
         if self.take(b'*')? {
             for variable in self.visible_graph_bindings() {
                 let at = self.mutation_projection(&mut inputs, variable, None)?;
@@ -828,6 +832,9 @@ impl<'a> Parser<'a> {
                 };
                 let operand = self.read_graph_value(&mut inputs, 0)?;
                 let end = self.current.at;
+                if with && self.syntax.distinct && self.repeatable_item(at, end)? {
+                    repeatable.push((at, end, outputs.len()));
+                }
                 let (mut alias, source) = if self.take_word("AS")? {
                     (self.name()?, None)
                 } else if with {
@@ -878,6 +885,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        self.projected_sources = (!repeatable.is_empty()).then(|| (outputs.len(), repeatable));
         Ok(GraphProjectionHead {
             with,
             plain: with && !self.syntax.distinct,

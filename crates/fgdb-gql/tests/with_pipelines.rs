@@ -316,6 +316,66 @@ fn named_with_expressions_and_parenthesized_variables_preserve_results() {
     assert_eq!(implicit.canonical_bytes(), explicit.canonical_bytes());
 }
 
+/// A grouping or DISTINCT WITH's own ORDER BY may repeat one of its items'
+/// expressions, which then is that item's output (openCypher, TCK
+/// WithOrderBy2 [22] to [24] and WithOrderBy4 [16] to [18]): `n.p` after
+/// `n.p AS p`, inside a larger key too, and an aggregate call after the same
+/// call. A repeat is a name, `name.key` or one call; any other expression,
+/// and the WITH's WHERE, still see only the projected names.
+#[test]
+fn a_grouping_or_distinct_with_orders_by_a_repeat_of_its_item() {
+    let values = [1, 2, 2, 3].map(CanonicalScalar::Int);
+    for (text, expected) in [
+        (
+            "MATCH (n) WITH n.p AS p, count(*) AS c ORDER BY n.p DESC LIMIT 1 RETURN p, c",
+            vec![(Some(3), Some(1))],
+        ),
+        (
+            "MATCH (n) WITH n.p AS p, count(*) AS c ORDER BY n.p + 10 LIMIT 1 RETURN p, c",
+            vec![(Some(1), Some(1))],
+        ),
+        (
+            "MATCH (n) WITH n.p AS p, count(*) AS c ORDER BY count(*) DESC, p LIMIT 1 \
+             RETURN p, c",
+            vec![(Some(2), Some(2))],
+        ),
+        (
+            "MATCH (n) WITH n.p AS p, count(*) AS c ORDER BY p - count(*) DESC, p \
+             RETURN p, c",
+            vec![(Some(3), Some(1)), (Some(1), Some(1)), (Some(2), Some(2))],
+        ),
+        (
+            "MATCH (n) WITH DISTINCT n.p AS p, 0 AS c ORDER BY n.p DESC RETURN p, c",
+            vec![(Some(3), Some(0)), (Some(2), Some(0)), (Some(1), Some(0))],
+        ),
+    ] {
+        let query = prepare(text);
+        let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+        let found: Vec<_> = ints(&rows, 0).into_iter().zip(ints(&rows, 1)).collect();
+        assert_eq!(found, expected, "{text}");
+    }
+    for text in [
+        // Not an item: the dropped binding stays out of scope.
+        "MATCH (n) WITH n.p AS p, count(*) AS c ORDER BY n.q RETURN p",
+        "MATCH (n) WITH n.p + 1 AS q, count(*) AS c ORDER BY n.p RETURN q",
+        // The WITH's WHERE reads its projected names only.
+        "MATCH (n) WITH n.p AS p, count(*) AS c WHERE n.p > 1 RETURN p",
+        // A later stage sees the projected row, not the item expressions.
+        "MATCH (n) WITH n.p AS p, count(*) AS c WITH p, c ORDER BY n.p RETURN p",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+}
+
 #[test]
 fn alias_arithmetic_case_and_coalesce_reuse_checked_lazy_execution() {
     let values = [

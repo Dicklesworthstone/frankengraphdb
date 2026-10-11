@@ -430,6 +430,63 @@ impl<'a> Parser<'a> {
         Ok(Some(column))
     }
 
+    /// A grouping or DISTINCT WITH's own ORDER BY repeating one of its items'
+    /// expressions, token for token, at the current token: that item's output
+    /// column over a row of `width`, consuming the repeat (openCypher: `WITH
+    /// a.name AS name, count(*) AS c ORDER BY a.name`). Within a group the
+    /// repeat and the output are the same value. Its WHERE resolves leaves
+    /// over no row schema, so it never sees these. `None` consumes nothing.
+    /// Out of line: the scalar operand reader that calls it repeats once per
+    /// nested parenthesis, and these lexers must not widen that frame.
+    #[inline(never)]
+    pub(in crate::graph_text) fn projected_source(
+        &mut self,
+        width: usize,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let Some((row, sources)) = self.projected_sources.as_ref() else {
+            return Ok(None);
+        };
+        // A comprehension, quantifier or reduce local is never an item's name.
+        if *row != width
+            || matches!(self.current.kind, TokenKind::Word(word) if self.elements.contains(&word))
+        {
+            return Ok(None);
+        }
+        let mut found = None;
+        for &(start, end, column) in sources {
+            let mut item = crate::graph_text::Lexer {
+                text: self.lexer.text,
+                at: start,
+                tokens: 0,
+            };
+            let mut here = self.lexer.clone();
+            let mut token = self.current;
+            let mut length = 0_usize;
+            let repeated = loop {
+                let expected = item.next()?;
+                if expected.at >= end {
+                    break length > 0;
+                }
+                if expected.kind != token.kind {
+                    break false;
+                }
+                length += 1;
+                token = here.next()?;
+            };
+            if repeated {
+                found = Some((length, column));
+                break;
+            }
+        }
+        let Some((length, column)) = found else {
+            return Ok(None);
+        };
+        for _ in 0..length {
+            self.advance()?;
+        }
+        Ok(Some(column))
+    }
+
     /// Project hidden boundary reads away (fgdb-1tgko) before a scope they
     /// must not reach: a later WITH or UNWIND stage, the next MATCH part, or
     /// the end of the statement. A no-op when this row carries none.
@@ -557,10 +614,12 @@ impl<'a> Parser<'a> {
                 }
             }
             // A plain WITH's dropped bindings end with its WHERE and pages;
-            // a RETURN or a later stage never resolves them.
+            // a RETURN or a later stage never resolves them. So do a grouping
+            // or DISTINCT WITH's repeatable item expressions.
             if let Some(boundary) = self.boundary_reads.as_mut() {
                 boundary.scoped.clear();
             }
+            self.projected_sources = None;
             let at = self.current.at;
             if !self.is_word("WITH") {
                 // A terminal RETURN, plain or aggregate, resolves the hidden

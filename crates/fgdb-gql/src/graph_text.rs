@@ -288,7 +288,7 @@ fn reference_text<'a>(statement: &'a str, variable: Name<'a>, property: Name<'a>
         _ => property,
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TokenKind<'a> {
     Word(&'a str),
     // Keep reserved delimited map keys distinct from grammar words. Other
@@ -606,6 +606,11 @@ struct Parser<'a> {
     /// began. A composite operand continues from it plus the scalar depth,
     /// so alternating values and expressions stay within one nesting bound.
     let_base: usize,
+    /// The repeatable items of the grouping or DISTINCT WITH whose own ORDER
+    /// BY is next, as (row width, [(source start, source end, output
+    /// column)]): a repeat of one item's expression there is that output
+    /// (openCypher: `WITH a.name AS name, count(*) AS c ORDER BY a.name`).
+    projected_sources: Option<(usize, Vec<(usize, usize, usize)>)>,
 }
 
 /// Property reads a graph-to-row WITH's scope makes through a projected MATCH
@@ -663,6 +668,7 @@ impl<'a> Parser<'a> {
             elements: Vec::new(),
             lets: None,
             let_base: 0,
+            projected_sources: None,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),

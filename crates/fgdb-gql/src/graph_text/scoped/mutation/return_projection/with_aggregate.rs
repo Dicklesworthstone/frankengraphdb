@@ -273,6 +273,58 @@ impl<'a> Parser<'a> {
         Ok(reads)
     }
 
+    /// Whether the item spelled from `start` to `end` is one the WITH's own
+    /// ORDER BY may repeat in place of its output: a name, `name.key` or one
+    /// call `f(...)`. A wider expression stays unmatched, so a repeat can
+    /// never regroup the operators around it.
+    pub(super) fn repeatable_item(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = crate::graph_text::Lexer {
+            text: self.lexer.text,
+            at: start,
+            tokens: 0,
+        };
+        let mut kinds = Vec::new();
+        loop {
+            let token = lexer.next()?;
+            if token.at >= end {
+                break;
+            }
+            kinds.push(token.kind);
+        }
+        Ok(match kinds.as_slice() {
+            [TokenKind::Word(_)] => true,
+            [
+                TokenKind::Word(_),
+                TokenKind::Punct(b'.'),
+                TokenKind::Word(_),
+            ] => true,
+            [
+                TokenKind::Word(_),
+                TokenKind::Punct(b'('),
+                ..,
+                TokenKind::Punct(b')'),
+            ] => {
+                // The call's own parenthesis closes at the last token, not
+                // before it (`f(a) + g(b)` is two operands).
+                let last = kinds.len() - 2;
+                let mut depth = 0_usize;
+                kinds[1..].iter().enumerate().all(|(at, kind)| {
+                    match kind {
+                        TokenKind::Punct(b'(') => depth += 1,
+                        TokenKind::Punct(b')') => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    depth > 0 || at == last
+                })
+            }
+            _ => false,
+        })
+    }
+
     pub(super) fn with_aggregate_stage(
         &mut self,
         schema: &pipeline::RowSchema<'a>,
@@ -287,6 +339,7 @@ impl<'a> Parser<'a> {
         let mut keys = Vec::new();
         let mut aggregates = Vec::new();
         let mut returned: Vec<(Name<'a>, Output, GraphSetColumnType)> = Vec::new();
+        let mut sources = Vec::new();
         loop {
             self.capacity(
                 returned.len(),
@@ -360,6 +413,9 @@ impl<'a> Parser<'a> {
                 };
                 (Output::Key(key), kind, name)
             };
+            if self.repeatable_item(item_at, self.current.at)? {
+                sources.push((item_at, self.current.at, returned.len()));
+            }
             let name = if self.take_word("AS")? {
                 self.name()?
             } else {
@@ -416,6 +472,7 @@ impl<'a> Parser<'a> {
             grouped: Vec::new(),
             scoped: Vec::new(),
         });
+        self.projected_sources = (!sources.is_empty()).then(|| (output_schema.len(), sources));
         Ok((
             ReadStageTemplate::Aggregate {
                 at,
