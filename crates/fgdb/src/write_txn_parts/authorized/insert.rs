@@ -155,7 +155,42 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphInsertQuery,
         policy: GraphInsertPolicy,
+        clock: impl FnMut() -> u64,
+    ) -> Result<QueryReceipt, QueryFault> {
+        self.execute_graph_insert_query_authorized_checked(
+            txn_cx, query_cx, commit_cx, authority, token, branch, query, policy, clock,
+            |_, _| Ok(()),
+        )
+        .await
+    }
+
+    /// Create and project through the same native owner, with final host admission.
+    ///
+    /// `admit` receives the final immutable rows exactly once, including empty
+    /// results, after image and signed row admission and BEFORE completion. It
+    /// may encode a private result or refuse an unsupported representation. It
+    /// must not publish tentative rows or perform external effects: completion
+    /// may still fail. It cannot access the database or alter the native result.
+    /// The meter polls cancellation and prices host work on the existing signed
+    /// permit, with live expiry/retirement checks. Hosts must use it before their
+    /// bounded traversal/encoding work. A no-op callback adds no new charges.
+    /// Refusal drops the private effects; no fallible admission follows commit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_insert_query_authorized_checked(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphInsertQuery,
+        policy: GraphInsertPolicy,
         mut clock: impl FnMut() -> u64,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
     ) -> Result<QueryReceipt, QueryFault> {
         if authority.namespace() != self.keys.namespace {
             return Err(query_source(WriteTxnError::Authorization(
@@ -230,6 +265,14 @@ impl<V: Vfs + Clone> Database<V> {
                     false,
                 )
                 .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
+                query_cx
+                    .with_restriction(|| {
+                        admit(&result.value, &mut |work| {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.work(work)
+                        })
+                    })
+                    .map_err(query_source)?;
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -508,7 +551,6 @@ impl<V: Vfs + Clone> Database<V> {
                 ));
                 let proposal = query_cx.with_restriction(|| {
                     // All RefCell borrows end before staging or the first await.
-                    // The permit is shared, not reissued for the creation arm.
                     let execution = RefCell::new(&mut execution);
                     let database = RefCell::new(&mut *self);
                     super::super::collect_vertex_merge(

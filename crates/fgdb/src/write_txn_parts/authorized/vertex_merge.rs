@@ -51,7 +51,53 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphVertexUpsertQuery,
         policy: GraphVertexUpsertPolicy,
+        clock: impl FnMut() -> u64,
+    ) -> Result<
+        (
+            GraphVertexUpsertStats,
+            GraphVertexMergeOutcome,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+            EmbeddedTxnCompletion,
+        ),
+        UpsertFault,
+    > {
+        self.execute_graph_vertex_upsert_query_authorized_checked(
+            txn_cx, query_cx, commit_cx, authority, token, branch, query, policy, clock,
+            |_, _| Ok(()),
+        )
+        .await
+    }
+
+    /// The same atomic upsert with a trusted host's final result admission.
+    ///
+    /// `admit` runs exactly once, including for zero rows, after native result
+    /// and signed row admission but BEFORE completion. It may build a private
+    /// wire representation or refuse one that the host cannot deliver. An error
+    /// discards the workspace. The callback must not publish rows or perform
+    /// external effects: even accepted results are tentative until completion.
+    /// It has no database/transaction access and cannot replace the native rows.
+    ///
+    /// The supplied meter polls cancellation and charges additional work to the
+    /// SAME signed write permit, including expiry and issuer retirement. Hosts
+    /// must meter their bounded traversal/encoding work before doing it; no new
+    /// allowance is issued. The ordinary method uses a no-op admission and keeps
+    /// its existing charges. No callback runs after publication.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_vertex_upsert_query_authorized_checked(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphVertexUpsertQuery,
+        policy: GraphVertexUpsertPolicy,
         mut clock: impl FnMut() -> u64,
+        admit: impl FnOnce(
+            &[fgdb_gql::algebra::GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
     ) -> Result<
         (
             GraphVertexUpsertStats,
@@ -152,6 +198,14 @@ impl<V: Vfs + Clone> Database<V> {
                     .permit
                     .charge_rows_at((execution.clock)(), rows)
                     .map_err(|error| source(WriteTxnError::Authorization(error)))?;
+                query_cx
+                    .with_restriction(|| {
+                        admit(&result.value, &mut |work| {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.work(work)
+                        })
+                    })
+                    .map_err(source)?;
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -188,14 +242,14 @@ pub(super) fn merge<V: Vfs + Clone, Clock: FnMut() -> u64>(
         collect_vertex_merge(
             merge,
             policy,
-            |pattern, budget| {
+            |pattern, allowance| {
                 selection::select_overlay(
                     transaction,
                     &database.borrow(),
                     cx,
                     pattern,
                     scope,
-                    budget,
+                    allowance,
                     &controls,
                 )
             },
@@ -277,7 +331,6 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 // Mask BEFORE lookup, not after reading a protected payload.
                 // A hidden field always supplies NULL, with no data-dependent
                 // source work, size admission, error or conflict observation.
-                // The MERGE reducer has already admitted this target's scope.
                 if !scope.allows_property(key) {
                     control(fgdb_gql::GlaExecutionEvent::ScratchEntry)?;
                     return Ok(fgdb_types::CanonicalScalar::Null);

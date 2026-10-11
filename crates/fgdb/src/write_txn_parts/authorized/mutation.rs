@@ -55,7 +55,49 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphMutationQuery,
         policy: GraphMutationPolicy,
+        clock: impl FnMut() -> u64,
+    ) -> Result<
+        (
+            GraphMutationStats,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+            EmbeddedTxnCompletion,
+        ),
+        QueryFault,
+    > {
+        self.execute_graph_mutation_query_authorized_checked(
+            txn_cx, query_cx, commit_cx, authority, token, branch, query, policy, clock,
+            |_, _| Ok(()),
+        )
+        .await
+    }
+
+    /// Admit a private host representation of the final rows before committing.
+    ///
+    /// This is the same native mutation, not a second evaluator. The callback
+    /// runs once (also for zero rows), after all original intents and result
+    /// rows pass authorization. Refusal discards the workspace. The host must
+    /// not publish tentative rows or perform external effects inside `admit`.
+    /// It cannot replace the native rows or access the database/transaction.
+    /// Use its meter before bounded traversal/encoding work: it polls QueryCx
+    /// cancellation and charges the existing live signed write permit, including
+    /// expiry and retirement. A no-op admission preserves ordinary API charges.
+    /// No callback or fallible host admission occurs after native completion.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_mutation_query_authorized_checked(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphMutationQuery,
+        policy: GraphMutationPolicy,
         mut clock: impl FnMut() -> u64,
+        admit: impl FnOnce(
+            &[fgdb_gql::algebra::GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
     ) -> Result<
         (
             GraphMutationStats,
@@ -136,6 +178,14 @@ impl<V: Vfs + Clone> Database<V> {
                     false,
                 )
                 .map_err(|error| error.map_source(GraphMutationQueryError::Mutation))?;
+                query_cx
+                    .with_restriction(|| {
+                        admit(&result.value, &mut |work| {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.work(work)
+                        })
+                    })
+                    .map_err(query_source)?;
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
@@ -293,14 +343,14 @@ impl<V: Vfs + Clone> Database<V> {
 pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &mut WriteTxn,
     database: &mut Database<V>,
-    query_cx: &QueryCx,
+    cx: &QueryCx,
     mutation: &PreparedGraphMutation,
     policy: GraphMutationPolicy,
     scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
 ) -> Result<(GraphMutationStats, Vec<VId>, Vec<EId>), Fault> {
-    let proposal = query_cx.with_restriction(|| {
+    let proposal = cx.with_restriction(|| {
         // These sequential callback borrows end before staging and
         // before any await. No RefCell or query result escapes.
         let execution = RefCell::new(&mut *execution);
@@ -310,7 +360,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 selection::select_overlay(
                     transaction,
                     database,
-                    query_cx,
+                    cx,
                     pattern,
                     scope,
                     allowance,
@@ -318,7 +368,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 )
             },
             || {
-                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                 execution.borrow_mut().checkpoint()
             },
         )
@@ -326,7 +376,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
     stage_proposal(
         transaction,
         database,
-        query_cx,
+        cx,
         mutation,
         proposal,
         execution,
