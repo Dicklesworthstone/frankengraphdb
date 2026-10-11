@@ -467,3 +467,63 @@ fn different_edges_budget_includes_membership_and_never_returns_a_cancelled_pref
         assert_eq!(calls.get(), stop);
     }
 }
+
+/// fgdb-vexfr: a lone quantified atom whose own search cannot repeat an edge
+/// gets no DifferentEdges check, so its plan keeps the identity-free engines.
+/// One whose search can (an unrestricted walk, an undirected SIMPLE or
+/// shortest walk, a directed shortest walk with a minimum above one) keeps
+/// it, and every walk beside an overlapping fixed atom keeps the cross-atom
+/// check.
+#[test]
+fn a_walk_whose_own_search_cannot_repeat_an_edge_needs_no_check() {
+    use GlaDirection::{Forward, Reverse, Undirected};
+    let checked = |kind: &str, direction: GlaDirection, minimum: u32, beside: bool| {
+        let names: &[&str] = if beside {
+            &["a", "b", "c"]
+        } else {
+            &["a", "b"]
+        };
+        let mut pattern = builder(names);
+        let bounds = GraphWalkBounds::new(minimum, 3).unwrap();
+        match kind {
+            "walk" => pattern.walk("a", R, direction, "b", bounds),
+            "acyclic" => pattern.acyclic_walk("a", R, direction, "b", bounds),
+            "simple" => pattern.simple_walk("a", R, direction, "b", bounds),
+            "shortest" => pattern.shortest_walk("a", R, direction, "b", bounds),
+            _ => pattern.any_shortest_walk("a", R, direction, "b", bounds),
+        }
+        .unwrap();
+        if beside {
+            pattern.edge("b", R, Forward, "c").unwrap();
+        }
+        prepare(&pattern, names)
+            .plan()
+            .operators()
+            .iter()
+            .any(|operator| matches!(operator, GlaOperator::DifferentEdges { .. }))
+    };
+    for (kind, direction, minimum, expected) in [
+        ("acyclic", Forward, 1, false),
+        ("acyclic", Undirected, 0, false),
+        ("simple", Forward, 1, false),
+        ("simple", Reverse, 0, false),
+        ("simple", Undirected, 1, true),
+        ("shortest", Forward, 1, false),
+        ("shortest", Reverse, 0, false),
+        ("shortest", Forward, 2, true),
+        ("shortest", Undirected, 1, true),
+        ("any", Forward, 1, false),
+        ("any", Undirected, 0, true),
+        ("walk", Forward, 1, true),
+    ] {
+        assert_eq!(
+            checked(kind, direction, minimum, false),
+            expected,
+            "{kind} {direction:?} {minimum}"
+        );
+        assert!(
+            checked(kind, direction, minimum, true),
+            "{kind} {direction:?} {minimum} beside an overlapping atom"
+        );
+    }
+}

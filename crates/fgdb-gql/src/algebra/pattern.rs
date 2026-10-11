@@ -258,6 +258,34 @@ fn relations_overlap(left: EdgeRelation, right: EdgeRelation) -> bool {
     left == right || left == EdgeRelation::Any || right == EdgeRelation::Any
 }
 
+/// Whether DIFFERENT EDGES must check this atom against itself: a quantified
+/// atom whose own search can repeat an edge (fgdb-vexfr). Several searches
+/// cannot, so the check adds nothing there and its absence keeps the
+/// factorized engines eligible:
+/// - TRAIL never repeats an EId, by definition;
+/// - ACYCLIC repeats no vertex, and a repeated edge repeats its endpoints;
+/// - directed SIMPLE repeats no vertex except a closing return to the
+///   first, and a repeated edge repeats its source at a non-final position;
+/// - a directed shortest walk of minimum at most one is a simple path or a
+///   simple cycle (cutting a repeat would leave a shorter admitted walk).
+///
+/// An undirected SIMPLE or shortest walk can return over the edge it came
+/// by (a-b-a), and an unrestricted walk can repeat anything: both keep it.
+fn walk_can_repeat_an_edge(edge: Edge) -> bool {
+    let Some(bounds) = edge.walk else {
+        return false;
+    };
+    let directed = edge.direction != GlaDirection::Undirected;
+    match edge.search {
+        GraphWalkSearch::Trail | GraphWalkSearch::Acyclic => false,
+        GraphWalkSearch::Simple => !directed,
+        GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest => {
+            !directed || bounds.minimum() > 1
+        }
+        GraphWalkSearch::All => true,
+    }
+}
+
 /// Width of a positive compiled body, including temporary closing endpoints.
 /// Count producers, not edges: each independent component has its own root.
 fn binding_width(operators: &[GlaOperator]) -> u32 {
@@ -293,7 +321,7 @@ impl GraphPatternBuilder {
     fn constrains_edges(&self) -> bool {
         self.match_mode == GraphMatchMode::DifferentEdges
             && self.edges.iter().enumerate().any(|(at, edge)| {
-                edge.walk.is_some()
+                walk_can_repeat_an_edge(*edge)
                     || self.edges[..at]
                         .iter()
                         .any(|previous| relations_overlap(previous.relation, edge.relation))
@@ -320,7 +348,7 @@ impl GraphPatternBuilder {
             .filter(|(relation, _)| relations_overlap(*relation, edge.relation))
             .map(|(_, slot)| *slot)
             .collect();
-        if !segments.is_empty() || edge.walk.is_some() {
+        if !segments.is_empty() || walk_can_repeat_an_edge(edge) {
             segments.push(appended);
             operators.push(GlaOperator::DifferentEdges { segments });
         }
@@ -497,7 +525,7 @@ impl GraphPatternBuilder {
                 "Expand"
             });
             if self.match_mode == GraphMatchMode::DifferentEdges
-                && (edge.walk.is_some()
+                && (walk_can_repeat_an_edge(*edge)
                     || self.edges[..at]
                         .iter()
                         .any(|previous| relations_overlap(previous.relation, edge.relation)))
