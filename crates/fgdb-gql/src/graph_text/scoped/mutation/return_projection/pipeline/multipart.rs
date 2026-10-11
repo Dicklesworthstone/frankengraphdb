@@ -148,7 +148,9 @@ fn join_spec(
             left[l] == right[r]
                 && matches!(
                     left[l],
-                    GraphSetColumnType::Scalar | GraphSetColumnType::Vertex
+                    GraphSetColumnType::Scalar
+                        | GraphSetColumnType::Vertex
+                        | GraphSetColumnType::Edge
                 )
         });
     let spec = if typed_keys {
@@ -391,13 +393,28 @@ impl<'a> Parser<'a> {
                     self.mutation_projection(&mut inputs, self.syntax.variables[right], None)?;
                 keys.push((left, right));
             }
-            if self.syntax.path.is_some_and(|path| path.text == name.text)
-                || self.syntax.visible_edge(name.text).is_some()
-            {
-                return Err(expected(
-                    name.at,
-                    "new path and relationship bindings after WITH",
-                ));
+            if self.syntax.path.is_some_and(|path| path.text == name.text) {
+                return Err(expected(name.at, "new path bindings after WITH"));
+            }
+            // A carried relationship correlates by identity, as a carried
+            // vertex does (openCypher: `WITH r MATCH (a)-[r]->(b)` matches
+            // that one relationship again). It must be one root edge.
+            let edge = self
+                .syntax
+                .visible_edge(name.text)
+                .map(|(edge, scoped)| (edge.variable, edge.walk.is_some() || scoped));
+            if let Some((variable, unsupported)) = edge {
+                let Some(variable) = variable.filter(|_| !unsupported) else {
+                    return Err(expected(
+                        name.at,
+                        "a carried relationship as one root edge of the next MATCH",
+                    ));
+                };
+                if kind != GraphSetColumnType::Edge {
+                    return Err(expected(name.at, "an edge-valued imported binding"));
+                }
+                let right = self.mutation_projection(&mut inputs, variable, None)?;
+                keys.push((left, right));
             }
         }
         // The current property-map correlation record has no scope tag. Do

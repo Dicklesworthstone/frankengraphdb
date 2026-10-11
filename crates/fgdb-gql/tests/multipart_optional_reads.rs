@@ -561,6 +561,78 @@ fn a_leading_optional_match_is_a_left_join_of_the_unit_row() {
     assert!(union.contains(&vertices(&[None])), "{union:?}");
 }
 
+/// A relationship carried past WITH correlates by identity in the next MATCH,
+/// as a carried vertex does (TCK Match2 [7], Match3 [24] to [26], Match7 [4]
+/// to [6], With1 [3], With3 [1]): it matches that one relationship again, in
+/// its own direction and types, or not at all. The parallel 1->2 edges stay
+/// two rows.
+#[test]
+fn a_carried_relationship_matches_itself_again() {
+    let pairs = |found: &[GraphValueRow]| {
+        let mut pairs: Vec<_> = found
+            .iter()
+            .map(|row| {
+                row.values()
+                    .iter()
+                    .map(|value| match value {
+                        GraphValue::Vertex(id) => Some(id.0),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        pairs.sort();
+        pairs
+    };
+    let all = vec![
+        vec![Some(1), Some(2)],
+        vec![Some(1), Some(2)],
+        vec![Some(2), Some(3)],
+        vec![Some(3), Some(3)],
+    ];
+    assert_eq!(
+        pairs(&rows(
+            "MATCH (a)-[r:R]->(b) WITH r, a MATCH (a)-[r:R]->(c) RETURN a, c"
+        )),
+        all
+    );
+    assert_eq!(
+        pairs(&rows(
+            "MATCH (a)-[r:R]->(b) WITH r AS s MATCH (x)-[s:R]->(y) RETURN x, y"
+        )),
+        all
+    );
+    // Reversed, only the self-loop is the same relationship; OPTIONAL keeps
+    // every carried row and NULL-extends the rest.
+    assert_eq!(
+        pairs(&rows(
+            "MATCH (a)-[r:R]->(b) WITH r, a MATCH (a)<-[r:R]-(c) RETURN a, c"
+        )),
+        vec![vec![Some(3), Some(3)]]
+    );
+    assert_eq!(
+        pairs(&rows(
+            "MATCH (a)-[r:R]->(b) WITH r, a OPTIONAL MATCH (a)<-[r:R]-(c) RETURN a, c"
+        )),
+        vec![
+            vec![Some(1), None],
+            vec![Some(1), None],
+            vec![Some(2), None],
+            vec![Some(3), Some(3)],
+        ]
+    );
+    // A path name, or a scalar under the relationship's name, still refuses.
+    for text in [
+        "MATCH p = (a)-[:R]->(b) WITH p MATCH p = (x)-[:R]->(y) RETURN x",
+        "MATCH (a)-[r:R]->(b) WITH a.score AS r MATCH (x)-[r:R]->(y) RETURN x",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
 /// A RETURN item after a leading OPTIONAL MATCH is a whole expression, as it
 /// is after a required MATCH: a comparison, IS [NOT] NULL or Boolean connector
 /// over the optional binding is the item's three-valued Boolean (openCypher,

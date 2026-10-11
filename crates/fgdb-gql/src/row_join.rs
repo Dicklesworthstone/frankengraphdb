@@ -102,10 +102,14 @@ impl RowJoinSpec {
                 let is_key = keys
                     .iter()
                     .any(|&(l, r)| column == if side == 0 { l } else { r });
+                // A vertex or edge key is its identity: a relationship carried
+                // past WITH into a later MATCH correlates as a vertex does.
                 if is_key
                     && !matches!(
                         kind,
-                        GraphSetColumnType::Scalar | GraphSetColumnType::Vertex
+                        GraphSetColumnType::Scalar
+                            | GraphSetColumnType::Vertex
+                            | GraphSetColumnType::Edge
                     )
                 {
                     return Err(RowJoinBuildError::UnsupportedColumn { side, column });
@@ -639,8 +643,8 @@ mod payload_tests {
 
     #[test]
     fn native_payload_domains_are_admitted_but_never_promoted_to_equality_keys() {
-        use GraphSetColumnType::{Any, Edge, Edges, List, Path, Scalar, Vertices};
-        for payload in [Any, Edge, Edges, List, Path, Vertices] {
+        use GraphSetColumnType::{Any, Edge, Edges, List, Path, Scalar, Vertex, Vertices};
+        for payload in [Any, Edges, List, Path, Vertices] {
             let schema = [Scalar, payload];
             assert!(RowJoinSpec::new(&schema, &schema, &[(0, 0)]).is_ok());
             assert_eq!(
@@ -650,6 +654,16 @@ mod payload_tests {
             assert_eq!(
                 RowJoinSpec::new(&[Scalar], &schema, &[(0, 1)]),
                 Err(RowJoinBuildError::UnsupportedColumn { side: 1, column: 1 })
+            );
+        }
+        // A vertex or edge is an identity, so it is an equality key on both
+        // sides (a relationship carried past WITH), never across kinds.
+        for identity in [Vertex, Edge] {
+            let schema = [Scalar, identity];
+            assert!(RowJoinSpec::new(&schema, &schema, &[(1, 1)]).is_ok());
+            assert_eq!(
+                RowJoinSpec::new(&[Scalar], &schema, &[(0, 1)]),
+                Err(RowJoinBuildError::KeyType { key: 0 })
             );
         }
     }
