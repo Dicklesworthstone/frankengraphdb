@@ -997,7 +997,8 @@ fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
             remap_output_columns(value, columns);
             remap_output_columns(list, columns);
         }
-        ReadValueTemplate::Equal { left, right } => {
+        ReadValueTemplate::Equal { left, right }
+        | ReadValueTemplate::Ordered { left, right, .. } => {
             remap_output_columns(left, columns);
             remap_output_columns(right, columns);
         }

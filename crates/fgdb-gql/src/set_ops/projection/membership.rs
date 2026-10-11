@@ -138,6 +138,59 @@ pub(crate) fn equal<E>(
     }
 }
 
+/// Three-valued `left <comparison> right` for `<`, `<=`, `>` or `>=`
+/// (openCypher comparability). Two scalars compare as a row predicate does.
+/// Two lists compare element by element: equal elements continue, the first
+/// unequal pair decides by the same comparison, and an UNKNOWN pair (NULL or
+/// incomparable) makes the whole comparison UNKNOWN. When one list is a prefix
+/// of the other, the shorter is the lesser. Any other pair, maps included, and
+/// a NULL operand are UNKNOWN. The deciding pair is followed in a loop, not by
+/// recursion, so nesting depth never reaches the process stack.
+pub(crate) fn order<E>(
+    comparison: IntegerComparison,
+    left: &GraphValue,
+    right: &GraphValue,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<bool>, E> {
+    let (mut left, mut right) = (left, right);
+    loop {
+        control(GlaExecutionEvent::Work)?;
+        match (left, right) {
+            (GraphValue::Scalar(left), GraphValue::Scalar(right)) => {
+                crate::algebra_exec::charge_payload(left, control)?;
+                crate::algebra_exec::charge_payload(right, control)?;
+                return Ok(comparison.evaluate_scalar_pair(Some(left), Some(right)));
+            }
+            (GraphValue::List(left_items), GraphValue::List(right_items)) => {
+                let mut deciding = None;
+                for (left_item, right_item) in left_items.iter().zip(right_items.iter()) {
+                    match equal(left_item, right_item, control)? {
+                        Some(true) => {}
+                        Some(false) => {
+                            deciding = Some((left_item, right_item));
+                            break;
+                        }
+                        None => return Ok(None),
+                    }
+                }
+                let Some((left_item, right_item)) = deciding else {
+                    let lengths = left_items.len().cmp(&right_items.len());
+                    return Ok(Some(match comparison {
+                        IntegerComparison::Equal => lengths.is_eq(),
+                        IntegerComparison::NotEqual => lengths.is_ne(),
+                        IntegerComparison::Less => lengths.is_lt(),
+                        IntegerComparison::LessOrEqual => lengths.is_le(),
+                        IntegerComparison::Greater => lengths.is_gt(),
+                        IntegerComparison::GreaterOrEqual => lengths.is_ge(),
+                    }));
+                };
+                (left, right) = (left_item, right_item);
+            }
+            _ => return Ok(None),
+        }
+    }
+}
+
 fn equal_sequence<T: PartialEq, E>(
     left: &[T],
     right: &[T],

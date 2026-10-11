@@ -94,6 +94,13 @@ pub(crate) enum ReadValueTemplate {
         left: Box<ReadValueTemplate>,
         right: Box<ReadValueTemplate>,
     },
+    /// Three-valued `<`, `<=`, `>` or `>=` over lists (openCypher
+    /// comparability): `[1, 0] >= [1]`.
+    Ordered {
+        comparison: crate::algebra::IntegerComparison,
+        left: Box<ReadValueTemplate>,
+        right: Box<ReadValueTemplate>,
+    },
     Literal(crate::GqlScalarParameter),
     Parameter {
         index: usize,
@@ -205,7 +212,9 @@ impl ReadValueTemplate {
             Self::Index { list, index } => list.binds_elements() || index.binds_elements(),
             Self::Size(inner) => inner.binds_elements(),
             Self::In { value, list } => value.binds_elements() || list.binds_elements(),
-            Self::Equal { left, right } => left.binds_elements() || right.binds_elements(),
+            Self::Equal { left, right } | Self::Ordered { left, right, .. } => {
+                left.binds_elements() || right.binds_elements()
+            }
             Self::Temporal { argument, .. } => argument.binds_elements(),
             Self::Column(_) | Self::Literal(_) | Self::Parameter { .. } | Self::Integer { .. } => {
                 false
@@ -411,6 +420,15 @@ impl ReadValueTemplate {
             Self::Temporal { function, argument } => {
                 bytes.extend_from_slice(&[21, function.tag()]);
                 argument.append_template_transcript(bytes);
+            }
+            Self::Ordered {
+                comparison,
+                left,
+                right,
+            } => {
+                bytes.extend_from_slice(&[22, comparison.tag()]);
+                left.append_template_transcript(bytes);
+                right.append_template_transcript(bytes);
             }
         }
     }

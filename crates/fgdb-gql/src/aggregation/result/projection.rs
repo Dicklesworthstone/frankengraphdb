@@ -253,6 +253,22 @@ fn expression<'g, E, C>(
                 truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
             )))
         }
+        // A list ordering with the row evaluator's law.
+        GraphSetValue::Ordered {
+            comparison,
+            left,
+            right,
+        } => {
+            let left = expression(left, input, column, control)?.into_owned(control)?;
+            let left = graph_value(left, column)?;
+            let right = expression(right, input, column, control)?.into_owned(control)?;
+            let right = graph_value(right, column)?;
+            let truth = crate::set_ops::evaluate_order(*comparison, &left, &right, control)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
+                truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
+            )))
+        }
         // Aggregate outputs bind no element scope (fgdb-20foe): the text
         // compilers refuse a comprehension there before binding, so this is
         // a typed failure for a hand-built plan, never a guessed element.

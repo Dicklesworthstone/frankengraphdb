@@ -732,6 +732,50 @@ fn composite_literals_compare_three_valued() {
     );
 }
 
+/// A list literal's `<`, `<=`, `>` or `>=` compares in openCypher's
+/// comparability order: the first unequal pair of elements decides, a NULL or
+/// incomparable pair makes the comparison UNKNOWN, and an equal prefix makes
+/// the shorter list the lesser (TCK Comparison2 [4], Precedence3 [6]).
+#[test]
+fn list_literals_order_element_by_element_three_valued() {
+    let truth = |value: bool| CanonicalScalar::Bool(value);
+    let null = CanonicalScalar::Null;
+    for (expression, expected) in [
+        // Comparison2 [4].
+        ("[1, 0] >= [1]", truth(true)),
+        ("[1, null] >= [1]", truth(true)),
+        ("[1, 2] >= [1, null]", null.clone()),
+        ("[1, 'a'] >= [1, null]", null.clone()),
+        ("[1, 2] >= [3, null]", truth(false)),
+        // Each operator, equal lists and the empty list.
+        ("[1, 2] < [1, 3]", truth(true)),
+        ("[1, 2] <= [1, 2]", truth(true)),
+        ("[1, 2] < [1, 2]", truth(false)),
+        ("[2] > [1, 9]", truth(true)),
+        ("[] < [null]", truth(true)),
+        ("[] >= []", truth(true)),
+        // Numbers compare across Int and Float; nested lists by the same rule.
+        ("[1.5] > [1]", truth(true)),
+        ("[[1, 2]] < [[1, 3]]", truth(true)),
+        ("[[1]] < [[1, 0]]", truth(true)),
+        // An incomparable pair, a non-list operand and NULL are UNKNOWN.
+        ("['a'] < [1]", null.clone()),
+        ("[1] < true", null.clone()),
+        ("[1] < null", null.clone()),
+        // `<>` stays the negated equality.
+        ("[1, 2] <> [1]", truth(true)),
+        // Precedence3 [6]: IN binds tighter than the comparison.
+        ("[1, 2] < [3, 4] IN [[3, 4], false]", null.clone()),
+        ("[1, 2] >= ([3, 4] IN [[3, 4], false])", null.clone()),
+        ("([1, 2] > [3, 4]) IN [true, false]", truth(true)),
+        // One operand of the Boolean operators around it.
+        ("[1] < [2] AND [3] > [2]", truth(true)),
+        ("NOT [1] < [2]", truth(false)),
+    ] {
+        assert_eq!(scalar(expression, &text("x")), expected, "{expression}");
+    }
+}
+
 /// fgdb-txbg9: date(...) builds a date from one calendar's fields (over an
 /// optional `date` base), from ISO 8601 text, from a date or from NULL, and a
 /// date reads its fields as `d.year`. Expected days are the TCK's (Temporal1

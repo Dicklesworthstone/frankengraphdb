@@ -6,7 +6,9 @@ mod map_overlay_tests;
 mod membership;
 mod temporal;
 
-pub(crate) use membership::{equal as evaluate_equality, evaluate as evaluate_membership};
+pub(crate) use membership::{
+    equal as evaluate_equality, evaluate as evaluate_membership, order as evaluate_order,
+};
 pub(crate) use temporal::{
     arithmetic as temporal_arithmetic, construct as construct_temporal, field as temporal_field,
     field_scratch_entries as temporal_field_scratch_entries, is_field_name as temporal_field_name,
@@ -55,6 +57,15 @@ pub enum GraphSetValue {
     /// lists and maps compare element by element, and a NULL operand is
     /// UNKNOWN. Both operands address the original row and execute once.
     Equal {
+        left: Box<GraphSetValue>,
+        right: Box<GraphSetValue>,
+    },
+    /// Three-valued `<`, `<=`, `>` or `>=` over lists (openCypher
+    /// comparability): elements compare in order, the first unequal pair
+    /// decides, and an equal prefix makes the shorter list the lesser.
+    /// Both operands address the original row and execute once.
+    Ordered {
+        comparison: crate::algebra::IntegerComparison,
         left: Box<GraphSetValue>,
         right: Box<GraphSetValue>,
     },
@@ -657,7 +668,7 @@ fn admit(
             }
             GraphSetColumnType::Scalar
         }
-        GraphSetValue::Equal { left, right } => {
+        GraphSetValue::Equal { left, right } | GraphSetValue::Ordered { left, right, .. } => {
             admit(left, types, column, depth + 1, nodes, locals)?;
             admit(right, types, column, depth + 1, nodes, locals)?;
             GraphSetColumnType::Scalar
@@ -984,6 +995,15 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             bytes.extend_from_slice(&[21, function.tag()]);
             append_value_transcript(argument, bytes);
         }
+        GraphSetValue::Ordered {
+            comparison,
+            left,
+            right,
+        } => {
+            bytes.extend_from_slice(&[22, comparison.tag()]);
+            append_value_transcript(left, bytes);
+            append_value_transcript(right, bytes);
+        }
     }
 }
 
@@ -1265,6 +1285,18 @@ fn evaluate_value_at<E>(
             let left = operand(left, row, column, control, depth + 1, nodes)?;
             let right = operand(right, row, column, control, depth + 1, nodes)?;
             let truth = membership::equal(left.as_ref(), right.as_ref(), control)
+                .map_err(ProjectionFailure::Control)?;
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
+        }
+        GraphSetValue::Ordered {
+            comparison,
+            left,
+            right,
+        } => {
+            let left = operand(left, row, column, control, depth + 1, nodes)?;
+            let right = operand(right, row, column, control, depth + 1, nodes)?;
+            let truth = membership::order(*comparison, left.as_ref(), right.as_ref(), control)
                 .map_err(ProjectionFailure::Control)?;
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
             GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))

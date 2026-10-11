@@ -382,7 +382,7 @@ impl<'a> Parser<'a> {
             };
             (value, false)
         } else {
-            let negate = self.comparison()? == IntegerComparison::NotEqual;
+            let comparison = self.comparison()?;
             let mut right = self.composite_value(columns, nesting, at)?;
             // IN binds tighter than a comparison, as in the scalar grammar:
             // `[1, 2] = [3, 4] IN l` compares with the membership
@@ -394,11 +394,20 @@ impl<'a> Parser<'a> {
                     list: Box::new(list),
                 };
             }
-            let value = ReadValueTemplate::Equal {
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-            (value, negate)
+            let (left, right) = (Box::new(left), Box::new(right));
+            match comparison {
+                IntegerComparison::Equal => (ReadValueTemplate::Equal { left, right }, false),
+                IntegerComparison::NotEqual => (ReadValueTemplate::Equal { left, right }, true),
+                // A list literal's `<`, `<=`, `>` or `>=`.
+                comparison => (
+                    ReadValueTemplate::Ordered {
+                        comparison,
+                        left,
+                        right,
+                    },
+                    false,
+                ),
+            }
         };
         self.let_slot(program, value, at)?;
         if negate {

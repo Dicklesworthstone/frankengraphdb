@@ -713,6 +713,7 @@ impl Properties {
                 | GraphSetValue::Size(_)
                 | GraphSetValue::In { .. }
                 | GraphSetValue::Equal { .. }
+                | GraphSetValue::Ordered { .. }
                 | GraphSetValue::Temporal { .. }
                 | GraphSetValue::Local(_)
                 | GraphSetValue::Comprehension { .. }

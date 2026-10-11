@@ -156,7 +156,7 @@ impl IntegerComparison {
         }
     }
 
-    fn tag(self) -> u8 {
+    pub(crate) fn tag(self) -> u8 {
         match self {
             Self::Equal => 0,
             Self::NotEqual => 1,

@@ -1377,17 +1377,20 @@ impl<'a> Parser<'a> {
 
     /// Whether a list or map literal starts here and, after its postfix
     /// reads, is compared with `=`, `<>`, `!=` or IN, as in `[1, 2] = [1]`
-    /// or `{k: 1} <> {}` (fgdb-9cawv). The scalar compiler reads such a
+    /// or `{k: 1} <> {}` (fgdb-9cawv), or a list literal with `<`, `<=`, `>`
+    /// or `>=`, as in `[1, 0] >= [1]`. The scalar compiler reads such a
     /// comparison whole in the value language; it never compares composites.
     pub(super) fn starts_composite_comparison(&self) -> Result<bool, GraphPatternTextError> {
-        if !(self.is_punct(b'{') || (self.is_punct(b'[') && !self.starts_let_operand()?)) {
+        let list = self.is_punct(b'[');
+        if !(self.is_punct(b'{') || (list && !self.starts_let_operand()?)) {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();
         skip_group(&mut lexer)?;
         Ok(match after_postfix(&mut lexer)?.kind {
             TokenKind::Punct(b'=') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
-            TokenKind::Punct(b'<') => matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
+            TokenKind::Punct(b'<') => list || matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
+            TokenKind::Punct(b'>') => list,
             TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
             TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
             _ => false,
@@ -2272,6 +2275,15 @@ pub(in crate::graph_text) fn bind_read_value(
             list: Box::new(bind_read_value(list, values)?),
         },
         ReadValueTemplate::Equal { left, right } => GraphSetValue::Equal {
+            left: Box::new(bind_read_value(left, values)?),
+            right: Box::new(bind_read_value(right, values)?),
+        },
+        ReadValueTemplate::Ordered {
+            comparison,
+            left,
+            right,
+        } => GraphSetValue::Ordered {
+            comparison: *comparison,
             left: Box::new(bind_read_value(left, values)?),
             right: Box::new(bind_read_value(right, values)?),
         },
