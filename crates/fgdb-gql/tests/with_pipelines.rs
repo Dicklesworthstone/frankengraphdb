@@ -597,6 +597,14 @@ fn a_plain_with_reads_the_bindings_it_drops_in_its_own_where_and_pages() {
              RETURN n ORDER BY n",
             1,
         ),
+        // A reduce accumulator named like a dropped binding is the local,
+        // not the binding: 0 + 1 + 2 = 3 holds on every row.
+        (
+            "MATCH (n) OPTIONAL MATCH (n)-[:R]->(m) WITH n.p AS v \
+             WHERE reduce(m = 0, x IN [1, 2] | m + x) = 3 RETURN v ORDER BY v",
+            "MATCH (n) WITH n.p AS v RETURN v ORDER BY v",
+            5,
+        ),
     ] {
         let found = rows(dropped);
         assert_eq!(found.len(), len, "{dropped}");

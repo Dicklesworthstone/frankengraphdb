@@ -390,7 +390,9 @@ impl<'a> Parser<'a> {
         else {
             return Ok(None);
         };
-        if boundary.width != width {
+        // A comprehension, quantifier or reduce local shadows every hidden
+        // read of the same name, whichever scan found the name.
+        if boundary.width != width || self.elements.contains(&alias) {
             return Ok(None);
         }
         let mut lookahead = self.lexer.clone();
