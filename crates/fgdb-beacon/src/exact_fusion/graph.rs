@@ -2,7 +2,7 @@
 //! separate from fusion so its path semantics and resource refusals cannot be
 //! hidden inside an approximate vector search or a post-filtering predicate.
 
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::num::NonZeroU32;
 
 use super::{ExactHybridQuery, ExactRrfScore, Ranked, rank};
@@ -108,6 +108,28 @@ impl IndexSnapshot {
         graph: &[GraphHit],
         work: &mut dyn WorkControl,
     ) -> Result<Vec<GraphHybridHit>, BeaconError> {
+        self.hybrid_search_graph_filtered(query, graph, |_| true, work)
+    }
+
+    /// Apply one result predicate to ALL three candidate lanes before fusion
+    /// and final top-k, rather than discarding winners after truncation. Text
+    /// and vector searches select their candidate depths from eligible rows;
+    /// graph ranks are dense among eligible entries of the supplied population.
+    ///
+    /// The graph slice remains an explicit bounded input: this method cannot
+    /// refill it from vertices not supplied by the caller. Filter during graph
+    /// expansion, before its candidate limit, when that limit must count only
+    /// eligible endpoints. Rejected endpoints may still be traversal vertices.
+    /// The predicate must be stable for this query and is NOT an ACL: the
+    /// corpus and graph input must already share an authorized snapshot.
+    /// Malformed graph input refuses even when the predicate rejects its IDs.
+    pub fn hybrid_search_graph_filtered(
+        &self,
+        query: GraphHybridQuery<'_>,
+        graph: &[GraphHit],
+        eligible: impl Fn(VId) -> bool,
+        work: &mut dyn WorkControl,
+    ) -> Result<Vec<GraphHybridHit>, BeaconError> {
         work.charge(1)?;
         let (vector_depth, text_depth, graph_depth) = query.candidate_depths()?;
         if query.retrieval.k == 0 {
@@ -121,26 +143,31 @@ impl IndexSnapshot {
                 ));
             }
             let mut previous = None;
-            for (offset, hit) in graph.iter().enumerate() {
-                work.charge(1 + graph_ranks.len().checked_ilog2().unwrap_or(0) as usize)?;
+            let mut seen = BTreeSet::new();
+            for hit in graph {
+                // Include rejected entries in validation and work accounting.
+                // They must not hide duplicates, disorder, or budget failures.
+                work.charge(2 * (1 + seen.len().checked_ilog2().unwrap_or(0) as usize))?;
                 let key = (hit.hops, hit.id);
-                if previous.is_some_and(|before| before >= key) || graph_ranks.contains_key(&hit.id)
-                {
+                if previous.is_some_and(|before| before >= key) || !seen.insert(hit.id) {
                     return Err(BeaconError::InvalidQuery(
                         "graph ranks must be ordered and unique",
                     ));
                 }
                 previous = Some(key);
-                graph_ranks.insert(hit.id, (rank(offset)?, hit.hops));
+                if eligible(hit.id) {
+                    let next_rank = rank(graph_ranks.len())?;
+                    graph_ranks.insert(hit.id, (next_rank, hit.hops));
+                }
             }
         }
-        // Same native source selection/rank assignment as two-lane RRF. It
-        // searches each enabled modality ONCE and performs no premature top-k.
+        // Every enabled modality applies the same predicate before assigning
+        // ranks. Search each source ONCE, without an earlier final top-k.
         let mut fused = self.fusion_candidates(
             query.source_query(),
             vector_depth,
             text_depth,
-            |_| true,
+            &eligible,
             work,
         )?;
         for &id in graph_ranks.keys() {
@@ -196,5 +223,204 @@ impl IndexSnapshot {
         }
         work.charge(1)?;
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod filtered_tests {
+    use super::*;
+    use crate::{
+        BeaconIndex, DistanceMetric, ExactRrfProfile, HnswConfig, IndexDocument, TextMatch,
+        VectorSearch, WorkBudget,
+    };
+
+    fn budget() -> WorkBudget {
+        WorkBudget::new(1_000_000)
+    }
+
+    fn index() -> IndexSnapshot {
+        BeaconIndex::build(
+            IndexConfig {
+                vector: Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean)),
+                ..IndexConfig::default()
+            },
+            [
+                IndexDocument {
+                    id: VId(1),
+                    vector: Some(vec![0.0]),
+                    text: Some("red".into()),
+                },
+                IndexDocument {
+                    id: VId(2),
+                    vector: Some(vec![1.0]),
+                    text: Some("red".into()),
+                },
+                IndexDocument {
+                    id: VId(3),
+                    vector: Some(vec![2.0]),
+                    text: Some("blue".into()),
+                },
+                IndexDocument {
+                    id: VId(4),
+                    vector: None,
+                    text: None,
+                },
+            ],
+            &mut budget(),
+        )
+        .unwrap()
+        .snapshot()
+    }
+
+    fn query() -> GraphHybridQuery<'static> {
+        GraphHybridQuery {
+            retrieval: ExactHybridQuery {
+                vector: &[0.0],
+                text: "red",
+                k: 2,
+                vector_candidates: 1,
+                text_candidates: 1,
+                vector_mode: VectorSearch::Exact,
+                text_mode: TextMatch::Any,
+                profile: ExactRrfProfile::default(),
+            },
+            graph_candidates: 3,
+            graph_weight: 100,
+        }
+    }
+
+    fn graph() -> [GraphHit; 3] {
+        [
+            GraphHit { id: VId(1), hops: 0 },
+            GraphHit { id: VId(3), hops: 1 },
+            GraphHit { id: VId(4), hops: 2 },
+        ]
+    }
+
+    #[test]
+    fn predicate_precedes_source_depths_and_final_top_k() {
+        let rows = index()
+            .hybrid_search_graph_filtered(
+                query(),
+                &graph(),
+                |id| id == VId(2) || id == VId(3),
+                &mut budget(),
+            )
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [VId(3), VId(2)]
+        );
+        assert_eq!(rows[0].graph_rank, NonZeroU32::new(1));
+        assert_eq!(rows[0].graph_hops, Some(1));
+        assert_eq!(rows[0].vector_rank, None);
+        assert_eq!(rows[0].text_rank, None);
+        assert_eq!(rows[1].graph_rank, None);
+        assert_eq!(rows[1].vector_rank, NonZeroU32::new(1));
+        assert_eq!(rows[1].text_rank, NonZeroU32::new(1));
+        assert_eq!(rows[0].score.numerator(), 100);
+        assert_eq!(rows[0].score.denominator(), 61);
+        assert_eq!(rows[1].score.numerator(), 2);
+        assert_eq!(rows[1].score.denominator(), 61);
+    }
+
+    #[test]
+    fn rejected_graph_entries_still_validate_order_and_global_uniqueness() {
+        let snapshot = index();
+        for graph in [
+            vec![
+                GraphHit { id: VId(1), hops: 1 },
+                GraphHit { id: VId(1), hops: 2 },
+            ],
+            vec![
+                GraphHit { id: VId(2), hops: 1 },
+                GraphHit { id: VId(1), hops: 1 },
+            ],
+        ] {
+            assert!(matches!(
+                snapshot.hybrid_search_graph_filtered(query(), &graph, |_| false, &mut budget()),
+                Err(BeaconError::InvalidQuery(
+                    "graph ranks must be ordered and unique"
+                ))
+            ));
+        }
+        let mut q = query();
+        q.graph_candidates = 1;
+        assert!(matches!(
+            snapshot.hybrid_search_graph_filtered(q, &graph(), |_| false, &mut budget()),
+            Err(BeaconError::InvalidQuery(
+                "graph population exceeds candidate depth"
+            ))
+        ));
+    }
+
+    #[test]
+    fn disabled_graph_is_not_observed_and_reject_all_returns_no_rows() {
+        let snapshot = index();
+        let mut q = query();
+        q.graph_weight = 0;
+        let malformed = [GraphHit { id: VId(99), hops: 2 }; 4];
+        let rows = snapshot
+            .hybrid_search_graph_filtered(
+                q,
+                &malformed,
+                |id| {
+                    assert_ne!(id, VId(99));
+                    true
+                },
+                &mut budget(),
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, VId(1));
+        assert!(
+            snapshot
+                .hybrid_search_graph_filtered(query(), &graph(), |_| false, &mut budget())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[derive(Default)]
+    struct Count(usize);
+    impl WorkControl for Count {
+        fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+            self.0 += units;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn every_shorter_allowance_refuses_without_a_partial_result() {
+        let snapshot = index();
+        let eligible = |id| id != VId(1);
+        let mut count = Count::default();
+        let expected = snapshot
+            .hybrid_search_graph_filtered(query(), &graph(), eligible, &mut count)
+            .unwrap();
+        for units in 0..count.0 {
+            assert_eq!(
+                snapshot
+                    .hybrid_search_graph_filtered(
+                        query(),
+                        &graph(),
+                        eligible,
+                        &mut WorkBudget::new(units),
+                    )
+                    .unwrap_err(),
+                BeaconError::WorkBudgetExceeded
+            );
+        }
+        assert_eq!(
+            snapshot
+                .hybrid_search_graph_filtered(
+                    query(),
+                    &graph(),
+                    eligible,
+                    &mut WorkBudget::new(count.0),
+                )
+                .unwrap(),
+            expected
+        );
     }
 }
