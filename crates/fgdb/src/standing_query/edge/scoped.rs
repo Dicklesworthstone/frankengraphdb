@@ -118,6 +118,12 @@ impl Shape {
                         return None;
                     }
                 }
+                GlaOperator::DifferentEdges { segments }
+                    if !segments.is_empty()
+                        && segments.len() <= MAX_PATTERN_EDGES
+                        && segments
+                            .iter()
+                            .all(|slot| slot.ordinal() >= 2 && slot.ordinal() < width) => {}
                 op if predicate(op, width) => {}
                 _ => return None,
             }

@@ -3,6 +3,7 @@
 //! admitted-row work, operator visits, scratch growth and final row release.
 
 mod comparison;
+mod different_edges;
 mod join;
 mod policy;
 mod projection;
@@ -863,17 +864,45 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         ),
                     };
                     let cursor = if let Some(identified) = self.identified_index {
-                        let capture = operators
-                            .iter()
-                            .any(|op| matches!(op, GlaOperator::CapturePath { .. }));
-                        Enumeration::Identified(trail::IdentifiedExpansion::new(
-                            source,
-                            bounds,
-                            search,
-                            identified.get(&(*relation, *direction)),
-                            capture,
-                            &mut self.control,
-                        )?)
+                        let capture = operators.iter().any(|op| {
+                            matches!(
+                                op,
+                                GlaOperator::CapturePath { .. }
+                                    | GlaOperator::DifferentEdges { .. }
+                            )
+                        });
+                        let adjacency = identified.get(&(*relation, *direction));
+                        let cursor = if let Some(segments) =
+                            different_edges::for_expansion(operators, ordinal, bindings.len())
+                        {
+                            let Some(forbidden) = different_edges::forbidden(
+                                segments,
+                                &self.segments,
+                                &mut self.control,
+                            )?
+                            else {
+                                next = None;
+                                continue;
+                            };
+                            trail::IdentifiedExpansion::new_different_edges(
+                                source,
+                                bounds,
+                                search,
+                                adjacency,
+                                forbidden,
+                                &mut self.control,
+                            )?
+                        } else {
+                            trail::IdentifiedExpansion::new(
+                                source,
+                                bounds,
+                                search,
+                                adjacency,
+                                capture,
+                                &mut self.control,
+                            )?
+                        };
+                        Enumeration::Identified(cursor)
                     } else if matches!(operator, GlaOperator::VarLengthExpand { .. }) {
                         Enumeration::Walk(WalkExpansion::new(
                             search,
@@ -946,6 +975,11 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         width: bindings.len(),
                     });
                     bindings.push(value);
+                }
+                GlaOperator::DifferentEdges { segments } => {
+                    if !different_edges::accepts(segments, &self.segments, &mut self.control)? {
+                        next = None;
+                    }
                 }
                 GlaOperator::CapturePath {
                     capture,

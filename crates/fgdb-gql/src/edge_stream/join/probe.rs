@@ -102,6 +102,28 @@ impl Probe {
         let mut capture_slots = BTreeMap::<u32, u32>::new();
         for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
             let bad = || EdgeScanBuildError { operator: at };
+            if let GlaOperator::DifferentEdges { segments } = op
+                && let [segment] = segments.as_slice()
+                && segment.ordinal() as usize == width - 1
+                && let Some(Step {
+                    binding: Binding::Walk { search, .. },
+                    predicates,
+                }) = steps.last_mut()
+                && predicates
+                    .iter()
+                    .all(|predicate| matches!(predicate, GlaOperator::VertexIdentity { .. }))
+            {
+                // One atom's identity domain is exactly a TRAIL. Its existing
+                // traversal owner checks EIds before descent, so retaining only
+                // endpoint support is sufficient. A later cross-atom domain
+                // still refuses below: no discarded route is reconstructed.
+                match search {
+                    GraphWalkSearch::All => *search = GraphWalkSearch::Trail,
+                    GraphWalkSearch::Trail | GraphWalkSearch::Acyclic => {}
+                    _ => return Err(bad()),
+                }
+                continue;
+            }
             let mut predicate = None;
             let binding = match op {
                 GlaOperator::ScanVertices => Some(Binding::Scan),
@@ -148,6 +170,20 @@ impl Probe {
                 | GlaOperator::CompareProperties { left, right, .. }
                     if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width =>
                 {
+                    None
+                }
+                GlaOperator::DifferentEdges { segments }
+                    if !segments.is_empty()
+                        && segments.len() <= MAX_PATTERN_EDGES
+                        && segments.iter().all(|slot| {
+                            (slot.ordinal() as usize)
+                                .checked_sub(outer_width)
+                                .and_then(|local| steps.get(local))
+                                .is_some_and(|step| matches!(step.binding, Binding::Expand(_)))
+                        }) =>
+                {
+                    // A multi-atom domain needs every constituent route. Only
+                    // fixed choices retain those EIds in this physical lane.
                     None
                 }
                 GlaOperator::CapturePath {
@@ -408,6 +444,32 @@ impl Probe {
             let mut paths = Vec::new();
             for predicate in &step.predicates {
                 control(GlaExecutionEvent::Work)?;
+                if let GlaOperator::DifferentEdges { segments } = predicate {
+                    for (index, slot) in segments.iter().enumerate() {
+                        let Position::Edge(Some(eid)) =
+                            frames[slot.ordinal() as usize - self.outer_width]
+                        else {
+                            return Err(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable));
+                        };
+                        for prior in &segments[..index] {
+                            control(GlaExecutionEvent::Work)?;
+                            if matches!(
+                                frames[prior.ordinal() as usize - self.outer_width],
+                                Position::Edge(Some(previous)) if previous == eid
+                            ) {
+                                passed = false;
+                                break;
+                            }
+                        }
+                        if !passed {
+                            break;
+                        }
+                    }
+                    if !passed {
+                        break;
+                    }
+                    continue;
+                }
                 if let GlaOperator::CapturePath {
                     capture,
                     start,

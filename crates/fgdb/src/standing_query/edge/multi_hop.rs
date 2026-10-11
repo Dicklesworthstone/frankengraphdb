@@ -29,12 +29,32 @@ struct Atom {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Shape {
     atoms: Vec<Atom>,
+    // Each clause owns its own relationship-identity domain. Atom indexes
+    // retain that boundary even when several clauses have the same topology.
+    different_edges: Vec<Vec<usize>>,
     width: usize,
     relations: BTreeSet<EdgeRelation>,
     scope: Option<scoped::Shape>,
 }
 
 impl Shape {
+    fn constraint(
+        segments: &[fgdb_gql::algebra::BindingSlot],
+        atoms: &[Atom],
+    ) -> Option<Vec<usize>> {
+        if segments.is_empty() || segments.len() > MAX_PATTERN_EDGES {
+            return None;
+        }
+        segments
+            .iter()
+            .map(|slot| {
+                atoms
+                    .iter()
+                    .position(|atom| atom.right == slot.ordinal() as usize)
+            })
+            .collect()
+    }
+
     fn reads_relation(&self, relation: RelationId) -> bool {
         self.relations
             .iter()
@@ -84,9 +104,16 @@ impl Shape {
             if width != scope.width() || atoms.len() < 2 {
                 return None;
             }
+            let mut different_edges = Vec::new();
+            for op in scope.body(query) {
+                if let GlaOperator::DifferentEdges { segments } = op {
+                    different_edges.push(Self::constraint(segments, &atoms)?);
+                }
+            }
             let relations = atoms.iter().map(|atom| atom.relation).collect();
             return Some(Self {
                 atoms,
+                different_edges,
                 width,
                 relations,
                 scope: Some(scope),
@@ -107,6 +134,7 @@ impl Shape {
             direction: *direction,
         }];
         let mut width = 2;
+        let mut different_edges = Vec::new();
         let mut projected = false;
         for op in &operators[1..] {
             match op {
@@ -148,6 +176,9 @@ impl Shape {
                         && (right.ordinal() as usize) < width => {}
                 GlaOperator::SelectBoolean { expression }
                     if !projected && expression.supports_vertex_bindings(width) => {}
+                GlaOperator::DifferentEdges { segments } if !projected => {
+                    different_edges.push(Self::constraint(segments, &atoms)?);
+                }
                 GlaOperator::ProjectValues { columns } if !projected => {
                     if columns.iter().any(|column| {
                         !matches!(column,
@@ -172,6 +203,7 @@ impl Shape {
         let relations = atoms.iter().map(|atom| atom.relation).collect();
         Some(Self {
             atoms,
+            different_edges,
             width,
             relations,
             scope: None,
@@ -411,6 +443,25 @@ impl Enumeration<'_> {
         output: &mut Vec<grouped::Contribution>,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
+        // Anchored maintenance may bind atoms in a different order from the
+        // source plan. Test every available pair within its original clause
+        // before following more partners or counting an OPTIONAL/EXISTS
+        // witness. Old and final source enumeration use this identical rule.
+        for constraint in &self.shape.different_edges {
+            for (index, &atom) in constraint.iter().enumerate() {
+                let Some(eid) = selected[atom] else {
+                    continue;
+                };
+                for &prior in &constraint[..index] {
+                    if let Some(previous) = selected[prior] {
+                        meter.charge(ZSetEvent::Work)?;
+                        if previous == eid {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
         let mut pending = false;
         for (index, atom) in self.shape.atoms.iter().enumerate() {
             meter.charge(ZSetEvent::Work)?;
@@ -777,6 +828,10 @@ impl State {
 #[cfg(test)]
 #[path = "multi_hop/scoped_tests.rs"]
 mod scoped_tests;
+
+#[cfg(test)]
+#[path = "multi_hop/match_mode_tests.rs"]
+mod match_mode_tests;
 
 #[cfg(test)]
 mod tests {

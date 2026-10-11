@@ -108,6 +108,7 @@ impl GraphPatternBuilder {
         if self.property_comparisons.is_empty()
             && self.path_captures.is_empty()
             && self.path_predicates.is_empty()
+            && !self.constrains_edges()
             && !self
                 .edges
                 .iter()

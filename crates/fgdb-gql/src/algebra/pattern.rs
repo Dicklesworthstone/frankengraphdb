@@ -6,7 +6,7 @@ mod property_comparison;
 mod value_projection;
 
 use super::{
-    BindingSlot, EdgeRelation, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow,
+    BindingSlot, EdgeRelation, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphMatchMode,
     GraphPathFunction, GraphWalkSearch, IntegerComparison, VertexPredicate,
 };
 use fgdb_delta_types::LabelId;
@@ -74,7 +74,7 @@ impl core::fmt::Display for PatternBuildError {
             Self::DuplicateProjection => f.write_str("binding projection repeats a column"),
             Self::InvalidColumnName => f.write_str("invalid graph-pattern column name"),
             Self::RequiresValueProjection => f.write_str(
-                "binding property comparisons and path captures require prepare_values or its scoped variants",
+                "binding property comparisons, path captures and relationship uniqueness require prepare_values or its scoped variants",
             ),
             Self::InvalidPathCapture => f.write_str("path capture requires an ordered connected root chain or a single WALK atom"),
             Self::LimitExceeded {
@@ -156,6 +156,7 @@ enum PathPredicate {
 /// Bounded definition metadata. Mutators validate before changing the builder.
 #[derive(Clone, Default)]
 pub struct GraphPatternBuilder {
+    match_mode: GraphMatchMode,
     variables: Vec<Variable>,
     edges: Vec<Edge>,
     identities: Vec<Identity>,
@@ -171,6 +172,7 @@ impl core::fmt::Debug for GraphPatternBuilder {
             .field("edges", &self.edges.len())
             .field("predicates", &self.predicate_count)
             .field("identities", &self.identities.len())
+            .field("match_mode", &self.match_mode)
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -252,6 +254,10 @@ fn reverse(direction: GlaDirection) -> GlaDirection {
     }
 }
 
+fn relations_overlap(left: EdgeRelation, right: EdgeRelation) -> bool {
+    left == right || left == EdgeRelation::Any || right == EdgeRelation::Any
+}
+
 /// Width of a positive compiled body, including temporary closing endpoints.
 /// Count producers, not edges: each independent component has its own root.
 fn binding_width(operators: &[GlaOperator]) -> u32 {
@@ -273,6 +279,52 @@ impl GraphPatternBuilder {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Select relationship reuse for this complete positive pattern. The
+    /// generic default is REPEATABLE ELEMENTS; textual MATCH selects DIFFERENT
+    /// EDGES. Use value preparation and an identified source when the latter
+    /// constrains a quantified atom or more than one fixed atom.
+    pub fn match_mode(&mut self, mode: GraphMatchMode) -> &mut Self {
+        self.match_mode = mode;
+        self
+    }
+
+    fn constrains_edges(&self) -> bool {
+        self.match_mode == GraphMatchMode::DifferentEdges
+            && self.edges.iter().enumerate().any(|(at, edge)| {
+                edge.walk.is_some()
+                    || self.edges[..at]
+                        .iter()
+                        .any(|previous| relations_overlap(previous.relation, edge.relation))
+            })
+    }
+
+    /// A valid identified graph assigns each EId one concrete relationship
+    /// type; callers of raw identified-source APIs must preserve that invariant.
+    /// Different explicit types therefore cannot refer to the same graph EId.
+    /// Keep proven-disjoint fixed atoms on their existing physical paths;
+    /// an untyped atom overlaps every relation and a walk checks itself.
+    fn constrain_edge(
+        &self,
+        edge: Edge,
+        appended: BindingSlot,
+        previous: &mut Vec<(EdgeRelation, BindingSlot)>,
+        operators: &mut Vec<GlaOperator>,
+    ) {
+        if self.match_mode != GraphMatchMode::DifferentEdges {
+            return;
+        }
+        let mut segments: Vec<_> = previous
+            .iter()
+            .filter(|(relation, _)| relations_overlap(*relation, edge.relation))
+            .map(|(_, slot)| *slot)
+            .collect();
+        if !segments.is_empty() || edge.walk.is_some() {
+            segments.push(appended);
+            operators.push(GlaOperator::DifferentEdges { segments });
+        }
+        previous.push((edge.relation, appended));
     }
 
     /// Encode the resolved definition without compiling a scope or supplying
@@ -417,6 +469,11 @@ impl GraphPatternBuilder {
                 }
             }
         }
+        if self.match_mode == GraphMatchMode::DifferentEdges {
+            // Preserve every existing generic definition byte-for-byte while
+            // ensuring rebinding cannot reuse a template with another mode.
+            bytes.extend_from_slice(b"fgdb:gql:different-edges:v1\0");
+        }
         bytes
     }
 
@@ -433,12 +490,20 @@ impl GraphPatternBuilder {
                 operators.push("Select");
             }
         }
-        for edge in &self.edges {
+        for (at, edge) in self.edges.iter().enumerate() {
             operators.push(if edge.walk.is_some() {
                 "VarLengthExpand"
             } else {
                 "Expand"
             });
+            if self.match_mode == GraphMatchMode::DifferentEdges
+                && (edge.walk.is_some()
+                    || self.edges[..at]
+                        .iter()
+                        .any(|previous| relations_overlap(previous.relation, edge.relation)))
+            {
+                operators.push("DifferentEdges");
+            }
         }
         operators.extend(std::iter::repeat_n("VertexIdentity", self.identities.len()));
         for comparison in &self.property_comparisons {
@@ -975,6 +1040,7 @@ impl GraphPatternBuilder {
         let mut slots = vec![None; self.variables.len()];
         let mut emitted = vec![false; self.identities.len()];
         let mut consumed = vec![false; self.edges.len()];
+        let mut distinct_segments = Vec::new();
         let mut path_segments = if self.path_captures.is_empty() {
             Vec::new()
         } else {
@@ -1005,6 +1071,12 @@ impl GraphPatternBuilder {
                     direction: first.direction,
                 });
             }
+            self.constrain_edge(
+                first,
+                BindingSlot(1),
+                &mut distinct_segments,
+                &mut operators,
+            );
             slots[first.source] = Some(BindingSlot(0));
             if first.source == first.destination {
                 operators.push(GlaOperator::VertexIdentity {
@@ -1045,6 +1117,7 @@ impl GraphPatternBuilder {
                 let appended = BindingSlot(next_slot);
                 next_slot += 1;
                 operators.push(edge.expansion(source, direction));
+                self.constrain_edge(edge, appended, &mut distinct_segments, &mut operators);
                 if !path_segments.is_empty() {
                     path_segments[at] = Some(appended);
                     edge_starts[at] = Some(source);

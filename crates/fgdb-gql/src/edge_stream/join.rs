@@ -142,6 +142,12 @@ fn compile_output(
             GlaOperator::Select { slot, .. } if (slot.ordinal() as usize) < width => {}
             GlaOperator::VertexIdentity { left, right, .. }
                 if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width => {}
+            GlaOperator::DifferentEdges { segments }
+                if !segments.is_empty()
+                    && segments.len() <= MAX_PATTERN_EDGES
+                    && segments
+                        .iter()
+                        .all(|slot| slot.ordinal() > 0 && (slot.ordinal() as usize) < width) => {}
             GlaOperator::CapturePath {
                 capture,
                 start,
@@ -564,6 +570,20 @@ fn test_stage<S: EdgeScanSource, C>(
                     ids[start.ordinal() as usize].expect("captured start"),
                     steps.into_boxed_slice(),
                 )));
+            }
+            Instruction::Native(GlaOperator::DifferentEdges { segments }) => {
+                // Every admitted segment is one retained fixed edge. Compare
+                // identities, not endpoint pairs: parallel edges may form a
+                // valid return path, but traversing one EId twice may not.
+                for (index, slot) in segments.iter().enumerate() {
+                    let eid = traversal.choices[slot.ordinal() as usize - 1].eid;
+                    for prior in &segments[..index] {
+                        control(GlaExecutionEvent::Work)?;
+                        if traversal.choices[prior.ordinal() as usize - 1].eid == eid {
+                            return Ok(None);
+                        }
+                    }
+                }
             }
             Instruction::Native(op) => {
                 if !accepts(op, ids, &paths, source, control)? {

@@ -373,6 +373,11 @@ impl GraphPatternBuilder {
                             segments: segments.into_iter().map(map).collect(),
                         });
                     }
+                    GlaOperator::DifferentEdges { segments } => {
+                        operators.push(GlaOperator::DifferentEdges {
+                            segments: segments.into_iter().map(map).collect(),
+                        });
+                    }
                     GlaOperator::SelectBoolean { expression } => {
                         operators.push(GlaOperator::SelectBoolean {
                             expression: expression.remap_elements(map, map_capture),

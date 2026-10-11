@@ -89,6 +89,19 @@ impl From<RelationId> for EdgeRelation {
     }
 }
 
+/// Relationship reuse within one positive graph-pattern clause. Separate
+/// MATCH, OPTIONAL and existence bodies have independent relationship sets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GraphMatchMode {
+    /// Every actual EId may occur at most once across all atoms in the clause,
+    /// including quantified atoms and disconnected comma-separated parts.
+    DifferentEdges,
+    /// Each atom uses its declared search semantics without a clause-wide
+    /// restriction. This preserves the generic typed builder's WALK default.
+    #[default]
+    RepeatableElements,
+}
+
 /// Search semantics of one finite path atom, not a terminal row quantifier.
 /// ALL and repetition-restricted modes retain edge-occurrence multiplicity;
 /// ANY selects one occurrence per endpoint pair. DISTINCT remains a separate
@@ -259,6 +272,13 @@ pub enum GlaOperator {
         direction: GlaDirection,
         bounds: crate::GraphWalkBounds,
         search: GraphWalkSearch,
+    },
+    /// Require pairwise distinct actual EIds across these identified expansion
+    /// segments. The newest endpoint is last. This positive-clause constraint
+    /// includes repetitions inside a quantified segment and is independent of
+    /// vertex identity, edge orientation and later MATCH/OPTIONAL/probe bodies.
+    DifferentEdges {
+        segments: Vec<BindingSlot>,
     },
     /// Evaluate the enclosed binding scope once per outer occurrence. The
     /// first complete witness resolves the predicate; it is not an output row.
@@ -697,6 +717,7 @@ impl<Row> GlaPlan<Row> {
             matches!(
                 op,
                 GlaOperator::CapturePath { .. }
+                    | GlaOperator::DifferentEdges { .. }
                     | GlaOperator::VarLengthExpand {
                         search: GraphWalkSearch::Trail,
                         ..
@@ -967,7 +988,9 @@ impl<Row> GlaPlan<Row> {
                 GlaOperator::OrderByValueColumns { columns } => {
                     // Tag 20 used storage type order. Keep implicit canonical
                     // row order unchanged; explicit keys use orderability v1.
-                    bytes.push(29);
+                    // Tag 29 belongs to ACYCLIC expansion, so the briefly used
+                    // conflicting explicit-order encoding is also retired.
+                    bytes.push(36);
                     bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
                     for column in columns.iter() {
                         bytes.extend_from_slice(&(column.column as u64).to_be_bytes());
@@ -1029,6 +1052,13 @@ impl<Row> GlaPlan<Row> {
                     bytes.push(26);
                     bytes.extend_from_slice(&capture.to_be_bytes());
                     bytes.extend_from_slice(&start.0.to_be_bytes());
+                    bytes.extend_from_slice(&(segments.len() as u64).to_be_bytes());
+                    for slot in segments {
+                        bytes.extend_from_slice(&slot.0.to_be_bytes());
+                    }
+                }
+                GlaOperator::DifferentEdges { segments } => {
+                    bytes.push(35);
                     bytes.extend_from_slice(&(segments.len() as u64).to_be_bytes());
                     for slot in segments {
                         bytes.extend_from_slice(&slot.0.to_be_bytes());

@@ -8,6 +8,9 @@
 //! ACYCLIC/SIMPLE use WALK reachability as an overapproximation, then check
 //! the actual path's membership before descent. Their histories never coalesce.
 //! Parallel edges and duplicate occurrences are not merged.
+//! DIFFERENT EDGES adds actual EId history and earlier clause segments to
+//! descent checks. Restricted shortest searches settle only completed valid
+//! histories; shared WALK layers remain an overapproximation of reachability.
 //! This is bounded query scratch, not a storage or spill implementation.
 
 use super::{EId, GlaExecutionEvent, GraphPath, GraphWalkBounds, VId};
@@ -24,6 +27,7 @@ struct Frame {
 pub(super) enum CaptureMode {
     All,
     AllShortest,
+    AnyShortest,
     Acyclic,
     Simple,
 }
@@ -35,7 +39,8 @@ pub(crate) struct CapturedPathCursor<'a> {
     mode: CaptureMode,
     depth: u32,
     layers: Vec<BTreeSet<VId>>,
-    settled: BTreeSet<VId>,
+    settled: BTreeMap<VId, u32>,
+    different_edges: Option<Vec<EId>>,
     // Reverse order: viable[k] can reach this output layer in exactly k hops.
     viable: Vec<BTreeSet<VId>>,
     frames: Vec<Frame>,
@@ -65,7 +70,8 @@ impl<'a> CapturedPathCursor<'a> {
             mode,
             depth: 0,
             layers: vec![BTreeSet::from([source])],
-            settled: BTreeSet::new(),
+            settled: BTreeMap::new(),
+            different_edges: None,
             viable: Vec::new(),
             frames: Vec::new(),
             steps: Vec::new(),
@@ -73,6 +79,11 @@ impl<'a> CapturedPathCursor<'a> {
             emitted_layer: false,
             done: false,
         })
+    }
+
+    pub(super) fn with_different_edges(mut self, forbidden: Vec<EId>) -> Self {
+        self.different_edges = Some(forbidden);
+        self
     }
 
     pub(super) fn next_with_control<E>(
@@ -91,6 +102,7 @@ impl<'a> CapturedPathCursor<'a> {
         self.adjacency = None;
         self.layers = Vec::new();
         self.settled.clear();
+        self.different_edges = None;
         self.viable = Vec::new();
         self.frames = Vec::new();
         self.steps = Vec::new();
@@ -114,7 +126,8 @@ impl<'a> CapturedPathCursor<'a> {
                 // searching more layers of impossible histories.
                 if self.depth >= self.bounds.minimum()
                     && !self.emitted_layer
-                    && matches!(self.mode, CaptureMode::Acyclic | CaptureMode::Simple)
+                    && (self.different_edges.is_some()
+                        || matches!(self.mode, CaptureMode::Acyclic | CaptureMode::Simple))
                 {
                     self.finish();
                     return Ok(None);
@@ -150,7 +163,8 @@ impl<'a> CapturedPathCursor<'a> {
                 for &(_, destination) in neighbors {
                     control(GlaExecutionEvent::Work)?;
                     if (self.mode == CaptureMode::AllShortest
-                        && self.settled.contains(&destination))
+                        && self.different_edges.is_none()
+                        && self.settled.contains_key(&destination))
                         || next.contains(&destination)
                     {
                         continue;
@@ -175,11 +189,11 @@ impl<'a> CapturedPathCursor<'a> {
     ) -> Result<(), E> {
         // Only admissible depths settle an endpoint. A visit below the lower
         // bound must not suppress a later qualifying walk through a cycle.
-        if self.mode == CaptureMode::AllShortest {
+        if self.mode == CaptureMode::AllShortest && self.different_edges.is_none() {
             for &vertex in self.layers.last().expect("an active cursor has a layer") {
                 control(GlaExecutionEvent::Work)?;
                 control(GlaExecutionEvent::ScratchEntry)?;
-                self.settled.insert(vertex);
+                self.settled.insert(vertex, self.depth);
             }
         }
         self.viable = Vec::new();
@@ -242,9 +256,24 @@ impl<'a> CapturedPathCursor<'a> {
 
     fn accepts_step<E>(
         &self,
+        edge: EId,
         destination: VId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
+        if let Some(forbidden) = &self.different_edges {
+            for &previous in forbidden {
+                control(GlaExecutionEvent::Work)?;
+                if edge == previous {
+                    return Ok(false);
+                }
+            }
+            for &(previous, _) in &self.steps {
+                control(GlaExecutionEvent::Work)?;
+                if edge == previous {
+                    return Ok(false);
+                }
+            }
+        }
         if !matches!(self.mode, CaptureMode::Acyclic | CaptureMode::Simple) {
             return Ok(true);
         }
@@ -274,13 +303,34 @@ impl<'a> CapturedPathCursor<'a> {
             control(GlaExecutionEvent::Work)?;
             let at = self.frames.len() - 1;
             if at == self.depth as usize {
+                // A valid prefix can still lead to a newly reachable endpoint,
+                // even if this endpoint was already selected at an earlier
+                // depth. Do not confuse suppressed output with no valid path.
+                self.emitted_layer = true;
+                if self.different_edges.is_some()
+                    && matches!(
+                        self.mode,
+                        CaptureMode::AllShortest | CaptureMode::AnyShortest
+                    )
+                {
+                    control(GlaExecutionEvent::Work)?;
+                    let endpoint = self.frames[at].vertex;
+                    if let Some(&depth) = self.settled.get(&endpoint) {
+                        if depth < self.depth || self.mode == CaptureMode::AnyShortest {
+                            self.pop_frame();
+                            continue;
+                        }
+                    } else {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        self.settled.insert(endpoint, self.depth);
+                    }
+                }
                 for _ in &self.steps {
                     control(GlaExecutionEvent::Work)?;
                     control(GlaExecutionEvent::ScratchEntry)?;
                 }
                 let path = GraphPath::new(self.source, self.steps.clone().into_boxed_slice());
                 self.pop_frame();
-                self.emitted_layer = true;
                 return Ok(Some(path));
             }
             let frame = &mut self.frames[at];
@@ -295,7 +345,9 @@ impl<'a> CapturedPathCursor<'a> {
             };
             frame.next += 1;
             let remaining = self.depth as usize - at - 1;
-            if self.viable[remaining].contains(&step.1) && self.accepts_step(step.1, control)? {
+            if self.viable[remaining].contains(&step.1)
+                && self.accepts_step(step.0, step.1, control)?
+            {
                 self.frames.push(Frame {
                     vertex: step.1,
                     next: 0,
@@ -417,6 +469,165 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn different_edges_selectors_match_complete_walk_filtering_with_prior_segments() {
+        let edges = [(10, 0, 0), (11, 0, 1), (12, 0, 1), (13, 1, 2), (14, 2, 0)];
+        for mask in 0..32 {
+            for undirected in [false, true] {
+                let mut adjacency = Adjacency::new();
+                for (at, &(edge, source, target)) in edges.iter().enumerate() {
+                    if mask & (1 << at) == 0 {
+                        continue;
+                    }
+                    adjacency
+                        .entry(VId(source))
+                        .or_default()
+                        .push((EId(edge), VId(target)));
+                    if undirected && source != target {
+                        adjacency
+                            .entry(VId(target))
+                            .or_default()
+                            .push((EId(edge), VId(source)));
+                    }
+                }
+                for neighbors in adjacency.values_mut() {
+                    neighbors.sort();
+                }
+                for source in [VId(0), VId(1), VId(3)] {
+                    for minimum in [0, 2] {
+                        let bounds = GraphWalkBounds::new(minimum, 3).unwrap();
+                        for search in [
+                            GraphWalkSearch::All,
+                            GraphWalkSearch::Trail,
+                            GraphWalkSearch::AllShortest,
+                            GraphWalkSearch::AnyShortest,
+                            GraphWalkSearch::Acyclic,
+                            GraphWalkSearch::Simple,
+                        ] {
+                            for forbidden in [vec![], vec![EId(11)]] {
+                                // Start with every complete bounded WALK. Vertex
+                                // restrictions, EId uniqueness and minima are
+                                // applied independently of production descent.
+                                let mode = match search {
+                                    GraphWalkSearch::Acyclic => CaptureMode::Acyclic,
+                                    GraphWalkSearch::Simple => CaptureMode::Simple,
+                                    _ => CaptureMode::All,
+                                };
+                                let mut expected = oracle(source, bounds, mode, &adjacency);
+                                expected.retain(|path| {
+                                    let edges = path.edges().collect::<Vec<_>>();
+                                    edges.iter().copied().collect::<BTreeSet<_>>().len()
+                                        == edges.len()
+                                        && edges.iter().all(|edge| !forbidden.contains(edge))
+                                });
+                                if matches!(
+                                    search,
+                                    GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest
+                                ) {
+                                    let mut first = BTreeMap::new();
+                                    expected.retain(|path| {
+                                        let endpoint =
+                                            path.steps().last().map_or(source, |step| step.1);
+                                        if let Some(&depth) = first.get(&endpoint) {
+                                            search == GraphWalkSearch::AllShortest
+                                                && depth == path.len()
+                                        } else {
+                                            first.insert(endpoint, path.len());
+                                            true
+                                        }
+                                    });
+                                }
+                                let mut cursor = IdentifiedExpansion::new_different_edges(
+                                    source,
+                                    bounds,
+                                    search,
+                                    Some(&adjacency),
+                                    forbidden.clone(),
+                                    &mut |_| Ok::<_, ()>(()),
+                                )
+                                .unwrap();
+                                let mut actual = Vec::new();
+                                while let Some((_, path)) =
+                                    cursor.next_with_control(&mut |_| Ok::<_, ()>(())).unwrap()
+                                {
+                                    actual.push(path.expect(
+                                        "different-edge segments retain actual identities",
+                                    ));
+                                }
+                                actual.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+                                assert_eq!(
+                                    actual, expected,
+                                    "mask={mask}, undirected={undirected}, source={source:?}, minimum={minimum}, search={search:?}, forbidden={forbidden:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn restricted_shortest_refusals_drop_prior_edges_and_all_history() {
+        let adjacency = Adjacency::from([
+            (VId(1), vec![(EId(1), VId(2)), (EId(2), VId(3))]),
+            (VId(2), vec![(EId(1), VId(1)), (EId(3), VId(3))]),
+            (VId(3), vec![(EId(2), VId(1)), (EId(3), VId(2))]),
+        ]);
+        for mode in [CaptureMode::AllShortest, CaptureMode::AnyShortest] {
+            let bounds = GraphWalkBounds::new(2, 4).unwrap();
+            let mut total = 0;
+            let mut cursor =
+                CapturedPathCursor::new(VId(1), bounds, mode, Some(&adjacency), &mut |_| {
+                    Ok::<_, usize>(())
+                })
+                .unwrap()
+                .with_different_edges(vec![EId(9)]);
+            while cursor
+                .next_with_control(&mut |_| {
+                    total += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap()
+                .is_some()
+            {}
+            for stop in 1..=total {
+                let mut cursor =
+                    CapturedPathCursor::new(VId(1), bounds, mode, Some(&adjacency), &mut |_| {
+                        Ok::<_, usize>(())
+                    })
+                    .unwrap()
+                    .with_different_edges(vec![EId(9)]);
+                let mut at = 0;
+                let mut control = |_| {
+                    at += 1;
+                    if at == stop { Err(stop) } else { Ok(()) }
+                };
+                loop {
+                    match cursor.next_with_control(&mut control) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => panic!("missed refusal {stop}"),
+                        Err(value) => {
+                            assert_eq!(value, stop);
+                            break;
+                        }
+                    }
+                }
+                assert_eq!(at, stop);
+                assert!(cursor.done && cursor.different_edges.is_none());
+                assert!(
+                    cursor.layers.is_empty()
+                        && cursor.steps.is_empty()
+                        && cursor.settled.is_empty()
+                );
+                assert_eq!(
+                    cursor.next_with_control(&mut |_| Err::<(), _>(usize::MAX)),
+                    Ok(None)
+                );
             }
         }
     }

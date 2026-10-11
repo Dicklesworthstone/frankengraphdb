@@ -38,6 +38,7 @@ pub struct GraphTrailCursor<'a> {
     adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
     bounds: GraphWalkBounds,
     stack: Vec<Frame<'a>>,
+    forbidden: Vec<EId>,
 }
 
 impl<'a> GraphTrailCursor<'a> {
@@ -58,6 +59,7 @@ impl<'a> GraphTrailCursor<'a> {
         Ok(Self {
             adjacency,
             bounds,
+            forbidden: Vec::new(),
             stack: vec![Frame {
                 vertex: source,
                 incoming: None,
@@ -68,6 +70,13 @@ impl<'a> GraphTrailCursor<'a> {
         })
     }
 
+    /// The GLA owner has already charged and copied earlier clause segments.
+    /// Keep this separate from the live frontier so zero hops consume no edge.
+    pub(crate) fn with_forbidden_edges(mut self, forbidden: Vec<EId>) -> Self {
+        self.forbidden = forbidden;
+        self
+    }
+
     pub fn next_endpoint_with_control<E>(
         &mut self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -75,6 +84,7 @@ impl<'a> GraphTrailCursor<'a> {
         let result = self.advance(control);
         if result.is_err() || matches!(&result, Ok(None)) {
             self.stack = Vec::new();
+            self.forbidden = Vec::new();
         }
         result
     }
@@ -110,6 +120,7 @@ impl<'a> GraphTrailCursor<'a> {
         })();
         if result.is_err() || matches!(&result, Ok(None)) {
             self.stack = Vec::new();
+            self.forbidden = Vec::new();
         }
         result
     }
@@ -135,6 +146,16 @@ impl<'a> GraphTrailCursor<'a> {
             let (edge, destination) = frame.neighbors[frame.next];
             frame.next += 1;
             let mut repeated = false;
+            for &prior in &self.forbidden {
+                control(GlaExecutionEvent::Work)?;
+                if prior == edge {
+                    repeated = true;
+                    break;
+                }
+            }
+            if repeated {
+                continue;
+            }
             for prior in self.stack.iter().skip(1) {
                 control(GlaExecutionEvent::Work)?;
                 if prior.incoming == Some(edge) {
