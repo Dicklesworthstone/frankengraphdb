@@ -675,6 +675,10 @@ fn composite_literals_compare_three_valued() {
         ("n.text IN keys({x: 1})", truth(true)),
         ("null IN tail([1, 2])", null.clone()),
         ("null IN tail([1])", truth(false)),
+        // A list literal read through a slice or subscript (List5 [4]).
+        ("3 IN [1, 2, 3][0..1]", truth(false)),
+        ("1 IN [1, 2, 3][0..1]", truth(true)),
+        ("3 IN [[1], [2, 3]][1]", truth(true)),
         // The comparison is one operand of the operators around it, after
         // the literal's own postfix reads.
         ("[1] = [1] AND [2] <> [3]", truth(true)),

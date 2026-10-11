@@ -105,7 +105,7 @@ fn let_value(mut slots: Vec<ReadValueTemplate>, body: ReadValueTemplate) -> Read
 
 /// Advance past the bracketed group whose opening token was just read. An
 /// unbalanced group stops at the end; the parser itself reports it.
-fn skip_group(lexer: &mut Lexer<'_>) -> Result<(), GraphPatternTextError> {
+pub(super) fn skip_group(lexer: &mut Lexer<'_>) -> Result<(), GraphPatternTextError> {
     let mut depth = 1_usize;
     loop {
         match lexer.next()?.kind {

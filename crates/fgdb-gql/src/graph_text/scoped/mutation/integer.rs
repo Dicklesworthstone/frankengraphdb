@@ -512,7 +512,13 @@ impl<'a> Parser<'a> {
         if !matches!(after.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")) {
             return Ok(false);
         }
-        Ok(!matches!(lexer.next()?.kind, TokenKind::Punct(b'[')))
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'[')) {
+            return Ok(true);
+        }
+        // A list literal keeps the scalar IN, unless a slice or subscript
+        // reads it (`3 IN [1, 2, 3][0..1]`): then the list is a value.
+        super::return_projection::skip_group(&mut lexer)?;
+        Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'[')))
     }
 
     /// `operand IN value` whose list is not a literal (a name, a parameter,
