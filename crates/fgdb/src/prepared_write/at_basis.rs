@@ -7,14 +7,13 @@
 //! await occurs.
 
 use crate::{
-    Database, PreparedWrite, RebuildError, Snapshot, WriteBatch, WriteError, WriteHeads, WriteTxn,
-    WriteTxnError,
+    Database, PreparedWrite, RebuildError, Snapshot, VersionHeads, WriteBatch, WriteError,
+    WriteHeads, WriteTxn, WriteTxnError,
 };
 use asupersync::fs::Vfs;
-use fgdb_delta_types::DeltaRow;
 use fgdb_strata::writer::BlockWriter;
 use fgdb_types::CommitSeq;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// An exact native fold at this writer lifetime's lazy-open cut. Keep the
@@ -201,7 +200,7 @@ impl<V: Vfs + Clone> Database<V> {
                 None => (
                     CommitSeq::ORIGIN,
                     BlockWriter::new(crate::GRAPH, crate::BRANCH, crate::PARTITION),
-                    BTreeMap::new(),
+                    VersionHeads::default(),
                     0_u64,
                 ),
             };
@@ -225,10 +224,7 @@ impl<V: Vfs + Clone> Database<V> {
                             .apply(self.keys.block_keys(), at, row)
                             .map_err(|error| basis_rebuild(at, error))?;
                         crate::touched_elements(row, &mut touched);
-                        if matches!(
-                            row,
-                            DeltaRow::CreateVertex { .. } | DeltaRow::CreateEdge { .. }
-                        ) {
+                        if versions.admit_creation(row) {
                             births += 1;
                         }
                     }
