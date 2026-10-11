@@ -17,6 +17,7 @@ const Q: PropertyKeyId = PropertyKeyId(2);
 const OLD: PropertyKeyId = PropertyKeyId(3);
 const TEXT: PropertyKeyId = PropertyKeyId(4);
 const UPDATED: LabelId = LabelId(1);
+const SEEN: LabelId = LabelId(2);
 type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
 type Triple = (VId, RelationId, VId);
 type MutationResult<C = ()> = Result<GraphMutationBatch, GqlQueryError<GraphMutationError<()>, C>>;
@@ -29,6 +30,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Property, "old") => Some(GraphSymbol::Property(OLD)),
         (GraphSymbolKind::Property, "text") => Some(GraphSymbol::Property(TEXT)),
         (GraphSymbolKind::Label, "Updated") => Some(GraphSymbol::Label(UPDATED)),
+        (GraphSymbolKind::Label, "Seen") => Some(GraphSymbol::Label(SEEN)),
         _ => None,
     }
 }
@@ -115,6 +117,45 @@ fn reciprocal_updates_freeze_rhs_and_collapse_parallel_matches() {
     );
     let renamed = prepare("MATCH (x)-[:R]->(y) SET x.p=y.p,y.p=x.p");
     assert_eq!(plan.canonical_bytes(), renamed.canonical_bytes());
+}
+
+/// openCypher Set3 and Remove2: `n:A:B` sets or removes each label. It is
+/// the same definition as the comma-separated actions, one apiece, and each
+/// label becomes its own intent.
+#[test]
+fn several_labels_after_one_target_are_one_action_apiece() {
+    for (several, separate) in [
+        (
+            "MATCH (a)-[:R]->(b) SET a:Updated:Seen",
+            "MATCH (a)-[:R]->(b) SET a:Updated, a:Seen",
+        ),
+        (
+            "MATCH (a)-[:R]->(b) REMOVE a:Updated:Seen, b.p",
+            "MATCH (a)-[:R]->(b) REMOVE a:Updated, a:Seen, b.p",
+        ),
+    ] {
+        assert_eq!(
+            prepare(several).canonical_bytes(),
+            prepare(separate).canonical_bytes(),
+            "{several}"
+        );
+    }
+    let result = run(
+        &prepare("MATCH (a)-[:R]->(b) SET b:Updated:Seen"),
+        &[VId(1), VId(2)],
+        &[(VId(1), R, VId(2))],
+        &props(),
+        policy(),
+    )
+    .unwrap();
+    for label in [UPDATED, SEEN] {
+        assert!(result.intents().contains(&GraphMutationIntent::Label {
+            vertex: VId(2),
+            label,
+            present: true,
+        }));
+    }
+    assert_eq!(result.stats().effects, 2);
 }
 
 #[test]

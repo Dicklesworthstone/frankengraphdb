@@ -294,8 +294,23 @@ impl<'a> Parser<'a> {
                         )
                         .into());
                     }
+                    // `n:A:B` sets or removes each label, one action apiece
+                    // in the statement's action allowance (openCypher Set3,
+                    // Remove2).
+                    let mut label = self.name()?;
+                    while self.take(b':')? {
+                        actions.push(Action {
+                            target,
+                            kind: ActionKind::Label {
+                                label,
+                                present: setting,
+                            },
+                        });
+                        self.mutation_action_capacity(actions.len())?;
+                        label = self.name()?;
+                    }
                     ActionKind::Label {
-                        label: self.name()?,
+                        label,
                         present: setting,
                     }
                 } else {
