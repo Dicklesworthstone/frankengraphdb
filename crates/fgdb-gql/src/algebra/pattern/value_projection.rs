@@ -124,6 +124,70 @@ impl PreparedGraphPattern<GraphValueRow> {
         self
     }
 
+    /// Prove one complete occurrence per root vertex for the maintained
+    /// collection adapter. Predicates and every original projected value stay
+    /// in the real source. A requested identity is appended, never inserted in
+    /// front of column references already bound by a computed projection.
+    pub(crate) fn incremental_vertex_collection_source(
+        &self,
+        identity_name: Option<&str>,
+    ) -> Option<(Self, Option<usize>)> {
+        if self.variable_count != 1 || self.edge_count != 0 || self.logical.visible_columns.is_some()
+        {
+            return None;
+        }
+        let [GlaOperator::ScanVertices, predicates @ .., GlaOperator::ProjectValues { columns }, GlaOperator::OrderByValues, GlaOperator::Limit { offset: 0, count: None }] =
+            self.logical.operators.as_slice()
+        else {
+            return None;
+        };
+        if columns.is_empty()
+            || columns.len() != self.columns.len()
+            || columns.iter().any(|column| {
+                !matches!(column, ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } if slot.ordinal() == 0)
+            })
+            || predicates.iter().any(|operator| match operator {
+                GlaOperator::Select { slot, .. } => slot.ordinal() != 0,
+                GlaOperator::VertexIdentity { left, right, .. }
+                | GlaOperator::CompareProperties { left, right, .. } => {
+                    left.ordinal() != 0 || right.ordinal() != 0
+                }
+                GlaOperator::SelectBoolean { expression } => {
+                    !expression.supports_vertex_bindings(1)
+                }
+                _ => true,
+            })
+        {
+            return None;
+        }
+        let mut source = self.clone();
+        let identity = match identity_name {
+            None => None,
+            Some(name) => match columns.iter().position(|column| {
+                matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() == 0)
+            }) {
+                Some(column) => Some(column),
+                None => {
+                    let column = columns.len();
+                    let projection = source.logical.operators.len() - 3;
+                    let GlaOperator::ProjectValues { columns } =
+                        &mut source.logical.operators[projection]
+                    else {
+                        unreachable!("the proved source has one terminal value projection")
+                    };
+                    columns.push(ValueProjection::Vertex {
+                        slot: BindingSlot(0),
+                    });
+                    source.columns.push(name.to_owned());
+                    Some(column)
+                }
+            },
+        };
+        // The counted-tuple producer reserves another private COUNT column.
+        // The projection may not evade that source's complete schema bound.
+        (source.columns.len() < MAX_PATTERN_VERTICES).then_some((source, identity))
+    }
+
     /// Rank by projected column positions before applying the existing page.
     /// Nulls default to last in both directions. Canonical complete-row order
     /// breaks remaining ties; DISTINCT still compares the entire output row.

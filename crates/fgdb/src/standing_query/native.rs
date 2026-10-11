@@ -134,6 +134,16 @@ impl PreparedNativeRead {
                             policy,
                         );
                     }
+                    if let Some(definition) = bound.incremental_vertex_collection_relation() {
+                        return set::register_group(
+                            database,
+                            cx,
+                            &definition,
+                            prepared.columns(),
+                            prepared.output_slots(),
+                            policy,
+                        );
+                    }
                     let layout = Layout::Aggregate {
                         columns: prepared.columns().to_vec(),
                         slots: prepared.output_slots().to_vec(),
@@ -166,6 +176,16 @@ impl PreparedNativeRead {
                     if bound.input_relation().is_some() {
                         let definition = fgdb_gql::PreparedGraphSetAggregate::from_relation(bound)
                             .ok_or(StandingQueryError::Unsupported)?;
+                        return set::register_group(
+                            database,
+                            cx,
+                            &definition,
+                            prepared.columns(),
+                            prepared.output_slots(),
+                            policy,
+                        );
+                    }
+                    if let Some(definition) = bound.incremental_vertex_collection_relation() {
                         return set::register_group(
                             database,
                             cx,

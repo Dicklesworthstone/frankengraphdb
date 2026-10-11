@@ -693,6 +693,92 @@ fn every_group_circuit_admission_and_rebuild_checkpoint_preserves_the_old_regist
 }
 
 #[test]
+fn native_collection_admission_and_rebuild_keep_budget_and_cancellation_atomic() {
+    let ((), report) = run_async_under_lab(0x6772_1025, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let args = GqlParameters::new();
+        for text in [
+            "MATCH (n) RETURN collect(n.amount) AS values,collect(DISTINCT n.amount) AS unique,COUNT(*) AS count",
+            "MATCH (n) RETURN collect([n.amount,n.bucket]) AS pairs,reduce(total=0,x IN collect(n.amount) | total+x) AS total",
+        ] {
+            let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+            let PreparedNativeRead::Aggregate(template) = &prepared else {
+                panic!("native graph collection template")
+            };
+            let definition = template
+                .bind_parameters(&args)
+                .unwrap()
+                .incremental_vertex_collection_relation()
+                .unwrap();
+            let mut calls = 0;
+            let handle = register_group_checked(
+                &mut db,
+                &cx,
+                &definition,
+                template.columns(),
+                template.output_slots(),
+                policy(),
+                &mut || { calls += 1; Ok(()) },
+            ).unwrap();
+            let first = match handle.native.as_deref().unwrap() {
+                Layout::GroupCircuit { first, .. } => *first,
+                _ => unreachable!(),
+            };
+            let footprint = prepared.subscription_footprint(&cx, &args).unwrap();
+            assert_eq!(footprint, ((handle.index - first + 1) as u64, 1));
+            assert_eq!(footprint.0, 3);
+            let accepted = saved(&db.standing_queries);
+            for limit in [
+                GqlQueryPolicy::new(100_000, 100_000, 0, 50_000_000),
+                GqlQueryPolicy::new(100_000, 100_000, 50_000_000, 0),
+                GqlQueryPolicy::new(0, 100_000, 50_000_000, 50_000_000),
+                GqlQueryPolicy::new(100_000, 0, 50_000_000, 50_000_000),
+            ] {
+                assert!(prepared.register_standing(&mut db, &cx, &args, limit).is_err());
+                assert_eq!(saved(&db.standing_queries), accepted);
+                assert!(db.rebuild_standing_query(&cx, &handle, limit).is_err());
+                assert_eq!(saved(&db.standing_queries), accepted);
+            }
+            for stop in 1..=calls {
+                let mut seen = 0;
+                assert!(register_group_checked(
+                    &mut db,
+                    &cx,
+                    &definition,
+                    template.columns(),
+                    template.output_slots(),
+                    policy(),
+                    &mut || {
+                        seen += 1;
+                        if seen == stop { Err(StandingQueryError::Maintenance(StandingQueryFailure::Interrupted)) } else { Ok(()) }
+                    },
+                ).is_err());
+                assert_eq!(seen, stop);
+                assert_eq!(saved(&db.standing_queries), accepted);
+            }
+            let mut calls = 0;
+            rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || { calls += 1; Ok(()) }).unwrap();
+            let accepted = saved(&db.standing_queries);
+            for stop in 1..=calls {
+                let mut seen = 0;
+                assert!(rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
+                    seen += 1;
+                    if seen == stop { Err(StandingQueryError::Maintenance(StandingQueryFailure::Interrupted)) } else { Ok(()) }
+                }).is_err());
+                assert_eq!(seen, stop);
+                assert_eq!(saved(&db.standing_queries), accepted);
+            }
+            assert_eq!(db.standing_native_query(&cx, &handle, policy()).unwrap().1, db.query(&cx, text, &args, symbols, policy()).unwrap());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn output_errors_dependency_failure_and_quotas_fence_only_the_affected_circuit_and_repair() {
     let ((), report) = run_async_under_lab(0x6772_1015, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

@@ -65,6 +65,121 @@ fn properties() -> Props {
     props
 }
 
+fn run_collection_relation(
+    plan: &PreparedGraphAggregate,
+    vertices: &[VId],
+    props: &Props,
+) -> Vec<GraphAggregateRow> {
+    let normalized = plan.incremental_vertex_collection_relation().unwrap();
+    assert_eq!(normalized.key_columns(), plan.key_columns());
+    assert_eq!(normalized.aggregate_columns(), plan.aggregate_columns());
+    assert_eq!(normalized.input().operand_count(), 1);
+    assert_eq!(normalized.input().incremental_result_order(), Some((&[][..], None)));
+    normalized
+        .execute_governed(
+            policy(),
+            |source, policy| {
+                source.plan().execute_governed_with_properties(
+                    vertices.len() as u64,
+                    vertices.iter().copied(),
+                    [],
+                    |_, _| Ok::<_, &'static str>(true),
+                    |id, key| Ok(props.get(&(id, key))),
+                    policy,
+                    || Ok::<_, ()>(()),
+                )
+            },
+            || Ok::<_, ()>(()),
+        )
+        .unwrap()
+        .value
+}
+
+#[test]
+fn maintained_collection_normalization_preserves_native_and_computed_source_order() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let vertices = [VId(1), VId(2), VId(3), VId(4)];
+    let mut props = Props::new();
+    for (id, p, q) in [(1, 7, 1), (2, 2, 1), (3, 7, 2), (4, -4, 2)] {
+        props.insert((VId(id), P), CanonicalScalar::Int(p));
+        props.insert((VId(id), Q), CanonicalScalar::Int(q));
+    }
+    for (text, expected) in [
+        ("MATCH (n) RETURN collect(n.p) AS values", vec![7, 2, 7, -4]),
+        ("MATCH (n) RETURN collect(DISTINCT n.p) AS values", vec![7, 2, -4]),
+        ("MATCH (n) RETURN collect(-n.p) AS values", vec![4, -2, -7, -7]),
+        ("MATCH (n) RETURN collect(n.p+n.q) AS values", vec![-2, 3, 8, 9]),
+        ("MATCH (n) RETURN [x IN collect(n.p) | x*2] AS values", vec![14, 4, 14, -8]),
+    ] {
+        let plan = prepare(text);
+        let original = plan.canonical_bytes();
+        let actual = run_collection_relation(&plan, &vertices, &props);
+        assert_eq!(actual, run(&plan, &vertices, &[], &props).unwrap().value, "{text}");
+        assert_eq!(actual.len(), 1);
+        assert_eq!(
+            actual[0].values()[0].as_value(),
+            Some(&GraphValue::List(expected.into_iter().map(|value| GraphValue::Scalar(CanonicalScalar::Int(value))).collect())),
+            "{text}"
+        );
+        assert_eq!(plan.canonical_bytes(), original);
+    }
+    props.insert((VId(u128::MAX), P), CanonicalScalar::Null);
+    props.insert((VId(u128::MAX), Q), CanonicalScalar::Int(3));
+    let vertices = [VId(1), VId(2), VId(3), VId(4), VId(u128::MAX)];
+    for text in [
+        "MATCH (n) RETURN collect(n) AS nodes,collect(n.p) AS values,COUNT(*) AS count,SUM(n.p) AS total,AVG(n.p) AS average",
+        "MATCH (n) RETURN n.q AS bucket,collect(DISTINCT n.p) AS values GROUP BY n.q ORDER BY n.q DESC",
+        "MATCH (n) RETURN DISTINCT collect(n.p) AS values GROUP BY n.q HAVING COUNT(n.p)>0 ORDER BY SUM(n.p) DESC LIMIT 1",
+        "MATCH (n) RETURN n.q AS bucket,[x IN collect(n.p) | x+n.q] AS values GROUP BY n.q ORDER BY n.q",
+        "MATCH (n) RETURN reduce(total=0,x IN collect(n.p) | total+x) AS total,any(x IN collect(n.p) WHERE x<0) AS negative",
+        "MATCH (n) RETURN collect([n.p,n.q]) AS values,COUNT(*) AS count",
+        "MATCH (n) RETURN collect(1) AS `_fgdb_collect_order_0`,collect(n.p) AS `_fgdb_collect_order_1`",
+        "MATCH (n) RETURN collect(n.p) AS values LIMIT 0",
+    ] {
+        let plan = prepare(text);
+        for vertices in [&vertices[..], &[][..]] {
+            assert_eq!(
+                run_collection_relation(&plan, vertices, &props),
+                run(&plan, vertices, &[], &props).unwrap().value,
+                "{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn maintained_collection_source_admission_keeps_topology_and_complete_schema_bounds() {
+    use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder, MAX_PATTERN_VERTICES};
+
+    for text in [
+        "MATCH (n) RETURN COUNT(*) AS count",
+        "MATCH (a)-[:R]->(b) RETURN collect(b.p) AS values",
+        "MATCH (a),(b) RETURN collect(a.p) AS values",
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) RETURN collect(b.p) AS values",
+    ] {
+        assert!(prepare(text).incremental_vertex_collection_relation().is_none(), "{text}");
+    }
+    let mut graph = GraphPatternBuilder::new();
+    graph.vertex("n").unwrap();
+    let names: Vec<_> = (0..MAX_PATTERN_VERTICES - 1).map(|column| format!("c{column}")).collect();
+    let mut columns: Vec<_> = names.iter().map(|name| GraphColumn::property(name, "n", P)).collect();
+    let prepare_columns = |columns: &[GraphColumn<'_>]| {
+        PreparedGraphAggregate::prepare(
+            graph.prepare_values(columns, 0, None).unwrap().with_duplicates(),
+            &[],
+            &[GraphAggregate::collect("values", 0)],
+            0,
+            None,
+        ).unwrap()
+    };
+    // The hidden identity cannot take the tuple producer's private COUNT cell.
+    assert!(prepare_columns(&columns).incremental_vertex_collection_relation().is_none());
+    // An already projected identity reuses its source column at the same bound.
+    columns[1] = GraphColumn::vertex(&names[1], "n");
+    assert!(prepare_columns(&columns).incremental_vertex_collection_relation().is_some());
+}
+
 #[test]
 fn aggregate_collections_bind_nested_element_scopes_and_preserve_occurrences() {
     use fgdb_gql::GraphAggregateValue;

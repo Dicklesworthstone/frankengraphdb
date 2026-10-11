@@ -9,7 +9,7 @@
 mod folded;
 
 use super::*;
-use crate::PreparedGraphSet;
+use crate::{GraphSetProjection, GraphSetQuantifier, GraphSetValue, PreparedGraphSet, PreparedGraphSetAggregate};
 use std::cell::RefCell;
 
 impl PreparedGraphAggregate {
@@ -87,6 +87,85 @@ impl PreparedGraphAggregate {
     #[must_use]
     pub fn input_relation(&self) -> Option<&PreparedGraphSet> {
         self.relational_input.as_ref()
+    }
+
+    /// Normalize a native single-vertex COLLECT into the existing ordered
+    /// relational group owner. The retained source is the original graph plan,
+    /// with at most one private vertex identity, not a fabricated schema leaf.
+    /// Every input expression and result clause remains in the definition.
+    ///
+    /// Ordinary native vertex scans visit ascending identities. Their private
+    /// leading identity makes that occurrence order explicit in the row bag.
+    /// Computed inputs instead retain the original complete-row ordering used
+    /// by their materialized source, before evaluating argument expressions.
+    /// Equal source rows have equal computed values and preserve their full
+    /// multiplicity. Neither argument order nor change-arrival order can stand
+    /// in for the original occurrence sequence.
+    ///
+    /// Edge/scoped sources, hidden source columns and unsupported schema widths
+    /// refuse. The consumer must still admit and meter the complete returned
+    /// relation through its ordinary maintained circuit. Iterator callers that
+    /// supply vertices in arbitrary order have no native ordering guarantee.
+    #[must_use]
+    pub fn incremental_vertex_collection_relation(&self) -> Option<PreparedGraphSetAggregate> {
+        if self.relational_input.is_some()
+            || !self.aggregates.iter().any(|aggregate| {
+                matches!(aggregate.function, GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct)
+            })
+        {
+            return None;
+        }
+        let mut names: BTreeSet<_> = self.input.columns().iter().cloned().collect();
+        if let Some(computed) = &self.computed_input {
+            names.extend(computed.iter().map(|column| column.name().to_owned()));
+        }
+        let mut ordinal = 0;
+        let mut private_name = || loop {
+            let name = format!("_fgdb_collect_order_{ordinal}");
+            ordinal += 1;
+            if names.insert(name.clone()) {
+                break name;
+            }
+        };
+        let (source, projection, prefix) = match &self.computed_input {
+            Some(computed) => {
+                let (source, _) = self.input.incremental_vertex_collection_source(None)?;
+                let prefix = source.columns().len();
+                let mut projection: Vec<_> = (0..prefix)
+                    .map(|column| GraphSetProjection::new(private_name(), GraphSetValue::Column(column)))
+                    .collect();
+                projection.extend_from_slice(computed);
+                (source, projection, prefix)
+            }
+            None => {
+                let name = private_name();
+                let (source, identity) = self.input.incremental_vertex_collection_source(Some(&name))?;
+                let mut projection = vec![GraphSetProjection::new(name, GraphSetValue::Column(identity?))];
+                projection.extend(self.input.columns().iter().enumerate().map(|(column, name)| {
+                    GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
+                }));
+                (source, projection, 1)
+            }
+        };
+        let relation = PreparedGraphSet::from(source.clone())
+            .project(projection, GraphSetQuantifier::All)
+            .ok()?;
+        relation.check_parent_depth().ok()?;
+        let mut summary = self.clone();
+        summary.input = AggregateInput(Some(source));
+        summary.computed_input = None;
+        summary.relational_input = Some(relation);
+        // Only input addresses shift. Output keys, hidden aggregate slots,
+        // HAVING and scoped collection-output expressions keep their schema.
+        for column in &mut summary.keys {
+            *column += prefix;
+        }
+        for aggregate in &mut summary.aggregates {
+            if let Some(column) = &mut aggregate.column {
+                *column += prefix;
+            }
+        }
+        PreparedGraphSetAggregate::from_relation(summary)
     }
 
     /// Reuse native grouping inside a relational operator whose COMPLETE
