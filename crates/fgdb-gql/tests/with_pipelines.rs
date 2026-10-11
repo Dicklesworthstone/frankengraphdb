@@ -316,6 +316,32 @@ fn named_with_expressions_and_parenthesized_variables_preserve_results() {
     assert_eq!(implicit.canonical_bytes(), explicit.canonical_bytes());
 }
 
+/// An UNWIND right after MATCH or WITH reads the carried vertex's properties
+/// through the same hidden boundary columns as a WITH's own scope. They end
+/// right after the UNWIND, which keeps its unwound column (TCK Graph8 reads
+/// `UNWIND keys(n)` the same way).
+#[test]
+fn an_unwind_after_match_or_with_reads_carried_properties() {
+    let values = [1, 2, 2, 3].map(CanonicalScalar::Int);
+    for text in [
+        "MATCH (n) UNWIND [n.p, n.p + 1] AS v RETURN v ORDER BY v",
+        "MATCH (n) WITH n UNWIND [n.p, n.p + 1] AS v RETURN v ORDER BY v",
+    ] {
+        let query = prepare(text);
+        assert_eq!(query.columns(), ["v"], "{text}");
+        let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+        assert_eq!(ints(&rows, 0), [1, 2, 2, 2, 3, 3, 3, 4].map(Some), "{text}");
+    }
+    // A binding a plain WITH drops stays out of the UNWIND's reach.
+    assert!(
+        PreparedGraphSetText::prepare(
+            "MATCH (n) WITH n.p AS p UNWIND [n.p] AS v RETURN v",
+            symbols
+        )
+        .is_err()
+    );
+}
+
 /// A grouping or DISTINCT WITH's own ORDER BY may repeat one of its items'
 /// expressions, which then is that item's output (openCypher, TCK
 /// WithOrderBy2 [22] to [24] and WithOrderBy4 [16] to [18]): `n.p` after

@@ -206,6 +206,17 @@ fn graph_maps_cover_vertices_relationships_optional_scopes_and_row_composition()
                 "MATCH (n:Thing) WITH n RETURN n.score AS score, properties(n) AS props ORDER BY score",
                 vec![vec![int(10), node.clone()], vec![null(), map(&[])]],
             ),
+            // An UNWIND right after MATCH or WITH reads a carried element's
+            // keys and properties (TCK Graph8 [1] to [6]).
+            (
+                "MATCH (n:Thing) UNWIND keys(n) AS k RETURN k ORDER BY k",
+                vec![vec![text("name")], vec![text("score")]],
+            ),
+            (
+                "MATCH (n:Thing) WHERE n.score = 10 WITH n UNWIND [n.score, n.score + 1] AS v \
+                 RETURN v ORDER BY v",
+                vec![vec![int(10)], vec![int(11)]],
+            ),
             (
                 "MATCH (n:Thing) WHERE n.score=10 RETURN n{.*, score: 11, extra: 'kept'} AS props",
                 vec![vec![map(&[

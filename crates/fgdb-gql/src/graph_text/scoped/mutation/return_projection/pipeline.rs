@@ -196,9 +196,16 @@ impl<'a> Parser<'a> {
         if !head.with {
             return Ok(());
         }
-        // The token after the projection list is not scanned. If it already
-        // ends the scope (a second WITH, UNWIND, MATCH ...), there is no scope.
+        // The scope also covers the expression of the first UNWIND after it,
+        // up to its AS: `MATCH (n) UNWIND keys(n) AS k` or `WITH n UNWIND
+        // [n.p] AS x` reads a carried element there. An UNWIND sees only what
+        // the head projects, never a binding a plain WITH drops.
+        let mut unwind = matches!(self.current.kind, TokenKind::Word(word)
+            if word.eq_ignore_ascii_case("UNWIND"));
+        // Otherwise the token after the projection list is not scanned. If it
+        // already ends the scope (a second WITH, MATCH ...), there is none.
         if let TokenKind::Word(word) = self.current.kind
+            && !unwind
             && ends_boundary_scope(word, None)
         {
             return Ok(());
@@ -210,7 +217,7 @@ impl<'a> Parser<'a> {
         // Those reads are hidden columns too, but scoped to that part.
         let mut scoped: Vec<(&'a str, Option<&'a str>, usize)> = Vec::new();
         let mut binders: Vec<&'a str> = Vec::new();
-        let mut before_return = head.plain;
+        let mut before_return = head.plain && !unwind;
         let mut lexer = self.lexer.clone();
         // The three tokens before the current one, oldest first.
         let mut window: [Option<TokenKind<'a>>; 3] = [None; 3];
@@ -226,6 +233,22 @@ impl<'a> Parser<'a> {
                         break;
                     };
                     depth = outer;
+                }
+                TokenKind::Word(word)
+                    if unwind && depth == 0 && !after_dot && word.eq_ignore_ascii_case("AS") =>
+                {
+                    break;
+                }
+                TokenKind::Word(word)
+                    if !unwind
+                        && depth == 0
+                        && !after_dot
+                        && word.eq_ignore_ascii_case("UNWIND")
+                        && !matches!(window[2], Some(TokenKind::Word(previous))
+                            if previous.eq_ignore_ascii_case("AS")) =>
+                {
+                    unwind = true;
+                    before_return = false;
                 }
                 TokenKind::Word(word)
                     if depth == 0 && !after_dot && ends_boundary_scope(word, window[2]) =>
@@ -592,10 +615,45 @@ impl<'a> Parser<'a> {
             }
             let at = self.current.at;
             if self.is_word("UNWIND") {
-                self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
                 self.word("UNWIND")?;
+                // The UNWIND expression may read a carried element's hidden
+                // boundary columns (hoist_boundary_reads), never a binding a
+                // plain WITH dropped nor an item repeat. The hidden columns
+                // end right after it; the unwound column stays.
+                if let Some(boundary) = self.boundary_reads.as_mut() {
+                    boundary.scoped.clear();
+                }
+                self.projected_sources = None;
+                let carried = self
+                    .boundary_reads
+                    .as_ref()
+                    .filter(|boundary| boundary.width == schema.len())
+                    .map(|boundary| boundary.visible);
                 let stage = self.unwind_stage(&mut schema, at)?;
                 append_stage(&mut stages, stage, &mut depth)?;
+                if let Some(visible) = carried {
+                    self.boundary_reads = None;
+                    let unwound = schema.len() - 1;
+                    let projection = (0..visible)
+                        .chain([unwound])
+                        .map(|index| ReadProjectionTemplate {
+                            name: schema[index].0.text.to_owned(),
+                            value: ReadValueTemplate::Column(index),
+                        })
+                        .collect();
+                    append_stage(
+                        &mut stages,
+                        ReadStageTemplate::Project {
+                            at,
+                            projection,
+                            quantifier: GraphSetQuantifier::All,
+                        },
+                        &mut depth,
+                    )?;
+                    let column = schema[unwound];
+                    schema.truncate(visible);
+                    schema.push(column);
+                }
                 continue;
             }
             if self.take_word("WHERE")? {
