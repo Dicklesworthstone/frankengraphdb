@@ -230,10 +230,12 @@ impl<'a> Parser<'a> {
                 width: outputs.len(),
                 reads,
                 grouped,
+                scoped: Vec::new(),
             });
         }
         Ok(GraphProjectionHead {
             with: true,
+            plain: false,
             inputs,
             outputs,
         })

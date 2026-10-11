@@ -75,6 +75,24 @@ fn boundary_binding<'a>(
         .then_some(input.variable)
 }
 
+/// Append a hidden boundary output reading head input `column` under the
+/// first private name no output uses, and return its output index.
+fn hidden_boundary_column<'a>(
+    head: &mut GraphProjectionHead<'a>,
+    at: usize,
+    column: usize,
+) -> Result<usize, GraphSetTextError> {
+    let Some(&text) = BOUNDARY_READ_NAMES
+        .iter()
+        .find(|name| head.outputs.iter().all(|(output, _)| output.text != **name))
+    else {
+        return Err(expected(at, "at most 16 hidden reads after a WITH"));
+    };
+    head.outputs
+        .push((Name { text, at }, ReadValueTemplate::Column(column)));
+    Ok(head.outputs.len() - 1)
+}
+
 /// Recognize only a complete graph-element map request. Nested map-valued
 /// expressions keep their ordinary scalar leaves and are not catalog reads.
 pub(super) fn property_map_source<'a>(
@@ -187,6 +205,12 @@ impl<'a> Parser<'a> {
         }
         let visible = head.outputs.len();
         let mut reads = Vec::new();
+        // A plain WITH's own WHERE and pages (everything before the RETURN)
+        // may also read the MATCH bindings it drops, as openCypher allows.
+        // Those reads are hidden columns too, but scoped to that part.
+        let mut scoped: Vec<(&'a str, Option<&'a str>, usize)> = Vec::new();
+        let mut binders: Vec<&'a str> = Vec::new();
+        let mut before_return = head.plain;
         let mut lexer = self.lexer.clone();
         // The three tokens before the current one, oldest first.
         let mut window: [Option<TokenKind<'a>>; 3] = [None; 3];
@@ -208,7 +232,35 @@ impl<'a> Parser<'a> {
                 {
                     break;
                 }
+                TokenKind::Word(word)
+                    if depth == 0 && !after_dot && word.eq_ignore_ascii_case("RETURN") =>
+                {
+                    before_return = false;
+                }
                 TokenKind::Word(word) if !after_dot => {
+                    let next = lexer.clone().next()?.kind;
+                    if before_return
+                        && !matches!(next, TokenKind::Punct(b'.' | b'(' | b'{' | b':'))
+                        && head.outputs.iter().all(|(output, _)| output.text != word)
+                    {
+                        // `[x IN list ...]` and quantifiers bind a local that
+                        // shadows any MATCH binding of the same name.
+                        if matches!(window[2], Some(TokenKind::Punct(b'[' | b'(')))
+                            && matches!(next, TokenKind::Word(next) if next.eq_ignore_ascii_case("IN"))
+                        {
+                            binders.push(word);
+                        } else if !scoped
+                            .iter()
+                            .any(|&(name, key, _)| name == word && key.is_none())
+                            && let Some(variable) =
+                                self.visible_graph_bindings().find(|name| name.text == word)
+                        {
+                            let input =
+                                self.mutation_projection(&mut head.inputs, variable, None)?;
+                            let column = hidden_boundary_column(head, token.at, offset + input)?;
+                            scoped.push((word, None, column));
+                        }
+                    }
                     if let Some(source) = property_map_source(word, token.at, &lexer)?
                         && let Some(variable) = boundary_binding(head, offset, source.text)
                         && !reads.iter().any(|&(alias, key, _): &(_, Name<'_>, _)| {
@@ -275,18 +327,39 @@ impl<'a> Parser<'a> {
                             ReadValueTemplate::Column(offset + input),
                         ));
                         reads.push((alias, key, head.outputs.len() - 1));
+                    } else if before_return
+                        && !chained
+                        && let Some(TokenKind::Word(alias)) = window[1]
+                        && head.outputs.iter().all(|(output, _)| output.text != alias)
+                        && !scoped
+                            .iter()
+                            .any(|&(name, key, _)| name == alias && key == Some(property))
+                        && let Some(variable) = self
+                            .visible_graph_bindings()
+                            .find(|name| name.text == alias)
+                    {
+                        let key = Name {
+                            text: property,
+                            at: token.at,
+                        };
+                        let input =
+                            self.mutation_projection(&mut head.inputs, variable, Some(key))?;
+                        let column = hidden_boundary_column(head, token.at, offset + input)?;
+                        scoped.push((alias, Some(property), column));
                     }
                 }
                 _ => {}
             }
             window = [window[1], window[2], Some(token.kind)];
         }
-        if !reads.is_empty() {
+        scoped.retain(|&(name, _, _)| !binders.contains(&name));
+        if head.outputs.len() != visible {
             self.boundary_reads = Some(BoundaryReads {
                 visible,
                 width: head.outputs.len(),
                 reads,
                 grouped: Vec::new(),
+                scoped,
             });
         }
         Ok(())
@@ -321,16 +394,31 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         let mut lookahead = self.lexer.clone();
-        if !matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
-            return Ok(None);
+        let next = lookahead.next()?.kind;
+        if !matches!(next, TokenKind::Punct(b'.')) {
+            // A binding a plain WITH dropped, read by its own WHERE or page.
+            if matches!(next, TokenKind::Punct(b'(' | b'{')) {
+                return Ok(None);
+            }
+            let Some(&(_, _, column)) =
+                (boundary.scoped.iter()).find(|&&(name, key, _)| name == alias && key.is_none())
+            else {
+                return Ok(None);
+            };
+            self.advance()?;
+            return Ok(Some(column));
         }
         let TokenKind::Word(property) = lookahead.next()?.kind else {
             return Ok(None);
         };
-        let Some(&(_, _, column)) = boundary
-            .reads
-            .iter()
+        let Some(column) = (boundary.reads.iter())
             .find(|&&(read, key, _)| read == alias && key.text == property)
+            .map(|&(_, _, column)| column)
+            .or_else(|| {
+                (boundary.scoped.iter())
+                    .find(|&&(name, key, _)| name == alias && key == Some(property))
+                    .map(|&(_, _, column)| column)
+            })
         else {
             return Ok(None);
         };
@@ -465,6 +553,11 @@ impl<'a> Parser<'a> {
                 if self.is_word("UNWIND") {
                     continue;
                 }
+            }
+            // A plain WITH's dropped bindings end with its WHERE and pages;
+            // a RETURN or a later stage never resolves them.
+            if let Some(boundary) = self.boundary_reads.as_mut() {
+                boundary.scoped.clear();
             }
             let at = self.current.at;
             if !self.is_word("WITH") {

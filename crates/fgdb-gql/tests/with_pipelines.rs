@@ -549,6 +549,76 @@ fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
     }
 }
 
+/// openCypher (TCK WithWhere7 [1], WithOrderBy2 [21], TriadicSelection1):
+/// a WITH that neither groups nor deduplicates lets its own WHERE and pages
+/// read the MATCH bindings it drops, bare or by property. Each such query
+/// equals the one that projects the binding explicitly. The dropped binding
+/// stays out of the RETURN, `*`, a later stage, and a DISTINCT WITH, where a
+/// hidden column would change which rows are duplicates.
+#[test]
+fn a_plain_with_reads_the_bindings_it_drops_in_its_own_where_and_pages() {
+    let values = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .map(|template| template.bind_parameters(&GqlParameters::new()).unwrap())
+            .map_err(|error| format!("{text}: {error:?}"))
+            .unwrap();
+        run(&query, &values, wide(), &mut || Ok(())).unwrap().value
+    };
+    for (dropped, explicit, len) in [
+        (
+            "MATCH (n) WITH n.p AS v WHERE n.p >= 2 RETURN v ORDER BY v",
+            "MATCH (n) WITH n.p AS v WHERE v >= 2 RETURN v ORDER BY v",
+            4,
+        ),
+        (
+            "MATCH (n) WITH n.p AS v ORDER BY n.p DESC LIMIT 2 RETURN v ORDER BY v",
+            "MATCH (n) WITH n.p AS v ORDER BY v DESC LIMIT 2 RETURN v ORDER BY v",
+            2,
+        ),
+        (
+            "MATCH (n) WITH n.p AS v ORDER BY n.p + 1 DESC LIMIT 2 RETURN v ORDER BY v",
+            "MATCH (n) WITH n.p AS v ORDER BY v DESC LIMIT 2 RETURN v ORDER BY v",
+            2,
+        ),
+        (
+            "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WITH n WHERE r IS NULL \
+             RETURN n ORDER BY n",
+            "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WITH n, r WHERE r IS NULL \
+             RETURN n ORDER BY n",
+            5,
+        ),
+        (
+            "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WITH n WHERE r IS NOT NULL OR n.p = 3 \
+             RETURN n ORDER BY n",
+            "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WITH n, r WHERE r IS NOT NULL OR n.p = 3 \
+             RETURN n ORDER BY n",
+            1,
+        ),
+    ] {
+        let found = rows(dropped);
+        assert_eq!(found.len(), len, "{dropped}");
+        assert_eq!(found, rows(explicit), "{dropped}");
+    }
+    let template =
+        PreparedGraphSetText::prepare("MATCH (n) WITH n.p AS v WHERE n.p > 1 RETURN *", symbols)
+            .unwrap();
+    assert_eq!(template.columns(), &["v"]);
+    for text in [
+        "MATCH (n) WITH n.p AS v WHERE n.p > 1 RETURN n",
+        "MATCH (n) WITH n.p AS v WHERE n.p > 1 RETURN n.p",
+        "MATCH (n) WITH n.p AS v ORDER BY n.p RETURN v, n.p",
+        "MATCH (n) WITH n.p AS v WITH v WHERE n.p > 1 RETURN v",
+        "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) WITH DISTINCT n WHERE r IS NULL RETURN n",
+        "MATCH (n) WITH DISTINCT n.p AS v ORDER BY n LIMIT 1 RETURN v",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn discarded_names_sibling_aliases_and_unsupported_forms_refuse_before_catalog() {
     for text in [

@@ -623,11 +623,17 @@ struct Parser<'a> {
 /// alias, the binding, the property and its hidden head column. The grouping
 /// stage turns each into a hidden key, and those keys become the grouped row's
 /// own `reads`.
+///
+/// `scoped` belongs to a plain WITH (openCypher): the MATCH bindings it drops,
+/// read by its own WHERE and pages only, never by the RETURN or a later
+/// stage. Each is the binding, the property (`None` for the element itself)
+/// and the hidden column.
 struct BoundaryReads<'a> {
     visible: usize,
     width: usize,
     reads: Vec<(&'a str, Name<'a>, usize)>,
     grouped: Vec<(&'a str, &'a str, Name<'a>, usize)>,
+    scoped: Vec<(&'a str, Option<&'a str>, usize)>,
 }
 
 impl<'a> Parser<'a> {

@@ -191,6 +191,9 @@ enum ListFunction {
 
 struct GraphProjectionHead<'a> {
     with: bool,
+    /// A written WITH that neither groups nor deduplicates. openCypher lets
+    /// its own WHERE and pages also read the MATCH bindings it drops.
+    plain: bool,
     inputs: Vec<Projection<'a>>,
     outputs: Vec<(Name<'a>, ReadValueTemplate)>,
 }
@@ -535,6 +538,7 @@ impl<'a> Parser<'a> {
                     .collect();
                 let mut head = GraphProjectionHead {
                     with: true,
+                    plain: false,
                     inputs: core::mem::take(&mut inputs),
                     outputs,
                 };
@@ -763,6 +767,7 @@ impl<'a> Parser<'a> {
             }
             return Ok(GraphProjectionHead {
                 with: true,
+                plain: false,
                 inputs,
                 outputs,
             });
@@ -852,6 +857,7 @@ impl<'a> Parser<'a> {
         }
         Ok(GraphProjectionHead {
             with,
+            plain: with && !self.syntax.distinct,
             inputs,
             outputs,
         })
@@ -865,6 +871,7 @@ impl<'a> Parser<'a> {
     ) -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
         let GraphProjectionHead {
             with,
+            plain: _,
             mut inputs,
             outputs,
         } = head;

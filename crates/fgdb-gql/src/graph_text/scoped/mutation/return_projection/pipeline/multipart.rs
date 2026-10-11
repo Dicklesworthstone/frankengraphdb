@@ -696,6 +696,7 @@ impl<'a> Parser<'a> {
         }
         Ok(GraphProjectionHead {
             with,
+            plain: false,
             inputs,
             outputs,
         })

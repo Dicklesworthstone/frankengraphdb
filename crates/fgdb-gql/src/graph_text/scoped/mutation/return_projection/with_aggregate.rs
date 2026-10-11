@@ -414,6 +414,7 @@ impl<'a> Parser<'a> {
             width: output_schema.len(),
             reads,
             grouped: Vec::new(),
+            scoped: Vec::new(),
         });
         Ok((
             ReadStageTemplate::Aggregate {
