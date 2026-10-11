@@ -10,6 +10,7 @@ use fgdb_gql::spill_aggregate::{
     AsyncVertexSpillAggregateCursor,
 };
 use fgdb_gql::stream::AsyncVertexScanSource;
+use fgdb_gql::{GlaExecutionEvent, GqlBudgetDimension};
 
 struct BufferedInput<'q, T> {
     cursor: T,
@@ -99,6 +100,86 @@ buffered_input!(
     fgdb_gql::edge_stream::EdgeScanState::Exhausted
 );
 
+// The source and every relational barrier have completed in authenticated
+// scratch. Keep their exact native counters alive during reduction; their
+// private row count is not the number of final aggregate results.
+struct CompletedRelation<'q> {
+    cx: &'q QueryCx,
+    policy: GqlQueryPolicy,
+    snapshot: CommitSeq,
+    kind: ScanKind,
+    rows: GqlExecutionStats,
+    evaluator: GlaExecutionStats,
+}
+
+impl<'q> CompletedRelation<'q> {
+    fn new(cx: &'q QueryCx, policy: GqlQueryPolicy, input: &NativeResultSpool) -> Self {
+        Self {
+            cx,
+            policy,
+            snapshot: input.snapshot_seq(),
+            kind: input.kind(),
+            rows: GqlExecutionStats {
+                snapshot_records: input.row_stats().snapshot_records,
+                result_rows: 0,
+            },
+            evaluator: input.evaluator_stats(),
+        }
+    }
+}
+
+impl GroupInput for CompletedRelation<'_> {
+    fn next_input(&mut self) -> crate::SendFuture<'_, Result<Option<SpoolRow>>> {
+        // This meter can only accompany the already completed input run.
+        // Accidentally dispatching it as a fresh source must not imply EOF.
+        Box::pin(async { Err(NativeSpoolError::IncompleteCursor.into()) })
+    }
+
+    fn charge(&mut self, event: VertexScanEvent) -> core::result::Result<(), ExecutionError> {
+        self.cx
+            .with_restriction(|| self.cx.checkpoint())
+            .map_err(GqlQueryError::Interrupted)?;
+        self.evaluator
+            .charge_event(
+                self.policy.evaluator,
+                match event {
+                    VertexScanEvent::Work => GlaExecutionEvent::Work,
+                    VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                },
+            )
+            .map_err(GqlQueryError::Evaluator)
+    }
+
+    fn finish_result(&mut self) -> core::result::Result<(), ExecutionError> {
+        let count = self.rows.result_rows.checked_add(1).ok_or_else(|| {
+            GqlQueryError::Source(fgdb_gql::GraphAggregateError::ResultCountOverflow)
+        })?;
+        self.policy
+            .rows
+            .check(GqlBudgetDimension::ResultRows, count)
+            .map_err(GqlQueryError::Rows)?;
+        self.charge(VertexScanEvent::Work)?;
+        self.rows.result_rows = count;
+        Ok(())
+    }
+
+    fn exhausted(&self) -> bool {
+        true
+    }
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.snapshot
+    }
+    fn kind(&self) -> ScanKind {
+        self.kind
+    }
+    fn row_stats(&self) -> GqlExecutionStats {
+        self.rows
+    }
+    fn evaluator_stats(&self) -> GlaExecutionStats {
+        self.evaluator
+    }
+}
+
 /// A completely bound local aggregate source plus its ordinary numeric/output
 /// definition. Construction reads no graph. The only execution strategy is the
 /// buffered source feeding the native grace-partition reducer.
@@ -120,8 +201,9 @@ impl PreparedNativeRead {
     /// or fixed-hop edge source before database opening. Computed inputs, HAVING,
     /// computed visible output, RETURN DISTINCT and exact numeric ordering use
     /// the ordinary aggregate compiler. COUNT/SUM/AVG DISTINCT arguments use
-    /// bounded external support passes. COLLECT,
-    /// relational input, OPTIONAL/variable-length expansion and probes refuse
+    /// bounded external support passes. Unary WITH projection/filter pipelines
+    /// retain intermediate DISTINCT, ordering and pagination in external stages.
+    /// COLLECT, relational joins/UNWIND, OPTIONAL/variable-length expansion and probes refuse
     /// at preparation. Join routing and one record per hop use the view pool;
     /// routing metadata remains resident and may refuse when it does not fit.
     pub fn prepare_buffered_aggregate(
@@ -155,6 +237,15 @@ impl PreparedNativeRead {
 }
 
 impl PreparedBufferedAggregate {
+    /// Number of external relational barriers before aggregate reduction.
+    /// Hosts include these append-only passes in scratch metadata admission.
+    pub fn stage_count(&self) -> usize {
+        match &self.plan {
+            AsyncSpillAggregatePlan::Relation { input, .. } => input.stages().len(),
+            _ => 0,
+        }
+    }
+
     /// Evaluate all buffered input into authenticated partitions, reduce bounded
     /// group populations, then apply the native completed-group clauses. The
     /// returned handle belongs to destination and appears only after complete
@@ -204,6 +295,71 @@ impl PreparedBufferedAggregate {
         let definition = self.plan.definition().clone();
         let columns = self.columns.clone();
         let slots = self.slots.clone();
+        if let AsyncSpillAggregatePlan::Relation { input, .. } = &self.plan {
+            let ordered =
+                crate::PreparedBufferedOrder::from_relation(input.as_ref().clone(), Some(as_of));
+            return Box::pin(async move {
+                validate_limits(
+                    group_capacity,
+                    max_partitions,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    max_row_bytes,
+                )?;
+                let private_policy = GqlQueryPolicy {
+                    rows: GqlExecutionBudget::new(
+                        policy.rows.max_snapshot_records().unwrap_or(u64::MAX),
+                        max_input_rows,
+                    ),
+                    evaluator: policy.evaluator,
+                };
+                // The ordered runner always writes its result to its second
+                // file. Leave that completed relation in the reducer's source
+                // file so no reader aliases a live destination writer.
+                let (initial, prior_work) = ordered
+                    .spool_in_view_with_resolver(
+                        view,
+                        cx,
+                        private_policy,
+                        partition,
+                        source,
+                        run_rows,
+                        max_runs,
+                        page_bytes,
+                        max_row_bytes,
+                        max_input_rows,
+                        max_work_units,
+                        resolver,
+                    )
+                    .await?;
+                let opened = Opened {
+                    input: Box::new(CompletedRelation::new(cx, policy, &initial)),
+                    definition,
+                    columns,
+                    slots,
+                };
+                execute(
+                    opened,
+                    Some(initial),
+                    prior_work,
+                    cx,
+                    source,
+                    partition,
+                    destination,
+                    group_capacity,
+                    max_partitions,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    max_row_bytes,
+                    max_input_rows,
+                    max_work_units,
+                    resolver,
+                )
+                .await
+            });
+        }
         let input: Result<Box<dyn GroupInput + 'q>> = match &self.plan {
             AsyncSpillAggregatePlan::Vertex(plan) => view
                 .open_vertex_aggregate_input(cx, plan.clone(), as_of, policy)
@@ -235,6 +391,9 @@ impl PreparedBufferedAggregate {
                         |error| fgdb_gql::GraphAggregateError::Source(ScanError::Edge(error)),
                     )))
                 }),
+            AsyncSpillAggregatePlan::Relation { .. } => {
+                return Box::pin(async { Err(NativeAggregateSpoolError::Unsupported) });
+            }
         };
         Box::pin(async move {
             let opened = Opened {
@@ -245,6 +404,8 @@ impl PreparedBufferedAggregate {
             };
             execute(
                 opened,
+                None,
+                0,
                 cx,
                 source,
                 partition,

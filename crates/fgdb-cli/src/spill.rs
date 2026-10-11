@@ -211,6 +211,15 @@ impl Scratch {
             .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?;
         let max_partitions = usize::try_from(append_runs)
             .map_err(|_| Failure::usage("spill partition count exceeds this platform"))?;
+        // Each admitted unary stage can sort canonical tuples, DISTINCT
+        // classes and rank, then copy/window its result. Aggregate pipelines
+        // owe these same passes before reduction; all retain the original
+        // byte/work caps and append history.
+        let stage_runs = u64::try_from(stages)
+            .ok()
+            .and_then(|stages| stages.checked_mul(4))
+            .and_then(|passes| append_runs.checked_mul(passes))
+            .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?;
         let append_runs = if aggregate {
             // Completed-group clauses can sort canonical keys, DISTINCT equality
             // classes, and final representative rank. Every pass retains the same
@@ -238,16 +247,17 @@ impl Scratch {
                 .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?;
             completed
                 .checked_add(argument_passes)
+                .and_then(|runs| runs.checked_add(stage_runs))
+                .and_then(|runs| {
+                    // A relational source also has its own complete sort tail
+                    // before the first native stage; ordinary aggregate pulls
+                    // still write their input directly.
+                    runs.checked_add(if stages == 0 { 0 } else { append_runs })
+                })
                 .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?
         } else {
-            // Each admitted unary stage may need canonical, DISTINCT and
-            // ranking passes plus window/copy runs. Stages share the original
-            // byte/work caps; none resets a file's append history.
-            u64::try_from(stages)
-                .ok()
-                .and_then(|stages| stages.checked_mul(4))
-                .and_then(|passes| passes.checked_add(1))
-                .and_then(|passes| append_runs.checked_mul(passes))
+            append_runs
+                .checked_add(stage_runs)
                 .ok_or_else(|| Failure::usage("spill append count exceeds this platform"))?
         };
         let file_limits = SpillLimits {
@@ -424,7 +434,7 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
     let aggregate = matches!(prepared, PreparedBuffered::Aggregate(_));
     let stages = match prepared {
         PreparedBuffered::Ordered(prepared) => prepared.stage_count(),
-        PreparedBuffered::Aggregate(_) => 0,
+        PreparedBuffered::Aggregate(prepared) => prepared.stage_count(),
     };
     let mut scratch = Scratch::new(cx, options, aggregate, stages).await?;
     let outcome = async {

@@ -227,9 +227,11 @@ impl<Row: Ord> core::fmt::Debug for ProjectedRows<Row> {
 }
 
 impl super::GlaExecutionStats {
-    /// The aggregate operator shares the evaluator's transactional, checked
-    /// meter instead of reimplementing its limit or overflow arithmetic.
-    pub(crate) fn charge_event(
+    /// Continue an execution's checked evaluator allowance through an operator
+    /// or an external materialization barrier. The caller retains these exact
+    /// accumulated counters and the original limits; this operation never
+    /// resets either counter and leaves both unchanged when admission fails.
+    pub fn charge_event(
         &mut self,
         limits: super::GlaExecutionLimits,
         event: super::GlaExecutionEvent,

@@ -9,6 +9,7 @@
 use crate::algebra::{GlaOperator, GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::edge_stream::EdgeScanBuildError;
 use crate::scan_stream::ScanKind;
+use crate::spill_set::{AsyncSpillSetPlan, SpillSetBuildError};
 use crate::stream::VertexScanBuildError;
 use crate::stream::VertexScanEvent;
 use crate::stream::aggregate::{Input, NumericState};
@@ -32,6 +33,7 @@ pub enum SpillAggregateBuildError {
     Unsupported,
     Vertex(VertexScanBuildError),
     Edge(EdgeScanBuildError),
+    Relation(SpillSetBuildError),
 }
 impl core::fmt::Display for SpillAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -41,6 +43,7 @@ impl core::fmt::Display for SpillAggregateBuildError {
             }
             Self::Vertex(error) => error.fmt(f),
             Self::Edge(error) => error.fmt(f),
+            Self::Relation(error) => error.fmt(f),
         }
     }
 }
@@ -87,17 +90,37 @@ impl SpillAggregatePlan {
 /// A complete aggregate input admitted for asynchronous local source access.
 /// The ordinary numeric definition and row evaluators own every semantic step.
 /// Fixed-hop edge expansions use the native awaitable join driver. Probes,
-/// OPTIONAL/variable-length expansion and relational input refuse before the
-/// host opens storage. This is a physical source plan, not a result or authority.
+/// OPTIONAL/variable-length expansion refuse before the host opens storage.
+/// Unary relational inputs retain every projection, filter, DISTINCT, ordering
+/// and window barrier before reduction. This is a physical source plan, not a
+/// result or authority.
 #[derive(Clone, Debug)]
 pub enum AsyncSpillAggregatePlan {
     Vertex(AsyncVertexSpillAggregatePlan),
     Edge(AsyncEdgeSpillAggregatePlan),
     Join(AsyncEdgeJoinSpillAggregatePlan),
+    Relation {
+        input: Box<AsyncSpillSetPlan>,
+        definition: SpillAggregateDefinition,
+    },
 }
 
 impl AsyncSpillAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
+        if let Some(relation) = aggregate.input_relation() {
+            // The complete relation, never just its graph leaf, owns the rows
+            // summarized by this definition. Admit both halves before I/O.
+            let input =
+                AsyncSpillSetPlan::compile(relation).map_err(SpillAggregateBuildError::Relation)?;
+            let physical = aggregate
+                .prepare_complete_group_output()
+                .ok_or(SpillAggregateBuildError::Unsupported)?;
+            let definition = SpillAggregateDefinition::from_physical(physical)?;
+            return Ok(Self::Relation {
+                input: Box::new(input),
+                definition,
+            });
+        }
         let definition = SpillAggregateDefinition::compile(aggregate)?;
         if matches!(
             aggregate.input_pattern().plan().operators().first(),
@@ -131,12 +154,14 @@ impl AsyncSpillAggregatePlan {
             Self::Vertex(plan) => plan.definition(),
             Self::Edge(plan) => plan.definition(),
             Self::Join(plan) => plan.definition(),
+            Self::Relation { definition, .. } => definition,
         }
     }
     pub fn kind(&self) -> ScanKind {
         match self {
             Self::Vertex(_) => ScanKind::Vertex,
             Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
+            Self::Relation { input, .. } => input.source().kind(),
         }
     }
 }
@@ -173,7 +198,17 @@ impl core::fmt::Debug for SpillAggregateState {
 
 impl SpillAggregateDefinition {
     fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
+        let physical = aggregate
+            .prepare_streamed_output()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        Self::from_physical(physical)
+    }
+
+    fn from_physical(aggregate: PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
         if aggregate.input_pattern().columns().len() > MAX_PATTERN_VERTICES
+            || aggregate
+                .input_relation()
+                .is_some_and(|relation| relation.columns().len() > MAX_PATTERN_VERTICES)
             || aggregate
                 .input_projection()
                 .is_some_and(|projection| projection.len() > MAX_PATTERN_VERTICES)
@@ -199,15 +234,15 @@ impl SpillAggregateDefinition {
         {
             return Err(SpillAggregateBuildError::Unsupported);
         }
-        let aggregate = aggregate
-            .prepare_streamed_output()
-            .ok_or(SpillAggregateBuildError::Unsupported)?;
         Ok(Self {
             aggregate: Arc::new(aggregate),
         })
     }
 
     pub fn input_width(&self) -> usize {
+        if let Some(relation) = self.aggregate.input_relation() {
+            return relation.columns().len();
+        }
         self.aggregate.input_projection().map_or_else(
             || self.aggregate.input_pattern().columns().len(),
             |projection| projection.len(),

@@ -411,6 +411,30 @@ fn buffered_external_queries_preserve_native_projection_distinct_grouping_and_hi
                 2,
             ),
             (
+                "MATCH (n) WITH n.p AS value ORDER BY value DESC LIMIT 2 RETURN COUNT(*) AS rows,SUM(value) AS total",
+                2,
+            ),
+            (
+                "MATCH (n) WITH DISTINCT n.p%2 AS bucket ORDER BY bucket DESC SKIP 1 LIMIT 1 RETURN COUNT(*) AS rows,SUM(bucket) AS total",
+                2,
+            ),
+            (
+                "MATCH (n) WITH n.p AS value WHERE value>1 WITH value%2 AS bucket,value+1 AS amount RETURN bucket,COUNT(*) AS rows,SUM(amount) AS total GROUP BY bucket HAVING total>=3 ORDER BY total DESC",
+                2,
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) WITH a.p AS owner,r.p AS value ORDER BY value DESC LIMIT 4 RETURN owner,COUNT(*) AS rows,SUM(value) AS total GROUP BY owner ORDER BY total DESC",
+                2,
+            ),
+            (
+                "MATCH (n) WITH n.p AS value WHERE value<0 RETURN COUNT(*) AS rows,SUM(value) AS total",
+                2,
+            ),
+            (
+                "MATCH (n) WITH n.p AS value RETURN COUNT(*) AS rows LIMIT 0",
+                2,
+            ),
+            (
                 "MATCH (n) RETURN [x IN [n.p,2,3] WHERE x>1 | x*2] AS value ORDER BY value",
                 2,
             ),
@@ -567,6 +591,8 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n.p LIMIT 0",
             "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN r.p LIMIT 0",
             "MATCH (n) RETURN collect(n.p) LIMIT 0",
+            "MATCH (n) WITH n.p AS value RETURN collect(value) LIMIT 0",
+            "MATCH (n) WITH n.p AS value UNWIND [value,value] AS item RETURN sum(item) LIMIT 0",
             "MATCH (n) RETURN n.p UNION ALL MATCH (m) RETURN m.p LIMIT 0",
         ] {
             assert!(
@@ -609,6 +635,22 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
             (
                 "MATCH (n) WITH n.p AS value RETURN {value:value*2} AS result",
                 Some(("--max-result-rows", "1")),
+            ),
+            (
+                "MATCH (n) WITH n.p AS value ORDER BY value DESC LIMIT 1 RETURN COUNT(*) AS rows",
+                Some(("--max-spill-rows", "1")),
+            ),
+            (
+                "MATCH (n) WITH n.p AS value WITH 10/(value-2) AS unused RETURN COUNT(*) AS rows LIMIT 0",
+                None,
+            ),
+            (
+                "MATCH (n) WITH n.p AS value RETURN SUM(10/(value-2)) AS total LIMIT 0",
+                None,
+            ),
+            (
+                "MATCH (n) WITH [n.p] AS value RETURN SUM(value) AS total LIMIT 0",
+                None,
             ),
             ("MATCH (n) RETURN sum(10/(n.p-2)) AS value LIMIT 0", None),
             (
@@ -686,6 +728,7 @@ fn buffered_external_output_failure_retires_all_files_without_a_success_record()
             "MATCH (n) RETURN n.p AS value ORDER BY value DESC",
             "MATCH (n) RETURN sum(n.p) AS total GROUP BY n.p ORDER BY total DESC",
             "MATCH (n) WITH n.p AS value RETURN {value:value*2} AS result ORDER BY result DESC",
+            "MATCH (n) WITH n.p AS value RETURN value,COUNT(*) AS rows GROUP BY value ORDER BY value DESC",
         ] {
             let options = spill_options(&directory, text);
             let prepared = okay(prepare_query(&options));
@@ -976,6 +1019,14 @@ fn buffered_external_fixed_hop_joins_reach_cli_delivery_and_retire_scratch() {
             ),
             (
                 "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r.p AS value LIMIT 0",
+                2,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH r.p+s.p AS value ORDER BY value DESC SKIP 1 LIMIT 2 RETURN COUNT(*) AS rows,SUM(value) AS total",
+                2,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH DISTINCT r.p%2 AS bucket RETURN bucket,COUNT(*) AS rows,SUM(bucket+1) AS total GROUP BY bucket ORDER BY total DESC",
                 2,
             ),
         ] {

@@ -663,6 +663,8 @@ impl PreparedNativeRead {
         Box::pin(async move {
             execute(
                 opened?,
+                None,
+                0,
                 cx,
                 source,
                 partition,
@@ -685,6 +687,64 @@ impl PreparedNativeRead {
 fn execute_error(error: ExecutionError) -> NativeAggregateSpoolError {
     NativeAggregateSpoolError::Execute(Box::new(error))
 }
+
+fn validate_limits(
+    group_capacity: usize,
+    max_partitions: usize,
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    max_row_bytes: usize,
+) -> Result<()> {
+    if group_capacity == 0
+        || max_partitions == 0
+        || run_rows == 0
+        || max_runs == 0
+        || page_bytes == 0
+        || page_bytes > 64 * 1024
+        || max_row_bytes == 0
+    {
+        return Err(SpillError::InvalidLimits.into());
+    }
+    Ok(())
+}
+
+// A completed unary relation is already in canonical spill frames. Validate
+// its numeric arguments in THAT relation's order before hash partitioning can
+// reorder them. This is the same admission as each native aggregate cursor,
+// under the continued source meter and with decoded bytes reserved first.
+async fn validate_completed_input<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
+    spool: &NativeResultSpool,
+    input: &mut dyn GroupInput,
+    definition: &SpillAggregateDefinition,
+    file: &mut SpillFile<F>,
+    work: &mut Work<'_>,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+) -> Result<()> {
+    if spool.encoded_columns != definition.input_width()
+        || spool.snapshot_seq() != input.snapshot_seq()
+        || spool.kind() != input.kind()
+        || !input.exhausted()
+        || input.row_stats().result_rows != 0
+    {
+        return invalid();
+    }
+    let pool = file.memory_pool().clone();
+    let mut reader = spool.reader(file);
+    while let Some(bytes) = reader.next_row(work.cx).await? {
+        work.charge(bytes.len())?;
+        let _decoded = decoded_reservation(&pool, work.cx, bytes.as_ref(), 1)?;
+        let row = decode_row(bytes.as_ref(), resolver)?;
+        definition
+            .validate_input(&row, &mut |event| input.charge(event))
+            .map_err(execute_error)?;
+    }
+    if reader.state() != ScanState::Exhausted {
+        return Err(NativeSpoolError::IncompleteCursor.into());
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drain_input<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
     input: &mut dyn GroupInput,
@@ -1107,6 +1167,8 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn execute<A, B, C>(
     mut opened: Opened<'_>,
+    completed_input: Option<NativeResultSpool>,
+    prior_work: u64,
     cx: &QueryCx,
     source: &mut SpillFile<A>,
     partition: &mut SpillFile<B>,
@@ -1126,19 +1188,17 @@ where
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
-    if group_capacity == 0
-        || max_partitions == 0
-        || run_rows == 0
-        || max_runs == 0
-        || page_bytes == 0
-        || page_bytes > 64 * 1024
-        || max_row_bytes == 0
-    {
-        return Err(SpillError::InvalidLimits.into());
-    }
+    validate_limits(
+        group_capacity,
+        max_partitions,
+        run_rows,
+        max_runs,
+        page_bytes,
+        max_row_bytes,
+    )?;
     let mut work = Work {
         cx,
-        used: 0,
+        used: prior_work,
         limit: max_work_units,
     };
     work.charge(1)?;
@@ -1147,16 +1207,35 @@ where
     // hash bit plus the active level. max_partitions caps TOTAL created runs;
     // it must not turn a small query into a huge upfront resident allocation.
     let mut pending = Catalog::<Partition>::new(&pool, cx, max_partitions.min(257))?;
-    let initial = drain_input(
-        opened.input.as_mut(),
-        &opened.definition,
-        source,
-        page_bytes,
-        max_row_bytes,
-        max_input_rows,
-        &mut work,
-    )
-    .await?;
+    let initial = if let Some(initial) = completed_input {
+        if initial.row_count() > max_input_rows {
+            return Err(NativeAggregateSpoolError::InputRows {
+                attempted: initial.row_count(),
+                limit: max_input_rows,
+            });
+        }
+        validate_completed_input(
+            &initial,
+            opened.input.as_mut(),
+            &opened.definition,
+            source,
+            &mut work,
+            resolver,
+        )
+        .await?;
+        initial
+    } else {
+        drain_input(
+            opened.input.as_mut(),
+            &opened.definition,
+            source,
+            page_bytes,
+            max_row_bytes,
+            max_input_rows,
+            &mut work,
+        )
+        .await?
+    };
     let mut partitions = 1_usize;
     let mut largest_output = 0;
     let mut completed_rows = 0_u64;

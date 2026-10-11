@@ -1,5 +1,6 @@
-//! Cold fixed-hop queries into the existing external numeric reducer. Literal
-//! summaries below come from the fixture's finite relation, not the join cursor.
+//! Cold fixed-hop queries and completed relational stages into the existing
+//! external numeric reducer. Literal summaries below come from the fixture's
+//! finite relation, not the join cursor or the external stage evaluator.
 
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
@@ -25,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 const WORK: u64 = 100_000_000;
-const MATCH: &str = "MATCH (a)-[r:R]->(b)-[s:R]->(c)";
+const MATCH: &str = "MATCH REPEATABLE ELEMENTS (a)-[r:R]->(b)-[s:R]->(c)";
 const TOTAL: &str = "RETURN COUNT(*) AS rows, SUM(r.p+s.p) AS total";
 type LogicalRows = Vec<(Vec<GraphValue>, Vec<GraphAggregateValue>)>;
 fn keys() -> DatabaseKeys {
@@ -210,6 +211,361 @@ fn summary(count: u64, sum: i128) -> LogicalRows {
             GraphAggregateValue::Integer(sum),
         ],
     )]
+}
+
+#[test]
+fn cold_pipeline_aggregates_preserve_every_input_page_distinct_and_computed_schema() {
+    let ((), report) = run_async_under_lab(0xc01d_a101, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        // At frontier 3 the vertices have values [1,2,13]. The two-hop
+        // occurrences have r.p+s.p = [26,27,17,18,18,19], including the
+        // repeatable self-loop. These literals are independent of execution.
+        for (text, expected) in [
+            (
+                "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH r.p+s.p AS value RETURN COUNT(*) AS rows,SUM(value) AS total".to_owned(),
+                summary(5, 107),
+            ),
+            (
+                "MATCH DIFFERENT EDGES (a)-[r:R]->(b)-[s:R]->(c) WITH r.p+s.p AS value RETURN COUNT(*) AS rows,SUM(value) AS total".to_owned(),
+                summary(5, 107),
+            ),
+            (
+                "MATCH (n) WITH n.p AS value ORDER BY value DESC LIMIT 2 RETURN COUNT(*) AS rows,SUM(value) AS total".to_owned(),
+                summary(2, 15),
+            ),
+            (
+                "MATCH (n) WITH DISTINCT n.p%2 AS bucket ORDER BY bucket DESC SKIP 1 LIMIT 1 RETURN COUNT(*) AS rows,SUM(bucket) AS total".to_owned(),
+                summary(1, 0),
+            ),
+            (
+                "MATCH (n) WITH n.p AS value ORDER BY value DESC LIMIT 2 WITH value%2 AS bucket,value+1 AS amount RETURN bucket,COUNT(*) AS rows,SUM(amount) AS total GROUP BY bucket HAVING total>=3 ORDER BY total DESC".to_owned(),
+                vec![
+                    (
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(1))],
+                        vec![GraphAggregateValue::Count(1), GraphAggregateValue::Integer(14)],
+                    ),
+                    (
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(0))],
+                        vec![GraphAggregateValue::Count(1), GraphAggregateValue::Integer(3)],
+                    ),
+                ],
+            ),
+            (
+                format!("{MATCH} WITH r.p+s.p AS value ORDER BY value DESC SKIP 1 LIMIT 4 RETURN COUNT(*) AS rows,SUM(value) AS total"),
+                summary(4, 81),
+            ),
+            (
+                format!("{MATCH} WITH r.p+s.p AS value ORDER BY value DESC SKIP 1 LIMIT 4 WITH DISTINCT value RETURN COUNT(*) AS rows,SUM(value+1) AS total"),
+                summary(3, 66),
+            ),
+            (
+                format!("{MATCH} WITH r.p+s.p AS value RETURN COUNT(*) AS rows,SUM(DISTINCT value) AS total"),
+                summary(6, 107),
+            ),
+            (
+                "MATCH (n) WITH n.p AS value ORDER BY value LIMIT 2 WITH 1/(value-13) AS unused RETURN COUNT(*) AS rows".to_owned(),
+                vec![(vec![], vec![GraphAggregateValue::Count(2)])],
+            ),
+            (
+                "MATCH (n) WITH n.p AS value WHERE value<0 RETURN COUNT(*) AS rows,SUM(value) AS total".to_owned(),
+                vec![(
+                    vec![],
+                    vec![
+                        GraphAggregateValue::Count(0),
+                        GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+                    ],
+                )],
+            ),
+            (
+                format!("{MATCH} WITH r.p+s.p AS value RETURN COUNT(*) AS rows LIMIT 0"),
+                vec![],
+            ),
+        ] {
+            let prepared = prepare(&text);
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+            let mut view = view(&commit, &vfs, &source_pool).await;
+            let baseline = source_pool.used();
+            let (mut source, _) = file(&cx, &spill_pool).await;
+            let (mut partition, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (spool, _) = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    policy(expected.len() as u64),
+                    &mut source,
+                    &mut partition,
+                    &mut destination,
+                    1,
+                    512,
+                    1,
+                    512,
+                    1024,
+                    16 * 1024,
+                    1000,
+                    WORK,
+                    None,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error}"));
+            assert_eq!(spool.snapshot_seq(), CommitSeq(3));
+            assert_eq!(spool.row_stats().result_rows, expected.len() as u64);
+            assert_eq!(contents(&spool, &mut destination, &cx).await, expected, "{text}");
+            assert!(view.buffer_stats().bypasses > 0, "{text}");
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_pipeline_aggregate_budgets_continue_across_source_stages_and_reduction() {
+    let ((), report) = run_async_under_lab(0xc01d_a102, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let prepared = prepare(&format!(
+            "{MATCH} WITH r.p+s.p AS value ORDER BY value DESC SKIP 1 LIMIT 3 RETURN COUNT(*) AS rows,SUM(value) AS total"
+        ));
+        let mut exact = None;
+        for case in 0..8 {
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+            let mut view = view(&commit, &vfs, &source_pool).await;
+            let baseline = source_pool.used();
+            let (mut source, _) = file(&cx, &spill_pool).await;
+            let (mut partition, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let mut budget = policy(if case == 2 { 0 } else { 1 });
+            let mut work = WORK;
+            if let Some((records, native_work, scratch, external)) = exact {
+                budget = GqlQueryPolicy::new(
+                    records - u64::from(case == 4),
+                    if case == 2 { 0 } else { 1 },
+                    native_work - u64::from(case == 5),
+                    scratch - u64::from(case == 6),
+                );
+                work = external - u64::from(case == 7);
+            }
+            let result = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    budget,
+                    &mut source,
+                    &mut partition,
+                    &mut destination,
+                    1,
+                    512,
+                    1,
+                    512,
+                    1024,
+                    16 * 1024,
+                    // The source has six rows even though its WITH page
+                    // selects three and the final aggregate has just one.
+                    if case == 3 { 5 } else { 6 },
+                    work,
+                    None,
+                )
+                .await;
+            if case < 2 {
+                let (spool, spent) = result.unwrap();
+                assert_eq!(
+                    contents(&spool, &mut destination, &cx).await,
+                    summary(3, 63)
+                );
+                let stats = spool.evaluator_stats();
+                let measured = (
+                    spool.row_stats().snapshot_records,
+                    stats.work_units,
+                    stats.scratch_entries,
+                    spent,
+                );
+                if let Some(exact) = exact {
+                    assert_eq!(measured, exact);
+                }
+                exact = Some(measured);
+            } else {
+                let error = result.expect_err("a cumulative boundary must refuse");
+                let diagnostic = format!("{error:?}");
+                let dimension = match case {
+                    2 => "ResultRows",
+                    3 => "Rows",
+                    4 => "SnapshotRecords",
+                    5 => "WorkUnits",
+                    6 => "ScratchEntries",
+                    7 => "SortWorkLimit",
+                    _ => unreachable!(),
+                };
+                assert!(diagnostic.contains(dimension), "case {case}: {diagnostic}");
+            }
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_pipeline_aggregate_orders_more_input_payload_than_its_scratch_pool() {
+    const ROWS: usize = 128;
+    const PAYLOAD_BYTES: usize = 4200;
+    const SCRATCH_BYTES: usize = 512 * 1024;
+    let ((), report) = run_async_under_lab(0xc01d_a103, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 1..=ROWS {
+            let text = format!("{id:04}:{}", "x".repeat(PAYLOAD_BYTES));
+            batch.create_vertex(
+                VId(id as u128),
+                vec![],
+                vec![
+                    (PropertyKeyId(1), CanonicalScalar::Int(id as i64)),
+                    (
+                        PropertyKeyId(2),
+                        CanonicalScalar::ucs_basic_text(&text).unwrap(),
+                    ),
+                ],
+            );
+        }
+        assert_eq!(db.write(&commit, batch).await.unwrap(), CommitSeq(1));
+        drop(db);
+        assert!(ROWS * PAYLOAD_BYTES > SCRATCH_BYTES);
+        let prepared = prepare(
+            "MATCH (n) WITH n.q AS label,n.p AS value ORDER BY label DESC LIMIT 96 RETURN COUNT(*) AS rows,SUM(value) AS total",
+        );
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut view = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let (mut source, _) = file(&cx, &spill_pool).await;
+        let (mut partition, _) = file(&cx, &spill_pool).await;
+        let (mut destination, _) = file(&cx, &spill_pool).await;
+        let (spool, _) = prepared
+            .spool_in_view(
+                &mut view,
+                &cx,
+                policy(1),
+                &mut source,
+                &mut partition,
+                &mut destination,
+                1,
+                512,
+                1,
+                512,
+                1024,
+                16 * 1024,
+                ROWS as u64,
+                1_000_000_000,
+                None,
+            )
+            .await
+            .unwrap();
+        // The source values selected by the descending label page are
+        // 128 through 33; their independent arithmetic-series sum is 7,728.
+        assert_eq!(
+            contents(&spool, &mut destination, &cx).await,
+            summary(96, 7728)
+        );
+        assert_eq!(spool.snapshot_seq(), CommitSeq(1));
+        assert!(
+            source.stats().reserved_bytes
+                + partition.stats().reserved_bytes
+                + destination.stats().reserved_bytes
+                > SCRATCH_BYTES as u64
+        );
+        assert!(view.buffer_stats().bypasses > 0);
+        assert_eq!(source_pool.used(), baseline);
+        assert_eq!(spill_pool.used(), 0);
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn dropping_a_blocked_relational_aggregate_phase_releases_source_and_scratch_owners() {
+    let ((), report) = run_async_under_lab(0xc01d_a104, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let prepared = prepare(
+            "MATCH (n) WITH n.q AS label,n.p%2 AS bucket ORDER BY label RETURN bucket,COUNT(*) AS rows GROUP BY bucket ORDER BY bucket",
+        );
+        // Every scratch role is interrupted independently. One resident group
+        // makes the partition file necessary after the ordered child succeeds.
+        for blocked in 0..3 {
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+            let mut view = view(&commit, &vfs, &source_pool).await;
+            let baseline = source_pool.used();
+            let (mut source, source_backing) = file(&cx, &spill_pool).await;
+            let (mut partition, partition_backing) = file(&cx, &spill_pool).await;
+            let (mut destination, destination_backing) = file(&cx, &spill_pool).await;
+            let backing = [&source_backing, &partition_backing, &destination_backing][blocked];
+            {
+                let mut state = backing.0.lock().unwrap();
+                state.pending = true;
+                state.writes = 0;
+            }
+            let mut future = prepared.spool_in_view(
+                &mut view,
+                &cx,
+                policy(2),
+                &mut source,
+                &mut partition,
+                &mut destination,
+                1,
+                512,
+                1,
+                512,
+                63,
+                16 * 1024,
+                1000,
+                WORK,
+                None,
+            );
+            poll_fn(|task| {
+                let result = future.as_mut().poll(task);
+                if backing.0.lock().unwrap().writes != 0 {
+                    assert!(result.is_pending());
+                    Poll::Ready(())
+                } else {
+                    assert!(result.is_pending(), "phase {blocked} was not reached");
+                    Poll::Pending
+                }
+            })
+            .await;
+            assert!(spill_pool.used() > 0);
+            drop(future);
+            assert_eq!(source_pool.used(), baseline, "phase {blocked}");
+            assert_eq!(spill_pool.used(), 0, "phase {blocked}");
+            assert!(
+                [&source, &partition, &destination][blocked].is_poisoned(),
+                "phase {blocked} must retire its interrupted writer"
+            );
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

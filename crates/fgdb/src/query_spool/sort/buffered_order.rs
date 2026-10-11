@@ -135,6 +135,17 @@ impl PreparedNativeRead {
 }
 
 impl PreparedBufferedOrder {
+    /// Reuse a fully admitted relational program as private aggregate input.
+    /// Its complete stage sequence and source tail remain unchanged.
+    pub(crate) fn from_relation(input: AsyncSpillSetPlan, as_of: Option<CommitSeq>) -> Self {
+        Self {
+            columns: input.columns().to_vec(),
+            tail: input.source_tail().clone(),
+            input: Input::Set(input),
+            as_of,
+        }
+    }
+
     /// Number of native relational barriers after graph-source evaluation.
     /// Every barrier has finite external sort/window/copy work; hosts may use
     /// this bound to admit scratch metadata before opening the database.
