@@ -795,6 +795,42 @@ fn implicit_optional_grouping_keeps_null_extended_rows() {
     }
 }
 
+/// ORDER BY sorts the rows RETURN produces and never groups them (openCypher
+/// InvalidAggregation, TCK ReturnOrderBy2 [14]). An aggregate only in ORDER
+/// BY is refused at its own offset, before any catalog access. GROUP BY,
+/// HAVING or a RETURN aggregate already groups the statement, and then the
+/// same ORDER BY aggregate is a hidden summary.
+#[test]
+fn an_order_by_aggregate_never_groups_a_statement_by_itself() {
+    for (text, at) in [
+        ("MATCH (a) RETURN a.n ORDER BY max(a.n)", "max"),
+        (
+            "MATCH (a) RETURN a.n AS key ORDER BY key, COUNT(*) DESC",
+            "COUNT",
+        ),
+    ] {
+        let mut calls = 0;
+        let error = PreparedGraphAggregateText::prepare(text, |kind, name| {
+            calls += 1;
+            symbols(kind, name)
+        })
+        .unwrap_err();
+        assert_eq!(error.offset, text.find(at).unwrap(), "{text}");
+        assert!(
+            matches!(error.kind, GraphPatternTextErrorKind::Expected(_)),
+            "{text}"
+        );
+        assert_eq!(calls, 0, "{text}");
+    }
+    for text in [
+        "MATCH (a) RETURN a.n AS key GROUP BY a.n ORDER BY max(a.n)",
+        "MATCH (a) RETURN a.n AS key HAVING COUNT(*) > 1 ORDER BY max(a.n)",
+        "MATCH (a) RETURN a.n AS key, COUNT(*) AS rows ORDER BY max(a.n)",
+    ] {
+        prepare(text);
+    }
+}
+
 #[test]
 fn implicit_keys_are_whole_return_expressions_not_hidden_aggregate_operands() {
     for text in [

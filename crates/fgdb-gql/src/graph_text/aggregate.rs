@@ -90,7 +90,9 @@ impl Summary {
 /// Projected aliases resolve to the original expression, not a new key.
 /// Operands occurring only inside aggregate output expressions never create
 /// implicit grouping keys. The bounded profile still requires an aggregate
-/// somewhere in RETURN, HAVING or ORDER BY, not a grouping-only statement.
+/// somewhere in RETURN, HAVING or ORDER BY, not a grouping-only statement,
+/// and ORDER BY never groups by itself: an aggregate only there needs GROUP
+/// BY, HAVING or a RETURN aggregate.
 /// SUM/SUM_INT and AVG/AVG_INT accept integer/null arguments; argument DISTINCT
 /// follows expression evaluation. AVG returns an exact reduced fraction.
 ///
@@ -211,7 +213,8 @@ impl PreparedGraphAggregateText {
             }
         }
         let mut groups = Vec::new();
-        if parser.take_word("GROUP")? {
+        let explicit_groups = parser.take_word("GROUP")?;
+        if explicit_groups {
             parser.word("BY")?;
             loop {
                 parser.capacity(
@@ -346,6 +349,15 @@ impl PreparedGraphAggregateText {
         }
         let (having, having_expression) =
             having::parse(&mut parser, &returned, &groups, &mut hidden, &mut computed)?;
+        // ORDER BY sorts the rows RETURN produces and never changes them. An
+        // aggregate there needs a statement already grouped by GROUP BY, a
+        // RETURN aggregate or HAVING; otherwise it would silently turn one
+        // row per match into one row per key (openCypher InvalidAggregation).
+        let grouped = explicit_groups
+            || visible > 0
+            || !hidden.is_empty()
+            || !having.is_empty()
+            || having_expression.is_some();
         let mut ordering: Vec<GraphAggregateOrder> = Vec::new();
         if parser.take_word("ORDER")? {
             parser.word("BY")?;
@@ -387,6 +399,14 @@ impl PreparedGraphAggregateText {
                     break;
                 }
             }
+        }
+        if !grouped && let Some(first) = hidden.first() {
+            return Err(error(
+                first.at,
+                GraphPatternTextErrorKind::Expected(
+                    "GROUP BY, HAVING or a RETURN aggregate before an ORDER BY aggregate",
+                ),
+            ));
         }
         parser.parse_pagination()?;
         parser.end()?;
