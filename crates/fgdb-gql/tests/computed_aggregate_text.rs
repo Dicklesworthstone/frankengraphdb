@@ -66,6 +66,316 @@ fn properties() -> Props {
 }
 
 #[test]
+fn aggregate_collections_bind_nested_element_scopes_and_preserve_occurrences() {
+    use fgdb_gql::GraphAggregateValue;
+    use fgdb_gql::algebra::GraphValue;
+
+    let integer = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let list = |values: &[i64]| GraphValue::List(values.iter().copied().map(integer).collect());
+    let vertices = [VId(1), VId(2), VId(3), VId(4)];
+    let props = properties();
+    for (text, expected) in [
+        (
+            "MATCH (n) RETURN [x IN collect(n.p) WHERE x > 0 | x * 2] AS value",
+            list(&[4, 4, 10]),
+        ),
+        (
+            "MATCH (n) RETURN [n IN collect(n.p) | n * 2] AS value",
+            list(&[-4, 4, 4, 10]),
+        ),
+        (
+            "MATCH (n) RETURN [x IN collect(n.p) | x + count(*)] AS value",
+            list(&[2, 6, 6, 9]),
+        ),
+        (
+            "MATCH (n) RETURN [x IN collect(DISTINCT n.p) | x] AS value",
+            list(&[-2, 2, 5]),
+        ),
+        (
+            "MATCH (n) RETURN [x IN collect(n.p) | [y IN [10, 20] | x + y]] AS value",
+            GraphValue::List(
+                [
+                    list(&[8, 18]),
+                    list(&[12, 22]),
+                    list(&[12, 22]),
+                    list(&[15, 25]),
+                ]
+                .into(),
+            ),
+        ),
+        (
+            "MATCH (n) RETURN [x IN collect(n.p) | reduce(total=x, y IN [1, 2] | total + y)] AS value",
+            list(&[1, 5, 5, 8]),
+        ),
+        (
+            "MATCH (n) RETURN reduce(total=0, x IN collect(n.p) | total * 10 + x) AS value",
+            integer(-1775),
+        ),
+        (
+            "MATCH (n) RETURN [x IN collect(n) | x] AS value",
+            GraphValue::List(vertices.iter().copied().map(GraphValue::Vertex).collect()),
+        ),
+        (
+            "MATCH (n) RETURN [x IN collect(n.p) WHERE null | 1/0] AS value",
+            list(&[]),
+        ),
+    ] {
+        let rows = run(&prepare(text), &vertices, &[], &props).unwrap().value;
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(
+            rows[0].values(),
+            &[GraphAggregateValue::Value(expected)],
+            "{text}"
+        );
+    }
+    // A scoped expression can read the enclosing group's key; the local
+    // never becomes a new key and duplicate input values keep their weight.
+    let text = "MATCH (n) RETURN n.p AS p, [x IN collect(n.q) | x + n.p] AS values GROUP BY n.p ORDER BY n.p";
+    let rows = run(&prepare(text), &vertices, &[], &props).unwrap().value;
+    for (row, (key, values)) in rows
+        .iter()
+        .zip([(-2, vec![-4]), (2, vec![4, 5]), (5, vec![6])])
+    {
+        assert_eq!(
+            row.values(),
+            &[
+                GraphAggregateValue::Value(integer(key)),
+                GraphAggregateValue::Value(list(&values)),
+            ]
+        );
+    }
+    assert_eq!(rows.len(), 3);
+}
+
+#[test]
+fn aggregate_list_predicates_keep_three_valued_empty_and_null_laws() {
+    use fgdb_gql::GraphAggregateValue;
+    use fgdb_gql::algebra::GraphValue;
+
+    let vertices = [VId(1), VId(2), VId(3), VId(4)];
+    let props = properties();
+    for (expression, nonempty, empty) in [
+        (
+            "any(x IN collect(n.p) WHERE x > 4)",
+            Some(true),
+            Some(false),
+        ),
+        (
+            "all(x IN collect(n.p) WHERE x > 0)",
+            Some(false),
+            Some(true),
+        ),
+        (
+            "none(x IN collect(n.p) WHERE x = 3)",
+            Some(true),
+            Some(true),
+        ),
+        (
+            "single(x IN collect(n.p) WHERE x = 2)",
+            Some(false),
+            Some(false),
+        ),
+        (
+            "single(x IN collect(n.p) WHERE x = 5)",
+            Some(true),
+            Some(false),
+        ),
+        ("any(x IN [count(*), null] WHERE x > 0)", Some(true), None),
+        ("all(x IN [count(*), null] WHERE x > 0)", None, Some(false)),
+        ("none(x IN [count(*), null] WHERE x > 0)", Some(false), None),
+        ("single(x IN [count(*), null] WHERE x > 0)", None, None),
+    ] {
+        let text = format!("MATCH (n) RETURN {expression} AS value");
+        let plan = prepare(&text);
+        for (vertices, truth) in [(&vertices[..], nonempty), (&[][..], empty)] {
+            let rows = run(&plan, vertices, &[], &props).unwrap().value;
+            assert_eq!(rows.len(), 1, "{text}");
+            assert_eq!(
+                rows[0].values(),
+                &[GraphAggregateValue::Value(GraphValue::Scalar(
+                    truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
+                ))],
+                "{text}"
+            );
+        }
+    }
+    for expression in [
+        "[x IN null | count(*)]",
+        "reduce(total=count(*), x IN null | total + x)",
+        "any(x IN null WHERE x = count(*))",
+    ] {
+        let text = format!("MATCH (n) RETURN {expression} AS value");
+        let rows = run(&prepare(&text), &vertices, &[], &props).unwrap().value;
+        assert_eq!(
+            rows[0].values(),
+            &[GraphAggregateValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Null
+            ))],
+            "{text}"
+        );
+    }
+    let plan = prepare(
+        "MATCH (n) RETURN [x IN collect(n.p) | x] AS list, reduce(total=count(*), x IN collect(n.p) | total+x) AS total",
+    );
+    let rows = run(&plan, &[], &[], &props).unwrap().value;
+    assert_eq!(
+        rows[0].values(),
+        &[
+            GraphAggregateValue::Value(GraphValue::List(Box::new([]))),
+            GraphAggregateValue::Count(0),
+        ]
+    );
+}
+
+#[test]
+fn aggregate_reduction_keeps_wide_sums_and_exact_average_accumulators() {
+    use fgdb_gql::{GraphAggregateValue, GraphExactAverage};
+
+    let vertices = [VId(1), VId(2)];
+    let props = BTreeMap::from([
+        ((VId(1), P), CanonicalScalar::Int(i64::MAX)),
+        ((VId(2), P), CanonicalScalar::Int(i64::MAX)),
+        ((VId(1), Q), CanonicalScalar::Int(1)),
+        ((VId(2), Q), CanonicalScalar::Int(2)),
+    ]);
+    for (text, expected) in [
+        (
+            "MATCH (n) RETURN reduce(total=sum(n.p), x IN collect(n.q) | total + x) AS value",
+            GraphAggregateValue::Integer(i128::from(i64::MAX) * 2 + 3),
+        ),
+        (
+            "MATCH (n) RETURN reduce(total=sum(n.p), x IN [] | total + x) AS value",
+            GraphAggregateValue::Integer(i128::from(i64::MAX) * 2),
+        ),
+        (
+            "MATCH (n) RETURN reduce(total=avg(n.q), x IN collect(n.p) | total) AS value",
+            GraphAggregateValue::Average(GraphExactAverage::new(3, 2).unwrap()),
+        ),
+        (
+            "MATCH (n) RETURN reduce(total=avg(n.q), x IN collect(n.p) | COALESCE(total, x)) AS value",
+            GraphAggregateValue::Average(GraphExactAverage::new(3, 2).unwrap()),
+        ),
+    ] {
+        let rows = run(&prepare(text), &vertices, &[], &props).unwrap().value;
+        assert_eq!(rows[0].values(), &[expected], "{text}");
+    }
+    // A maintainer can hold a count larger than any scalar integer. A local
+    // accumulator must retain that domain rather than truncate the input row.
+    let plan = prepare("MATCH (n) RETURN reduce(total=count(*), x IN [1, 2] | total-x) AS value");
+    let complete = GraphAggregateRow::from_group_values(
+        Vec::new(),
+        vec![GraphAggregateValue::Count(u64::MAX)],
+    );
+    let projected = plan
+        .project_incremental_output(&complete, &mut |_| Ok::<_, ()>(()))
+        .unwrap()
+        .expect("a complete native count group");
+    assert_eq!(
+        projected.values(),
+        &[GraphAggregateValue::Integer(i128::from(u64::MAX) - 3)]
+    );
+}
+
+#[test]
+fn batch_and_maintained_aggregate_collections_share_scopes_and_late_failures() {
+    use fgdb_gql::GlaExecutionEvent;
+
+    let props = properties();
+    for text in [
+        "MATCH (n) RETURN [x IN collect(n.p) WHERE x > 0 | x * 2] AS value",
+        "MATCH (n) RETURN all(x IN collect(n.p) WHERE x > 0) AS value",
+        "MATCH (n) RETURN reduce(total=0, x IN collect(n.p) | total * 10 + x) AS value",
+    ] {
+        let plan = prepare(text);
+        let source = plan.incremental_source_definition().expect(text);
+        for vertices in [
+            &[VId(1), VId(2), VId(3), VId(4)][..],
+            &[VId(1), VId(4)][..],
+            &[][..],
+        ] {
+            let expected = run(&plan, vertices, &[], &props).unwrap().value;
+            let complete = run(&source, vertices, &[], &props).unwrap().value;
+            let projected: Vec<_> = complete
+                .iter()
+                .map(|row| {
+                    plan.project_incremental_output(row, &mut |_| Ok::<_, ()>(()))
+                        .unwrap()
+                        .expect("same completed group schema")
+                })
+                .collect();
+            assert_eq!(projected, expected, "{text}: {vertices:?}");
+        }
+        let complete = run(&source, &[VId(1), VId(2), VId(3), VId(4)], &[], &props)
+            .unwrap()
+            .value;
+        let mut work = 0;
+        let refused = plan.project_incremental_output(&complete[0], &mut |event| {
+            if event == GlaExecutionEvent::Work {
+                work += 1;
+            }
+            if work >= 16 {
+                Err("cancel during output")
+            } else {
+                Ok(())
+            }
+        });
+        assert!(
+            matches!(
+                refused,
+                Err(GqlQueryError::Interrupted("cancel during output"))
+            ),
+            "{text}: {refused:?}"
+        );
+        assert!(
+            plan.project_incremental_output(&complete[0], &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_some()
+        );
+    }
+    for (expression, kind) in [
+        (
+            "[x IN collect(n.p) | 10/(x-2)]",
+            GraphIntegerErrorKind::DivisionByZero,
+        ),
+        (
+            "any(x IN collect(n.p) WHERE x < 0 OR 10/(x-2)>0)",
+            GraphIntegerErrorKind::DivisionByZero,
+        ),
+        (
+            "[x IN collect(n.p) WHERE x | x]",
+            GraphIntegerErrorKind::NonBoolean,
+        ),
+        (
+            "reduce(total=count(*)/0, x IN null | total)",
+            GraphIntegerErrorKind::DivisionByZero,
+        ),
+    ] {
+        let text = format!("MATCH (n) RETURN {expression} AS value LIMIT 0");
+        let plan = prepare(&text);
+        assert!(
+            matches!(run(&plan, &[VId(1), VId(2)], &[], &props),
+            Err(GqlQueryError::Source(GraphAggregateError::OutputExpression {error, ..})) if error.kind == kind),
+            "{text}"
+        );
+    }
+    let plan = prepare("MATCH (n) RETURN [x IN collect(n.p) | range(0,100)] AS value LIMIT 0");
+    let complete = run(&plan, &[VId(1), VId(2)], &[], &props).unwrap();
+    let mut bounded = policy();
+    bounded.evaluator.max_work_units = complete.evaluator.work_units - 1;
+    let refused: ResultOf = plan.execute_governed(
+        2,
+        [VId(1), VId(2)],
+        [],
+        |_, _| Ok(true),
+        |vid, key| Ok(props.get(&(vid, key))),
+        bounded,
+        || Ok(()),
+    );
+    assert!(matches!(refused, Err(GqlQueryError::Evaluator(limit))
+        if limit.dimension == fgdb_gql::GlaLimitDimension::WorkUnits));
+}
+
+#[test]
 fn aggregates_inside_nested_maps_lists_and_scalar_outputs_share_the_native_group_engine() {
     use fgdb_gql::GraphAggregateValue;
     use fgdb_gql::algebra::GraphValue;
@@ -554,6 +864,11 @@ fn malformed_computation_and_grouping_refuse_before_catalog_resolution() {
         "MATCH (n) RETURN COUNT(*) AS c GROUP BY n.p+1,n.p+1",
         "MATCH (n) RETURN COUNT(*) AS c HAVING SUM(n.p+) > 0",
         "MATCH (n) RETURN COUNT(*) AS c ORDER BY SUM(n.p+)",
+        "MATCH (n) RETURN [x IN collect(sum(n.p)) | x] AS values",
+        "MATCH (n) RETURN [x IN collect(n.p) | x] AS values, x AS leaked",
+        "MATCH (n) RETURN [n IN collect(n.p) | id(n)] AS values GROUP BY n",
+        "MATCH (n) RETURN [n IN collect(n.p) | elementId(n)] AS values GROUP BY n",
+        "MATCH (n) RETURN reduce(n = 0, x IN collect(n.p) | id(n)) AS values GROUP BY n",
     ] {
         let calls = Cell::new(0);
         assert!(

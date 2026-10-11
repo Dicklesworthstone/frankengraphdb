@@ -10,18 +10,6 @@ mod ranking;
 use super::*;
 use core::convert::Infallible;
 
-fn result_cell(value: &GraphAggregateValue) -> Cell<'_> {
-    match value {
-        GraphAggregateValue::Count(value) => Cell::Count(*value),
-        GraphAggregateValue::Integer(value) => Cell::Integer(*value),
-        GraphAggregateValue::Average(value) => Cell::Average {
-            sum: value.numerator(),
-            count: value.denominator(),
-        },
-        GraphAggregateValue::Value(value) => Cell::Value(value_ref(value)),
-    }
-}
-
 impl PreparedGraphAggregate {
     /// Whether the final result differs from the complete evaluation groups.
     /// HAVING is upstream of this transformation, not an output projection.
@@ -105,7 +93,7 @@ impl PreparedGraphAggregate {
         row: &GraphAggregateRow,
         govern: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<GraphAggregateRow, QueryError<E, C>> {
-        let input = |column: usize| {
+        let columns = |column: usize| {
             if column < row.keys.len() {
                 Ok(Cell::Value(value_ref(&row.keys[column])))
             } else {
@@ -115,13 +103,20 @@ impl PreparedGraphAggregate {
                     .ok_or(GraphIntegerErrorKind::MissingColumn)
             }
         };
+        let mut input = ExpressionInput {
+            columns,
+            width: row.keys.len() + row.values.len(),
+            locals: Vec::new(),
+        };
         govern(GlaExecutionEvent::ScratchEntry)?;
         let mut keys = Vec::new();
         let mut values = Vec::new();
         if let Some(projection) = &self.output_projection {
             for (column, output) in projection.iter().enumerate() {
                 govern(GlaExecutionEvent::ScratchEntry)?;
-                values.push(expression(output.value(), input, column, govern)?.into_owned(govern)?);
+                values.push(
+                    expression(output.value(), &mut input, column, govern)?.into_owned(govern)?,
+                );
             }
         } else {
             if let Some(projection) = &self.key_output {

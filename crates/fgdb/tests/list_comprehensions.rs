@@ -198,6 +198,15 @@ fn elements_shadow_graph_names_and_read_the_enclosing_row() {
             ),
             vec![vec![truth(Some(true)), truth(Some(true))]]
         );
+        // The same scopes now run directly over completed aggregate outputs.
+        // Their local names remain separate from the graph binding and each
+        // following RETURN item.
+        assert_eq!(
+            query(
+                "MATCH (n:Person) RETURN [n IN collect(n.p) WHERE n > 15 | n + 1] AS l, reduce(total=0, x IN collect(n.p) | total+x) AS total, any(x IN collect(n.p) WHERE x=40) AS has"
+            ),
+            vec![vec![ints(&[21, 31, 41]), int(100), truth(Some(true))]]
+        );
     });
 }
 
@@ -210,8 +219,9 @@ fn out_of_profile_comprehensions_refuse_typed() {
         for text in [
             // A property read on an element needs storage access in the scope.
             "MATCH (n:Person) RETURN [x IN [1] | x.p] AS l",
-            // The aggregate-output evaluator binds no element scope.
-            "MATCH (n:Person) RETURN [x IN collect(n.p) WHERE x > 10] AS l",
+            // Aggregates may feed an element scope; an aggregate nested
+            // inside another aggregate's argument is still invalid.
+            "MATCH (n:Person) RETURN [x IN collect(sum(n.p)) | x] AS l",
             // A quantifier needs its WHERE predicate.
             "RETURN any(x IN [1, 2]) AS b",
             // An element is not visible outside its brackets.

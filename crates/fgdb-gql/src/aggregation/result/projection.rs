@@ -13,6 +13,27 @@ enum OutputValue<'a> {
     Owned(GraphAggregateValue),
 }
 
+/// Group columns keep their exact aggregate domains. Only local element and
+/// accumulator cells are owned; entering a list scope never copies the group
+/// or narrows its count, wide integer sum or exact average into a graph scalar.
+struct ExpressionInput<F> {
+    columns: F,
+    width: usize,
+    locals: Vec<GraphAggregateValue>,
+}
+
+fn result_cell(value: &GraphAggregateValue) -> Cell<'_> {
+    match value {
+        GraphAggregateValue::Count(value) => Cell::Count(*value),
+        GraphAggregateValue::Integer(value) => Cell::Integer(*value),
+        GraphAggregateValue::Average(value) => Cell::Average {
+            sum: value.numerator(),
+            count: value.denominator(),
+        },
+        GraphAggregateValue::Value(value) => Cell::Value(value_ref(value)),
+    }
+}
+
 fn value_ref(value: &GraphValue) -> ValueRef<'_> {
     match value {
         GraphValue::Scalar(value) => ValueRef::Scalar(value),
@@ -112,9 +133,17 @@ fn input_cell<'g, 'a: 'g>(
     }
 }
 
+fn element_truth<E, C>(cell: Cell<'_>, column: usize) -> Result<Option<bool>, QueryError<E, C>> {
+    match cell {
+        cell if cell.is_null() => Ok(None),
+        Cell::Value(ValueRef::Scalar(CanonicalScalar::Bool(value))) => Ok(Some(*value)),
+        _ => Err(failure(column, GraphIntegerErrorKind::NonBoolean)),
+    }
+}
+
 fn expression<'g, E, C>(
     value: &'g GraphSetValue,
-    input: impl Fn(usize) -> Result<Cell<'g>, GraphIntegerErrorKind> + Copy,
+    input: &mut ExpressionInput<impl Fn(usize) -> Result<Cell<'g>, GraphIntegerErrorKind>>,
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
 ) -> Result<OutputValue<'g>, QueryError<E, C>> {
@@ -123,7 +152,7 @@ fn expression<'g, E, C>(
     control(GlaExecutionEvent::Work)?;
     Ok(match value {
         GraphSetValue::Column(at) => {
-            OutputValue::Borrowed(input(*at).map_err(|kind| failure(column, kind))?)
+            OutputValue::Borrowed((input.columns)(*at).map_err(|kind| failure(column, kind))?)
         }
         GraphSetValue::Literal(value) => {
             OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(value.value())))
@@ -136,13 +165,58 @@ fn expression<'g, E, C>(
         }
         GraphSetValue::Value(value) => OutputValue::Borrowed(Cell::Value(value_ref(value))),
         GraphSetValue::Integer(expression) => {
+            if !input.locals.is_empty() {
+                // The scalar VM addresses locals after the frozen group row.
+                // Copy a borrowed scalar result before leaving this scope;
+                // exact aggregate numbers remain in their original domains.
+                let load = |at| {
+                    if at < input.width {
+                        (input.columns)(at)
+                    } else {
+                        input
+                            .locals
+                            .get(at - input.width)
+                            .map(result_cell)
+                            .ok_or(GraphIntegerErrorKind::MissingColumn)
+                    }
+                };
+                let value = expression
+                    .evaluate_loaded_with_control(
+                        input.width + input.locals.len(),
+                        |at| load(at).and_then(load_cell),
+                        |at| load(at).and_then(load_element),
+                        control,
+                    )
+                    .map_err(|error| match error {
+                        GraphIntegerEvaluationError::Control(error) => error,
+                        GraphIntegerEvaluationError::Value(error) => {
+                            GqlQueryError::Source(GraphAggregateError::OutputExpression {
+                                column,
+                                error,
+                            })
+                        }
+                    })?;
+                let value = match value {
+                    ExpressionCell::Scalar(Cow::Borrowed(value)) => {
+                        OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(value)))
+                            .into_owned(control)?
+                    }
+                    ExpressionCell::Scalar(Cow::Owned(value)) => {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        GraphAggregateValue::Value(GraphValue::Scalar(value))
+                    }
+                    ExpressionCell::Count(value) => GraphAggregateValue::Count(value),
+                    ExpressionCell::Integer(value) => GraphAggregateValue::Integer(value),
+                    ExpressionCell::Average(value) => GraphAggregateValue::Average(value),
+                };
+                return Ok(OutputValue::Owned(value));
+            }
             let value = expression
-                // Aggregate outputs bind no element scope (fgdb-20foe), so a
-                // width of 0 makes any Local a MissingColumn, never a cell.
+                // Outside an element scope, Local cannot alias a group column.
                 .evaluate_loaded_with_control(
                     0,
-                    |at| input(at).and_then(load_cell),
-                    |at| input(at).and_then(load_element),
+                    |at| (input.columns)(at).and_then(load_cell),
+                    |at| (input.columns)(at).and_then(load_element),
                     control,
                 )
                 .map_err(|error| match error {
@@ -232,14 +306,119 @@ fn expression<'g, E, C>(
                 truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
             )))
         }
-        // Aggregate outputs bind no element scope (fgdb-20foe): the text
-        // compilers refuse a comprehension there before binding, so this is
-        // a typed failure for a hand-built plan, never a guessed element.
-        GraphSetValue::Local(_)
-        | GraphSetValue::Comprehension { .. }
-        | GraphSetValue::Quantifier { .. }
-        | GraphSetValue::Reduce { .. } => {
-            return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
+        GraphSetValue::Local(offset) => {
+            let cell = input
+                .locals
+                .len()
+                .checked_sub(offset + 1)
+                .and_then(|at| input.locals.get(at))
+                .map(result_cell)
+                .ok_or_else(|| failure(column, GraphIntegerErrorKind::MissingColumn))?;
+            OutputValue::Owned(OutputValue::Borrowed(cell).into_owned(control)?)
+        }
+        GraphSetValue::Comprehension { list, filter, map } => {
+            let list = expression(list, input, column, control)?;
+            if list.cell().is_null() {
+                return Ok(OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))));
+            }
+            let Cell::Value(ValueRef::List(members)) = list.cell() else {
+                return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
+            };
+            control(GlaExecutionEvent::ScratchEntry)?;
+            let mut kept = Vec::new();
+            let depth = input.locals.len();
+            for member in members {
+                control(GlaExecutionEvent::Work)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                input.locals.push(GraphAggregateValue::Value(
+                    member.copy_with_control(control)?,
+                ));
+                let projected = (|| -> Result<Option<GraphValue>, QueryError<E, C>> {
+                    if let Some(filter) = filter {
+                        let predicate = expression(filter, input, column, control)?;
+                        if !element_truth(predicate.cell(), column)?.unwrap_or(false) {
+                            return Ok(None);
+                        }
+                    }
+                    let value = match map {
+                        Some(map) => {
+                            let value =
+                                expression(map, input, column, control)?.into_owned(control)?;
+                            graph_value(value, column)?
+                        }
+                        None => member.copy_with_control(control)?,
+                    };
+                    Ok(Some(value))
+                })();
+                // Restore the outer scope before propagating any failure.
+                input.locals.truncate(depth);
+                if let Some(value) = projected? {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    kept.push(value);
+                }
+            }
+            let value = GraphValue::List(kept.into_boxed_slice());
+            if !value.validate_bounds() {
+                return Err(failure(column, GraphIntegerErrorKind::Overflow));
+            }
+            OutputValue::Owned(GraphAggregateValue::Value(value))
+        }
+        GraphSetValue::Quantifier {
+            kind,
+            list,
+            predicate,
+        } => {
+            let list = expression(list, input, column, control)?;
+            if list.cell().is_null() {
+                return Ok(OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))));
+            }
+            let Cell::Value(ValueRef::List(members)) = list.cell() else {
+                return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
+            };
+            control(GlaExecutionEvent::ScratchEntry)?;
+            let mut results = Vec::new();
+            let depth = input.locals.len();
+            for member in members {
+                control(GlaExecutionEvent::Work)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                input.locals.push(GraphAggregateValue::Value(
+                    member.copy_with_control(control)?,
+                ));
+                let predicate = expression(predicate, input, column, control)
+                    .and_then(|value| element_truth(value.cell(), column));
+                input.locals.truncate(depth);
+                let predicate = predicate?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                results.push(predicate);
+            }
+            OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
+                kind.combine(results)
+                    .map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
+            )))
+        }
+        GraphSetValue::Reduce { init, list, expr } => {
+            let mut accumulator = expression(init, input, column, control)?.into_owned(control)?;
+            let list = expression(list, input, column, control)?;
+            if list.cell().is_null() {
+                return Ok(OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))));
+            }
+            let Cell::Value(ValueRef::List(members)) = list.cell() else {
+                return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
+            };
+            let depth = input.locals.len();
+            for member in members {
+                control(GlaExecutionEvent::Work)?;
+                let member = member.copy_with_control(control)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                input.locals.push(accumulator);
+                input.locals.push(GraphAggregateValue::Value(member));
+                let reduced = expression(expr, input, column, control)
+                    .and_then(|value| value.into_owned(control));
+                input.locals.truncate(depth);
+                accumulator = reduced?;
+            }
+            OutputValue::Owned(accumulator)
         }
         // Map values over aggregate cells (fgdb-2jw3z), with the row
         // evaluator's laws: keys sorted at preparation, NULL for a NULL map or
@@ -674,14 +853,14 @@ impl PreparedGraphAggregate {
             }
             control(GlaExecutionEvent::ScratchEntry)?;
             let mut values = Vec::new();
+            let mut input = ExpressionInput {
+                columns: |at| input_cell(group, at),
+                width: group.key.len() + group.state.len(),
+                locals: Vec::new(),
+            };
             for (column, value) in projection.iter().enumerate() {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                values.push(expression(
-                    value.value(),
-                    |at| input_cell(group, at),
-                    column,
-                    control,
-                )?);
+                values.push(expression(value.value(), &mut input, column, control)?);
             }
             control(GlaExecutionEvent::ScratchEntry)?;
             rows.push(ProjectedGroup { group, values });

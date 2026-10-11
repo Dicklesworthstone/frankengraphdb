@@ -156,43 +156,6 @@ impl ReadValueTemplate {
         }
     }
 
-    /// Whether this value binds a list-comprehension element anywhere.
-    pub(crate) fn binds_elements(&self) -> bool {
-        match self {
-            Self::Local(_)
-            | Self::Comprehension { .. }
-            | Self::Quantifier { .. }
-            | Self::Reduce { .. } => true,
-            Self::Slice { list, from, to } => {
-                list.binds_elements()
-                    || [from, to]
-                        .into_iter()
-                        .flatten()
-                        .any(|bound| bound.binds_elements())
-            }
-            Self::Range { start, end, step } => {
-                start.binds_elements()
-                    || end.binds_elements()
-                    || step.as_deref().is_some_and(Self::binds_elements)
-            }
-            Self::MapLiteral { values, guard, .. } => {
-                values.iter().any(Self::binds_elements)
-                    || guard.as_deref().is_some_and(Self::binds_elements)
-            }
-            Self::MapOverlay { base, values, .. } => {
-                base.binds_elements() || values.iter().any(Self::binds_elements)
-            }
-            Self::MapGet { map, .. } | Self::Keys(map) => map.binds_elements(),
-            Self::List(items) => items.iter().any(Self::binds_elements),
-            Self::Index { list, index } => list.binds_elements() || index.binds_elements(),
-            Self::Size(inner) => inner.binds_elements(),
-            Self::In { value, list } => value.binds_elements() || list.binds_elements(),
-            Self::Column(_) | Self::Literal(_) | Self::Parameter { .. } | Self::Integer { .. } => {
-                false
-            }
-        }
-    }
-
     pub(crate) fn column_type(
         &self,
         input: &[GraphSetColumnType],
