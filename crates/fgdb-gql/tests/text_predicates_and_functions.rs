@@ -1536,6 +1536,26 @@ fn datetimes_at_offsets_build_read_compare_and_convert() {
     }
 }
 
+/// fgdb-txbg9: the clock reads `date.transaction(x)`, `.statement(x)` and
+/// `.realtime(x)` of every temporal kind propagate NULL (TCK Temporal4 [13]).
+/// A query context grants no clock capability, so any other argument fails
+/// typed instead of reading a host clock that would break replay.
+#[test]
+fn clock_reads_propagate_null_and_refuse_a_real_read() {
+    let x = text("x");
+    for kind in ["date", "localtime", "time", "localdatetime", "datetime"] {
+        for clock in ["transaction", "statement", "realtime"] {
+            let call = format!("{kind}.{clock}(null)");
+            assert_eq!(scalar(&call, &x), CanonicalScalar::Null, "{call}");
+            let query = prepare(&format!("MATCH (n) RETURN {kind}.{clock}('UTC') AS value"));
+            assert!(
+                execute(&query, &x, policy()).is_err(),
+                "{kind}.{clock}('UTC')"
+            );
+        }
+    }
+}
+
 /// fgdb-txbg9: date.truncate, localtime.truncate, time.truncate,
 /// localdatetime.truncate and datetime.truncate cut a value down to the start
 /// of a unit, then set a map's fields over it; datetime.fromepoch and

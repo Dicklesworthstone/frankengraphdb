@@ -268,6 +268,11 @@ pub enum GraphTemporalFunction {
     InDays,
     /// `duration.inSeconds(a, b)`: the whole time from `a` to `b`.
     InSeconds,
+    /// `date.transaction(x)`, `.statement(x)` and `.realtime(x)` for every
+    /// temporal kind: a clock read. NULL is NULL. A query context grants no
+    /// clock capability, so any other argument is a typed refusal, never a
+    /// host clock that would break replay.
+    Clock,
 }
 
 impl GraphTemporalFunction {
@@ -291,6 +296,7 @@ impl GraphTemporalFunction {
             Self::InMonths => 15,
             Self::InDays => 16,
             Self::InSeconds => 17,
+            Self::Clock => 18,
         }
     }
 
@@ -310,7 +316,15 @@ impl GraphTemporalFunction {
 
     /// The function a call `name.operation(...)` (any case) denotes.
     pub(crate) fn dotted(name: &str, operation: &str) -> Option<Self> {
-        let function = if operation.eq_ignore_ascii_case("TRUNCATE") {
+        let clock = ["TRANSACTION", "STATEMENT", "REALTIME"]
+            .iter()
+            .any(|spelling| operation.eq_ignore_ascii_case(spelling));
+        let function = if clock {
+            match Self::named(name)? {
+                Self::Duration => return None,
+                _ => Self::Clock,
+            }
+        } else if operation.eq_ignore_ascii_case("TRUNCATE") {
             match Self::named(name)? {
                 Self::Date => Self::TruncateDate,
                 Self::LocalTime => Self::TruncateLocalTime,
@@ -362,7 +376,8 @@ impl GraphTemporalFunction {
             | Self::Time
             | Self::LocalDateTime
             | Self::DateTime
-            | Self::Duration => None,
+            | Self::Duration
+            | Self::Clock => None,
         }
     }
 }

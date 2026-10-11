@@ -156,6 +156,9 @@ pub(crate) fn construct(
         | GraphTemporalFunction::InMonths
         | GraphTemporalFunction::InDays
         | GraphTemporalFunction::InSeconds => between(function, arguments(argument)?),
+        // A clock read with a timezone argument needs a clock capability
+        // the query context does not grant (NULL returned above).
+        GraphTemporalFunction::Clock => Err(GraphIntegerErrorKind::IncompatibleOperands),
     }
 }
 
