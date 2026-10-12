@@ -372,16 +372,26 @@ fn edge_admission_precedes_headers_and_io_errors_keep_their_cause() {
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit).await;
-        for text in [
-            "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r) AS n",
-            "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COUNT(*) AS n",
-        ] {
-            let opts = options(text);
-            PreparedNativeRead::prepare(text, &opts.params, &opts).unwrap();
-            let mut bytes = Vec::new();
-            assert!(run(&db, &cx, &opts, true, &mut bytes).is_err());
-            assert!(bytes.is_empty(), "{text}");
-        }
+        // A directed root's edge identity alone proves its order and
+        // uniqueness (67506bf7), so a collection of the edge itself streams,
+        // and its rows equal the eager answer.
+        let text = "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r) AS n";
+        let opts = options(text);
+        let eager = db.query(&cx, text, &opts.params, &opts, policy()).unwrap();
+        let mut expected = Vec::new();
+        okay(crate::render(eager, 1, "rows", true, &mut expected));
+        let mut bytes = Vec::new();
+        okay(run(&db, &cx, &opts, true, &mut bytes));
+        assert_eq!(
+            row_lines(&String::from_utf8(bytes).unwrap()),
+            row_lines(&String::from_utf8(expected).unwrap())
+        );
+        let text = "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COUNT(*) AS n";
+        let opts = options(text);
+        PreparedNativeRead::prepare(text, &opts.params, &opts).unwrap();
+        let mut bytes = Vec::new();
+        assert!(run(&db, &cx, &opts, true, &mut bytes).is_err());
+        assert!(bytes.is_empty(), "{text}");
     });
     assert!(report.lab_test_passed(), "{report:?}");
     let io = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "source failure");
