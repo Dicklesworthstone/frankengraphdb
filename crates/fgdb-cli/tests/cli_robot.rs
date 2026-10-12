@@ -2111,15 +2111,21 @@ fn cli_named_time_zone_constructs_through_every_read_front_end() {
     // fgdb-txbg9: a write statement's temporal constructors resolve a named
     // zone through the same --tzdb-file. Without one the write refuses and
     // stages nothing; with one it stores the constructor's instant and offset.
-    let create = format!("CREATE (:Event {{at: {after}}})");
+    // The harness catalog is fixed (Person; name, born, ...), so the write
+    // names only cataloged symbols and the refusal is the zone's own.
+    let create = format!("CREATE (:Person {{born: {after}}})");
     let refused = db.command("write", &[create.as_str()]);
     assert_ne!(
         refused.code, 0,
         "{create} without a tzdb: {}",
         refused.stdout
     );
-    // Nothing was staged: only the Person vertex exists. (The Event label is
-    // not in the catalog yet, so a query naming it would not resolve.)
+    assert!(
+        refused.stdout.contains("TemporalConstruction"),
+        "{create} without a tzdb refuses its constructor: {}",
+        refused.stdout
+    );
+    // Nothing was staged: only the first Person vertex exists.
     let none = db.command("query", &["MATCH (n) RETURN count(*) AS n"]);
     assert_rows(&none, r#"[[{"type":"count","value":"1"}]]"#);
     let written = db.command(
@@ -2131,7 +2137,10 @@ fn cli_named_time_zone_constructs_through_every_read_front_end() {
         ],
     );
     assert_eq!(written.code, 0, "{create}: {}", written.stdout);
-    let stored = db.command("query", &["MATCH (e:Event) RETURN e.at AS v"]);
+    let stored = db.command(
+        "query",
+        &["MATCH (e:Person) WHERE e.born IS NOT NULL RETURN e.born AS v"],
+    );
     assert_eq!(stored.code, 0, "{}", stored.stdout);
     assert!(
         stored
