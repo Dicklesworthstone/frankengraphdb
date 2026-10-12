@@ -338,12 +338,16 @@ impl Traversal {
 
 pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
     cursor: &mut EdgeScanCursor<S, F>,
-) -> ScanResult<Option<GraphValueRow>, S::Error, C> {
+    remaining: &mut usize,
+) -> ScanResult<core::task::Poll<Option<GraphValueRow>>, S::Error, C> {
     let plan = cursor.plan.joined.as_ref().expect("joined plan");
     let meter = &mut cursor.meter;
-    meter.event(GlaExecutionEvent::Work)?;
+    if !cursor.advancing {
+        meter.event(GlaExecutionEvent::Work)?;
+        cursor.advancing = true;
+    }
     if cursor.plan.count == Some(0) {
-        return Ok(None);
+        return Ok(core::task::Poll::Ready(None));
     }
     let source = cursor.source.as_mut().expect("open cursor owns its source");
     let hops = plan.expansions.len() + 1;
@@ -356,19 +360,36 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
         traversal.resume = false;
     }
     loop {
-        meter.event(GlaExecutionEvent::Work)?;
+        if *remaining == 0 {
+            return Ok(core::task::Poll::Pending);
+        }
+        *remaining -= 1;
+        if !cursor.source_pending {
+            meter.event(GlaExecutionEvent::Work)?;
+        }
         let depth = traversal.choices.len();
         let (eid, from, to) = if depth == 0 {
             let (eid, second) = if let Some(eid) = cursor.reverse_pending.take() {
                 (eid, true)
             } else {
-                let Some(eid) = flatten(
-                    source.next_edge_for_relation(cursor.plan.relation, &mut |event| {
-                        meter.event(event)
-                    }),
-                )?
-                else {
-                    return Ok(None);
+                let next = flatten(source.next_edge_step_for_relation(
+                    cursor.plan.relation,
+                    cursor.source_pending,
+                    &mut |event| meter.event(event),
+                ))?;
+                let eid = match next {
+                    crate::scan_stream::SourceStep::Item(eid) => {
+                        cursor.source_pending = false;
+                        eid
+                    }
+                    crate::scan_stream::SourceStep::Skipped(_) => {
+                        cursor.source_pending = true;
+                        continue;
+                    }
+                    crate::scan_stream::SourceStep::Exhausted => {
+                        cursor.source_pending = false;
+                        return Ok(core::task::Poll::Ready(None));
+                    }
                 };
                 meter.event(GlaExecutionEvent::Work)?;
                 if cursor.last.is_some_and(|last| eid <= last) {
@@ -403,11 +424,12 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
         } else {
             let expansion = plan.expansions[depth - 1];
             let from = traversal.bindings[expansion.source].expect("positive bound endpoint");
-            let next = source.next_incident_edge_for_relation(
+            let next = source.next_incident_edge_step_for_relation(
                 from,
                 expansion.relation,
                 expansion.direction,
                 traversal.after[depth],
+                cursor.source_pending,
                 &mut |event| meter.event(event),
             );
             let next = match next {
@@ -417,9 +439,24 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
                 }
                 Err(EdgeExpansionSourceError::Read(error)) => flatten(Err(error))?,
             };
-            let Some(eid) = next else {
-                traversal.pop();
-                continue;
+            let eid = match next {
+                crate::scan_stream::SourceStep::Item(eid) => {
+                    cursor.source_pending = false;
+                    eid
+                }
+                crate::scan_stream::SourceStep::Skipped(eid) => {
+                    if traversal.after[depth].is_some_and(|prior| eid <= prior) {
+                        return Err(GqlQueryError::Source(EdgeScanError::NonIncreasingIdentity));
+                    }
+                    traversal.after[depth] = Some(eid);
+                    cursor.source_pending = true;
+                    continue;
+                }
+                crate::scan_stream::SourceStep::Exhausted => {
+                    cursor.source_pending = false;
+                    traversal.pop();
+                    continue;
+                }
             };
             meter.event(GlaExecutionEvent::Work)?;
             if traversal.after[depth].is_some_and(|prior| eid <= prior) {
@@ -509,7 +546,7 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             meter.event(GlaExecutionEvent::Work)?;
         }
         traversal.resume = true;
-        return Ok(Some(row));
+        return Ok(core::task::Poll::Ready(Some(row)));
     }
 }
 

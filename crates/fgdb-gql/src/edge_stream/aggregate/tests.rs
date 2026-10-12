@@ -1,5 +1,6 @@
 use super::*;
 mod computed;
+mod cooperative;
 mod grouped;
 mod groups;
 mod output;

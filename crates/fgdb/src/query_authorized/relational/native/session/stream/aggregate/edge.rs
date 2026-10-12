@@ -171,6 +171,53 @@ where
         }))
     }
 
+    fn next_edge_step_for_relation<C>(
+        &mut self,
+        relation: EdgeRelation,
+        continuing: bool,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<fgdb_gql::scan_stream::SourceStep<EId>, EdgeScanSourceError<QueryError, C>> {
+        use fgdb_gql::scan_stream::SourceStep;
+        self.poll()?;
+        // One logical successor lookup spans any number of private skips.
+        // Its admission and work charges occur once, not once per hidden edge.
+        if !continuing {
+            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        }
+        if relation.one().is_some_and(|relation| {
+            !self
+                .vertices
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_relation(relation)
+        }) {
+            return Ok(SourceStep::Exhausted);
+        }
+        let execution = &self.vertices.execution;
+        let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
+        let Some(eid) = self
+            .edges
+            .next_edge_for_relation(relation, &mut poll)
+            .map_err(private_error)?
+        else {
+            return Ok(SourceStep::Exhausted);
+        };
+        if self.after.is_some_and(|after| eid <= after) {
+            return Err(EdgeScanSourceError::Source(source_error(
+                EdgeScanError::NonIncreasingIdentity,
+            )));
+        }
+        self.after = Some(eid);
+        if self.visible::<C>(eid, relation.one())?.is_some() {
+            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+            Ok(SourceStep::Item(eid))
+        } else {
+            Ok(SourceStep::Skipped(eid))
+        }
+    }
+
     fn edge_record<'a, C>(
         &'a self,
         eid: EId,
@@ -284,6 +331,79 @@ where
         self.vertices
             .next_probe_edge_for_relation(endpoint, relation, direction, after, control)
     }
+
+    fn next_incident_edge_step_for_relation<C>(
+        &self,
+        endpoint: VId,
+        relation: EdgeRelation,
+        direction: fgdb_gql::algebra::GlaDirection,
+        after: Option<EId>,
+        continuing: bool,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<fgdb_gql::scan_stream::SourceStep<EId>, EdgeExpansionSourceError<QueryError, C>>
+    {
+        use fgdb_gql::scan_stream::SourceStep;
+        if !continuing {
+            control(GlaExecutionEvent::Work).map_err(|error| {
+                EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error))
+            })?;
+        }
+        if relation.one().is_some_and(|relation| {
+            !self
+                .vertices
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_relation(relation)
+        }) {
+            return Ok(SourceStep::Exhausted);
+        }
+        if !continuing {
+            let vertex = self
+                .vertices
+                .admitted_vertex(endpoint, &mut |event| control(edge_event(event)))
+                .map_err(|error| {
+                    EdgeExpansionSourceError::Read(match error {
+                        VertexScanSourceError::Source(error) => EdgeScanSourceError::Source(error),
+                        VertexScanSourceError::Control(error) => {
+                            EdgeScanSourceError::Control(error)
+                        }
+                    })
+                })?;
+            if vertex.is_none() {
+                return Err(EdgeExpansionSourceError::Read(EdgeScanSourceError::Source(
+                    source_error(EdgeScanError::DanglingEndpoint),
+                )));
+            }
+        }
+        let execution = &self.vertices.execution;
+        let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
+        let next = self
+            .edges
+            .next_incident_edge_for_relation(endpoint, relation, direction, after, &mut poll);
+        let next = match next {
+            Ok(next) => next,
+            Err(EdgeExpansionSourceError::Unavailable) => {
+                return Err(EdgeExpansionSourceError::Unavailable);
+            }
+            Err(EdgeExpansionSourceError::Read(error)) => {
+                return Err(EdgeExpansionSourceError::Read(private_error(error)));
+            }
+        };
+        let Some(eid) = next else {
+            return Ok(SourceStep::Exhausted);
+        };
+        if self
+            .visible::<C>(eid, relation.one())
+            .map_err(EdgeExpansionSourceError::Read)?
+            .is_some()
+        {
+            Ok(SourceStep::Item(eid))
+        } else {
+            Ok(SourceStep::Skipped(eid))
+        }
+    }
 }
 
 fn source_error(error: EdgeScanError<QueryError>) -> QueryError {
@@ -299,7 +419,7 @@ fn source_error(error: EdgeScanError<QueryError>) -> QueryError {
     };
     QueryError::EdgeStream(GqlQueryError::Source(error))
 }
-fn error(error: EdgeAggregateError<QueryError, QueryError>) -> QueryError {
+pub(super) fn error(error: EdgeAggregateError<QueryError, QueryError>) -> QueryError {
     match error {
         GqlQueryError::Interrupted(error) => error,
         GqlQueryError::Source(GraphAggregateError::Source(error)) => source_error(error),

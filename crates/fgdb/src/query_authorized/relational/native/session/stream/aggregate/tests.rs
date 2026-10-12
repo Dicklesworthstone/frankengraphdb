@@ -10,6 +10,9 @@ use fgdb_types::{CommitCx, DatabaseSecurityNamespaceId, PurposeContexts};
 use fgdb_warden::{Error as Denied, Grant, LimitDimension, QueryLimits, Scope};
 use std::cell::Cell;
 
+#[path = "asynchronous_tests.rs"]
+mod asynchronous_tests;
+
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x84; 32]);
 const P: PropertyKeyId = PropertyKeyId(1);
 const H: PropertyKeyId = PropertyKeyId(2);

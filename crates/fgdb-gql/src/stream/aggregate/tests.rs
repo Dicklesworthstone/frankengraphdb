@@ -4,6 +4,7 @@ use crate::algebra::{GraphColumn, GraphPatternBuilder};
 use std::cell::Cell;
 use std::rc::Rc;
 
+mod cooperative;
 mod distinct_tests;
 mod spill_tests;
 

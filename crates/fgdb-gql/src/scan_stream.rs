@@ -10,6 +10,17 @@ use crate::stream::{VertexScanCursor, VertexScanError, VertexScanSource};
 use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryError};
 use fgdb_types::CommitSeq;
 
+/// One resumable source examination. A scoped source can skip a private
+/// identity without charging or exposing it as a matching candidate. The
+/// identity is retained only to advance an independently owned successor.
+/// This is source progress, never a query row or a public cardinality.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceStep<T> {
+    Item(T),
+    Skipped(T),
+    Exhausted,
+}
+
 /// Compiler-owned terminal clauses deferred by a blocking scan consumer.
 /// A sort-input cursor is NOT a completed query: the consumer must order all
 /// admitted occurrences, apply DISTINCT when requested, then SKIP/LIMIT and
