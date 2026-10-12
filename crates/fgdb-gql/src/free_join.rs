@@ -22,7 +22,7 @@ mod graph;
 mod plan;
 mod trie;
 
-pub use execute::{FreeJoin, JoinBinding, MultiplicityOverflow};
+pub use execute::{FreeJoin, FreeJoinCursor, JoinBinding, MultiplicityOverflow};
 pub use factor::{
     FactorNodeKind, FactorizedBatch, FactorizedColumns, FactorizedCursor, FactorizedReadError,
 };
