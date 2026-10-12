@@ -1296,6 +1296,15 @@ impl UnwindRows {
         let values = match list {
             GraphValue::List(values) => values.into_vec(),
             value if value.is_null() => Vec::new(),
+            // nodes(p), relationships(p) and a variable-length relationship
+            // variable are compact element lists (fgdb-xnd7x): each member
+            // unwinds as its Vertex or Edge value, one scratch entry each.
+            value @ (GraphValue::Vertices(_) | GraphValue::Edges(_)) => {
+                list_members(&value, control)
+                    .map_err(ProjectionFailure::Control)?
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_default()
+            }
             _ => {
                 return Err(ProjectionFailure::Arithmetic {
                     column,

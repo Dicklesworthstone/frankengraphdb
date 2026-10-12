@@ -465,9 +465,8 @@ fn a_top_level_where_identity_with_an_imported_element_is_the_reused_name_join()
         ),
         optional
     );
-    let edges = execute("MATCH ()-[r:R]->() WITH r MATCH ()-[s:R]->() WHERE r = s RETURN r, s");
-    assert_eq!(edges.len(), 5);
-    assert!(edges.iter().all(|row| row.values()[0] == row.values()[1]));
+    // Relationship identity needs identified edges: multipart_optional_reads
+    // a_top_level_where_identity_correlates_a_carried_relationship.
     // Not a top-level AND conjunct, or not equality: refused before any
     // catalog call, as for the property form.
     for text in [

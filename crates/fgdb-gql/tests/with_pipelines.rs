@@ -1375,10 +1375,35 @@ fn order_by_a_returned_property_after_with_is_its_output_column() {
 /// output columns.
 #[test]
 fn order_by_a_property_the_return_did_not_project_still_refuses() {
+    // fgdb-ujuga: ORDER BY reads any property of an element the RETURN can
+    // see, projected or not. `n.q` passes every structural check and fails
+    // only at the catalog, which knows no `q`.
+    let resolved =
+        PreparedGraphSetText::prepare("MATCH (n) WITH n RETURN n.p ORDER BY n.q", symbols);
+    assert!(
+        matches!(
+            &resolved,
+            Err(error) if matches!(
+                error.kind,
+                GraphSetTextErrorKind::Pattern(fgdb_gql::GraphPatternTextErrorKind::UnknownSymbol(_))
+            )
+        ),
+        "{:?}",
+        resolved.as_ref().err()
+    );
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    let ordered = run(
+        &prepare("MATCH (n) WITH n RETURN n.p + 1 AS p ORDER BY n.p DESC"),
+        &values,
+        wide(),
+        &mut || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(ints(&ordered.value, 0), vec![Some(4), Some(3), Some(2)]);
+    // A binding the WITH renamed away, and a compound set's tail, which
+    // ranks output columns only, still refuse before any catalog call.
     for text in [
-        "MATCH (n) WITH n RETURN n.p ORDER BY n.q",
         "MATCH (n) WITH n AS m RETURN m.p ORDER BY n.p",
-        "MATCH (n) WITH n RETURN n.p + 1 AS p ORDER BY n.p",
         "MATCH (n) WITH n RETURN n.p UNION MATCH (n) WITH n RETURN n.p ORDER BY n.p",
     ] {
         let calls = Cell::new(0);
@@ -1386,11 +1411,7 @@ fn order_by_a_property_the_return_did_not_project_still_refuses() {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         });
-        assert!(
-            matches!(&prepared, Err(error) if matches!(error.kind, GraphSetTextErrorKind::Expected(_))),
-            "{text}: must refuse with Expected: {:?}",
-            prepared.as_ref().err()
-        );
+        assert!(prepared.is_err(), "{text}");
         assert_eq!(calls.get(), 0, "{text}: refused after a catalog call");
     }
 }

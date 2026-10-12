@@ -738,6 +738,20 @@ fn a_leading_optional_match_returns_whole_predicate_items() {
     );
 }
 
+/// fgdb-23qrt: `WITH r MATCH ()-[s]->() WHERE r = s` correlates `s` with the
+/// carried relationship by identity, as reusing the name `[r]` does
+/// (TCK Comparison1 [5]): each stored relationship matches only itself.
+#[test]
+fn a_top_level_where_identity_correlates_a_carried_relationship() {
+    let rows =
+        identified_rows("MATCH ()-[r:R]->() WITH r MATCH ()-[s:R]->() WHERE r = s RETURN r, s");
+    assert_eq!(rows.len(), EDGES.len());
+    assert!(rows.iter().all(|row| row.values()[0] == row.values()[1]));
+    let distinct: std::collections::BTreeSet<_> =
+        rows.iter().map(|row| row.values()[0].clone()).collect();
+    assert_eq!(distinct.len(), EDGES.len());
+}
+
 /// An aggregating WITH may key on, or aggregate, a captured path's metadata:
 /// `length(p)`, `nodes(p)` and `relationships(p)` each read the graph source
 /// once as a hidden grouping input (TCK Quantifier1-4 [9]).
