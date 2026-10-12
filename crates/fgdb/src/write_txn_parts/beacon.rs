@@ -221,10 +221,18 @@ impl WriteTxn {
             |work| {
                 let config = options.config_for(query)?;
                 query.validate(&config, &mut Shared(work))?;
-                Ok(config)
+                Ok(Some(config))
             },
             |_, _| Ok(()),
-            |index, _, work| query.execute_filtered(index, eligible, &mut Shared(work)),
+            |index, _, work| {
+                query.execute_filtered(
+                    index.ok_or(BeaconError::Invariant(
+                        "requested search index was not constructed",
+                    ))?,
+                    eligible,
+                    &mut Shared(work),
+                )
+            },
         )
     }
 
@@ -346,10 +354,10 @@ impl WriteTxn {
         )
     }
 
-    // The two- and three-lane reads share owner/frontier admission, the exact
-    // same prepared vertex overlay, one work/scratch allowance and the final
-    // live gate. `selected` sees every selected vertex, including graph-only
-    // transit vertices that have neither a text nor a vector document.
+    // Indexed and topology-only reads share owner/frontier admission, the
+    // exact same prepared vertex overlay, one work/scratch allowance and final
+    // live gate. `selected` sees every selected vertex even without an index.
+    // None is an explicit request, never a substitute for a failed index build.
     #[allow(clippy::too_many_arguments)]
     fn beacon_read<V: Vfs + Clone, T>(
         &self,
@@ -357,9 +365,13 @@ impl WriteTxn {
         cx: &QueryCx,
         options: &Options,
         observer: Option<Observer<'_>>,
-        configure: impl FnOnce(&RefCell<Control<'_>>) -> Result<IndexConfig, BeaconError>,
+        configure: impl FnOnce(&RefCell<Control<'_>>) -> Result<Option<IndexConfig>, BeaconError>,
         mut selected: impl FnMut(VId, &RefCell<Control<'_>>) -> Result<(), BeaconError>,
-        finish: impl FnOnce(&IndexSnapshot, &Snapshot, &RefCell<Control<'_>>) -> Result<T, BeaconError>,
+        finish: impl FnOnce(
+            Option<&IndexSnapshot>,
+            &Snapshot,
+            &RefCell<Control<'_>>,
+        ) -> Result<T, BeaconError>,
     ) -> Result<T, ReadError<WriteTxnError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(ReadError::Interrupted)?;
@@ -448,6 +460,9 @@ impl WriteTxn {
                         Ok(())
                     },
                 )?;
+                let max_documents = config
+                    .as_ref()
+                    .map_or(options.index.max_documents, |config| config.max_documents);
                 let mut staged = 0usize;
                 let projected = rows.into_iter().filter_map(|(vid, overlay)| {
                     (|| {
@@ -466,7 +481,7 @@ impl WriteTxn {
                         }) {
                             return Ok(None);
                         }
-                        let limit = options.policy.max_staging_rows.min(config.max_documents);
+                        let limit = options.policy.max_staging_rows.min(max_documents);
                         if staged == limit {
                             return Err(BeaconError::ResourceLimit {
                                 resource: "staged vertices",
@@ -475,11 +490,16 @@ impl WriteTxn {
                         }
                         staged += 1;
                         selected(vid, &work)?;
+                        let Some(config) = config.as_ref() else {
+                            // The selected vertex already entered the graph.
+                            // A topology-only request has no document to build.
+                            return Ok(None);
+                        };
                         options
                             .projection
                             .project(
                                 vid,
-                                &config,
+                                config,
                                 |key| {
                                     overlay.properties.get(&key).copied().unwrap_or_else(|| {
                                         props
@@ -494,8 +514,24 @@ impl WriteTxn {
                     })()
                     .transpose()
                 });
-                let index = BeaconIndex::try_build(config.clone(), projected, &mut Shared(&work))?;
-                let result = finish(&index.snapshot(), &view.snapshot, &work)?;
+                let index = match config.as_ref() {
+                    Some(config) => Some(BeaconIndex::try_build(
+                        config.clone(),
+                        projected,
+                        &mut Shared(&work),
+                    )?),
+                    None => {
+                        // Drive the complete source even with no index. Lazy
+                        // selection, errors and witnesses must not disappear
+                        // because every successful row projects no document.
+                        for document in projected {
+                            document?;
+                        }
+                        None
+                    }
+                };
+                let index_snapshot = index.as_ref().map(BeaconIndex::snapshot);
+                let result = finish(index_snapshot.as_ref(), &view.snapshot, &work)?;
                 // Native empty and zero-k paths still have a final live gate.
                 work.borrow_mut().charge(1)?;
                 Ok(result)
