@@ -5255,7 +5255,9 @@ fn append_props_transcript(
         // statement keeps its transcript (fgdb-k3nub).
         let encoded = match value.as_scalar() {
             Some(scalar) => scalar.encode().map_err(|_| CanonicalError::Scalar)?,
-            None => value.encode().map_err(CanonicalError::PropertyValue)?,
+            None => value
+                .encode()
+                .map_err(|error| CanonicalError::PropertyValue(Box::new(error)))?,
         };
         out.extend_from_slice(&key.0.to_le_bytes());
         out.extend_from_slice(&(encoded.len() as u32).to_le_bytes());

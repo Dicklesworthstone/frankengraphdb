@@ -65,12 +65,18 @@ fn read(
     }
 }
 
-fn set(edge: bool, key: PropertyKeyId, value: Option<CanonicalScalar>) -> WriteBatch {
+/// A scalar fixture or a stored value read back, as in a restore.
+fn set(
+    edge: bool,
+    key: PropertyKeyId,
+    value: Option<impl Into<CanonicalPropertyValue>>,
+) -> WriteBatch {
+    let value = value.map(Into::into);
     let mut batch = WriteBatch::new(R);
     if edge {
-        batch.set_edge_property(EId(1), key, value);
+        batch.set_edge_property_value(EId(1), key, value);
     } else {
-        batch.set_vertex_property(VId(1), key, value);
+        batch.set_vertex_property_value(VId(1), key, value);
     }
     batch
 }

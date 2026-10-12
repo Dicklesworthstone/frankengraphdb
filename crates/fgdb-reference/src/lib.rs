@@ -123,7 +123,7 @@ fn append_props_transcript(
             })?,
             None => value.encode().map_err(|error| {
                 ApplyError::VersionIdentityEncoding(
-                    fgdb_delta_types::CanonicalError::PropertyValue(error),
+                    fgdb_delta_types::CanonicalError::PropertyValue(Box::new(error)),
                 )
             })?,
         };

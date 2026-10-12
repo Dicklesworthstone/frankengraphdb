@@ -123,7 +123,9 @@ pub enum CanonicalError {
     Scalar,
     /// A List or Map property value could not be encoded or decoded: a bound
     /// on its entries, nesting or size, or a noncanonical collection encoding.
-    PropertyValue(CanonicalPropertyValueError),
+    /// Boxed: the value error is 64 bytes and this enum sits inline in every
+    /// read and write error (ReadError::VersionHead, WriteError::Canonical).
+    PropertyValue(Box<CanonicalPropertyValueError>),
     /// The input ended inside a value.
     Truncated,
     /// A tag this reader does not define. Never skipped: a reader that does
@@ -352,7 +354,9 @@ impl Writer {
         if let Some(scalar) = value.as_scalar() {
             return self.scalar(scalar);
         }
-        let encoded = value.encode().map_err(CanonicalError::PropertyValue)?;
+        let encoded = value
+            .encode()
+            .map_err(|error| CanonicalError::PropertyValue(Box::new(error)))?;
         self.count(encoded.len())?;
         self.out.extend_from_slice(&encoded);
         Ok(())
@@ -587,7 +591,7 @@ impl<'a> Reader<'a> {
             Some(resolver) => CanonicalPropertyValue::decode_with_resolver(encoded, resolver),
             None => CanonicalPropertyValue::decode(encoded),
         }
-        .map_err(CanonicalError::PropertyValue)
+        .map_err(|error| CanonicalError::PropertyValue(Box::new(error)))
     }
 
     fn optional_value(&mut self) -> Result<Option<CanonicalPropertyValue>, CanonicalError> {
