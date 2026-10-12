@@ -345,7 +345,7 @@ fn authorized_native_pin_keeps_historical_edges_but_checks_live_expiry() {
         grant.relations = Scope::only([R]);
         grant.properties = Scope::only([TEXT, X]);
         let token = authority.issue_at(&grant, 100).unwrap();
-        let now = Cell::new(100_u64);
+        let now = std::sync::atomic::AtomicU64::new(100);
         let mut session = db
             .authorized_read_session(
                 &c.query(),
@@ -354,7 +354,7 @@ fn authorized_native_pin_keeps_historical_edges_but_checks_live_expiry() {
                 "main",
                 symbols,
                 policy(),
-                || now.get(),
+                || now.load(std::sync::atomic::Ordering::Relaxed),
             )
             .unwrap();
         let text = statement("");
@@ -377,7 +377,7 @@ fn authorized_native_pin_keeps_historical_edges_but_checks_live_expiry() {
             rows(session.execute(&c.query(), &prepared, &parameters).unwrap()),
             expected(false, false)
         );
-        now.set(1001);
+        now.store(1001, std::sync::atomic::Ordering::Relaxed);
         assert!(matches!(
             session.execute(&c.query(), &prepared, &parameters),
             Err(crate::QueryError::Authorization(
