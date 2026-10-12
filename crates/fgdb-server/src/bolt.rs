@@ -19,6 +19,11 @@
 //!   so all of its statements read one pinned generation; autocommit read
 //!   RUNs each pin their own. No lock is held across network round trips.
 //! - The database is RUN/BEGIN's `db`, or the only served database.
+//! - Local database-qualified bookmarks constrain BEGIN, autocommit reads,
+//!   writes and schema procedures. An unmet floor refuses before execution;
+//!   an open read transaction never advances its pinned snapshot to satisfy
+//!   a newer bookmark. Unsupported timeouts/impersonation refuse explicitly.
+//!   These local bookmarks are not signed RYW tokens or cluster read proofs.
 //! - Graph values come back as Bolt nodes, relationships and paths. Labels,
 //!   types, endpoints and properties are read through the same authorized
 //!   session at the statement's effective snapshot. The server's catalog
@@ -35,6 +40,7 @@
 //!   cooperative Warden fence, not durable audit or revocation evidence.
 
 mod autocommit;
+mod causal;
 
 use crate::execute::{ReadSession, Refusal, SessionError, query_refusal, read_session};
 use crate::recovery::Generation;
@@ -597,9 +603,7 @@ impl<'s> Connection<'s> {
         let (name, db) = self.database(extra)?;
         self.output_database = Some(db);
         let token = self.token.as_ref().expect("authenticated");
-        let (session, seq) = read_session(cx, db, token)
-            .await
-            .map_err(Failure::from_refusal)?;
+        let (session, seq) = causal::session(cx, db, token, &name, extra).await?;
         self.output_generation = Some(session.generation());
         self.transaction = Some(Transaction {
             name,
@@ -623,8 +627,17 @@ impl<'s> Connection<'s> {
                 "RUN while a result is still streaming; PULL or DISCARD it first",
             ));
         }
+        if let Some(transaction) = self.transaction.as_ref() {
+            self.output_database = Some(transaction.db);
+            let generation = transaction.session.generation();
+            generation
+                .check()
+                .map_err(|error| Failure::from_refusal(error.into()))?;
+            self.output_generation = Some(generation);
+            causal::in_transaction(extra, &transaction.name, transaction.seq)?;
+        }
         if let Some((column, kind)) = schema_procedure(query) {
-            return self.schema_rows(extra, column, kind);
+            return self.schema_rows(cx, extra, column, kind).await;
         }
         let arguments = statement_parameters(parameters)?;
         if let Some(metadata) =
@@ -650,9 +663,7 @@ impl<'s> Connection<'s> {
             let (name, db) = self.database(extra)?;
             self.output_database = Some(db);
             let token = self.token.as_ref().expect("authenticated");
-            let (session, seq) = read_session(cx, db, token)
-                .await
-                .map_err(Failure::from_refusal)?;
+            let (session, seq) = causal::session(cx, db, token, &name, extra).await?;
             autocommit = Some(session);
             (name, db, seq, None)
         };
@@ -773,20 +784,31 @@ impl<'s> Connection<'s> {
 
     /// `CALL db.labels()` and its siblings: the schema names this token may
     /// see, the same filtered answer as HTTP's schema route.
-    fn schema_rows(&mut self, extra: &Map, column: &str, kind: SchemaKind) -> Result<Map, Failure> {
-        let (name, db, seq, generation) = match self.transaction.as_ref() {
-            Some(transaction) => (
+    async fn schema_rows(
+        &mut self,
+        cx: &Cx,
+        extra: &Map,
+        column: &str,
+        kind: SchemaKind,
+    ) -> Result<Map, Failure> {
+        // Do not retain a shared borrow of the session across the autocommit
+        // await. Only these owned coordinates survive the branch selection.
+        let transaction = self.transaction.as_ref().map(|transaction| {
+            (
                 transaction.name.clone(),
                 transaction.db,
                 Some(transaction.seq),
                 transaction.session.generation(),
-            ),
+            )
+        });
+        let (name, db, seq, generation) = match transaction {
+            Some(pinned) => pinned,
             None => {
                 let (name, db) = self.database(extra)?;
-                let generation = db
-                    .db
-                    .generation()
-                    .map_err(|error| Failure::from_refusal(error.into()))?;
+                self.output_database = Some(db);
+                let token = self.token.as_ref().expect("authenticated");
+                let generation =
+                    causal::schema_generation(cx, db, token, &name, extra).await?;
                 (name, db, None, generation)
             }
         };
