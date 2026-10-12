@@ -400,7 +400,15 @@ impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> VertexScanSo
             .next_vertex_step(&mut poll)
             .map_err(scoped_error)?
         {
-            SourceStep::Item(vid) if self.visible(vid)? => Ok(SourceStep::Item(vid)),
+            SourceStep::Item(vid) if self.visible(vid)? => {
+                // The cooperative step admits a root exactly as next_vertex
+                // does, so its node is charged before any row can use it.
+                self.execution
+                    .borrow_mut()
+                    .root_node(vid)
+                    .map_err(VertexScanSourceError::Source)?;
+                Ok(SourceStep::Item(vid))
+            }
             SourceStep::Item(vid) | SourceStep::Skipped(vid) => Ok(SourceStep::Skipped(vid)),
             SourceStep::Exhausted => Ok(SourceStep::Exhausted),
         }
