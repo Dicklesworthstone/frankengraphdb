@@ -208,8 +208,10 @@ fn a_kept_vertex_reads_its_properties_after_the_grouping_in_both_return_classes(
             (
                 "MATCH (n:L)-[:R]->(m:L) WITH n, count(m) AS c RETURN n.p, n.secret, c",
                 NativeReadClass::Set,
+                // An unaliased item is named by its exact source text (owner
+                // ruling 2026-09-30, fgdb-aw8lm).
                 rows(
-                    &["p", "secret", "c"],
+                    &["n.p", "n.secret", "c"],
                     vec![
                         vec![value(10), value(100), value(2)],
                         vec![value(10), value(200), value(1)],

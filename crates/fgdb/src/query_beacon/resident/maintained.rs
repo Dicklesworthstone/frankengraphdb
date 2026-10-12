@@ -285,10 +285,10 @@ impl<V: Vfs + Clone> Database<V> {
         cx.with_restriction(|| {
             checkpoint(cx)?;
             let current = self.frontier().map_err(Error::Source)?;
-            if let Some(requested) = options.as_of {
-                if requested != current {
-                    return Err(MaintainedBeaconError::NotCurrent { requested, current });
-                }
+            if let Some(requested) = options.as_of
+                && requested != current
+            {
+                return Err(MaintainedBeaconError::NotCurrent { requested, current });
             }
             let slot = self.maintained_beacon.vacant_slot()?;
             // Reserve the bounded slot before building index data. A failed
