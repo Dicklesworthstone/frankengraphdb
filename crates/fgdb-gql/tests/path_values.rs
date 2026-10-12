@@ -381,22 +381,26 @@ fn path_element_lists_answer_every_list_operation() {
     }
 }
 
-/// fgdb-xnd7x: `x.key` over a vertex or edge an expression produced (a path's
-/// nodes or relationships, an UNWIND row) reads that element's stored property
-/// through the host's reader, with the key bound at preparation. A key the
-/// catalog lacks is NULL without a read, an absent property is NULL, a
-/// non-element operand stays a typed error, and a host with no reader refuses
-/// rather than guessing NULL (TCK Quantifier1-4 [8], [9]).
-#[test]
-fn element_values_read_their_properties_through_the_host_reader() {
+/// The two-edge chain 1 -[91]-> 2 -[92]-> 3 for element property laws: `name`
+/// is "a" on vertex 1 and "b" on vertex 2 (vertex 3 has none), and each edge
+/// carries `w` equal to its id. With `with_reader`, `x.key` on an element reads
+/// through the host reader and counts each read in `reads`. Without it, the
+/// host reads no element properties.
+fn chain_rows(
+    text: &str,
+    with_reader: bool,
+    reads: &std::cell::Cell<usize>,
+) -> Result<
+    Vec<fgdb_gql::algebra::GraphValueRow>,
+    fgdb_gql::GqlQueryError<fgdb_gql::GraphSetExecutionError<()>, ()>,
+> {
     use fgdb_delta_types::{ElementId, PropertyKeyId};
-    use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+    use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
     use fgdb_gql::{
-        GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphIntegerErrorKind,
-        GraphSetExecutionError, PreparedGraphSetText, PreparedProcedureCall,
+        GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, PreparedGraphSetText,
+        PreparedProcedureCall,
     };
     use fgdb_types::{CanonicalScalar, EId, VId};
-    use std::cell::Cell;
     let keys = |kind: GraphSymbolKind, name: &str| match (kind, name) {
         (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(PropertyKeyId(7))),
         (GraphSymbolKind::Property, "w") => Some(GraphSymbol::Property(PropertyKeyId(8))),
@@ -406,12 +410,6 @@ fn element_values_read_their_properties_through_the_host_reader() {
         (EId(91), VId(1), RelationId(1), VId(2)),
         (EId(92), VId(2), RelationId(1), VId(3)),
     ];
-    let text = |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
-    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
-    let null = GraphValue::Scalar(CanonicalScalar::Null);
-    let list = |values: Vec<GraphValue>| GraphValue::List(values.into_boxed_slice());
-    let reads = Cell::new(0_usize);
-    // Vertices 1 and 2 are named; vertex 3 has no name. Edges carry `w`.
     let stored = |element: ElementId, key: PropertyKeyId| {
         reads.set(reads.get() + 1);
         Ok::<_, ()>(match (element, key) {
@@ -425,43 +423,62 @@ fn element_values_read_their_properties_through_the_host_reader() {
             _ => None,
         })
     };
+    let query = PreparedGraphSetText::prepare(text, keys)
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    let patterns = |pattern: &PreparedGraphPattern<GraphValueRow>, remaining: GqlQueryPolicy| {
+        pattern.plan().execute_governed_with_identified_properties(
+            edges.len() as u64 + 4,
+            (1..=4).map(VId),
+            edges.iter().copied(),
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            remaining,
+            || Ok::<_, ()>(()),
+        )
+    };
+    let policy = GqlQueryPolicy::new(1000, 1000, 100_000, 100_000);
+    let result = if with_reader {
+        query.execute_governed_with_elements(
+            policy,
+            patterns,
+            |_: &PreparedProcedureCall,
+             _: &[GraphValue],
+             _: GqlQueryPolicy|
+             -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+                unreachable!("no CALL source")
+            },
+            stored,
+            || Ok::<_, ()>(()),
+        )
+    } else {
+        query.execute_governed(policy, patterns, || Ok::<_, ()>(()))
+    };
+    result.map(|execution| execution.value)
+}
+
+/// fgdb-xnd7x: `x.key` over a vertex or edge an expression produced (a path's
+/// nodes or relationships, an UNWIND row) reads that element's stored property
+/// through the host's reader, with the key bound at preparation. A key the
+/// catalog lacks is NULL without a read, an absent property is NULL, a
+/// non-element operand stays a typed error, and a host with no reader refuses
+/// rather than guessing NULL (TCK Quantifier1-4 [8], [9]).
+#[test]
+fn element_values_read_their_properties_through_the_host_reader() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GqlQueryError, GraphIntegerErrorKind, GraphSetExecutionError};
+    use fgdb_types::CanonicalScalar;
+    use std::cell::Cell;
+    let text = |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let list = |values: Vec<GraphValue>| GraphValue::List(values.into_boxed_slice());
+    let reads = Cell::new(0_usize);
     let run = |text: &str, with_reader: bool| {
-        let query = PreparedGraphSetText::prepare(text, keys)
-            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
-            .bind_parameters(&GqlParameters::new())
-            .unwrap();
-        let patterns = |pattern: &fgdb_gql::algebra::PreparedGraphPattern<GraphValueRow>,
-                        remaining: GqlQueryPolicy| {
-            pattern.plan().execute_governed_with_identified_properties(
-                edges.len() as u64 + 4,
-                (1..=4).map(VId),
-                edges.iter().copied(),
-                |_, _| Ok::<_, ()>(true),
-                |_, _| Ok(None),
-                remaining,
-                || Ok::<_, ()>(()),
-            )
-        };
-        let policy = GqlQueryPolicy::new(1000, 1000, 100_000, 100_000);
-        let result = if with_reader {
-            query.execute_governed_with_elements(
-                policy,
-                patterns,
-                |_: &PreparedProcedureCall,
-                 _: &[GraphValue],
-                 _: GqlQueryPolicy|
-                 -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
-                    unreachable!("no CALL source")
-                },
-                stored,
-                || Ok::<_, ()>(()),
-            )
-        } else {
-            query.execute_governed(policy, patterns, || Ok::<_, ()>(()))
-        };
-        result.map(|execution| {
-            assert_eq!(execution.value.len(), 1, "{text}");
-            execution.value[0].values()[0].clone()
+        chain_rows(text, with_reader, &reads).map(|rows| {
+            assert_eq!(rows.len(), 1, "{text}");
+            rows[0].values()[0].clone()
         })
     };
     let path = "MATCH p = (a)-[:R]->(b)-[:R]->(c) RETURN";
@@ -529,4 +546,46 @@ fn element_values_read_their_properties_through_the_host_reader() {
         false
     )));
     assert_eq!(reads.get(), 0);
+}
+
+/// fgdb-1c29d: a root MATCH WHERE over list or path values (a quantifier,
+/// size(nodes(p)), relationships(p)) runs as a row filter after the match,
+/// exactly as the explicit `WITH * WHERE` form does. Element properties inside
+/// it read through the host reader (fgdb-xnd7x). In the chain 1 -> 2 -> 3,
+/// `[:R*1..2]` matches the paths 1-2, 2-3 and 1-2-3.
+#[test]
+fn match_where_over_list_values_filters_after_the_match() {
+    use std::cell::Cell;
+    let reads = Cell::new(0_usize);
+    let rows = |text: &str| {
+        let mut rows =
+            chain_rows(text, true, &reads).unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        rows.sort();
+        rows
+    };
+    let path = "MATCH p = (a)-[:R*1..2]->(c)";
+    for (predicate, count) in [
+        ("all(x IN nodes(p) WHERE x.name IS NOT NULL)", 1),
+        ("any(x IN nodes(p) WHERE x.name = 'b')", 3),
+        ("size(nodes(p)) > 2", 1),
+        ("none(e IN relationships(p) WHERE e.w = 92)", 1),
+        (
+            "single(x IN nodes(p) WHERE x.name = 'a') AND size(relationships(p)) = 1",
+            1,
+        ),
+    ] {
+        let deferred = rows(&format!("{path} WHERE {predicate} RETURN a, c"));
+        let explicit = rows(&format!("{path} WITH * WHERE {predicate} RETURN a, c"));
+        assert_eq!(deferred, explicit, "{predicate}");
+        assert_eq!(deferred.len(), count, "{predicate}");
+    }
+    // The deferred predicate belongs to the root MATCH, so v1 refuses another
+    // MATCH clause between it and the RETURN rather than moving it past one.
+    assert!(
+        fgdb_gql::PreparedGraphSetText::prepare(
+            "MATCH p = (a)-[:R]->(c) WHERE size(nodes(p)) > 1 MATCH (d) RETURN a",
+            symbols,
+        )
+        .is_err()
+    );
 }

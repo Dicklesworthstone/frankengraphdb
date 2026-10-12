@@ -512,8 +512,28 @@ impl<'a> Parser<'a> {
         {
             return self.parse_leading_pipeline(statement);
         }
+        self.defer_where = true;
         self.parse_match_prefix()?;
-        let mut head = self.graph_projection_head()?;
+        self.defer_where = false;
+        let mut head = if let Some((lexer, at_where)) = self.deferred_where.take() {
+            // MATCH ... WHERE <over list values> is MATCH ... WITH * WHERE ...
+            // (fgdb-1c29d): the row pipeline reads the predicate after an
+            // implicit boundary that projects every visible binding.
+            if !self.syntax.scopes.is_empty() || !(self.is_word("RETURN") || self.is_word("WITH")) {
+                return Err(GraphSetTextError {
+                    offset: self.current.at,
+                    kind: GraphSetTextErrorKind::Expected(
+                        "RETURN or WITH right after a MATCH WHERE over list values",
+                    ),
+                });
+            }
+            let head = self.implicit_with_head()?;
+            self.lexer = lexer;
+            self.current = at_where;
+            head
+        } else {
+            self.graph_projection_head()?
+        };
         self.hoist_boundary_reads(&mut head, 0)?;
         let pipeline = if head.with {
             self.row_pipeline(head.schema(&self.syntax.parameters))?
@@ -1005,6 +1025,24 @@ impl<'a> Parser<'a> {
         Ok((head.outputs, distinct, at))
     }
 
+    /// The implicit boundary after a MATCH that a WITH would otherwise write:
+    /// every visible binding, unchanged (`MATCH ... UNWIND`, and a MATCH WHERE
+    /// over list values, fgdb-1c29d).
+    fn implicit_with_head(&mut self) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        for variable in self.visible_graph_bindings() {
+            let index = self.mutation_projection(&mut inputs, variable, None)?;
+            outputs.push((variable, ReadValueTemplate::Column(index)));
+        }
+        Ok(GraphProjectionHead {
+            with: true,
+            plain: false,
+            inputs,
+            outputs,
+        })
+    }
+
     /// Shared graph-to-row boundary. Exact grouped RETURN uses this same first
     /// WITH projection and row-stage parser, not a synthetic RETURN statement.
     fn graph_projection_head(&mut self) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
@@ -1012,18 +1050,7 @@ impl<'a> Parser<'a> {
             return self.with_graph_head(&[], Vec::new(), false);
         }
         if self.is_word("UNWIND") {
-            let mut inputs = Vec::new();
-            let mut outputs = Vec::new();
-            for variable in self.visible_graph_bindings() {
-                let index = self.mutation_projection(&mut inputs, variable, None)?;
-                outputs.push((variable, ReadValueTemplate::Column(index)));
-            }
-            return Ok(GraphProjectionHead {
-                with: true,
-                plain: false,
-                inputs,
-                outputs,
-            });
+            return self.implicit_with_head();
         }
         let with = self.take_word("WITH")?;
         if !with {

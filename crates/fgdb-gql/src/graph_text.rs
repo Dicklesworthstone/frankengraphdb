@@ -683,6 +683,11 @@ struct Parser<'a> {
     /// The host's pinned tzdb, carried by every temporal constructor the
     /// statement reads (fgdb-txbg9): named zones resolve only through it.
     zones: Option<crate::GqlTimeZones>,
+    /// The read composition entry lets a root MATCH WHERE that needs the
+    /// value language run as a row filter after the match (fgdb-1c29d).
+    defer_where: bool,
+    /// The lexer and token at that WHERE keyword, once it was deferred.
+    deferred_where: Option<(Lexer<'a>, Token<'a>)>,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -759,6 +764,8 @@ impl<'a> Parser<'a> {
             aggregate_argument: false,
             having_operand: false,
             zones: None,
+            defer_where: false,
+            deferred_where: None,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),

@@ -568,7 +568,13 @@ impl<'a> Parser<'a> {
         if let Some(path) = self.syntax.path {
             self.syntax.filters.push(Filter::PathCapture(path));
         }
-        if self.take_word("WHERE")? {
+        if self.defer_where && self.is_word("WHERE") && self.where_needs_values()? {
+            // A predicate over list or path values runs as a row filter after
+            // the match, at an implicit `WITH *` (fgdb-1c29d). The composition
+            // entry re-reads it from here.
+            self.deferred_where = Some((self.lexer.clone(), self.current));
+            self.skip_where()?;
+        } else if self.take_word("WHERE")? {
             self.scoped_predicates(true)?;
         }
         loop {
@@ -607,6 +613,119 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(optional)
+    }
+
+    /// Whether the WHERE at the current token needs the value language
+    /// (fgdb-1c29d): a list quantifier, a list comprehension, a list or path
+    /// function, or IN over a computed list. Pattern predicates accept none
+    /// of these, so a WHERE without one keeps its exact pattern lowering.
+    /// `nodes(p)` and `edges(p)` at depth zero are path predicates; inside
+    /// parentheses (`size(nodes(p))`) they are list values.
+    fn where_needs_values(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut depth = 0_usize;
+        let mut previous: Option<TokenKind<'a>> = None;
+        loop {
+            let token = lexer.next()?;
+            let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')));
+            let mut ahead = lexer.clone();
+            let next = ahead.next()?.kind;
+            let binds = |ahead: &mut Lexer<'a>| -> Result<bool, GraphPatternTextError> {
+                Ok(matches!(ahead.next()?.kind, TokenKind::Word(word)
+                    if word.eq_ignore_ascii_case("IN")))
+            };
+            match token.kind {
+                TokenKind::End => return Ok(false),
+                TokenKind::Word(word) if depth == 0 && !key && Self::ends_where(word, previous) => {
+                    return Ok(false);
+                }
+                TokenKind::Word(word) if !key && matches!(next, TokenKind::Punct(b'(')) => {
+                    let list_function = [
+                        "relationships",
+                        "labels",
+                        "keys",
+                        "reduce",
+                        "head",
+                        "last",
+                        "tail",
+                        "reverse",
+                        "range",
+                    ]
+                    .iter()
+                    .any(|name| word.eq_ignore_ascii_case(name));
+                    let path_list = depth > 0
+                        && (word.eq_ignore_ascii_case("nodes")
+                            || word.eq_ignore_ascii_case("edges"));
+                    let quantifier = ["all", "any", "none", "single"]
+                        .iter()
+                        .any(|name| word.eq_ignore_ascii_case(name))
+                        && {
+                            ahead.next()?;
+                            binds(&mut ahead)?
+                        };
+                    if list_function || path_list || quantifier {
+                        return Ok(true);
+                    }
+                }
+                TokenKind::Punct(b'[')
+                    if matches!(next, TokenKind::Word(_)) && binds(&mut ahead)? =>
+                {
+                    return Ok(true);
+                }
+                TokenKind::Word(word)
+                    if !key
+                        && word.eq_ignore_ascii_case("IN")
+                        && !matches!(next, TokenKind::Punct(b'[') | TokenKind::Parameter(_)) =>
+                {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            match token.kind {
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            previous = Some(token.kind);
+        }
+    }
+
+    /// Step past a deferred WHERE and its predicate, to the next clause.
+    fn skip_where(&mut self) -> Result<(), GraphPatternTextError> {
+        self.advance()?;
+        let mut depth = 0_usize;
+        let mut previous: Option<TokenKind<'a>> = None;
+        loop {
+            let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')));
+            match self.current.kind {
+                TokenKind::End => return Ok(()),
+                TokenKind::Word(word) if depth == 0 && !key && Self::ends_where(word, previous) => {
+                    return Ok(());
+                }
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            previous = Some(self.current.kind);
+            self.advance()?;
+        }
+    }
+
+    /// A clause keyword that ends a root WHERE predicate at depth zero. The
+    /// WITH of `STARTS WITH` or `ENDS WITH` is an operator, not a clause.
+    fn ends_where(word: &str, previous: Option<TokenKind<'_>>) -> bool {
+        if word.eq_ignore_ascii_case("WITH")
+            && matches!(previous, Some(TokenKind::Word(previous))
+                if previous.eq_ignore_ascii_case("STARTS") || previous.eq_ignore_ascii_case("ENDS"))
+        {
+            return false;
+        }
+        [
+            "RETURN", "WITH", "MATCH", "OPTIONAL", "UNWIND", "ORDER", "SKIP", "LIMIT", "UNION",
+            "CALL", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "FOREACH",
+        ]
+        .iter()
+        .any(|clause| word.eq_ignore_ascii_case(clause))
     }
 
     fn starts_path_binding(&self) -> Result<bool, GraphPatternTextError> {
