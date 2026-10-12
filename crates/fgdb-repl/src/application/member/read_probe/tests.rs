@@ -342,7 +342,7 @@ fn cancellation_stale_replies_and_stepdown_preserve_the_owned_read_identity() {
     assert!(members[0].confirm_read_index(&id, ack).unwrap());
     immediate(members[0].step(Event::LivenessTimeout)).unwrap();
     let output = immediate(members[0].step(Event::LivenessTimeout)).unwrap();
-    assert_eq!(output.leadership_lost, [id.clone()]);
+    assert_eq!(output.leadership_lost, std::slice::from_ref(&id));
     assert_eq!(members[0].pending_reads(), 0);
     assert!(matches!(
         members[0].read_index_probes(&id),
