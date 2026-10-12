@@ -49,8 +49,8 @@
 //! This is exact fusion of selected candidates, not an exhaustive hybrid
 //! top-k; `ann` remains approximate. It is not a durable index definition.
 
-use super::{graph, indexed};
 use super::{Meter, Options, Scan, SharedWork};
+use super::{graph, indexed};
 use crate::query::ProcedureError;
 use crate::{GqlError, ReadError, Snapshot, VertexRow};
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};

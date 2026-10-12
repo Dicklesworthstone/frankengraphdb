@@ -758,7 +758,13 @@ mod batch_tests {
     fn every_batch_size_preserves_bag_occurrences_and_physical_columns() {
         let plan = FreeJoinPlan::binary(vec![V(1), V(0)], vec![V(2), V(1)]).unwrap();
         let left = vec![vec![2, 10], vec![2, 10], vec![3, 11]];
-        let right = vec![vec![20, 2], vec![20, 2], vec![20, 2], vec![21, 2], vec![22, 3]];
+        let right = vec![
+            vec![20, 2],
+            vec![20, 2],
+            vec![20, 2],
+            vec![21, 2],
+            vec![22, 3],
+        ];
         // Independent occurrence-by-occurrence natural join, not a trie or
         // multiplicity counter. The physical order here is [1, 0, 2].
         let mut expected = Vec::new();
@@ -775,20 +781,30 @@ mod batch_tests {
         for size in 1..=12 {
             let mut cursor = join.batch_cursor();
             let mut actual = Vec::new();
-            while let Some(batch) = cursor.next_batch(limit(size), &mut |_| Ok::<_, ()>(())).unwrap() {
+            while let Some(batch) = cursor
+                .next_batch(limit(size), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+            {
                 assert_eq!(batch.variables(), &[V(1), V(0), V(2)]);
                 assert!((1..=size).contains(&batch.row_count()));
-                assert!(batch.columns().iter().all(|column| column.len() == batch.row_count()));
+                assert!(
+                    batch
+                        .columns()
+                        .iter()
+                        .all(|column| column.len() == batch.row_count())
+                );
                 actual.extend(rows(&batch));
             }
             assert_eq!(actual, expected, "batch size {size}");
             assert!(cursor.is_finished());
             assert!(!cursor.is_failed());
             assert_eq!(cursor.positions.capacity(), 0);
-            assert!(cursor
-                .next_batch(limit(1), &mut |_| -> Result<(), ()> { panic!("exhausted") })
-                .unwrap()
-                .is_none());
+            assert!(
+                cursor
+                    .next_batch(limit(1), &mut |_| -> Result<(), ()> { panic!("exhausted") })
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 
@@ -824,10 +840,12 @@ mod batch_tests {
         assert!(!cursor.is_finished());
         cursor.close();
         assert_eq!(cursor.positions.capacity(), 0);
-        assert!(cursor
-            .next_batch(limit(1), &mut |_| -> Result<(), ()> { panic!("closed") })
-            .unwrap()
-            .is_none());
+        assert!(
+            cursor
+                .next_batch(limit(1), &mut |_| -> Result<(), ()> { panic!("closed") })
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -835,7 +853,10 @@ mod batch_tests {
         let plan = FreeJoinPlan::binary(vec![V(0)], vec![V(1)]).unwrap();
         let data = inputs(
             &plan,
-            &[vec![vec![1], vec![1], vec![2]], vec![vec![7], vec![8], vec![8]]],
+            &[
+                vec![vec![1], vec![1], vec![2]],
+                vec![vec![7], vec![8], vec![8]],
+            ],
         );
         let join = FreeJoin::new(&plan, &data).unwrap();
         let mut complete = join.batch_cursor();
@@ -853,7 +874,10 @@ mod batch_tests {
             })
             .unwrap()
             .unwrap();
-        assert_eq!(rows(&second), vec![vec![1, 8], vec![1, 8], vec![2, 7], vec![2, 8]]);
+        assert_eq!(
+            rows(&second),
+            vec![vec![1, 8], vec![1, 8], vec![2, 7], vec![2, 8]]
+        );
         let last = complete
             .next_batch(limit(4), &mut |_| Ok::<_, ()>(()))
             .unwrap()
@@ -869,11 +893,7 @@ mod batch_tests {
             let result = cursor.next_batch(limit(4), &mut |_| {
                 let current = at;
                 at += 1;
-                if current == refusal {
-                    Err(())
-                } else {
-                    Ok(())
-                }
+                if current == refusal { Err(()) } else { Ok(()) }
             });
             assert!(matches!(result, Err(FactorizedReadError::Control(()))));
             assert_eq!(rows(&delivered), expected_first);
@@ -925,18 +945,21 @@ mod batch_tests {
             .unwrap()
             .unwrap();
         assert_eq!(rows(&batch), vec![Vec::<i64>::new()]);
-        assert!(cursor
-            .next_batch(limit(3), &mut |_| Ok::<_, ()>(()))
-            .unwrap()
-            .is_none());
+        assert!(
+            cursor
+                .next_batch(limit(3), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
 
         let empty_plan = FreeJoinPlan::generic(vec![vec![V(0)]], vec![V(0)]).unwrap();
         let data = inputs(&empty_plan, &[Vec::new()]);
         let join = FreeJoin::new(&empty_plan, &data).unwrap();
-        assert!(join
-            .batch_cursor()
-            .next_batch(limit(3), &mut |_| Ok::<_, ()>(()))
-            .unwrap()
-            .is_none());
+        assert!(
+            join.batch_cursor()
+                .next_batch(limit(3), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
     }
 }

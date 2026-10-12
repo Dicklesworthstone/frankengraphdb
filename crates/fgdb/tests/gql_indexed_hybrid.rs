@@ -8,7 +8,9 @@ use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphSetText};
-use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
 use std::cell::Cell;
 
@@ -40,7 +42,9 @@ fn props(id: i64) -> Vec<(PropertyKeyId, CanonicalScalar)> {
 }
 
 async fn open(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
-    let mut db = Database::open_memory(cx, DatabaseKeys::new([0xf1; 32], NS, [0xf3; 32])).await.unwrap();
+    let mut db = Database::open_memory(cx, DatabaseKeys::new([0xf1; 32], NS, [0xf3; 32]))
+        .await
+        .unwrap();
     let mut batch = WriteBatch::new(R);
     for id in [1, 2, 3, 4, 9] {
         batch.create_vertex(VId(id), vec![LabelId(1)], props(id as i64));
@@ -69,7 +73,11 @@ async fn open(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
 
 fn statement(access: Option<&str>, extra: &str) -> String {
     let access = access.map_or_else(String::new, |access| format!(", graph_access => {access}"));
-    let extra = if extra.is_empty() { String::new() } else { format!(", {extra}") };
+    let extra = if extra.is_empty() {
+        String::new()
+    } else {
+        format!(", {extra}")
+    };
     format!(
         "CALL hybrid.search(seeds => [1], max_hops => 2, relation => 'R', \
          candidates => 1, k => 1{access}{extra}) \
@@ -101,21 +109,46 @@ fn native_indexed_selection_composes_and_matches_every_materialized_lane() {
             "eligible => [3], vector => [0], vector_properties => ['x']",
             "eligible => [3], text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x']",
         ] {
-            let expected = db.query(&c.query(), &statement(None, extra), &params, symbols, policy()).unwrap();
+            let expected = db
+                .query(
+                    &c.query(),
+                    &statement(None, extra),
+                    &params,
+                    symbols,
+                    policy(),
+                )
+                .unwrap();
             for mode in ["'materialized'", "'indexed'", "NULL"] {
-                let result = db.query(&c.query(), &statement(Some(mode), extra), &params, symbols, policy()).unwrap();
+                let result = db
+                    .query(
+                        &c.query(),
+                        &statement(Some(mode), extra),
+                        &params,
+                        symbols,
+                        policy(),
+                    )
+                    .unwrap();
                 assert_eq!(result, expected, "mode={mode}, {extra}");
             }
             let actual = rows(expected);
             assert_eq!(actual.len(), 1);
             assert_eq!(actual[0][0], QueryValue::Value(GraphValue::Vertex(VId(3))));
-            assert_eq!(actual[0][2], int(2), "rejected vertex 2 must remain a transit vertex");
+            assert_eq!(
+                actual[0][2],
+                int(2),
+                "rejected vertex 2 must remain a transit vertex"
+            );
             assert_eq!(actual[0][3], int(1), "filter precedes candidate truncation");
         }
         let text = "CALL hybrid.search(seeds => [9], max_hops => 0, include_seeds => true, \
                     graph_access => 'indexed') YIELD node, graph_hops RETURN node, graph_hops";
-        assert_eq!(rows(db.query(&c.query(), text, &params, symbols, policy()).unwrap()),
-            vec![vec![QueryValue::Value(GraphValue::Vertex(VId(9))), int(0)]]);
+        assert_eq!(
+            rows(
+                db.query(&c.query(), text, &params, symbols, policy())
+                    .unwrap()
+            ),
+            vec![vec![QueryValue::Value(GraphValue::Vertex(VId(9))), int(0)]]
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -137,18 +170,41 @@ fn native_indexed_source_reuses_one_prepared_template_and_pinned_history() {
                 GraphValue::Vertex(VId(3)),
                 GraphValue::Scalar(CanonicalScalar::Int(3 - source)),
             ])];
-            assert_eq!(db.execute_graph_set_governed(&c.query(), &query, policy()).unwrap().value, expected);
+            assert_eq!(
+                db.execute_graph_set_governed(&c.query(), &query, policy())
+                    .unwrap()
+                    .value,
+                expected
+            );
         }
         let params = GqlParameters::new().with_int64("source", 1).unwrap();
-        let before = pinned.query(&c.query(), text, &params, symbols, policy()).unwrap();
+        let before = pinned
+            .query(&c.query(), text, &params, symbols, policy())
+            .unwrap();
         let mut edit = WriteBatch::new(R);
         edit.delete_edge(EId(2));
         db.write(&c.commit(), edit).await.unwrap();
-        assert!(rows(db.query(&c.query(), text, &params, symbols, policy()).unwrap()).is_empty());
+        assert!(
+            rows(
+                db.query(&c.query(), text, &params, symbols, policy())
+                    .unwrap()
+            )
+            .is_empty()
+        );
         db.compact(&c.commit()).await.unwrap();
-        assert_eq!(pinned.query(&c.query(), text, &params, symbols, policy()).unwrap(), before);
+        assert_eq!(
+            pinned
+                .query(&c.query(), text, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
         drop(db);
-        assert_eq!(pinned.query(&c.query(), text, &params, symbols, policy()).unwrap(), before);
+        assert_eq!(
+            pinned
+                .query(&c.query(), text, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -159,30 +215,68 @@ fn a_tight_native_work_budget_proves_indexed_execution_not_an_eager_fallback() {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let db = open(&c.commit(), false).await;
         let params = GqlParameters::new();
-        let prepare = |mode| PreparedGraphSetText::prepare(&statement(Some(mode), "eligible => [3]"), symbols)
-            .unwrap().bind_parameters(&params).unwrap();
+        let prepare = |mode| {
+            PreparedGraphSetText::prepare(&statement(Some(mode), "eligible => [3]"), symbols)
+                .unwrap()
+                .bind_parameters(&params)
+                .unwrap()
+        };
         let indexed = prepare("'indexed'");
         let materialized = prepare("'materialized'");
-        let actual = db.execute_graph_set_governed(&c.query(), &indexed, policy()).unwrap();
-        let eager = db.execute_graph_set_governed(&c.query(), &materialized, policy()).unwrap();
+        let actual = db
+            .execute_graph_set_governed(&c.query(), &indexed, policy())
+            .unwrap();
+        let eager = db
+            .execute_graph_set_governed(&c.query(), &materialized, policy())
+            .unwrap();
         assert_eq!(actual.value, eager.value);
-        assert!(actual.evaluator.work_units < eager.evaluator.work_units,
-            "the disconnected edge population must distinguish the source profiles");
-        let exact = GqlQueryPolicy::new(actual.rows.snapshot_records, actual.rows.result_rows,
-            actual.evaluator.work_units, actual.evaluator.scratch_entries);
-        assert_eq!(db.execute_graph_set_governed(&c.query(), &indexed, exact).unwrap().value, actual.value);
-        assert!(db.execute_graph_set_governed(&c.query(), &materialized, exact).is_err());
+        assert!(
+            actual.evaluator.work_units < eager.evaluator.work_units,
+            "the disconnected edge population must distinguish the source profiles"
+        );
+        let exact = GqlQueryPolicy::new(
+            actual.rows.snapshot_records,
+            actual.rows.result_rows,
+            actual.evaluator.work_units,
+            actual.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            db.execute_graph_set_governed(&c.query(), &indexed, exact)
+                .unwrap()
+                .value,
+            actual.value
+        );
+        assert!(
+            db.execute_graph_set_governed(&c.query(), &materialized, exact)
+                .is_err()
+        );
         let mut short = exact;
         short.evaluator.max_work_units -= 1;
-        assert!(db.execute_graph_set_governed(&c.query(), &indexed, short).is_err());
+        assert!(
+            db.execute_graph_set_governed(&c.query(), &indexed, short)
+                .is_err()
+        );
         let mut scratch = exact;
         scratch.evaluator.max_scratch_entries -= 1;
-        assert!(db.execute_graph_set_governed(&c.query(), &indexed, scratch).is_err());
+        assert!(
+            db.execute_graph_set_governed(&c.query(), &indexed, scratch)
+                .is_err()
+        );
         // A final empty page does not excuse a source or endpoint-filter refusal.
         let empty = PreparedGraphSetText::prepare(
-            &format!("{} LIMIT 0", statement(Some("'indexed'"), "eligible => [-1]")), symbols,
-        ).unwrap().bind_parameters(&params).unwrap();
-        assert!(db.execute_graph_set_governed(&c.query(), &empty, policy()).is_err());
+            &format!(
+                "{} LIMIT 0",
+                statement(Some("'indexed'"), "eligible => [-1]")
+            ),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&params)
+        .unwrap();
+        assert!(
+            db.execute_graph_set_governed(&c.query(), &empty, policy())
+                .is_err()
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -193,8 +287,23 @@ fn prepared_authorized_indexed_calls_mask_hidden_sources_and_recheck_expiry() {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let full = open(&c.commit(), true).await;
         let clean = open(&c.commit(), false).await;
-        let authority = Authority::new(AuthKey::from_seed(3904), NS, "host-graph", SchemaEpoch(0), 1).unwrap();
-        let mut grant = Grant::read_only("main", 1000, QueryLimits { max_nodes: 100, max_work: 10_000_000, max_rows: 100 });
+        let authority = Authority::new(
+            AuthKey::from_seed(3904),
+            NS,
+            "host-graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 100,
+                max_work: 10_000_000,
+                max_rows: 100,
+            },
+        );
         grant.labels = Scope::only([LabelId(1)]);
         grant.relations = Scope::only([R]);
         grant.properties = Scope::only([BODY, X]);
@@ -203,14 +312,48 @@ fn prepared_authorized_indexed_calls_mask_hidden_sources_and_recheck_expiry() {
         let text = statement(Some("'indexed'"),
             "eligible => [3, 90], text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x']")
             .replace(", relation => 'R'", "");
-        let expected = clean.query(&c.query(), &text, &params, symbols, policy()).unwrap();
-        let privileged = full.query(&c.query(), &text, &params, symbols, policy()).unwrap();
-        assert_ne!(privileged, expected, "the hidden shortcut must be an active control");
-        assert_eq!(full.query_authorized(&c.query(), &authority, &token, "main", &text, &params, symbols, policy(), || 100).unwrap(), expected);
+        let expected = clean
+            .query(&c.query(), &text, &params, symbols, policy())
+            .unwrap();
+        let privileged = full
+            .query(&c.query(), &text, &params, symbols, policy())
+            .unwrap();
+        assert_ne!(
+            privileged, expected,
+            "the hidden shortcut must be an active control"
+        );
+        assert_eq!(
+            full.query_authorized(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                &text,
+                &params,
+                symbols,
+                policy(),
+                || 100
+            )
+            .unwrap(),
+            expected
+        );
         let now = Cell::new(100_u64);
-        let mut session = full.authorized_read_session(&c.query(), &authority, &token, "main", symbols, policy(), || now.get()).unwrap();
+        let mut session = full
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                symbols,
+                policy(),
+                || now.get(),
+            )
+            .unwrap();
         let prepared = session.prepare(&c.query(), &text, &params).unwrap();
-        assert_eq!(session.execute(&c.query(), &prepared, &params).unwrap(), expected);
+        assert_eq!(
+            session.execute(&c.query(), &prepared, &params).unwrap(),
+            expected
+        );
         now.set(1100);
         assert!(session.execute(&c.query(), &prepared, &params).is_err());
     });
@@ -232,17 +375,32 @@ fn explicit_indexed_access_refuses_in_transactions_without_losing_staged_effects
         let params = GqlParameters::new();
         for tail in ["", " LIMIT 0"] {
             let text = format!("{}{tail}", statement(Some("'indexed'"), "eligible => [10]"));
-            let error = txn.query(&db, &c.query(), &text, &params, symbols, policy()).unwrap_err();
-            assert!(error.to_string().contains("indexed graph access is not available over transaction overlays"));
+            let error = txn
+                .query(&db, &c.query(), &text, &params, symbols, policy())
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("indexed graph access is not available over transaction overlays")
+            );
             assert_eq!(txn.staged_effect_digest().unwrap(), before);
             assert_eq!(db.frontier().unwrap(), basis);
         }
         let text = statement(Some("'materialized'"), "eligible => [10]");
-        let staged = rows(txn.query(&db, &c.query(), &text, &params, symbols, policy()).unwrap());
+        let staged = rows(
+            txn.query(&db, &c.query(), &text, &params, symbols, policy())
+                .unwrap(),
+        );
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0][0], QueryValue::Value(GraphValue::Vertex(VId(10))));
         assert_eq!(staged[0][2], int(2));
-        assert!(rows(db.query(&c.query(), &text, &params, symbols, policy()).unwrap()).is_empty());
+        assert!(
+            rows(
+                db.query(&c.query(), &text, &params, symbols, policy())
+                    .unwrap()
+            )
+            .is_empty()
+        );
         txn.abort();
         assert_eq!(c.outstanding_obligations(), 0);
     });
@@ -257,18 +415,33 @@ fn malformed_or_orphan_source_profiles_refuse_even_with_limit_zero() {
         let params = GqlParameters::new();
         for value in ["'auto'", "1", "true", "['indexed']"] {
             let text = format!("{} LIMIT 0", statement(Some(value), ""));
-            assert!(db.query(&c.query(), &text, &params, symbols, policy()).is_err(), "{value}");
+            assert!(
+                db.query(&c.query(), &text, &params, symbols, policy())
+                    .is_err(),
+                "{value}"
+            );
         }
         for access in ["'indexed'", "'materialized'"] {
-            let text = format!("CALL hybrid.search(text => 'graph', text_property => 'body', \
-                graph_access => {access}) YIELD node RETURN node LIMIT 0");
-            assert!(db.query(&c.query(), &text, &params, symbols, policy()).is_err());
+            let text = format!(
+                "CALL hybrid.search(text => 'graph', text_property => 'body', \
+                graph_access => {access}) YIELD node RETURN node LIMIT 0"
+            );
+            assert!(
+                db.query(&c.query(), &text, &params, symbols, policy())
+                    .is_err()
+            );
         }
         let duplicate = statement(Some("'indexed'"), "graph_access => 'materialized'");
-        assert!(db.query(&c.query(), &duplicate, &params, symbols, policy()).is_err());
+        assert!(
+            db.query(&c.query(), &duplicate, &params, symbols, policy())
+                .is_err()
+        );
         let late = "CALL hybrid.search(seeds => [1], max_hops => 2, graph_access => 'indexed') \
                     YIELD node RETURN 1 / 0 AS fail LIMIT 0";
-        assert!(db.query(&c.query(), late, &params, symbols, policy()).is_err());
+        assert!(
+            db.query(&c.query(), late, &params, symbols, policy())
+                .is_err()
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

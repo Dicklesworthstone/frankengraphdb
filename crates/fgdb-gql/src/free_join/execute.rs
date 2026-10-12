@@ -771,11 +771,7 @@ mod cursor_tests {
                     match cursor.next_binding(&mut |_| {
                         let current = at;
                         at += 1;
-                        if current == refusal {
-                            Err(())
-                        } else {
-                            Ok(())
-                        }
+                        if current == refusal { Err(()) } else { Ok(()) }
                     }) {
                         Ok(Some(binding)) => prefix.push((
                             binding.values().copied().collect::<Vec<_>>(),
