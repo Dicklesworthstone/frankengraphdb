@@ -808,8 +808,7 @@ impl<'s> Connection<'s> {
                 let (name, db) = self.database(extra)?;
                 self.output_database = Some(db);
                 let token = self.token.as_ref().expect("authenticated");
-                let generation =
-                    causal::schema_generation(cx, db, token, &name, extra).await?;
+                let generation = causal::schema_generation(cx, db, token, &name, extra).await?;
                 (name, db, None, generation)
             }
         };

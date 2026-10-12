@@ -86,7 +86,10 @@ fn canonical_bookmarks_share_the_write_grammar_and_full_u64_domain() {
             Value::string("fgdb:test:7"),
         ]),
     )];
-    assert_eq!(options(&multiple, "test").unwrap().minimum_seq, CommitSeq(7));
+    assert_eq!(
+        options(&multiple, "test").unwrap().minimum_seq,
+        CommitSeq(7)
+    );
     assert_eq!(
         options(&extra(u64::MAX), "test").unwrap().minimum_seq,
         CommitSeq(u64::MAX),
@@ -100,7 +103,9 @@ fn canonical_bookmarks_share_the_write_grammar_and_full_u64_domain() {
     assert!(require_frontier(CommitSeq(7), CommitSeq(7)).is_ok());
     assert!(require_frontier(CommitSeq(8), CommitSeq(7)).is_ok());
     assert_eq!(
-        require_frontier(CommitSeq(6), CommitSeq(7)).unwrap_err().code,
+        require_frontier(CommitSeq(6), CommitSeq(7))
+            .unwrap_err()
+            .code,
         UNREACHED,
     );
 }
@@ -133,7 +138,11 @@ fn malformed_and_foreign_bookmarks_never_collapse_into_an_empty_requirement() {
         )];
         assert_eq!(options(&extra, "test").unwrap_err().code, INVALID);
     }
-    for value in [Value::string("fgdb:test:1"), Value::Int(1), Value::Map(vec![])] {
+    for value in [
+        Value::string("fgdb:test:1"),
+        Value::Int(1),
+        Value::Map(vec![]),
+    ] {
         assert_eq!(
             options(&vec![("bookmarks".into(), value)], "test")
                 .unwrap_err()
@@ -150,7 +159,9 @@ fn transaction_options_cannot_change_authority_or_move_a_pinned_snapshot() {
     }
     for mode in [Value::Null, Value::Bool(true), Value::string("read")] {
         assert_eq!(
-            options(&vec![("mode".into(), mode)], "test").unwrap_err().code,
+            options(&vec![("mode".into(), mode)], "test")
+                .unwrap_err()
+                .code,
             INVALID,
         );
     }
@@ -158,7 +169,9 @@ fn transaction_options_cannot_change_authority_or_move_a_pinned_snapshot() {
         assert!(options(&vec![(key.into(), Value::Null)], "test").is_ok());
         for value in [Value::Int(0), Value::Int(10), Value::string("other")] {
             assert_eq!(
-                options(&vec![(key.into(), value)], "test").unwrap_err().code,
+                options(&vec![(key.into(), value)], "test")
+                    .unwrap_err()
+                    .code,
                 INVALID,
             );
         }
@@ -170,7 +183,9 @@ fn transaction_options_cannot_change_authority_or_move_a_pinned_snapshot() {
     assert!(in_transaction(&vec![], "test", CommitSeq(1)).is_ok());
     assert!(in_transaction(&extra(1), "test", CommitSeq(1)).is_ok());
     assert_eq!(
-        in_transaction(&extra(2), "test", CommitSeq(1)).unwrap_err().code,
+        in_transaction(&extra(2), "test", CommitSeq(1))
+            .unwrap_err()
+            .code,
         INVALID,
     );
     for db in [Value::string("other"), Value::Int(1)] {
@@ -201,14 +216,21 @@ fn future_bookmarks_refuse_before_any_query_or_transaction_result_escapes() {
             "CALL db.propertyKeys()",
         ] {
             assert_eq!(
-                client.run(&root, text, &vec![], &extra(1)).await.unwrap_err().code,
+                client
+                    .run(&root, text, &vec![], &extra(1))
+                    .await
+                    .unwrap_err()
+                    .code,
                 UNREACHED,
                 "{text}",
             );
             assert!(client.pending.is_none());
             assert!(client.transaction.is_none());
         }
-        assert_eq!(client.begin(&root, &extra(1)).await.unwrap_err().code, UNREACHED);
+        assert_eq!(
+            client.begin(&root, &extra(1)).await.unwrap_err().code,
+            UNREACHED
+        );
         assert!(client.transaction.is_none());
         let mut wire = io();
         client
@@ -250,7 +272,10 @@ fn autocommit_reads_observe_satisfied_write_bookmarks_but_keep_explicit_history(
         assert_markers(&reader, 1);
         assert_eq!(reader.pending.as_ref().unwrap().seq, Some(CommitSeq(1)));
         let done = reader.pull(&root, &mut io(), -1, true).await.unwrap();
-        assert_eq!(get(&done, "bookmark").and_then(Value::as_str), Some("fgdb:test:1"));
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:test:1")
+        );
         // The causal admission floor is not a replacement for intentional time travel.
         reader
             .run(
@@ -352,14 +377,22 @@ fn schema_fast_paths_enforce_bookmarks_and_reject_unsupported_transaction_option
         let mut writer = connection(&server, token.clone());
         write_vertex(&root, &mut writer).await;
         let mut reader = connection(&server, token);
-        for text in ["CALL db.labels()", "CALL db.relationshipTypes()", "CALL db.propertyKeys()"] {
+        for text in [
+            "CALL db.labels()",
+            "CALL db.relationshipTypes()",
+            "CALL db.propertyKeys()",
+        ] {
             reader.run(&root, text, &vec![], &extra(1)).await.unwrap();
             // Operator bindings are not graph rows: do not fabricate a schema bookmark.
             assert!(reader.pending.as_ref().unwrap().seq.is_none());
             let done = reader.pull(&root, &mut io(), -1, true).await.unwrap();
             assert!(get(&done, "bookmark").is_none());
             assert_eq!(
-                reader.run(&root, text, &vec![], &extra(2)).await.unwrap_err().code,
+                reader
+                    .run(&root, text, &vec![], &extra(2))
+                    .await
+                    .unwrap_err()
+                    .code,
                 UNREACHED,
             );
         }
@@ -368,7 +401,10 @@ fn schema_fast_paths_enforce_bookmarks_and_reject_unsupported_transaction_option
             ("tx_timeout", Value::Int(0)),
             ("tx_timeout", Value::Int(1000)),
             ("mode", Value::string("invalid")),
-            ("bookmarks", Value::List(vec![Value::string("fgdb:other:1")])),
+            (
+                "bookmarks",
+                Value::List(vec![Value::string("fgdb:other:1")]),
+            ),
         ] {
             let input = vec![
                 ("db".into(), Value::string("test")),
@@ -376,7 +412,11 @@ fn schema_fast_paths_enforce_bookmarks_and_reject_unsupported_transaction_option
             ];
             for text in ["RETURN 7 AS marker", "CALL db.labels()"] {
                 assert_eq!(
-                    reader.run(&root, text, &vec![], &input).await.unwrap_err().code,
+                    reader
+                        .run(&root, text, &vec![], &input)
+                        .await
+                        .unwrap_err()
+                        .code,
                     INVALID,
                 );
                 assert!(reader.pending.is_none());
@@ -425,9 +465,15 @@ fn read_bookmarks_do_not_grant_write_rights_or_reattach_a_recovered_transaction(
         assert!(reader.pending.is_none());
         reader.begin(&root, &extra(0)).await.unwrap();
         fail_after_marker(&root, db, 0xca05).await;
-        assert!(matches!(settled(db).await, crate::DatabaseStatus::Ready { generation: 2 }));
+        assert!(matches!(
+            settled(db).await,
+            crate::DatabaseStatus::Ready { generation: 2 }
+        ));
         assert!(
-            reader.run(&root, "RETURN 7 AS marker", &vec![], &vec![]).await.is_err()
+            reader
+                .run(&root, "RETURN 7 AS marker", &vec![], &vec![])
+                .await
+                .is_err()
         );
         assert!(reader.pending.is_none());
         // A new request may use the recovered root, never the old transaction.
