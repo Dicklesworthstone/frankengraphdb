@@ -1041,10 +1041,10 @@ async fn load_gql_fixture(
             key: k.to_string(),
             labels: vec![PERSON],
             props: vec![
-                (K_KEY, CanonicalScalar::Int(key)),
-                (NAME, CanonicalScalar::Int(name)),
-                (TEAM, CanonicalScalar::Int(team)),
-                (AGE, CanonicalScalar::Int(age)),
+                (K_KEY, CanonicalScalar::Int(key).into()),
+                (NAME, CanonicalScalar::Int(name).into()),
+                (TEAM, CanonicalScalar::Int(team).into()),
+                (AGE, CanonicalScalar::Int(age).into()),
             ],
         })
     });
