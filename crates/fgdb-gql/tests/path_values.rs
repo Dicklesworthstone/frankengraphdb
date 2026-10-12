@@ -615,11 +615,13 @@ fn chain_rows(
     // A conjunction with `type(r)` filters inside the pattern, so its accessors
     // serve the same names and weights as the row reader above.
     let edge_type = CanonicalScalar::ucs_basic_text("R").unwrap();
-    let names = [
-        CanonicalScalar::ucs_basic_text("a").unwrap(),
-        CanonicalScalar::ucs_basic_text("b").unwrap(),
+    let names: [fgdb_types::CanonicalPropertyValue; 2] = [
+        CanonicalScalar::ucs_basic_text("a").unwrap().into(),
+        CanonicalScalar::ucs_basic_text("b").unwrap().into(),
     ];
-    let weights = edges.map(|(EId(id), ..)| CanonicalScalar::Int(id as i64));
+    let weights = edges.map(|(EId(id), ..)| {
+        fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(id as i64))
+    });
     let patterns = |pattern: &PreparedGraphPattern<GraphValueRow>, remaining: GqlQueryPolicy| {
         pattern.plan().execute_governed_with_element_accessors(
             edges.len() as u64 + 4,
