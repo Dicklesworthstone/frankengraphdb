@@ -291,6 +291,37 @@ impl GqlParameters {
         self.values.get(name).cloned()
     }
 
+    /// openCypher and Bolt clients send every integer as a signed Int64,
+    /// while SKIP and LIMIT parameters are declared UInt64 (fgdb-3dnpu). For
+    /// each UInt64 declaration in `schema`, a non-negative Int64 argument is
+    /// that same unsigned value: the returned map holds it as UInt64, so a
+    /// binder and everything it binds only ever see the declared type. A
+    /// negative argument is left as it is and still refuses as a type
+    /// mismatch. Nothing else changes, and the map is borrowed when nothing
+    /// converts. Both kinds have the same transcript size.
+    #[must_use]
+    pub fn admit_unsigned<'s>(&'s self, schema: &[GqlParameterSpec]) -> std::borrow::Cow<'s, Self> {
+        let unsigned =
+            |spec: &GqlParameterSpec| match (spec.parameter_type, self.values.get(&spec.name)) {
+                (GqlParameterType::UInt64, Some(GqlParameterValue::Int64(value))) => {
+                    u64::try_from(*value).ok()
+                }
+                _ => None,
+            };
+        if !schema.iter().any(|spec| unsigned(spec).is_some()) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut admitted = self.clone();
+        for spec in schema {
+            if let Some(value) = unsigned(spec) {
+                admitted
+                    .values
+                    .insert(spec.name.clone(), GqlParameterValue::UInt64(value));
+            }
+        }
+        std::borrow::Cow::Owned(admitted)
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.values.len()

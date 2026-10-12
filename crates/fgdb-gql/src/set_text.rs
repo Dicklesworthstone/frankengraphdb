@@ -2186,6 +2186,9 @@ impl PreparedGraphSetText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphSet, GraphSetTextError> {
+        // Signed client integers for SKIP/LIMIT parameters (fgdb-3dnpu).
+        let admitted = arguments.admit_unsigned(&self.parameters);
+        let arguments: &GqlParameters = &admitted;
         // Reject the complete argument map before constructing any leaf plan.
         for (spec, &offset) in self.parameters.iter().zip(&self.parameter_offsets) {
             let value = arguments

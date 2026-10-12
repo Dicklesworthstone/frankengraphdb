@@ -2061,6 +2061,9 @@ impl PreparedGraphText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<Vec<GqlParameterValue>, GraphPatternTextError> {
+        // Signed client integers for SKIP/LIMIT parameters (fgdb-3dnpu).
+        let admitted = arguments.admit_unsigned(&self.parameters);
+        let arguments: &GqlParameters = &admitted;
         let mut values = Vec::new();
         for (index, spec) in self.parameters.iter().enumerate() {
             let at = self.parameter_offsets[index];

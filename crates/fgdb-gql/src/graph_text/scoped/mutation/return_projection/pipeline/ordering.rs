@@ -47,6 +47,9 @@ impl crate::set_text::CompoundOrderTemplate {
         input: PreparedGraphSet,
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphSet, GraphSetTextError> {
+        // Signed client integers for SKIP/LIMIT parameters (fgdb-3dnpu).
+        let admitted = arguments.admit_unsigned(&self.parameters);
+        let arguments: &GqlParameters = &admitted;
         let mut values = Vec::with_capacity(self.parameters.len());
         for (spec, &at) in self.parameters.iter().zip(&self.parameter_offsets) {
             let value = arguments

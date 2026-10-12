@@ -631,3 +631,50 @@ fn a_decimal_literal_is_the_float_parameter_of_the_same_value() {
         );
     }
 }
+
+/// fgdb-3dnpu: openCypher and Bolt clients send SKIP and LIMIT arguments as
+/// signed integers. A non-negative Int64 binds exactly as the same UInt64,
+/// to an identical bound plan, in the pattern, set and WITH pipeline
+/// facades. A negative one still refuses as a type mismatch.
+#[test]
+fn signed_page_arguments_bind_as_the_same_unsigned_values() {
+    let arguments = |skip: GqlParameterValue, limit: GqlParameterValue| {
+        let mut parameters = GqlParameters::new();
+        parameters.insert("s", skip).unwrap();
+        parameters.insert("l", limit).unwrap();
+        parameters
+    };
+    let signed = arguments(GqlParameterValue::Int64(1), GqlParameterValue::Int64(2));
+    let unsigned = arguments(GqlParameterValue::UInt64(1), GqlParameterValue::UInt64(2));
+    let negative = arguments(GqlParameterValue::Int64(-1), GqlParameterValue::UInt64(2));
+    let text = "MATCH (n) RETURN n ORDER BY n.p ASC SKIP $s LIMIT $l";
+    let pattern = PreparedGraphText::prepare(text, symbols).unwrap();
+    assert_eq!(
+        pattern.bind_parameters(&signed).unwrap().canonical_bytes(),
+        pattern
+            .bind_parameters(&unsigned)
+            .unwrap()
+            .canonical_bytes()
+    );
+    assert!(matches!(
+        pattern.bind_parameters(&negative).unwrap_err().kind,
+        GraphPatternTextErrorKind::ParameterTypeMismatch {
+            expected: GqlParameterType::UInt64,
+            found: GqlParameterType::Int64,
+        }
+    ));
+    for text in [
+        text,
+        "MATCH (n) WITH n ORDER BY n.p ASC SKIP $s LIMIT $l RETURN n",
+        "UNWIND [3, 1, 2] AS x RETURN x ORDER BY x SKIP $s LIMIT $l",
+    ] {
+        let set = fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(
+            set.bind_parameters(&signed).unwrap().canonical_bytes(),
+            set.bind_parameters(&unsigned).unwrap().canonical_bytes(),
+            "{text}"
+        );
+        assert!(set.bind_parameters(&negative).is_err(), "{text}");
+    }
+}

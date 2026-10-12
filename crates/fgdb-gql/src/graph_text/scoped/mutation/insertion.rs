@@ -995,6 +995,9 @@ impl PreparedGraphInsertText {
             } => {
                 // Use the original registered names, positions and exact-kind
                 // acceptance law. There is no MATCH object to bind or execute.
+                // Signed client integers for SKIP/LIMIT (fgdb-3dnpu).
+                let admitted = arguments.admit_unsigned(parameters);
+                let arguments: &GqlParameters = &admitted;
                 let mut values = Vec::new();
                 for (spec, &at) in parameters.iter().zip(parameter_offsets) {
                     let value = arguments

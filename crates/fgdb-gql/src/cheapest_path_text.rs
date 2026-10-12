@@ -301,6 +301,9 @@ impl PreparedGraphCheapestPathText {
         target: VId,
         arguments: &GqlParameters,
     ) -> Result<BoundGraphCheapestPathQuery, GraphCheapestPathTextError> {
+        // A client's signed K is the same unsigned count (fgdb-3dnpu).
+        let admitted = arguments.admit_unsigned(&self.parameters);
+        let arguments: &GqlParameters = &admitted;
         let mut values = Vec::new();
         for (spec, &at) in self.parameters.iter().zip(&self.parameter_offsets) {
             match arguments.get(&spec.name) {
