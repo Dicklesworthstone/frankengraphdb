@@ -4,7 +4,7 @@
 
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
-use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch, WriteError, WriteTxnError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphSetText};
@@ -218,7 +218,7 @@ fn prepared_authorized_indexed_calls_mask_hidden_sources_and_recheck_expiry() {
 }
 
 #[test]
-fn explicit_indexed_access_refuses_in_transactions_without_losing_staged_effects() {
+fn explicit_indexed_access_reads_staged_effects_and_preserves_them_on_failure() {
     let ((), report) = run_async_under_lab(0xbeac_3905, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let mut db = open(&c.commit(), false).await;
@@ -230,19 +230,23 @@ fn explicit_indexed_access_refuses_in_transactions_without_losing_staged_effects
         txn.write(&mut db, edit).unwrap();
         let before = txn.staged_effect_digest().unwrap();
         let params = GqlParameters::new();
-        for tail in ["", " LIMIT 0"] {
-            let text = format!("{}{tail}", statement(Some("'indexed'"), "eligible => [10]"));
-            let error = txn.query(&db, &c.query(), &text, &params, symbols, policy()).unwrap_err();
-            assert!(error.to_string().contains("indexed graph access is not available over transaction overlays"));
-            assert_eq!(txn.staged_effect_digest().unwrap(), before);
-            assert_eq!(db.frontier().unwrap(), basis);
-        }
         let text = statement(Some("'materialized'"), "eligible => [10]");
         let staged = rows(txn.query(&db, &c.query(), &text, &params, symbols, policy()).unwrap());
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0][0], QueryValue::Value(GraphValue::Vertex(VId(10))));
         assert_eq!(staged[0][2], int(2));
         assert!(rows(db.query(&c.query(), &text, &params, symbols, policy()).unwrap()).is_empty());
+        for tail in ["", " LIMIT 0"] {
+            let text = format!("{}{tail}", statement(Some("'indexed'"), "eligible => [10]"));
+            let actual = rows(txn.query(&db, &c.query(), &text, &params, symbols, policy()).unwrap());
+            assert_eq!(actual, if tail.is_empty() { staged.clone() } else { Vec::new() });
+            for (access, filter) in [("'auto'", "[10]"), ("'indexed'", "[-1]")] {
+                let invalid = format!("{}{tail}", statement(Some(access), &format!("eligible => {filter}")));
+                assert!(txn.query(&db, &c.query(), &invalid, &params, symbols, policy()).is_err());
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                assert_eq!(db.frontier().unwrap(), basis);
+            }
+        }
         txn.abort();
         assert_eq!(c.outstanding_obligations(), 0);
     });
@@ -269,6 +273,150 @@ fn malformed_or_orphan_source_profiles_refuse_even_with_limit_zero() {
         let late = "CALL hybrid.search(seeds => [1], max_hops => 2, graph_access => 'indexed') \
                     YIELD node RETURN 1 / 0 AS fail LIMIT 0";
         assert!(db.query(&c.query(), late, &params, symbols, policy()).is_err());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Source IDs are rebound against the SAME staged topology and projected
+/// properties. The committed graph cannot supply either new endpoint.
+#[test]
+fn transaction_indexed_parameters_and_all_lanes_follow_staged_topology_and_rollback() {
+    let ((), report) = run_async_under_lab(0xbeac_4201, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = open(&c.commit(), false).await;
+        let basis = db.frontier().unwrap();
+        let mut txn = db.begin(&c.txn()).unwrap();
+        let mut edit = WriteBatch::new(R);
+        edit.delete_edge(EId(2));
+        edit.create_vertex(VId(10), vec![LabelId(1)], props(10));
+        edit.create_vertex(VId(11), vec![LabelId(1)], props(0));
+        edit.add_edge(EId(10_000), VId(2), VId(10), vec![]);
+        edit.add_edge(EId(10_001), VId(10), VId(11), vec![]);
+        txn.write(&mut db, edit).unwrap();
+        txn.savepoint(&db, "linked").unwrap();
+        let text = |access, modalities| format!(
+            "CALL hybrid.search(seeds => [$source], max_hops => 3, \
+             graph_access => '{access}', label => 'Person', relation => 'R', \
+             eligible => [11], candidates => 1, k => 1{modalities}) \
+             YIELD node, graph_hops, graph_rank, vector_rank, text_rank, vector_distance \
+             RETURN node.x AS x, graph_hops, graph_rank, vector_rank, text_rank, vector_distance"
+        );
+        for (modalities, vector, text_lane) in [
+            ("", false, false),
+            (", text => 'graph', text_property => 'body'", false, true),
+            (", vector => [0], vector_properties => ['x']", true, false),
+            (", text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x']", true, true),
+        ] {
+            for (source, hops) in [(1, 3), (2, 2), (10, 1)] {
+                let params = GqlParameters::new().with_int64("source", source).unwrap();
+                let actual = rows(txn.query(&db, &c.query(), &text("indexed", modalities), &params, symbols, policy()).unwrap());
+                assert_eq!(actual, rows(txn.query(&db, &c.query(), &text("materialized", modalities), &params, symbols, policy()).unwrap()));
+                assert_eq!(actual.len(), 1);
+                assert_eq!(&actual[0][..3], &[int(0), int(hops), int(1)]);
+                let null = QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+                assert_eq!(actual[0][3], if vector { int(1) } else { null.clone() });
+                assert_eq!(actual[0][4], if text_lane { int(1) } else { null.clone() });
+                if vector {
+                    assert_eq!(actual[0][5], QueryValue::Value(GraphValue::Scalar(
+                        CanonicalScalar::Float(fgdb_types::CanonicalF64::new(0.0)),
+                    )));
+                } else {
+                    assert_eq!(actual[0][5], null);
+                }
+                assert!(rows(db.query(&c.query(), &text("indexed", modalities), &params, symbols, policy()).unwrap()).is_empty());
+            }
+        }
+        let params = GqlParameters::new().with_int64("source", 1).unwrap();
+        let graph_only = text("indexed", "");
+        let before = rows(txn.query(&db, &c.query(), &graph_only, &params, symbols, policy()).unwrap());
+        let mut exclude = WriteBatch::new(R);
+        exclude.set_vertex_label(VId(10), LabelId(1), false);
+        txn.write(&mut db, exclude).unwrap();
+        assert!(rows(txn.query(&db, &c.query(), &graph_only, &params, symbols, policy()).unwrap()).is_empty());
+        txn.rollback_to_savepoint(&db, "linked").unwrap();
+        assert_eq!(rows(txn.query(&db, &c.query(), &graph_only, &params, symbols, policy()).unwrap()), before);
+        assert_eq!(db.frontier().unwrap(), basis);
+        txn.commit(&mut db, &c.commit()).await.unwrap();
+        assert_eq!(rows(db.query(&c.query(), &graph_only, &params, symbols, policy()).unwrap()), before);
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn transaction_indexed_source_fits_reached_record_budget_without_eager_retry() {
+    let ((), report) = run_async_under_lab(0xbeac_4202, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = open(&c.commit(), false).await;
+        let basis = db.frontier().unwrap();
+        let mut txn = db.begin(&c.txn()).unwrap();
+        let mut edit = WriteBatch::new(R);
+        edit.create_vertex(VId(10), vec![LabelId(1)], props(10));
+        edit.add_edge(EId(10_000), VId(2), VId(10), vec![]);
+        txn.write(&mut db, edit).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let params = GqlParameters::new();
+        let indexed = statement(Some("'indexed'"), "eligible => [10]");
+        let before = rows(txn.query(&db, &c.query(), &indexed, &params, symbols, policy()).unwrap());
+        // Six selected vertices plus reached incidences fit; copying the 512
+        // unreachable loops cannot. This is an admission control, not timing.
+        let reached = GqlQueryPolicy::new(128, 100, 10_000_000, 1_000_000);
+        assert_eq!(rows(txn.query(&db, &c.query(), &indexed, &params, symbols, reached).unwrap()), before);
+        for access in [None, Some("NULL"), Some("'materialized'")] {
+            let eager = statement(access, "eligible => [10]");
+            assert_eq!(rows(txn.query(&db, &c.query(), &eager, &params, symbols, policy()).unwrap()), before);
+            for tail in ["", " LIMIT 0"] {
+                assert!(txn.query(&db, &c.query(), &format!("{eager}{tail}"), &params, symbols, reached).is_err());
+                assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            }
+        }
+        // A filter with no successful row cannot skip source admission either.
+        let none = statement(Some("'indexed'"), "eligible => []");
+        let denied = GqlQueryPolicy::new(0, 100, 10_000_000, 1_000_000);
+        assert!(txn.query(&db, &c.query(), &none, &params, symbols, denied).is_err());
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!(db.frontier().unwrap(), basis);
+        txn.abort();
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_indexed_empty_pages_and_late_errors_keep_transaction_read_conflicts() {
+    let ((), report) = run_async_under_lab(0xbeac_4203, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        for case in 0..3 {
+            let mut db = open(&c.commit(), false).await;
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            txn.savepoint(&db, "before-read").unwrap();
+            let params = GqlParameters::new();
+            let text = match case {
+                0 => statement(Some("'indexed'"), "eligible => []"),
+                1 => format!("{} LIMIT 0", statement(Some("'indexed'"), "eligible => [3]")),
+                _ => "CALL hybrid.search(seeds => [1], max_hops => 2, graph_access => 'indexed') \
+                      YIELD node RETURN 1 / 0 AS failure LIMIT 0".to_owned(),
+            };
+            let result = txn.query(&db, &c.query(), &text, &params, symbols, policy());
+            if case == 2 {
+                assert!(result.is_err(), "the post-retrieval expression must fail");
+            } else {
+                assert!(rows(result.unwrap()).is_empty());
+            }
+            txn.rollback_to_savepoint(&db, "before-read").unwrap();
+            assert_eq!(db.frontier().unwrap(), basis);
+            let mut concurrent = WriteBatch::new(R);
+            concurrent.add_edge(EId(99), VId(1), VId(4), vec![]);
+            db.write(&c.commit(), concurrent).await.unwrap();
+            let frontier = db.frontier().unwrap();
+            assert!(matches!(txn.finish(&mut db, &c.commit()).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01", ..
+                }))), "case={case}");
+            assert_eq!(db.frontier().unwrap(), frontier);
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

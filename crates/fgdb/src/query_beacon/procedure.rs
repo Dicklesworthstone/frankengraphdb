@@ -40,9 +40,10 @@
 //! `graph_access => 'indexed'` selects this profile explicitly;
 //! `graph_access => 'materialized'` selects the whole-edge preparation profile.
 //! Both execute the same graph/ranking semantics, with distinct source limits.
-//! Transaction overlays default to their canonical materialized staged-edge
-//! source and conservative conflict witnesses. Explicit indexed access refuses
-//! there; it can never silently consult a committed-only index or ignore edits.
+//! Transaction overlays retain the materialized default. Explicit indexed
+//! access merges pinned historical adjacency with canonical staged replacements,
+//! including deletions and cascades; it never ignores edits or uses a newer cut.
+//! Both transaction profiles retain conservative global edge-scan witnesses.
 //! Omitted/null access retains the host's default; a nonnull choice needs seeds.
 //!
 //! Requested indexes are built for this one execution from the read's snapshot.
@@ -224,8 +225,8 @@ fn list<'v>(
 }
 
 impl HybridSearch {
-    /// Bind a host backed by the canonical staged overlay. It must not accept
-    /// an indexed request and silently replace it with materialized traversal.
+    /// Bind a host backed by the canonical staged overlay. Preserve its
+    /// materialized default while honoring an explicit indexed source choice.
     pub(crate) fn bind_filtered<'a>(
         call: &PreparedProcedureCall,
         arguments: &'a [GraphValue],
@@ -256,7 +257,7 @@ impl HybridSearch {
         arguments: &'a [GraphValue],
         at: CommitSeq,
         remaining: GqlQueryPolicy,
-        indexed_available: bool,
+        indexed_default: bool,
     ) -> Result<(Self, Option<&'a [GraphValue]>), HybridCallError> {
         if call.name() != "search" {
             return Err(HybridCallError::UnknownProcedure(call.name().to_owned()));
@@ -499,16 +500,11 @@ impl HybridSearch {
         if graph_access.is_some() && !graph {
             return Err(HybridCallError::Combination("graph_access requires seeds"));
         }
-        let graph_access = graph_access.unwrap_or(if indexed_available {
+        let graph_access = graph_access.unwrap_or(if indexed_default {
             GraphAccess::Indexed
         } else {
             GraphAccess::Materialized
         });
-        if graph_access == GraphAccess::Indexed && !indexed_available {
-            return Err(HybridCallError::Combination(
-                "indexed graph access is not available over transaction overlays",
-            ));
-        }
         if !graph
             && (max_hops.is_some()
                 || relation.is_some()
@@ -648,6 +644,12 @@ impl HybridSearch {
 
     pub(crate) fn options(&self) -> &Options {
         &self.options
+    }
+
+    /// The transaction host must carry the bound physical source choice all
+    /// the way to its canonical overlay; it is not an immutable-source handle.
+    pub(crate) fn uses_indexed_graph(&self) -> bool {
+        self.graph_access == GraphAccess::Indexed
     }
 
     /// The fused query. A lane that was not requested has weight zero and is
