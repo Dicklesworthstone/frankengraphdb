@@ -334,19 +334,42 @@ pub enum GraphIntegerErrorKind {
     /// (`GraphValue::MAX_LIST_NODES`, `MAX_LIST_DEPTH`), so no complete
     /// query value can hold it (fgdb-k3nub). It is never truncated.
     StoredValueBounds,
+    /// A stored List or Map property reached an operator that reads only
+    /// scalars, such as a numeric aggregate or a path weight (fgdb-k3nub).
+    /// Refused, never read as NULL: NULL would silently change the answer.
+    StoredCollection,
 }
 impl GraphIntegerErrorKind {
     /// A data exception that every statement family raises, a WHERE predicate
     /// included: division by zero, numeric overflow (GQL class 22), and a
-    /// stored value too large to read whole. The other kinds are a value that
-    /// does not fit its operator. A Boolean predicate reads those as UNKNOWN,
-    /// so a property holding mixed types never escapes as a query error.
+    /// stored value too large to read whole or read by a scalar-only
+    /// operator. The other kinds are a value that does not fit its operator.
+    /// A Boolean predicate reads those as UNKNOWN, so a property holding
+    /// mixed types never escapes as a query error.
     #[must_use]
     pub const fn is_arithmetic_exception(self) -> bool {
         matches!(
             self,
-            Self::DivisionByZero | Self::Overflow | Self::StoredValueBounds
+            Self::DivisionByZero
+                | Self::Overflow
+                | Self::StoredValueBounds
+                | Self::StoredCollection
         )
+    }
+}
+
+/// The scalar a scalar-only operator reads from a stored property value
+/// (fgdb-k3nub): absent stays absent, a scalar is itself, and a List or Map
+/// raises `StoredCollection` instead of reading as NULL.
+pub(crate) fn stored_scalar(
+    value: Option<&fgdb_types::CanonicalPropertyValue>,
+) -> Result<Option<&CanonicalScalar>, GraphIntegerError> {
+    match value {
+        None => Ok(None),
+        Some(value) => value.as_scalar().map(Some).ok_or(GraphIntegerError {
+            instruction: 0,
+            kind: GraphIntegerErrorKind::StoredCollection,
+        }),
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

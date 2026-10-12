@@ -112,7 +112,7 @@ mod sealed {
     }
 }
 
-fn collect_one<Row: GlaOutput, E>(
+fn collect_one<Row: GlaOutput, E: From<crate::GraphIntegerError>>(
     vid: VId,
     row: VertexScanRow<'_>,
     projection: &GlaOperator,

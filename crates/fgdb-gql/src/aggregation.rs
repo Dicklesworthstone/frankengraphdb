@@ -26,7 +26,7 @@ use crate::{
     GqlQueryExecution, GqlQueryPolicy,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1083,6 +1083,11 @@ impl PreparedGraphAggregate {
                                 Some(vid) => property(vid, *key)?,
                                 None => None,
                             };
+                            // Group keys borrow the source; a stored List or
+                            // Map refuses here rather than read as NULL
+                            // (fgdb-k3nub).
+                            let value = crate::integer_expression::stored_scalar(value)
+                                .map_err(GqlQueryError::from)?;
                             ValueRef::Scalar(value.unwrap_or(&NULL))
                         }
                         ValueProjection::Path { .. }

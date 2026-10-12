@@ -100,6 +100,30 @@ pub(crate) fn compare_properties<'a, E: From<crate::GraphIntegerError>>(
     Ok(comparison.accepts_scalar_pair(left, right))
 }
 
+/// [`charge_payload`] for a stored property value (fgdb-k3nub): a scalar is
+/// charged exactly as `charge_payload` charges it; a List or Map charges one
+/// unit per element, each map key's payload quanta, and every nested scalar.
+pub(crate) fn charge_stored_payload<E>(
+    value: &CanonicalPropertyValue,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => charge_payload(scalar, control),
+        CanonicalPropertyValue::List(list) => list.values().iter().try_for_each(|value| {
+            control(GlaExecutionEvent::Work)?;
+            charge_stored_payload(value, &mut *control)
+        }),
+        CanonicalPropertyValue::Map(map) => map.entries().iter().try_for_each(|entry| {
+            control(GlaExecutionEvent::Work)?;
+            let key = entry.key().as_str().len();
+            for _ in 0..key.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                control(GlaExecutionEvent::Work)?;
+            }
+            charge_stored_payload(entry.value(), &mut *control)
+        }),
+    }
+}
+
 /// Reserve each borrowed variable-size payload before comparing it. The two
 /// text fields are accounted separately, avoiding a potentially wrapping sum.
 /// This is logical work accounting, not preemption within Ord or a byte cap.

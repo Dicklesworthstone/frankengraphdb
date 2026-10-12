@@ -4,7 +4,7 @@
 
 use super::{VertexScanEvent, VertexScanRow};
 use fgdb_delta_types::{LabelId, PropertyKeyId};
-use fgdb_types::CanonicalScalar;
+use fgdb_types::CanonicalPropertyValue;
 
 /// Root fields from one admitted vertex. Both forms obey VertexScanRow's sorted,
 /// unique metadata contract. Owning fields confers no source authentication;
@@ -13,7 +13,7 @@ pub enum VertexScanRecord<'a> {
     Borrowed(VertexScanRow<'a>),
     Owned {
         labels: Vec<LabelId>,
-        properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+        properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
 }
 impl VertexScanRecord<'_> {
@@ -50,7 +50,7 @@ impl VertexScanRecord<'_> {
             if allows_property(*key) {
                 control(VertexScanEvent::Work)?;
                 control(VertexScanEvent::ScratchEntry)?;
-                crate::algebra_exec::charge_payload(value, &mut |_| {
+                crate::algebra_exec::charge_stored_payload(value, &mut |_| {
                     control(VertexScanEvent::Work)?;
                     control(VertexScanEvent::ScratchEntry)
                 })?;

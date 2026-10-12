@@ -13,7 +13,7 @@ use crate::free_join::{
     FreeJoin, FreeJoinPlan, GraphTrie, GraphTrieError, JoinVariable, MAX_JOIN_VARIABLES,
 };
 use fgdb_delta_types::RelationId;
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::VId;
 
 #[cfg(test)]
 mod tests;
@@ -236,6 +236,7 @@ impl Topology {
     ) -> Result<Vec<Row>, E>
     where
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+        E: From<crate::GraphIntegerError>,
     {
         // Build only advertised physical orientations, once, from the same
         // admitted source. No second snapshot scan or flat tuple copy occurs.

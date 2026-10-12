@@ -287,7 +287,10 @@ impl PreparedGraphCheapestPath {
         &self,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        mut property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Option<GraphCostPath>, GraphCheapestPathError<E>> {
         self.evaluate(
@@ -306,7 +309,10 @@ impl PreparedGraphCheapestPath {
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        mut property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphCostPath>, GqlQueryError<GraphCheapestPathError<E>, C>> {
@@ -356,7 +362,10 @@ impl PreparedGraphCheapestPath {
         &self,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: &mut impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         failure: impl Fn(GraphPathCostError) -> E,
     ) -> Result<(BTreeSet<VId>, WeightedIndex), E> {
@@ -381,8 +390,11 @@ impl PreparedGraphCheapestPath {
             if !live.contains(&left) || !live.contains(&right) {
                 return Err(failure(GraphPathCostError::DanglingEndpoint));
             }
+            // A stored List or Map is not an integer weight (fgdb-k3nub).
             let weight = match property(edge, self.weight)? {
-                Some(CanonicalScalar::Int(weight)) => *weight,
+                Some(fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(weight))) => {
+                    *weight
+                }
                 None => return Err(failure(GraphPathCostError::MissingWeight)),
                 Some(_) => return Err(failure(GraphPathCostError::NonIntegerWeight)),
             };
@@ -417,7 +429,10 @@ impl PreparedGraphCheapestPath {
         &self,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: &mut impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         failure: impl Fn(GraphPathCostError) -> E,
     ) -> Result<Option<GraphCostPath>, E> {
