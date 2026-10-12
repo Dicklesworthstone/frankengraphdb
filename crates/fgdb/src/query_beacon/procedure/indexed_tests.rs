@@ -70,6 +70,7 @@ fn search(vector: bool, text: bool) -> HybridSearch {
         k: 1, candidates: 1, profile, seeds: vec![VId(1)], relation: None,
         direction: ExpansionDirection::Outgoing, max_hops: 2, include_seeds: false,
         graph_candidates: 1, graph_weight: 100, outputs: vec![0, 7, 2, 3],
+        graph_access: GraphAccess::Indexed,
     }
 }
 

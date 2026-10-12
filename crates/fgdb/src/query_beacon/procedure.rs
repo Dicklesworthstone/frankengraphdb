@@ -32,19 +32,24 @@
 //! own rank and score are separate outputs, null where that lane did not
 //! return the vertex. Rows arrive best first, ties by ascending vertex.
 //!
-//! Immutable reads use seed-directed historical adjacency: only reached
+//! Immutable reads default to seed-directed historical adjacency: only reached
 //! vertices below max_hops open incidence cursors. Graph limits count admitted
 //! incidence visits (parallel edges separately, undirected edges at each
 //! expanded endpoint), not the whole edge population. There is no full-graph
 //! retry on refusal. The selected vertex directory is still prepared once.
-//! Transaction overlays retain their own canonical staged-edge source and
-//! conservative conflict witnesses; they never consult a committed-only index.
+//! `graph_access => 'indexed'` selects this profile explicitly;
+//! `graph_access => 'materialized'` selects the whole-edge preparation profile.
+//! Both execute the same graph/ranking semantics, with distinct source limits.
+//! Transaction overlays default to their canonical materialized staged-edge
+//! source and conservative conflict witnesses. Explicit indexed access refuses
+//! there; it can never silently consult a committed-only index or ignore edits.
+//! Omitted/null access retains the host's default; a nonnull choice needs seeds.
 //!
 //! Requested indexes are built for this one execution from the read's snapshot.
 //! This is exact fusion of selected candidates, not an exhaustive hybrid
 //! top-k; `ann` remains approximate. It is not a durable index definition.
 
-use super::indexed;
+use super::{graph, indexed};
 use super::{Meter, Options, Scan, SharedWork};
 use crate::query::ProcedureError;
 use crate::{GqlError, ReadError, Snapshot, VertexRow};
@@ -149,6 +154,12 @@ pub(crate) fn refuse<C>(error: HybridCallError) -> GqlQueryError<GqlError, C> {
     GqlQueryError::Source(GqlError::Procedure(ProcedureError::Search(error)))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphAccess {
+    Materialized,
+    Indexed,
+}
+
 /// A bound `hybrid.search`: the frozen corpus definition and query inputs.
 pub(crate) struct HybridSearch {
     options: Options,
@@ -166,6 +177,7 @@ pub(crate) struct HybridSearch {
     include_seeds: bool,
     graph_candidates: u32,
     graph_weight: u16,
+    graph_access: GraphAccess,
     /// For each YIELD column, its position in [`HYBRID_SEARCH_OUTPUTS`].
     outputs: Vec<usize>,
 }
@@ -212,16 +224,39 @@ fn list<'v>(
 }
 
 impl HybridSearch {
-    /// Borrow the optional eligible list; allocation and per-ID validation
-    /// happen later under the SAME live meter as source preparation/search.
-    /// The call's named arguments and YIELD list bind once. `at` pins the read's
-    /// snapshot; `remaining` caps Beacon's own work and staging allowances
-    /// by what the read has left, so retrieval cannot outspend the statement.
+    /// Bind a host backed by the canonical staged overlay. It must not accept
+    /// an indexed request and silently replace it with materialized traversal.
     pub(crate) fn bind_filtered<'a>(
         call: &PreparedProcedureCall,
         arguments: &'a [GraphValue],
         at: CommitSeq,
         remaining: GqlQueryPolicy,
+    ) -> Result<(Self, Option<&'a [GraphValue]>), HybridCallError> {
+        Self::bind_arguments(call, arguments, at, remaining, false)
+    }
+
+    /// Immutable hosts can honor either explicit source profile. This is the
+    /// same binder as transaction execution, not a second procedure grammar.
+    pub(crate) fn bind_snapshot_filtered<'a>(
+        call: &PreparedProcedureCall,
+        arguments: &'a [GraphValue],
+        at: CommitSeq,
+        remaining: GqlQueryPolicy,
+    ) -> Result<(Self, Option<&'a [GraphValue]>), HybridCallError> {
+        Self::bind_arguments(call, arguments, at, remaining, true)
+    }
+
+    /// Borrow the optional eligible list; allocation and per-ID validation
+    /// happen later under the SAME live meter as source preparation/search.
+    /// The call's named arguments and YIELD list bind once. `at` pins the read's
+    /// snapshot; `remaining` caps Beacon's own work and staging allowances
+    /// by what the read has left, so retrieval cannot outspend the statement.
+    fn bind_arguments<'a>(
+        call: &PreparedProcedureCall,
+        arguments: &'a [GraphValue],
+        at: CommitSeq,
+        remaining: GqlQueryPolicy,
+        indexed_available: bool,
     ) -> Result<(Self, Option<&'a [GraphValue]>), HybridCallError> {
         if call.name() != "search" {
             return Err(HybridCallError::UnknownProcedure(call.name().to_owned()));
@@ -252,6 +287,7 @@ impl HybridSearch {
         let mut include_seeds = None;
         let mut graph_candidates = None;
         let mut graph_weight = None;
+        let mut graph_access = None;
         for (name, value) in call.argument_names().iter().zip(arguments) {
             // A null argument is an absent one, so `vector => $q` with a
             // null $q runs the remaining lanes.
@@ -260,6 +296,13 @@ impl HybridSearch {
             }
             match name.as_str() {
                 "eligible" => eligible = Some(list("eligible", value)?),
+                "graph_access" => {
+                    graph_access = Some(match text_value("graph_access", value)? {
+                        "materialized" => GraphAccess::Materialized,
+                        "indexed" => GraphAccess::Indexed,
+                        _ => return Err(domain("graph_access", "'materialized' or 'indexed'")),
+                    });
+                }
                 "text" => text = Some(text_value("text", value)?.to_owned()),
                 "text_property" => {
                     text_property = Some(PropertyKeyId(identity("text_property", value)?));
@@ -453,6 +496,19 @@ impl HybridSearch {
             }
         };
         let graph = seeds.is_some();
+        if graph_access.is_some() && !graph {
+            return Err(HybridCallError::Combination("graph_access requires seeds"));
+        }
+        let graph_access = graph_access.unwrap_or(if indexed_available {
+            GraphAccess::Indexed
+        } else {
+            GraphAccess::Materialized
+        });
+        if graph_access == GraphAccess::Indexed && !indexed_available {
+            return Err(HybridCallError::Combination(
+                "indexed graph access is not available over transaction overlays",
+            ));
+        }
         if !graph
             && (max_hops.is_some()
                 || relation.is_some()
@@ -583,6 +639,7 @@ impl HybridSearch {
                     0
                 },
                 graph_weight: if graph { graph_weight.unwrap_or(1) } else { 0 },
+                graph_access,
                 outputs,
             },
             eligible,
@@ -632,7 +689,8 @@ impl HybridSearch {
     }
 
     /// Both immutable hosts use this body, including the bool-predicate
-    /// refusal latch. Eligibility cannot be lost between binding and execution.
+    /// refusal latch. Eligibility and the requested physical profile cannot be
+    /// lost between binding and execution. Neither source is a fallback.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_filtered(
         &self,
@@ -653,21 +711,38 @@ impl HybridSearch {
             remaining.evaluator.max_scratch_entries,
             &mut SharedWork(work),
         )?;
-        let result = indexed::evaluate_filtered(
-            snapshot,
-            at,
-            &self.options,
-            self.query(),
-            self.expansion(),
-            work,
-            scan,
-            admit,
-            label_allowed,
-            property_allowed,
-            relation_allowed,
-            || Ok(()),
-            |id| filter.admits(id, work),
-        );
+        let result = match self.graph_access {
+            GraphAccess::Materialized => graph::evaluate_filtered(
+                snapshot,
+                at,
+                &self.options,
+                self.query(),
+                self.expansion(),
+                work,
+                scan,
+                admit,
+                label_allowed,
+                property_allowed,
+                relation_allowed,
+                || Ok(()),
+                |id| filter.admits(id, work),
+            ),
+            GraphAccess::Indexed => indexed::evaluate_filtered(
+                snapshot,
+                at,
+                &self.options,
+                self.query(),
+                self.expansion(),
+                work,
+                scan,
+                admit,
+                label_allowed,
+                property_allowed,
+                relation_allowed,
+                || Ok(()),
+                |id| filter.admits(id, work),
+            ),
+        };
         filter
             .finish(result)
             .map(|hits| (hits, filter.scratch_entries()))
@@ -731,7 +806,7 @@ pub(crate) fn privileged(
     cx: &QueryCx,
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
     let (search, eligible) =
-        HybridSearch::bind_filtered(call, arguments, at, remaining).map_err(refuse)?;
+        HybridSearch::bind_snapshot_filtered(call, arguments, at, remaining).map_err(refuse)?;
     let spent = Cell::new(0_u64);
     let admitted = Cell::new(0_u64);
     let work = RefCell::new(Meter::new(search.options.policy.max_work_units, |units| {
