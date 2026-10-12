@@ -1152,6 +1152,49 @@ fn a_single_reads_order_by_ranks_by_input_columns_it_does_not_return() {
     }
 }
 
+/// fgdb-7xqxb: a set that leads with its one vertex scan's identity, then
+/// columns and constants, pulls row by row. Projecting the pattern's own
+/// rows in its visitation order reproduces the eager relation exactly.
+/// Every other shape has no pull.
+#[test]
+fn a_vertex_rooted_projection_pulls_in_its_canonical_order() {
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    let set = PreparedGraphSetText::prepare("MATCH (n) RETURN n AS id, $v AS v, n.p AS p", symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new().with_int64("v", 9).unwrap())
+        .unwrap();
+    let pull = set.row_pull().expect("one vertex scan, identity first");
+    let eager = run(&set, &values, wide(), &mut || Ok(())).unwrap().value;
+    let source = run(
+        &PreparedGraphSet::from(pull.pattern().clone()),
+        &values,
+        wide(),
+        &mut || Ok(()),
+    )
+    .unwrap()
+    .value;
+    let pulled: Vec<_> = source
+        .iter()
+        .enumerate()
+        .map(|(at, row)| {
+            pull.project(row, at as u64, &mut |_| Ok::<(), ()>(()), |_, _| ())
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(eager.len(), values.len());
+    assert_eq!(pulled, eager);
+    for text in [
+        "MATCH (n) RETURN 9 AS v, n AS id",
+        "MATCH (n) RETURN DISTINCT n AS id, 9 AS v",
+        "MATCH (n) RETURN n AS id, 9 AS v LIMIT 2",
+        "MATCH (n) RETURN n AS id, 9 AS v ORDER BY v",
+        "MATCH (n)-[:R]->(m) RETURN n AS id, 9 AS v",
+        "MATCH (n), (m) RETURN n AS id, 9 AS v",
+    ] {
+        assert!(prepare(text).row_pull().is_none(), "{text}");
+    }
+}
+
 #[test]
 fn parameter_contracts_and_original_utf8_offsets_span_all_stages() {
     let text = "\u{2003}MATCH (n) WITH n.p+$add AS score LIMIT $top WHERE score>$min RETURN score*$scale AS answer";

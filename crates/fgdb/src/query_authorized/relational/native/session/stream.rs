@@ -3,13 +3,13 @@
 //! the native physical operator. No source table or result set is collected.
 
 use super::*;
-use fgdb_gql::GlaExecutionEvent;
 use fgdb_gql::algebra::{EdgeRelation, GlaOperator, PreparedGraphPattern};
 use fgdb_gql::edge_stream::{EdgeExpansionSourceError, EdgeScanError, EdgeScanPlan, EdgeScanRow};
 use fgdb_gql::stream::{
     VertexScanBuildError, VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanPlan,
     VertexScanRecord, VertexScanRow, VertexScanSource, VertexScanSourceError, VertexScanState,
 };
+use fgdb_gql::{GlaExecutionEvent, GraphSetExecutionError, GraphSetRowPull};
 use fgdb_types::EId;
 use std::iter::FusedIterator;
 use std::marker::PhantomData;
@@ -712,17 +712,21 @@ fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result
     }
     Ok(())
 }
+/// A bound row plan: the physical plan, its cut, the output columns and,
+/// for a set that pulls row by row, the projection each source row takes.
+type BoundRows = (RowPlan, CommitSeq, Vec<String>, Option<GraphSetRowPull>);
+
 fn bind(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
     default: CommitSeq,
-) -> Result<(RowPlan, CommitSeq, Vec<String>), QueryError> {
+) -> Result<BoundRows, QueryError> {
     match prepared {
         PreparedNativeRead::Pattern(prepared) => {
             let query = prepared
                 .bind_parameters(params)
                 .map_err(QueryError::PatternText)?;
-            Ok((compile(&query)?, default, query.columns().to_vec()))
+            Ok((compile(&query)?, default, query.columns().to_vec(), None))
         }
         PreparedNativeRead::TemporalPattern(prepared) => {
             let query = prepared
@@ -732,6 +736,25 @@ fn bind(
                 compile(query.pattern())?,
                 query.as_of(),
                 query.pattern().columns().to_vec(),
+                None,
+            ))
+        }
+        // `MATCH (n) RETURN n AS id, $value AS value` (fgdb-7xqxb): a set
+        // whose canonical order is its one vertex scan's order pulls through
+        // that scan's native cursor, projecting each row as the eager path.
+        PreparedNativeRead::Set(set) => {
+            let query = set.bind_parameters(params).map_err(QueryError::SetText)?;
+            let pull = query.row_pull().ok_or(QueryError::StreamingUnsupported {
+                facade: prepared.facade_class(),
+            })?;
+            let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
+                unreachable!("a row pull is rooted at its one vertex scan")
+            };
+            Ok((
+                RowPlan::Vertex(plan),
+                default,
+                query.columns().to_vec(),
+                Some(pull),
             ))
         }
         _ => Err(QueryError::StreamingUnsupported {
@@ -833,37 +856,41 @@ fn open<'q, C: FnMut() -> u64, Plan, Output>(
 }
 
 fn build_rows<'q, C: FnMut() -> u64>(
-    selected: (RowPlan, CommitSeq, Vec<String>),
+    selected: BoundRows,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
 ) -> Opened<'q, GraphValueRow, ()> {
-    let (plan, at, columns) = selected;
+    let (plan, at, columns, pull) = selected;
     let driver: Pull<'q, GraphValueRow> = match plan {
         RowPlan::Edge(plan) => Box::new(aggregate::edge::row_driver(
             plan, at, view, cx, execution, policy,
         )?),
-        RowPlan::Vertex(plan) => Box::new(vertex_driver(plan, at, view, cx, execution, policy)?),
+        RowPlan::Vertex(plan) => {
+            Box::new(vertex_driver(plan, pull, at, view, cx, execution, policy)?)
+        }
     };
     Ok((AuthorizedRowCursor::new(driver, columns, at), ()))
 }
 
 fn build_send_rows<'q, C: FnMut() -> u64 + Send>(
-    selected: (RowPlan, CommitSeq, Vec<String>),
+    selected: BoundRows,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
 ) -> Opened<'q, GraphValueRow, (), SendPull<'q, GraphValueRow>> {
-    let (plan, at, columns) = selected;
+    let (plan, at, columns, pull) = selected;
     // Only erasure differs from the local factory. Both use the exact same
     // native physical driver, source masks, signed permit and terminal guard.
     let driver: SendPull<'q, GraphValueRow> = match plan {
         RowPlan::Edge(plan) => Box::new(aggregate::edge::row_driver(
             plan, at, view, cx, execution, policy,
         )?),
-        RowPlan::Vertex(plan) => Box::new(vertex_driver(plan, at, view, cx, execution, policy)?),
+        RowPlan::Vertex(plan) => {
+            Box::new(vertex_driver(plan, pull, at, view, cx, execution, policy)?)
+        }
     };
     Ok((AuthorizedRowCursor::new(driver, columns, at), ()))
 }
@@ -874,6 +901,7 @@ type DriverStep = Result<(Option<GraphValueRow>, bool), QueryError>;
 
 fn vertex_driver<'q, C: FnMut() -> u64>(
     plan: VertexScanPlan<GraphValueRow>,
+    pull: Option<GraphSetRowPull>,
     at: CommitSeq,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
@@ -890,8 +918,30 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
         control.borrow_mut().checkpoint()
     });
     execution.borrow_mut().checkpoint()?;
+    let mut ordinal = 0_u64;
     Ok(move || {
-        let row = cursor.next().transpose().map_err(scan_error)?;
+        let mut row = cursor.next().transpose().map_err(scan_error)?;
+        // A pulled set row takes its projection before delivery, charging
+        // each evaluation step to the signed allowance as the eager set does.
+        if let (Some(pull), Some(source)) = (&pull, &row) {
+            let projected = pull.project(
+                source,
+                ordinal,
+                &mut |event| match event {
+                    GlaExecutionEvent::Work => execution.borrow_mut().checkpoint(),
+                    _ => Ok(()),
+                },
+                |column, error| {
+                    QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                        row: usize::try_from(ordinal).unwrap_or(usize::MAX),
+                        column,
+                        error,
+                    }))
+                },
+            )?;
+            ordinal += 1;
+            row = Some(projected);
+        }
         // A row remains private until live signed delivery admission succeeds.
         // The extra terminal check also covers a natural EOF or LIMIT 0.
         execution.borrow_mut().deliver(usize::from(row.is_some()))?;

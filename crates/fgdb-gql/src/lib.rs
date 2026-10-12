@@ -204,9 +204,9 @@ pub use set_ops::{
     GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetBuildError, GraphSetColumnType,
     GraphSetExecutionError, GraphSetFilterError, GraphSetOperand, GraphSetOperation,
     GraphSetPredicateOp, GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier,
-    GraphSetSource, GraphSetValue, GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH,
-    MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall,
-    ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
+    GraphSetRowPull, GraphSetSource, GraphSetValue, GraphTemporalFunction, GraphValueFunction,
+    MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
+    PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
     ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementReads,
     WithProcedures,
 };

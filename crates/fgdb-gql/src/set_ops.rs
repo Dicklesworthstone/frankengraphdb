@@ -996,4 +996,123 @@ impl PreparedGraphSet {
             }
         }
     }
+
+    /// The row-by-row pull of this relation, when it has one (fgdb-7xqxb):
+    /// `Project ALL` over one vertex-rooted pattern without relationships,
+    /// with no order or page at either level. The first output cell is the
+    /// root vertex itself; every other cell is a column, a bound constant or
+    /// integer arithmetic over columns.
+    ///
+    /// The vertex scan visits strictly increasing identities, and each row
+    /// leads with its own identity. Its visitation order is therefore exactly
+    /// the canonical row order the eager projection sorts into, and no two
+    /// rows can tie. Any other shape returns None: there is no pull fallback.
+    #[must_use]
+    pub fn row_pull(&self) -> Option<GraphSetRowPull> {
+        if !self.order.is_empty() || self.offset != 0 || self.count.is_some() {
+            return None;
+        }
+        let SetNode::Project {
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
+            preserve_order: false,
+        } = &self.node
+        else {
+            return None;
+        };
+        if !input.order.is_empty() || input.offset != 0 || input.count.is_some() {
+            return None;
+        }
+        let SetNode::Pattern(pattern) = &input.node else {
+            return None;
+        };
+        let operators = pattern.plan().operators();
+        let roots = operators
+            .iter()
+            .filter(|operator| matches!(operator, crate::algebra::GlaOperator::ScanVertices))
+            .count();
+        if roots != 1
+            || !matches!(
+                operators.first(),
+                Some(crate::algebra::GlaOperator::ScanVertices)
+            )
+            || pattern.plan().reads_edges()
+        {
+            return None;
+        }
+        let (first, rest) = projection.split_first()?;
+        let GraphSetValue::Column(column) = *first.value() else {
+            return None;
+        };
+        if !matches!(
+            pattern.value_columns().get(column),
+            Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0
+        ) {
+            return None;
+        }
+        if !rest.iter().all(|cell| {
+            matches!(
+                cell.value(),
+                GraphSetValue::Column(_)
+                    | GraphSetValue::Literal(_)
+                    | GraphSetValue::Value(_)
+                    | GraphSetValue::TypedNull(_)
+                    | GraphSetValue::Integer(_)
+            )
+        }) {
+            return None;
+        }
+        Some(GraphSetRowPull {
+            pattern: pattern.clone(),
+            projection: projection.clone(),
+        })
+    }
+}
+
+/// A relation that pulls row by row (PreparedGraphSet::row_pull): one
+/// vertex-rooted source pattern and the projection each of its rows takes.
+#[derive(Clone)]
+pub struct GraphSetRowPull {
+    pattern: PreparedGraphPattern<GraphValueRow>,
+    projection: Vec<GraphSetProjection>,
+}
+
+impl core::fmt::Debug for GraphSetRowPull {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphSetRowPull")
+            .field("columns", &self.projection.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl GraphSetRowPull {
+    /// The source pattern whose native cursor supplies the input rows.
+    #[must_use]
+    pub fn pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
+        &self.pattern
+    }
+
+    /// Project one source row exactly as the eager projection does.
+    /// - `ordinal` numbers the source rows from zero.
+    /// - Every evaluation event goes to `control`.
+    /// - An arithmetic failure becomes `arithmetic(column, error)`, as the
+    ///   eager path's Projection error. Its row is the caller's ordinal.
+    pub fn project<E>(
+        &self,
+        row: &GraphValueRow,
+        ordinal: u64,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+        arithmetic: impl FnOnce(usize, crate::GraphIntegerError) -> E,
+    ) -> Result<GraphValueRow, E> {
+        GraphSetProjection::evaluate_numbered_row_with_control(
+            row,
+            ordinal,
+            &self.projection,
+            control,
+            &mut projection::no_element_reads,
+            arithmetic,
+        )
+    }
 }

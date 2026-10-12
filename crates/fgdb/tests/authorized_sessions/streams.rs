@@ -26,6 +26,64 @@ fn expected_row(id: u128, p: i64) -> GraphValueRow {
     ])
 }
 
+/// fgdb-7xqxb: a set whose canonical order is its one vertex scan's order
+/// (the vertex first, then columns, constants and parameters) pulls through
+/// that scan's native cursor, projecting each row exactly as the eager set
+/// does. Every other set shape still refuses streaming; nothing falls back
+/// to an eager result.
+#[test]
+fn a_vertex_set_with_constant_columns_pulls_through_its_scan() {
+    let ((), report) = run_async_under_lab(0x5ec0_6011, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut session = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        for text in [
+            "MATCH (n) RETURN n AS id, $value AS value",
+            "MATCH (n) RETURN n AS id, 7 AS seven, n.p AS p, $value AS value",
+        ] {
+            let parse = GqlParameters::new().with_int64("value", 1).unwrap();
+            let prepared = session.prepare(&cx, text, &parse).unwrap();
+            // One prepared set rebinds to each argument without reparsing.
+            for value in [42, -3] {
+                let args = GqlParameters::new().with_int64("value", value).unwrap();
+                let eager = session.execute(&cx, &prepared, &args).unwrap();
+                let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+                let columns = cursor.columns().to_vec();
+                let streamed = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                assert!(!streamed.is_empty(), "{text}");
+                assert!(streamed.iter().all(|row| {
+                    row.values().last() == Some(&GraphValue::Scalar(CanonicalScalar::Int(value)))
+                }));
+                assert_eq!(rows_result(&columns, streamed), eager, "{text}");
+                assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                assert!(cursor.next().is_none());
+            }
+        }
+        let args = GqlParameters::new().with_int64("value", 1).unwrap();
+        for text in [
+            "MATCH (n) RETURN $value AS value, n AS id",
+            "MATCH (n) RETURN DISTINCT n AS id, $value AS value",
+            "MATCH (n) RETURN n AS id, $value AS value LIMIT 1",
+            "MATCH (n) RETURN n AS id, $value AS value ORDER BY value",
+        ] {
+            let prepared = session.prepare(&cx, text, &args).unwrap();
+            assert!(
+                matches!(
+                    session.stream(&cx, &prepared, &args),
+                    Err(QueryError::StreamingUnsupported { .. })
+                ),
+                "{text}"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn streamed_predicates_and_projection_see_masked_fields_with_exact_order_and_pages() {
     let ((), report) = run_async_under_lab(0x5ec0_6001, |root| async move {
