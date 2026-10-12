@@ -288,8 +288,8 @@ fn prelimit_filter_preserves_transit_and_staged_labels_in_every_lane() {
 fn reached_incidence_limits_do_not_copy_disconnected_edges_or_hide_late_failures() {
     let ((), report) = run_async_under_lab(0xbeac_4103, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
-        let db = fixture(&c.commit(), 128).await;
-        let mut txn = db.begin(&c.txn()).unwrap();
+        let mut db = fixture(&c.commit(), 128).await;
+        let txn = db.begin(&c.txn()).unwrap();
         let seeds = [VId(0)];
         let mut expansion = spec(&seeds);
         expansion.max_hops = 2;
@@ -332,7 +332,7 @@ fn reached_incidence_limits_do_not_copy_disconnected_edges_or_hide_late_failures
                 .is_err()
         );
         txn.abort();
-        let mut txn = db.begin(&c.txn()).unwrap();
+        let txn = db.begin(&c.txn()).unwrap();
         let seeds = [HIGH, VId(9), VId(9), VId(999)];
         let mut zero = spec(&seeds);
         zero.max_hops = 0;
