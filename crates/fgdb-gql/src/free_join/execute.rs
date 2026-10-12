@@ -199,6 +199,19 @@ impl<K: Ord + Clone, T: TrieRelation<K>> FreeJoin<'_, K, T> {
 }
 
 impl<K: Ord + Clone, T: TrieRelation<K>> FreeJoinCursor<'_, K, T> {
+    // A flattening producer may retain this complete binding between batches
+    // without copying its keys or advancing the join. No borrow survives the
+    // next mutable cursor operation.
+    pub(super) fn current_binding(&self) -> JoinBinding<'_, K> {
+        let state = self.state.as_ref().expect("an active binding has state");
+        debug_assert!(state.yielded && !self.finished);
+        JoinBinding {
+            variables: &self.plan.order,
+            values: &state.values,
+            factors: &state.factors,
+        }
+    }
+
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.finished
@@ -535,7 +548,10 @@ mod cursor_tests {
     }
 
     impl TrieRelation<i64> for Tracked<'_> {
-        type Cursor<'a> = TrackedCursor<'a> where Self: 'a;
+        type Cursor<'a>
+            = TrackedCursor<'a>
+        where
+            Self: 'a;
 
         fn attribute_order(&self) -> &[JoinVariable] {
             self.trie.attribute_order()
@@ -752,7 +768,11 @@ mod cursor_tests {
                     match cursor.next_binding(&mut |_| {
                         let current = at;
                         at += 1;
-                        if current == refusal { Err(()) } else { Ok(()) }
+                        if current == refusal {
+                            Err(())
+                        } else {
+                            Ok(())
+                        }
                     }) {
                         Ok(Some(binding)) => prefix.push((
                             binding.values().copied().collect::<Vec<_>>(),
