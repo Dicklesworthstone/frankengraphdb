@@ -16,7 +16,8 @@ use fgdb_gql::{
     PreparedGraphWriteScript,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +26,7 @@ const R: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
-type Props = BTreeMap<PropertyKeyId, CanonicalScalar>;
+type Props = BTreeMap<PropertyKeyId, CanonicalPropertyValue>;
 type Vertex = (Vec<LabelId>, Props);
 type Edge = (VId, RelationId, VId, Props);
 
@@ -36,9 +37,9 @@ struct State {
 }
 
 fn props(p: i64, q: Option<i64>) -> Props {
-    let mut values = BTreeMap::from([(P, CanonicalScalar::Int(p))]);
+    let mut values = BTreeMap::from([(P, CanonicalScalar::Int(p).into())]);
     if let Some(q) = q {
-        values.insert(Q, CanonicalScalar::Int(q));
+        values.insert(Q, CanonicalScalar::Int(q).into());
     }
     values
 }
@@ -75,7 +76,7 @@ impl Op {
         let find = |s: &State, p| {
             *s.vertices
                 .iter()
-                .find(|(_, (_, values))| values.get(&P) == Some(&CanonicalScalar::Int(p)))
+                .find(|(_, (_, values))| values.get(&P) == Some(&CanonicalScalar::Int(p).into()))
                 .unwrap()
                 .0
         };
@@ -96,7 +97,7 @@ impl Op {
                     .values_mut()
                     .find(|(src, r, dst, _)| *src == a && *r == R && *dst == b)
                 {
-                    values.insert(Q, CanonicalScalar::Int(value + 2));
+                    values.insert(Q, CanonicalScalar::Int(value + 2).into());
                 } else {
                     assert!(
                         state
@@ -107,7 +108,7 @@ impl Op {
                                     a,
                                     R,
                                     b,
-                                    BTreeMap::from([(Q, CanonicalScalar::Int(value + 1))])
+                                    BTreeMap::from([(Q, CanonicalScalar::Int(value + 1).into())])
                                 )
                             )
                             .is_none()
@@ -121,7 +122,7 @@ impl Op {
                     .get_mut(&id)
                     .unwrap()
                     .1
-                    .insert(Q, CanonicalScalar::Int(value + 3));
+                    .insert(Q, CanonicalScalar::Int(value + 3).into());
             }
             Self::Remove { p } => {
                 let id = find(state, p);
@@ -390,14 +391,14 @@ fn run_seed(seed: u64) {
                 if !first {
                     let mut batch = WriteBatch::new(R);
                     for (id, (labels, values)) in &pre.vertices {
-                        batch.create_vertex(
+                        batch.create_vertex_values(
                             *id,
                             labels.clone(),
                             values.iter().map(|(k, v)| (*k, v.clone())).collect(),
                         );
                     }
                     for (id, (a, _, b, values)) in &pre.edges {
-                        batch.add_edge(
+                        batch.add_edge_values(
                             *id,
                             *a,
                             *b,

@@ -41,7 +41,7 @@ use fgdb_reference::intents::{Intent, MismatchPolicy, Statement, evaluate};
 use fgdb_sim::{commit_capsule, prepare_capsule, replay};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, EId, GraphId, ObjectId, VId};
 use std::path::PathBuf;
 
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -93,8 +93,8 @@ where
     output
 }
 
-fn text(v: &str) -> CanonicalScalar {
-    CanonicalScalar::Text(fgdb_types::CanonicalText::new_ucs_basic(v).expect("bounded"))
+fn text(v: &str) -> CanonicalPropertyValue {
+    CanonicalScalar::Text(fgdb_types::CanonicalText::new_ucs_basic(v).expect("bounded")).into()
 }
 
 fn create(vid: u128, name: &str) -> Intent {

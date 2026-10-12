@@ -98,7 +98,9 @@ fn oracle(rows: &[VertexRow], operation: Op, quantifier: Q) -> Vec<CanonicalScal
             .props
             .iter()
             .find(|(key, _)| *key == N)
-            .map_or(CanonicalScalar::Null, |(_, value)| value.clone());
+            .map_or(CanonicalScalar::Null, |(_, value)| {
+                value.as_scalar().expect("scalar fixture").clone()
+            });
         let count = counts.entry(value).or_default();
         count.0 += usize::from(row.labels.contains(&L));
         count.1 += usize::from(row.labels.contains(&R));

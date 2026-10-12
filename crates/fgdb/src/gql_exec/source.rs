@@ -1415,7 +1415,7 @@ mod indexed_tests {
                         created_at: CommitSeq(seq),
                         retired_at: None,
                         labels: vec![],
-                        props: vec![(PropertyKeyId(1 + next(2)), value)],
+                        props: vec![(PropertyKeyId(1 + next(2)), value.into())],
                     });
                 }
                 let bytes = fgdb_strata::vertex::encode_patch(&rows).unwrap();
@@ -1471,7 +1471,7 @@ mod indexed_tests {
             created_at: CommitSeq(created),
             retired_at: retired.map(CommitSeq),
             labels: vec![fgdb_delta_types::LabelId(1)],
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(value).into())],
         };
         let patch = |rows: &[VertexRow]| {
             let bytes = fgdb_strata::vertex::encode_patch(rows).unwrap();
@@ -1510,7 +1510,7 @@ mod indexed_tests {
                 .into_iter()
                 .filter(|row| {
                     row.props.iter().any(|(key, value)| {
-                        *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7)
+                        *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7).into()
                     })
                 })
                 .map(|row| row.vid)
@@ -1522,7 +1522,7 @@ mod indexed_tests {
                     .visible_row(&patches, *vid, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
                     .unwrap()
                     && row.props.iter().any(|(key, value)| {
-                        *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7)
+                        *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7).into()
                     })
                 {
                     winners.push(row.vid);
@@ -2239,7 +2239,7 @@ mod tests {
             created_at: CommitSeq(created),
             retired_at: retired.map(CommitSeq),
             labels: vec![LabelId(1)],
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(value).into())],
         }
     }
     fn patch(rows: &[VertexRow]) -> VertexPatchRows {
@@ -2397,14 +2397,16 @@ mod tests {
     fn shared_edge_generations_keep_exact_historical_coordinates_and_property_borrows() {
         use fgdb_strata::edge_props::BlockProps;
 
-        let old_value = CanonicalScalar::ucs_basic_text(&"carried".repeat(1024)).unwrap();
+        let old_value = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"carried".repeat(1024)).unwrap(),
+        );
         let block: Arc<[AdjacencyEntry]> =
             vec![edge(1, 1, None), edge(2, 1, None), edge(3, 1, None)].into();
         let sidecar = Arc::new(BlockProps {
             locators: vec![1, 0, 2],
             rows: vec![
                 vec![(PropertyKeyId(1), old_value.clone())],
-                vec![(PropertyKeyId(1), CanonicalScalar::Int(30))],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(30).into())],
             ],
         });
         let pinned_blocks = vec![Arc::clone(&block)];
@@ -2417,7 +2419,7 @@ mod tests {
             locators: vec![1, 2],
             rows: vec![
                 vec![(PropertyKeyId(1), old_value.clone())],
-                vec![(PropertyKeyId(1), CanonicalScalar::Int(13))],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(13).into())],
             ],
         })));
         blocks.push(vec![edge(2, 1, Some(4))].into());
@@ -2425,7 +2427,7 @@ mod tests {
         blocks.push(vec![edge(4, 5, None)].into());
         props.push(Some(Arc::new(BlockProps {
             locators: vec![1],
-            rows: vec![vec![(PropertyKeyId(1), CanonicalScalar::Int(40))]],
+            rows: vec![vec![(PropertyKeyId(1), CanonicalScalar::Int(40).into())]],
         })));
         let index = pinned_index.extend(&blocks, pinned_blocks.len());
         assert!(index.equivalent(&AdjacencyIndex::build(&blocks)));
@@ -2449,17 +2451,23 @@ mod tests {
                         if at < 3 {
                             old_value.clone()
                         } else {
-                            CanonicalScalar::Int(13)
+                            CanonicalScalar::Int(13).into()
                         },
                     )],
                 ));
                 if at < 4 {
                     expected.push((EId(2), Vec::new()));
                 }
-                expected.push((EId(3), vec![(PropertyKeyId(1), CanonicalScalar::Int(30))]));
+                expected.push((
+                    EId(3),
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(30).into())],
+                ));
             }
             if at >= 5 {
-                expected.push((EId(4), vec![(PropertyKeyId(1), CanonicalScalar::Int(40))]));
+                expected.push((
+                    EId(4),
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(40).into())],
+                ));
             }
             assert_eq!(
                 actual

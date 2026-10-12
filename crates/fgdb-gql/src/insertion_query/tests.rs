@@ -10,7 +10,7 @@ use crate::{
     GraphMutationValue, GraphSetValue, PreparedGraphSet, PreparedGraphText,
 };
 use fgdb_delta_types::{LabelId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 
 const R: RelationId = RelationId(9);
@@ -155,7 +155,8 @@ fn occurrence_rows_keep_duplicate_values_distinct_identities_and_frozen_properti
         let vertex = VId(100 + row as u128 * 256);
         assert!(
             matches!(&intents[0], GraphInsertIntent::Vertex { vertex: id, properties, .. }
-            if *id == vertex && properties[0].1 == *input[row].as_scalar().unwrap())
+            if *id == vertex
+                && properties[0].1.as_scalar() == Some(input[row].as_scalar().unwrap()))
         );
         assert!(
             matches!(&intents[1], GraphInsertIntent::Edge { edge, source, destination, .. }
@@ -714,7 +715,7 @@ fn return_property_binds_the_computed_creation_value_and_native_null_arithmetic(
     ]) {
         assert!(
             matches!(intent, GraphInsertIntent::Vertex { properties, .. }
-            if properties == &[(P, expected)])
+            if properties == &[(P, CanonicalPropertyValue::Scalar(expected))])
         );
     }
 }

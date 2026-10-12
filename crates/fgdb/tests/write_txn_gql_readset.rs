@@ -142,7 +142,7 @@ fn a_commit_whose_matched_destination_was_overwritten_aborts_typed() {
             .expect("reopens");
         assert_eq!(
             db.vertex(VId(2)).expect("reads").expect("row").props,
-            vec![(PROP, int(1))],
+            vec![(PROP, int(1).into())],
             "the winner's overwrite is durable"
         );
         assert!(
@@ -197,12 +197,12 @@ fn a_disjoint_concurrent_create_does_not_abort_the_matcher() {
             .expect("reopens");
         assert_eq!(
             db.vertex(VId(3)).expect("reads").expect("row").props,
-            vec![(PROP, int(3))],
+            vec![(PROP, int(3).into())],
             "the matcher's create is durable"
         );
         assert_eq!(
             db.vertex(VId(9)).expect("reads").expect("row").props,
-            vec![(PROP, int(9))],
+            vec![(PROP, int(9).into())],
             "the concurrent bare create is durable beside it — both committed"
         );
     });

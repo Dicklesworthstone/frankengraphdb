@@ -186,11 +186,11 @@ fn all_pairs_merge_deduplicates_rows_preserves_pair_slots_and_is_idempotent() {
                 (record.entry.src, record.entry.dst, record.entry.relation),
                 (VId(1), VId(destination), S)
             );
-            assert_eq!(record.props, vec![(P, CanonicalScalar::Int(7))]);
+            assert_eq!(record.props, vec![(P, CanonicalScalar::Int(7).into())]);
         }
         assert_eq!(
             db.edge(EId(21)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(99))]
+            vec![(P, CanonicalScalar::Int(99).into())]
         );
         let frontier = db.frontier().unwrap();
         let mut txn = db.begin(&txcx).unwrap();

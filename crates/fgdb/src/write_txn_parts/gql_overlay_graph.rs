@@ -821,8 +821,8 @@ mod query_source {
         #[test]
         fn borrowed_property_overrides_shadow_without_cloning_or_coercion() {
             let key = PropertyKeyId(1);
-            let properties = [(key, CanonicalScalar::Int(7))];
-            let changed = CanonicalScalar::Int(9);
+            let properties = [(key, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7)))];
+            let changed = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(9));
             let mut row = VertexView::new(&[LabelId(2)], &properties);
             assert!(std::ptr::eq(row.property(key).unwrap(), &properties[0].1));
             row.property_edits.insert(key, Some(&changed));
@@ -853,13 +853,22 @@ mod query_source {
         fn complete_property_maps_use_staged_add_update_and_removal_for_both_element_kinds() {
             use fgdb_gql::algebra::GraphValue;
             let properties = [
-                (PropertyKeyId(1), CanonicalScalar::Int(7)),
+                (
+                    PropertyKeyId(1),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7)),
+                ),
                 // An effective removal must not consult this unmapped key.
-                (PropertyKeyId(2), CanonicalScalar::Int(8)),
-                (PropertyKeyId(4), CanonicalScalar::Int(9)),
+                (
+                    PropertyKeyId(2),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(8)),
+                ),
+                (
+                    PropertyKeyId(4),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(9)),
+                ),
             ];
-            let updated = CanonicalScalar::Bool(false);
-            let added = CanonicalScalar::Null;
+            let updated = CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(false));
+            let added = CanonicalPropertyValue::Scalar(CanonicalScalar::Null);
             let mut vertex = VertexView::new(&[], &properties);
             vertex
                 .property_edits
@@ -901,8 +910,8 @@ mod query_source {
             .unwrap();
             assert_eq!(vertex_map, expected);
             assert_eq!(edge_map, expected);
-            assert_eq!(properties[0].1, CanonicalScalar::Int(7));
-            assert_eq!(properties[1].1, CanonicalScalar::Int(8));
+            assert_eq!(properties[0].1, CanonicalScalar::Int(7).into());
+            assert_eq!(properties[1].1, CanonicalScalar::Int(8).into());
             assert!(std::ptr::eq(
                 vertex.property(PropertyKeyId(1)).unwrap(),
                 &updated
@@ -927,13 +936,22 @@ mod query_source {
         fn scalar_and_null_predicates_read_the_canonical_override_not_the_old_type() {
             use fgdb_gql::algebra::ScalarPredicate;
             let key = PropertyKeyId(1);
-            let properties = [(key, CanonicalScalar::ucs_basic_text("old value").unwrap())];
-            let changed = CanonicalScalar::Bool(false);
-            let null = CanonicalScalar::Null;
+            let properties = [(
+                key,
+                CanonicalPropertyValue::Scalar(
+                    CanonicalScalar::ucs_basic_text("old value").unwrap(),
+                ),
+            )];
+            let changed = CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(false));
+            let null = CanonicalPropertyValue::Scalar(CanonicalScalar::Null);
             let mut row = VertexView::new(&[], &properties);
             let scalar = VertexPredicate::ScalarProperty {
                 key,
-                predicate: ScalarPredicate::new(changed.clone(), IntegerComparison::Equal).unwrap(),
+                predicate: ScalarPredicate::new(
+                    changed.as_scalar().unwrap().clone(),
+                    IntegerComparison::Equal,
+                )
+                .unwrap(),
             };
             let absent = VertexPredicate::PropertyNull { key, is_null: true };
             assert!(!row.matches(&scalar));

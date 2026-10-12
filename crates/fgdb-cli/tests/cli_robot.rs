@@ -1548,7 +1548,7 @@ fn refused_zoned_timestamp_preserves_cli_history_reopen_and_rebuild() {
                         let vertex = database.vertex(VID);
                         steps.push((
                             format!("embedded {phase} offset-only read"),
-                            matches!(&vertex, Ok(Some(row)) if row.props == vec![(PropertyKeyId(2), baseline.clone())]),
+                            matches!(&vertex, Ok(Some(row)) if row.props == vec![(PropertyKeyId(2), baseline.clone().into())]),
                             format!("{vertex:?}"),
                         ));
                         drop(database);

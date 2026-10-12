@@ -6907,7 +6907,7 @@ mod lazy_delta_laws {
                 assert_eq!(db.frontier().unwrap(), CommitSeq(2));
                 assert_eq!(
                     db.vertex(VId(1)).unwrap().unwrap().props[0].1,
-                    CanonicalScalar::Int(30)
+                    CanonicalScalar::Int(30).into()
                 );
             }
         });
@@ -7068,7 +7068,7 @@ mod lazy_delta_laws {
                 assert_eq!(txn.basis(), basis);
                 assert_eq!(
                     txn.vertex(&db, VId(2)).unwrap().unwrap().props[0].1,
-                    CanonicalScalar::Int(10)
+                    CanonicalScalar::Int(10).into()
                 );
                 // Returning the old V2 value adds a real dependency. Its
                 // changed winner must conflict even though the V1 write is
@@ -7087,7 +7087,7 @@ mod lazy_delta_laws {
                 assert_eq!(txn.commit(&mut db, &cx).await.unwrap(), CommitSeq(5));
                 assert_eq!(
                     db.vertex(VId(2)).unwrap().unwrap().props[0].1,
-                    CanonicalScalar::Int(33)
+                    CanonicalScalar::Int(33).into()
                 );
 
                 // The ordinary API retains its explicit refresh contract, and
@@ -7300,7 +7300,7 @@ mod version_transcript_laws {
             VId(1),
             RelationId(1),
             VId(2),
-            &[(PropertyKeyId(3), CanonicalScalar::Int(1))],
+            &[(PropertyKeyId(3), CanonicalScalar::Int(1).into())],
         )
         .expect("encodes");
         let base = statement_successor(None, &edge);
@@ -7314,7 +7314,7 @@ mod version_transcript_laws {
             VId(1),
             RelationId(1),
             VId(2),
-            &[(PropertyKeyId(3), CanonicalScalar::Int(1))],
+            &[(PropertyKeyId(3), CanonicalScalar::Int(1).into())],
         )
         .expect("encodes");
         assert_ne!(
@@ -7327,7 +7327,7 @@ mod version_transcript_laws {
             VId(1),
             RelationId(1),
             VId(2),
-            &[(PropertyKeyId(3), CanonicalScalar::Int(2))],
+            &[(PropertyKeyId(3), CanonicalScalar::Int(2).into())],
         )
         .expect("encodes");
         assert_ne!(

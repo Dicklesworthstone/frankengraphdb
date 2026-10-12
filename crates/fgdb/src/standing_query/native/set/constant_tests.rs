@@ -148,7 +148,7 @@ fn independent_set<V: Vfs + Clone>(
             .props
             .iter()
             .find(|(key, _)| *key == P)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
             .unwrap_or(CanonicalScalar::Null);
         *live.entry(GraphValue::Scalar(value)).or_default() += 1;
     }

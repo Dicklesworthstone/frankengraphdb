@@ -25,7 +25,7 @@ use fgdb_reference::ReferenceGraph;
 use fgdb_sim::replay;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, EId, GraphId, VId};
 
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
@@ -48,7 +48,7 @@ fn reference_far_ends_of_kept_near_ends(
     let mut rows = Vec::new();
     for (_, first) in graph.iter_edges().filter(|(_, edge)| edge.relation == R) {
         let near_end_kept = graph.vertex(first.dst).is_some_and(
-            |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if keeps(*v)),
+            |vertex| matches!(vertex.props.get(&K), Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v))) if keeps(*v)),
         );
         if !near_end_kept {
             continue;

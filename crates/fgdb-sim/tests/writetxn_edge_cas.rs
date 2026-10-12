@@ -93,7 +93,7 @@ fn aborted_matching_edge_cas_replays_the_old_value() {
                 .expect("overlay edge")
                 .expect("edge remains live")
                 .props,
-            vec![(PROPERTY, CanonicalScalar::Int(11))]
+            vec![(PROPERTY, CanonicalScalar::Int(11).into())]
         );
         transaction.abort();
         assert_eq!(txn_cx.outstanding_obligations(), 0);
@@ -115,7 +115,10 @@ fn aborted_matching_edge_cas_replays_the_old_value() {
             .expect("reference coordinate exists")
             .edge(EDGE)
             .expect("edge remains durable");
-        assert_eq!(edge.props.get(&PROPERTY), Some(&CanonicalScalar::Int(OLD)));
+        assert_eq!(
+            edge.props.get(&PROPERTY),
+            Some(&CanonicalScalar::Int(OLD).into())
+        );
     });
     assert!(
         report.lab_test_passed(),
@@ -164,7 +167,10 @@ fn committed_matching_edge_cas_replays_the_new_value() {
             .expect("reference coordinate exists")
             .edge(EDGE)
             .expect("edge remains durable");
-        assert_eq!(edge.props.get(&PROPERTY), Some(&CanonicalScalar::Int(22)));
+        assert_eq!(
+            edge.props.get(&PROPERTY),
+            Some(&CanonicalScalar::Int(22).into())
+        );
     });
     assert!(
         report.lab_test_passed(),
@@ -195,7 +201,7 @@ fn concurrent_matching_cas_aborts_reader_and_replays_only_writer() {
                 .expect("transactional edge read succeeds")
                 .expect("observed edge exists")
                 .props,
-            vec![(PROPERTY, CanonicalScalar::Int(OLD))]
+            vec![(PROPERTY, CanonicalScalar::Int(OLD).into())]
         );
         let mut disjoint = WriteBatch::new(R);
         disjoint.create_vertex(VId(3), vec![], vec![]);
@@ -240,7 +246,7 @@ fn concurrent_matching_cas_aborts_reader_and_replays_only_writer() {
                 .expect("edge remains durable")
                 .props
                 .get(&PROPERTY),
-            Some(&CanonicalScalar::Int(33)),
+            Some(&CanonicalScalar::Int(33).into()),
             "B's CAS result is durable"
         );
         assert!(

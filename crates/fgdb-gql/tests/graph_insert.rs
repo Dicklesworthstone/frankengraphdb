@@ -148,8 +148,8 @@ fn repeated_matches_create_distinct_row_local_structures_with_frozen_properties(
             vertex,
             labels: vec![LabelId(9)],
             properties: vec![
-                (P, CanonicalScalar::Int(value)),
-                (Q, CanonicalScalar::Int(value + 1)),
+                (P, CanonicalScalar::Int(value).into()),
+                (Q, CanonicalScalar::Int(value + 1).into()),
             ],
         });
         for (edge, from, to, properties) in [
@@ -158,7 +158,7 @@ fn repeated_matches_create_distinct_row_local_structures_with_frozen_properties(
                 1,
                 vertex,
                 destination,
-                vec![(P, CanonicalScalar::Int(value))],
+                vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(value)))],
             ),
         ] {
             let ElementId::Edge(id) = identity(GraphInsertRequest::Edge { row, edge }).unwrap()

@@ -8,7 +8,8 @@ use fgdb_gql::{
     PreparedGraphMutation, PreparedGraphMutationText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -16,7 +17,11 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const OLD: PropertyKeyId = PropertyKeyId(3);
 const UPDATED: LabelId = LabelId(1);
-type LogicalRow = (VId, Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>);
+type LogicalRow = (
+    VId,
+    Vec<LabelId>,
+    Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+);
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -70,7 +75,7 @@ fn logical(rows: &[VertexRow]) -> Vec<LogicalRow> {
         .map(|row| (row.vid, row.labels.clone(), row.props.clone()))
         .collect()
 }
-fn value(row: &VertexRow, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+fn value(row: &VertexRow, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
     row.props
         .iter()
         .find(|(property, _)| *property == key)
@@ -119,7 +124,7 @@ fn simultaneous_updates_commit_as_one_batch_and_pinned_history_survives_reopen()
         let staged = txn.vertices(&db).unwrap();
         for (vid, expected) in [(1, 20), (2, 10), (3, 30)] {
             let row = staged.iter().find(|row| row.vid == VId(vid)).unwrap();
-            assert_eq!(value(row, P), Some(&CanonicalScalar::Int(expected)));
+            assert_eq!(value(row, P), Some(&CanonicalScalar::Int(expected).into()));
             if vid != 3 {
                 assert!(row.labels.contains(&UPDATED));
                 assert!(value(row, OLD).is_none());
@@ -191,7 +196,7 @@ fn failed_assignments_and_quotas_preserve_prior_staged_work_and_abort_discards_s
             assert!(db.vertex(VId(777)).unwrap().is_some());
             assert_eq!(
                 value(&db.vertex(VId(1)).unwrap().unwrap(), P),
-                Some(&CanonicalScalar::Int(10))
+                Some(&CanonicalScalar::Int(10).into())
             );
             assert!(value(&db.vertex(VId(1)).unwrap().unwrap(), Q).is_none());
             let frozen = logical(&db.vertices().unwrap());

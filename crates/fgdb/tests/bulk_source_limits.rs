@@ -76,7 +76,7 @@ fn vertex(key: &str) -> BulkRow {
     BulkRow::Vertex(BulkVertex {
         key: key.into(),
         labels: vec![LabelId(1)],
-        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(7).into())],
     })
 }
 fn edge(key: &str, source: &str, destination: &str) -> BulkRow {
@@ -85,7 +85,7 @@ fn edge(key: &str, source: &str, destination: &str) -> BulkRow {
         source: source.into(),
         destination: destination.into(),
         relation: RelationId(1),
-        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(9))],
+        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(9).into())],
     })
 }
 fn rows() -> Vec<BulkRow> {

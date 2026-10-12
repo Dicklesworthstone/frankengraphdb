@@ -6,7 +6,9 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
     PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use std::collections::BTreeSet;
 
 const OWNER: LabelId = LabelId(1);
@@ -120,7 +122,11 @@ fn existential_standing_results_partition_roots_after_every_committed_transition
             let value = |vid| {
                 vertices.iter().find(|row| row.vid == vid).and_then(|row| {
                     row.props.iter().find_map(|(key, value)| match value {
-                        CanonicalScalar::Int(n) if *key == AMOUNT => Some(*n),
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n))
+                            if *key == AMOUNT =>
+                        {
+                            Some(*n)
+                        }
                         _ => None,
                     })
                 })

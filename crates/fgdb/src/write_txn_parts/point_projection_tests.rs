@@ -135,14 +135,14 @@ fn projected_fields_match_canonical_rows_through_noops_cascades_and_rollback() {
         assert_eq!(txn.vertex_property(&db, VId(1), P).unwrap(), None);
         assert_eq!(
             txn.edge_property(&db, EId(0), Q).unwrap(),
-            Some(CanonicalScalar::Null)
+            Some(CanonicalScalar::Null.into())
         );
         assert_eq!(txn.edge_property(&db, EId(u128::MAX), P).unwrap(), None);
         txn.rollback_to_savepoint(&db, "before").unwrap();
         compare_with_full_rows(&txn, &db);
         assert_eq!(
             txn.edge_property(&db, EId(u128::MAX), P).unwrap(),
-            Some(CanonicalScalar::Null)
+            Some(CanonicalScalar::Null.into())
         );
         txn.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -260,11 +260,11 @@ fn old_cut_and_reopened_cut_use_their_own_winning_payloads() {
         let frontier = db.write(&cx, changes).await.unwrap();
         assert_eq!(
             old.vertex_property(&db, VId(0), Q).unwrap(),
-            Some(CanonicalScalar::Int(7))
+            Some(CanonicalScalar::Int(7).into())
         );
         assert_eq!(
             old.edge_property(&db, EId(0), Q).unwrap(),
-            Some(CanonicalScalar::Int(8))
+            Some(CanonicalScalar::Int(8).into())
         );
         assert_eq!(
             old.vertex_has_label(&db, VId(0), LabelId(1)).unwrap(),
@@ -282,11 +282,11 @@ fn old_cut_and_reopened_cut_use_their_own_winning_payloads() {
         compare_with_full_rows(&txn, &db);
         assert_eq!(
             txn.vertex_property(&db, VId(0), Q).unwrap(),
-            Some(CanonicalScalar::Int(100))
+            Some(CanonicalScalar::Int(100).into())
         );
         assert_eq!(
             txn.edge_property(&db, EId(0), Q).unwrap(),
-            Some(CanonicalScalar::Int(101))
+            Some(CanonicalScalar::Int(101).into())
         );
         assert_eq!(
             txn.vertex_has_label(&db, VId(0), LabelId(1)).unwrap(),

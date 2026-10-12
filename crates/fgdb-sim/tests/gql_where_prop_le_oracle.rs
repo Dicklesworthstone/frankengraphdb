@@ -18,7 +18,7 @@ use fgdb_reference::ReferenceGraph;
 use fgdb_sim::replay;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, EId, GraphId, VId};
 
 const R: RelationId = RelationId(1);
 const K: PropertyKeyId = PropertyKeyId(7);
@@ -35,7 +35,7 @@ fn reference_dests_of_le_sources(graph: &ReferenceGraph) -> Vec<VId> {
             graph.vertex(edge.src).is_some_and(|source| {
                 matches!(
                     source.props.get(&K),
-                    Some(CanonicalScalar::Int(value)) if *value <= 1
+                    Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) if *value <= 1
                 )
             })
         })

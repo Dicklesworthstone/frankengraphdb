@@ -99,7 +99,7 @@ fn per_relation_prefixes_are_preserved_and_birth_ordinals_do_not_collide() {
             .expect("independent groups with ordered prefixes");
         let four = db.vertex(VId(4)).unwrap().unwrap();
         let five = db.vertex(VId(5)).unwrap().unwrap();
-        assert_eq!(four.props, vec![(P, CanonicalScalar::Int(2))]);
+        assert_eq!(four.props, vec![(P, CanonicalScalar::Int(2).into())]);
         assert_eq!(four.birth_ordinal, 1);
         assert_eq!(five.birth_ordinal, 4);
         assert_eq!(db.neighbours(VId(4), R).unwrap(), vec![VId(1)]);
@@ -154,7 +154,7 @@ fn invalid_or_dependent_group_never_publishes_a_valid_prefix() {
             assert!(db.edges().unwrap().is_empty());
             assert_eq!(
                 db.vertex(VId(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(0))]
+                vec![(P, CanonicalScalar::Int(0).into())]
             );
         }
     });
@@ -190,21 +190,21 @@ fn compound_prepared_write_keeps_all_groups_history_dependencies() {
                 assert_eq!(db.frontier().unwrap(), frontier);
                 assert_eq!(
                     db.vertex(VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(0))]
+                    vec![(P, CanonicalScalar::Int(0).into())]
                 );
                 assert_eq!(
                     db.vertex(VId(2)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(99))]
+                    vec![(P, CanonicalScalar::Int(99).into())]
                 );
             } else {
                 result.expect("disjoint history permits the whole compound write");
                 assert_eq!(
                     db.vertex(VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(10))]
+                    vec![(P, CanonicalScalar::Int(10).into())]
                 );
                 assert_eq!(
                     db.vertex(VId(2)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(20))]
+                    vec![(P, CanonicalScalar::Int(20).into())]
                 );
             }
         }

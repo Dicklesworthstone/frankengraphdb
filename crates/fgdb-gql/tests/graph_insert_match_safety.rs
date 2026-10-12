@@ -264,7 +264,7 @@ fn matched_edge_results_keep_edge_identity_and_property_domains_in_creation_and_
                 .contains(&GraphInsertIntent::Vertex {
                     vertex: *created,
                     labels: vec![],
-                    properties: vec![(P, property)],
+                    properties: vec![(P, property.into())],
                 })
         );
     }

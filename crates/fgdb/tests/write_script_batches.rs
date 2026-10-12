@@ -408,8 +408,8 @@ fn direct_batch_execution_keeps_one_final_commit_and_durable_properties() {
             assert_eq!(
                 db.vertex(VId(1000 + index)).unwrap().unwrap().props,
                 vec![
-                    (P, CanonicalScalar::Int(index as i64)),
-                    (Q, CanonicalScalar::Int(index as i64 + 10))
+                    (P, CanonicalScalar::Int(index as i64).into()),
+                    (Q, CanonicalScalar::Int(index as i64 + 10).into())
                 ]
             );
         }
@@ -474,8 +474,8 @@ fn infrastructure_refusal_is_not_mislabeled_as_a_record_failure() {
             assert_eq!(
                 txn.vertex(&db, VId(1000 + index)).unwrap().unwrap().props,
                 vec![
-                    (P, CanonicalScalar::Int(index as i64)),
-                    (Q, CanonicalScalar::Int(index as i64 + 10)),
+                    (P, CanonicalScalar::Int(index as i64).into()),
+                    (Q, CanonicalScalar::Int(index as i64 + 10).into()),
                 ],
             );
         }

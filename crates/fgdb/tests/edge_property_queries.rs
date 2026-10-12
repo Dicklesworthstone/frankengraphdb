@@ -79,7 +79,9 @@ fn edge_property(edge: &EdgeRecord) -> CanonicalScalar {
     edge.props
         .iter()
         .find(|(key, _)| *key == P)
-        .map_or(CanonicalScalar::Null, |(_, value)| value.clone())
+        .map_or(CanonicalScalar::Null, |(_, value)| {
+            value.as_scalar().expect("scalar fixture").clone()
+        })
 }
 fn query_rows(
     db: &Database<MemVfs>,
@@ -276,7 +278,7 @@ fn generated_edge_property_history_matches_independent_records() {
                         edge.props = if remove {
                             vec![]
                         } else {
-                            vec![(P, CanonicalScalar::Int(n + 7))]
+                            vec![(P, CanonicalScalar::Int(n + 7).into())]
                         };
                     }
                 }

@@ -125,7 +125,7 @@ fn property(row: &VertexRow, key: PropertyKeyId) -> Option<&CanonicalScalar> {
     row.props
         .iter()
         .find(|(found, _)| *found == key)
-        .map(|(_, value)| value)
+        .map(|(_, value)| value.as_scalar().expect("scalar fixture"))
 }
 // Independent owned-row oracle: no parser, GLA, scalar-predicate or query call.
 fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord]) -> Vec<Plain> {

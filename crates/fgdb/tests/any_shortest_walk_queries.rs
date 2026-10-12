@@ -310,7 +310,7 @@ fn any_selected_ingestion_creates_per_pair_and_late_refusal_restores_outer_work(
         for vertex in [VId(201), VId(202)] {
             assert_eq!(
                 db.vertex(vertex).unwrap().unwrap().props,
-                vec![(Q, CanonicalScalar::Int(7))]
+                vec![(Q, CanonicalScalar::Int(7).into())]
             );
         }
         assert!(db.vertex(VId(99)).unwrap().is_some());

@@ -7,7 +7,8 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText};
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, QueryCx, VId,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -536,14 +537,14 @@ fn cli_answers(fixture: &Fixture, relation: RelationId) -> Vec<Vec<i64>> {
     rows.sort();
     rows
 }
-type Vertices = BTreeMap<String, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type Vertices = BTreeMap<String, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 type Edges = BTreeMap<
     String,
     (
         String,
         String,
         RelationId,
-        Vec<(PropertyKeyId, CanonicalScalar)>,
+        Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     ),
 >;
 fn logical(db: &Database, checkpoint: &BulkLoadCheckpoint) -> (Vertices, Edges) {
@@ -627,17 +628,21 @@ fn expected(rows: &[BulkRow]) -> (Vertices, Edges) {
     }
     (vertices, edges)
 }
-fn props(n: usize, payload: i64) -> Vec<(PropertyKeyId, CanonicalScalar)> {
+fn props(n: usize, payload: i64) -> Vec<(PropertyKeyId, CanonicalPropertyValue)> {
     vec![
-        (P, CanonicalScalar::Int(payload)),
-        (K, CanonicalScalar::Int(n as i64)),
+        (P, CanonicalScalar::Int(payload).into()),
+        (K, CanonicalScalar::Int(n as i64).into()),
         (
             PropertyKeyId(3),
             CanonicalScalar::ucs_basic_text(&format!("row {n}: \"quoted\" \\ newline\nUnicode λ"))
-                .unwrap(),
+                .unwrap()
+                .into(),
         ),
-        (PropertyKeyId(4), CanonicalScalar::Bool(n.is_multiple_of(2))),
-        (PropertyKeyId(5), CanonicalScalar::Null),
+        (
+            PropertyKeyId(4),
+            CanonicalScalar::Bool(n.is_multiple_of(2)).into(),
+        ),
+        (PropertyKeyId(5), CanonicalScalar::Null.into()),
     ]
 }
 fn generated(seed: u64) -> Vec<BulkRow> {
@@ -668,7 +673,7 @@ fn generated(seed: u64) -> Vec<BulkRow> {
     rows
 }
 fn ndjson(rows: &[BulkRow]) -> String {
-    let properties = |props: &[(PropertyKeyId, CanonicalScalar)]| {
+    let properties = |props: &[(PropertyKeyId, CanonicalPropertyValue)]| {
         props
             .iter()
             .map(|(key, value)| {
@@ -681,13 +686,17 @@ fn ndjson(rows: &[BulkRow]) -> String {
                     _ => panic!("unknown test property"),
                 };
                 let value = match value {
-                    CanonicalScalar::Int(value) => format!("int:{value}"),
-                    CanonicalScalar::Bool(value) => format!("bool:{value}"),
-                    CanonicalScalar::Null => "null".into(),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => {
+                        format!("int:{value}")
+                    }
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(value)) => {
+                        format!("bool:{value}")
+                    }
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Null) => "null".into(),
                     _ if *key == PropertyKeyId(3) => {
                         // Derive text from the independent ordinal property; the logical
                         // comparison below checks its actual persisted canonical value.
-                        let (_, CanonicalScalar::Int(n)) =
+                        let (_, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n))) =
                             props.iter().find(|(key, _)| *key == K).unwrap()
                         else {
                             panic!("ordinal")

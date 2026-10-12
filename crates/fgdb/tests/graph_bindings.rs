@@ -13,7 +13,8 @@ use fgdb_gql::algebra::{
 };
 use fgdb_gql::{GlaLimitDimension, GqlBudgetDimension, GqlQueryError, GqlQueryPolicy};
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::BTreeSet;
 
@@ -119,7 +120,11 @@ fn oracle(
         let friend = left.entry.dst;
         let qualifying = vertices.iter().find(|v| v.vid == friend).is_some_and(|v| {
             v.props.iter().any(|(key, scalar)| {
-                *key == N && matches!(scalar, CanonicalScalar::Int(n) if *n >= 3)
+                *key == N
+                    && matches!(
+                        scalar,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)) if *n >= 3
+                    )
             })
         });
         if !qualifying {

@@ -63,7 +63,7 @@ fn label_dependent_field_edit_survives_unrelated_label_change_but_not_full_read(
                 assert_eq!(db.delta_since(frontier).unwrap().count(), 1);
                 let row = db.vertex(VId(1)).unwrap().unwrap();
                 assert_eq!(row.labels, vec![L, OTHER]);
-                assert_eq!(row.props, vec![(P, CanonicalScalar::Int(11))]);
+                assert_eq!(row.props, vec![(P, CanonicalScalar::Int(11).into())]);
             }
             assert_eq!(tcx.outstanding_obligations(), 0);
         }
@@ -213,7 +213,7 @@ fn label_and_property_witnesses_do_not_alias_and_point_sets_union() {
         elem: vertex,
         property: P,
         before: None,
-        after: Some(CanonicalScalar::Int(1)),
+        after: Some(CanonicalScalar::Int(1).into()),
     };
     let mut reads = PointReads::default();
     reads.record(vertex, PointReadField::Property(P));

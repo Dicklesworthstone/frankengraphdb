@@ -484,7 +484,7 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
                         .expect("the edge remains live throughout the chain");
                     assert_eq!(
                         edge.props,
-                        vec![(property, CanonicalScalar::Int(*value))],
+                        vec![(property, CanonicalScalar::Int(*value).into())],
                         "sequence {sequence:?} answered with the wrong content version"
                     );
                 }
@@ -600,7 +600,7 @@ fn a_long_edge_version_chain_survives_cold_reopen_and_compaction() {
                             .expect("the pinned edge remains live");
                         assert_eq!(
                             edge.props,
-                            vec![(property, CanonicalScalar::Int(*value))],
+                            vec![(property, CanonicalScalar::Int(*value).into())],
                             "pinned sequence {sequence:?} moved during compaction"
                         );
                     }
@@ -728,7 +728,7 @@ fn a_pinned_read_snapshot_survives_a_successor_write() {
                     .unwrap()
                     .expect("edge is visible")
                     .props,
-                vec![(property, CanonicalScalar::Int(7))]
+                vec![(property, CanonicalScalar::Int(7).into())]
             );
 
             let mut successor = WriteBatch::new(KNOWS);

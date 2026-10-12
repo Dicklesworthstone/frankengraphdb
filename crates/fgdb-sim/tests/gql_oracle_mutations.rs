@@ -9,7 +9,8 @@ use fgdb_gql::{
 };
 use fgdb_reference::ReferenceGraph;
 use fgdb_types::{
-    CanonicalScalar, CanonicalText, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CanonicalText, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -66,7 +67,7 @@ fn create_vertex(
             vid: id,
             birth_ordinal: id.0 as u64,
             labels,
-            props,
+            props: props.into_iter().map(|(k, v)| (k, v.into())).collect(),
             valid_time: None,
         })
         .unwrap();
@@ -86,7 +87,7 @@ fn create_edge(
             relation: R,
             dst,
             canonical_key: None,
-            props,
+            props: props.into_iter().map(|(k, v)| (k, v.into())).collect(),
             valid_time: None,
         })
         .unwrap();
@@ -107,14 +108,14 @@ fn property(
             elem,
             property: key,
             before,
-            after,
+            after: after.map(CanonicalPropertyValue::from),
         })
         .unwrap();
 }
 fn selected(model: &ReferenceGraph, key: i64) -> Vec<VId> {
     model
         .iter_vertices()
-        .filter(|(_, v)| v.props.get(&KEY) == Some(&int(key)))
+        .filter(|(_, v)| v.props.get(&KEY) == Some(&int(key).into()))
         .map(|(id, _)| id)
         .collect()
 }
@@ -246,13 +247,9 @@ fn case(text: String, op: Op, family: usize) -> Case {
     }
 }
 type VertexRecord = (VId, Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>);
-type EdgeRecord = (
-    EId,
-    VId,
-    RelationId,
-    VId,
-    Vec<(PropertyKeyId, CanonicalScalar)>,
-);
+type StoredProps = Vec<(PropertyKeyId, CanonicalPropertyValue)>;
+type StoredVertexRecord = (VId, Vec<LabelId>, StoredProps);
+type EdgeRecord = (EId, VId, RelationId, VId, StoredProps);
 // Initial vertices, initial (edge, source, destination) triples, and cases.
 type GeneratedWorkload = (Vec<VertexRecord>, Vec<(EId, VId, VId)>, Vec<Case>);
 // Three disjoint components allow destructive operations in every round, not
@@ -391,7 +388,7 @@ fn generated(seed: u64) -> GeneratedWorkload {
 }
 #[derive(Debug, PartialEq, Eq)]
 struct State {
-    vertices: Vec<VertexRecord>,
+    vertices: Vec<StoredVertexRecord>,
     edges: Vec<EdgeRecord>,
 }
 fn actual(db: &Database<MemVfs>) -> State {

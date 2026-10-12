@@ -129,19 +129,21 @@ mod tests {
 
     #[test]
     fn masked_unknown_properties_match_physical_removal_in_values_and_charges() {
-        let visible = [
-            (PropertyKeyId(1), CanonicalScalar::Int(7)),
-            (PropertyKeyId(2), CanonicalScalar::Null),
+        let visible: [(PropertyKeyId, CanonicalPropertyValue); 2] = [
+            (PropertyKeyId(1), CanonicalScalar::Int(7).into()),
+            (PropertyKeyId(2), CanonicalScalar::Null.into()),
         ];
         let mut with_hidden = visible.to_vec();
         with_hidden.push((
             PropertyKeyId(99),
-            CanonicalScalar::ucs_basic_text(&"hidden".repeat(1024)).unwrap(),
+            CanonicalScalar::ucs_basic_text(&"hidden".repeat(1024))
+                .unwrap()
+                .into(),
         ));
         let mut catalog = ReverseSymbolCatalog::new();
         catalog.insert_property(PropertyKeyId(1), "zeta");
         catalog.insert_property(PropertyKeyId(2), "alpha");
-        let run = |properties: &[(PropertyKeyId, CanonicalScalar)]| {
+        let run = |properties: &[(PropertyKeyId, CanonicalPropertyValue)]| {
             let mut events = Vec::new();
             let value = collect(
                 properties.iter().map(|(key, value)| (*key, value)),
@@ -189,7 +191,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty, GraphValue::map(Vec::new()).unwrap());
-        let value = CanonicalScalar::Int(1);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
         let mut catalog = ReverseSymbolCatalog::new();
         catalog.insert_property(PropertyKeyId(1), "same");
         catalog.insert_property(PropertyKeyId(2), "same");
@@ -207,7 +209,9 @@ mod tests {
 
     #[test]
     fn every_payload_reservation_refusal_returns_no_map_and_stops_callbacks() {
-        let value = CanonicalScalar::ucs_basic_text(&"payload".repeat(33)).unwrap();
+        let value = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"payload".repeat(33)).unwrap(),
+        );
         let mut catalog = ReverseSymbolCatalog::new();
         catalog.insert_property(PropertyKeyId(1), "name".repeat(33));
         let run = |stop| {

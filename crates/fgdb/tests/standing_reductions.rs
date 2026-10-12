@@ -94,7 +94,9 @@ fn source(db: &Database<MemVfs>, label: u64) -> Bag {
                     row.props
                         .iter()
                         .find(|(k, _)| *k == key)
-                        .map_or(CanonicalScalar::Null, |(_, value)| value.clone()),
+                        .map_or(CanonicalScalar::Null, |(_, value)| {
+                            value.as_scalar().expect("scalar fixture").clone()
+                        }),
                 )
             });
             *out.entry(values.to_vec()).or_default() += 1;

@@ -820,7 +820,7 @@ fn authorized_multi_pair_merge_masks_sources_and_preserves_existing_middle_pair(
                     (edge.entry.src, edge.entry.relation, edge.entry.dst),
                     (src, S, dst)
                 );
-                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(7))]);
+                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(7).into())]);
             }
             assert_eq!(db.edge(EId(21)).unwrap().unwrap().props, existing.props);
             assert_eq!(db.vertices().unwrap(), vertices);

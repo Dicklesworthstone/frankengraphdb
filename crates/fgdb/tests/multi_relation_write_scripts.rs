@@ -13,8 +13,8 @@ use fgdb_gql::{
     GraphWriteProgramPolicy, PreparedGraphWriteScript,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
-    PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 
 const KNOWS: RelationId = RelationId(1);
@@ -23,7 +23,7 @@ const WORKS_AT: RelationId = RelationId(3);
 const NAME: PropertyKeyId = PropertyKeyId(1);
 const SINCE: PropertyKeyId = PropertyKeyId(2);
 
-type Properties = Vec<(PropertyKeyId, CanonicalScalar)>;
+type Properties = Vec<(PropertyKeyId, CanonicalPropertyValue)>;
 type LogicalVertex = (CanonicalScalar, Vec<LabelId>, Properties);
 type LogicalEdge = (RelationId, CanonicalScalar, CanonicalScalar, Properties);
 
@@ -158,6 +158,8 @@ fn graph<V: Vfs + Clone>(db: &Database<V>) -> LogicalGraph {
                 .find(|(key, _)| *key == NAME)
                 .unwrap()
                 .1
+                .as_scalar()
+                .expect("scalar name")
                 .clone();
             (row.vid, name)
         })
@@ -190,8 +192,8 @@ fn text(value: &str) -> CanonicalScalar {
 
 fn properties(name: String, since: u64) -> Properties {
     vec![
-        (NAME, text(&name)),
-        (SINCE, CanonicalScalar::Int(since as i64)),
+        (NAME, text(&name).into()),
+        (SINCE, CanonicalScalar::Int(since as i64).into()),
     ]
 }
 

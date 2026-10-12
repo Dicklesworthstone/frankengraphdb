@@ -107,19 +107,19 @@ fn standalone_return_reads_exact_created_vertex_edge_and_frozen_properties() {
             GraphInsertIntent::Vertex {
                 vertex: VId(100),
                 labels: vec![COPY],
-                properties: vec![(P, CanonicalScalar::Int(3))]
+                properties: vec![(P, CanonicalScalar::Int(3).into())]
             },
             GraphInsertIntent::Vertex {
                 vertex: VId(101),
                 labels: vec![],
-                properties: vec![(P, CanonicalScalar::Int(8))]
+                properties: vec![(P, CanonicalScalar::Int(8).into())]
             },
             GraphInsertIntent::Edge {
                 edge: EId(1_000),
                 relation: R,
                 source: VId(100),
                 destination: VId(101),
-                properties: vec![(P, CanonicalScalar::Int(9))]
+                properties: vec![(P, CanonicalScalar::Int(9).into())]
             },
         ]
     );

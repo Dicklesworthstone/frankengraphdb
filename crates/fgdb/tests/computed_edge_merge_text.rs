@@ -134,8 +134,8 @@ fn native_create_and_match_keep_simultaneous_then_sequential_values_after_reopen
             assert_eq!(
                 db.edge(edge).unwrap().unwrap().props,
                 vec![
-                    (P, CanonicalScalar::Int(expected[0])),
-                    (W, CanonicalScalar::Int(expected[1])),
+                    (P, CanonicalScalar::Int(expected[0]).into()),
+                    (W, CanonicalScalar::Int(expected[1]).into()),
                 ]
             );
             assert!(pinned.edge(edge).unwrap().is_none());
@@ -151,7 +151,10 @@ fn native_create_and_match_keep_simultaneous_then_sequential_values_after_reopen
         assert!(edge.entry.src == VId(1) && edge.entry.dst == VId(2));
         assert_eq!(
             edge.props,
-            vec![(P, CanonicalScalar::Int(21)), (W, CanonicalScalar::Int(11))]
+            vec![
+                (P, CanonicalScalar::Int(21).into()),
+                (W, CanonicalScalar::Int(11).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -212,11 +215,11 @@ fn native_unwind_accumulates_repeated_relationships_in_one_durable_commit() {
         assert_eq!(db.edges().unwrap().len(), 2);
         assert_eq!(
             db.edge(first).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(5))]
+            vec![(W, CanonicalScalar::Int(5).into())]
         );
         assert_eq!(
             db.edge(second).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(4))]
+            vec![(W, CanonicalScalar::Int(4).into())]
         );
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -284,7 +287,7 @@ fn late_unwind_overflow_retains_row_coordinates_and_the_outer_transaction_prefix
         assert!(txn.edge(&db, EId(100)).unwrap().is_none());
         assert_eq!(
             txn.edge(&db, EId(90)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(i64::MAX))]
+            vec![(W, CanonicalScalar::Int(i64::MAX).into())]
         );
         assert!(db.edges().unwrap().is_empty());
         assert_eq!(db.frontier().unwrap(), before);
@@ -382,7 +385,7 @@ fn no_input_and_unselected_branches_are_lazy_but_overwritten_failures_are_not_er
         ));
         assert_eq!(
             db.edge(EId(90)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(5))]
+            vec![(W, CanonicalScalar::Int(5).into())]
         );
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -535,7 +538,10 @@ fn authorized_native_expressions_mask_hidden_payloads_and_preserve_original_writ
             measured = Some(usage);
             assert_eq!(
                 db.edge(EId(90)).unwrap().unwrap().props,
-                vec![(W, CanonicalScalar::Int(6)), (SECRET, secret.clone())]
+                vec![
+                    (W, CanonicalScalar::Int(6).into()),
+                    (SECRET, secret.clone().into())
+                ]
             );
             let before = db.frontier().unwrap();
             let text = format!("{HEAD} ON MATCH SET e.w=e.w+1 SET e.secret=0");
@@ -568,7 +574,7 @@ fn authorized_native_expressions_mask_hidden_payloads_and_preserve_original_writ
             assert_eq!(db.frontier().unwrap(), before);
             assert_eq!(
                 db.edge(EId(90)).unwrap().unwrap().props,
-                vec![(W, CanonicalScalar::Int(6)), (SECRET, secret)]
+                vec![(W, CanonicalScalar::Int(6).into()), (SECRET, secret.into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
@@ -616,11 +622,11 @@ fn parallel_relationship_ambiguity_refuses_before_computed_actions_or_allocation
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(
             db.edge(EId(90)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(5))]
+            vec![(W, CanonicalScalar::Int(5).into())]
         );
         assert_eq!(
             db.edge(EId(91)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(7))]
+            vec![(W, CanonicalScalar::Int(7).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

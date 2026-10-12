@@ -9,7 +9,9 @@ use fgdb_gql::{
     GraphIntegerBinary as Binary, GraphIntegerExpression, GraphIntegerOp as Op, GraphSetProjection,
     GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 
 const P: PropertyKeyId = PropertyKeyId(1);
 fn policy() -> GqlQueryPolicy {
@@ -74,8 +76,12 @@ fn expected<V: Vfs + Clone>(db: &Database<V>, q: GraphSetQuantifier) -> (CommitS
     let mut values = Vec::new();
     for row in db.vertices_at(at).unwrap() {
         let value = match row.props.iter().find(|(key, _)| *key == P).map(|(_, v)| v) {
-            Some(CanonicalScalar::Int(n)) => CanonicalScalar::Int(n % 2 + 10),
-            None | Some(CanonicalScalar::Null) => CanonicalScalar::Null,
+            Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n))) => {
+                CanonicalScalar::Int(n % 2 + 10)
+            }
+            None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => {
+                CanonicalScalar::Null
+            }
             _ => unreachable!("fixture scalar domain"),
         };
         values.push(GraphValue::Scalar(value.clone()));

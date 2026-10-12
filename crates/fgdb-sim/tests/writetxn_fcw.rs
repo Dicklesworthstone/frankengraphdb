@@ -131,7 +131,7 @@ fn overlapping_write_txns_are_fcw_and_abort_is_trace_free() {
             .expect("winner's vertex is durable");
         assert_eq!(
             vertex.props.get(&PROPERTY),
-            Some(&CanonicalScalar::Int(11)),
+            Some(&CanonicalScalar::Int(11).into()),
             "reference state must contain only the winning property update"
         );
     });

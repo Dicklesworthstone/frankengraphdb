@@ -122,14 +122,14 @@ fn duplicates_null_and_input_order_create_distinct_occurrence_local_structures()
         expected.push(GraphInsertIntent::Vertex {
             vertex,
             labels: vec![LabelId(3)],
-            properties: vec![(P, value.clone())],
+            properties: vec![(P, value.clone().into())],
         });
         expected.push(GraphInsertIntent::Edge {
             edge: EId(200 + row as u128 * 256),
             relation: R,
             source: vertex,
             destination: vertex,
-            properties: vec![(P, value)],
+            properties: vec![(P, value.into())],
         });
         expected_requests.push(GraphInsertRequest::Vertex { row, vertex: 0 });
         expected_requests.push(GraphInsertRequest::Edge { row, edge: 0 });
@@ -155,7 +155,13 @@ fn relation_order_and_page_determine_identity_requests_after_unwind() {
         let GraphInsertIntent::Vertex { properties, .. } = intent else {
             panic!("expected one vertex before its edge")
         };
-        assert_eq!(properties, &[(P, CanonicalScalar::Int(expected))]);
+        assert_eq!(
+            properties,
+            &[(
+                P,
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(expected))
+            )]
+        );
     }
 }
 
@@ -303,7 +309,7 @@ fn chained_unwind_can_retain_unused_list_columns_and_create_from_final_scalars()
             GraphInsertIntent::Vertex {
                 vertex: VId(100 + row as u128 * 256),
                 labels: vec![LabelId(3)],
-                properties: vec![(P, CanonicalScalar::Int(value))],
+                properties: vec![(P, CanonicalScalar::Int(value).into())],
             }
         );
     }

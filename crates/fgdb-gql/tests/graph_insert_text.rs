@@ -137,8 +137,8 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
             vertex,
             labels: vec![COPY],
             properties: vec![
-                (P, CanonicalScalar::Int(value)),
-                (Q, CanonicalScalar::Int(value + 1)),
+                (P, CanonicalScalar::Int(value).into()),
+                (Q, CanonicalScalar::Int(value + 1).into()),
             ],
         });
         expected.push(GraphInsertIntent::Edge {
@@ -146,7 +146,7 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
             relation: R,
             source,
             destination: vertex,
-            properties: vec![(Q, CanonicalScalar::Int(1))],
+            properties: vec![(Q, CanonicalScalar::Int(1).into())],
         });
         expected.push(GraphInsertIntent::Edge {
             edge: EId(1_001 + row as u128 * 16),
@@ -196,7 +196,7 @@ fn constants_preserve_walk_optional_and_edge_only_occurrences() {
         let y = VId(x.0 + 1);
         assert!(
             matches!(&intents[1], GraphInsertIntent::Vertex { properties, .. }
-            if properties == &[(P, CanonicalScalar::Null)])
+            if properties == &[(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))])
         );
         for (edge, source, destination) in [(2, x, y), (3, y, x), (4, x, x)] {
             assert!(
@@ -370,7 +370,10 @@ fn scalar_payloads_and_original_utf8_offsets_survive_binding_without_interpolati
     let batch = run(&plan, &[VId(1)], &[], &Props::new()).unwrap();
     assert!(
         matches!(&batch.intents()[0], GraphInsertIntent::Vertex { properties, .. }
-        if properties == &[(P, CanonicalScalar::ucs_basic_text(payload).unwrap()), (Q, CanonicalScalar::Int(-7))])
+        if properties == &[
+            (P, CanonicalPropertyValue::Scalar(CanonicalScalar::ucs_basic_text(payload).unwrap())),
+            (Q, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-7))),
+        ])
     );
     assert!(!format!("{template:?} {plan:?} {batch:?}").contains(payload));
     assert!(matches!(
@@ -478,9 +481,21 @@ fn inline_chains_incoming_arrows_cycles_and_anonymous_nodes_bind_exact_endpoints
     let result = result.unwrap();
     let mut expected = Vec::new();
     for (index, labels, properties) in [
-        (0, vec![COPY], vec![(P, CanonicalScalar::Int(1))]),
-        (1, vec![], vec![(P, CanonicalScalar::Int(2))]),
-        (2, vec![], vec![(P, CanonicalScalar::Int(3))]),
+        (
+            0,
+            vec![COPY],
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(1)))],
+        ),
+        (
+            1,
+            vec![],
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(2)))],
+        ),
+        (
+            2,
+            vec![],
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(3)))],
+        ),
         (3, vec![], vec![]),
         (4, vec![COPY], vec![]),
     ] {
@@ -491,7 +506,12 @@ fn inline_chains_incoming_arrows_cycles_and_anonymous_nodes_bind_exact_endpoints
         });
     }
     for (index, source, destination, properties) in [
-        (0, 100, 101, vec![(P, CanonicalScalar::Int(10))]),
+        (
+            0,
+            100,
+            101,
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(10)))],
+        ),
         (1, 102, 101, vec![]),
         (2, 101, 100, vec![]),
         (3, 100, 103, vec![]),
@@ -556,12 +576,12 @@ fn consecutive_create_clauses_are_one_creation_over_shared_bindings() {
         GraphInsertIntent::Vertex {
             vertex: VId(100),
             labels: vec![COPY],
-            properties: vec![(P, CanonicalScalar::Int(1))],
+            properties: vec![(P, CanonicalScalar::Int(1).into())],
         },
         GraphInsertIntent::Vertex {
             vertex: VId(101),
             labels: vec![],
-            properties: vec![(P, CanonicalScalar::Int(2))],
+            properties: vec![(P, CanonicalScalar::Int(2).into())],
         },
     ];
     for (index, source, destination) in [(0, 100, 101), (1, 101, 100)] {
@@ -629,7 +649,10 @@ fn standalone_parameters_keep_exact_kinds_offsets_occurrences_and_lazy_case() {
     let batch = result.unwrap();
     assert!(
         matches!(&batch.intents()[0], GraphInsertIntent::Vertex { properties, .. }
-        if properties == &[(P, CanonicalScalar::ucs_basic_text(payload).unwrap()), (Q, CanonicalScalar::Int(0))])
+        if properties == &[
+            (P, CanonicalPropertyValue::Scalar(CanonicalScalar::ucs_basic_text(payload).unwrap())),
+            (Q, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0))),
+        ])
     );
     assert_eq!(calls.get(), 4);
     assert_eq!(
@@ -787,7 +810,7 @@ fn unwind_creation_is_the_native_relation_with_ordered_duplicate_occurrences() {
                 GraphInsertIntent::Vertex {
                     vertex: VId(100 + row as u128 * 16),
                     labels: vec![COPY],
-                    properties: vec![(P, CanonicalScalar::Int(value))],
+                    properties: vec![(P, CanonicalScalar::Int(value).into())],
                 }
             })
             .collect::<Vec<_>>()
@@ -825,24 +848,24 @@ fn multiple_unwinds_feed_computed_fields_and_row_local_creation_chains() {
                 vertex: a,
                 labels: vec![COPY],
                 properties: vec![
-                    (P, CanonicalScalar::Int(value)),
+                    (P, CanonicalScalar::Int(value).into()),
                     (
                         Q,
-                        CanonicalScalar::Int(if value == 1 { 9 } else { value * 2 }),
+                        CanonicalScalar::Int(if value == 1 { 9 } else { value * 2 }).into(),
                     ),
                 ],
             },
             GraphInsertIntent::Vertex {
                 vertex: b,
                 labels: vec![],
-                properties: vec![(P, CanonicalScalar::Int(value - 1))],
+                properties: vec![(P, CanonicalScalar::Int(value - 1).into())],
             },
             GraphInsertIntent::Edge {
                 edge: EId(1_000 + row as u128 * 16),
                 relation: R,
                 source: a,
                 destination: b,
-                properties: vec![(P, CanonicalScalar::Int(value + 10))],
+                properties: vec![(P, CanonicalScalar::Int(value + 10).into())],
             },
             GraphInsertIntent::Edge {
                 edge: EId(1_001 + row as u128 * 16),
@@ -896,12 +919,18 @@ fn unwind_parameters_bind_once_and_empty_sources_never_create_a_unit() {
             GraphInsertIntent::Vertex {
                 vertex: VId(100),
                 labels: vec![COPY],
-                properties: vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(9))]
+                properties: vec![
+                    (P, CanonicalScalar::Int(7).into()),
+                    (Q, CanonicalScalar::Int(9).into())
+                ]
             },
             GraphInsertIntent::Vertex {
                 vertex: VId(116),
                 labels: vec![COPY],
-                properties: vec![(P, CanonicalScalar::Null), (Q, CanonicalScalar::Null)]
+                properties: vec![
+                    (P, CanonicalScalar::Null.into()),
+                    (Q, CanonicalScalar::Null.into())
+                ]
             },
         ]
     );
