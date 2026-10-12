@@ -737,3 +737,75 @@ fn a_leading_optional_match_returns_whole_predicate_items() {
         ]
     );
 }
+
+/// An aggregating WITH may key on, or aggregate, a captured path's metadata:
+/// `length(p)`, `nodes(p)` and `relationships(p)` each read the graph source
+/// once as a hidden grouping input (TCK Quantifier1-4 [9]).
+#[test]
+fn an_aggregating_with_keys_on_captured_path_metadata() {
+    use std::collections::BTreeMap;
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let pair = |a: i64, b: i64| GraphValueRow::from_owned_values(vec![int(a), int(b)]);
+    // One- and two-edge trails over the fixture (DIFFERENT EDGES: no edge
+    // twice, so the self-loop cannot follow itself), by edge index.
+    let mut trails: Vec<Vec<usize>> = (0..EDGES.len()).map(|edge| vec![edge]).collect();
+    for first in 0..EDGES.len() {
+        for second in 0..EDGES.len() {
+            if first != second && EDGES[first].2 == EDGES[second].0 {
+                trails.push(vec![first, second]);
+            }
+        }
+    }
+    let by_length = |offset: i64| {
+        let mut groups = BTreeMap::<i64, i64>::new();
+        for trail in &trails {
+            *groups.entry(trail.len() as i64 + offset).or_default() += 1;
+        }
+        groups
+            .into_iter()
+            .map(|(key, count)| pair(key, count))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        identified_rows(
+            "MATCH p = (a)-[:R*1..2]->(b) WITH length(p) AS l, count(*) AS c RETURN l, c ORDER BY l"
+        ),
+        by_length(0)
+    );
+    assert_eq!(
+        identified_rows(
+            "MATCH p = (a)-[:R*1..2]->(b) WITH size(nodes(p)) AS n, count(*) AS c \
+             RETURN n, c ORDER BY n"
+        ),
+        by_length(1)
+    );
+    // Grouping by the remaining relationships: each one-edge trail leaves [],
+    // each two-edge trail leaves its second edge.
+    let mut rests = BTreeMap::<Vec<usize>, i64>::new();
+    for trail in &trails {
+        *rests.entry(trail[1..].to_vec()).or_default() += 1;
+    }
+    let mut expected: Vec<_> = rests
+        .iter()
+        .map(|(rest, count)| (rest.len() as i64, *count))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        identified_rows(
+            "MATCH p = (a)-[:R*1..2]->(b) WITH tail(relationships(p)) AS rest, count(*) AS c \
+             RETURN size(rest) AS s, c ORDER BY s, c"
+        ),
+        expected
+            .into_iter()
+            .map(|(size, count)| pair(size, count))
+            .collect::<Vec<_>>()
+    );
+    // A metadata call whose domain is not a path stays refused.
+    assert!(
+        PreparedGraphSetText::prepare(
+            "MATCH p = (a)-[:R*1..2]->(b) WITH labels(p) AS l, count(*) AS c RETURN l, c",
+            symbols
+        )
+        .is_err()
+    );
+}

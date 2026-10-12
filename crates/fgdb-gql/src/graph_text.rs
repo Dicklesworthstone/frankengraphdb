@@ -655,7 +655,7 @@ struct Parser<'a> {
     edge_count: usize,
     parameter_types: BTreeMap<String, GqlParameterType>,
     read_row_bindings: Vec<Name<'a>>,
-    read_correlations: Vec<(Name<'a>, Name<'a>, usize)>,
+    read_correlations: Vec<(Name<'a>, Option<Name<'a>>, usize)>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
@@ -1192,7 +1192,7 @@ impl<'a> Parser<'a> {
             };
             if let Some(row) = row {
                 self.advance()?;
-                self.read_correlations.push((variable, key, row));
+                self.read_correlations.push((variable, Some(key), row));
             } else {
                 let at = self.current.at;
                 let predicate = self.property_operand(variable, key, IntegerComparison::Equal)?;

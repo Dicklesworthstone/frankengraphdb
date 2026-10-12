@@ -682,8 +682,7 @@ impl PreparedGraphInsertText {
         // fields without shifting any previously compiled expression slot.
         let mut correlations = Vec::new();
         for (variable, key, row) in core::mem::take(&mut parser.read_correlations) {
-            let column =
-                parser.mutation_projection(&mut parsed.projections, variable, Some(key))?;
+            let column = parser.mutation_projection(&mut parsed.projections, variable, key)?;
             correlations.push((row, column));
         }
         let input_types = parser.insertion_input_types(&row_schema, &parsed.projections);

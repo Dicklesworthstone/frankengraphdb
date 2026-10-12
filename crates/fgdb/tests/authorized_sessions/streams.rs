@@ -283,6 +283,27 @@ fn signed_and_native_limits_span_all_pulls_and_errors_are_not_silent_eof() {
                 vec![expected_row(1, 7)]
             );
         }
+        // fgdb-7xqxb: a root costs its node when admitted even if no record is
+        // read, so an identity-only stream cannot bypass max_nodes either.
+        let mut limited = grant();
+        limited.limits.max_nodes = 1;
+        let token = issuer.issue_at(&limited, 100).unwrap();
+        let mut session = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let prepared = session
+            .prepare(&cx, "MATCH (n) RETURN n AS id", &args)
+            .unwrap();
+        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
+        assert!(cursor.next().unwrap().is_ok());
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Nodes
+            ))))
+        ));
+        assert!(cursor.next().is_none());
+        drop(cursor);
         let token = issuer.issue_at(&grant(), 100).unwrap();
         let mut session = db
             .authorized_read_session(

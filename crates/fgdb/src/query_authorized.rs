@@ -64,6 +64,9 @@ struct Execution<'cx, 'permit, Clock> {
     // cause across outer completion checks instead of losing expiry/retirement
     // to ExecutionStopped and accidentally restoring a terminal session.
     failure: Option<fgdb_warden::Error>,
+    // The pull root most recently admitted and charged its node. Its own
+    // record, field and incidence reads do not charge that node again.
+    pull_root: Option<VId>,
 }
 impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
     fn new(cx: &'cx QueryCx, permit: ExecutionPermit<'permit, ReadAccess>, clock: Clock) -> Self {
@@ -73,6 +76,7 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             clock,
             clock_floor: None,
             failure: None,
+            pull_root: None,
         }
     }
     fn tracking(
@@ -121,6 +125,22 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
         let now = self.now();
         let charged = self.permit.charge_nodes_at(now, 1);
         charged.map_err(|error| self.refusal(error))
+    }
+    /// A pull root costs one node when admitted, whether or not anything
+    /// reads its record, as an eager table admits each vertex once. An
+    /// identity-only RETURN or count(*) therefore cannot bypass max_nodes.
+    fn root_node(&mut self, vid: VId) -> Result<(), QueryError> {
+        self.node()?;
+        self.pull_root = Some(vid);
+        Ok(())
+    }
+    /// An admitted vertex read. The current pull root was charged on
+    /// admission; every other vertex is charged here.
+    fn vertex_node(&mut self, vid: VId) -> Result<(), QueryError> {
+        if self.pull_root == Some(vid) {
+            return Ok(());
+        }
+        self.node()
     }
     fn deliver(&mut self, rows: usize) -> Result<(), QueryError> {
         self.checkpoint()?;

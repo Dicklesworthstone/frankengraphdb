@@ -429,15 +429,22 @@ impl<'a> Parser<'a> {
             return Err(expected(at, "root-only imported property-map correlations"));
         }
         for (variable, key, left) in core::mem::take(&mut self.read_correlations) {
-            let right = self.mutation_projection(&mut inputs, variable, Some(key))?;
+            let right = self.mutation_projection(&mut inputs, variable, key)?;
             if !keys.contains(&(left, right)) {
                 keys.push((left, right));
             }
         }
         // An aggregate terminal addresses completed row aliases, not graph
-        // slots. Require the same explicit graph-to-row boundary as the
-        // single-source pipeline aggregate; do not invent a RETURN projection.
-        if aggregate && !self.is_word("WITH") && !(kind.is_none() && self.is_word("UNWIND")) {
+        // slots. A continuation's own RETURN reads every visible binding, so
+        // it passes through the `WITH *` boundary openCypher gives it: the
+        // incoming columns plus this MATCH's bindings, nothing invented. The
+        // first part still needs its explicit boundary before the next MATCH.
+        let implicit_star = aggregate && kind.is_some() && self.is_word("RETURN");
+        if aggregate
+            && !implicit_star
+            && !self.is_word("WITH")
+            && !(kind.is_none() && self.is_word("UNWIND"))
+        {
             return Err(expected(
                 self.current.at,
                 "WITH before a multipart aggregate RETURN",
@@ -445,6 +452,14 @@ impl<'a> Parser<'a> {
         }
         let mut head = if kind.is_none() {
             self.graph_projection_head()?
+        } else if implicit_star {
+            let outputs = self.star_outputs(incoming, &mut inputs)?;
+            GraphProjectionHead {
+                with: true,
+                plain: false,
+                inputs,
+                outputs,
+            }
         } else {
             self.multipart_head(incoming, inputs, optional)?
         };
@@ -571,22 +586,7 @@ impl<'a> Parser<'a> {
         let width = incoming.len();
         let mut outputs = Vec::new();
         if self.take(b'*')? {
-            for (index, &(name, _)) in incoming.iter().enumerate() {
-                outputs.push((name, ReadValueTemplate::Column(index)));
-            }
-            let visible: Vec<_> = self.visible_graph_bindings().collect();
-            for variable in visible {
-                if incoming.iter().any(|(name, _)| name.text == variable.text) {
-                    continue;
-                }
-                self.capacity(
-                    outputs.len(),
-                    MAX_PATTERN_VERTICES,
-                    crate::algebra::PatternLimitDimension::Columns,
-                )?;
-                let column = self.mutation_projection(&mut inputs, variable, None)?;
-                outputs.push((variable, ReadValueTemplate::Column(width + column)));
-            }
+            outputs = self.star_outputs(incoming, &mut inputs)?;
         } else {
             loop {
                 self.capacity(
@@ -697,6 +697,35 @@ impl<'a> Parser<'a> {
             inputs,
             outputs,
         })
+    }
+
+    /// `WITH *`: every incoming column, then each visible graph binding the
+    /// incoming row does not already carry.
+    fn star_outputs(
+        &mut self,
+        incoming: &RowSchema<'a>,
+        inputs: &mut Vec<Projection<'a>>,
+    ) -> Result<Vec<(Name<'a>, ReadValueTemplate)>, GraphSetTextError> {
+        let width = incoming.len();
+        let mut outputs: Vec<_> = incoming
+            .iter()
+            .enumerate()
+            .map(|(index, &(name, _))| (name, ReadValueTemplate::Column(index)))
+            .collect();
+        let visible: Vec<_> = self.visible_graph_bindings().collect();
+        for variable in visible {
+            if incoming.iter().any(|(name, _)| name.text == variable.text) {
+                continue;
+            }
+            self.capacity(
+                outputs.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let column = self.mutation_projection(inputs, variable, None)?;
+            outputs.push((variable, ReadValueTemplate::Column(width + column)));
+        }
+        Ok(outputs)
     }
 }
 
