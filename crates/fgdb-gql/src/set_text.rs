@@ -1361,7 +1361,7 @@ impl<'a> Composition<'a> {
                 height,
             )?;
         }
-        if self.has_expression_order() {
+        if self.has_expression_order(matches!(node.kind, NodeKind::Leaf(_))) {
             let start = self.current().at;
             let end = self.expression_order_end()?;
             if let NodeKind::Leaf(leaf) = node.kind {
@@ -1428,7 +1428,7 @@ impl<'a> Composition<'a> {
     /// Routing over admitted tokens only. The ordinary scalar compiler owns
     /// every expression; this recognizes the old column-only tail so its
     /// template and bound-plan bytes remain unchanged.
-    fn has_expression_order(&self) -> bool {
+    fn has_expression_order(&self, allow_returned_property: bool) -> bool {
         let token = |at| self.tokens.get(at).copied();
         if !self.current().word("ORDER")
             || !token(self.at + 1).is_some_and(|token| token.word("BY"))
@@ -1442,6 +1442,14 @@ impl<'a> Composition<'a> {
             }
             at += 1;
             if token(at).is_some_and(|token| token.punct(b'.')) {
+                // After a set or parenthesized output boundary, `doc.rank`
+                // reads a returned row value, not an arm's graph binding.
+                // Let the shared expression compiler resolve MAP/temporal
+                // fields. Single reads retain their projected-property alias
+                // path; a quoted `doc.rank` is still one plain column token.
+                if !allow_returned_property {
+                    return true;
+                }
                 at += 1;
                 if !token(at).is_some_and(|token| matches!(token.kind, TextKind::Word(_))) {
                     return true;
