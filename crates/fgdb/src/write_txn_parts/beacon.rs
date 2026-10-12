@@ -279,12 +279,13 @@ impl WriteTxn {
                     BeaconError::Cancelled
                 })
             };
-            self.beacon_search_graph_filtered_observed(
+            self.beacon_search_graph_with_access_observed(
                 database,
                 cx,
                 search.options(),
                 search.query(),
                 search.expansion(),
+                search.uses_indexed_graph(),
                 Some(&observe),
                 |work| {
                     let source_scratch = {
