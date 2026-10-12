@@ -1208,10 +1208,13 @@ impl<'a> Parser<'a> {
                         *at,
                         self.syntax.parameters[*index].parameter_type,
                     );
+                    // A parameter never holds a graph element; its fields
+                    // need no element key.
                     for key in keys {
                         value = ReadValueTemplate::MapGet {
                             map: Box::new(value),
                             key: key.clone(),
+                            property: crate::set_text::ElementKeySlot::default(),
                         };
                     }
                     value
@@ -1284,12 +1287,10 @@ impl<'a> Parser<'a> {
                             ReturnMapInput::Property(key),
                         )?)
                     } else {
-                        ReadValueTemplate::MapGet {
-                            map: Box::new(ReadValueTemplate::Column(
-                                carried.expect("carried map source checked"),
-                            )),
-                            key: key.text.into(),
-                        }
+                        self.map_get(
+                            ReadValueTemplate::Column(carried.expect("carried map source checked")),
+                            key.text,
+                        )
                     };
                     (key.text.into(), value)
                 } else {
@@ -2121,10 +2122,7 @@ impl<'a> Parser<'a> {
             {
                 self.advance()?;
                 let key = self.map_key()?;
-                value = ReadValueTemplate::MapGet {
-                    map: Box::new(value),
-                    key: key.text.into(),
-                };
+                value = self.map_get(value, key.text);
                 graph_map = false;
                 continue;
             }
@@ -2912,9 +2910,10 @@ pub(in crate::graph_text) fn bind_read_value(
                 .map(|guard| bind_read_value(guard, values).map(Box::new))
                 .transpose()?,
         },
-        ReadValueTemplate::MapGet { map, key } => GraphSetValue::MapGet {
+        ReadValueTemplate::MapGet { map, key, property } => GraphSetValue::MapGet {
             map: Box::new(bind_read_value(map, values)?),
             key: key.clone(),
+            property: property.bind(),
         },
         ReadValueTemplate::MapOverlay {
             base,

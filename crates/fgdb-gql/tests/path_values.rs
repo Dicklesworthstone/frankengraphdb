@@ -380,3 +380,153 @@ fn path_element_lists_answer_every_list_operation() {
         assert_eq!(first(text), expected, "{text}");
     }
 }
+
+/// fgdb-xnd7x: `x.key` over a vertex or edge an expression produced (a path's
+/// nodes or relationships, an UNWIND row) reads that element's stored property
+/// through the host's reader, with the key bound at preparation. A key the
+/// catalog lacks is NULL without a read, an absent property is NULL, a
+/// non-element operand stays a typed error, and a host with no reader refuses
+/// rather than guessing NULL (TCK Quantifier1-4 [8], [9]).
+#[test]
+fn element_values_read_their_properties_through_the_host_reader() {
+    use fgdb_delta_types::{ElementId, PropertyKeyId};
+    use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+    use fgdb_gql::{
+        GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphIntegerErrorKind,
+        GraphSetExecutionError, PreparedGraphSetText, PreparedProcedureCall,
+    };
+    use fgdb_types::{CanonicalScalar, EId, VId};
+    use std::cell::Cell;
+    let keys = |kind: GraphSymbolKind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(PropertyKeyId(7))),
+        (GraphSymbolKind::Property, "w") => Some(GraphSymbol::Property(PropertyKeyId(8))),
+        _ => symbols(kind, name),
+    };
+    let edges = [
+        (EId(91), VId(1), RelationId(1), VId(2)),
+        (EId(92), VId(2), RelationId(1), VId(3)),
+    ];
+    let text = |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let list = |values: Vec<GraphValue>| GraphValue::List(values.into_boxed_slice());
+    let reads = Cell::new(0_usize);
+    // Vertices 1 and 2 are named; vertex 3 has no name. Edges carry `w`.
+    let stored = |element: ElementId, key: PropertyKeyId| {
+        reads.set(reads.get() + 1);
+        Ok::<_, ()>(match (element, key) {
+            (ElementId::Vertex(VId(1)), PropertyKeyId(7)) => {
+                Some(CanonicalScalar::ucs_basic_text("a").unwrap())
+            }
+            (ElementId::Vertex(VId(2)), PropertyKeyId(7)) => {
+                Some(CanonicalScalar::ucs_basic_text("b").unwrap())
+            }
+            (ElementId::Edge(EId(id)), PropertyKeyId(8)) => Some(CanonicalScalar::Int(id as i64)),
+            _ => None,
+        })
+    };
+    let run = |text: &str, with_reader: bool| {
+        let query = PreparedGraphSetText::prepare(text, keys)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let patterns = |pattern: &fgdb_gql::PreparedGraphPattern<GraphValueRow>,
+                        remaining: GqlQueryPolicy| {
+            pattern.plan().execute_governed_with_identified_properties(
+                edges.len() as u64 + 4,
+                (1..=4).map(VId),
+                edges.iter().copied(),
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                remaining,
+                || Ok::<_, ()>(()),
+            )
+        };
+        let policy = GqlQueryPolicy::new(1000, 1000, 100_000, 100_000);
+        let result = if with_reader {
+            query.execute_governed_with_elements(
+                policy,
+                patterns,
+                |_: &PreparedProcedureCall,
+                 _: &[GraphValue],
+                 _: GqlQueryPolicy|
+                 -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+                    unreachable!("no CALL source")
+                },
+                stored,
+                || Ok::<_, ()>(()),
+            )
+        } else {
+            query.execute_governed(policy, patterns, || Ok::<_, ()>(()))
+        };
+        result.map(|execution| {
+            assert_eq!(execution.value.len(), 1, "{text}");
+            execution.value[0].values()[0].clone()
+        })
+    };
+    let path = "MATCH p = (a)-[:R]->(b)-[:R]->(c) RETURN";
+    for (item, expected, read_count) in [
+        (
+            "[x IN nodes(p) | x.name] AS v",
+            list(vec![text("a"), text("b"), null.clone()]),
+            3,
+        ),
+        (
+            "[e IN relationships(p) | e.w] AS v",
+            list(vec![int(91), int(92)]),
+            2,
+        ),
+        (
+            "any(x IN nodes(p) WHERE x.name = 'b') AS v",
+            GraphValue::Scalar(CanonicalScalar::Bool(true)),
+            3,
+        ),
+        (
+            "[x IN tail(nodes(p)) | x.name] AS v",
+            list(vec![text("b"), null.clone()]),
+            2,
+        ),
+        // The catalog lacks `nokey`: NULL for every element, and no read.
+        (
+            "[x IN nodes(p) | x.nokey] AS v",
+            list(vec![null.clone(), null.clone(), null.clone()]),
+            0,
+        ),
+    ] {
+        reads.set(0);
+        let statement = format!("{path} {item}");
+        assert_eq!(run(&statement, true).unwrap(), expected, "{item}");
+        assert_eq!(reads.get(), read_count, "{item}");
+    }
+    // A carried path's elements read the same way after WITH and UNWIND.
+    reads.set(0);
+    assert_eq!(
+        run(
+            "MATCH p = (a)-[:R]->(b)-[:R]->(c) WITH nodes(p) AS ns UNWIND ns AS n \
+             WITH n WHERE n.name = 'b' RETURN n.name AS v",
+            true,
+        )
+        .unwrap(),
+        text("b"),
+    );
+    let typed_error =
+        |result: Result<GraphValue, GqlQueryError<GraphSetExecutionError<()>, ()>>| {
+            matches!(
+                result,
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                    if error.kind == GraphIntegerErrorKind::IncompatibleOperands
+            )
+        };
+    // A non-element operand is still a typed error with a reader present.
+    assert!(typed_error(run(
+        &format!("{path} [x IN [1, 2] | x.name] AS v"),
+        true
+    )));
+    // A host with no reader refuses instead of reading NULL.
+    reads.set(0);
+    assert!(typed_error(run(
+        &format!("{path} [x IN nodes(p) | x.name] AS v"),
+        false
+    )));
+    assert_eq!(reads.get(), 0);
+}

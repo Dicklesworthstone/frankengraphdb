@@ -707,10 +707,7 @@ impl<'a> Parser<'a> {
         {
             self.advance()?;
             let key = self.map_key()?;
-            value = ReadValueTemplate::MapGet {
-                map: Box::new(value),
-                key: key.text.into(),
-            };
+            value = self.map_get(value, key.text);
         }
         Ok(value)
     }

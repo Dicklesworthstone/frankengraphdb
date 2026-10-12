@@ -10,7 +10,8 @@
 
 use crate::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
 use crate::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetValue};
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_types::CanonicalScalar;
 
 /// A procedure's induced graph, resolved during preparation. The selection
 /// narrows the host's already authorized snapshot; it grants no authority and
@@ -216,6 +217,19 @@ pub trait GraphSetSource<E, C> {
     fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
         None
     }
+
+    /// One stored property of a vertex or edge value, read at the same pinned
+    /// cut as every pattern, for `x.key` over an element an expression produced:
+    /// a path's nodes, a collected list, an UNWIND row (fgdb-xnd7x). `Ok(None)`
+    /// is an absent property. `None` means this host reads no element
+    /// properties, so the read stays a typed error, never a guessed NULL.
+    fn element_property(
+        &mut self,
+        _element: ElementId,
+        _key: PropertyKeyId,
+    ) -> Option<Result<Option<CanonicalScalar>, E>> {
+        None
+    }
 }
 
 impl<E, C, F> GraphSetSource<E, C> for F
@@ -266,6 +280,44 @@ where
         policy: GqlQueryPolicy,
     ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
         Some((self.procedures)(call, arguments, policy))
+    }
+}
+
+/// A source plus the host's element property reader (fgdb-xnd7x).
+pub struct WithElementReads<S, R> {
+    pub source: S,
+    pub elements: R,
+}
+
+impl<E, C, S, R> GraphSetSource<E, C> for WithElementReads<S, R>
+where
+    S: GraphSetSource<E, C>,
+    R: FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalScalar>, E>,
+{
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+        self.source.pattern(pattern, policy)
+    }
+    fn procedure(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.procedure(call, arguments, policy)
+    }
+    fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
+        self.source.owned()
+    }
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<CanonicalScalar>, E>> {
+        Some((self.elements)(element, key))
     }
 }
 

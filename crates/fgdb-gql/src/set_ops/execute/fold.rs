@@ -338,12 +338,17 @@ where
                 }
                 meter.event(GlaExecutionEvent::Work)?;
                 // Numbered like project_rows, so rand() draws the same here.
-                let result =
-                    projection::evaluate(&row, projection, Some(row_at as u64), &mut |event| {
-                        meter.event(event)
-                    })
-                    .map_err(|error| projected(error, row_at))
-                    .and_then(|row| window.push(row, meter, consume));
+                // The fold's per-row callback holds no source, so an element
+                // property read here stays a typed error (fgdb-xnd7x).
+                let result = projection::evaluate(
+                    &row,
+                    projection,
+                    Some(row_at as u64),
+                    &mut |event| meter.event(event),
+                    &mut projection::no_element_reads,
+                )
+                .map_err(|error| projected(error, row_at))
+                .and_then(|row| window.push(row, meter, consume));
                 remember(result, &mut local)?;
                 row_at = row_at.checked_add(1).ok_or_else(|| {
                     GqlQueryError::Source(GraphSetExecutionError::AccountingOverflow {

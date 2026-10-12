@@ -208,7 +208,7 @@ impl<V: Vfs + Clone> Database<V> {
         // A CALL stage runs in Prism at this same snapshot, so its rows and
         // every pattern leaf read one generation.
         cx.with_restriction(|| {
-            query.execute_governed_with_procedures(
+            query.execute_governed_with_elements(
                 policy,
                 |pattern, allowance| {
                     crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
@@ -235,6 +235,7 @@ impl<V: Vfs + Clone> Database<V> {
                         |spec, options| self.execute_fnx(cx, spec, options),
                     )
                 },
+                |element, key| crate::gql_exec::element_property_at(self, element, key, as_of),
                 || cx.checkpoint(),
             )
         })
@@ -273,7 +274,7 @@ impl EmbeddedReadView {
             )))
         })?;
         cx.with_restriction(|| {
-            query.execute_governed_with_procedures(
+            query.execute_governed_with_elements(
                 policy,
                 |pattern, allowance| {
                     crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
@@ -300,6 +301,7 @@ impl EmbeddedReadView {
                         |spec, options| self.execute_fnx(cx, spec, options),
                     )
                 },
+                |element, key| crate::gql_exec::element_property_at(self, element, key, as_of),
                 || cx.checkpoint(),
             )
         })

@@ -27,6 +27,7 @@ use crate::{
     GlaExecutionEvent, GqlScalarParameter, GraphIntegerError, GraphIntegerEvaluationError,
     GraphIntegerExpression,
 };
+use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_types::CanonicalScalar;
 use std::collections::BTreeSet;
 
@@ -128,11 +129,13 @@ pub enum GraphSetValue {
         keys: Box<[Box<str>]>,
         values: Vec<GraphSetValue>,
     },
-    /// `m.key`: NULL for a NULL map or an absent key; a non-map is a typed
-    /// error.
+    /// `m.key`: NULL for a NULL map or an absent key. A vertex or edge reads
+    /// its stored property through `property` (fgdb-xnd7x). Any other value
+    /// is a typed error.
     MapGet {
         map: Box<GraphSetValue>,
         key: Box<str>,
+        property: GraphElementKey,
     },
     /// `keys(m)`: the map's keys as text, ascending; NULL for a NULL map.
     Keys(Box<GraphSetValue>),
@@ -181,6 +184,19 @@ pub enum GraphSetValue {
         site: u32,
         scope: u32,
     },
+}
+
+/// How `x.key` reads a vertex or edge value (fgdb-xnd7x). The key binds at
+/// preparation through the statement's symbol resolver, like a pattern
+/// variable's property, so execution never needs a catalog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphElementKey {
+    /// No resolver bound this read: an element operand is a typed error.
+    Unbound,
+    /// The catalog lacks the key: every element reads NULL.
+    Missing,
+    /// The element's stored property under this key, read at the source's cut.
+    Property(PropertyKeyId),
 }
 
 /// The openCypher value functions over lists and text (fgdb-13l85).
@@ -504,7 +520,8 @@ impl GraphSetProjection {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         arithmetic: impl FnOnce(usize, GraphIntegerError) -> E,
     ) -> Result<GraphValueRow, E> {
-        evaluate(row, projection, None, control).map_err(|error| match error {
+        evaluate(row, projection, None, control, &mut no_element_reads).map_err(|error| match error
+        {
             ProjectionFailure::Control(error) => error,
             ProjectionFailure::Arithmetic { column, error } => arithmetic(column, error),
         })
@@ -512,15 +529,17 @@ impl GraphSetProjection {
 
     /// evaluate_row_with_control for a row at `ordinal` in the stage's
     /// deterministic input order, which keys rand() (fgdb-13l85). Every
-    /// executor of the same stage numbers its rows the same way.
+    /// executor of the same stage numbers its rows the same way. `read` is the
+    /// host's element property reader (fgdb-xnd7x).
     pub(crate) fn evaluate_numbered_row_with_control<E>(
         row: &GraphValueRow,
         ordinal: u64,
         projection: &[Self],
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        read: &mut ElementRead<'_, E>,
         arithmetic: impl FnOnce(usize, GraphIntegerError) -> E,
     ) -> Result<GraphValueRow, E> {
-        evaluate(row, projection, Some(ordinal), control).map_err(|error| match error {
+        evaluate(row, projection, Some(ordinal), control, read).map_err(|error| match error {
             ProjectionFailure::Control(error) => error,
             ProjectionFailure::Arithmetic { column, error } => arithmetic(column, error),
         })
@@ -1129,11 +1148,25 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
                 append_value_transcript(value, bytes);
             }
         }
-        GraphSetValue::MapGet { map, key } => {
-            bytes.push(15);
+        GraphSetValue::MapGet { map, key, property } => {
+            // An unbound read keeps its original bytes. A bound one names the
+            // catalog answer, which decides what an element operand reads.
+            bytes.push(if *property == GraphElementKey::Unbound {
+                15
+            } else {
+                27
+            });
             append_value_transcript(map, bytes);
             bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
             bytes.extend_from_slice(key.as_bytes());
+            match property {
+                GraphElementKey::Unbound => {}
+                GraphElementKey::Missing => bytes.push(0),
+                GraphElementKey::Property(PropertyKeyId(id)) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&id.to_be_bytes());
+                }
+            }
         }
         GraphSetValue::Keys(map) => {
             bytes.push(16);
@@ -1308,6 +1341,7 @@ pub(super) fn evaluate<E>(
     projection: &[GraphSetProjection],
     ordinal: Option<u64>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    read: &mut ElementRead<'_, E>,
 ) -> Result<GraphValueRow, ProjectionFailure<E>> {
     let mut values = Vec::new();
     for (column, output) in projection.iter().enumerate() {
@@ -1317,7 +1351,7 @@ pub(super) fn evaluate<E>(
             column,
             control,
             0,
-            &mut Evaluation::new(ordinal),
+            &mut Evaluation::new(ordinal, read),
         )?;
         values.push(value);
     }
@@ -1330,25 +1364,54 @@ pub(crate) fn evaluate_value<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<GraphValue, ProjectionFailure<E>> {
-    evaluate_value_at(value, row, column, control, 0, &mut Evaluation::new(None))
+    evaluate_value_at(
+        value,
+        row,
+        column,
+        control,
+        0,
+        &mut Evaluation::new(None, &mut no_element_reads),
+    )
 }
 
-/// One value evaluation's running state: the node count that bounds it, and
-/// the row's ordinal when its caller numbers the rows it projects, which
-/// keys rand() (fgdb-13l85). Without an ordinal, rand() is a typed error.
-struct Evaluation {
+/// Reads one stored property of a vertex or edge value at the executing
+/// source's cut (fgdb-xnd7x). `Ok(None)` is an absent property. `None` means
+/// this host reads no element properties, so the read stays a typed error,
+/// never a guessed NULL.
+pub(crate) type ElementRead<'r, E> =
+    dyn FnMut(ElementId, PropertyKeyId) -> Option<Result<Option<CanonicalScalar>, E>> + 'r;
+
+/// The element reader of a host that reads no element properties.
+pub(crate) fn no_element_reads<E>(
+    _: ElementId,
+    _: PropertyKeyId,
+) -> Option<Result<Option<CanonicalScalar>, E>> {
+    None
+}
+
+/// One value evaluation's running state: the node count that bounds it, the
+/// row's ordinal when its caller numbers the rows it projects, which keys
+/// rand() (fgdb-13l85; without an ordinal, rand() is a typed error), and the
+/// host's element property reader (fgdb-xnd7x).
+struct Evaluation<'a, 'r, E> {
     nodes: usize,
     ordinal: Option<u64>,
+    read: &'a mut ElementRead<'r, E>,
 }
 
-impl Evaluation {
-    const fn new(ordinal: Option<u64>) -> Self {
-        Self { nodes: 0, ordinal }
+impl<'a, 'r, E> Evaluation<'a, 'r, E> {
+    fn new(ordinal: Option<u64>, read: &'a mut ElementRead<'r, E>) -> Self {
+        Self {
+            nodes: 0,
+            ordinal,
+            read,
+        }
     }
 
-    /// A fresh node bound for one element's own evaluation, on the same row.
-    const fn element(&self) -> Self {
-        Self::new(self.ordinal)
+    /// A fresh node bound for one element's own evaluation, on the same row
+    /// and with the same reader.
+    fn element(&mut self) -> Evaluation<'_, 'r, E> {
+        Evaluation::new(self.ordinal, &mut *self.read)
     }
 }
 
@@ -1358,7 +1421,7 @@ fn operand<'a, E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     depth: usize,
-    nodes: &mut Evaluation,
+    nodes: &mut Evaluation<'_, '_, E>,
 ) -> Result<std::borrow::Cow<'a, GraphValue>, ProjectionFailure<E>> {
     let borrowed = match value {
         GraphSetValue::Column(input) => row.values().get(*input),
@@ -1407,7 +1470,7 @@ fn evaluate_value_at<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     depth: usize,
-    nodes: &mut Evaluation,
+    nodes: &mut Evaluation<'_, '_, E>,
 ) -> Result<GraphValue, ProjectionFailure<E>> {
     use crate::GraphIntegerErrorKind;
     let failure = |kind| ProjectionFailure::Arithmetic {
@@ -1822,11 +1885,40 @@ fn evaluate_value_at<E>(
             }
             value
         }
-        GraphSetValue::MapGet { map, key } => {
+        GraphSetValue::MapGet { map, key, property } => {
             let map = operand(map, row, column, control, depth + 1, nodes)?;
+            let element = match map.as_ref() {
+                GraphValue::Vertex(vid) => Some(ElementId::Vertex(*vid)),
+                GraphValue::Edge(eid) => Some(ElementId::Edge(*eid)),
+                _ => None,
+            };
             if map.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
+            } else if let Some(element) = element {
+                // A vertex or edge reads its stored property at the source's
+                // cut (fgdb-xnd7x). The read is charged as work and its value
+                // as a copy. A host without a reader keeps the typed error.
+                let value = match property {
+                    GraphElementKey::Unbound => None,
+                    GraphElementKey::Missing => Some(Ok(None)),
+                    GraphElementKey::Property(key) => {
+                        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+                        (nodes.read)(element, *key)
+                    }
+                };
+                match value
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?
+                    .map_err(ProjectionFailure::Control)?
+                {
+                    Some(value) => copy_value(&GraphValue::Scalar(value), control)
+                        .map_err(ProjectionFailure::Control)?,
+                    None => {
+                        control(GlaExecutionEvent::ScratchEntry)
+                            .map_err(ProjectionFailure::Control)?;
+                        GraphValue::Scalar(CanonicalScalar::Null)
+                    }
+                }
             } else if let GraphValue::Scalar(scalar) = map.as_ref()
                 && let Some(field) = temporal::field(scalar, key)
             {
@@ -2074,7 +2166,7 @@ fn coalesce_value<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     depth: usize,
-    nodes: &mut Evaluation,
+    nodes: &mut Evaluation<'_, '_, E>,
 ) -> Result<GraphValue, ProjectionFailure<E>> {
     let arguments = match arguments {
         GraphSetValue::List(arguments) => arguments.as_slice(),
@@ -2313,7 +2405,7 @@ fn integer_part<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     depth: usize,
-    nodes: &mut Evaluation,
+    nodes: &mut Evaluation<'_, '_, E>,
 ) -> Result<Option<i64>, ProjectionFailure<E>> {
     match evaluate_value_at(value, row, column, control, depth + 1, nodes)? {
         GraphValue::Scalar(CanonicalScalar::Int(value)) => Ok(Some(value)),
@@ -2410,7 +2502,7 @@ fn element_truth<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     depth: usize,
-    outer: &Evaluation,
+    outer: &mut Evaluation<'_, '_, E>,
 ) -> Result<Option<bool>, ProjectionFailure<E>> {
     match evaluate_value_at(
         predicate,

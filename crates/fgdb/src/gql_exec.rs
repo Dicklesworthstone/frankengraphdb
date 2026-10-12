@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 
 pub(crate) trait GqlSnapshotReader {
     fn gql_vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError>;
+    fn gql_edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError>;
     fn gql_vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError>;
     fn gql_edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError>;
     fn gql_admitted_snapshot(&self, _as_of: CommitSeq) -> Result<Option<&Snapshot>, ReadError> {
@@ -30,6 +31,9 @@ pub(crate) trait GqlSnapshotReader {
 impl<V: Vfs + Clone> GqlSnapshotReader for Database<V> {
     fn gql_vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
         Database::vertex_at(self, vid, as_of)
+    }
+    fn gql_edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
+        Database::edge_at(self, eid, as_of)
     }
     fn gql_vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
         Database::vertices_at(self, as_of)
@@ -47,6 +51,9 @@ impl GqlSnapshotReader for EmbeddedReadView {
     fn gql_vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
         EmbeddedReadView::vertex_at(self, vid, as_of)
     }
+    fn gql_edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
+        EmbeddedReadView::edge_at(self, eid, as_of)
+    }
     fn gql_vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
         EmbeddedReadView::vertices_at(self, as_of)
     }
@@ -58,6 +65,33 @@ impl GqlSnapshotReader for EmbeddedReadView {
         Ok(Some(&self.snapshot))
     }
 }
+/// One stored property of a vertex or edge at `as_of`, for `x.key` over an
+/// element value an expression produced (fgdb-xnd7x). The element came from a
+/// pattern at this same cut. Should it be absent there anyway, it reads NULL.
+pub(crate) fn element_property_at(
+    reader: &impl GqlSnapshotReader,
+    element: fgdb_delta_types::ElementId,
+    key: PropertyKeyId,
+    as_of: CommitSeq,
+) -> Result<Option<CanonicalScalar>, GqlError> {
+    let lookup = |props: &[(PropertyKeyId, CanonicalScalar)]| {
+        props
+            .binary_search_by_key(&key, |(key, _)| *key)
+            .ok()
+            .map(|at| props[at].1.clone())
+    };
+    Ok(match element {
+        fgdb_delta_types::ElementId::Vertex(vid) => reader
+            .gql_vertex_at(vid, as_of)
+            .map_err(GqlError::Read)?
+            .and_then(|row| lookup(&row.props)),
+        fgdb_delta_types::ElementId::Edge(eid) => reader
+            .gql_edge_at(eid, as_of)
+            .map_err(GqlError::Read)?
+            .and_then(|record| lookup(&record.props)),
+    })
+}
+
 fn bind_plan(statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError> {
     bind.bind(statement).map_err(|error| match error {
         fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),

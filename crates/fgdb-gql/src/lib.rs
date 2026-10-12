@@ -201,13 +201,14 @@ pub use prepared::{
 };
 pub use set_ops::row_filter;
 pub use set_ops::{
-    GqlTimeZones, GraphListQuantifier, GraphSetBuildError, GraphSetColumnType,
+    GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetBuildError, GraphSetColumnType,
     GraphSetExecutionError, GraphSetFilterError, GraphSetOperand, GraphSetOperation,
     GraphSetPredicateOp, GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier,
     GraphSetSource, GraphSetValue, GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH,
     MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall,
     ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
-    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithProcedures,
+    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementReads,
+    WithProcedures,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;

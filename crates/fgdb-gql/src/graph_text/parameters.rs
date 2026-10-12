@@ -207,6 +207,17 @@ impl UnresolvedGraphText<'_> {
         for stage in self.leading.iter_mut().chain(self.pipeline.iter_mut()) {
             resolve_call_symbols(stage, &mut |kind, name| resolve.resolve_symbol(kind, name))?;
         }
+        // Every `x.key` read binds its key now, so an element operand reads
+        // that stored property at execution with no catalog (fgdb-xnd7x). A
+        // key the catalog lacks reads NULL, as `n.key` on a pattern vertex does.
+        for (key, slot) in &self.syntax.element_keys {
+            slot.resolve(
+                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                    Some(GraphSymbol::Property(key)) => Some(key),
+                    _ => None,
+                },
+            );
+        }
         let quantifier = if self.syntax.distinct {
             crate::GraphSetQuantifier::Distinct
         } else {
