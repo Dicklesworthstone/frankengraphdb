@@ -50,16 +50,8 @@ const CASES: &[(&str, NativeReadClass, &str)] = &[
         NativeReadClass::Pattern,
         "since.",
     ),
-    (
-        "MATCH (p:Person) WHERE EXISTS { (p)-[:R]->() } RETURN p.p",
-        NativeReadClass::Pattern,
-        "EXISTS { (p)-[:R]->() }",
-    ),
-    (
-        "MATCH (p:Person) WHERE NOT EXISTS { (p)-[:R]->() } RETURN p.p",
-        NativeReadClass::Pattern,
-        "NOT EXISTS { (p)-[:R]->() }",
-    ),
+    // `EXISTS { (p)-[:R]->() }` and its NOT form are openCypher's pattern
+    // subquery shorthand and now execute (fgdb-44d8n), so they left this list.
     (
         "MATCH (p:Person) RETURN p.p AS x UNION ALL MATCH (q:Person) RETURN q.p AS x ORDER BY missing",
         NativeReadClass::Set,

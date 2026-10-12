@@ -37,8 +37,10 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         _ => None,
     }
 }
+// Both arms name their column `p`: a set operator over differently named
+// columns is DifferentColumnsInUnion (openCypher; c8a7a399).
 fn query(op: &str) -> String {
-    format!("MATCH (n:L) RETURN n.p AS p {op} MATCH (n:R) RETURN n.p AS other")
+    format!("MATCH (n:L) RETURN n.p AS p {op} MATCH (n:R) RETURN n.p AS p")
 }
 fn oracle(db: &Database<MemVfs>, op: usize) -> QueryResult {
     let mut left = BTreeMap::new();

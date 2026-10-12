@@ -115,17 +115,33 @@ mod query_source {
         }
     }
 
-    /// Per-execution label and type names for `labels(n)` and `type(r)`.
+    /// Per-execution label and type names for `labels(n)` and `type(r)`. An
+    /// element whose id the plan's catalog cannot name keeps that id, and
+    /// refuses only when its own labels or type are read: a staged label on
+    /// a vertex the statement never returns must not refuse the statement.
     pub(super) struct CatalogNames {
-        labels: BTreeMap<VId, Vec<fgdb_gql::algebra::GraphValue>>,
-        types: BTreeMap<EId, CanonicalScalar>,
+        labels: BTreeMap<VId, Result<Vec<fgdb_gql::algebra::GraphValue>, LabelId>>,
+        types: BTreeMap<EId, Result<CanonicalScalar, RelationId>>,
     }
     impl CatalogNames {
-        pub(super) fn labels(&self, vid: VId) -> Option<&[fgdb_gql::algebra::GraphValue]> {
-            self.labels.get(&vid).map(Vec::as_slice)
+        pub(super) fn labels(
+            &self,
+            vid: VId,
+        ) -> Result<Option<&[fgdb_gql::algebra::GraphValue]>, WriteTxnError> {
+            match self.labels.get(&vid) {
+                None => Ok(None),
+                Some(Ok(names)) => Ok(Some(names)),
+                Some(Err(id)) => Err(WriteTxnError::Read(crate::ReadError::UnmappedLabel(*id))),
+            }
         }
-        pub(super) fn edge_type(&self, eid: EId) -> Option<&CanonicalScalar> {
-            self.types.get(&eid)
+        pub(super) fn edge_type(&self, eid: EId) -> Result<Option<&CanonicalScalar>, WriteTxnError> {
+            match self.types.get(&eid) {
+                None => Ok(None),
+                Some(Ok(name)) => Ok(Some(name)),
+                Some(Err(relation)) => Err(WriteTxnError::Read(
+                    crate::ReadError::UnmappedRelation(*relation),
+                )),
+            }
         }
     }
 
@@ -168,37 +184,34 @@ mod query_source {
 
         /// `labels(n)` and `type(r)` names from the plan's reverse catalog,
         /// over staged label edits, as the snapshot source resolves them. An
-        /// unmapped symbol refuses; it never reads as NULL.
-        pub(super) fn catalog_names(&self) -> Result<CatalogNames, WriteTxnError> {
+        /// unmapped symbol refuses when its element is read; it never reads
+        /// as NULL.
+        pub(super) fn catalog_names(&self) -> CatalogNames {
             let reverse = self.logical.reverse_catalog.as_deref();
+            let name = |text: Option<&String>| text.and_then(|text| CanonicalScalar::ucs_basic_text(text).ok());
             let mut labels = BTreeMap::new();
             if self.logical.projects_labels() {
                 for (vid, view) in &self.vertices {
-                    let mut names = Vec::new();
-                    for id in view.effective_labels() {
-                        let unmapped = || WriteTxnError::Read(crate::ReadError::UnmappedLabel(id));
-                        let name = reverse
-                            .and_then(|catalog| catalog.labels.get(&id))
-                            .ok_or_else(unmapped)?;
-                        let text = CanonicalScalar::ucs_basic_text(name).map_err(|_| unmapped())?;
-                        names.push(fgdb_gql::algebra::GraphValue::Scalar(text));
-                    }
+                    let names = view
+                        .effective_labels()
+                        .map(|id| {
+                            name(reverse.and_then(|catalog| catalog.labels.get(&id)))
+                                .map(fgdb_gql::algebra::GraphValue::Scalar)
+                                .ok_or(id)
+                        })
+                        .collect();
                     labels.insert(*vid, names);
                 }
             }
             let mut types = BTreeMap::new();
             if self.logical.projects_types() {
                 for ((eid, _, relation, _), _) in &self.edges {
-                    let unmapped =
-                        || WriteTxnError::Read(crate::ReadError::UnmappedRelation(*relation));
-                    let name = reverse
-                        .and_then(|catalog| catalog.relations.get(relation))
-                        .ok_or_else(unmapped)?;
-                    let text = CanonicalScalar::ucs_basic_text(name).map_err(|_| unmapped())?;
+                    let text = name(reverse.and_then(|catalog| catalog.relations.get(relation)))
+                        .ok_or(*relation);
                     types.insert(*eid, text);
                 }
             }
-            Ok(CatalogNames { labels, types })
+            CatalogNames { labels, types }
         }
         pub(super) fn property_maps<E>(
             &self,
@@ -401,9 +414,7 @@ mod query_source {
                         usage.observe(policy, event)
                     },
                 )?;
-                let names = source
-                    .catalog_names()
-                    .map_err(fgdb_gql::GqlQueryError::Source)?;
+                let names = source.catalog_names();
                 let maps = source.property_maps(
                     &mut |event| {
                         cx.checkpoint()
@@ -419,8 +430,8 @@ mod query_source {
                     |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
                     |vid, key| Ok(source.property(vid, key)),
                     |eid, key| Ok(source.edge_property(eid, key)),
-                    |vid| Ok(names.labels(vid)),
-                    |eid| Ok(names.edge_type(eid)),
+                    |vid| names.labels(vid),
+                    |eid| names.edge_type(eid),
                     |vid| Ok(maps.vertices.get(&vid)),
                     |eid| Ok(maps.edges.get(&eid)),
                     usage.remaining(policy),

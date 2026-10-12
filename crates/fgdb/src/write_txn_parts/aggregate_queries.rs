@@ -42,9 +42,7 @@ impl WriteTxn {
                     usage.observe(policy, event)
                 },
             )?;
-            let names = source
-                .catalog_names()
-                .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
+            let names = source.catalog_names();
             let maps = source.property_maps(
                 &mut |event| {
                     cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
@@ -61,8 +59,8 @@ impl WriteTxn {
                 |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
                 |vid, key| Ok(source.property(vid, key)),
                 |eid, key| Ok(source.edge_property(eid, key)),
-                |vid| Ok(names.labels(vid)),
-                |eid| Ok(names.edge_type(eid)),
+                |vid| names.labels(vid),
+                |eid| names.edge_type(eid),
                 |vid| Ok(maps.vertices.get(&vid)),
                 |eid| Ok(maps.edges.get(&eid)),
                 usage.remaining(policy),

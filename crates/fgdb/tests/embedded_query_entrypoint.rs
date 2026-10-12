@@ -1518,9 +1518,11 @@ fn null_and_list_predicates_bind_tighter_than_comparison() {
             rows("RETURN (false AND null) IS NULL = (null AND false) IS NULL AS r"),
             [[truth(true)]]
         );
-        // Comparisons among themselves still fold left; NOT stays below them.
+        // A grouped comparison compares as a Boolean operand; NOT stays below
+        // comparisons. Ungrouped `1 < 2 = true` is a chain, `1 < 2 AND 2 =
+        // true` (openCypher, b490a061), not a left fold.
         assert_eq!(
-            rows("RETURN 1 < 2 = true AS a, NOT true = false AS b"),
+            rows("RETURN (1 < 2) = true AS a, NOT true = false AS b"),
             [[truth(true), truth(true)]]
         );
     });
