@@ -2497,10 +2497,13 @@ impl<'a> Parser<'a> {
             // including the operand-only aggregate-resolution scope.
             let at = self.current.at;
             Some(if let Some(resolve) = resolve.as_mut() {
-                let operand = self
-                    .resolved_predicate(&mut |parser| resolve.leaf(parser))
-                    .map_err(expression_error)?;
-                self.read_value_template(operand, at)?
+                // Composite operands and element entries (`x.age`) take let
+                // slots here too, as read_scalar_value's do (fgdb-1c29d).
+                let base = core::mem::replace(&mut self.let_base, depth + 1);
+                let parsed = self.resolved_predicate_with_lets(&mut |parser| resolve.leaf(parser));
+                self.let_base = base;
+                let (operand, slots) = parsed.map_err(expression_error)?;
+                self.scalar_let_value(operand, slots, at)?
             } else {
                 self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth + 1)?
             })
