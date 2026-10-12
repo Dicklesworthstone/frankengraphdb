@@ -341,8 +341,8 @@ fn native_aggregate_announces_and_services_controls_during_input_without_scratch
             let first = decoder.decode(&announced, |_| Ok(())).unwrap();
             assert_eq!(first.consumed, announced.len());
             let frame = first.frame.expect("schema precedes source accumulation");
-            assert_eq!(frame.header().kind, FrameKind::SnapshotResultChunk);
-            assert_eq!(frame.header().stream_id, stream);
+            assert_eq!(frame.header().kind(), FrameKind::SnapshotResultChunk);
+            assert_eq!(frame.header().stream_id(), stream);
             let chunk = ResultChunk::decode(frame.payload()).unwrap();
             assert_eq!(chunk.columns, Some(vec!["n".into()]));
             assert!(chunk.rows.is_empty(), "no partial aggregate may escape");
@@ -361,7 +361,7 @@ fn native_aggregate_announces_and_services_controls_during_input_without_scratch
                 .unwrap();
             assert_eq!(pong.consumed, outgoing.len() - announced.len());
             let pong = pong.frame.expect("PING is serviced while count is pending");
-            assert_eq!(pong.header().kind, FrameKind::Pong);
+            assert_eq!(pong.header().kind(), FrameKind::Pong);
             assert_eq!(Ping::decode(pong.payload()).unwrap().nonce, 611);
 
             match stop {
