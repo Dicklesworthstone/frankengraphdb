@@ -197,7 +197,8 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Hold a value-language CREATE property to the scalar property law.
+    /// Hold a value-language CREATE property to the written property law:
+    /// a scalar or a stored List (fgdb-k3nub).
     fn scalar_property_value(
         &self,
         value: ReadValueTemplate,
@@ -206,27 +207,30 @@ impl<'a> Parser<'a> {
         inputs: &[Projection<'a>],
     ) -> Result<ReadValueTemplate, GraphInsertTextError> {
         let types = self.insertion_input_types(imports, inputs);
-        if !matches!(
-            value.column_type(&types, &self.syntax.parameters),
-            GraphSetColumnType::Scalar | GraphSetColumnType::Any
-        ) {
-            return Err(expected(at, "scalar CREATE property expression"));
+        let kind = value.column_type(&types, &self.syntax.parameters);
+        let admitted = match value {
+            // A parameter binds a scalar argument only; a list parameter is
+            // not yet a written List.
+            ReadValueTemplate::Parameter { .. } => {
+                matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any)
+            }
+            _ => matches!(
+                kind,
+                GraphSetColumnType::Scalar | GraphSetColumnType::List | GraphSetColumnType::Any
+            ),
+        };
+        if !admitted {
+            return Err(expected(at, "scalar or list CREATE property expression"));
         }
-        // A list or map is never a stored property. A list index, a map
-        // entry (`row.name`), size(), IN, a quantifier or reduce() may be
-        // scalar and is checked per row at execution.
+        // A map construction is never a written property (openCypher
+        // InvalidPropertyType) until the owner rules on stored maps. A list
+        // that holds a map or a graph element, a map entry (`row.name`) and
+        // every other composite are checked per row at execution.
         if matches!(
             value,
-            ReadValueTemplate::List(_)
-                | ReadValueTemplate::Local(_)
-                | ReadValueTemplate::Comprehension { .. }
-                | ReadValueTemplate::Slice { .. }
-                | ReadValueTemplate::Range { .. }
-                | ReadValueTemplate::MapLiteral { .. }
-                | ReadValueTemplate::MapOverlay { .. }
-                | ReadValueTemplate::Keys(_)
+            ReadValueTemplate::MapLiteral { .. } | ReadValueTemplate::MapOverlay { .. }
         ) {
-            return Err(expected(at, "scalar CREATE property expression"));
+            return Err(expected(at, "scalar or list CREATE property expression"));
         }
         Ok(value)
     }
@@ -575,19 +579,20 @@ fn bind_fields(
             | ReadValueTemplate::Quantifier { .. }
             | ReadValueTemplate::Reduce { .. }
             | ReadValueTemplate::MapGet { .. }
-            | ReadValueTemplate::Let { .. } => GraphMutationValue::Composite(
-                return_projection::bind_read_value(value, values.unwrap_or(shape))?,
-            ),
-            ReadValueTemplate::List(_)
+            | ReadValueTemplate::Let { .. }
+            // A list-valued field is a stored List (fgdb-k3nub). Execution
+            // refuses a list that holds a map or a graph element.
+            | ReadValueTemplate::List(_)
             | ReadValueTemplate::Local(_)
             | ReadValueTemplate::Comprehension { .. }
             | ReadValueTemplate::Slice { .. }
             | ReadValueTemplate::Range { .. }
-            | ReadValueTemplate::MapLiteral { .. }
-            | ReadValueTemplate::MapOverlay { .. }
-            | ReadValueTemplate::Keys(_) => {
-                // Scalar properties only: list construction is a read-surface
-                // capability, not a stored property encoding.
+            | ReadValueTemplate::Keys(_) => GraphMutationValue::Composite(
+                return_projection::bind_read_value(value, values.unwrap_or(shape))?,
+            ),
+            ReadValueTemplate::MapLiteral { .. } | ReadValueTemplate::MapOverlay { .. } => {
+                // A map is not a written property value (openCypher
+                // InvalidPropertyType) until the owner rules on stored maps.
                 return Err(GraphInsertTextError {
                     offset: 0,
                     kind: GraphInsertTextErrorKind::Expression(

@@ -156,13 +156,20 @@ pub(super) fn keeps(
                 meter.charge(ZSetEvent::Work)?;
                 meter.units(
                     ZSetEvent::Work,
-                    left.map_or(0, scalar_units)
-                        .max(right.map_or(0, scalar_units)),
+                    left.map_or(0, stored_units)
+                        .max(right.map_or(0, stored_units)),
                 )?;
                 // Ordinary WHERE keeps only TRUE; NULL/missing and incompatible
                 // kinds do not pass even !=. This bool must never be negated as
-                // though it represented a three-valued Boolean expression.
-                if !comparison.accepts_scalar_pair(left, right) {
+                // though it represented a three-valued Boolean expression. A
+                // stored List or Map pair compares as the snapshot executor
+                // compares it (fgdb-k3nub); the units above reserve its work.
+                if !comparison
+                    .accepts_property_pair(left, right, &mut |_| {
+                        Ok::<(), fgdb_gql::GraphIntegerError>(())
+                    })
+                    .map_err(StandingQueryFailure::PredicateExpression)?
+                {
                     return Ok(false);
                 }
             }

@@ -306,7 +306,7 @@ impl WriteTxn {
                     else {
                         unreachable!("validated vertex MERGE contains no edge creation")
                     };
-                    batch.create_vertex(vertex, labels, properties);
+                    batch.create_vertex_values(vertex, labels, properties);
                 }
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                 // Preserve the insertion adapter's original composition choice.

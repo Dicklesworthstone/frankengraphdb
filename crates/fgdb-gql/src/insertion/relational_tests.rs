@@ -183,9 +183,14 @@ fn empty_and_null_lists_create_nothing_and_request_no_identity() {
 }
 
 #[test]
-fn dynamic_non_scalar_properties_refuse_before_any_identity_is_requested() {
+fn dynamic_unwritable_properties_refuse_before_any_identity_is_requested() {
+    // A list is a stored List field since fgdb-k3nub (the law below). A map,
+    // a list holding a map, and a graph element are never written values.
+    let map = || GraphValue::map(vec![(Box::<str>::from("p"), scalar(9))]).unwrap();
     for bad in [
-        GraphValue::List(vec![scalar(9)].into()),
+        map(),
+        GraphValue::List(vec![scalar(9), map()].into()),
+        GraphValue::List(vec![GraphValue::Vertex(VId(999))].into()),
         GraphValue::Vertex(VId(999)),
         GraphValue::Edge(EId(999)),
     ] {
@@ -204,6 +209,43 @@ fn dynamic_non_scalar_properties_refuse_before_any_identity_is_requested() {
             }))
         ));
     }
+}
+
+/// fgdb-k3nub: a list row is written as a stored List, nested lists and NULL
+/// elements included, on both the vertex and the edge. Its value is the
+/// canonical list of the row's own elements, never a truncated scalar.
+#[test]
+fn dynamic_list_properties_are_written_as_stored_lists() {
+    use fgdb_types::CanonicalList;
+    let nested = GraphValue::List(
+        vec![
+            scalar(1),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::List(vec![scalar(2), scalar(3)].into()),
+        ]
+        .into(),
+    );
+    let batch = run(&plan(unwind(vec![nested])), policy()).unwrap();
+    let stored = |values: Vec<CanonicalPropertyValue>| {
+        CanonicalPropertyValue::List(CanonicalList::try_new(values).unwrap())
+    };
+    let int = |value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value));
+    let expected = stored(vec![
+        int(1),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Null),
+        stored(vec![int(2), int(3)]),
+    ]);
+    let [
+        GraphInsertIntent::Vertex { properties, .. },
+        GraphInsertIntent::Edge {
+            properties: edge, ..
+        },
+    ] = batch.intents()
+    else {
+        panic!("one vertex and one edge per row");
+    };
+    assert_eq!(properties, &[(P, expected.clone())]);
+    assert_eq!(edge, &[(P, expected)]);
 }
 
 #[test]

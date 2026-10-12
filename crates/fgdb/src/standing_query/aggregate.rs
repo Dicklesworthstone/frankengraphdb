@@ -318,7 +318,7 @@ impl StandingQuery {
                 }
                 for (key, value) in &state.props {
                     meter.charge(ZSetEvent::Work)?;
-                    meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+                    meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
                     next.props.insert(*key, value.clone());
                 }
                 Some(next)
@@ -363,7 +363,7 @@ impl StandingQuery {
                     for (key, value) in props {
                         meter.charge(ZSetEvent::Work)?;
                         if needs_property(&self.definition, *key) {
-                            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+                            meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
                             state.props.insert(*key, value.clone());
                         }
                     }
@@ -584,7 +584,7 @@ impl<V: Vfs + Clone> Database<V> {
                         .map_err(StandingQueryError::Maintenance)?;
                     for (_, value) in &row.props {
                         meter
-                            .units(ZSetEvent::ScratchEntry, scalar_units(value))
+                            .units(ZSetEvent::ScratchEntry, stored_units(value))
                             .map_err(StandingQueryError::Maintenance)?;
                     }
                 }

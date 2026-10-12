@@ -657,6 +657,31 @@ impl GraphValue {
         visit(self, 0)
     }
 
+    /// The stored value a CREATE or SET writes (fgdb-k3nub): a scalar, or a
+    /// list whose elements are themselves written values. `None` for a map at
+    /// any depth, and for everything [`Self::to_property_value`] refuses.
+    ///
+    /// Storage holds maps, but openCypher refuses a map-valued property
+    /// (InvalidPropertyType). Writes therefore admit lists only, until the
+    /// owner rules on stored maps.
+    #[must_use]
+    pub fn to_written_property(&self) -> Option<CanonicalPropertyValue> {
+        fn holds_map(value: &GraphValue, depth: usize) -> bool {
+            match value {
+                GraphValue::Map { .. } => true,
+                // Depth beyond the bound is refused by to_property_value.
+                GraphValue::List(values) if depth <= GraphValue::MAX_LIST_DEPTH => {
+                    values.iter().any(|value| holds_map(value, depth + 1))
+                }
+                _ => false,
+            }
+        }
+        if holds_map(self, 0) {
+            return None;
+        }
+        self.to_property_value()
+    }
+
     /// Self-delimiting, domain-separated identity bytes. Encoding is iterative;
     /// even externally constructed deep values never recurse on the stack.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, fgdb_types::ScalarEncodeError> {

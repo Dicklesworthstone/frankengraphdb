@@ -285,8 +285,11 @@ fn late_return_failure_spends_ids_but_exposes_no_proposal_even_under_limit_zero(
 
 #[test]
 fn all_property_rows_validate_before_first_identity_even_when_return_only_uses_ids() {
+    // A list is a stored List field since fgdb-k3nub; a map is still never a
+    // written property, so row 1 refuses before any identity is requested.
+    let map = GraphValue::map(vec![(Box::<str>::from("p"), scalar(8))]).unwrap();
     let query = PreparedGraphInsertQuery::prepare(
-        insertion(vec![scalar(7), GraphValue::List(vec![scalar(8)].into())]),
+        insertion(vec![scalar(7), map]),
         vec![GraphInsertBinding::CreatedVertex(0)],
         projection(1),
         GraphSetQuantifier::All,

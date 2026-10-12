@@ -27,6 +27,32 @@ pub(crate) fn compare_stored<E: From<crate::GraphIntegerError>>(
     }
 }
 
+impl IntegerComparison {
+    /// [`Self::accepts_scalar_pair`] over stored property values
+    /// (fgdb-k3nub), decided exactly as CompareProperties decides it: two
+    /// stored Lists or Maps compare element by element, a collection against
+    /// a scalar or an absent value is UNKNOWN, and otherwise the scalar pair
+    /// compares. Only TRUE is kept. Element evaluation charges `control`; a
+    /// collection beyond the query bounds raises StoredValueBounds.
+    pub fn accepts_property_pair<E: From<crate::GraphIntegerError>>(
+        self,
+        left: Option<&CanonicalPropertyValue>,
+        right: Option<&CanonicalPropertyValue>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        if let (Some(left), Some(right)) = (left, right)
+            && left.is_collection()
+            && right.is_collection()
+        {
+            return Ok(compare_stored(self, left, right, control)? == Some(true));
+        }
+        Ok(self.accepts_scalar_pair(
+            left.and_then(CanonicalPropertyValue::as_scalar),
+            right.and_then(CanonicalPropertyValue::as_scalar),
+        ))
+    }
+}
+
 /// Both source reads are explicit and fallible; no source failure is a missing
 /// value. A null binding has no property source and rejects without a read.
 /// Mixed vertex/captured-edge scalar comparisons execute through the same

@@ -3,7 +3,9 @@ use super::*;
 use crate::{DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, RelationId};
-use fgdb_types::{CommitCx, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 use std::cell::Cell;
 
 const R: RelationId = RelationId(1);

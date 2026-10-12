@@ -9,7 +9,8 @@ use fgdb_gql::{
     PreparedGraphMutationText,
 };
 use fgdb_types::{
-    CanonicalDate, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, EId, VId,
+    CanonicalDate, CanonicalList, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind,
+    EId, VId,
 };
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -949,10 +950,11 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
         "UNWIND [1] AS x CREATE (x:Copy)",
         "UNWIND [1] AS x CREATE (:Copy {p:y})",
         // `x.name` is a map entry since fgdb-2jw3z slice 3, checked per row
-        // at execution (crates/fgdb/tests/map_values.rs); a map or list
-        // literal is never a property value.
+        // at execution (crates/fgdb/tests/map_values.rs); a map literal is
+        // never a property value. A list literal is a stored List since
+        // fgdb-k3nub (a_create_property_may_be_a_temporal_or_composite_value);
+        // a list PARAMETER still binds no stored List.
         "UNWIND [1] AS x CREATE (:Copy {p:{name: x}})",
-        "UNWIND [1] AS x CREATE (:Copy {p:[x]})",
         "UNWIND $items AS x CREATE (:Copy {p:$items})",
         // `UNWIND ... MATCH ... CREATE` is supported since 70ebdf31; its
         // positive laws are in graph_insert_query_text.rs.
@@ -988,9 +990,11 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
 
 #[test]
 fn every_unwind_property_is_validated_before_the_first_identity() {
+    // A list row is a stored List since fgdb-k3nub; a map row never is.
     for text in [
         "UNWIND [2,0] AS x CREATE (:Copy {p:10/x})",
-        "UNWIND [1,[2]] AS x CREATE (:Copy {p:x})",
+        "UNWIND [1,{a: 2}] AS x CREATE (:Copy {p:x})",
+        "UNWIND [1,[{a: 2}]] AS x CREATE (:Copy {p:x})",
     ] {
         let query = prepare(text);
         let result: ResultOf = query.execute_governed(
@@ -1006,7 +1010,9 @@ fn every_unwind_property_is_validated_before_the_first_identity() {
 /// A CREATE property may be any scalar the value language computes: a
 /// temporal constructor (fgdb-txbg9), or a composite operand such as size()
 /// of a list (fgdb-o5o9t), which the scalar compiler reads only through a
-/// let slot. A list-valued property still refuses where it starts.
+/// let slot. Since fgdb-k3nub a list-valued property (a literal, a
+/// comprehension, keys()) is a stored List; a map literal still refuses
+/// where it starts.
 #[test]
 fn a_create_property_may_be_a_temporal_or_composite_value() {
     let query =
@@ -1024,12 +1030,44 @@ fn a_create_property_may_be_a_temporal_or_composite_value() {
             vertex: VId(100),
             labels: vec![COPY],
             properties: vec![
-                (P, CanonicalScalar::Date(date)),
-                (Q, CanonicalScalar::Int(3)),
+                (P, CanonicalScalar::Date(date).into()),
+                (Q, CanonicalScalar::Int(3).into()),
             ],
         }]
     );
-    let text = "CREATE (:Copy {p: [x IN [1, 2] | x]})";
+    let int = |value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value));
+    let list = |values| CanonicalPropertyValue::List(CanonicalList::try_new(values).unwrap());
+    for (text, expected) in [
+        (
+            "CREATE (:Copy {p: [x IN [1, 2] | x]})",
+            list(vec![int(1), int(2)]),
+        ),
+        (
+            "CREATE (:Copy {p: [[1], []]})",
+            list(vec![list(vec![int(1)]), list(vec![])]),
+        ),
+        (
+            "CREATE (:Copy {p: range(1, 3)})",
+            list(vec![int(1), int(2), int(3)]),
+        ),
+    ] {
+        let result: ResultOf = prepare(text).execute_governed(
+            policy(),
+            |_, _| Err(GqlQueryError::Source(())),
+            identity,
+            || Ok(()),
+        );
+        assert_eq!(
+            result.unwrap().intents(),
+            vec![GraphInsertIntent::Vertex {
+                vertex: VId(100),
+                labels: vec![COPY],
+                properties: vec![(P, expected)],
+            }],
+            "{text}"
+        );
+    }
+    let text = "CREATE (:Copy {p: {a: 1}})";
     let error = PreparedGraphInsertText::prepare(text, R, symbols).unwrap_err();
     assert_eq!(error.offset, 18, "{text}: {error:?}");
 }

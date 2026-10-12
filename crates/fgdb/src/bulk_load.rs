@@ -171,9 +171,11 @@ pub enum BulkLoadErrorKind {
     SourceChanged {
         row: usize,
     },
+    /// A source value has no canonical stored encoding: a scalar's or, since
+    /// fgdb-k3nub, a stored List's or Map's.
     SourceEncoding {
         row: usize,
-        source: fgdb_types::ScalarEncodeError,
+        source: fgdb_types::CanonicalPropertyValueError,
     },
     CounterOverflow,
     /// A source reader/decoder failed. No partially read chunk was submitted.
