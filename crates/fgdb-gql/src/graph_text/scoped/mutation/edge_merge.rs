@@ -5,8 +5,8 @@ use crate::mutation_text::EdgeMergeReturnTemplate;
 use crate::set_text::{ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate};
 use crate::{
     GraphEdgeMergeBinding, GraphEdgeMergeTextError, GraphEdgeMergeTextErrorKind,
-    GraphSetQuantifier, PreparedGraphEdgeMerge, PreparedGraphEdgeMergeQuery,
-    PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeMergeText,
+    GraphSetColumnType, GraphSetProjection, GraphSetQuantifier, PreparedGraphEdgeMerge,
+    PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeMergeText,
 };
 use mutation_query::ReturnLeaves;
 

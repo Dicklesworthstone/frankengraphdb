@@ -2,15 +2,16 @@
 //! through native prepared text, one canonical overlay and one atomic program.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, WriteBatch};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::{GraphInsertLimitDimension, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeMergeError, GraphEdgeMergeOutcome,
-    GraphMutationProgramDimension, GraphMutationProgramError, GraphSymbol, GraphSymbolKind,
-    GraphVertexMergeOutcome, GraphWriteProgramError, GraphWriteProgramPolicy,
-    PreparedGraphEdgeMergeText, PreparedGraphVertexMergeText, PreparedGraphWriteProgram,
-    PreparedGraphWriteProgramTemplate,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateValue, GraphEdgeMergeError,
+    GraphEdgeMergeOutcome, GraphMutationProgramDimension, GraphMutationProgramError, GraphSymbol,
+    GraphSymbolKind, GraphVertexMergeOutcome, GraphWriteIdentityRequest, GraphWriteProgramError,
+    GraphWriteProgramPolicy, PreparedGraphEdgeMergeText, PreparedGraphVertexMergeText,
+    PreparedGraphWriteProgram, PreparedGraphWriteProgramTemplate,
 };
 use fgdb_types::{
     CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
@@ -794,6 +795,146 @@ fn merge_maps_filter_matches_keep_parallel_edges_and_undirected_accepts_either_o
                 vec![(P, CanonicalScalar::Int(p))]
             );
         }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-at06q: MERGE ... RETURN through the public write dispatch yields one
+/// row per selected row and resolved edge. Each parallel match is a row, an
+/// undirected match reports the edge's own orientation, and a created edge's
+/// properties read back from the staged graph. Autocommit rows follow commit.
+#[test]
+fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
+    type Allocate<'a> = &'a mut dyn FnMut(GraphWriteIdentityRequest) -> Result<ElementId, ()>;
+    let ((), report) = run_async_under_lab(0xed9e_4030, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in [1, 2] {
+            batch.create_vertex(VId(id), vec![PERSON], vec![]);
+        }
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(&commit, batch).await.unwrap();
+        let mut existing = WriteBatch::new(S);
+        for (eid, src, dst, p) in [(40, 1, 2, 7), (41, 1, 2, 8), (42, 1, 2, 7), (43, 2, 1, 9)] {
+            existing.add_edge(
+                EId(eid),
+                VId(src),
+                VId(dst),
+                vec![(P, CanonicalScalar::Int(p))],
+            );
+        }
+        db.write(&commit, existing).await.unwrap();
+        let rows = |result: QueryResult, names: &[&str]| -> Vec<Vec<GraphValue>> {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("MERGE RETURN was dispatched to the no-result program engine")
+            };
+            assert_eq!(columns, names);
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| match cell {
+                            GraphAggregateValue::Value(value) => value,
+                            other => panic!("write RETURN cells are graph values: {other:?}"),
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let edge = |id| GraphValue::Edge(EId(id));
+        let vertex = |id| GraphValue::Vertex(VId(id));
+        let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let mut none = |_: GraphWriteIdentityRequest| -> Result<ElementId, ()> {
+            panic!("a matched pair cannot allocate")
+        };
+        let arguments = GqlParameters::new();
+        let selected = "MATCH (a:Person)-[:R]->(b:Person) MERGE ";
+
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = |text: &str, edges: u64, allocate: Allocate<'_>| {
+            txn.query_write(
+                &mut db,
+                &query,
+                &format!("{selected}{text}"),
+                &arguments,
+                symbols,
+                R,
+                policy(0, edges),
+                allocate,
+            )
+            .unwrap()
+        };
+        // Both parallel p=7 edges are rows, in identity order.
+        assert_eq!(
+            rows(
+                staged(
+                    "(a)-[e:S {p: 7}]->(b) RETURN e, e.p AS p, startNode(e) AS s, endNode(e) AS t",
+                    0,
+                    &mut none,
+                ),
+                &["e", "p", "s", "t"],
+            ),
+            vec![
+                vec![edge(40), int(7), vertex(1), vertex(2)],
+                vec![edge(42), int(7), vertex(1), vertex(2)],
+            ]
+        );
+        // The reverse p=9 edge matches undirected; its own orientation shows.
+        assert_eq!(
+            rows(
+                staged(
+                    "(a)-[e:S {p: 9}]-(b) RETURN startNode(e) AS s, endNode(e) AS t, b",
+                    0,
+                    &mut none,
+                ),
+                &["s", "t", "b"],
+            ),
+            vec![vec![vertex(2), vertex(1), vertex(2)]]
+        );
+        assert_eq!(
+            rows(
+                staged("(a)-[e:S {p: 7}]->(b) RETURN count(e) AS n", 0, &mut none),
+                &["n"],
+            ),
+            vec![vec![int(2)]]
+        );
+        // A miss creates one edge; RETURN reads it from the staged graph.
+        let created = staged(
+            "(a)-[e:S {p: 5}]->(b) RETURN e.p AS p, e",
+            1,
+            &mut |request| {
+                assert_eq!(request.statement, 0);
+                Ok(ElementId::Edge(EId(60)))
+            },
+        );
+        assert_eq!(rows(created, &["p", "e"]), vec![vec![int(5), edge(60)]]);
+        txn.finish(&mut db, &commit).await.unwrap();
+
+        let committed = db
+            .query_write(
+                &txcx,
+                &query,
+                &commit,
+                &format!("{selected}(a)-[e:S {{p: 5}}]->(b) RETURN e"),
+                &arguments,
+                symbols,
+                R,
+                policy(0, 0),
+                none,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows(committed, &["e"]), vec![vec![edge(60)]]);
+        let stored = db.edge(EId(60)).unwrap().unwrap();
+        assert_eq!(
+            (stored.entry.src, stored.entry.dst, stored.entry.relation),
+            (VId(1), VId(2), S)
+        );
+        assert_eq!(stored.props, vec![(P, CanonicalScalar::Int(5))]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
