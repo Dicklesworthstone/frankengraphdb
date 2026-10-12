@@ -239,23 +239,17 @@ mod tests {
             admitted: &admitted,
             trace: Vec::new(),
         };
-        let result = EndpointFilter::prepare_with_admission(
-            Some(&values),
-            1,
-            5,
-            &mut work,
-            || {
-                admitted.set(admitted.get() + 1);
-                if admitted.get() == 2 {
-                    Err(BeaconError::ResourceLimit {
-                        resource: "test retained IDs",
-                        limit: 1,
-                    })
-                } else {
-                    Ok(())
-                }
-            },
-        );
+        let result = EndpointFilter::prepare_with_admission(Some(&values), 1, 5, &mut work, || {
+            admitted.set(admitted.get() + 1);
+            if admitted.get() == 2 {
+                Err(BeaconError::ResourceLimit {
+                    resource: "test retained IDs",
+                    limit: 1,
+                })
+            } else {
+                Ok(())
+            }
+        });
         assert!(matches!(
             result,
             Err(BeaconError::ResourceLimit {

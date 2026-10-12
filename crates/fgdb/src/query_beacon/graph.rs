@@ -928,37 +928,87 @@ mod tests {
             assert!(opt.index.validate().is_err());
             let q = GraphHybridQuery::graph_only(1, 1, 100, 60).unwrap();
             let spec = expansion(&[VId(1)]);
-            let before = db.beacon_search_graph_filtered(&cx, &opt, q, spec, |id| id == HIGH).unwrap();
+            let before = db
+                .beacon_search_graph_filtered(&cx, &opt, q, spec, |id| id == HIGH)
+                .unwrap();
             assert_eq!(before.len(), 1);
             assert_eq!(before[0].id, HIGH);
             assert_eq!(before[0].graph_hops, Some(2));
             assert_eq!(before[0].graph_rank.unwrap().get(), 1);
-            assert_eq!((before[0].score.numerator(), before[0].score.denominator()), (100, 61));
+            assert_eq!(
+                (before[0].score.numerator(), before[0].score.denominator()),
+                (100, 61)
+            );
             assert_eq!(before[0].vector_rank, None);
             assert_eq!(before[0].text_rank, None);
             let work = RefCell::new(fgdb_beacon::WorkBudget::new(1_000_000));
-            assert_eq!(evaluate_filtered(
-                &db.snapshot, at, &opt, q, spec, &work, Scan::Metered,
-                |_| Ok(true), |_| true, |_| panic!("graph-only read requested a property"),
-                |_| true, || Ok(()), |id| id == HIGH,
-            ).unwrap(), before);
+            assert_eq!(
+                evaluate_filtered(
+                    &db.snapshot,
+                    at,
+                    &opt,
+                    q,
+                    spec,
+                    &work,
+                    Scan::Metered,
+                    |_| Ok(true),
+                    |_| true,
+                    |_| panic!("graph-only read requested a property"),
+                    |_| true,
+                    || Ok(()),
+                    |id| id == HIGH,
+                )
+                .unwrap(),
+                before
+            );
             // Excluding a transit source is unlike rejecting it as a result.
-            assert!(evaluate_filtered(
-                &db.snapshot, at, &opt, q, spec, &work, Scan::Metered,
-                |row| Ok(row.vid != VId(2)), |_| true, |_| false,
-                |_| true, || Ok(()), |id| id == HIGH,
-            ).unwrap().is_empty());
+            assert!(
+                evaluate_filtered(
+                    &db.snapshot,
+                    at,
+                    &opt,
+                    q,
+                    spec,
+                    &work,
+                    Scan::Metered,
+                    |row| Ok(row.vid != VId(2)),
+                    |_| true,
+                    |_| false,
+                    |_| true,
+                    || Ok(()),
+                    |id| id == HIGH,
+                )
+                .unwrap()
+                .is_empty()
+            );
             let mut changes = WriteBatch::new(RelationId(1));
             changes.delete_vertex(VId(2));
             db.write(&commit, changes).await.unwrap();
-            assert!(db.beacon_search_graph_filtered(&cx, &opt, q, spec, |id| id == HIGH).unwrap().is_empty());
+            assert!(
+                db.beacon_search_graph_filtered(&cx, &opt, q, spec, |id| id == HIGH)
+                    .unwrap()
+                    .is_empty()
+            );
             opt.as_of = Some(at);
-            assert_eq!(db.beacon_search_graph_filtered(&cx, &opt, q, spec, |id| id == HIGH).unwrap(), before);
+            assert_eq!(
+                db.beacon_search_graph_filtered(&cx, &opt, q, spec, |id| id == HIGH)
+                    .unwrap(),
+                before
+            );
             db.compact(&commit).await.unwrap();
-            assert_eq!(db.beacon_search_graph_filtered(&cx, &opt, q, spec, |id| id == HIGH).unwrap(), before);
+            assert_eq!(
+                db.beacon_search_graph_filtered(&cx, &opt, q, spec, |id| id == HIGH)
+                    .unwrap(),
+                before
+            );
             opt.as_of = None;
             drop(db);
-            assert_eq!(pinned.beacon_search_graph_filtered(&cx, &opt, q, spec, |id| id == HIGH).unwrap(), before);
+            assert_eq!(
+                pinned
+                    .beacon_search_graph_filtered(&cx, &opt, q, spec, |id| id == HIGH)
+                    .unwrap(),
+                before
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -978,39 +1028,83 @@ mod tests {
             spec.limits.max_input_edges = 0;
             spec.limits.max_source_scratch = 0;
             let rows = db.beacon_search_graph(&cx, &options(), q, spec).unwrap();
-            assert_eq!(rows.iter().map(|row| (row.id, row.graph_hops)).collect::<Vec<_>>(), [(VId(4), Some(0)), (HIGH, Some(0))]);
+            assert_eq!(
+                rows.iter()
+                    .map(|row| (row.id, row.graph_hops))
+                    .collect::<Vec<_>>(),
+                [(VId(4), Some(0)), (HIGH, Some(0))]
+            );
             let mut opt = options();
             opt.policy.max_staging_rows = 0;
-            assert!(matches!(db.beacon_search_graph_filtered(&cx, &opt, q, spec, |_| false),
-                Err(Error::Index(BeaconError::ResourceLimit { resource: "staged vertices", .. }))));
+            assert!(matches!(
+                db.beacon_search_graph_filtered(&cx, &opt, q, spec, |_| false),
+                Err(Error::Index(BeaconError::ResourceLimit {
+                    resource: "staged vertices",
+                    ..
+                }))
+            ));
             let work = RefCell::new(fgdb_beacon::WorkBudget::new(1_000_000));
-            evaluate_filtered(&db.snapshot, at, &options(), q, spec, &work, Scan::Metered,
-                |_| Ok(true), |_| true, |_| false, |_| true,
-                || panic!("zero-hop request admitted an edge"), |_| true).unwrap();
+            evaluate_filtered(
+                &db.snapshot,
+                at,
+                &options(),
+                q,
+                spec,
+                &work,
+                Scan::Metered,
+                |_| Ok(true),
+                |_| true,
+                |_| false,
+                |_| true,
+                || panic!("zero-hop request admitted an edge"),
+                |_| true,
+            )
+            .unwrap();
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]
     fn graph_only_reject_all_retains_every_cancellation_checkpoint() {
-        struct Cut { calls: usize, stop: usize }
+        struct Cut {
+            calls: usize,
+            stop: usize,
+        }
         impl WorkControl for Cut {
             fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
                 self.calls += 1;
-                if self.calls == self.stop { Err(BeaconError::Cancelled) } else { Ok(()) }
+                if self.calls == self.stop {
+                    Err(BeaconError::Cancelled)
+                } else {
+                    Ok(())
+                }
             }
         }
         let ((), report) = run_async_under_lab(0xbeac_3603, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
-            let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
             let at = db.write(&contexts.commit(), initial()).await.unwrap();
             for k in [0, 1] {
                 let q = GraphHybridQuery::graph_only(k, 1, 1, 60).unwrap();
                 let run = |stop| {
                     let work = RefCell::new(Cut { calls: 0, stop });
-                    let result = evaluate_filtered(&db.snapshot, at, &options(), q,
-                        expansion(&[VId(1)]), &work, Scan::Metered, |_| Ok(true),
-                        |_| true, |_| false, |_| true, || Ok(()), |_| false);
+                    let result = evaluate_filtered(
+                        &db.snapshot,
+                        at,
+                        &options(),
+                        q,
+                        expansion(&[VId(1)]),
+                        &work,
+                        Scan::Metered,
+                        |_| Ok(true),
+                        |_| true,
+                        |_| false,
+                        |_| true,
+                        || Ok(()),
+                        |_| false,
+                    );
                     (result, work.into_inner().calls)
                 };
                 let (result, calls) = run(usize::MAX);
@@ -1018,7 +1112,10 @@ mod tests {
                 assert!(calls > 2);
                 for stop in 1..=calls {
                     let (result, seen) = run(stop);
-                    assert!(matches!(result, Err(BeaconError::Cancelled)), "cut {stop}, k={k}");
+                    assert!(
+                        matches!(result, Err(BeaconError::Cancelled)),
+                        "cut {stop}, k={k}"
+                    );
                     assert_eq!(seen, stop);
                 }
             }

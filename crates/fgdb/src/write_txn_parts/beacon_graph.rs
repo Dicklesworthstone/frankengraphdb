@@ -222,11 +222,9 @@ impl WriteTxn {
                             |id| eligible(id, work),
                             &mut Shared(work),
                         ),
-                        None => query.fuse_graph_only(
-                            &hits,
-                            |id| eligible(id, work),
-                            &mut Shared(work),
-                        ),
+                        None => {
+                            query.fuse_graph_only(&hits, |id| eligible(id, work), &mut Shared(work))
+                        }
                     }
                 })();
                 finish_filter(result)

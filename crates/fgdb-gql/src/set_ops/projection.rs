@@ -1508,16 +1508,21 @@ fn evaluate_value_at<E>(
                 let GraphValue::Scalar(CanonicalScalar::Text(key)) = &index else {
                     return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
                 };
-                let at = GraphSetValue::map_subscript_index(
-                    keys, values.len(), key.as_str(), control,
-                ).map_err(|error| match error {
-                    GraphIntegerEvaluationError::Control(error) => ProjectionFailure::Control(error),
-                    GraphIntegerEvaluationError::Value(error) => failure(error.kind),
-                })?;
+                let at =
+                    GraphSetValue::map_subscript_index(keys, values.len(), key.as_str(), control)
+                        .map_err(|error| match error {
+                        GraphIntegerEvaluationError::Control(error) => {
+                            ProjectionFailure::Control(error)
+                        }
+                        GraphIntegerEvaluationError::Value(error) => failure(error.kind),
+                    })?;
                 match at {
-                    Some(at) => copy_value(&values[at], control).map_err(ProjectionFailure::Control)?,
+                    Some(at) => {
+                        copy_value(&values[at], control).map_err(ProjectionFailure::Control)?
+                    }
                     None => {
-                        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                        control(GlaExecutionEvent::ScratchEntry)
+                            .map_err(ProjectionFailure::Control)?;
                         GraphValue::Scalar(CanonicalScalar::Null)
                     }
                 }

@@ -68,7 +68,9 @@ impl Control<'_> {
         if let Some(observer) = self.observer {
             observer(event).map_err(|error| self.refuse(error))?;
         }
-        self.budget.charge(units).map_err(|error| self.refuse(error))
+        self.budget
+            .charge(units)
+            .map_err(|error| self.refuse(error))
     }
 
     fn source(&mut self, event: SourceEvent) -> Result<(), BeaconError> {
@@ -583,8 +585,15 @@ mod control_tests {
                 assert_eq!(calls.get(), 1);
                 assert_eq!(control.charge(0).unwrap_err(), first);
                 assert_eq!(control.charge(1).unwrap_err(), first);
-                assert_eq!(control.source(SourceEvent::SnapshotRecord).unwrap_err(), first);
-                assert_eq!(calls.get(), 1, "a refusal cannot be retried as a smaller charge");
+                assert_eq!(
+                    control.source(SourceEvent::SnapshotRecord).unwrap_err(),
+                    first
+                );
+                assert_eq!(
+                    calls.get(),
+                    1,
+                    "a refusal cannot be retried as a smaller charge"
+                );
                 assert_eq!(control.scratch, 0);
             }
         });

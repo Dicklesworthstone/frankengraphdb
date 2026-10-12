@@ -139,10 +139,20 @@ fn build_selected(
     selected: impl FnMut(&VertexRow) -> Result<(), BeaconError>,
 ) -> Result<BeaconIndex, BeaconError> {
     build_selected_optional(
-        snapshot, at, options, Some(config), work, scan, admit,
-        label_allowed, property_allowed, selected,
+        snapshot,
+        at,
+        options,
+        Some(config),
+        work,
+        scan,
+        admit,
+        label_allowed,
+        property_allowed,
+        selected,
     )?
-    .ok_or(BeaconError::Invariant("requested search index was not constructed"))
+    .ok_or(BeaconError::Invariant(
+        "requested search index was not constructed",
+    ))
 }
 
 /// The same admitted vertex source with an explicitly optional index. None
@@ -324,7 +334,7 @@ impl EmbeddedReadView {
         cx: &QueryCx,
         options: &Options,
         query: Search<'_>,
-        ) -> Result<Rows, Error<ReadError, Cancel>> {
+    ) -> Result<Rows, Error<ReadError, Cancel>> {
         self.beacon_search_filtered(cx, options, query, |_| true)
     }
 

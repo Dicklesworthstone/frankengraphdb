@@ -360,7 +360,8 @@ impl<K: Ord + Clone, C: TrieCursor<K>> BindingState<K, C> {
                 // Cursor clones copy navigation only. The level's saved slots
                 // were admitted before any candidate was requested.
                 let original = self.cursors[access.relation].clone();
-                let Some(child) = probe(original.clone(), &access.key_positions, candidate, control)?
+                let Some(child) =
+                    probe(original.clone(), &access.key_positions, candidate, control)?
                 else {
                     accepted = false;
                     break;
@@ -535,7 +536,10 @@ mod cursor_tests {
     }
 
     impl TrieRelation<i64> for Tracked<'_> {
-        type Cursor<'a> = TrackedCursor<'a> where Self: 'a;
+        type Cursor<'a>
+            = TrackedCursor<'a>
+        where
+            Self: 'a;
 
         fn attribute_order(&self) -> &[JoinVariable] {
             self.trie.attribute_order()
@@ -624,8 +628,8 @@ mod cursor_tests {
 
     #[test]
     fn first_refusal_and_unstarted_close_never_open_a_source() {
-        let plan = FreeJoinPlan::generic(vec![vec![JoinVariable(0)]], vec![JoinVariable(0)])
-            .unwrap();
+        let plan =
+            FreeJoinPlan::generic(vec![vec![JoinVariable(0)]], vec![JoinVariable(0)]).unwrap();
         let counts = Counts::default();
         let data = sources(&plan, &[vec![vec![1], vec![2]]], &counts);
         let join = FreeJoin::new(&plan, &data).unwrap();
@@ -666,8 +670,7 @@ mod cursor_tests {
     #[test]
     fn one_pull_and_close_do_not_drive_a_product_suffix() {
         let measure = |size: i64| {
-            let plan = FreeJoinPlan::binary(vec![JoinVariable(0)], vec![JoinVariable(1)])
-                .unwrap();
+            let plan = FreeJoinPlan::binary(vec![JoinVariable(0)], vec![JoinVariable(1)]).unwrap();
             let counts = Counts::default();
             let rows: Vec<_> = (0..size).map(|value| vec![value]).collect();
             let data = sources(&plan, &[rows.clone(), rows], &counts);
@@ -719,7 +722,10 @@ mod cursor_tests {
             .unwrap(),
             FreeJoinPlan::new(
                 schemas,
-                vec![vec![JoinVariable(0), JoinVariable(1)], vec![JoinVariable(2)]],
+                vec![
+                    vec![JoinVariable(0), JoinVariable(1)],
+                    vec![JoinVariable(2)],
+                ],
             )
             .unwrap(),
         ];
@@ -774,10 +780,8 @@ mod cursor_tests {
                 );
                 assert_eq!(counts.operations.get(), operations);
             }
-            let result = join.for_each_binding(
-                &mut |_| Ok::<_, &'static str>(()),
-                |_, _| Err("sink"),
-            );
+            let result =
+                join.for_each_binding(&mut |_| Ok::<_, &'static str>(()), |_, _| Err("sink"));
             assert_eq!(result, Err("sink"));
             assert_eq!(counts.live.get(), 0, "sink refusal releases the producer");
         }
@@ -795,27 +799,37 @@ mod cursor_tests {
             .unwrap();
         assert_eq!(binding.values().count(), 0);
         assert_eq!(binding.multiplicity(), Ok(1));
-        assert!(cursor.next_binding(&mut |_| Ok::<_, ()>(())).unwrap().is_none());
+        assert!(
+            cursor
+                .next_binding(&mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
 
         let plan = FreeJoinPlan::binary(Vec::new(), vec![JoinVariable(0)]).unwrap();
         let counts = Counts::default();
         let data = sources(&plan, &[Vec::new(), vec![vec![1]]], &counts);
         let join = FreeJoin::new(&plan, &data).unwrap();
         let mut cursor = join.cursor();
-        assert!(cursor.next_binding(&mut |_| Ok::<_, ()>(())).unwrap().is_none());
-        assert_eq!(counts.opens.get(), 1, "an empty input stops source preparation");
+        assert!(
+            cursor
+                .next_binding(&mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            counts.opens.get(),
+            1,
+            "an empty input stops source preparation"
+        );
         assert_eq!(counts.live.get(), 0);
 
         let plan = FreeJoinPlan::generic(vec![Vec::new(); 5], Vec::new()).unwrap();
         let data: Vec<ColumnarTrie<i64>> = (0..5)
             .map(|_| {
-                ColumnarTrie::new_weighted(
-                    &[],
-                    &[],
-                    vec![(Vec::new(), usize::MAX)],
-                    1,
-                    &mut |_| Ok::<_, ()>(()),
-                )
+                ColumnarTrie::new_weighted(&[], &[], vec![(Vec::new(), usize::MAX)], 1, &mut |_| {
+                    Ok::<_, ()>(())
+                })
                 .unwrap()
             })
             .collect();
@@ -827,6 +841,11 @@ mod cursor_tests {
             .unwrap();
         assert_eq!(binding.multiplicity_factors(), &[usize::MAX; 5]);
         assert_eq!(binding.multiplicity(), Err(MultiplicityOverflow));
-        assert!(cursor.next_binding(&mut |_| Ok::<_, ()>(())).unwrap().is_none());
+        assert!(
+            cursor
+                .next_binding(&mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
     }
 }

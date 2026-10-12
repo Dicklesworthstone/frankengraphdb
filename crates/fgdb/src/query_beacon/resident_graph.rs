@@ -267,9 +267,12 @@ impl PinnedIndex {
         } else {
             Vec::new()
         };
-        let rows = self
-            .index
-            .hybrid_search_graph_filtered(query, &graph, eligible, &mut SharedWork(work))?;
+        let rows = self.index.hybrid_search_graph_filtered(
+            query,
+            &graph,
+            eligible,
+            &mut SharedWork(work),
+        )?;
         work.borrow_mut().charge(1)?;
         Ok(rows)
     }
@@ -417,7 +420,9 @@ mod filtered_tests {
     use fgdb_beacon::{
         DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch,
     };
-    use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts};
+    use fgdb_types::{
+        CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts,
+    };
 
     const R: RelationId = RelationId(1);
     const HIGH: VId = VId(u128::MAX);
@@ -481,7 +486,10 @@ mod filtered_tests {
                 id,
                 vec![LabelId(1)],
                 vec![
-                    (PropertyKeyId(1), CanonicalScalar::ucs_basic_text("graph").unwrap()),
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                    ),
                     (PropertyKeyId(2), CanonicalScalar::Int(coordinate)),
                 ],
             );
@@ -504,11 +512,15 @@ mod filtered_tests {
         let ((), report) = run_async_under_lab(0xbeac_5201, |root| async move {
             let c = PurposeContexts::narrow_runtime_root(&root);
             let db = database(&c.commit(), true).await;
-            let resident = db.prepare_beacon_graph_index(&c.query(), &options()).unwrap();
+            let resident = db
+                .prepare_beacon_graph_index(&c.query(), &options())
+                .unwrap();
             let pinned = resident.snapshot();
             let stats = pinned.stats();
             let expected = db
-                .beacon_search_graph_filtered(&c.query(), &options(), query(), expansion(), |id| id == HIGH)
+                .beacon_search_graph_filtered(&c.query(), &options(), query(), expansion(), |id| {
+                    id == HIGH
+                })
                 .unwrap();
             let mut local = expansion();
             local.limits.max_vertices = 3;
@@ -524,10 +536,19 @@ mod filtered_tests {
                 assert_eq!(rows[0].graph_rank.unwrap().get(), 1);
                 assert_eq!(rows[0].vector_rank.unwrap().get(), 1);
                 assert_eq!(rows[0].text_rank.unwrap().get(), 1);
-                assert_eq!((rows[0].score.numerator(), rows[0].score.denominator()), (102, 61));
+                assert_eq!(
+                    (rows[0].score.numerator(), rows[0].score.denominator()),
+                    (102, 61)
+                );
                 assert_eq!(pinned.stats(), stats);
             }
-            assert_eq!(pinned.search_graph(&c.query(), query(), local, policy()).unwrap()[0].id, VId(2));
+            assert_eq!(
+                pinned
+                    .search_graph(&c.query(), query(), local, policy())
+                    .unwrap()[0]
+                    .id,
+                VId(2)
+            );
             let mut graph_only = expansion();
             graph_only.max_hops = 3;
             let rows = pinned
@@ -546,10 +567,14 @@ mod filtered_tests {
         let ((), report) = run_async_under_lab(0xbeac_5202, |root| async move {
             let c = PurposeContexts::narrow_runtime_root(&root);
             let mut db = database(&c.commit(), false).await;
-            let mut resident = db.prepare_beacon_graph_index(&c.query(), &options()).unwrap();
+            let mut resident = db
+                .prepare_beacon_graph_index(&c.query(), &options())
+                .unwrap();
             let old = resident.snapshot();
             let eligible = |id| id == HIGH || id == VId(4);
-            let before = old.search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible).unwrap();
+            let before = old
+                .search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible)
+                .unwrap();
             let mut change = WriteBatch::new(R);
             change.delete_edge(EId(2));
             change.add_edge(EId(4), VId(2), VId(4), vec![]);
@@ -561,19 +586,41 @@ mod filtered_tests {
             db.write(&c.commit(), change).await.unwrap();
             let mut historical = options();
             historical.as_of = Some(second);
-            let expected = db.beacon_search_graph_filtered(
-                &c.query(), &historical, query(), expansion(), eligible,
-            ).unwrap();
-            resident.refresh(&c.query(), &db, Some(second), ReadPolicy::default()).unwrap();
+            let expected = db
+                .beacon_search_graph_filtered(
+                    &c.query(),
+                    &historical,
+                    query(),
+                    expansion(),
+                    eligible,
+                )
+                .unwrap();
+            resident
+                .refresh(&c.query(), &db, Some(second), ReadPolicy::default())
+                .unwrap();
             let middle = resident.snapshot();
             assert_eq!(middle.source_sequence(), second);
-            assert_eq!(middle.search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible).unwrap(), expected);
+            assert_eq!(
+                middle
+                    .search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible)
+                    .unwrap(),
+                expected
+            );
             assert_eq!(expected[0].id, VId(4));
             assert_eq!(before[0].id, HIGH);
             db.compact(&c.commit()).await.unwrap();
             drop(db);
-            assert_eq!(old.search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible).unwrap(), before);
-            assert_eq!(middle.search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible).unwrap(), expected);
+            assert_eq!(
+                old.search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible)
+                    .unwrap(),
+                before
+            );
+            assert_eq!(
+                middle
+                    .search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible)
+                    .unwrap(),
+                expected
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -583,20 +630,31 @@ mod filtered_tests {
         let ((), report) = run_async_under_lab(0xbeac_5203, |root| async move {
             let c = PurposeContexts::narrow_runtime_root(&root);
             let db = database(&c.commit(), false).await;
-            let resident = db.prepare_beacon_graph_index(&c.query(), &options()).unwrap();
+            let resident = db
+                .prepare_beacon_graph_index(&c.query(), &options())
+                .unwrap();
             let pinned = resident.snapshot();
             for accept in [false, true] {
                 let mut limited = expansion();
                 limited.limits.max_visited_vertices = 2;
                 assert!(matches!(
-                    pinned.search_graph_filtered(&c.query(), query(), limited, policy(), |_| accept),
-                    Err(Error::Index(BeaconError::ResourceLimit { resource: "expansion visited vertices", limit: 2 }))
+                    pinned
+                        .search_graph_filtered(&c.query(), query(), limited, policy(), |_| accept),
+                    Err(Error::Index(BeaconError::ResourceLimit {
+                        resource: "expansion visited vertices",
+                        limit: 2
+                    }))
                 ));
                 let mut denied = policy();
                 denied.max_result_rows = 0;
                 assert!(matches!(
-                    pinned.search_graph_filtered(&c.query(), query(), expansion(), denied, |_| accept),
-                    Err(Error::Index(BeaconError::ResourceLimit { resource: "result rows", limit: 0 }))
+                    pinned.search_graph_filtered(&c.query(), query(), expansion(), denied, |_| {
+                        accept
+                    }),
+                    Err(Error::Index(BeaconError::ResourceLimit {
+                        resource: "result rows",
+                        limit: 0
+                    }))
                 ));
             }
             let plain = db.prepare_beacon_index(&c.query(), &options()).unwrap();
@@ -609,12 +667,17 @@ mod filtered_tests {
             let mut disabled = expansion();
             disabled.limits.max_seed_ids = 0;
             disabled.limits.max_source_scratch = 0;
-            let rows = plain.search_graph_filtered(
-                &c.query(), two_lanes, disabled, policy(), |id| id == HIGH,
-            ).unwrap();
+            let rows = plain
+                .search_graph_filtered(&c.query(), two_lanes, disabled, policy(), |id| id == HIGH)
+                .unwrap();
             assert_eq!(rows[0].id, HIGH);
             assert_eq!(rows[0].graph_rank, None);
-            assert!(pinned.search_graph_filtered(&c.query(), query(), expansion(), policy(), |_| false).unwrap().is_empty());
+            assert!(
+                pinned
+                    .search_graph_filtered(&c.query(), query(), expansion(), policy(), |_| false)
+                    .unwrap()
+                    .is_empty()
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -622,23 +685,38 @@ mod filtered_tests {
     #[test]
     fn filtered_search_cancellation_at_every_checkpoint_preserves_the_index() {
         #[derive(Default)]
-        struct Cut { calls: usize, stop: usize }
+        struct Cut {
+            calls: usize,
+            stop: usize,
+        }
         impl WorkControl for Cut {
             fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
                 self.calls += 1;
-                if self.calls == self.stop { Err(BeaconError::Cancelled) } else { Ok(()) }
+                if self.calls == self.stop {
+                    Err(BeaconError::Cancelled)
+                } else {
+                    Ok(())
+                }
             }
         }
         let ((), report) = run_async_under_lab(0xbeac_5204, |root| async move {
             let c = PurposeContexts::narrow_runtime_root(&root);
             let db = database(&c.commit(), false).await;
-            let pinned = db.prepare_beacon_graph_index(&c.query(), &options()).unwrap().snapshot();
+            let pinned = db
+                .prepare_beacon_graph_index(&c.query(), &options())
+                .unwrap()
+                .snapshot();
             let before = pinned.stats();
             let at = pinned.source_sequence();
             let run = |stop| {
                 let work = RefCell::new(Cut { calls: 0, stop });
                 let result = pinned.search_graph_filtered_with_work(
-                    &c.query(), query(), expansion(), policy(), |id| id == HIGH, &work,
+                    &c.query(),
+                    query(),
+                    expansion(),
+                    policy(),
+                    |id| id == HIGH,
+                    &work,
                 );
                 (result, work.into_inner().calls)
             };
@@ -647,7 +725,10 @@ mod filtered_tests {
             assert_eq!(expected[0].id, HIGH);
             for stop in 1..=calls {
                 let (result, seen) = run(stop);
-                assert!(matches!(result, Err(Error::Index(BeaconError::Cancelled))), "cut {stop}");
+                assert!(
+                    matches!(result, Err(Error::Index(BeaconError::Cancelled))),
+                    "cut {stop}"
+                );
                 assert_eq!(seen, stop);
             }
             assert_eq!(pinned.source_sequence(), at);
@@ -662,40 +743,90 @@ mod filtered_tests {
         let ((), report) = run_async_under_lab(0xbeac_5205, |root| async move {
             let c = PurposeContexts::narrow_runtime_root(&root);
             let mut db = database(&c.commit(), false).await;
-            let handle = db.register_beacon_graph_index(&c.query(), &options(), ReadPolicy::default()).unwrap();
+            let handle = db
+                .register_beacon_graph_index(&c.query(), &options(), ReadPolicy::default())
+                .unwrap();
             let denied = ReadPolicy {
                 max_work_units: 0,
                 ..ReadPolicy::default()
             };
-            let fenced = db.register_beacon_graph_index(&c.query(), &options(), denied).unwrap();
+            let fenced = db
+                .register_beacon_graph_index(&c.query(), &options(), denied)
+                .unwrap();
             let old = db.beacon_index_snapshot(&c.query(), &handle).unwrap();
             let eligible = |id| id == HIGH || id == VId(4);
-            let before = db.search_beacon_graph_index_filtered(
-                &c.query(), &handle, query(), expansion(), policy(), eligible,
-            ).unwrap();
+            let before = db
+                .search_beacon_graph_index_filtered(
+                    &c.query(),
+                    &handle,
+                    query(),
+                    expansion(),
+                    policy(),
+                    eligible,
+                )
+                .unwrap();
             assert_eq!(before[0].id, HIGH);
             let mut change = WriteBatch::new(R);
             change.delete_edge(EId(2));
             change.add_edge(EId(4), VId(2), VId(4), vec![]);
             let second = db.write(&c.commit(), change).await.unwrap();
-            let after = db.search_beacon_graph_index_filtered(
-                &c.query(), &handle, query(), expansion(), policy(), eligible,
-            ).unwrap();
+            let after = db
+                .search_beacon_graph_index_filtered(
+                    &c.query(),
+                    &handle,
+                    query(),
+                    expansion(),
+                    policy(),
+                    eligible,
+                )
+                .unwrap();
             assert_eq!(after[0].id, VId(4));
-            assert_eq!(db.beacon_index_snapshot(&c.query(), &handle).unwrap().source_sequence(), second);
-            assert_eq!(old.search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible).unwrap(), before);
+            assert_eq!(
+                db.beacon_index_snapshot(&c.query(), &handle)
+                    .unwrap()
+                    .source_sequence(),
+                second
+            );
+            assert_eq!(
+                old.search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible)
+                    .unwrap(),
+                before
+            );
             let called = Cell::new(false);
             let refused = db.search_beacon_graph_index_filtered(
-                &c.query(), &fenced, query(), expansion(), policy(), |_| { called.set(true); false },
+                &c.query(),
+                &fenced,
+                query(),
+                expansion(),
+                policy(),
+                |_| {
+                    called.set(true);
+                    false
+                },
             );
-            assert!(matches!(refused, Err(MaintainedBeaconError::Unavailable { .. })));
+            assert!(matches!(
+                refused,
+                Err(MaintainedBeaconError::Unavailable { .. })
+            ));
             assert!(!called.get());
             db.unregister_beacon_index(&c.query(), &handle).unwrap();
-            assert!(db.search_beacon_graph_index_filtered(
-                &c.query(), &handle, query(), expansion(), policy(), eligible,
-            ).is_err());
+            assert!(
+                db.search_beacon_graph_index_filtered(
+                    &c.query(),
+                    &handle,
+                    query(),
+                    expansion(),
+                    policy(),
+                    eligible,
+                )
+                .is_err()
+            );
             drop(db);
-            assert_eq!(old.search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible).unwrap(), before);
+            assert_eq!(
+                old.search_graph_filtered(&c.query(), query(), expansion(), policy(), eligible)
+                    .unwrap(),
+                before
+            );
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
