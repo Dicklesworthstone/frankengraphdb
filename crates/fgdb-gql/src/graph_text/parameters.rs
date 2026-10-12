@@ -723,37 +723,50 @@ mod projection_schema_tests {
         );
     }
 
+    /// A property is a stored value (fgdb-kr8j1), carried as one through WITH;
+    /// arithmetic over it is a scalar.
     #[test]
     fn edge_property_output_types_match_the_bound_plan_in_every_projection_form() {
-        for terminal in [
-            "RETURN e.cost AS cost",
-            "WITH e.cost AS cost RETURN cost",
-            "WITH e.cost AS cost WHERE cost > 0 RETURN cost + 1 AS next",
+        for (terminal, kind) in [
+            ("RETURN e.cost AS cost", GraphSetColumnType::Stored),
+            (
+                "WITH e.cost AS cost RETURN cost",
+                GraphSetColumnType::Stored,
+            ),
+            (
+                "WITH e.cost AS cost WHERE cost > 0 RETURN cost + 1 AS next",
+                GraphSetColumnType::Scalar,
+            ),
         ] {
-            check(
-                &format!("MATCH (a)-[e:R]->(b) {terminal}"),
-                &[GraphSetColumnType::Scalar],
-            );
+            check(&format!("MATCH (a)-[e:R]->(b) {terminal}"), &[kind]);
         }
         check(
             "MATCH (a)-[e:R]->(b) RETURN e AS edge, e.cost AS cost, type(e) AS relation",
             &[
                 GraphSetColumnType::Edge,
-                GraphSetColumnType::Scalar,
+                GraphSetColumnType::Stored,
                 GraphSetColumnType::Scalar,
             ],
         );
     }
 
     #[test]
-    fn scalar_set_operations_accept_edge_and_vertex_property_arms() {
+    fn stored_set_operations_accept_edge_and_vertex_property_arms() {
         for operation in ["UNION ALL", "UNION DISTINCT", "INTERSECT", "EXCEPT"] {
             check(
                 &format!(
                     "MATCH (a)-[e:R]->(b) RETURN e.cost AS value \
                      {operation} MATCH (n) RETURN n.cost AS value"
                 ),
-                &[GraphSetColumnType::Scalar],
+                &[GraphSetColumnType::Stored],
+            );
+            // A scalar arm widens to the stored domain, never narrows it.
+            check(
+                &format!(
+                    "MATCH (a)-[e:R]->(b) RETURN e.cost AS value \
+                     {operation} MATCH (n) RETURN 1 AS value"
+                ),
+                &[GraphSetColumnType::Stored],
             );
         }
     }
