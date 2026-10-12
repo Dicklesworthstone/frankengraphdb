@@ -1012,6 +1012,56 @@ impl PreparedGraphSet {
         if !self.order.is_empty() || self.offset != 0 || self.count.is_some() {
             return None;
         }
+        let pull = self.vertex_projection()?;
+        let GraphSetValue::Column(column) = *pull.projection.first()?.value() else {
+            return None;
+        };
+        if !matches!(
+            pull.pattern.value_columns().get(column),
+            Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0
+        ) {
+            return None;
+        }
+        Some(pull)
+    }
+
+    /// The ordered pull of this relation, when it has one (fgdb-7xqxb): the
+    /// same `Project ALL` over one vertex-rooted pattern as
+    /// [`Self::row_pull`], with this relation's own ORDER BY and page
+    /// returned as the external sort's tail.
+    ///
+    /// The caller projects every scanned row with [`GraphSetRowPull::project`]
+    /// and sorts the complete projected bag by the tail. Ties then break on
+    /// the whole typed row, as the eager projection's canonical sort followed
+    /// by its stable ORDER BY does, so no output cell needs to lead with the
+    /// root. The pattern's own rows must lead with the root vertex, or
+    /// project no cell. The scan then numbers source rows exactly as the
+    /// eager path numbers its canonically sorted input.
+    #[must_use]
+    pub fn ordered_row_pull(&self) -> Option<(GraphSetRowPull, crate::scan_stream::ScanSortTail)> {
+        let pull = self.vertex_projection()?;
+        let columns = pull.pattern.value_columns();
+        if !columns.is_empty()
+            && !matches!(
+                columns.first(),
+                Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0
+            )
+        {
+            return None;
+        }
+        let tail = crate::scan_stream::ScanSortTail::for_relation(
+            pull.projection.len(),
+            self.order.clone(),
+            self.offset,
+            self.count,
+        )?;
+        Some((pull, tail))
+    }
+
+    /// `Project ALL` over one vertex-rooted, relationship-free pattern with
+    /// no inner order or page, whose every cell a pull can evaluate: a column,
+    /// a bound constant or integer arithmetic over columns.
+    fn vertex_projection(&self) -> Option<GraphSetRowPull> {
         let SetNode::Project {
             input,
             projection,
@@ -1041,26 +1091,18 @@ impl PreparedGraphSet {
         {
             return None;
         }
-        let (first, rest) = projection.split_first()?;
-        let GraphSetValue::Column(column) = *first.value() else {
-            return None;
-        };
-        if !matches!(
-            pattern.value_columns().get(column),
-            Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0
-        ) {
-            return None;
-        }
-        if !rest.iter().all(|cell| {
-            matches!(
-                cell.value(),
-                GraphSetValue::Column(_)
-                    | GraphSetValue::Literal(_)
-                    | GraphSetValue::Value(_)
-                    | GraphSetValue::TypedNull(_)
-                    | GraphSetValue::Integer(_)
-            )
-        }) {
+        if projection.is_empty()
+            || !projection.iter().all(|cell| {
+                matches!(
+                    cell.value(),
+                    GraphSetValue::Column(_)
+                        | GraphSetValue::Literal(_)
+                        | GraphSetValue::Value(_)
+                        | GraphSetValue::TypedNull(_)
+                        | GraphSetValue::Integer(_)
+                )
+            })
+        {
             return None;
         }
         Some(GraphSetRowPull {

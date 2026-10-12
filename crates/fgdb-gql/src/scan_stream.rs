@@ -60,6 +60,32 @@ impl ScanSortTail {
         self.count
     }
 
+    /// The tail of a relation whose complete projected rows the caller sorts
+    /// (a pulled set, fgdb-7xqxb): `width` visible cells, the relation's own
+    /// ORDER BY keys over them and its page, with no hidden cell and no
+    /// DISTINCT. None when the width is out of range or a key names no cell.
+    pub(crate) fn for_relation(
+        width: usize,
+        order: Vec<crate::algebra::GraphValueOrder>,
+        offset: u64,
+        count: Option<u64>,
+    ) -> Option<Self> {
+        if width == 0
+            || width > crate::algebra::MAX_PATTERN_VERTICES
+            || order.iter().any(|key| key.column >= width)
+        {
+            return None;
+        }
+        Some(Self {
+            evaluation_width: width,
+            visible_width: width,
+            order,
+            distinct: false,
+            offset,
+            count,
+        })
+    }
+
     // Only physical compilers call this. They must still audit EVERY source,
     // predicate and projection instruction, not just recognize the final tail.
     pub(crate) fn compile(plan: &crate::algebra::GlaPlan<GraphValueRow>) -> Result<Self, usize> {

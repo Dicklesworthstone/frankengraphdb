@@ -279,6 +279,72 @@ fn masked_vertex_and_edge_ordering_keep_bags_hidden_keys_and_final_windows() {
 }
 
 #[test]
+fn a_vertex_set_with_constant_columns_sorts_its_projected_scan() {
+    // fgdb-7xqxb: no pattern facade projects a literal, so these reads are
+    // sets. Each scanned root takes the set's projection, then the external
+    // sort applies the set's own ORDER BY and page. Ties break on the whole
+    // row, as the eager projection's canonical sort does. VId 99 is outside
+    // the label scope and never appears.
+    let ((), report) = run_async_under_lab(0x8600_000b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = database(&contexts.commit()).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let (mut ordered, a, b) = session(&db, &cx, &issuer, &token, &pool, || 100, limits()).await;
+        let params = GqlParameters::new();
+        let vertex = |id| GraphValue::Vertex(VId(id));
+        for (text, expected) in [
+            (
+                "MATCH (n:L) RETURN 1 AS value ORDER BY value",
+                vec![vec![scalar(1)]; 5],
+            ),
+            (
+                "MATCH (n:L) RETURN n AS id, 7 AS seven ORDER BY id DESC SKIP 1 LIMIT 2",
+                vec![vec![vertex(4), scalar(7)], vec![vertex(3), scalar(7)]],
+            ),
+            (
+                "MATCH (n:L) RETURN 7 AS seven, n AS id ORDER BY seven LIMIT 3",
+                vec![
+                    vec![scalar(7), vertex(1)],
+                    vec![scalar(7), vertex(2)],
+                    vec![scalar(7), vertex(3)],
+                ],
+            ),
+        ] {
+            let prepared = ordered.prepare(&cx, text, &params).unwrap();
+            let mut cursor = ordered
+                .execute_ordered(&cx, &prepared, &params)
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(cursor.snapshot_seq(), CommitSeq(1));
+            assert_eq!(values(&mut cursor).await, expected, "{text}");
+            drop(cursor);
+            assert!(!ordered.is_closed());
+            assert_eq!(pool.used(), 0);
+        }
+        // A set that reads a relationship has no ordered pull. It refuses
+        // before any scratch is written, with no eager fallback.
+        let scratch_bytes = a.0.lock().unwrap().bytes.get_ref().len();
+        let destination_bytes = b.0.lock().unwrap().bytes.get_ref().len();
+        let edge = ordered
+            .prepare(
+                &cx,
+                "MATCH (n:L)-[e:R]->(m:L) RETURN 1 AS one ORDER BY one",
+                &params,
+            )
+            .unwrap();
+        assert!(matches!(ordered.execute_ordered(&cx, &edge, &params),
+            Err(NativeSpoolError::Authorized(error)) if matches!(*error, QueryError::StreamingUnsupported { .. })));
+        assert_eq!(a.0.lock().unwrap().bytes.get_ref().len(), scratch_bytes);
+        assert_eq!(b.0.lock().unwrap().bytes.get_ref().len(), destination_bytes);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn sorted_cursor_pins_the_selected_history_while_the_writer_advances() {
     let ((), report) = run_async_under_lab(0x8600_0002, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
