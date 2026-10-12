@@ -59,13 +59,14 @@ async fn seed(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) {
     for id in 1..=4_u128 {
         batch.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
     }
-    batch.add_edge(
-        EId(10),
-        VId(1),
-        VId(2),
-        vec![(WEIGHT, CanonicalScalar::Int(3))],
-    );
+    // The MERGE map {WEIGHT: 7} is a match predicate (fgdb-at06q): edge 10
+    // matches it, and its sibling 13 on the same pair is filtered out.
+    batch.add_edge(EId(10), VId(1), VId(2), weight(7));
+    batch.add_edge(EId(13), VId(1), VId(2), weight(3));
     db.write(cx, batch).await.unwrap();
+}
+fn weight(value: i64) -> Vec<(PropertyKeyId, CanonicalScalar)> {
+    vec![(WEIGHT, CanonicalScalar::Int(value))]
 }
 
 #[test]
@@ -94,7 +95,9 @@ fn one_existing_relationship_matches_without_allocation_or_write() {
             .unwrap();
         assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(10)));
         assert_eq!(stats.created_edges, 0);
-        assert_eq!(stats.overlay_edges, 1);
+        // The native host inspects every overlay edge (10 and 13); only edge
+        // 10 satisfies the map.
+        assert_eq!(stats.overlay_edges, 2);
         assert_eq!(allocations.get(), 0);
         assert!(matches!(
             txn.finish(&mut db, &commit).await.unwrap(),
@@ -116,7 +119,7 @@ fn parallel_relationships_and_multiple_endpoint_pairs_refuse_before_allocation()
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit).await;
         let mut parallel = WriteBatch::new(R);
-        parallel.add_edge(EId(11), VId(1), VId(2), vec![]);
+        parallel.add_edge(EId(11), VId(1), VId(2), weight(7));
         db.write(&commit, parallel).await.unwrap();
 
         let allocations = Cell::new(0);
@@ -231,7 +234,7 @@ fn staged_edge_creation_and_deletion_are_visible_to_merge() {
 
         let mut txn = db.begin(&txcx).unwrap();
         let mut create = WriteBatch::new(R);
-        create.add_edge(EId(30), VId(3), VId(4), vec![]);
+        create.add_edge(EId(30), VId(3), VId(4), weight(7));
         txn.write(&mut db, create).unwrap();
         let (stats, matched) = txn
             .execute_graph_edge_merge_governed(
@@ -245,6 +248,7 @@ fn staged_edge_creation_and_deletion_are_visible_to_merge() {
         assert_eq!(matched, GraphEdgeMergeOutcome::Matched(EId(30)));
         assert_eq!(stats.created_edges, 0);
 
+        // With edge 10 deleted, only the filtered sibling 13 remains: a miss.
         let mut remove = WriteBatch::new(R);
         remove.delete_edge(EId(10));
         txn.write(&mut db, remove).unwrap();
@@ -318,7 +322,7 @@ fn wrong_identity_collision_and_concurrent_matching_insert_never_publish_duplica
 
         let mut competitor = db.begin(&txcx).unwrap();
         let mut edge = WriteBatch::new(R);
-        edge.add_edge(EId(200), VId(2), VId(4), vec![]);
+        edge.add_edge(EId(200), VId(2), VId(4), weight(7));
         competitor.write(&mut db, edge).unwrap();
         competitor.commit(&mut db, &commit).await.unwrap();
 
