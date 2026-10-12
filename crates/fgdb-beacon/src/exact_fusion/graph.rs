@@ -63,8 +63,7 @@ impl<'a> GraphHybridQuery<'a> {
     /// No text/vector source participates, including corpus construction.
     #[must_use]
     pub fn is_graph_only(self) -> bool {
-        self.retrieval.profile.vector_weight() == 0
-            && self.retrieval.profile.text_weight() == 0
+        self.retrieval.profile.vector_weight() == 0 && self.retrieval.profile.text_weight() == 0
     }
 
     #[must_use]
@@ -555,12 +554,26 @@ mod filtered_tests {
     fn graph_only_ranks_without_an_index_and_keeps_full_width_identities() {
         let q = GraphHybridQuery::graph_only(3, 3, 100, 60).unwrap();
         let population = [
-            GraphHit { id: VId(9), hops: 0 },
-            GraphHit { id: VId(1), hops: 1 },
-            GraphHit { id: VId(u128::MAX), hops: 1 },
+            GraphHit {
+                id: VId(9),
+                hops: 0,
+            },
+            GraphHit {
+                id: VId(1),
+                hops: 1,
+            },
+            GraphHit {
+                id: VId(u128::MAX),
+                hops: 1,
+            },
         ];
-        let rows = q.fuse_graph_only(&population, |_| true, &mut budget()).unwrap();
-        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), [VId(9), VId(1), VId(u128::MAX)]);
+        let rows = q
+            .fuse_graph_only(&population, |_| true, &mut budget())
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [VId(9), VId(1), VId(u128::MAX)]
+        );
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(row.graph_rank, NonZeroU32::new(i as u32 + 1));
             assert_eq!(row.graph_hops, Some(population[i].hops));
@@ -568,10 +581,20 @@ mod filtered_tests {
             assert_eq!(row.text_rank, None);
             assert_eq!(row.vector_distance, None);
             assert_eq!(row.text_score, None);
-            assert_eq!(row.score.numerator() * (61 + i as u128), 100 * row.score.denominator());
+            assert_eq!(
+                row.score.numerator() * (61 + i as u128),
+                100 * row.score.denominator()
+            );
         }
-        assert_eq!(rows, index().hybrid_search_graph(q, &population, &mut budget()).unwrap());
-        let filtered = q.fuse_graph_only(&population, |id| id != VId(9), &mut budget()).unwrap();
+        assert_eq!(
+            rows,
+            index()
+                .hybrid_search_graph(q, &population, &mut budget())
+                .unwrap()
+        );
+        let filtered = q
+            .fuse_graph_only(&population, |id| id != VId(9), &mut budget())
+            .unwrap();
         assert_eq!(filtered[0].id, VId(1));
         assert_eq!(filtered[0].score.numerator(), 100);
         assert_eq!(filtered[0].score.denominator(), 61);
@@ -580,44 +603,102 @@ mod filtered_tests {
     #[test]
     fn index_free_execution_never_discards_an_enabled_lane_or_weakens_profiles() {
         assert!(ExactRrfProfile::new(60, 0, 0).is_err());
-        for (k, depth, weight, constant) in [(1, 1, 1, 0), (0, 1, 0, 60), (0, 0, 1, 60), (2, 1, 1, 60)] {
+        for (k, depth, weight, constant) in
+            [(1, 1, 1, 0), (0, 1, 0, 60), (0, 0, 1, 60), (2, 1, 1, 60)]
+        {
             assert!(GraphHybridQuery::graph_only(k, depth, weight, constant).is_err());
         }
-        assert!(query().fuse_graph_only(&[], |_| true, &mut budget()).is_err());
+        assert!(
+            query()
+                .fuse_graph_only(&[], |_| true, &mut budget())
+                .is_err()
+        );
         let q = GraphHybridQuery::graph_only(0, 1, 1, 60).unwrap();
-        assert!(q.fuse_graph_only(&[], |_| true, &mut budget()).unwrap().is_empty());
+        assert!(
+            q.fuse_graph_only(&[], |_| true, &mut budget())
+                .unwrap()
+                .is_empty()
+        );
         let mut disabled = q;
         disabled.graph_weight = 0;
-        assert!(disabled.fuse_graph_only(&[], |_| true, &mut budget()).is_err());
+        assert!(
+            disabled
+                .fuse_graph_only(&[], |_| true, &mut budget())
+                .is_err()
+        );
         let mut options = ReadOptions::<u64, u64>::text(1);
         options.index.text = None;
         options.index.vector = None;
         assert!(options.index.validate().is_err());
         options.validate_graph_only(q).unwrap();
         options.policy.max_result_rows = 0;
-        assert!(matches!(options.validate_graph_only(GraphHybridQuery::graph_only(1, 1, 1, 60).unwrap()),
-            Err(BeaconError::ResourceLimit { resource: "result rows", limit: 0 })));
+        assert!(matches!(
+            options.validate_graph_only(GraphHybridQuery::graph_only(1, 1, 1, 60).unwrap()),
+            Err(BeaconError::ResourceLimit {
+                resource: "result rows",
+                limit: 0
+            })
+        ));
         assert!(options.validate_graph_only(query()).is_err());
     }
 
     #[test]
     fn graph_only_refusals_survive_reject_all_and_every_work_cut() {
         let q = GraphHybridQuery::graph_only(3, 3, 1, 60).unwrap();
-        let duplicate = [GraphHit { id: VId(1), hops: 0 }, GraphHit { id: VId(1), hops: 1 }];
-        assert!(matches!(q.fuse_graph_only(&duplicate, |_| false, &mut budget()),
-            Err(BeaconError::InvalidQuery("graph ranks must be ordered and unique"))));
-        let reversed = [GraphHit { id: VId(2), hops: 1 }, GraphHit { id: VId(1), hops: 1 }];
-        assert!(q.fuse_graph_only(&reversed, |_| false, &mut budget()).is_err());
-        let too_many = [GraphHit { id: VId(0), hops: 0 }; 4];
-        assert!(q.fuse_graph_only(&too_many, |_| false, &mut budget()).is_err());
+        let duplicate = [
+            GraphHit {
+                id: VId(1),
+                hops: 0,
+            },
+            GraphHit {
+                id: VId(1),
+                hops: 1,
+            },
+        ];
+        assert!(matches!(
+            q.fuse_graph_only(&duplicate, |_| false, &mut budget()),
+            Err(BeaconError::InvalidQuery(
+                "graph ranks must be ordered and unique"
+            ))
+        ));
+        let reversed = [
+            GraphHit {
+                id: VId(2),
+                hops: 1,
+            },
+            GraphHit {
+                id: VId(1),
+                hops: 1,
+            },
+        ];
+        assert!(
+            q.fuse_graph_only(&reversed, |_| false, &mut budget())
+                .is_err()
+        );
+        let too_many = [GraphHit {
+            id: VId(0),
+            hops: 0,
+        }; 4];
+        assert!(
+            q.fuse_graph_only(&too_many, |_| false, &mut budget())
+                .is_err()
+        );
         for reject_all in [false, true] {
             let eligible = |id| !reject_all && id != VId(1);
             let mut count = Count::default();
             let expected = q.fuse_graph_only(&graph(), eligible, &mut count).unwrap();
             for units in 0..count.0 {
-                assert_eq!(q.fuse_graph_only(&graph(), eligible, &mut WorkBudget::new(units)).unwrap_err(), BeaconError::WorkBudgetExceeded);
+                assert_eq!(
+                    q.fuse_graph_only(&graph(), eligible, &mut WorkBudget::new(units))
+                        .unwrap_err(),
+                    BeaconError::WorkBudgetExceeded
+                );
             }
-            assert_eq!(q.fuse_graph_only(&graph(), eligible, &mut WorkBudget::new(count.0)).unwrap(), expected);
+            assert_eq!(
+                q.fuse_graph_only(&graph(), eligible, &mut WorkBudget::new(count.0))
+                    .unwrap(),
+                expected
+            );
         }
     }
 }
