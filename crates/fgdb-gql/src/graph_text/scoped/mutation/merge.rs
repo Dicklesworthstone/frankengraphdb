@@ -724,9 +724,12 @@ impl PreparedGraphVertexUpsertText {
         .map_err(upsert_merge_error)?;
         drop(symbol);
         if let Some(returning) = &mut returning
-            && returning
+            && (returning
                 .bindings
                 .contains(&GraphVertexReturnBinding::Properties)
+                || returning
+                    .bindings
+                    .contains(&GraphVertexReturnBinding::Labels))
         {
             // The returned map is read after all clauses. Preserve the host's
             // complete trusted naming contract, including keys absent from
@@ -792,6 +795,7 @@ enum VertexBinding<'a> {
     Vertex,
     Property(Name<'a>),
     Properties,
+    Labels,
 }
 
 pub(super) struct ParsedVertexReturn<'a> {
@@ -830,6 +834,27 @@ impl<'a> mutation_query::ReturnLeaves<'a> for ParsedVertexReturn<'a> {
             }
             // Properties of MAP/NULL values stay with the shared value
             // evaluator; only the actual MERGE vertex needs a source cell.
+            return Ok(None);
+        }
+        // labels() of the MERGE vertex reads its labels after every clause
+        // (fgdb-iufb7); the host names them through the label catalog.
+        if word.eq_ignore_ascii_case("labels")
+            && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            let mut lookahead = parser.lexer.clone();
+            lookahead.next()?;
+            if matches!(lookahead.next()?.kind, TokenKind::Word(variable)
+                    if variable == self.variable.text && !parser.elements.contains(&variable))
+                && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+            {
+                let name = parser.name()?;
+                parser.punct(b'(', "(")?;
+                parser.name()?;
+                parser.punct(b')', ")")?;
+                return self
+                    .column(VertexBinding::Labels, name, GraphSetColumnType::List)
+                    .map(Some);
+            }
             return Ok(None);
         }
         if word != self.variable.text
@@ -888,7 +913,8 @@ impl<'a> ParsedVertexReturn<'a> {
             .iter()
             .position(|(old, _, _)| match (old, binding) {
                 (VertexBinding::Vertex, VertexBinding::Vertex) => true,
-                (VertexBinding::Properties, VertexBinding::Properties) => true,
+                (VertexBinding::Properties, VertexBinding::Properties)
+                | (VertexBinding::Labels, VertexBinding::Labels) => true,
                 (VertexBinding::Property(old), VertexBinding::Property(key)) => {
                     old.text == key.text
                 }
@@ -920,6 +946,7 @@ impl<'a> ParsedVertexReturn<'a> {
             bindings.push(match binding {
                 VertexBinding::Vertex => GraphVertexReturnBinding::Vertex,
                 VertexBinding::Properties => GraphVertexReturnBinding::Properties,
+                VertexBinding::Labels => GraphVertexReturnBinding::Labels,
                 VertexBinding::Property(key) => {
                     let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
                         unreachable!("shared catalog resolver checked the domain")

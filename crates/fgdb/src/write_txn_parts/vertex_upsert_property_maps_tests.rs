@@ -327,3 +327,118 @@ fn merge_map_polls_hidden_and_unrelated_staged_effects_without_resource_charges(
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+const PERSON: LabelId = LabelId(1);
+const ADMIN: LabelId = LabelId(2);
+const ZED: LabelId = LabelId(3);
+const SECRET: LabelId = LabelId(99);
+
+fn read_labels(
+    transaction: &WriteTxn,
+    database: &Database<MemVfs>,
+    vertex: VId,
+    visible: impl FnMut(LabelId) -> bool,
+) -> (Result<GraphValue, Fault>, Vec<GlaExecutionEvent>) {
+    let mut catalog = catalog();
+    catalog.insert_label(PERSON, "Person");
+    catalog.insert_label(ADMIN, "Admin");
+    catalog.insert_label(ZED, "Zed");
+    let mut events = Vec::new();
+    let value = vertex_upsert_labels(
+        transaction,
+        database,
+        vertex,
+        Some(&catalog),
+        visible,
+        || Ok(()),
+        &mut |event| {
+            events.push(event);
+            Ok(())
+        },
+    );
+    (value, events)
+}
+fn names(values: &[&str]) -> GraphValue {
+    GraphValue::List(
+        values
+            .iter()
+            .map(|value| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap()))
+            .collect(),
+    )
+}
+
+// fgdb-iufb7: MERGE ... RETURN labels(n) reads the selected vertex's history
+// and staged membership edits in identity order. A hidden label is skipped
+// before naming or any charge, exactly as if it were physically absent.
+#[test]
+fn merge_labels_mask_history_and_hidden_staged_edits_before_charging() {
+    let ((), report) = run_async_under_lab(0xb76d_0005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txcx) = (contexts.commit(), contexts.txn());
+        let visible = |label: LabelId| label != SECRET;
+        let mut observations = Vec::new();
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut labels = vec![ADMIN, PERSON];
+            if hidden {
+                labels.push(SECRET);
+            }
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), labels, vec![]);
+            db.write(&commit, seed).await.unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let (value, events) = read_labels(&transaction, &db, VId(1), visible);
+            let before = (value.unwrap(), events);
+            // Identity order, not name order.
+            assert_eq!(before.0, names(&["Person", "Admin"]));
+            // The whole element is witnessed, as for a complete property map.
+            assert!(
+                transaction
+                    .read_set
+                    .borrow()
+                    .contains(&ElementId::Vertex(VId(1)))
+            );
+            assert!(transaction.point_reads.borrow().is_empty());
+            transaction.savepoint(&db, "before").unwrap();
+            let mut edits = WriteBatch::new(R);
+            edits.set_vertex_label(VId(1), PERSON, false);
+            edits.set_vertex_label(VId(1), ZED, true);
+            if hidden {
+                edits.set_vertex_label(VId(1), SECRET, false);
+            }
+            edits.create_vertex(VId(2), vec![ZED], vec![]);
+            transaction.write(&mut db, edits).unwrap();
+            let mut created = WriteBatch::new(R);
+            created.set_vertex_label(VId(2), PERSON, true);
+            transaction.write(&mut db, created).unwrap();
+            let (value, events) = read_labels(&transaction, &db, VId(1), visible);
+            let after = (value.unwrap(), events);
+            assert_eq!(after.0, names(&["Admin", "Zed"]));
+            let (value, events) = read_labels(&transaction, &db, VId(1), visible);
+            assert_eq!((value.unwrap(), events), after);
+            // A vertex created in this transaction reads its created labels
+            // and later edits.
+            assert_eq!(
+                read_labels(&transaction, &db, VId(2), visible).0.unwrap(),
+                names(&["Person", "Zed"])
+            );
+            transaction.rollback_to_savepoint(&db, "before").unwrap();
+            let (value, events) = read_labels(&transaction, &db, VId(1), visible);
+            assert_eq!((value.unwrap(), events), before);
+            if hidden {
+                // An unnamed label refuses; it is never omitted.
+                assert!(matches!(
+                    read_labels(&transaction, &db, VId(1), |_| true).0,
+                    Err(GqlQueryError::Source(GraphVertexUpsertError::Staging(
+                        WriteTxnError::Read(crate::ReadError::UnmappedLabel(SECRET))
+                    )))
+                ));
+            }
+            observations.push((before, after));
+            transaction.abort();
+        }
+        assert_eq!(observations[0], observations[1]);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

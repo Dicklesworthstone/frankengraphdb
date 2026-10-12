@@ -124,6 +124,20 @@ impl WriteTxn {
                         control,
                     )
                 },
+                |control| {
+                    vertex_upsert_labels(
+                        &*workspace.txn,
+                        &*database,
+                        outcome.vertex(),
+                        query.property_catalog(),
+                        |_| true,
+                        || {
+                            cx.checkpoint()
+                                .map_err(fgdb_gql::GqlQueryError::Interrupted)
+                        },
+                        control,
+                    )
+                },
             )
         })?;
         workspace.accept();
@@ -167,8 +181,9 @@ type VertexUpsertActionResult<T, E, A, C> =
 
 // Both native and authorized adapters supply point reads of the same selected
 // vertex. Continue the upsert's evaluator allowance through RETURN, never a new
-// MATCH or a fresh projection budget. Hidden-property masking belongs to the
-// authorized property callback, before its storage read.
+// MATCH or a fresh projection budget. Hidden-property and hidden-label masking
+// belong to the authorized callbacks, before their storage reads.
+#[allow(clippy::too_many_arguments)]
 fn vertex_upsert_returning<E, A, C>(
     query: &fgdb_gql::PreparedGraphVertexUpsertQuery,
     stats: fgdb_gql::GraphVertexUpsertStats,
@@ -180,6 +195,9 @@ fn vertex_upsert_returning<E, A, C>(
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
     ) -> VertexUpsertActionResult<CanonicalScalar, E, A, C>,
     mut properties: impl FnMut(
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
+    ) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
+    mut labels: impl FnMut(
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
     ) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
 ) -> VertexUpsertActionResult<fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>, E, A, C>
@@ -227,6 +245,7 @@ fn vertex_upsert_returning<E, A, C>(
                     GraphValue::Scalar(property(*key, &mut control)?)
                 }
                 GraphVertexReturnBinding::Properties => properties(&mut control)?,
+                GraphVertexReturnBinding::Labels => labels(&mut control)?,
             });
         }
     }
@@ -471,6 +490,79 @@ fn vertex_upsert_properties<V: Vfs + Clone, A, C>(
             &mut source_control,
             &|error| source_error(WriteTxnError::Read(error)),
         )?,
+        None => {
+            source_control(SourceEvent::ScratchEntry)?;
+            GraphValue::Scalar(CanonicalScalar::Null)
+        }
+    };
+    attempt.accepted = true;
+    Ok(value)
+}
+
+// labels() of the MERGE vertex after every clause (fgdb-iufb7). Like a whole
+// map, the list observes the full element: a concurrent label insertion must
+// not go unseen, so the conservative element witness applies even to an empty
+// list. Hidden labels are skipped before naming or charges, and an unnamed
+// visible label refuses; it is never omitted.
+fn vertex_upsert_labels<V: Vfs + Clone, A, C>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vertex: VId,
+    catalog: Option<&fgdb_gql::ReverseSymbolCatalog>,
+    mut visible: impl FnMut(LabelId) -> bool,
+    mut poll: impl FnMut() -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+    control: &mut dyn FnMut(
+        fgdb_gql::GlaExecutionEvent,
+    ) -> VertexUpsertActionResult<(), WriteTxnError, A, C>,
+) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, WriteTxnError, A, C> {
+    use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
+    use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphVertexUpsertError};
+    control(GlaExecutionEvent::Work)?;
+    let element = ElementId::Vertex(vertex);
+    let mut attempt = ProjectionReadAttempt {
+        reads: &transaction.point_reads,
+        element,
+        accepted: false,
+    };
+    let mut source_control = |event| {
+        control(match event {
+            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+        })
+    };
+    let source_error = |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error));
+    let projected = transaction.vertex_labels_with_control(
+        database,
+        vertex,
+        &mut visible,
+        &mut poll,
+        &mut source_control,
+        &source_error,
+    )?;
+    source_control(SourceEvent::ScratchEntry)?;
+    transaction.read_set.borrow_mut().insert(element);
+    let value = match projected {
+        Some(projected) => {
+            let unmapped =
+                |label| source_error(WriteTxnError::Read(ReadError::UnmappedLabel(label)));
+            let mut names = Vec::new();
+            for label in projected.effective_labels() {
+                if !visible(label) {
+                    continue;
+                }
+                source_control(SourceEvent::Work)?;
+                let name = catalog
+                    .and_then(|catalog| catalog.labels.get(&label))
+                    .ok_or_else(|| unmapped(label))?;
+                for _ in 0..=name.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                    source_control(SourceEvent::ScratchEntry)?;
+                }
+                let text = CanonicalScalar::ucs_basic_text(name).map_err(|_| unmapped(label))?;
+                names.push(GraphValue::Scalar(text));
+            }
+            GraphValue::List(names.into_boxed_slice())
+        }
         None => {
             source_control(SourceEvent::ScratchEntry)?;
             GraphValue::Scalar(CanonicalScalar::Null)

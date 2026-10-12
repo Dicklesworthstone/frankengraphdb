@@ -387,3 +387,72 @@ fn final_map_validation_and_projection_share_prefix_allowances_and_cancellation(
         vec![vec![null(), null(), map(vec![("p", int(3))]), map(vec![])]]
     );
 }
+
+// fgdb-iufb7: labels() of the MERGE vertex is one host-read list cell, shared
+// by every mention. The definition binds the reverse label names (and not the
+// property names RETURN never reads), and the final projection refuses a host
+// cell that is not a list of text.
+#[test]
+fn merge_labels_bind_reverse_label_names_and_refuse_malformed_host_cells() {
+    #[derive(Clone, Copy)]
+    struct Labels(&'static str, &'static str);
+    impl GraphSymbolResolver for Labels {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            symbols(kind, name)
+        }
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = ReverseSymbolCatalog::new();
+            catalog.insert_label(LabelId(1), self.0);
+            catalog.insert_property(P, self.1);
+            catalog.insert_property(Q, "q");
+            Some(catalog)
+        }
+    }
+    let statement =
+        "MERGE (n:Item {p:7}) ON CREATE SET n.q=1 RETURN labels(n) AS names,labels(n) AS again";
+    let query = prepare(statement, Labels("Item", "p"));
+    assert_eq!(query.bindings(), [GraphVertexReturnBinding::Labels]);
+    assert_eq!(
+        query
+            .property_catalog()
+            .unwrap()
+            .labels
+            .get(&LabelId(1))
+            .unwrap(),
+        "Item"
+    );
+    assert_ne!(
+        query.canonical_bytes(),
+        prepare(statement, Labels("Renamed", "p")).canonical_bytes()
+    );
+    // Duplicate property names matter only to a complete property map.
+    assert_eq!(
+        query.canonical_bytes(),
+        prepare(statement, Labels("Item", "q")).canonical_bytes()
+    );
+    let names = list(vec![text("Item"), text("Other")]);
+    assert_eq!(
+        rows(&project(&query, vec![names.clone()])),
+        vec![vec![names.clone(), names]]
+    );
+    for malformed in [
+        null(),
+        text("Item"),
+        map(vec![]),
+        list(vec![int(1)]),
+        list(vec![list(vec![])]),
+    ] {
+        assert!(matches!(
+            query.project_governed::<(), ()>(
+                vec![malformed],
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(),
+                || Ok(())
+            ),
+            Err(GqlQueryError::Source(
+                GraphSetExecutionError::InputSchema { .. }
+            ))
+        ));
+    }
+}

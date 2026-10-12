@@ -22,6 +22,11 @@ pub enum GraphVertexReturnBinding {
     /// The host enumerates its actual fields and uses `property_catalog()` to
     /// name them; an absent or unknown catalog entry is never an omitted field.
     Properties,
+    /// The chosen vertex's visible labels after every staged clause (MERGE
+    /// pattern, ON CREATE / ON MATCH / SET label edits), named through
+    /// `property_catalog()`'s label map in identity order (fgdb-iufb7). An
+    /// unnamed label refuses; it is never omitted.
+    Labels,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,10 +120,15 @@ impl PreparedGraphVertexUpsertQuery {
                 GraphVertexReturnBinding::Vertex => GraphSetColumnType::Vertex,
                 GraphVertexReturnBinding::Property(_) => GraphSetColumnType::Scalar,
                 GraphVertexReturnBinding::Properties => GraphSetColumnType::Any,
+                GraphVertexReturnBinding::Labels => GraphSetColumnType::List,
             })
             .collect();
-        let property_catalog = if bindings.contains(&GraphVertexReturnBinding::Properties) {
-            if let Some(catalog) = &property_catalog {
+        let property_catalog = if bindings.contains(&GraphVertexReturnBinding::Properties)
+            || bindings.contains(&GraphVertexReturnBinding::Labels)
+        {
+            if bindings.contains(&GraphVertexReturnBinding::Properties)
+                && let Some(catalog) = &property_catalog
+            {
                 let mut names = std::collections::BTreeSet::new();
                 if !catalog.properties.values().all(|name| names.insert(name)) {
                     return Err(GraphVertexUpsertQueryBuildError::PropertyMapCatalog);
@@ -211,7 +221,8 @@ impl PreparedGraphVertexUpsertQuery {
     /// clause was staged. `selection` and `evaluator` are the upsert's own
     /// cumulative counters, so the result counters cover the whole statement.
     /// Complete property-map inputs must contain bounded, canonical maps of
-    /// scalar fields, even when grouping or LIMIT would discard their values.
+    /// scalar fields, and label inputs bounded lists of text, even when
+    /// grouping or LIMIT would discard their values.
     pub fn project_governed<E, C>(
         &self,
         row: Vec<GraphValue>,
@@ -223,6 +234,7 @@ impl PreparedGraphVertexUpsertQuery {
         if self
             .bindings
             .contains(&GraphVertexReturnBinding::Properties)
+            || self.bindings.contains(&GraphVertexReturnBinding::Labels)
         {
             let invalid =
                 || GqlQueryError::Source(GraphSetExecutionError::InputSchema { operand: 0 });
@@ -244,6 +256,25 @@ impl PreparedGraphVertexUpsertQuery {
                 return Err(invalid());
             }
             for (binding, value) in self.bindings.iter().zip(&row) {
+                if *binding == GraphVertexReturnBinding::Labels {
+                    work()?;
+                    let GraphValue::List(labels) = value else {
+                        return Err(invalid());
+                    };
+                    if labels.len() >= GraphValue::MAX_LIST_NODES {
+                        return Err(invalid());
+                    }
+                    for label in labels {
+                        work()?;
+                        if !matches!(
+                            label,
+                            GraphValue::Scalar(fgdb_types::CanonicalScalar::Text(_))
+                        ) {
+                            return Err(invalid());
+                        }
+                    }
+                    continue;
+                }
                 if *binding != GraphVertexReturnBinding::Properties {
                     continue;
                 }
@@ -302,6 +333,7 @@ impl PreparedGraphVertexUpsertQuery {
                     bytes.extend_from_slice(&key.0.to_be_bytes());
                 }
                 GraphVertexReturnBinding::Properties => bytes.push(2),
+                GraphVertexReturnBinding::Labels => bytes.push(3),
             }
         }
         bytes.extend_from_slice(&(self.projection.len() as u64).to_be_bytes());
@@ -327,6 +359,12 @@ impl PreparedGraphVertexUpsertQuery {
             .contains(&GraphVertexReturnBinding::Properties)
         {
             crate::algebra::append_property_catalog_transcript(
+                self.property_catalog.as_deref(),
+                &mut bytes,
+            );
+        }
+        if self.bindings.contains(&GraphVertexReturnBinding::Labels) {
+            crate::algebra::append_label_catalog_transcript(
                 self.property_catalog.as_deref(),
                 &mut bytes,
             );
