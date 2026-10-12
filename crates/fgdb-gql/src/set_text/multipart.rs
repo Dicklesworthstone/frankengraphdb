@@ -86,6 +86,32 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     false
 }
 
+/// Whether a leading UNWIND starts the statement and a top-level MATCH
+/// follows its row stages (`UNWIND $ids AS id MATCH (n {id: id}) WITH ...
+/// RETURN count(*)`). Where has_continuation is false, a pipeline aggregate
+/// then reads the leading pipeline's graph part as a read does: one CrossJoin
+/// of the unwound rows and the pattern, filtered by its correlations.
+pub(crate) fn leading_rows_then_match(tokens: &[TextToken<'_>]) -> bool {
+    if !tokens.first().is_some_and(|token| token.word("UNWIND")) {
+        return false;
+    }
+    let mut depth = 0_usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ if depth == 0 && token.word("MATCH") => {
+                let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
+                if !previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS")) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 impl BoundReadInput {
     pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] {
         self.first.parameter_schema()

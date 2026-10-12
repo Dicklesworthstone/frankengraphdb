@@ -397,7 +397,6 @@ fn invalid_terminal_shapes_and_parameters_fail_before_any_source_or_catalog() {
         "RETURN COUNT(DISTINCT *)",
         "RETURN COUNT(*) AS n,SUM(1) AS n",
         "RETURN COUNT(*) LIMIT 0 MATCH (n)",
-        "UNWIND [1] AS x MATCH (n) RETURN COUNT(*)",
     ] {
         assert!(
             PreparedGraphPipelineAggregateText::prepare(text, |_, _| {
@@ -407,6 +406,16 @@ fn invalid_terminal_shapes_and_parameters_fail_before_any_source_or_catalog() {
             "{text}"
         );
     }
+    // A leading UNWIND joined by MATCH feeds an aggregate RETURN (lane6,
+    // pipeline_aggregate_text proves its answers). It names no symbol, so it
+    // prepares without a catalog call.
+    assert!(
+        PreparedGraphPipelineAggregateText::prepare(
+            "UNWIND [1] AS x MATCH (n) RETURN COUNT(*)",
+            |_, _| panic!("a symbol-free statement must not resolve symbols")
+        )
+        .is_ok()
+    );
     let text = "\u{2003}WITH $p AS x RETURN SUM(x) AS total";
     let missing = template(text)
         .bind_relation_parameters(&GqlParameters::new())

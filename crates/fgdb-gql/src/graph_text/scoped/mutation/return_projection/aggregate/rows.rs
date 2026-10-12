@@ -19,6 +19,7 @@ pub(super) fn prefix<'a>(
     parser: &mut Parser<'a>,
     statement: &'a str,
     multipart: bool,
+    leading_match: bool,
 ) -> Result<
     (
         Head<'a>,
@@ -34,6 +35,20 @@ pub(super) fn prefix<'a>(
             Head::Multipart {
                 first: Box::new(first),
                 continuations,
+            },
+            Vec::new(),
+            schema,
+            depth,
+        ));
+    }
+    // `UNWIND ... MATCH ... WITH ...`: the leading pipeline's graph part, the
+    // CrossJoin a read builds for it, as the one source of the aggregate.
+    if leading_match {
+        let (first, schema, depth) = parser.leading_aggregate_prefix(statement)?;
+        return Ok((
+            Head::Multipart {
+                first: Box::new(first),
+                continuations: Vec::new(),
             },
             Vec::new(),
             schema,

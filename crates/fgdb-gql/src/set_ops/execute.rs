@@ -470,7 +470,21 @@ where
         } => {
             let preserve_order = *preserve_order || input.preserves_row_order();
             let input = run(input, source, meter, operand)?;
-            project_rows(input, projection, *quantifier, preserve_order, meter)?
+            let mut read = |element, key| {
+                source.element_property(element, key).map(|read| {
+                    read.map_err(|error| {
+                        GqlQueryError::Source(GraphSetExecutionError::Source(error))
+                    })
+                })
+            };
+            project_rows(
+                input,
+                projection,
+                *quantifier,
+                preserve_order,
+                meter,
+                &mut read,
+            )?
         }
         SetNode::Binary {
             operation,
@@ -498,6 +512,7 @@ fn project_rows<E, C, Checkpoint>(
     quantifier: GraphSetQuantifier,
     preserve_order: bool,
     meter: &mut Meter<Checkpoint>,
+    read: &mut projection::ElementRead<'_, GqlQueryError<GraphSetExecutionError<E>, C>>,
 ) -> SetResult<Vec<GraphValueRow>, E, C>
 where
     Checkpoint: FnMut() -> Result<(), C>,
@@ -510,6 +525,7 @@ where
             row_at as u64,
             projection,
             &mut |event| meter.event(event),
+            read,
             |column, error| {
                 GqlQueryError::Source(GraphSetExecutionError::Projection {
                     row: row_at,
@@ -564,12 +580,14 @@ pub(crate) fn finish_owned_aggregate<E, C>(
         },
         evaluator: input.evaluator,
     };
+    // A write's owned rows have no graph source to read elements from.
     let input = project_rows(
         input.value,
         &grouping.inputs,
         GraphSetQuantifier::All,
         true,
         &mut meter,
+        &mut projection::no_element_reads,
     )?;
     let value = grouping
         .summarize_value_rows(&input, &mut |event| {
@@ -615,7 +633,14 @@ pub(crate) fn finish_owned_projection<E, C>(
         },
         evaluator: input.evaluator,
     };
-    let rows = project_rows(input.value, projection, quantifier, true, &mut meter)?;
+    let rows = project_rows(
+        input.value,
+        projection,
+        quantifier,
+        true,
+        &mut meter,
+        &mut projection::no_element_reads,
+    )?;
     let rows = order_page(rows, order, page.0, page.1, &mut meter)?;
     for _ in &rows {
         meter.event(GlaExecutionEvent::ResultRow)?;

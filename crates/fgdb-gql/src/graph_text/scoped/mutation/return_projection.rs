@@ -512,8 +512,28 @@ impl<'a> Parser<'a> {
         {
             return self.parse_leading_pipeline(statement);
         }
+        self.defer_where = true;
         self.parse_match_prefix()?;
-        let mut head = self.graph_projection_head()?;
+        self.defer_where = false;
+        let mut head = if let Some((lexer, at_where)) = self.deferred_where.take() {
+            // MATCH ... WHERE <over list values> is MATCH ... WITH * WHERE ...
+            // (fgdb-1c29d): the row pipeline reads the predicate after an
+            // implicit boundary that projects every visible binding.
+            if !self.syntax.scopes.is_empty() || !(self.is_word("RETURN") || self.is_word("WITH")) {
+                return Err(GraphSetTextError {
+                    offset: self.current.at,
+                    kind: GraphSetTextErrorKind::Expected(
+                        "RETURN or WITH right after a MATCH WHERE over list values",
+                    ),
+                });
+            }
+            let head = self.implicit_with_head()?;
+            self.lexer = lexer;
+            self.current = at_where;
+            head
+        } else {
+            self.graph_projection_head()?
+        };
         self.hoist_boundary_reads(&mut head, 0)?;
         let pipeline = if head.with {
             self.row_pipeline(head.schema(&self.syntax.parameters))?
@@ -549,191 +569,8 @@ impl<'a> Parser<'a> {
             self.implied_call_vertices(&schema, &leading)?
         };
         if self.is_word("MATCH") || !implied.is_empty() {
-            self.read_row_bindings = schema.iter().map(|(name, _)| *name).collect();
-            if implied.is_empty() {
-                self.parse_match_prefix()?;
-            } else {
-                // The implied `MATCH (n)` for each read CALL output: exactly
-                // the root a written one parses, and nothing else.
-                for name in implied {
-                    self.capacity(
-                        self.syntax.variables.len(),
-                        MAX_PATTERN_VERTICES,
-                        crate::algebra::PatternLimitDimension::Vertices,
-                    )?;
-                    self.syntax.variables.push(name);
-                }
-                self.syntax.root_variables = self.syntax.variables.len();
-                self.syntax.return_at = self.current.at;
-            }
-            let correlations = core::mem::take(&mut self.read_correlations);
-            let width = schema.len();
-            let rebound = self
-                .syntax
-                .path
-                .into_iter()
-                .chain(
-                    self.syntax
-                        .visible_edges()
-                        .filter_map(|(edge, _)| edge.variable),
-                )
-                .find(|name| {
-                    self.read_row_bindings
-                        .iter()
-                        .any(|row| row.text == name.text)
-                });
-            if let Some(name) = rebound {
-                return Err(GraphSetTextError {
-                    offset: name.at,
-                    kind: GraphSetTextErrorKind::Expected(
-                        "a new name for a path or edge after a leading stage",
-                    ),
-                });
-            }
-            let mut inputs = Vec::new();
-            let mut bound_correlations = Vec::new();
-            // The graph vertices a WITH-less projection exposes after the
-            // leading columns, as (name, combined-row column).
-            let mut exposed = Vec::new();
-            // (leading column, graph vertex input) pairs equal by the join.
-            let mut identity = Vec::new();
-            for &variable in &self.syntax.variables {
-                let index = self.mutation_projection(&mut inputs, variable, None)?;
-                // A MATCH vertex reusing a leading column's name IS that
-                // value: an identity correlation, never a second binding that
-                // shadows the first and silently crosses every row.
-                match (self.read_row_bindings.iter()).position(|row| row.text == variable.text) {
-                    Some(row) => {
-                        bound_correlations.push((row, index));
-                        identity.push((row, index));
-                    }
-                    None => {
-                        schema.push((variable, GraphSetColumnType::Vertex));
-                        exposed.push((variable, width + index));
-                    }
-                }
-            }
-            for (variable, key, row) in correlations {
-                let index = self.mutation_projection(&mut inputs, variable, Some(key))?;
-                bound_correlations.push((row, index));
-            }
-            // A CALL output matched as a vertex must be one (fgdb-luq0b):
-            // record it, so the host refuses a scalar instead of letting the
-            // identity join drop every row.
-            if let Some(ReadStageTemplate::Call {
-                outputs, vertices, ..
-            }) = leading.first_mut()
-            {
-                let mut rows: Vec<usize> = (identity.iter())
-                    .map(|&(row, _)| row)
-                    .filter(|&row| row < outputs.len())
-                    .collect();
-                rows.sort_unstable();
-                rows.dedup();
-                *vertices = rows;
-            }
-            // The first WITH is the graph-to-row boundary, exactly as it is
-            // for a statement that starts at MATCH: `n.p` there reads a graph
-            // property. Later stages see only the projected row.
-            let (projection, pipeline) = if self.is_word("WITH") {
-                let (outputs, distinct, at) =
-                    self.leading_with_head(&schema, width, &mut inputs)?;
-                let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
-                types.extend(inputs.iter().map(projection_type));
-                let next: pipeline::RowSchema<'a> = outputs
-                    .iter()
-                    .map(|(name, value)| {
-                        (*name, value.column_type(&types, &self.syntax.parameters))
-                    })
-                    .collect();
-                let mut pipeline = Vec::new();
-                if distinct {
-                    // Deduplicate the projected rows, not the graph child's.
-                    pipeline.push(ReadStageTemplate::Project {
-                        at,
-                        projection: next
-                            .iter()
-                            .enumerate()
-                            .map(|(index, (name, _))| ReadProjectionTemplate {
-                                name: name.text.to_owned(),
-                                value: ReadValueTemplate::Column(index),
-                            })
-                            .collect(),
-                        quantifier: crate::GraphSetQuantifier::Distinct,
-                    });
-                }
-                pipeline.extend(self.row_pipeline(next)?);
-                let projection = outputs
-                    .into_iter()
-                    .map(|(name, value)| ReadProjectionTemplate {
-                        name: name.text.to_owned(),
-                        value,
-                    })
-                    .collect();
-                (projection, pipeline)
-            } else {
-                // Without a WITH the row is the leading columns, then the new
-                // MATCH vertices. A leading column a MATCH vertex correlates
-                // with is carried as that vertex's graph column (equal by the
-                // join, and typed Vertex), so a later `n.p` reads its
-                // properties through hidden boundary reads.
-                let outputs = (self.read_row_bindings.iter().copied().enumerate())
-                    .map(|(row, name)| {
-                        let column = identity
-                            .iter()
-                            .find(|&&(at, _)| at == row)
-                            .map_or(row, |&(_, input)| width + input);
-                        (name, ReadValueTemplate::Column(column))
-                    })
-                    .chain(
-                        (exposed.into_iter())
-                            .map(|(name, column)| (name, ReadValueTemplate::Column(column))),
-                    )
-                    .collect();
-                let mut head = GraphProjectionHead {
-                    with: true,
-                    plain: false,
-                    inputs: core::mem::take(&mut inputs),
-                    outputs,
-                };
-                self.hoist_boundary_reads(&mut head, width)?;
-                inputs = head.inputs;
-                let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
-                types.extend(inputs.iter().map(projection_type));
-                let next: pipeline::RowSchema<'a> = (head.outputs.iter())
-                    .map(|(name, value)| {
-                        (*name, value.column_type(&types, &self.syntax.parameters))
-                    })
-                    .collect();
-                let projection = (head.outputs.into_iter())
-                    .map(|(name, value)| ReadProjectionTemplate {
-                        name: name.text.to_owned(),
-                        value,
-                    })
-                    .collect();
-                (projection, self.row_pipeline(next)?)
-            };
-            self.end()?;
-            self.syntax.columns = inputs
-                .into_iter()
-                .map(|source| Column {
-                    variable: source.variable,
-                    property: source.property,
-                    path: source.path,
-                    alias: source.variable,
-                })
-                .collect();
-            let projection = Some(projection);
-            return Ok(UnresolvedGraphText {
-                statement,
-                syntax: self.syntax,
-                projection,
-                pipeline,
-                singleton: false,
-                leading,
-                leading_types: vec![GraphSetColumnType::Any; width],
-                correlations: bound_correlations,
-            });
+            let (part, _) = self.leading_graph_part(statement, schema, leading, implied, false)?;
+            return Ok(part);
         }
         // A standalone `CALL ... YIELD a, b` is a complete read that returns
         // exactly its yielded columns, as `... YIELD a, b RETURN a, b` does
@@ -765,6 +602,255 @@ impl<'a> Parser<'a> {
             leading_types: Vec::new(),
             correlations: Vec::new(),
         })
+    }
+
+    /// The MATCH part after a leading pipeline (`UNWIND ... MATCH ...` or a
+    /// read CALL's implied MATCH), joined to the leading rows by its
+    /// correlations. A read parses through its RETURN. With `aggregate` the
+    /// part stops before the terminal aggregate RETURN and also returns the
+    /// row schema there (the first WITH's, or the implicit leading columns
+    /// and MATCH vertices): the aggregate owner compiles RETURN over it with
+    /// the same parser.
+    #[allow(clippy::type_complexity)]
+    fn leading_graph_part(
+        &mut self,
+        statement: &'a str,
+        mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
+        mut leading: Vec<ReadStageTemplate>,
+        implied: Vec<Name<'a>>,
+        aggregate: bool,
+    ) -> Result<(UnresolvedGraphText<'a>, Option<pipeline::RowSchema<'a>>), GraphSetTextError> {
+        self.read_row_bindings = schema.iter().map(|(name, _)| *name).collect();
+        if implied.is_empty() {
+            self.parse_match_prefix()?;
+        } else {
+            // The implied `MATCH (n)` for each read CALL output: exactly
+            // the root a written one parses, and nothing else.
+            for name in implied {
+                self.capacity(
+                    self.syntax.variables.len(),
+                    MAX_PATTERN_VERTICES,
+                    crate::algebra::PatternLimitDimension::Vertices,
+                )?;
+                self.syntax.variables.push(name);
+            }
+            self.syntax.root_variables = self.syntax.variables.len();
+            self.syntax.return_at = self.current.at;
+        }
+        let correlations = core::mem::take(&mut self.read_correlations);
+        let width = schema.len();
+        let rebound = self
+            .syntax
+            .path
+            .into_iter()
+            .chain(
+                self.syntax
+                    .visible_edges()
+                    .filter_map(|(edge, _)| edge.variable),
+            )
+            .find(|name| {
+                self.read_row_bindings
+                    .iter()
+                    .any(|row| row.text == name.text)
+            });
+        if let Some(name) = rebound {
+            return Err(GraphSetTextError {
+                offset: name.at,
+                kind: GraphSetTextErrorKind::Expected(
+                    "a new name for a path or edge after a leading stage",
+                ),
+            });
+        }
+        let mut inputs = Vec::new();
+        let mut bound_correlations = Vec::new();
+        // The graph vertices a WITH-less projection exposes after the
+        // leading columns, as (name, combined-row column).
+        let mut exposed = Vec::new();
+        // (leading column, graph vertex input) pairs equal by the join.
+        let mut identity = Vec::new();
+        for &variable in &self.syntax.variables {
+            let index = self.mutation_projection(&mut inputs, variable, None)?;
+            // A MATCH vertex reusing a leading column's name IS that
+            // value: an identity correlation, never a second binding that
+            // shadows the first and silently crosses every row.
+            match (self.read_row_bindings.iter()).position(|row| row.text == variable.text) {
+                Some(row) => {
+                    bound_correlations.push((row, index));
+                    identity.push((row, index));
+                }
+                None => {
+                    schema.push((variable, GraphSetColumnType::Vertex));
+                    exposed.push((variable, width + index));
+                }
+            }
+        }
+        for (variable, key, row) in correlations {
+            let index = self.mutation_projection(&mut inputs, variable, Some(key))?;
+            bound_correlations.push((row, index));
+        }
+        // A CALL output matched as a vertex must be one (fgdb-luq0b):
+        // record it, so the host refuses a scalar instead of letting the
+        // identity join drop every row.
+        if let Some(ReadStageTemplate::Call {
+            outputs, vertices, ..
+        }) = leading.first_mut()
+        {
+            let mut rows: Vec<usize> = (identity.iter())
+                .map(|&(row, _)| row)
+                .filter(|&row| row < outputs.len())
+                .collect();
+            rows.sort_unstable();
+            rows.dedup();
+            *vertices = rows;
+        }
+        // The first WITH is the graph-to-row boundary, exactly as it is
+        // for a statement that starts at MATCH: `n.p` there reads a graph
+        // property. Later stages see only the projected row.
+        let mut tail = None;
+        let (projection, pipeline) = if self.is_word("WITH") {
+            let (outputs, distinct, at) = self.leading_with_head(&schema, width, &mut inputs)?;
+            let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
+            types.extend(inputs.iter().map(projection_type));
+            let next: pipeline::RowSchema<'a> = outputs
+                .iter()
+                .map(|(name, value)| (*name, value.column_type(&types, &self.syntax.parameters)))
+                .collect();
+            let mut pipeline = Vec::new();
+            if distinct {
+                // Deduplicate the projected rows, not the graph child's.
+                pipeline.push(ReadStageTemplate::Project {
+                    at,
+                    projection: next
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (name, _))| ReadProjectionTemplate {
+                            name: name.text.to_owned(),
+                            value: ReadValueTemplate::Column(index),
+                        })
+                        .collect(),
+                    quantifier: crate::GraphSetQuantifier::Distinct,
+                });
+            }
+            if aggregate {
+                let (stages, schema, _) = self.row_pipeline_prefix(next)?;
+                pipeline.extend(stages);
+                tail = Some(schema);
+            } else {
+                pipeline.extend(self.row_pipeline(next)?);
+            }
+            let projection = outputs
+                .into_iter()
+                .map(|(name, value)| ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value,
+                })
+                .collect();
+            (projection, pipeline)
+        } else {
+            // Without a WITH the row is the leading columns, then the new
+            // MATCH vertices. A leading column a MATCH vertex correlates
+            // with is carried as that vertex's graph column (equal by the
+            // join, and typed Vertex), so a later `n.p` reads its
+            // properties through hidden boundary reads.
+            let outputs = (self.read_row_bindings.iter().copied().enumerate())
+                .map(|(row, name)| {
+                    let column = identity
+                        .iter()
+                        .find(|&&(at, _)| at == row)
+                        .map_or(row, |&(_, input)| width + input);
+                    (name, ReadValueTemplate::Column(column))
+                })
+                .chain(
+                    (exposed.into_iter())
+                        .map(|(name, column)| (name, ReadValueTemplate::Column(column))),
+                )
+                .collect();
+            let mut head = GraphProjectionHead {
+                with: true,
+                plain: false,
+                inputs: core::mem::take(&mut inputs),
+                outputs,
+            };
+            self.hoist_boundary_reads(&mut head, width)?;
+            inputs = head.inputs;
+            let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
+            types.extend(inputs.iter().map(projection_type));
+            let next: pipeline::RowSchema<'a> = (head.outputs.iter())
+                .map(|(name, value)| (*name, value.column_type(&types, &self.syntax.parameters)))
+                .collect();
+            let projection = (head.outputs.into_iter())
+                .map(|(name, value)| ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value,
+                })
+                .collect();
+            // An aggregate RETURN reads this implicit row: the leading
+            // columns, the new MATCH vertices and their hidden property reads.
+            let pipeline = if aggregate {
+                let (stages, schema, _) = self.row_pipeline_prefix(next)?;
+                tail = Some(schema);
+                stages
+            } else {
+                self.row_pipeline(next)?
+            };
+            (projection, pipeline)
+        };
+        if !aggregate {
+            self.end()?;
+        }
+        self.syntax.columns = inputs
+            .into_iter()
+            .map(|source| Column {
+                variable: source.variable,
+                property: source.property,
+                path: source.path,
+                alias: source.variable,
+            })
+            .collect();
+        let projection = Some(projection);
+        Ok((
+            UnresolvedGraphText {
+                statement,
+                syntax: self.take_part_syntax()?,
+                projection,
+                pipeline,
+                singleton: false,
+                leading,
+                leading_types: vec![GraphSetColumnType::Any; width],
+                correlations: bound_correlations,
+            },
+            tail,
+        ))
+    }
+
+    /// `UNWIND ... MATCH ...` (with or without a WITH) before a pipeline
+    /// aggregate RETURN:
+    /// the leading pipeline's graph part, parsed exactly as a read parses it
+    /// (one CrossJoin of the unwound rows and the pattern, filtered by the
+    /// correlations), stopped before RETURN. `UNWIND $ids AS id MATCH (n {id:
+    /// id}) WITH n.p AS p RETURN count(*)`.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::graph_text) fn leading_aggregate_prefix(
+        &mut self,
+        statement: &'a str,
+    ) -> Result<(UnresolvedGraphText<'a>, pipeline::RowSchema<'a>, usize), GraphSetTextError> {
+        let mut schema = Vec::new();
+        let mut leading = Vec::new();
+        while self.is_word("UNWIND") {
+            let at = self.current.at;
+            self.advance()?;
+            leading.push(self.unwind_stage(&mut schema, at)?);
+        }
+        let at = self.current.at;
+        let (part, tail) = self.leading_graph_part(statement, schema, leading, Vec::new(), true)?;
+        let schema = tail.ok_or(GraphSetTextError {
+            offset: at,
+            kind: GraphSetTextErrorKind::Expected(
+                "a row schema before a pipeline aggregate RETURN",
+            ),
+        })?;
+        let depth = part.depth();
+        Ok((part, schema, depth))
     }
 
     /// Same public binding order as native RETURN *: named vertices, a
@@ -939,6 +1025,24 @@ impl<'a> Parser<'a> {
         Ok((head.outputs, distinct, at))
     }
 
+    /// The implicit boundary after a MATCH that a WITH would otherwise write:
+    /// every visible binding, unchanged (`MATCH ... UNWIND`, and a MATCH WHERE
+    /// over list values, fgdb-1c29d).
+    fn implicit_with_head(&mut self) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        for variable in self.visible_graph_bindings() {
+            let index = self.mutation_projection(&mut inputs, variable, None)?;
+            outputs.push((variable, ReadValueTemplate::Column(index)));
+        }
+        Ok(GraphProjectionHead {
+            with: true,
+            plain: false,
+            inputs,
+            outputs,
+        })
+    }
+
     /// Shared graph-to-row boundary. Exact grouped RETURN uses this same first
     /// WITH projection and row-stage parser, not a synthetic RETURN statement.
     fn graph_projection_head(&mut self) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
@@ -946,18 +1050,7 @@ impl<'a> Parser<'a> {
             return self.with_graph_head(&[], Vec::new(), false);
         }
         if self.is_word("UNWIND") {
-            let mut inputs = Vec::new();
-            let mut outputs = Vec::new();
-            for variable in self.visible_graph_bindings() {
-                let index = self.mutation_projection(&mut inputs, variable, None)?;
-                outputs.push((variable, ReadValueTemplate::Column(index)));
-            }
-            return Ok(GraphProjectionHead {
-                with: true,
-                plain: false,
-                inputs,
-                outputs,
-            });
+            return self.implicit_with_head();
         }
         let with = self.take_word("WITH")?;
         if !with {
@@ -1142,10 +1235,13 @@ impl<'a> Parser<'a> {
                         *at,
                         self.syntax.parameters[*index].parameter_type,
                     );
+                    // A parameter never holds a graph element; its fields
+                    // need no element key.
                     for key in keys {
                         value = ReadValueTemplate::MapGet {
                             map: Box::new(value),
                             key: key.clone(),
+                            property: crate::set_text::ElementKeySlot::default(),
                         };
                     }
                     value
@@ -1218,12 +1314,10 @@ impl<'a> Parser<'a> {
                             ReturnMapInput::Property(key),
                         )?)
                     } else {
-                        ReadValueTemplate::MapGet {
-                            map: Box::new(ReadValueTemplate::Column(
-                                carried.expect("carried map source checked"),
-                            )),
-                            key: key.text.into(),
-                        }
+                        self.map_get(
+                            ReadValueTemplate::Column(carried.expect("carried map source checked")),
+                            key.text,
+                        )
                     };
                     (key.text.into(), value)
                 } else {
@@ -2055,10 +2149,7 @@ impl<'a> Parser<'a> {
             {
                 self.advance()?;
                 let key = self.map_key()?;
-                value = ReadValueTemplate::MapGet {
-                    map: Box::new(value),
-                    key: key.text.into(),
-                };
+                value = self.map_get(value, key.text);
                 graph_map = false;
                 continue;
             }
@@ -2406,10 +2497,13 @@ impl<'a> Parser<'a> {
             // including the operand-only aggregate-resolution scope.
             let at = self.current.at;
             Some(if let Some(resolve) = resolve.as_mut() {
-                let operand = self
-                    .resolved_predicate(&mut |parser| resolve.leaf(parser))
-                    .map_err(expression_error)?;
-                self.read_value_template(operand, at)?
+                // Composite operands and element entries (`x.age`) take let
+                // slots here too, as read_scalar_value's do (fgdb-1c29d).
+                let base = core::mem::replace(&mut self.let_base, depth + 1);
+                let parsed = self.resolved_predicate_with_lets(&mut |parser| resolve.leaf(parser));
+                self.let_base = base;
+                let (operand, slots) = parsed.map_err(expression_error)?;
+                self.scalar_let_value(operand, slots, at)?
             } else {
                 self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth + 1)?
             })
@@ -2846,9 +2940,10 @@ pub(in crate::graph_text) fn bind_read_value(
                 .map(|guard| bind_read_value(guard, values).map(Box::new))
                 .transpose()?,
         },
-        ReadValueTemplate::MapGet { map, key } => GraphSetValue::MapGet {
+        ReadValueTemplate::MapGet { map, key, property } => GraphSetValue::MapGet {
             map: Box::new(bind_read_value(map, values)?),
             key: key.clone(),
+            property: property.bind(),
         },
         ReadValueTemplate::MapOverlay {
             base,

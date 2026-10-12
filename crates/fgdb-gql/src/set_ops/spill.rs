@@ -638,6 +638,7 @@ impl SpillSetStage {
                     row_index as u64,
                     projection,
                     &mut event,
+                    &mut projection::no_element_reads,
                     |column, error| {
                         SpillSetRowError::Native(GraphSetExecutionError::Projection {
                             row: row_index,

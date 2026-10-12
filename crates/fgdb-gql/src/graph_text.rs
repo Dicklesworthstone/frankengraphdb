@@ -608,6 +608,9 @@ struct Syntax<'a> {
     count: Option<Number>,
     distinct: bool,
     return_at: usize,
+    /// Every `x.key` read this part's expressions parsed, with the slot its
+    /// template binds through (fgdb-xnd7x). Resolution fills each slot once.
+    element_keys: Vec<(&'a str, crate::set_text::ElementKeySlot)>,
 }
 
 impl<'a> Syntax<'a> {
@@ -680,6 +683,11 @@ struct Parser<'a> {
     /// The host's pinned tzdb, carried by every temporal constructor the
     /// statement reads (fgdb-txbg9): named zones resolve only through it.
     zones: Option<crate::GqlTimeZones>,
+    /// The read composition entry lets a root MATCH WHERE that needs the
+    /// value language run as a row filter after the match (fgdb-1c29d).
+    defer_where: bool,
+    /// The lexer and token at that WHERE keyword, once it was deferred.
+    deferred_where: Option<(Lexer<'a>, Token<'a>)>,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -756,6 +764,8 @@ impl<'a> Parser<'a> {
             aggregate_argument: false,
             having_operand: false,
             zones: None,
+            defer_where: false,
+            deferred_where: None,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),
@@ -775,12 +785,28 @@ impl<'a> Parser<'a> {
                 count: None,
                 distinct: false,
                 return_at: 0,
+                element_keys: Vec::new(),
             },
         })
     }
     fn advance(&mut self) -> Result<(), GraphPatternTextError> {
         self.current = self.lexer.next()?;
         Ok(())
+    }
+    /// A `map.key` read, with its key recorded for this part's preparation to
+    /// bind against a vertex or edge operand (fgdb-xnd7x).
+    fn map_get(
+        &mut self,
+        map: crate::set_text::ReadValueTemplate,
+        key: &'a str,
+    ) -> crate::set_text::ReadValueTemplate {
+        let property = crate::set_text::ElementKeySlot::default();
+        self.syntax.element_keys.push((key, property.clone()));
+        crate::set_text::ReadValueTemplate::MapGet {
+            map: Box::new(map),
+            key: key.into(),
+            property,
+        }
     }
     /// The statement text of `[at, end)` without trailing trivia: the
     /// openCypher name of an unaliased RETURN item (`count(n)`, `a.title`).

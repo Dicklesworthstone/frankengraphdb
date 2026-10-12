@@ -27,11 +27,11 @@ pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub use procedure::{
     GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection,
     ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
-    WithProcedures,
+    WithElementReads, WithProcedures,
 };
 pub use projection::{
-    GqlTimeZones, GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
-    GraphTemporalFunction, GraphValueFunction,
+    GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetProjection,
+    GraphSetProjectionError, GraphSetValue, GraphTemporalFunction, GraphValueFunction,
 };
 pub(crate) use projection::{
     ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership, evaluate_order,
@@ -906,6 +906,39 @@ impl PreparedGraphSet {
         let mut source = WithProcedures {
             patterns,
             procedures,
+        };
+        execute::execute(self, policy, &mut source, checkpoint)
+    }
+
+    /// `execute_governed_with_procedures` plus the host's element property
+    /// reader (fgdb-xnd7x). `x.key` over a vertex or edge that an expression
+    /// produced reads `elements(element, key)` at the same pinned cut and
+    /// under the same authorization as `patterns`. Without this entry such a
+    /// read stays a typed error.
+    pub fn execute_governed_with_elements<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        procedures: impl FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        elements: impl FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalScalar>, E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let mut source = WithElementReads {
+            source: WithProcedures {
+                patterns,
+                procedures,
+            },
+            elements,
         };
         execute::execute(self, policy, &mut source, checkpoint)
     }

@@ -707,10 +707,7 @@ impl<'a> Parser<'a> {
         {
             self.advance()?;
             let key = self.map_key()?;
-            value = ReadValueTemplate::MapGet {
-                map: Box::new(value),
-                key: key.text.into(),
-            };
+            value = self.map_get(value, key.text);
         }
         Ok(value)
     }
@@ -745,6 +742,22 @@ impl<'a> Parser<'a> {
         resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
     ) -> Result<Operand, GraphMutationTextError> {
         self.checked_expression(&mut ExpressionColumns::Resolved(resolve), true)
+    }
+
+    /// [`Self::resolved_predicate`] with its own let sink: a composite operand
+    /// or a list element's entry (`x.key`) reads as a let slot, as it does in
+    /// a graph or row scope. A quantifier or comprehension WHERE over row
+    /// aliases (a MATCH WHERE deferred past an implicit WITH *, fgdb-1c29d)
+    /// reads element properties this way.
+    pub(super) fn resolved_predicate_with_lets(
+        &mut self,
+        resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+    ) -> Result<(Operand, Vec<ReadValueTemplate>), GraphMutationTextError> {
+        self.checked_expression_scoped(
+            &mut ExpressionColumns::Resolved(resolve),
+            ExpressionBoundary::Whole,
+            true,
+        )
     }
 
     pub(super) fn resolved_expression(

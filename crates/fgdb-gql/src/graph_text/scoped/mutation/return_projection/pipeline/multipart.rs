@@ -319,7 +319,9 @@ impl<'a> Parser<'a> {
         Ok((result, incoming))
     }
 
-    fn take_part_syntax(&mut self) -> Result<Syntax<'a>, GraphPatternTextError> {
+    pub(in crate::graph_text) fn take_part_syntax(
+        &mut self,
+    ) -> Result<Syntax<'a>, GraphPatternTextError> {
         // Reset only graph-local bindings. The live lexer, declaration map and
         // definition-wide predicate/edge/identity counters are never reset.
         let mut next: Syntax<'a> = Parser::new("")?.syntax;

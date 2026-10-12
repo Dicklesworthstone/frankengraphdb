@@ -342,9 +342,10 @@ impl PreparedGraphAggregateText {
                     .map(|guard| Self::bind_input_value(guard, values).map(Box::new))
                     .transpose()?,
             }),
-            ReadValueTemplate::MapGet { map, key } => Ok(GraphSetValue::MapGet {
+            ReadValueTemplate::MapGet { map, key, property } => Ok(GraphSetValue::MapGet {
                 map: Box::new(Self::bind_input_value(map, values)?),
                 key: key.clone(),
+                property: property.bind(),
             }),
             ReadValueTemplate::MapOverlay {
                 base,

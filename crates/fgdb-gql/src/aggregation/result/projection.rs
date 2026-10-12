@@ -598,7 +598,7 @@ fn expression<'g, E, C>(
                 })?;
             OutputValue::Owned(GraphAggregateValue::Value(value))
         }
-        GraphSetValue::MapGet { map, key } => {
+        GraphSetValue::MapGet { map, key, .. } => {
             let map = expression(map, input, column, control)?;
             match map.cell() {
                 cell if cell.is_null() => {

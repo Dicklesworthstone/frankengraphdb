@@ -219,7 +219,10 @@ impl PreparedGraphPipelineAggregateText {
             .with_zones(resolve.time_zones());
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
         let multipart = crate::set_text::multipart::has_continuation(&tokens);
-        let (head, mut stages, schema, depth) = rows::prefix(&mut parser, statement, multipart)?;
+        let leading_match =
+            !multipart && crate::set_text::multipart::leading_rows_then_match(&tokens);
+        let (head, mut stages, schema, depth) =
+            rows::prefix(&mut parser, statement, multipart, leading_match)?;
         let aggregate_at = parser.current.at;
         if depth >= crate::MAX_GRAPH_SET_DEPTH {
             return Err(build(

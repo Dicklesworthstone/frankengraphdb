@@ -1321,3 +1321,72 @@ fn native_preparation_and_final_delivery_recheck_expiry_and_resolver_retirement(
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// fgdb-xnd7x under a capability: `x.key` on a path's elements reads through
+/// the authorized host. Every element there was admitted under the token, and
+/// a property outside its scope reads exactly as an absent one (FG-INV-20),
+/// as the pattern tables mask it. The trusted unscoped control reads the
+/// hidden values, so a privileged reader cannot pass this law.
+#[test]
+fn element_property_reads_apply_the_capability_property_scope() {
+    use fgdb_gql::algebra::GraphValue;
+    let ((), report) = run_async_under_lab(0x5ec0_4011, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let issuer = authority(411);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let params = GqlParameters::new();
+        let list = |values: &[Option<i64>]| {
+            QueryValue::Value(GraphValue::List(
+                values
+                    .iter()
+                    .map(|value| {
+                        GraphValue::Scalar(
+                            value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                        )
+                    })
+                    .collect(),
+            ))
+        };
+        let text = "MATCH p = (a)-[:R]->(b) \
+            RETURN [n IN nodes(p) | n.p] AS ps, [n IN nodes(p) | n.hidden] AS hs, \
+            [e IN relationships(p) | e.hidden] AS ehs";
+        // Visible R edges join only vertices 1 and 3: two 1->3, one 3->1.
+        let hidden = list(&[None, None]);
+        let expected = native_rows(
+            &["ps", "hs", "ehs"],
+            vec![
+                vec![list(&[Some(10), Some(30)]), hidden.clone(), list(&[None])],
+                vec![list(&[Some(10), Some(30)]), hidden.clone(), list(&[None])],
+                vec![list(&[Some(30), Some(10)]), hidden, list(&[None])],
+            ],
+        );
+        assert_eq!(
+            db.query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                text,
+                &params,
+                symbols,
+                policy(),
+                || 100
+            )
+            .unwrap(),
+            expected
+        );
+        let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+        let QueryResult::Rows { rows, .. } = prepared.execute(&db, &cx, &params, policy()).unwrap()
+        else {
+            panic!("a row query")
+        };
+        assert!(
+            rows.iter()
+                .any(|row| row[1] == list(&[Some(100), Some(300)])),
+            "the unscoped control reads the hidden property"
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

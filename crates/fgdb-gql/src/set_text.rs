@@ -12,6 +12,7 @@ use crate::{
     GraphSetQuantifier, GraphSymbol, GraphSymbolKind, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
     PreparedGraphText,
 };
+use fgdb_delta_types::PropertyKeyId;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Original byte offsets, never query fragments, names, or argument payloads.
@@ -156,6 +157,7 @@ pub(crate) enum ReadValueTemplate {
     MapGet {
         map: Box<ReadValueTemplate>,
         key: Box<str>,
+        property: ElementKeySlot,
     },
     Keys(Box<ReadValueTemplate>),
     /// A scalar expression over composite operands (fgdb-o5o9t): `values`
@@ -190,6 +192,31 @@ pub(crate) enum ReadValueTemplate {
         scope: u32,
     },
 }
+
+/// The catalog binding of one `x.key` read (fgdb-xnd7x). The parser records
+/// each read's key with an empty slot. Preparation resolves every recorded key
+/// once, through the statement's resolver, before any binding, and binding
+/// stamps the answer on the bound MapGet. A slot that no resolution filled
+/// binds Unbound, so an element operand stays a typed error rather than NULL.
+#[derive(Clone, Default)]
+pub(crate) struct ElementKeySlot(std::sync::Arc<std::sync::OnceLock<Option<PropertyKeyId>>>);
+
+impl ElementKeySlot {
+    pub(crate) fn resolve(&self, key: Option<PropertyKeyId>) {
+        // One statement resolves through one resolver, so a repeated
+        // resolution would give the same answer.
+        let _ = self.0.set(key);
+    }
+
+    pub(crate) fn bind(&self) -> crate::GraphElementKey {
+        match self.0.get() {
+            None => crate::GraphElementKey::Unbound,
+            Some(None) => crate::GraphElementKey::Missing,
+            Some(Some(key)) => crate::GraphElementKey::Property(*key),
+        }
+    }
+}
+
 impl ReadValueTemplate {
     pub(crate) fn parameter(index: usize, at: usize, kind: GqlParameterType) -> Self {
         Self::Parameter {
@@ -370,7 +397,7 @@ impl ReadValueTemplate {
                     value.append_template_transcript(bytes);
                 }
             }
-            Self::MapGet { map, key } => {
+            Self::MapGet { map, key, .. } => {
                 bytes.push(15);
                 map.append_template_transcript(bytes);
                 ordinal(bytes, key.len());
