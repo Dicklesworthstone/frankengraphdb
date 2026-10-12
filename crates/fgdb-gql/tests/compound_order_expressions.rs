@@ -206,7 +206,7 @@ mod compound_order_expression_tests {
         let plain = "RETURN 1 AS x UNION ALL RETURN 2 AS x ORDER BY x + $weight";
         let decorated = "RETURN 1 AS x UNION ALL RETURN 2 AS x \
                          ORDER /* a */ BY x /* b */ + /* c */ $weight";
-        let prepare = |text| PreparedGraphSetText::prepare(text, symbols).unwrap();
+        let prepare = |text: &str| PreparedGraphSetText::prepare(text, symbols).unwrap();
         assert_eq!(
             prepare(plain).canonical_template_bytes(),
             prepare(decorated).canonical_template_bytes()
