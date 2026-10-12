@@ -1767,12 +1767,7 @@ impl PreparedGraphSetText {
         }
         let page_parameters = std::mem::take(&mut parser.page_parameters);
         let tokens = &parser.tokens;
-        let compile = |spans: &[Span],
-                       mut uses: Vec<(usize, GqlParameterSpec)>|
-         -> Result<
-            (Vec<_>, Vec<Schema>, Vec<(usize, GqlParameterSpec)>),
-            GraphSetTextError,
-        > {
+        let compile = |spans: &[Span], mut uses: Vec<(usize, GqlParameterSpec)>| {
             let mut pending = Vec::new();
             let mut schemas = Vec::new();
             let mut operands = 0;
@@ -1824,7 +1819,7 @@ impl PreparedGraphSetText {
                 }
                 pending.push(input);
             }
-            Ok((pending, schemas, uses))
+            Ok::<_, GraphSetTextError>((pending, schemas, uses))
         };
         let (mut pending, mut schemas, mut uses) = compile(&parser.spans, page_parameters)?;
         // A single read's ORDER BY that names no output column ranks by the
