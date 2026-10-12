@@ -365,6 +365,16 @@ pub(crate) type UpsertQueryResult<A> = Result<
     TxnGqlError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>>,
 >;
 
+/// A staged relationship MERGE RETURN (fgdb-at06q): the MERGE's statistics
+/// and its governed RETURN rows, or the query's error with allocator error `A`.
+pub(crate) type EdgeMergeQueryResult<A> = Result<
+    (
+        fgdb_gql::GraphEdgeMergeStats,
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+    ),
+    TxnGqlError<fgdb_gql::GraphEdgeMergeQueryError<WriteTxnError, A>>,
+>;
+
 /// Failure to prepare an atomic write or stage/finish a bounded transaction.
 #[derive(Debug)]
 pub enum WriteTxnError {

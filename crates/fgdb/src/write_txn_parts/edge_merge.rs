@@ -35,13 +35,27 @@ trait EdgeMergeOutput: Sized {
     fn result_rows(&self) -> u64;
 }
 
+/// Each endpoint pair's resolved edges, with each edge's own endpoints.
+type ResolvedPairEdges = std::collections::BTreeMap<(VId, VId), Vec<(EId, (VId, VId))>>;
+
 /// The RETURN owner's resolution (fgdb-at06q): every edge each endpoint pair
 /// resolved to, in canonical pair and identity order, with its endpoints.
 #[derive(Default)]
 struct EdgeMergeRows {
-    edges: std::collections::BTreeMap<(VId, VId), Vec<(EId, (VId, VId))>>,
+    edges: ResolvedPairEdges,
     resolved: u64,
 }
+
+/// The shared collector's result for one output kind, with the frozen MATCH
+/// rows a RETURN owner projects.
+type EdgeMergeOutputResult<Output, A> = Result<
+    (
+        fgdb_gql::GraphEdgeMergeStats,
+        Output,
+        Vec<fgdb_gql::algebra::GraphValueRow>,
+    ),
+    TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
+>;
 
 impl EdgeMergeOutput for EdgeMergeRows {
     const PARALLEL: bool = true;
@@ -525,13 +539,7 @@ impl WriteTxn {
         query: &fgdb_gql::PreparedGraphEdgeMergeQuery,
         policy: fgdb_gql::GraphEdgeMergePolicy,
         mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
-    ) -> Result<
-        (
-            fgdb_gql::GraphEdgeMergeStats,
-            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-        ),
-        TxnGqlError<fgdb_gql::GraphEdgeMergeQueryError<WriteTxnError, A>>,
-    > {
+    ) -> EdgeMergeQueryResult<A> {
         use fgdb_gql::GraphEdgeMergeQueryError;
         let (stats, resolved, selected) = self
             .execute_graph_edge_merge_output_governed::<EdgeMergeRows, V, A>(
@@ -574,13 +582,7 @@ impl WriteTxn {
         cx: &fgdb_types::QueryCx,
         query: &fgdb_gql::PreparedGraphEdgeMergeQuery,
         policy: fgdb_gql::GraphEdgeMergePolicy,
-    ) -> Result<
-        (
-            fgdb_gql::GraphEdgeMergeStats,
-            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-        ),
-        TxnGqlError<fgdb_gql::GraphEdgeMergeQueryError<WriteTxnError, WriteTxnError>>,
-    > {
+    ) -> EdgeMergeQueryResult<WriteTxnError> {
         let source = |error| {
             fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphEdgeMergeQueryError::Merge(
                 fgdb_gql::GraphEdgeMergeError::Source(error),
@@ -620,14 +622,7 @@ impl WriteTxn {
         merge: &fgdb_gql::PreparedGraphEdgeMerge,
         policy: fgdb_gql::GraphEdgeMergePolicy,
         allocate: impl FnMut(usize) -> Result<ElementId, A>,
-    ) -> Result<
-        (
-            fgdb_gql::GraphEdgeMergeStats,
-            Output,
-            Vec<fgdb_gql::algebra::GraphValueRow>,
-        ),
-        TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
-    > {
+    ) -> EdgeMergeOutputResult<Output, A> {
         use fgdb_gql::{GqlQueryError, GraphEdgeMergeError};
         let infrastructure = |error| GqlQueryError::Source(GraphEdgeMergeError::Source(error));
 
