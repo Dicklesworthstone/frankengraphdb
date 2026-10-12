@@ -11,15 +11,16 @@
 //! and they do not provide disk spill or an independently writable graph.
 
 use super::{Meter, Scan, SharedWork, build};
-use crate::{Database, EmbeddedReadView, ReadError};
+use crate::gql_exec::source::{self, SourceEvent};
+use crate::{Database, EmbeddedReadView, ReadError, Snapshot};
 use asupersync::fs::Vfs;
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
 use fgdb_beacon::{
     BeaconError, BeaconIndex, IndexMutation, IndexSnapshot, IndexStats, WorkControl,
 };
-use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId};
+use fgdb_delta_types::{DeltaRow, ElementId, LabelId, LogicalDeltaBatch, PropertyKeyId};
 use fgdb_gql::stream::{VertexScanEvent, VertexScanSource, VertexScanSourceError};
-use fgdb_types::{CommitSeq, QueryCx};
+use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -29,6 +30,14 @@ pub type Options = ReadOptions<PropertyKeyId, LabelId>;
 
 #[path = "resident_graph.rs"]
 mod graph;
+
+#[path = "resident/maintained.rs"]
+mod maintained;
+pub(crate) use maintained::Registry;
+pub use maintained::{
+    MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
+    MaintainedBeaconIndex, MaintainedBeaconStatus,
+};
 
 #[cfg(test)]
 #[path = "resident_tests.rs"]
@@ -306,7 +315,7 @@ impl ResidentIndex {
     // assignments belong to local candidates, never to the retained index.
     fn refresh_with_work<V: Vfs + Clone>(
         &mut self,
-        cx: &QueryCx,
+        _cx: &QueryCx,
         database: &Database<V>,
         through: Option<CommitSeq>,
         policy: ReadPolicy,
@@ -345,46 +354,84 @@ impl ResidentIndex {
                     return Err(Error::IncompleteDelta { after, through });
                 }
                 after = batch.commit_seq();
-                for coordinate in batch.coordinate_entries() {
-                    work.borrow_mut().charge(1)?;
-                    if coordinate.schema_transition.is_some() {
-                        return Err(Error::UnsupportedDelta);
-                    }
-                    for row in &coordinate.rows {
-                        work.borrow_mut().charge(1)?;
-                        let vid = match row {
-                            DeltaRow::CreateVertex { vid, .. }
-                            | DeltaRow::DeleteVertex { vid, .. }
-                            | DeltaRow::LabelMembership { vid, .. }
-                            | DeltaRow::Property {
-                                elem: ElementId::Vertex(vid),
-                                ..
-                            } => *vid,
-                            DeltaRow::CreateEdge { .. }
-                            | DeltaRow::DeleteEdge { .. }
-                            | DeltaRow::Property {
-                                elem: ElementId::Edge(_),
-                                ..
-                            } => continue,
-                            _ => return Err(Error::UnsupportedDelta),
-                        };
-                        if !affected.contains(&vid) {
-                            let limit = policy
-                                .max_staging_rows
-                                .min(self.definition.index.max_batch_operations);
-                            if affected.len() == limit {
-                                return Err(BeaconError::ResourceLimit {
-                                    resource: "refresh vertices",
-                                    limit,
-                                }
-                                .into());
-                            }
-                            reserve_scratch(&mut scratch, policy)?;
-                            affected.insert(vid);
+                self.collect_affected(batch, &mut affected, &mut scratch, policy, work)?;
+            }
+        }
+        self.apply_affected(&database.snapshot, through, affected, scratch, policy, work)
+    }
+
+    /// The same row-family admission serves explicit delta-window refresh and
+    /// one-tick commit maintenance. An unknown family never advances a watermark.
+    fn collect_affected(
+        &self,
+        batch: &LogicalDeltaBatch,
+        affected: &mut BTreeSet<VId>,
+        scratch: &mut usize,
+        policy: ReadPolicy,
+        work: &RefCell<impl WorkControl>,
+    ) -> Result<(), Error> {
+        for coordinate in batch.coordinate_entries() {
+            work.borrow_mut().charge(1)?;
+            if coordinate.schema_transition.is_some() {
+                return Err(Error::UnsupportedDelta);
+            }
+            for row in &coordinate.rows {
+                work.borrow_mut().charge(1)?;
+                let vid = match row {
+                    DeltaRow::CreateVertex { vid, .. }
+                    | DeltaRow::DeleteVertex { vid, .. }
+                    | DeltaRow::LabelMembership { vid, .. }
+                    | DeltaRow::Property {
+                        elem: ElementId::Vertex(vid),
+                        ..
+                    } => *vid,
+                    DeltaRow::CreateEdge { .. }
+                    | DeltaRow::DeleteEdge { .. }
+                    | DeltaRow::Property {
+                        elem: ElementId::Edge(_),
+                        ..
+                    } => continue,
+                    _ => return Err(Error::UnsupportedDelta),
+                };
+                if !affected.contains(&vid) {
+                    let limit = policy
+                        .max_staging_rows
+                        .min(self.definition.index.max_batch_operations);
+                    if affected.len() == limit {
+                        return Err(BeaconError::ResourceLimit {
+                            resource: "refresh vertices",
+                            limit,
                         }
+                        .into());
                     }
+                    reserve_scratch(scratch, policy)?;
+                    affected.insert(vid);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Project only changed identities from one admitted immutable native cut.
+    /// This helper accepts no runtime capability: its caller supplies the live
+    /// QueryCx or CommitCx meter and admits the source before invoking it.
+    /// All candidate work is off-side until the final shared-meter checkpoint.
+    fn apply_affected(
+        &mut self,
+        snapshot: &Arc<Snapshot>,
+        through: CommitSeq,
+        affected: BTreeSet<VId>,
+        mut scratch: usize,
+        policy: ReadPolicy,
+        work: &RefCell<impl WorkControl>,
+    ) -> Result<RefreshReport, Error> {
+        snapshot.check_frontier(through).map_err(Error::Source)?;
+        let from = self.source_sequence;
+        if through.0 < from.0 {
+            return Err(Error::BeforeSource {
+                source: from,
+                requested: through,
+            });
         }
         let report = RefreshReport {
             from,
@@ -394,30 +441,22 @@ impl ResidentIndex {
         };
         let mut next = self.index.clone();
         if !affected.is_empty() {
-            // The native source owns one admitted immutable view. It exposes
-            // per-VId history resolution independently of its scan position;
-            // never advance next_vertex() or collect all historical winners.
-            let source = database
-                .read_session()
-                .map_err(Error::Source)?
-                .vertex_scan_source(cx, through)
-                .map_err(Error::Source)?;
+            // This is the same maintained history lookup used by the native
+            // vertex stream. It borrows winners without enumerating unrelated
+            // histories or requiring a fabricated QueryCx during commit.
             let mutations = affected
                 .into_iter()
                 .map(|vid| -> Result<IndexMutation, Error> {
                     work.borrow_mut().charge(1)?;
-                    let row = source
-                        .vertex(vid, &mut |event| {
-                            work.borrow_mut().charge(1)?;
-                            if matches!(event, VertexScanEvent::ScratchEntry) {
-                                reserve_scratch(&mut scratch, policy)?;
-                            }
-                            Ok::<(), BeaconError>(())
-                        })
-                        .map_err(|error| match error {
-                            VertexScanSourceError::Source(error) => Error::Source(error),
-                            VertexScanSourceError::Control(error) => Error::Index(error),
-                        })?;
+                    // Preserve the vertex source's per-lookup admission event.
+                    work.borrow_mut().charge(1)?;
+                    let row = source::find_vertex(snapshot, vid, through, &mut |event| {
+                        work.borrow_mut().charge(1)?;
+                        if matches!(event, SourceEvent::ScratchEntry) {
+                            reserve_scratch(&mut scratch, policy)?;
+                        }
+                        Ok::<(), BeaconError>(())
+                    })?;
                     let Some(row) = row else {
                         return Ok(IndexMutation::Delete(vid));
                     };
@@ -436,10 +475,10 @@ impl ResidentIndex {
                             vid,
                             &self.definition.index,
                             |key| {
-                                row.properties
+                                row.props
                                     .binary_search_by_key(&key, |(key, _)| *key)
                                     .ok()
-                                    .map(|slot| &row.properties[slot].1)
+                                    .map(|slot| &row.props[slot].1)
                             },
                             &mut SharedWork(work),
                         )
@@ -453,7 +492,9 @@ impl ResidentIndex {
         // as both search lanes. Failure/unwind leaves the old coherent triple.
         let graph_source = if self.graph_source.is_some() {
             work.borrow_mut().charge(1)?;
-            Some(database.read_session().map_err(Error::Source)?)
+            Some(EmbeddedReadView {
+                snapshot: Arc::clone(snapshot),
+            })
         } else {
             None
         };
