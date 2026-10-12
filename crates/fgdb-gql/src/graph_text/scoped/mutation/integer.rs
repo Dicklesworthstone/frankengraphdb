@@ -1462,6 +1462,13 @@ impl<'a> Parser<'a> {
         if self.row_entry_slot(columns, program, at)? {
             return Ok(());
         }
+        // `n[key]` of a MATCH element reads through a let slot too (Graph7).
+        if self.lets.is_some()
+            && matches!(columns, ExpressionColumns::Graph(_))
+            && self.element_subscript_follows()?
+        {
+            return self.composite_slot(columns, depth, program, at);
+        }
         let function = if crate::graph_text::SCALAR_FUNCTIONS
             .iter()
             .any(|name| self.is_word(name))

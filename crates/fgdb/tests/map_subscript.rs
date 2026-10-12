@@ -24,6 +24,8 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "Item") => Some(GraphSymbol::Label(LabelId(1))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         _ => None,
     }
 }
@@ -139,6 +141,100 @@ fn parameter_documents_select_native_identities_lists_and_maps_without_coercion(
             .unwrap(),
             expected(&["a", "b"], vec![vec![null(), null()]])
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// openCypher dynamic property access (Graph7; the Merge6/Merge7 control
+/// queries): `n[key]` of a MATCH vertex or relationship reads the property
+/// named by `key`, NULL when absent, alone, in arithmetic and in a
+/// comprehension. A path is not subscripted, and a non-text key fails.
+#[test]
+fn element_subscripts_read_the_property_named_by_a_dynamic_key() {
+    let ((), report) = run_async_under_lab(0x6d61_7004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut next = 200u128;
+        let write_policy = GraphWriteProgramPolicy::new(policy(), 10_000, 10_000, 10_000);
+        db.query_write(
+            &contexts.txn(),
+            &cx,
+            &commit,
+            "CREATE (:Item {p: 1, q: 'x'})-[:R {q: 'y'}]->(:Item {p: 3})",
+            &GqlParameters::new(),
+            symbols,
+            RelationId(1),
+            write_policy,
+            |request| {
+                next += 1;
+                Ok::<_, Infallible>(match request.request {
+                    fgdb_gql::insertion::GraphInsertRequest::Vertex { .. } => {
+                        ElementId::Vertex(VId(next))
+                    }
+                    fgdb_gql::insertion::GraphInsertRequest::Edge { .. } => {
+                        ElementId::Edge(fgdb_types::EId(next))
+                    }
+                })
+            },
+        )
+        .await
+        .unwrap();
+        let text =
+            |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+        let read = |statement: &str, params: &GqlParameters| {
+            db.query(&cx, statement, params, symbols, policy())
+        };
+        let key = GqlParameters::new().with_text("key", "q").unwrap();
+        assert_eq!(
+            read(
+                "MATCH (n:Item) RETURN n['p'] AS a, n[$key] AS b, n['absent'] AS c ORDER BY a",
+                &key
+            )
+            .unwrap(),
+            expected(
+                &["a", "b", "c"],
+                vec![
+                    vec![int(1), text("x"), null()],
+                    vec![int(3), null(), null()]
+                ]
+            )
+        );
+        assert_eq!(
+            read(
+                "MATCH ()-[r:R]->() RETURN r['q'] AS a, \
+                 [key IN keys(r) | key + '->' + r[key]] AS kv",
+                &GqlParameters::new()
+            )
+            .unwrap(),
+            expected(
+                &["a", "kv"],
+                vec![vec![
+                    text("y"),
+                    GraphValue::List(vec![text("q->y")].into_boxed_slice())
+                ]]
+            )
+        );
+        assert_eq!(
+            read(
+                "MATCH (n:Item) RETURN n['p'] + 10 AS a, n[null] AS b ORDER BY a",
+                &GqlParameters::new()
+            )
+            .unwrap(),
+            expected(
+                &["a", "b"],
+                vec![vec![int(11), null()], vec![int(13), null()]]
+            )
+        );
+        for refused in [
+            "MATCH p = (a:Item)-[:R]->(b) RETURN p['q'] AS a",
+            "MATCH (n:Item) RETURN n[1] AS a",
+            "MATCH (n:Item) RETURN m['p'] AS a",
+        ] {
+            assert!(read(refused, &GqlParameters::new()).is_err(), "{refused}");
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
