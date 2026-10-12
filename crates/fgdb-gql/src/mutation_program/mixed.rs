@@ -84,8 +84,10 @@ impl From<PreparedGraphDelete> for GraphWriteStatement {
 /// The host must also distinguish separate program invocations. Rollback never
 /// rewinds an external allocator or licenses reusing an already-issued identity.
 /// A vertex MERGE creation requests Vertex { row: 0, vertex: 0 } exactly once;
-/// an edge MERGE requests Edge { row: 0, edge: 0 }. Matched and NoInput branches
-/// never call the allocator.
+/// a plain edge MERGE requests Edge { row: pair_ordinal, edge: 0 } for each
+/// missing distinct endpoint pair, ordered canonically. Matched pairs retain
+/// their ordinal but never allocate, so requested row slots may have gaps.
+/// Singular edge upserts retain row zero; NoInput never calls the allocator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphWriteIdentityRequest {
     pub statement: usize,

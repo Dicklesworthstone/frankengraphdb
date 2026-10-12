@@ -1,9 +1,11 @@
 //! Bounded directed relationship MERGE definition.
 //!
 //! A prepared MATCH produces source/destination vertex columns. Duplicate rows
-//! for the same endpoint pair collapse; multiple distinct endpoint pairs refuse.
-//! The write-capable host then resolves the exact relation in its canonical edge
-//! overlay: zero edges creates one, one edge matches, parallel edges are ambiguous.
+//! for the same endpoint pair collapse. The singular primitive refuses multiple
+//! distinct pairs; native write programs resolve every pair in canonical order
+//! and stage their complete batch atomically. The write-capable host resolves
+//! the exact relation in its canonical edge overlay: zero edges creates one,
+//! one edge matches, parallel edges are ambiguous.
 //! Creation properties are already-bound canonical scalars. Relationship pattern
 //! predicates, undirected creation and ON MATCH/ON CREATE actions remain above
 //! this primitive.
@@ -31,7 +33,8 @@ impl core::error::Error for GraphEdgeMergeBuildError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphEdgeMergePolicy {
-    /// Cumulative MATCH + endpoint reduction + relationship existence scan.
+    /// Cumulative MATCH + endpoint reduction + all relationship existence scans
+    /// and batch receipt ownership, under one work/scratch/source allowance.
     pub query: GqlQueryPolicy,
     /// Creation proposals only. Zero permits Matched and NoInput outcomes but
     /// rejects a missing relationship before external identity allocation.
@@ -55,7 +58,8 @@ impl GraphEdgeMergePolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphEdgeMergeStats {
     pub match_selection: GqlExecutionStats,
-    /// Visible overlay edge records examined by the relationship existence step.
+    /// Visible overlay edge records examined by all relationship existence
+    /// scans. Repeated physical scans count again, including matched pairs.
     pub overlay_edges: u64,
     pub evaluator: GlaExecutionStats,
     pub created_edges: u64,

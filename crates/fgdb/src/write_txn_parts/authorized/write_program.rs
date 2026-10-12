@@ -60,8 +60,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// cost one delivered identity, not one row per action or creation callback.
     /// Relationship MERGE/upsert require ReadWrite and the requested relation
     /// during whole-program preflight, even for NoInput. Their existing native
-    /// reducer sees only the selected authorized directed pair. Parallel EIds
-    /// refuse; NoInput executes neither branch, allocates no identity and costs
+    /// reducer sees only selected authorized directed pairs. Plain MERGE handles
+    /// every distinct pair; ON/trailing actions retain the singular contract.
+    /// Parallel EIds refuse; NoInput executes neither branch, allocates no identity and costs
     /// no result row. No privileged existence path is an authorization fallback.
     /// Relation coordinates can differ; native ordered composition remains the
     /// only writer. No caller-selected identity or allocator callback is exposed.
@@ -385,7 +386,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         )
                                     }
                                     GraphWriteStatement::EdgeMerge(input) => {
-                                        let (stats, outcome) = edge_merge::apply(
+                                        let (stats, receipt) = edge_merge::apply_many(
                                             workspace.transaction(),
                                             self,
                                             query_cx,
@@ -396,10 +397,7 @@ impl<V: Vfs + Clone> Database<V> {
                                             returning,
                                         )
                                         .map_err(GraphWriteStepError::EdgeMerge)?;
-                                        (
-                                            GraphWriteStepStats::EdgeMerge(stats),
-                                            GraphWriteStepReceipt::EdgeMerge { outcome },
-                                        )
+                                        (GraphWriteStepStats::EdgeMerge(stats), receipt)
                                     }
                                     GraphWriteStatement::EdgeUpsert(input) => {
                                         let (stats, outcome) = edge_upsert::apply(

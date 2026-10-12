@@ -7,15 +7,17 @@ use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::{GraphInsertLimitDimension, GraphInsertRequest};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeMergeError, GraphEdgeMergeOutcome,
-    GraphSymbol, GraphSymbolKind, GraphVertexMergeOutcome, GraphWriteProgramError,
-    GraphWriteProgramPolicy, PreparedGraphEdgeMergeText, PreparedGraphVertexMergeText,
-    PreparedGraphWriteProgram, PreparedGraphWriteProgramTemplate,
+    GraphMutationProgramDimension, GraphMutationProgramError, GraphSymbol, GraphSymbolKind,
+    GraphVertexMergeOutcome, GraphWriteProgramError, GraphWriteProgramPolicy,
+    PreparedGraphEdgeMergeText, PreparedGraphVertexMergeText, PreparedGraphWriteProgram,
+    PreparedGraphWriteProgramTemplate,
 };
 use fgdb_types::{
     CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
+const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
 const PERSON: LabelId = LabelId(1);
 const EDGE_TEXT: &str =
@@ -30,6 +32,7 @@ fn keys() -> DatabaseKeys {
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+        (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(PERSON)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         _ => None,
@@ -70,6 +73,365 @@ async fn seed(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) {
     let mut batch = WriteBatch::new(R);
     batch.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(99))]);
     db.write(cx, batch).await.unwrap();
+}
+
+fn pairs_program() -> PreparedGraphWriteProgram {
+    let merge = PreparedGraphEdgeMergeText::prepare(
+        "MATCH (a:Person)-[:R]->(b:Person) MERGE (a)-[:S {p:7}]->(b)",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    PreparedGraphWriteProgram::prepare(vec![merge.into()]).unwrap()
+}
+
+async fn seed_pairs(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) {
+    let mut batch = WriteBatch::new(R);
+    for id in 1..=4 {
+        batch.create_vertex(VId(id), vec![PERSON], vec![]);
+    }
+    // Deliberately different edge and endpoint order, with a repeated pair.
+    for (edge, destination) in [(11, 4), (12, 2), (13, 3), (14, 2)] {
+        batch.add_edge(EId(edge), VId(1), VId(destination), vec![]);
+    }
+    db.write(cx, batch).await.unwrap();
+    let mut existing = WriteBatch::new(S);
+    existing.add_edge(EId(21), VId(1), VId(3), vec![(P, CanonicalScalar::Int(99))]);
+    db.write(cx, existing).await.unwrap();
+}
+
+#[test]
+fn all_pairs_merge_deduplicates_rows_preserves_pair_slots_and_is_idempotent() {
+    let ((), report) = run_async_under_lab(0xed9e_4010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed_pairs(&mut db, &commit).await;
+        let program = pairs_program();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut requests = Vec::new();
+        let receipt = txn
+            .execute_graph_write_program_returning_governed(
+                &mut db,
+                &query,
+                &program,
+                policy(0, 2),
+                |request| {
+                    assert_eq!(request.statement, 0);
+                    requests.push(request.request);
+                    let GraphInsertRequest::Edge { row, edge: 0 } = request.request else {
+                        panic!("plain relationship MERGE only allocates its edge slot");
+                    };
+                    Ok::<_, ()>(ElementId::Edge(EId(30 + row as u128)))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            requests,
+            [
+                GraphInsertRequest::Edge { row: 0, edge: 0 },
+                GraphInsertRequest::Edge { row: 2, edge: 0 },
+            ]
+        );
+        assert_eq!(receipt.stats().selection.result_rows, 4);
+        assert_eq!(receipt.stats().created_edges, 2);
+        assert_eq!(receipt.steps()[0].merged_edge(), None);
+        assert_eq!(
+            receipt.steps()[0].merged_edges(),
+            Some(
+                &[
+                    GraphEdgeMergeOutcome::Created(EId(30)),
+                    GraphEdgeMergeOutcome::Matched(EId(21)),
+                    GraphEdgeMergeOutcome::Created(EId(32)),
+                ][..]
+            )
+        );
+        assert_eq!(
+            receipt.steps()[0].created_edges(),
+            Some(&[EId(30), EId(32)][..])
+        );
+        // The second execution must see the complete staged batch and spend no
+        // additional creation allowance, before anything has been committed.
+        let staged = txn
+            .execute_graph_write_program_returning_governed(
+                &mut db,
+                &query,
+                &program,
+                policy(0, 0),
+                |_| -> Result<ElementId, ()> { panic!("staged matches cannot allocate") },
+            )
+            .unwrap();
+        assert_eq!(staged.stats().created_edges, 0);
+        assert_eq!(
+            staged.steps()[0].merged_edges(),
+            Some(
+                &[
+                    GraphEdgeMergeOutcome::Matched(EId(30)),
+                    GraphEdgeMergeOutcome::Matched(EId(21)),
+                    GraphEdgeMergeOutcome::Matched(EId(32)),
+                ][..]
+            )
+        );
+        assert!(matches!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted { .. }
+        ));
+        for (edge, destination) in [(30, 2), (32, 4)] {
+            let record = db.edge(EId(edge)).unwrap().unwrap();
+            assert_eq!(
+                (record.entry.src, record.entry.dst, record.entry.relation),
+                (VId(1), VId(destination), S)
+            );
+            assert_eq!(record.props, vec![(P, CanonicalScalar::Int(7))]);
+        }
+        assert_eq!(
+            db.edge(EId(21)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(99))]
+        );
+        let frontier = db.frontier().unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let repeated = txn
+            .execute_graph_write_program_returning_governed(
+                &mut db,
+                &query,
+                &program,
+                policy(0, 0),
+                |_| -> Result<ElementId, ()> { panic!("committed matches cannot allocate") },
+            )
+            .unwrap();
+        assert_eq!(repeated.steps(), staged.steps());
+        assert!(matches!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn later_pair_creation_limit_preserves_prefix_and_allows_a_complete_retry() {
+    let ((), report) = run_async_under_lab(0xed9e_4011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed_pairs(&mut db, &commit).await;
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(S);
+        prefix.create_vertex(VId(200), vec![], vec![]);
+        txn.write(&mut db, prefix).unwrap();
+        let before = txn.staged_effect_digest().unwrap();
+        let mut requests = Vec::new();
+        let error = txn
+            .execute_graph_write_program_returning_governed(
+                &mut db,
+                &query,
+                &pairs_program(),
+                policy(0, 1),
+                |request| {
+                    requests.push(request.request);
+                    Ok::<_, ()>(ElementId::Edge(EId(30)))
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GraphWriteProgramError::CreationBudget {
+                statement: 0,
+                dimension: GraphInsertLimitDimension::Edges,
+                limit: 1,
+                observed: 2,
+            }
+        ));
+        assert_eq!(requests, [GraphInsertRequest::Edge { row: 0, edge: 0 }]);
+        assert_eq!(txn.staged_effect_digest().unwrap(), before);
+        let receipt = txn
+            .execute_graph_write_program_returning_governed(
+                &mut db,
+                &query,
+                &pairs_program(),
+                policy(0, 2),
+                |request| {
+                    let GraphInsertRequest::Edge { row, edge: 0 } = request.request else {
+                        panic!("edge allocation");
+                    };
+                    Ok::<_, ()>(ElementId::Edge(EId(40 + row as u128)))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            receipt.steps()[0].created_edges(),
+            Some(&[EId(40), EId(42)][..])
+        );
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert!(db.vertex(VId(200)).unwrap().is_some());
+        assert!(db.edge(EId(30)).unwrap().is_none());
+        assert!(db.edge(EId(40)).unwrap().is_some());
+        assert!(db.edge(EId(42)).unwrap().is_some());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn all_pair_source_work_and_scratch_share_exact_program_boundaries() {
+    let ((), report) = run_async_under_lab(0xed9e_4014, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed_pairs(&mut db, &commit).await;
+        let program = pairs_program();
+        let allocate = |request: fgdb_gql::GraphWriteIdentityRequest| {
+            let GraphInsertRequest::Edge { row, edge: 0 } = request.request else {
+                panic!("edge allocation");
+            };
+            Ok::<_, ()>(ElementId::Edge(EId(30 + row as u128)))
+        };
+        let mut measured = db.begin(&txcx).unwrap();
+        let expected = measured
+            .execute_graph_write_program_returning_governed(
+                &mut db,
+                &query,
+                &program,
+                policy(0, 2),
+                allocate,
+            )
+            .unwrap()
+            .stats();
+        measured.abort();
+        let frontier = db.frontier().unwrap();
+        for short in [
+            None,
+            Some(GraphMutationProgramDimension::SnapshotRecords),
+            Some(GraphMutationProgramDimension::WorkUnits),
+            Some(GraphMutationProgramDimension::ScratchEntries),
+        ] {
+            let records = expected.selection.snapshot_records
+                - u64::from(short == Some(GraphMutationProgramDimension::SnapshotRecords));
+            let work = expected.evaluator.work_units
+                - u64::from(short == Some(GraphMutationProgramDimension::WorkUnits));
+            let scratch = expected.evaluator.scratch_entries
+                - u64::from(short == Some(GraphMutationProgramDimension::ScratchEntries));
+            let exact = GraphWriteProgramPolicy::new(
+                GqlQueryPolicy::new(records, 100_000, work, scratch),
+                0,
+                0,
+                2,
+            );
+            let mut txn = db.begin(&txcx).unwrap();
+            let before = txn.staged_effect_digest().unwrap();
+            // Stats-only and returning routes must pay the same batch costs.
+            let result = txn
+                .execute_graph_write_program_governed(&mut db, &query, &program, exact, allocate);
+            if let Some(expected_dimension) = short {
+                assert!(matches!(result,
+                    Err(GraphWriteProgramError::Program(GraphMutationProgramError::Budget {
+                        dimension, ..
+                    })) if dimension == expected_dimension));
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+            } else {
+                assert_eq!(result.unwrap(), expected);
+            }
+            txn.abort();
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert!(db.edge(EId(30)).unwrap().is_none());
+            assert!(db.edge(EId(32)).unwrap().is_none());
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn later_pair_ambiguity_or_allocator_refusal_keeps_negative_witnesses_after_rollback() {
+    for parallel in [false, true] {
+        let ((), report) =
+            run_async_under_lab(0xed9e_4012 + u64::from(parallel), move |root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let commit = contexts.commit();
+                let query = contexts.query();
+                let txcx = contexts.txn();
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                seed_pairs(&mut db, &commit).await;
+                if parallel {
+                    let mut duplicate = WriteBatch::new(S);
+                    duplicate.add_edge(EId(22), VId(1), VId(3), vec![]);
+                    db.write(&commit, duplicate).await.unwrap();
+                }
+                let mut txn = db.begin(&txcx).unwrap();
+                let mut prefix = WriteBatch::new(S);
+                prefix.create_vertex(VId(200), vec![], vec![]);
+                txn.write(&mut db, prefix).unwrap();
+                txn.savepoint(&db, "before-pairs").unwrap();
+                let before = txn.staged_effect_digest().unwrap();
+                let mut requests = Vec::new();
+                let error = txn
+                    .execute_graph_write_program_governed(
+                        &mut db,
+                        &query,
+                        &pairs_program(),
+                        policy(0, 2),
+                        |request| {
+                            requests.push(request.request);
+                            match request.request {
+                                GraphInsertRequest::Edge { row: 0, edge: 0 } => {
+                                    Ok(ElementId::Edge(EId(30)))
+                                }
+                                GraphInsertRequest::Edge { row: 2, edge: 0 } => {
+                                    Err("late-allocator-refusal")
+                                }
+                                _ => panic!("matched pair cannot allocate"),
+                            }
+                        },
+                    )
+                    .unwrap_err();
+                if parallel {
+                    assert!(matches!(
+                        error,
+                        GraphWriteProgramError::EdgeMerge {
+                            statement: 0,
+                            source: GqlQueryError::Source(
+                                GraphEdgeMergeError::AmbiguousRelationships { observed: 2 }
+                            ),
+                        }
+                    ));
+                    assert_eq!(requests.len(), 1);
+                } else {
+                    assert!(matches!(
+                        error,
+                        GraphWriteProgramError::EdgeMerge {
+                            statement: 0,
+                            source: GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(
+                                "late-allocator-refusal"
+                            )),
+                        }
+                    ));
+                    assert_eq!(requests.len(), 2);
+                }
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                txn.rollback_to_savepoint(&db, "before-pairs").unwrap();
+                let mut competing = WriteBatch::new(S);
+                competing.add_edge(EId(90), VId(1), VId(2), vec![]);
+                db.write(&commit, competing).await.unwrap();
+                let frontier = db.frontier().unwrap();
+                assert!(txn.finish(&mut db, &commit).await.is_err());
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert!(db.edge(EId(30)).unwrap().is_none());
+                assert!(db.edge(EId(90)).unwrap().is_some());
+                assert!(db.vertex(VId(200)).unwrap().is_none());
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 }
 
 #[test]
