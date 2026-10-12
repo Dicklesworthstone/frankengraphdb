@@ -838,6 +838,7 @@ impl<'a> Parser<'a> {
             }
             let mut head = GraphProjectionHead {
                 with: true,
+                plain: false,
                 inputs: core::mem::take(inputs),
                 outputs,
             };
@@ -929,6 +930,7 @@ impl<'a> Parser<'a> {
         }
         let mut head = GraphProjectionHead {
             with: true,
+            plain: false,
             inputs: core::mem::take(inputs),
             outputs,
         };

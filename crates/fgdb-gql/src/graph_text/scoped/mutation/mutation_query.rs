@@ -792,6 +792,7 @@ impl<'a> Parser<'a> {
                 visible,
                 width: schema.len(),
                 reads,
+                functions: Vec::new(),
                 grouped: Vec::new(),
                 scoped: Vec::new(),
             });
