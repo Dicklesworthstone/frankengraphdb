@@ -1,8 +1,10 @@
 //! Credit-driven native source reads, with one retained session and permit.
 //! A frame and at most one row awaiting byte credit are the adapter's only row
 //! buffers. Native aggregates retain their governed group/support state and
-//! consume the input on first demand, then move completed groups through this
-//! same delivery path without rescanning or collecting the source graph.
+//! consume the input cooperatively on first demand, then move completed groups
+//! through this same delivery path without rescanning the source graph. The
+//! metadata chunk announces the child before any input is demanded, so its
+//! cancellation can be serviced during accumulation.
 
 use super::*;
 use crate::execute::{read_prepared_session, read_session};
@@ -84,7 +86,7 @@ impl Chunks {
         }))
     }
 
-    /// Ordered reads arrive asynchronously. Admit exactly one pending row
+    /// Native reads can arrive asynchronously. Admit exactly one pending row
     /// outside the synchronous chunk assembler, then share its measuring and
     /// credit rules. No row future starts without room for its minimum frame.
     pub(super) fn needs_row(&self, byte_room: usize, row_room: usize) -> bool {
@@ -206,10 +208,60 @@ impl Lane {
                 .saturating_sub(framing)
                 .min(frame_budget);
             let row_room = usize::try_from(available.rows).unwrap_or(usize::MAX);
-            let next = chunks.next(byte_room, row_room, frame_budget, || {
-                let row = source.next()?;
-                Ok((row, source.exhausted()))
-            });
+            // Announce the real stream identity before polling an aggregate.
+            // Metadata uses byte credit but spends no input or output rows.
+            let announcing = chunks.columns.is_some();
+            if source.is_aggregate() && !announcing && chunks.needs_row(byte_room, row_room) {
+                let row = match self
+                    .read_progress(
+                        cx,
+                        waiter,
+                        &mut window,
+                        stream,
+                        request,
+                        binding,
+                        source.next(),
+                    )
+                    .await?
+                {
+                    Ok(row) => row,
+                    Err(error) => {
+                        return self
+                            .refuse(cx, request, stream, binding, error.code, &error.message)
+                            .await;
+                    }
+                };
+                if let Err(error) = chunks.accept(row, source.exhausted(), frame_budget) {
+                    return self
+                        .refuse(cx, request, stream, binding, error.code, &error.message)
+                        .await;
+                }
+            }
+            // Credit received while the retained row future was Pending is
+            // already available. Never wait for a redundant second grant.
+            let available = window.available();
+            let byte_room = usize::try_from(available.bytes)
+                .unwrap_or(usize::MAX)
+                .saturating_sub(framing)
+                .min(frame_budget);
+            let row_room = if announcing {
+                0
+            } else {
+                usize::try_from(available.rows).unwrap_or(usize::MAX)
+            };
+            let next = if source.is_aggregate() {
+                chunks.next(byte_room, row_room.min(1), frame_budget, || {
+                    Err(Refusal::new(
+                        ErrorCode::Execution,
+                        "native aggregate row was not admitted",
+                    ))
+                })
+            } else {
+                chunks.next(byte_room, row_room, frame_budget, || {
+                    let row = source.next_immediate()?;
+                    Ok((row, source.exhausted()))
+                })
+            };
             let chunk = match next {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) if chunks.done() => break,
@@ -418,13 +470,15 @@ mod tests {
                 &GqlParameters::new(),
             ));
             let mut chunks = Chunks::new(source.columns().to_vec());
-            let mut pull = || source.next().map(|row| (row, source.exhausted()));
-            let metadata = accepted(chunks.next(128, 0, 128, &mut pull)).unwrap();
+            let metadata = accepted(chunks.next(128, 0, 128, || panic!("no row credit"))).unwrap();
             assert_eq!(metadata.columns, Some(vec!["n".into()]));
             assert!(metadata.rows.is_empty());
-            assert!(accepted(chunks.next(128, 0, 128, &mut pull)).is_none());
-            assert!(accepted(chunks.next(0, 1, 128, &mut pull)).is_none());
-            let error = chunks.next(128, 1, 128, &mut pull).err().unwrap();
+            assert!(accepted(chunks.next(128, 0, 128, || panic!("no row credit"))).is_none());
+            assert!(accepted(chunks.next(0, 1, 128, || panic!("no byte credit"))).is_none());
+            assert!(!chunks.needs_row(128, 0));
+            assert!(!chunks.needs_row(0, 1));
+            assert!(chunks.needs_row(128, 1));
+            let error = source.next().await.err().unwrap();
             assert_eq!(error.code, ErrorCode::Budget);
             assert!(
                 !chunks.done(),
@@ -467,47 +521,50 @@ mod tests {
                 .unwrap();
             let query = contexts.query();
             let parameters = GqlParameters::new();
-            for text in [
-                "MATCH (n) RETURN n",
-                "MATCH (n) RETURN count(*) AS n",
-            ] {
-                let definition = accepted(crate::execute::prepare_read(
-                    &root,
-                    db,
-                    &token,
-                    &Prepare {
-                        statement: text.into(),
-                        parameters: vec![],
-                    },
-                )
-                .await);
+            for text in ["MATCH (n) RETURN n", "MATCH (n) RETURN count(*) AS n"] {
+                let definition = accepted(
+                    crate::execute::prepare_read(
+                        &root,
+                        db,
+                        &token,
+                        &Prepare {
+                            statement: text.into(),
+                            parameters: vec![],
+                        },
+                    )
+                    .await,
+                );
                 let (mut session, prepared) =
                     accepted(read_prepared_session(&root, db, &token, &definition).await);
-                let mut source =
-                    accepted(session.stream_prepared(&query, &prepared, &parameters));
+                let mut source = accepted(session.stream_prepared(&query, &prepared, &parameters));
                 let mut chunks = Chunks::new(source.columns().to_vec());
-                let mut pull = || source.next().map(|row| (row, source.exhausted()));
-                let metadata = accepted(chunks.next(128, 0, 128, &mut pull)).unwrap();
+                let metadata =
+                    accepted(chunks.next(128, 0, 128, || panic!("no row credit"))).unwrap();
                 assert!(metadata.rows.is_empty());
-                assert!(accepted(chunks.next(128, 0, 128, &mut pull)).is_none());
-                assert!(accepted(chunks.next(0, 1, 128, &mut pull)).is_none());
+                assert!(accepted(chunks.next(128, 0, 128, || panic!("no row credit"))).is_none());
+                assert!(accepted(chunks.next(0, 1, 128, || panic!("no byte credit"))).is_none());
+                assert!(!chunks.needs_row(128, 0));
+                assert!(!chunks.needs_row(0, 1));
+                assert!(chunks.needs_row(128, 1));
                 assert_eq!(
-                    chunks.next(128, 1, 128, &mut pull).err().unwrap().code,
+                    source.next().await.err().unwrap().code,
                     ErrorCode::Budget,
                     "{text}"
                 );
                 assert!(!chunks.done());
             }
-            let definition = accepted(crate::execute::prepare_read(
-                &root,
-                db,
-                &token,
-                &Prepare {
-                    statement: "MATCH (n) RETURN 1 AS value".into(),
-                    parameters: vec![],
-                },
-            )
-            .await);
+            let definition = accepted(
+                crate::execute::prepare_read(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        statement: "MATCH (n) RETURN 1 AS value".into(),
+                        parameters: vec![],
+                    },
+                )
+                .await,
+            );
             let (mut session, prepared) =
                 accepted(read_prepared_session(&root, db, &token, &definition).await);
             assert_eq!(
@@ -520,10 +577,7 @@ mod tests {
                 "profile refusal must precede the zero-node execution limit"
             );
             drop(session);
-            for text in [
-                "MATCH (n) RETURN id(n)",
-                "MATCH (n) RETURN elementId(n)",
-            ] {
+            for text in ["MATCH (n) RETURN id(n)", "MATCH (n) RETURN elementId(n)"] {
                 assert_eq!(
                     crate::execute::prepare_read(
                         &root,
@@ -582,7 +636,11 @@ mod tests {
                 ] {
                     let (mut session, _) = accepted(read_session(&root, db, &token).await);
                     let mut source = accepted(session.stream(&query, text, &GqlParameters::new()));
-                    let error = source.next().err().expect("native allowance must refuse");
+                    let error = source
+                        .next()
+                        .await
+                        .err()
+                        .expect("native allowance must refuse");
                     assert_eq!(error.code, ErrorCode::Budget, "{text}: {}", error.message);
                 }
             }
@@ -613,7 +671,7 @@ mod tests {
             let mut source = accepted(session.stream(&query, text, &parameters));
             assert_eq!(source.snapshot_seq(), 1);
             assert_eq!(
-                accepted(source.next()),
+                accepted(source.next().await),
                 Some(vec![WireValue::Vertex(1), WireValue::Count(1)])
             );
             fail_after_marker(&root, db, 3).await;
@@ -622,7 +680,7 @@ mod tests {
                 crate::DatabaseStatus::Ready { generation: 2 }
             );
             assert_eq!(
-                source.next().err().unwrap().code,
+                source.next().await.err().unwrap().code,
                 ErrorCode::DatabaseRecovering
             );
             drop(source);
@@ -631,13 +689,13 @@ mod tests {
             let (mut session, _) = accepted(read_session(&root, db, &token).await);
             let mut source = accepted(session.stream(&query, text, &parameters));
             assert_eq!(source.snapshot_seq(), 2);
-            assert!(accepted(source.next()).is_some());
+            assert!(accepted(source.next().await).is_some());
             assert!(db.authority.retire());
             assert_eq!(
-                source.next().err().unwrap().code,
+                source.next().await.err().unwrap().code,
                 ErrorCode::PermissionDenied
             );
-            assert!(accepted(source.next()).is_none());
+            assert!(accepted(source.next().await).is_none());
             drop(source);
             drop(session);
             server.join_database_workers(&root).await;

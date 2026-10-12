@@ -21,7 +21,7 @@ impl Lane {
     /// Own and pin one future outside the control loop. A PING or credit
     /// update cannot drop/recreate a partially advanced spill operation.
     #[allow(clippy::too_many_arguments)]
-    async fn ordered_progress<T>(
+    pub(super) async fn read_progress<T>(
         &mut self,
         cx: &Cx,
         waiter: &Waiter,
@@ -157,7 +157,7 @@ impl Lane {
         // too. No schema exists yet, but disconnect, drain and recovery can
         // release this connection without waiting for an outstanding syscall.
         let (mut session, imported) = match self
-            .ordered_progress(
+            .read_progress(
                 cx,
                 waiter,
                 &mut window,
@@ -216,7 +216,7 @@ impl Lane {
         self.ordered_chunk(cx, waiter, &mut window, stream, request, binding, columns)
             .await?;
         let mut source = match self
-            .ordered_progress(
+            .read_progress(
                 cx,
                 waiter,
                 &mut window,
@@ -247,7 +247,7 @@ impl Lane {
             let row_room = usize::try_from(available.rows).unwrap_or(usize::MAX);
             if chunks.needs_row(byte_room, row_room) {
                 let row = match self
-                    .ordered_progress(
+                    .read_progress(
                         cx,
                         waiter,
                         &mut window,

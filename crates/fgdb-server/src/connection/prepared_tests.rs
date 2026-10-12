@@ -237,7 +237,7 @@ fn prepared_sources_rebind_without_reparsing_and_pin_one_execution_frontier() {
         let mut source = ok(session.stream_prepared(&query, &prepared, &first_parameters));
         assert_eq!(source.snapshot_seq(), 1);
         assert_eq!(
-            ok(source.next()),
+            ok(source.next().await),
             Some(vec![WireValue::Vertex(1), WireValue::Int(11)])
         );
         // The cursor has no writer lock and remains on its first snapshot.
@@ -249,10 +249,10 @@ fn prepared_sources_rebind_without_reparsing_and_pin_one_execution_frontier() {
             .await
             .unwrap();
         assert_eq!(
-            ok(source.next()),
+            ok(source.next().await),
             Some(vec![WireValue::Vertex(2), WireValue::Int(11)])
         );
-        assert!(ok(source.next()).is_none());
+        assert!(ok(source.next().await).is_none());
         drop(source);
         drop(session);
 
@@ -265,11 +265,11 @@ fn prepared_sources_rebind_without_reparsing_and_pin_one_execution_frontier() {
         assert_eq!(source.snapshot_seq(), 2);
         for id in 1..=3 {
             assert_eq!(
-                ok(source.next()),
+                ok(source.next().await),
                 Some(vec![WireValue::Vertex(id), WireValue::Int(23)])
             );
         }
-        assert!(ok(source.next()).is_none());
+        assert!(ok(source.next().await).is_none());
         drop(source);
         drop(session);
         server.join_database_workers(&root).await;
@@ -303,7 +303,7 @@ fn prepared_source_cursors_and_templates_keep_recovery_and_live_authority_fences
             ok(crate::execute::read_prepared_session(&root, db, &token, &definition).await);
         let mut source = ok(session.stream_prepared(&query, &prepared, &parameters));
         assert_eq!(
-            ok(source.next()),
+            ok(source.next().await),
             Some(vec![WireValue::Vertex(1), WireValue::Count(1)])
         );
         fail_after_marker(&root, db, 99).await;
@@ -312,7 +312,7 @@ fn prepared_source_cursors_and_templates_keep_recovery_and_live_authority_fences
             crate::DatabaseStatus::Ready { generation: 2 }
         );
         assert_eq!(
-            source.next().err().unwrap().code,
+            source.next().await.err().unwrap().code,
             ErrorCode::DatabaseRecovering
         );
         drop(source);
@@ -331,13 +331,13 @@ fn prepared_source_cursors_and_templates_keep_recovery_and_live_authority_fences
             ok(crate::execute::read_prepared_session(&root, db, &token, &definition).await);
         let mut source = ok(session.stream_prepared(&query, &prepared, &parameters));
         assert_eq!(source.snapshot_seq(), 2);
-        assert!(ok(source.next()).is_some());
+        assert!(ok(source.next().await).is_some());
         assert!(db.authority.retire());
         assert_eq!(
-            source.next().err().unwrap().code,
+            source.next().await.err().unwrap().code,
             ErrorCode::PermissionDenied
         );
-        assert!(ok(source.next()).is_none());
+        assert!(ok(source.next().await).is_none());
         drop(source);
         drop(session);
         server.join_database_workers(&root).await;

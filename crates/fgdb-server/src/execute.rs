@@ -115,9 +115,9 @@ pub(crate) struct ReadSession<'a> {
     generation: Generation,
 }
 
-/// A native source position, never a collected result. Each synchronous pull
+/// A native source position, never a collected result. Each nonblocking poll
 /// enters the retained recovery generation; no generation guard or writer
-/// lock remains held while the connection waits for client credit.
+/// lock remains held while an aggregate yields or the client withholds credit.
 pub(crate) struct ReadCursor<'q> {
     native: ReadSource<'q>,
     generation: Generation,
@@ -125,10 +125,14 @@ pub(crate) struct ReadCursor<'q> {
 
 enum ReadSource<'q> {
     Rows(fgdb::AuthorizedSendRowCursor<'q>),
-    Aggregate(fgdb::AuthorizedSendAggregateCursor<'q>),
+    Aggregate(fgdb::AuthorizedAsyncAggregateCursor<'q>),
 }
 
 impl ReadCursor<'_> {
+    pub(crate) fn is_aggregate(&self) -> bool {
+        matches!(self.native, ReadSource::Aggregate(_))
+    }
+
     pub(crate) fn columns(&self) -> &[String] {
         match &self.native {
             ReadSource::Rows(cursor) => cursor.columns(),
@@ -148,35 +152,56 @@ impl ReadCursor<'_> {
         };
         state == fgdb_gql::stream::VertexScanState::Exhausted
     }
-    pub(crate) fn next(&mut self) -> Result<Option<Vec<WireValue>>, Refusal> {
+
+    /// Ordinary row streams keep their existing frame-sized batch pulls.
+    /// Aggregate input must use the cooperative future, never this method.
+    pub(crate) fn next_immediate(&mut self) -> Result<Option<Vec<WireValue>>, Refusal> {
         let _operation = self.generation.enter().map_err(Refusal::from)?;
-        let result = match &mut self.native {
-            ReadSource::Rows(cursor) => cursor
-                .next()
-                .transpose()
-                .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect())),
-            ReadSource::Aggregate(cursor) => cursor.next().transpose().map(|row| {
-                row.map(|row| {
-                    // The native compiler validates these RETURN ordinals before
-                    // opening a source. Preserve exact aggregate domains and
-                    // repeated keys without a lossy row-value intermediate.
-                    cursor
-                        .output_slots()
-                        .iter()
-                        .map(|slot| match *slot {
-                            fgdb_gql::GraphAggregateTextSlot::GroupKey(at) => {
-                                convert::graph(&row.keys()[at])
-                            }
-                            fgdb_gql::GraphAggregateTextSlot::Aggregate(at) => {
-                                convert::cell(&row.values()[at])
-                            }
-                        })
-                        .collect()
-                })
-            }),
+        let ReadSource::Rows(cursor) = &mut self.native else {
+            return Err(Refusal::new(
+                ErrorCode::Execution,
+                "aggregate input requires cooperative execution",
+            ));
         };
+        let result = cursor
+            .next()
+            .transpose()
+            .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect()));
         self.generation.check().map_err(Refusal::from)?;
         result.map_err(query_refusal)
+    }
+
+    pub(crate) async fn next(&mut self) -> Result<Option<Vec<WireValue>>, Refusal> {
+        let generation = self.generation.clone();
+        ordered::in_generation(&generation, async {
+            let result = match &mut self.native {
+                ReadSource::Rows(cursor) => cursor
+                    .next()
+                    .transpose()
+                    .map(|row| row.map(|row| row.values().iter().map(convert::graph).collect())),
+                ReadSource::Aggregate(cursor) => cursor.next_row().await.map(|row| {
+                    row.map(|row| {
+                        // The native compiler validates these RETURN ordinals before
+                        // opening a source. Preserve exact aggregate domains and
+                        // repeated keys without a lossy row-value intermediate.
+                        cursor
+                            .output_slots()
+                            .iter()
+                            .map(|slot| match *slot {
+                                fgdb_gql::GraphAggregateTextSlot::GroupKey(at) => {
+                                    convert::graph(&row.keys()[at])
+                                }
+                                fgdb_gql::GraphAggregateTextSlot::Aggregate(at) => {
+                                    convert::cell(&row.values()[at])
+                                }
+                            })
+                            .collect()
+                    })
+                }),
+            };
+            result.map_err(query_refusal)
+        })
+        .await
     }
 }
 
@@ -259,7 +284,7 @@ impl ReadSession<'_> {
             | fgdb::NativeReadClass::TemporalAggregate
             | fgdb::NativeReadClass::PipelineAggregate => self
                 .native
-                .stream_aggregate_send(cx, prepared, parameters)
+                .stream_aggregate_async(cx, prepared, parameters)
                 .map(ReadSource::Aggregate),
             _ => self
                 .native

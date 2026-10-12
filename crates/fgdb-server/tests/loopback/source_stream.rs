@@ -340,6 +340,81 @@ fn native_aggregate_stream_budgets_and_cancellation_count_final_groups() {
 }
 
 #[test]
+fn aggregate_schema_cancellation_precedes_input_refusal_for_text_and_prepared_reads() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "aggregate-schema-cancel").await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        seed(cx, &mut owner).await;
+        let mut scope = grant(Rights::Read);
+        scope.limits.max_nodes = 0;
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let statement = "MATCH (n:Person) RETURN count(*) AS n";
+        let prepared = reader.prepare_read(cx, statement, vec![]).await.unwrap();
+        for use_prepared in [false, true] {
+            let mut schemas = 0;
+            let on_columns = |columns: &[String]| {
+                schemas += 1;
+                assert_eq!(columns, ["n"]);
+                Err(ClientError::Protocol("cancel before aggregate input"))
+            };
+            let on_row = |_| -> Result<(), ClientError> {
+                panic!("a zero-node grant cannot produce an aggregate row")
+            };
+            let error = if use_prepared {
+                reader
+                    .execute_prepared_streaming(
+                        cx,
+                        PreparedReadMode::SourceStream,
+                        prepared,
+                        vec![],
+                        on_columns,
+                        on_row,
+                    )
+                    .await
+                    .unwrap_err()
+            } else {
+                reader
+                    .execute_streaming(
+                        cx,
+                        ExecuteMode::ReadStream,
+                        statement,
+                        vec![],
+                        on_columns,
+                        on_row,
+                    )
+                    .await
+                    .unwrap_err()
+            };
+            assert!(matches!(
+                error,
+                ClientError::Protocol("cancel before aggregate input")
+            ));
+            assert_eq!(schemas, 1);
+            reader.ping(cx, 84).await.unwrap();
+        }
+        // Accepting the same metadata does not waive the input allowance.
+        assert_eq!(
+            server_code(
+                reader
+                    .execute(cx, ExecuteMode::ReadStream, statement, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Budget
+        );
+        reader.ping(cx, 85).await.unwrap();
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn native_source_stream_preserves_scoped_rows_across_exact_credit_windows() {
     run(async |cx| {
         let (addr, shutdown, mut task) = start(cx, "native-source-stream").await;

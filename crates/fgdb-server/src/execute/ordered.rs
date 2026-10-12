@@ -35,7 +35,7 @@ pub(crate) struct OrderedCursor<'q> {
 /// credit or a Pending filesystem operation, and an old result or error cannot
 /// cross the post-poll generation check. The native future separately checks
 /// the same live capability permit around every poll and final delivery.
-async fn in_generation<T>(
+pub(super) async fn in_generation<T>(
     generation: &Generation,
     future: impl Future<Output = Result<T, Refusal>>,
 ) -> Result<T, Refusal> {
