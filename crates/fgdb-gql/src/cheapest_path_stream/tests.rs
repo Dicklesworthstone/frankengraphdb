@@ -1,6 +1,7 @@
 use super::*;
 use crate::algebra::GlaDirection;
 use crate::{GraphCheapestPathMode, GraphPathCostError, GraphWalkBounds};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,7 +36,7 @@ fn query(
     .unwrap()
     .with_mode(mode)
 }
-fn fixture(mask: u8) -> (Vec<Edge>, BTreeMap<EId, CanonicalScalar>) {
+fn fixture(mask: u8) -> (Vec<Edge>, BTreeMap<EId, CanonicalPropertyValue>) {
     let raw = [
         (1, 0, 0, -1),
         (2, 0, 1, 2),
@@ -57,7 +58,12 @@ fn fixture(mask: u8) -> (Vec<Edge>, BTreeMap<EId, CanonicalScalar>) {
             .collect(),
         selected
             .iter()
-            .map(|&(id, _, _, weight)| (EId(id), CanonicalScalar::Int(weight)))
+            .map(|&(id, _, _, weight)| {
+                (
+                    EId(id),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(weight)),
+                )
+            })
             .collect(),
     )
 }
@@ -98,7 +104,7 @@ fn oracle(
     q: &PreparedGraphCheapestPath,
     k: u64,
     edges: &[Edge],
-    weights: &BTreeMap<EId, CanonicalScalar>,
+    weights: &BTreeMap<EId, CanonicalPropertyValue>,
 ) -> Vec<Answer> {
     let mut layer = vec![(q.source(), 0_i128, Vec::<(EId, VId)>::new())];
     let mut answers = Vec::new();
@@ -140,7 +146,8 @@ fn oracle(
                 if relation != q.relation() {
                     continue;
                 }
-                let CanonicalScalar::Int(weight) = &weights[&eid] else {
+                let CanonicalPropertyValue::Scalar(CanonicalScalar::Int(weight)) = &weights[&eid]
+                else {
                     panic!("integer fixture");
                 };
                 let mut destinations = Vec::new();
@@ -401,9 +408,9 @@ fn close_and_k_boundary_never_expand_the_unrequested_suffix() {
         40,
         40,
     );
-    let costs = BTreeMap::from([
-        (EId(1), CanonicalScalar::Int(-1)),
-        (EId(2), CanonicalScalar::Int(1)),
+    let costs: BTreeMap<EId, CanonicalPropertyValue> = BTreeMap::from([
+        (EId(1), CanonicalScalar::Int(-1).into()),
+        (EId(2), CanonicalScalar::Int(1).into()),
     ]);
     let edges = [(EId(1), VId(0), R, VId(0)), (EId(2), VId(0), R, VId(0))];
     let start = |k| {
@@ -479,7 +486,7 @@ fn opening_zero_count_or_missing_anchors_still_validates_all_selected_costs() {
             3,
             [VId(0), VId(1)],
             edges,
-            |_, _| Err::<Option<&CanonicalScalar>, _>("source refused"),
+            |_, _| Err::<Option<&CanonicalPropertyValue>, _>("source refused"),
             policy(),
             || Ok::<_, ()>(()),
         );
@@ -559,7 +566,8 @@ fn stream_owns_costs_and_full_width_identities_without_debug_disclosure() {
     )
     .unwrap();
     let mut stream = {
-        let mut costs = BTreeMap::from([(EId(u128::MAX), CanonicalScalar::Int(i64::MIN))]);
+        let mut costs: BTreeMap<EId, CanonicalPropertyValue> =
+            BTreeMap::from([(EId(u128::MAX), CanonicalScalar::Int(i64::MIN).into())]);
         let stream = q
             .stream_governed_with_edge_properties(
                 1,

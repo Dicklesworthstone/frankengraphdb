@@ -9,7 +9,8 @@ use crate::{DeltaBlockVersion, PartitionRootVersion, encode_block_with_propertie
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::{
-    BranchId, CanonicalScalar, DatabaseSecurityNamespaceId, GraphId, PurposeContexts,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, GraphId,
+    PurposeContexts,
 };
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -80,7 +81,7 @@ fn vertex(id: u128, created: u64, retired: Option<u64>, p: i64) -> VertexRow {
         created_at: CommitSeq(created),
         retired_at: retired.map(CommitSeq),
         labels: vec![LabelId(9)],
-        props: vec![(P, CanonicalScalar::Int(p))],
+        props: vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(p)))],
     }
 }
 async fn fixture(contexts: &PurposeContexts, path: &Path) -> (BlockStore, PartitionRootVersion) {
@@ -128,7 +129,7 @@ async fn fixture(contexts: &PurposeContexts, path: &Path) -> (BlockStore, Partit
     for (entries, values, predecessor) in definitions {
         let props: Vec<_> = values
             .into_iter()
-            .map(|v| vec![(P, CanonicalScalar::Int(v))])
+            .map(|v| vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v)))])
             .collect();
         let patch = store
             .put_edge_property_patch(&cx, &encode_property_patch(&props).unwrap())
@@ -282,8 +283,12 @@ fn cold_successors_match_900_independent_cut_direction_relation_and_position_cas
                             if let Some(candidate) = got {
                                 assert_eq!(
                                     candidate.row.as_ref().map(|r| r.edge().props.clone()),
-                                    visible(candidate.eid.0, cut)
-                                        .map(|p| vec![(P, CanonicalScalar::Int(p))])
+                                    visible(candidate.eid.0, cut).map(|p| {
+                                        vec![(
+                                            P,
+                                            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(p)),
+                                        )]
+                                    })
                                 );
                                 if let Some(row) = candidate.row {
                                     let (_, src, dst) = wanted.unwrap();
@@ -299,7 +304,12 @@ fn cold_successors_match_900_independent_cut_direction_relation_and_position_cas
                                         };
                                         assert_eq!(
                                             vertex.props,
-                                            vec![(P, CanonicalScalar::Int(p))]
+                                            vec![(
+                                                P,
+                                                CanonicalPropertyValue::Scalar(
+                                                    CanonicalScalar::Int(p)
+                                                )
+                                            )]
                                         );
                                     }
                                     assert_eq!(

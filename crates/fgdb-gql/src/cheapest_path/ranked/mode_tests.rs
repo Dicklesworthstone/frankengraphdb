@@ -1,4 +1,5 @@
 use super::*;
+use fgdb_types::CanonicalPropertyValue;
 
 const R: RelationId = RelationId(7);
 const W: PropertyKeyId = PropertyKeyId(9);
@@ -62,7 +63,7 @@ fn permitted(mode: GraphCheapestPathMode, source: VId, steps: &[Step]) -> bool {
 fn oracle(
     q: &PreparedGraphCheapestPath,
     edges: &[Edge],
-    weights: &BTreeMap<EId, CanonicalScalar>,
+    weights: &BTreeMap<EId, CanonicalPropertyValue>,
 ) -> Vec<Answer> {
     let mut layer = vec![(q.source(), 0_i128, Vec::<Step>::new())];
     let mut answers = Vec::new();
@@ -94,7 +95,8 @@ fn oracle(
                 if relation != R {
                     continue;
                 }
-                let CanonicalScalar::Int(weight) = &weights[&eid] else {
+                let CanonicalPropertyValue::Scalar(CanonicalScalar::Int(weight)) = &weights[&eid]
+                else {
                     panic!("integer fixture");
                 };
                 let mut destinations = Vec::new();
@@ -136,7 +138,12 @@ fn combined_match_and_path_modes_rank_signed_routes_before_selecting_any_answer(
             .collect();
         let weights: BTreeMap<_, _> = selected
             .iter()
-            .map(|&(eid, _, _, weight)| (EId(eid), CanonicalScalar::Int(weight)))
+            .map(|&(eid, _, _, weight)| {
+                (
+                    EId(eid),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(weight)),
+                )
+            })
             .collect();
         for match_mode in [
             GraphMatchMode::DifferentEdges,
@@ -194,9 +201,9 @@ fn combined_match_and_path_modes_rank_signed_routes_before_selecting_any_answer(
 #[test]
 fn different_edges_rejects_a_cheaper_undirected_simple_backtrack_before_ranking() {
     let edges = [(EId(1), VId(0), R, VId(1)), (EId(2), VId(0), R, VId(1))];
-    let weights = BTreeMap::from([
-        (EId(1), CanonicalScalar::Int(-10)),
-        (EId(2), CanonicalScalar::Int(3)),
+    let weights: BTreeMap<EId, CanonicalPropertyValue> = BTreeMap::from([
+        (EId(1), CanonicalScalar::Int(-10).into()),
+        (EId(2), CanonicalScalar::Int(3).into()),
     ]);
     for mode in [GraphCheapestPathMode::Walk, GraphCheapestPathMode::Simple] {
         let base = query(0, 0, GlaDirection::Undirected, 2, 2).with_mode(mode);
@@ -274,7 +281,10 @@ fn exhaustive_signed_mode_ranking_matches_complete_walks_filtered_only_at_the_en
             if choice != 0 {
                 let eid = EId(id as u128);
                 edges.push((eid, VId(src), R, VId(dst)));
-                weights.insert(eid, CanonicalScalar::Int(choice as i64 - 2));
+                weights.insert(
+                    eid,
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(choice as i64 - 2)),
+                );
             }
         }
         for direction in [
@@ -331,7 +341,12 @@ fn a_more_expensive_prefix_at_the_same_depth_and_vertex_can_be_the_only_legal_an
             .collect();
         let weights = fixture
             .iter()
-            .map(|&(id, _, _, w)| (EId(id), CanonicalScalar::Int(w)))
+            .map(|&(id, _, _, w)| {
+                (
+                    EId(id),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(w)),
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         let depth = if *mode == GraphCheapestPathMode::Trail {
             5
@@ -369,7 +384,7 @@ fn a_more_expensive_prefix_at_the_same_depth_and_vertex_can_be_the_only_legal_an
 #[test]
 fn simple_closure_is_terminal_but_is_not_edge_unique_trail() {
     let edges = [(EId(1), VId(0), R, VId(1))];
-    let weight = CanonicalScalar::Int(-1);
+    let weight = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-1));
     for (mode, expected) in [
         (GraphCheapestPathMode::Trail, 0),
         (GraphCheapestPathMode::Acyclic, 0),
@@ -442,10 +457,10 @@ fn forbidden_prefix_families_are_pruned_before_enumerating_exponentially_many_wa
         (EId(2), VId(0), R, VId(0)),
         (EId(3), VId(0), R, VId(1)),
     ];
-    let weights = BTreeMap::from([
-        (EId(1), CanonicalScalar::Int(-2)),
-        (EId(2), CanonicalScalar::Int(-1)),
-        (EId(3), CanonicalScalar::Int(5)),
+    let weights: BTreeMap<EId, CanonicalPropertyValue> = BTreeMap::from([
+        (EId(1), CanonicalScalar::Int(-2).into()),
+        (EId(2), CanonicalScalar::Int(-1).into()),
+        (EId(3), CanonicalScalar::Int(5).into()),
     ]);
     for mode in &MODES[1..] {
         let q = query(0, 1, GlaDirection::Forward, 1, 80).with_mode(*mode);
@@ -483,11 +498,11 @@ fn every_history_refusal_is_terminal_and_every_retry_returns_the_same_complete_a
         (EId(3), VId(1), R, VId(0)),
         (EId(4), VId(1), R, VId(1)),
     ];
-    let weights = BTreeMap::from([
-        (EId(1), CanonicalScalar::Int(-1)),
-        (EId(2), CanonicalScalar::Int(4)),
-        (EId(3), CanonicalScalar::Int(0)),
-        (EId(4), CanonicalScalar::Int(-2)),
+    let weights: BTreeMap<EId, CanonicalPropertyValue> = BTreeMap::from([
+        (EId(1), CanonicalScalar::Int(-1).into()),
+        (EId(2), CanonicalScalar::Int(4).into()),
+        (EId(3), CanonicalScalar::Int(0).into()),
+        (EId(4), CanonicalScalar::Int(-2).into()),
     ]);
     let profiles = MODES
         .into_iter()
@@ -569,7 +584,7 @@ fn every_history_refusal_is_terminal_and_every_retry_returns_the_same_complete_a
 #[test]
 fn mode_budgets_are_cumulative_exact_and_zero_count_still_validates_costs() {
     let edges = [(EId(1), VId(0), R, VId(0)), (EId(2), VId(0), R, VId(1))];
-    let weight = CanonicalScalar::Int(-1);
+    let weight = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-1));
     let profiles = MODES
         .into_iter()
         .skip(1)
@@ -637,7 +652,7 @@ fn all_history_modes_handle_the_maximum_depth_iteratively_and_sum_wide_signed_we
             )
         })
         .collect();
-    let weight = CanonicalScalar::Int(i64::MIN);
+    let weight = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(i64::MIN));
     for mode in &MODES[1..] {
         let q = query(0, u128::from(depth), GlaDirection::Forward, depth, depth).with_mode(*mode);
         let rows = q

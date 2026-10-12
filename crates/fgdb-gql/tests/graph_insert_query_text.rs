@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphPatternTextErrorKind, GraphSetColumnType, GraphSymbol, GraphSymbolKind,
     PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphInsertText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -373,7 +373,7 @@ fn empty_sources_never_allocate_and_return_star_has_only_visible_bindings() {
     );
 }
 
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 
 fn run_matched(
@@ -440,10 +440,10 @@ fn matched_creation_returns_original_and_created_bindings_for_every_occurrence()
         (VId(2), R, VId(3)),
     ];
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(10)),
-        ((VId(2), P), CanonicalScalar::Int(20)),
-        ((VId(2), Q), CanonicalScalar::Int(7)),
-        ((VId(3), Q), CanonicalScalar::Int(8)),
+        ((VId(1), P), CanonicalScalar::Int(10).into()),
+        ((VId(2), P), CanonicalScalar::Int(20).into()),
+        ((VId(2), Q), CanonicalScalar::Int(7).into()),
+        ((VId(3), Q), CanonicalScalar::Int(8).into()),
     ]);
     let batch = run_matched(&query, &vertices, &edges, &props).unwrap();
     assert_eq!(
@@ -498,7 +498,7 @@ fn matched_creation_returns_original_and_created_bindings_for_every_occurrence()
 
 #[test]
 fn match_return_only_columns_and_star_do_not_use_creation_column_positions() {
-    let props = Props::from([((VId(1), Q), CanonicalScalar::Int(11))]);
+    let props = Props::from([((VId(1), Q), CanonicalScalar::Int(11).into())]);
     let batch = run_matched(
         &prepare("MATCH (n) CREATE (c {p:7}) RETURN n.q AS q,n,c ORDER BY n"),
         &[VId(1), VId(2)],
@@ -610,12 +610,12 @@ fn empty_match_is_a_no_op_and_return_errors_expose_no_partial_proposal() {
 // therefore changes an independently spelled expected answer.
 fn imported_props() -> Props {
     Props::from([
-        ((VId(1), P), CanonicalScalar::Int(1)),
-        ((VId(2), P), CanonicalScalar::Int(2)),
-        ((VId(3), P), CanonicalScalar::Int(2)),
-        ((VId(1), Q), CanonicalScalar::Int(10)),
-        ((VId(2), Q), CanonicalScalar::Int(20)),
-        ((VId(3), Q), CanonicalScalar::Int(30)),
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
+        ((VId(3), P), CanonicalScalar::Int(2).into()),
+        ((VId(1), Q), CanonicalScalar::Int(10).into()),
+        ((VId(2), Q), CanonicalScalar::Int(20).into()),
+        ((VId(3), Q), CanonicalScalar::Int(30).into()),
     ])
 }
 

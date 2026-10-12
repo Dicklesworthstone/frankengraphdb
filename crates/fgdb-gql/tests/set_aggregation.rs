@@ -12,7 +12,7 @@ use fgdb_gql::{
     GraphSetValue, MAX_GRAPH_SET_DEPTH, PreparedGraphAggregate, PreparedGraphSet,
     PreparedGraphSetAggregate,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -65,17 +65,22 @@ fn source<C>(
     policy: GqlQueryPolicy,
     checkpoint: impl FnMut() -> Result<(), C>,
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, C>> {
+    let stored: Vec<CanonicalPropertyValue> = data
+        .iter()
+        .map(|(_, value)| CanonicalPropertyValue::from(value.clone()))
+        .collect();
     pattern.plan().execute_governed_with_properties(
         data.len() as u64,
         (0..data.len()).map(|i| VId(i as u128)),
         [],
         |vid, tests| {
-            let (label, value) = &data[vid.0 as usize];
+            let label = data[vid.0 as usize].0;
+            let value = &stored[vid.0 as usize];
             Ok(tests
                 .iter()
-                .all(|test| test.matches(&[*label], &[(P, value.clone())])))
+                .all(|test| test.matches(&[label], &[(P, value.clone())])))
         },
-        |vid, _| Ok(Some(&data[vid.0 as usize].1)),
+        |vid, _| Ok(Some(&stored[vid.0 as usize])),
         policy,
         checkpoint,
     )
@@ -428,13 +433,14 @@ fn single_source_contract_transcripts_and_definition_bounds_remain_intact() {
     let new = PreparedGraphSetAggregate::prepare(input.clone(), &[], &aggregates, 0, None).unwrap();
     assert_eq!(new.canonical_bytes(), old.canonical_bytes());
     let data = [(A, CanonicalScalar::Int(4))];
+    let stored = CanonicalPropertyValue::from(data[0].1.clone());
     let ordinary = old
         .execute_governed(
             1,
             [VId(0)],
             [],
             |_, _| Ok::<_, &str>(true),
-            |_, _| Ok(Some(&data[0].1)),
+            |_, _| Ok(Some(&stored)),
             wide(),
             || Ok::<_, ()>(()),
         )

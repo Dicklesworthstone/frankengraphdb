@@ -20,7 +20,7 @@ use fgdb_delta_types::{
 };
 use fgdb_gql::algebra::{GlaOperator, ValueProjection, VertexPredicate};
 use fgdb_gql::{GqlQueryPolicy, GraphAggregateFunction, GraphAggregateRow, PreparedGraphAggregate};
-use fgdb_types::{CanonicalScalar, CommitSeq, QueryCx, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, QueryCx, VId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ use std::sync::Arc;
 #[derive(Debug, Default, PartialEq)]
 struct VertexState {
     labels: BTreeSet<LabelId>,
-    props: BTreeMap<PropertyKeyId, CanonicalScalar>,
+    props: BTreeMap<PropertyKeyId, CanonicalPropertyValue>,
 }
 
 pub(crate) struct StandingQuery {
@@ -68,6 +68,21 @@ fn scalar_units(value: &CanonicalScalar) -> usize {
         _ => 0,
     };
     1 + bytes.div_ceil(64)
+}
+/// Retained units of a stored value: a scalar's own, or a List's or Map's
+/// node, each key's bytes and every nested value (fgdb-k3nub).
+fn stored_units(value: &CanonicalPropertyValue) -> usize {
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => scalar_units(scalar),
+        CanonicalPropertyValue::List(list) => list.values().iter().fold(1usize, |units, value| {
+            units.saturating_add(stored_units(value))
+        }),
+        CanonicalPropertyValue::Map(map) => map.entries().iter().fold(1usize, |units, entry| {
+            units
+                .saturating_add(entry.key().as_str().len().div_ceil(64))
+                .saturating_add(stored_units(entry.value()))
+        }),
+    }
 }
 fn eligible(query: &PreparedGraphAggregate) -> bool {
     // A complete relational schema is NOT permission to maintain only its
@@ -227,7 +242,7 @@ fn state_from(
     for (key, value) in &row.props {
         meter.charge(ZSetEvent::Work)?;
         if needs_property(query, *key) {
-            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+            meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
             state.props.insert(*key, value.clone());
         }
     }
@@ -396,7 +411,7 @@ impl StandingQuery {
                     }
                     match after {
                         Some(value) => {
-                            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+                            meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
                             state.props.insert(*property, value.clone());
                         }
                         None => {

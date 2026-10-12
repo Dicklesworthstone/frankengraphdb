@@ -322,7 +322,7 @@ fn group_quotas_late_data_errors_empty_input_and_close_obey_the_pull_contract() 
         assert!(cursor.next().is_none());
     }
     let mut bad = source(63);
-    bad.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true))];
+    bad.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true).into())];
     let mut cursor = run(&q, bad, wide());
     assert!(matches!(
         cursor.next(),
@@ -386,7 +386,12 @@ fn thousands_of_joined_occurrences_share_group_local_distinct_support_and_exact_
         let value = i64::MAX - i64::try_from((id / 2) % 2).unwrap();
         s.edges.insert(
             EId(id),
-            (owner, R, VId(1), vec![(P, CanonicalScalar::Int(value))]),
+            (
+                owner,
+                R,
+                VId(1),
+                vec![(P, CanonicalScalar::Int(value).into())],
+            ),
         );
     }
     let mut cursor = run(&q, s, GqlQueryPolicy::new(4096, 2, 10_000_000, 1_000_000));

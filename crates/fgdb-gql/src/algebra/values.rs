@@ -1511,6 +1511,19 @@ mod tests {
     use fgdb_types::CanonicalF64;
     use std::collections::BTreeSet;
 
+    /// A caller's own source or control failure, or a data exception the
+    /// projection raised. The projection never folds the second into the first.
+    #[derive(Debug, PartialEq)]
+    enum Failure<S> {
+        Source(S),
+        Data(crate::GraphIntegerError),
+    }
+    impl<S> From<crate::GraphIntegerError> for Failure<S> {
+        fn from(error: crate::GraphIntegerError) -> Self {
+            Self::Data(error)
+        }
+    }
+
     fn canonical_test_frame(payload: &[u8]) -> Vec<u8> {
         let mut bytes = (payload.len() as u64).to_be_bytes().to_vec();
         bytes.extend_from_slice(payload);
@@ -1957,7 +1970,7 @@ mod tests {
 
     #[test]
     fn bounded_values_read_rejected_payloads_without_copying_them() {
-        let payload = CanonicalScalar::bytes(vec![3; 4096]).unwrap();
+        let payload = CanonicalPropertyValue::from(CanonicalScalar::bytes(vec![3; 4096]).unwrap());
         let mut rows = ProjectedRows::for_plan(
             false,
             &[super::super::GlaOperator::Limit {
@@ -1974,7 +1987,7 @@ mod tests {
                 &mut rows,
                 &mut |_, _| {
                     reads += 1;
-                    Ok::<_, ()>(Some(&payload))
+                    Ok::<_, Failure<()>>(Some(&payload))
                 },
                 &mut |event| {
                     scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
@@ -1995,17 +2008,19 @@ mod tests {
                 &columns(),
                 &[Some(VId(99)), Some(VId(42))],
                 &mut rows,
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("late property failure"),
+                &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
+                    "late property failure"
+                )),
                 &mut |_| Ok(())
             ),
-            Err("late property failure")
+            Err(Failure::Source("late property failure"))
         );
         assert_eq!(rows.len(), 1);
     }
 
     #[test]
     fn refused_replacement_keeps_the_previous_complete_value_row() {
-        let payload = CanonicalScalar::bytes(vec![1; 129]).unwrap();
+        let payload = CanonicalPropertyValue::from(CanonicalScalar::bytes(vec![1; 129]).unwrap());
         let initialized = || {
             let mut rows = ProjectedRows::for_plan(
                 false,
@@ -2018,7 +2033,7 @@ mod tests {
                 &columns(),
                 &[Some(VId(9)), Some(VId(2))],
                 &mut rows,
-                &mut |_, _| Ok::<_, usize>(Some(&payload)),
+                &mut |_, _| Ok::<_, Failure<usize>>(Some(&payload)),
                 &mut |_| Ok(()),
             )
             .unwrap();
@@ -2030,7 +2045,7 @@ mod tests {
             &columns(),
             &[Some(VId(1)), Some(VId(2))],
             &mut measured,
-            &mut |_, _| Ok::<_, usize>(Some(&payload)),
+            &mut |_, _| Ok::<_, Failure<usize>>(Some(&payload)),
             &mut |_| {
                 total += 1;
                 Ok(())
@@ -2049,13 +2064,17 @@ mod tests {
                 &columns(),
                 &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
-                &mut |_, _| Ok::<_, usize>(Some(&payload)),
+                &mut |_, _| Ok::<_, Failure<usize>>(Some(&payload)),
                 &mut |_| {
                     calls += 1;
-                    if calls == stop { Err(stop) } else { Ok(()) }
+                    if calls == stop {
+                        Err(Failure::Source(stop))
+                    } else {
+                        Ok(())
+                    }
                 },
             );
-            assert_eq!(result, Err(stop));
+            assert_eq!(result, Err(Failure::Source(stop)));
             assert_eq!(calls, stop);
             assert_eq!(rows.len(), 1);
             assert_eq!(rows.first(), Some(&before));
@@ -2117,14 +2136,14 @@ mod tests {
 
     #[test]
     fn missing_and_stored_null_collapse_but_vertex_correlations_survive() {
-        let null = CanonicalScalar::Null;
+        let null = CanonicalPropertyValue::Scalar(CanonicalScalar::Null);
         let mut rows = ProjectedRows::new(true);
         for (owner, present) in [(1, false), (1, true), (2, false)] {
             collect_values(
                 &columns(),
                 &[Some(VId(owner)), Some(VId(4))],
                 &mut rows,
-                &mut |_, _| Ok::<_, ()>(present.then_some(&null)),
+                &mut |_, _| Ok::<_, Failure<()>>(present.then_some(&null)),
                 &mut |_| Ok(()),
             )
             .unwrap();
@@ -2141,6 +2160,7 @@ mod tests {
     #[test]
     fn duplicate_payload_rows_allocate_nothing_and_payload_growth_is_charged() {
         let payload = CanonicalScalar::bytes(vec![7; 129]).unwrap();
+        let stored = CanonicalPropertyValue::Scalar(payload.clone());
         let mut rows = ProjectedRows::new(true);
         let mut scratch = 0;
         for _ in 0..2 {
@@ -2148,7 +2168,7 @@ mod tests {
                 &columns(),
                 &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
-                &mut |_, _| Ok::<_, ()>(Some(&payload)),
+                &mut |_, _| Ok::<_, Failure<()>>(Some(&stored)),
                 &mut |event| {
                     scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
                     Ok(())
@@ -2166,13 +2186,15 @@ mod tests {
 
     #[test]
     fn every_value_projection_checkpoint_refuses_before_row_publication() {
-        let payload = CanonicalScalar::ucs_basic_text(&"x".repeat(129)).unwrap();
+        let payload = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"x".repeat(129)).unwrap(),
+        );
         let mut total = 0;
         collect_values(
             &columns(),
             &[Some(VId(1)), Some(VId(2))],
             &mut ProjectedRows::new(true),
-            &mut |_, _| Ok::<_, usize>(Some(&payload)),
+            &mut |_, _| Ok::<_, Failure<usize>>(Some(&payload)),
             &mut |_| {
                 total += 1;
                 Ok(())
@@ -2186,13 +2208,17 @@ mod tests {
                 &columns(),
                 &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
-                &mut |_, _| Ok::<_, usize>(Some(&payload)),
+                &mut |_, _| Ok::<_, Failure<usize>>(Some(&payload)),
                 &mut |_| {
                     calls += 1;
-                    if calls == stop { Err(stop) } else { Ok(()) }
+                    if calls == stop {
+                        Err(Failure::Source(stop))
+                    } else {
+                        Ok(())
+                    }
                 },
             );
-            assert_eq!(result, Err(stop));
+            assert_eq!(result, Err(Failure::Source(stop)));
             assert_eq!(calls, stop);
             assert!(rows.is_empty());
         }
@@ -2202,10 +2228,10 @@ mod tests {
                 &columns(),
                 &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("source"),
+                &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source("source")),
                 &mut |_| Ok(())
             ),
-            Err("source")
+            Err(Failure::Source("source"))
         );
         assert!(rows.is_empty());
     }
@@ -2213,6 +2239,7 @@ mod tests {
     #[test]
     fn all_value_rows_charge_each_payload_and_keep_null_occurrences() {
         let payload = CanonicalScalar::bytes(vec![7; 129]).unwrap();
+        let stored = CanonicalPropertyValue::Scalar(payload.clone());
         let mut rows = ProjectedRows::new(false);
         let mut scratch = 0;
         for present in [true, false, true, false] {
@@ -2220,7 +2247,7 @@ mod tests {
                 &columns(),
                 &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
-                &mut |_, _| Ok::<_, ()>(present.then_some(&payload)),
+                &mut |_, _| Ok::<_, Failure<()>>(present.then_some(&stored)),
                 &mut |event| {
                     scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
                     Ok(())
@@ -2239,13 +2266,13 @@ mod tests {
 
     #[test]
     fn every_all_value_checkpoint_preserves_previously_completed_occurrences() {
-        let payload = CanonicalScalar::bytes(vec![9; 129]).unwrap();
+        let payload = CanonicalPropertyValue::from(CanonicalScalar::bytes(vec![9; 129]).unwrap());
         let mut total = 0;
         collect_values(
             &columns(),
             &[Some(VId(1)), Some(VId(2))],
             &mut ProjectedRows::new(false),
-            &mut |_, _| Ok::<_, usize>(Some(&payload)),
+            &mut |_, _| Ok::<_, Failure<usize>>(Some(&payload)),
             &mut |_| {
                 total += 1;
                 Ok(())
@@ -2258,7 +2285,7 @@ mod tests {
                 &columns(),
                 &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
-                &mut |_, _| Ok::<_, usize>(Some(&payload)),
+                &mut |_, _| Ok::<_, Failure<usize>>(Some(&payload)),
                 &mut |_| Ok(()),
             )
             .unwrap();
@@ -2267,13 +2294,17 @@ mod tests {
                 &columns(),
                 &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
-                &mut |_, _| Ok::<_, usize>(Some(&payload)),
+                &mut |_, _| Ok::<_, Failure<usize>>(Some(&payload)),
                 &mut |_| {
                     calls += 1;
-                    if calls == stop { Err(stop) } else { Ok(()) }
+                    if calls == stop {
+                        Err(Failure::Source(stop))
+                    } else {
+                        Ok(())
+                    }
                 },
             );
-            assert_eq!(result, Err(stop));
+            assert_eq!(result, Err(Failure::Source(stop)));
             assert_eq!(calls, stop);
             assert_eq!(
                 rows.len(),
@@ -2303,7 +2334,11 @@ mod tests {
                 &selected,
                 &[Some(owner), None],
                 &mut rows,
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("null binding reached the source"),
+                &mut |_, _| {
+                    Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
+                        "null binding reached the source",
+                    ))
+                },
                 &mut |_| Ok(()),
             )
             .unwrap();
@@ -2313,6 +2348,7 @@ mod tests {
             assert!(row.get(2).unwrap().is_null());
         }
         let scalar = CanonicalScalar::Int(12);
+        let stored = CanonicalPropertyValue::Scalar(scalar.clone());
         let mut calls = 0;
         let mut rows = ProjectedRows::new(false);
         collect_values(
@@ -2322,7 +2358,7 @@ mod tests {
             &mut |vid, _| {
                 assert_eq!(vid, VId(0));
                 calls += 1;
-                Ok::<_, ()>(Some(&scalar))
+                Ok::<_, Failure<()>>(Some(&stored))
             },
             &mut |_| Ok(()),
         )

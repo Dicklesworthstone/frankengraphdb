@@ -9,7 +9,7 @@ use crate::Snapshot;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_strata::AdjacencyEntry;
 use fgdb_strata::vertex::{VertexPatchRows, VertexRow};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
@@ -666,7 +666,10 @@ impl PropertyEqualityIndex {
                     .push((row.created_at, patch, row_at));
                 for (key, value) in &row.props {
                     work += 1;
-                    if matches!(value, CanonicalScalar::Null) {
+                    // A List or Map is indexed under its own canonical bytes
+                    // (fgdb-k3nub): never skipped, and never equal to the
+                    // scalar a lookup encodes.
+                    if matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) {
                         continue;
                     }
                     let Ok(encoded) = value.encode() else {
@@ -738,7 +741,7 @@ impl PropertyEqualityIndex {
                 self.histories = self.histories.insert(row.vid, history, &mut self.work);
                 for (key, value) in &row.props {
                     self.work += 1;
-                    if matches!(value, CanonicalScalar::Null) {
+                    if matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) {
                         continue;
                     }
                     let Ok(encoded) = value.encode() else {
@@ -1059,7 +1062,12 @@ fn bound_vertices<'a, E, Row>(
                 // Historical membership is only a candidate superset. Recheck
                 // spelling on the visible row; retain all original GLA filters.
                 if row.props.iter().any(|(property, value)| {
-                    *property == key && matches!(value, CanonicalScalar::Text(value) if value.as_str().starts_with(text))
+                    *property == key
+                        && matches!(
+                            value,
+                            CanonicalPropertyValue::Scalar(CanonicalScalar::Text(value))
+                                if value.as_str().starts_with(text)
+                        )
                 }) {
                     control(SourceEvent::ScratchEntry)?;
                     rows.push(row);
@@ -1527,13 +1535,16 @@ mod indexed_tests {
     }
 }
 
-type BorrowedEdge<'a> = (IdentifiedEdge, &'a [(PropertyKeyId, CanonicalScalar)]);
+type BorrowedEdge<'a> = (
+    IdentifiedEdge,
+    &'a [(PropertyKeyId, CanonicalPropertyValue)],
+);
 
 fn edge_properties_at(
     props: &[Option<Arc<fgdb_strata::edge_props::BlockProps>>],
     block: usize,
     row: usize,
-) -> &[(PropertyKeyId, CanonicalScalar)] {
+) -> &[(PropertyKeyId, CanonicalPropertyValue)] {
     let Some(Some(props)) = props.get(block) else {
         return &[];
     };
@@ -1552,7 +1563,7 @@ pub(crate) fn visit_edges_with_properties<'a, E, C>(
     control: &mut C,
     mut visit: impl FnMut(
         &'a AdjacencyEntry,
-        &'a [(PropertyKeyId, CanonicalScalar)],
+        &'a [(PropertyKeyId, CanonicalPropertyValue)],
         &mut C,
     ) -> Result<(), E>,
 ) -> Result<(), E>
@@ -2080,7 +2091,11 @@ pub(super) fn admit<'a, E, Row>(
     })
 }
 impl BorrowedTables<'_> {
-    pub(super) fn edge_property(&self, eid: EId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+    pub(super) fn edge_property(
+        &self,
+        eid: EId,
+        key: PropertyKeyId,
+    ) -> Option<&CanonicalPropertyValue> {
         let at = self
             .edges
             .binary_search_by_key(&eid, |(edge, _)| edge.0)
@@ -2091,7 +2106,7 @@ impl BorrowedTables<'_> {
             .ok()
             .map(|at| &props[at].1)
     }
-    pub(super) fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+    pub(super) fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
         let row = self.vertices[self
             .vertices
             .binary_search_by_key(&vid, |row| row.vid)

@@ -200,7 +200,7 @@ mod tests {
             !compare_properties(
                 &comparison(),
                 &[Some(VId(1)), None],
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source(
+                &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
                     "must not read null bindings"
                 )),
                 &mut |_| Ok(())
@@ -211,8 +211,12 @@ mod tests {
 
     #[test]
     fn payload_work_and_both_source_reads_can_be_interrupted() {
-        let first = CanonicalScalar::ucs_basic_text(&"a".repeat(4096)).unwrap();
-        let second = CanonicalScalar::ucs_basic_text(&"b".repeat(8192)).unwrap();
+        let first = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"a".repeat(4096)).unwrap(),
+        );
+        let second = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"b".repeat(8192)).unwrap(),
+        );
         let values = [&first, &second];
         let mut events = 0;
         let complete = compare_properties(
@@ -260,10 +264,14 @@ mod tests {
                 &bindings,
                 &[],
                 &mut |_, _| {
-                    Err::<Option<&CanonicalScalar>, _>(Failure::Source("unexpected vertex read"))
+                    Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
+                        "unexpected vertex read",
+                    ))
                 },
                 &mut |_, _| {
-                    Err::<Option<&CanonicalScalar>, _>(Failure::Source("unexpected edge read"))
+                    Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
+                        "unexpected edge read",
+                    ))
                 },
                 &mut |_| Err(Failure::Source("unexpected work for null bindings")),
             );
@@ -295,7 +303,7 @@ mod tests {
 
     #[test]
     fn element_comparison_can_be_cancelled_before_each_source_read() {
-        let value = CanonicalScalar::ucs_basic_text("").unwrap();
+        let value = CanonicalPropertyValue::from(CanonicalScalar::ucs_basic_text("").unwrap());
         for stop in 1..=3 {
             let mut events = 0;
             let mut reads = 0;
@@ -341,7 +349,10 @@ mod tests {
 
     #[test]
     fn captured_edges_never_replace_vertex_property_operands() {
-        let values = [CanonicalScalar::Int(1), CanonicalScalar::Int(2)];
+        let values: [CanonicalPropertyValue; 2] = [
+            CanonicalScalar::Int(1).into(),
+            CanonicalScalar::Int(2).into(),
+        ];
         for (comparison, expected) in [
             (IntegerComparison::Equal, false),
             (IntegerComparison::NotEqual, true),
@@ -387,7 +398,9 @@ mod tests {
                     &comparison(),
                     &ids,
                     &paths,
-                    &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source("vertex read")),
+                    &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
+                        "vertex read"
+                    )),
                     &mut |_, _| Err(Failure::Source("edge read")),
                     &mut |_| Err(Failure::Source("work after a NULL binding")),
                 ),
@@ -459,8 +472,8 @@ mod tests {
             .iter()
             .find(|op| matches!(op, GlaOperator::SelectBoolean { .. }))
             .unwrap();
-        let vertex_value = CanonicalScalar::Int(5);
-        let edge_value = CanonicalScalar::Int(10);
+        let vertex_value = CanonicalPropertyValue::from(CanonicalScalar::Int(5));
+        let edge_value = CanonicalPropertyValue::from(CanonicalScalar::Int(10));
         let mut vertices = Vec::new();
         let mut edges = Vec::new();
         let result = compare_element_properties(

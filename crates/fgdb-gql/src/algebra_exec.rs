@@ -1673,7 +1673,7 @@ mod tests {
                 reads.set(reads.get() + 1);
                 assert_eq!(vid, VId(2));
                 Ok::<_, ()>(predicates.iter().all(|predicate| {
-                    predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(7))])
+                    predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(7).into())])
                 }))
             })
             .unwrap();

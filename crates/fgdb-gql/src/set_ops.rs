@@ -930,7 +930,7 @@ impl PreparedGraphSet {
         elements: impl FnMut(
             fgdb_delta_types::ElementId,
             fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalScalar>, E>,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
         let mut source = WithElementReads {

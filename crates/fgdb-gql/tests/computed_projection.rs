@@ -9,7 +9,7 @@ use fgdb_gql::{
     GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetValue, GraphSymbol,
     GraphSymbolKind, MAX_GRAPH_SET_DEPTH, PreparedGraphSet, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 
 type QueryResult<C = ()> =
@@ -49,7 +49,7 @@ fn absolute(quantifier: GraphSetQuantifier) -> PreparedGraphSet {
 }
 fn run(
     query: &PreparedGraphSet,
-    values: &[Option<CanonicalScalar>],
+    values: &[Option<CanonicalPropertyValue>],
     budget: GqlQueryPolicy,
 ) -> QueryResult {
     query.execute_governed(
@@ -77,13 +77,13 @@ fn integers(rows: &[GraphValueRow]) -> Vec<Option<i64>> {
         })
         .collect()
 }
-fn fixture() -> Vec<Option<CanonicalScalar>> {
+fn fixture() -> Vec<Option<CanonicalPropertyValue>> {
     vec![
-        Some(CanonicalScalar::Int(-2)),
-        Some(CanonicalScalar::Int(2)),
-        Some(CanonicalScalar::Int(-3)),
-        Some(CanonicalScalar::Int(3)),
-        Some(CanonicalScalar::Null),
+        Some(CanonicalScalar::Int(-2).into()),
+        Some(CanonicalScalar::Int(2).into()),
+        Some(CanonicalScalar::Int(-3).into()),
+        Some(CanonicalScalar::Int(3).into()),
+        Some(CanonicalScalar::Null.into()),
         None,
     ]
 }
@@ -263,7 +263,7 @@ fn projection_errors_are_not_hidden_by_distinct_or_zero_output() {
     ] {
         let result = run(
             &query,
-            &[Some(CanonicalScalar::Int(0)), Some(bad)],
+            &[Some(CanonicalScalar::Int(0).into()), Some(bad.into())],
             policy(),
         );
         assert!(

@@ -469,11 +469,11 @@ mod tests {
 
     #[test]
     fn property_groups_equal_ordinary_bags_for_nulls_parallel_edges_and_directions() {
-        let properties = BTreeMap::from([
-            (VId(0), CanonicalScalar::Int(7)),
-            (VId(1), CanonicalScalar::Null),
-            (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Int(-2)),
+        let properties: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::from([
+            (VId(0), CanonicalScalar::Int(7).into()),
+            (VId(1), CanonicalScalar::Null.into()),
+            (VId(2), CanonicalScalar::Int(7).into()),
+            (VId(3), CanonicalScalar::Int(-2).into()),
         ]);
         let edges = [
             (VId(0), RelationId(1), VId(1)),
@@ -549,7 +549,7 @@ mod tests {
             [VId(0), VId(1)],
             edges,
             |_, _| Ok::<_, &str>(true),
-            |_, _| Err::<Option<&CanonicalScalar>, _>("property source failed"),
+            |_, _| Err::<Option<&CanonicalPropertyValue>, _>("property source failed"),
             policy,
             || Ok::<_, ()>(()),
         );
@@ -559,7 +559,7 @@ mod tests {
                 "property source failed"
             )))
         ));
-        let value = CanonicalScalar::Int(1);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
         let mut events = 0;
         aggregate
             .execute_governed(
@@ -605,7 +605,7 @@ mod tests {
         let policy = GqlQueryPolicy::new(256, 1, 100_000, 10_000);
         let run = |aggregate: &PreparedGraphAggregate,
                    source: &[(VId, RelationId, VId)],
-                   value: &CanonicalScalar| {
+                   value: &CanonicalPropertyValue| {
             aggregate.execute_governed(
                 source.len() as u64,
                 [VId(0)],
@@ -622,7 +622,7 @@ mod tests {
         };
         let rejected = query(&format!("MATCH {pattern} WHERE a.n=0 RETURN COUNT(*) AS n"));
         assert!(eligible(&rejected));
-        let value = CanonicalScalar::Int(1);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
         assert_eq!(
             run(&rejected, &edges, &value).unwrap().value,
             run(&rejected, &[], &value).unwrap().value
@@ -634,7 +634,7 @@ mod tests {
                 GraphAggregateError::ArithmeticOverflow { aggregate: 0 }
             ))
         ));
-        let null = CanonicalScalar::Null;
+        let null = CanonicalPropertyValue::from(CanonicalScalar::Null);
         assert_eq!(
             run(&counted, &edges, &null).unwrap().value,
             run(&counted, &[], &null).unwrap().value

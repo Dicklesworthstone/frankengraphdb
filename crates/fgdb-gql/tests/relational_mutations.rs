@@ -9,7 +9,7 @@ use fgdb_gql::{
     GraphSetOperation, GraphSetQuantifier, GraphSymbol, GraphSymbolKind, MAX_GRAPH_SET_DEPTH,
     PreparedGraphMutation, PreparedGraphSet, PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 
 const R: RelationId = RelationId(1);
@@ -50,6 +50,11 @@ fn execute<C>(
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<()>, C>> {
     let checkpoint = std::cell::RefCell::new(&mut checkpoint);
+    let stored: Vec<_> = values
+        .iter()
+        .cloned()
+        .map(CanonicalPropertyValue::from)
+        .collect();
     mutation.execute_governed(
         policy,
         |pattern, remaining| {
@@ -60,7 +65,7 @@ fn execute<C>(
                 |_, _| Ok::<_, ()>(true),
                 |vid, key| {
                     Ok(if key == P {
-                        values.get(vid.0 as usize)
+                        stored.get(vid.0 as usize)
                     } else {
                         None
                     })
@@ -404,6 +409,7 @@ fn ordinary_definition_is_unchanged_and_pipeline_executes_one_real_leaf() {
     assert_eq!(pipeline.selection(), ordinary.selection());
     assert_ne!(pipeline.canonical_bytes(), ordinary.canonical_bytes());
     let values = [CanonicalScalar::Int(7)];
+    let stored = values.clone().map(CanonicalPropertyValue::from);
     assert_eq!(
         run(&ordinary, &values, &[], wide()).intents(),
         run(&pipeline, &values, &[], wide()).intents()
@@ -420,7 +426,7 @@ fn ordinary_definition_is_unchanged_and_pipeline_executes_one_real_leaf() {
                     [VId(0)],
                     [],
                     |_, _| Ok::<_, ()>(true),
-                    |_, _| Ok(Some(&values[0])),
+                    |_, _| Ok(Some(&stored[0])),
                     remaining,
                     || Ok::<_, ()>(()),
                 )

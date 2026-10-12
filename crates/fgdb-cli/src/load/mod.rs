@@ -642,7 +642,7 @@ fn parse_row(
     if key.is_empty() {
         return Err("caller key must not be empty".into());
     }
-    let mut props = Vec::new();
+    let mut props: Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)> = Vec::new();
     if let Some(values) = fields.get("props") {
         for (name, value) in object(values)? {
             let id = options
@@ -660,7 +660,7 @@ fn parse_row(
                     return Err("InvalidProperty: value is not a storable canonical scalar".into());
                 }
             };
-            props.push((PropertyKeyId(u64::from(*id)), value));
+            props.push((PropertyKeyId(u64::from(*id)), value.into()));
         }
     }
     props.sort_by_key(|(id, _)| *id);

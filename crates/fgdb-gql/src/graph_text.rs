@@ -2136,7 +2136,7 @@ impl PreparedGraphText {
 mod tests {
     use super::*;
     use crate::{GqlQueryError, GqlQueryPolicy};
-    use fgdb_types::{CanonicalScalar, EId, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
     use std::cell::Cell;
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -2741,7 +2741,10 @@ mod tests {
     #[test]
     fn inline_property_map_selects_only_equal_values() {
         let pattern = query("MATCH (a {n:1}) RETURN a");
-        let values = [CanonicalScalar::Int(1), CanonicalScalar::Int(2)];
+        let values: [CanonicalPropertyValue; 2] = [
+            CanonicalScalar::Int(1).into(),
+            CanonicalScalar::Int(2).into(),
+        ];
         let actual = pattern
             .plan()
             .execute_governed_with_properties(
@@ -2755,7 +2758,8 @@ mod tests {
                             comparison,
                             value,
                         } => {
-                            values.get(vid.0 as usize - 1) == Some(&CanonicalScalar::Int(*value))
+                            values.get(vid.0 as usize - 1)
+                                == Some(&CanonicalPropertyValue::from(CanonicalScalar::Int(*value)))
                                 && *comparison == IntegerComparison::Equal
                         }
                         _ => true,
@@ -2820,8 +2824,8 @@ mod tests {
 
     #[test]
     fn property_nulls_and_duplicate_pagination_use_existing_value_semantics() {
-        let null = CanonicalScalar::Null;
-        let value = CanonicalScalar::Int(7);
+        let null = CanonicalPropertyValue::from(CanonicalScalar::Null);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
         let edges = [
             (VId(1), RelationId(1), VId(2)),
             (VId(1), RelationId(1), VId(3)),
@@ -2854,7 +2858,7 @@ mod tests {
         assert!(run("b.n SKIP 1 LIMIT 1")[0].get(0).unwrap().is_null());
         assert_eq!(
             run("b.n SKIP 2 LIMIT 1")[0].get(0).unwrap().as_scalar(),
-            Some(&value)
+            Some(&CanonicalScalar::Int(7))
         );
         assert!(run("b.n LIMIT 0").is_empty());
         assert_eq!(
@@ -2919,7 +2923,7 @@ mod tests {
             (EId(3), VId(2), RelationId(2), VId(3)),
             (EId(4), VId(2), RelationId(2), VId(4)),
         ];
-        let scalar = CanonicalScalar::Int(7);
+        let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
         let run = |cap| {
             pattern.plan().execute_governed_with_identified_properties(
                 4,
@@ -3097,9 +3101,15 @@ mod tests {
     #[test]
     fn inline_node_maps_keep_optional_rows_parallel_edges_and_null_semantics() {
         let values = BTreeMap::from([
-            (VId(1), CanonicalScalar::Int(1)),
-            (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Null),
+            (
+                VId(1),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(1)),
+            ),
+            (
+                VId(2),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(7)),
+            ),
+            (VId(3), CanonicalPropertyValue::from(CanonicalScalar::Null)),
         ]);
         let edges = [
             (VId(1), RelationId(1), VId(2)),

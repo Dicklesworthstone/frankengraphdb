@@ -170,7 +170,7 @@ impl Snapshot {
         control: &mut C,
         mut visit: impl FnMut(
             &'a AdjacencyEntry,
-            &'a [(PropertyKeyId, CanonicalScalar)],
+            &'a [(PropertyKeyId, fgdb_types::CanonicalPropertyValue)],
             &mut C,
         ) -> Result<(), E>,
     ) -> Result<(), E>

@@ -1380,7 +1380,10 @@ mod tests {
             };
             assert!(!predicate.matches(&[], &[]));
             assert_eq!(
-                predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(i64::MIN))]),
+                predicate.matches(
+                    &[],
+                    &[(PropertyKeyId(4), CanonicalScalar::Int(i64::MIN).into())]
+                ),
                 comparison.accepts(i64::MIN, i64::MAX)
             );
         }
@@ -1416,7 +1419,7 @@ mod tests {
         ] {
             let properties = [(
                 PropertyKeyId(4),
-                CanonicalScalar::Float(CanonicalF64::new(actual)),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(actual))),
             )];
             for (comparison, expected) in comparisons.into_iter().zip(expected) {
                 let predicate = VertexPredicate::IntegerProperty {
@@ -1443,10 +1446,12 @@ mod tests {
                 CanonicalScalar::Bool(true),
                 CanonicalScalar::ucs_basic_text("1").unwrap(),
             ] {
-                assert!(!predicate.matches(&[], &[(PropertyKeyId(4), actual)]));
+                assert!(!predicate.matches(&[], &[(PropertyKeyId(4), actual.into())]));
             }
             assert!(!predicate.matches(&[], &[]));
-            assert!(!predicate.matches(&[], &[(PropertyKeyId(99), CanonicalScalar::Int(1))]));
+            assert!(
+                !predicate.matches(&[], &[(PropertyKeyId(99), CanonicalScalar::Int(1).into())])
+            );
         }
     }
 
@@ -1474,7 +1479,10 @@ mod tests {
                 .collect();
             let rows = plan
                 .execute(vertices, edges, |id, predicates| {
-                    let properties = [(PropertyKeyId(4), values[id.0 as usize - 1].clone())];
+                    let properties = [(
+                        PropertyKeyId(4),
+                        CanonicalPropertyValue::Scalar(values[id.0 as usize - 1].clone()),
+                    )];
                     Ok::<_, ()>(
                         predicates
                             .iter()

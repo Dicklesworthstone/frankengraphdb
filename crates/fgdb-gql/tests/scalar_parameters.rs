@@ -6,7 +6,7 @@ use fgdb_gql::{
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
     PreparedGraphText,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -68,6 +68,10 @@ fn run(
     pattern: &PreparedGraphPattern<GraphValueRow>,
     values: &[Option<CanonicalScalar>],
 ) -> Vec<VId> {
+    let stored: Vec<Option<CanonicalPropertyValue>> = values
+        .iter()
+        .map(|value| value.clone().map(CanonicalPropertyValue::from))
+        .collect();
     pattern
         .plan()
         .execute_governed_with_properties(
@@ -75,14 +79,14 @@ fn run(
             (0..values.len()).map(|at| VId(at as u128)),
             [],
             |vid, predicates| {
-                let property = values[vid.0 as usize].as_ref().map(|value| (P, value));
+                let property = stored[vid.0 as usize].as_ref().map(|value| (P, value));
                 Ok::<_, ()>(
                     predicates
                         .iter()
                         .all(|predicate| predicate.matches_borrowed([], property)),
                 )
             },
-            |vid, _| Ok(values[vid.0 as usize].as_ref()),
+            |vid, _| Ok(stored[vid.0 as usize].as_ref()),
             wide(),
             || Ok::<_, ()>(()),
         )
@@ -371,8 +375,8 @@ fn scoped_scalar_arguments_compose_with_null_extension_existence_and_group_ranki
     )
     .unwrap();
     let query = template.bind_parameters(&arguments).unwrap();
-    let ready = text("ready");
-    let banned = CanonicalScalar::Bool(true);
+    let ready = CanonicalPropertyValue::from(text("ready"));
+    let banned = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
     let edges = [
         (VId(1), RelationId(1), VId(10)),
         (VId(1), RelationId(1), VId(10)),
@@ -495,6 +499,7 @@ fn scalar_bindings_keep_exact_limits_and_every_interruption_boundary() {
                 .unwrap(),
         )
         .unwrap();
+    let value = CanonicalPropertyValue::from(value);
     let mut checkpoints = 0;
     let full = query
         .plan()

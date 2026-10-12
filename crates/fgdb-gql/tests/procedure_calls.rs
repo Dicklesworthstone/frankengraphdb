@@ -11,7 +11,7 @@ use fgdb_gql::{
     ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
     ProcedureSelfLoops, ReverseSymbolCatalog,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::RefCell;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -565,7 +565,7 @@ fn each_call_in_a_set_expression_runs_exactly_once() {
 #[test]
 fn procedure_columns_correlate_with_a_later_match() {
     // Graph: VId(i) has p = values[i]. The procedure yields ids to look up.
-    let values = [10, 20, 30].map(CanonicalScalar::Int);
+    let values = [10, 20, 30].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let query = prepare(
         "CALL t.echo(20) YIELD id MATCH (n {p: id}) RETURN n",
         &GqlParameters::new(),
@@ -644,7 +644,7 @@ fn the_call_is_part_of_the_relation_identity() {
 
 /// Graph VId(i) has p = values[i]; any property read of `p` sees it.
 fn graph(
-    values: &[CanonicalScalar],
+    values: &[CanonicalPropertyValue],
 ) -> impl FnMut(&fgdb_gql::algebra::PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy) -> Rows + '_
 {
     move |pattern, remaining| {
@@ -668,7 +668,8 @@ fn graph(
 
 #[test]
 fn a_match_vertex_reusing_a_yielded_name_is_that_vertex_not_a_cross_product() {
-    let values = [10, 20, 30, 40, 50].map(CanonicalScalar::Int);
+    let values =
+        [10, 20, 30, 40, 50].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let run = |text: &str| {
         prepare(text, &GqlParameters::new())
             .execute_governed_with_procedures(
@@ -709,7 +710,8 @@ fn a_match_vertex_reusing_a_yielded_name_is_that_vertex_not_a_cross_product() {
 
 #[test]
 fn a_return_reads_a_correlated_vertex_properties_without_a_with() {
-    let values = [10, 20, 30, 40, 50].map(CanonicalScalar::Int);
+    let values =
+        [10, 20, 30, 40, 50].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let run = |text: &str| {
         prepare(text, &GqlParameters::new())
             .execute_governed_with_procedures(
@@ -747,7 +749,8 @@ fn a_return_reads_a_correlated_vertex_properties_without_a_with() {
 /// which outputs it must supply as vertices.
 #[test]
 fn a_property_read_of_a_yielded_output_implies_its_identity_match() {
-    let values = [10, 20, 30, 40, 50].map(CanonicalScalar::Int);
+    let values =
+        [10, 20, 30, 40, 50].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let seen = RefCell::new(Vec::new());
     let run = |text: &str| {
         prepare(text, &GqlParameters::new())
@@ -864,7 +867,7 @@ impl GraphSymbolResolver for MetadataCatalog {
 }
 
 struct MetadataGraph {
-    properties: [CanonicalScalar; 5],
+    properties: [CanonicalPropertyValue; 5],
     maps: Vec<GraphValue>,
     labels: Vec<GraphValue>,
     edge_type: CanonicalScalar,
@@ -880,7 +883,7 @@ impl MetadataGraph {
             .map(|value| GraphValue::map(vec![("p".into(), GraphValue::Scalar(value))]).unwrap())
             .collect();
         Self {
-            properties,
+            properties: properties.map(CanonicalPropertyValue::from),
             maps,
             labels: vec![GraphValue::Scalar(
                 CanonicalScalar::ucs_basic_text("Person").unwrap(),

@@ -11,7 +11,7 @@ use fgdb_gql::{
     GraphSymbolResolver, PreparedGraphAggregateText, PreparedGraphSetText, PreparedGraphText,
     ReverseSymbolCatalog,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -61,21 +61,39 @@ fn property(value: Option<&GraphValue>, key: PropertyKeyId) -> Option<&Canonical
         .get(keys.binary_search_by(|key| key.as_ref().cmp(name)).ok()?)?
         .as_scalar()
 }
+/// The stored property values the per-key source reads: exactly what
+/// `property` finds in each element's map, held as stored values.
+fn stored<K: Copy + Ord>(
+    maps: &BTreeMap<K, GraphValue>,
+) -> BTreeMap<(K, PropertyKeyId), CanonicalPropertyValue> {
+    maps.iter()
+        .filter_map(|(&element, value)| {
+            let stored = CanonicalPropertyValue::from(property(Some(value), P)?.clone());
+            Some(((element, P), stored))
+        })
+        .collect()
+}
 
 struct Fixture {
     vertices: BTreeMap<VId, GraphValue>,
     edges: Vec<Edge>,
     edge_maps: BTreeMap<EId, GraphValue>,
+    vertex_values: BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>,
+    edge_values: BTreeMap<(EId, PropertyKeyId), CanonicalPropertyValue>,
 }
 impl Fixture {
     fn new() -> Self {
+        let vertices = BTreeMap::from([(VId(1), map(&[("p", integer(1))])), (VId(2), map(&[]))]);
+        let edge_maps = BTreeMap::from([
+            (EId(11), map(&[("p", integer(11))])),
+            (EId(12), map(&[("p", integer(12))])),
+        ]);
         Self {
-            vertices: BTreeMap::from([(VId(1), map(&[("p", integer(1))])), (VId(2), map(&[]))]),
+            vertex_values: stored(&vertices),
+            edge_values: stored(&edge_maps),
+            vertices,
             edges: vec![(EId(11), VId(1), R, VId(2)), (EId(12), VId(1), R, VId(2))],
-            edge_maps: BTreeMap::from([
-                (EId(11), map(&[("p", integer(11))])),
-                (EId(12), map(&[("p", integer(12))])),
-            ]),
+            edge_maps,
         }
     }
     fn execute(
@@ -88,8 +106,8 @@ impl Fixture {
             self.vertices.keys().copied(),
             self.edges.iter().copied(),
             |_, _| Ok(true),
-            |vid, key| Ok(property(self.vertices.get(&vid), key)),
-            |eid, key| Ok(property(self.edge_maps.get(&eid), key)),
+            |vid, key| Ok(self.vertex_values.get(&(vid, key))),
+            |eid, key| Ok(self.edge_values.get(&(eid, key))),
             |_| Ok(None),
             |_| Ok(None),
             |vid| Ok(self.vertices.get(&vid)),
@@ -334,7 +352,7 @@ fn map_inputs_and_outputs_use_the_existing_aggregate_engine() {
                 source.vertices.keys().copied(),
                 [],
                 |_, _| Ok::<_, ()>(true),
-                |vid, key| Ok(property(source.vertices.get(&vid), key)),
+                |vid, key| Ok(source.vertex_values.get(&(vid, key))),
                 |_, _| Ok(None),
                 |_| Ok(None),
                 |_| Ok(None),

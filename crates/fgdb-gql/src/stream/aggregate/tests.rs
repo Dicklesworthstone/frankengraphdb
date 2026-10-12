@@ -16,7 +16,7 @@ struct Row {
     vid: VId,
     visible: bool,
     labels: Vec<LabelId>,
-    properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 struct Source {
     rows: Vec<Row>,
@@ -78,7 +78,10 @@ fn row(vid: u128, value: Option<CanonicalScalar>) -> Row {
         vid: VId(vid),
         visible: true,
         labels: vec![LABEL],
-        properties: value.into_iter().map(|v| (KEY, v)).collect(),
+        properties: value
+            .into_iter()
+            .map(|v| (KEY, CanonicalPropertyValue::Scalar(v)))
+            .collect(),
     }
 }
 fn wide() -> GqlQueryPolicy {
@@ -471,7 +474,7 @@ fn grouped_row(vid: u128, bucket: Option<CanonicalScalar>, value: Option<i64>) -
     let mut result = row(vid, value.map(CanonicalScalar::Int));
     result
         .properties
-        .extend(bucket.map(|value| (BUCKET, value)));
+        .extend(bucket.map(|value| (BUCKET, CanonicalPropertyValue::Scalar(value))));
     result
 }
 fn expected_groups(definition: &PreparedGraphAggregate, rows: &[Row]) -> Vec<GraphAggregateRow> {
@@ -645,7 +648,7 @@ fn grouped_source_data_and_final_group_budget_refusals_emit_no_partial_groups() 
     assert_eq!(cursor.row_stats().result_rows, 0);
     assert!(cursor.pending.is_none());
     let mut bad = rows.clone();
-    bad[1].properties[0].1 = CanonicalScalar::ucs_basic_text("bad").unwrap();
+    bad[1].properties[0].1 = CanonicalScalar::ucs_basic_text("bad").unwrap().into();
     let mut cursor =
         VertexAggregateCursor::new(source(bad), plan.clone(), wide(), || Ok::<_, ()>(()));
     assert!(matches!(

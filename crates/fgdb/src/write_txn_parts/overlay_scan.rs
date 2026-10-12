@@ -274,7 +274,7 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
         control: &mut C,
         mut visit: impl FnMut(
             &'s AdjacencyEntry,
-            &'s [(PropertyKeyId, CanonicalScalar)],
+            &'s [(PropertyKeyId, CanonicalPropertyValue)],
             &mut C,
         ) -> Result<(), E>,
     ) -> Option<Result<(), E>>
@@ -304,7 +304,7 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
             }
             let mut replacements = edges.iter().peekable();
             let mut emit = |entry: &'s AdjacencyEntry,
-                            properties: &'s [(PropertyKeyId, CanonicalScalar)],
+                            properties: &'s [(PropertyKeyId, CanonicalPropertyValue)],
                             control: &mut C| {
                 if observe(entry) {
                     self.transaction

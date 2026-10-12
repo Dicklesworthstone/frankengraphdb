@@ -5,7 +5,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
     GraphSymbol, GraphSymbolKind, PreparedGraphSet, PreparedGraphSetText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     (kind == GraphSymbolKind::Property && name == "text")
@@ -30,6 +30,7 @@ fn execute(
     input: &CanonicalScalar,
     budget: GqlQueryPolicy,
 ) -> QueryResult {
+    let input = &CanonicalPropertyValue::from(input.clone());
     query.execute_governed(
         budget,
         |pattern, remaining| {
@@ -405,6 +406,7 @@ fn size_of_a_text_aggregate_counts_characters_in_the_result_projection() {
     .bind_parameters(&GqlParameters::new())
     .unwrap();
     let run = |input: &CanonicalScalar| {
+        let input = &CanonicalPropertyValue::from(input.clone());
         query.execute_governed(
             1,
             [VId(1)],
@@ -2564,6 +2566,7 @@ fn opencypher_to_string_and_to_integer_convert_the_scalar_domain() {
         (work(&parse, &long) - work(&plain, &long)) - (work(&parse, &short) - work(&plain, &short)),
         1024 / 64 - 1
     );
+    let stored = CanonicalPropertyValue::from(input.clone());
     let counted = fgdb_gql::PreparedGraphAggregateText::prepare(
         "MATCH (n) RETURN toString(COUNT(*)) AS c",
         symbols,
@@ -2576,7 +2579,7 @@ fn opencypher_to_string_and_to_integer_convert_the_scalar_domain() {
         [VId(1)],
         [],
         |_, _| Ok::<_, ()>(true),
-        |_, _| Ok(Some(&input)),
+        |_, _| Ok(Some(&stored)),
         policy(),
         || Ok::<_, ()>(()),
     )
@@ -2665,7 +2668,7 @@ fn opencypher_regex_match_is_a_bounded_whole_string_match() {
     .unwrap()
     .bind_parameters(&GqlParameters::new())
     .unwrap();
-    let input = text("ab");
+    let input = CanonicalPropertyValue::from(text("ab"));
     let grouped = keyed
         .execute_governed(
             1,

@@ -5,7 +5,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol,
     GraphSymbolKind, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -21,7 +21,8 @@ fn fixed_edge_properties_use_eid_and_preserve_missing_null() {
             .unwrap();
     let prepared = text.bind_parameters(&GqlParameters::new()).unwrap();
     let value = CanonicalScalar::Int(2003);
-    let wrong_domain = CanonicalScalar::Int(99);
+    let stored = CanonicalPropertyValue::from(value.clone());
+    let wrong_domain = CanonicalPropertyValue::from(CanonicalScalar::Int(99));
     let result = prepared
         .plan()
         .execute_governed_with_element_properties(
@@ -33,7 +34,7 @@ fn fixed_edge_properties_use_eid_and_preserve_missing_null() {
             ],
             |_, _| Ok::<_, ()>(true),
             |_, _| Ok(Some(&wrong_domain)),
-            |eid, _| Ok((eid == EId(1)).then_some(&value)),
+            |eid, _| Ok((eid == EId(1)).then_some(&stored)),
             GqlQueryPolicy::new(2, 10, 10000, 10000),
             || Ok::<_, ()>(()),
         )
@@ -80,9 +81,9 @@ fn inline_rows(text: &str) -> Vec<Vec<GraphValue>> {
         .unwrap_or_else(|error| panic!("{text}: {error}"))
         .bind_parameters(&GqlParameters::new())
         .unwrap();
-    let five = CanonicalScalar::Int(5);
-    let seven = CanonicalScalar::Int(7);
-    let nine = CanonicalScalar::Int(9);
+    let five = CanonicalPropertyValue::from(CanonicalScalar::Int(5));
+    let seven = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
+    let nine = CanonicalPropertyValue::from(CanonicalScalar::Int(9));
     let vertex_p = |vid: VId| match vid.0 {
         1 => Some(&five),
         3 => Some(&nine),

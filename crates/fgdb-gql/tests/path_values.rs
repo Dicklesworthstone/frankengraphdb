@@ -579,7 +579,7 @@ fn chain_rows(
         GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, PreparedGraphSetText,
         PreparedProcedureCall,
     };
-    use fgdb_types::{CanonicalScalar, EId, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
     let keys = |kind: GraphSymbolKind, name: &str| match (kind, name) {
         (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(PropertyKeyId(7))),
         (GraphSymbolKind::Property, "w") => Some(GraphSymbol::Property(PropertyKeyId(8))),
@@ -591,16 +591,21 @@ fn chain_rows(
     ];
     let stored = |element: ElementId, key: PropertyKeyId| {
         reads.set(reads.get() + 1);
-        Ok::<_, ()>(match (element, key) {
-            (ElementId::Vertex(VId(1)), PropertyKeyId(7)) => {
-                Some(CanonicalScalar::ucs_basic_text("a").unwrap())
+        Ok::<_, ()>(
+            match (element, key) {
+                (ElementId::Vertex(VId(1)), PropertyKeyId(7)) => {
+                    Some(CanonicalScalar::ucs_basic_text("a").unwrap())
+                }
+                (ElementId::Vertex(VId(2)), PropertyKeyId(7)) => {
+                    Some(CanonicalScalar::ucs_basic_text("b").unwrap())
+                }
+                (ElementId::Edge(EId(id)), PropertyKeyId(8)) => {
+                    Some(CanonicalScalar::Int(id as i64))
+                }
+                _ => None,
             }
-            (ElementId::Vertex(VId(2)), PropertyKeyId(7)) => {
-                Some(CanonicalScalar::ucs_basic_text("b").unwrap())
-            }
-            (ElementId::Edge(EId(id)), PropertyKeyId(8)) => Some(CanonicalScalar::Int(id as i64)),
-            _ => None,
-        })
+            .map(CanonicalPropertyValue::from),
+        )
     };
     let query = PreparedGraphSetText::prepare(text, keys)
         .unwrap_or_else(|error| panic!("{text}: {error:?}"))

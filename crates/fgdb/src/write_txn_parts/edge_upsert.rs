@@ -78,7 +78,7 @@ fn edge_upsert_actions<E, A, C>(
                 control(GlaExecutionEvent::ScratchEntry)?;
                 let value = match &definition.value {
                     GraphEdgeUpsertValue::Literal(value) => {
-                        point_payload_admission(value.value(), &mut |event| {
+                        point_scalar_payload_admission(value.value(), &mut |event| {
                             control(match event {
                                 SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
                                 _ => GlaExecutionEvent::Work,

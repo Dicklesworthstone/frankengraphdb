@@ -33,8 +33,16 @@ fn statement(direction: GlaDirection, predicate: &str, all: bool, skip: u64, lim
         if all { "ALL " } else { "DISTINCT " }
     )
 }
-type EdgeFixtures = BTreeMap<EId, (VId, RelationId, VId, Vec<(PropertyKeyId, CanonicalScalar)>)>;
-type VertexFixtures = BTreeMap<VId, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type EdgeFixtures = BTreeMap<
+    EId,
+    (
+        VId,
+        RelationId,
+        VId,
+        Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+    ),
+>;
+type VertexFixtures = BTreeMap<VId, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 #[derive(Clone)]
 struct Fixture {
     ids: Vec<EId>,
@@ -55,12 +63,12 @@ impl Fixture {
         let vertices = BTreeMap::from([
             (
                 IDS[0],
-                (vec![LabelId(1)], vec![(P, CanonicalScalar::Int(4))]),
+                (vec![LabelId(1)], vec![(P, CanonicalScalar::Int(4).into())]),
             ),
-            (IDS[1], (vec![], vec![(P, CanonicalScalar::Null)])),
+            (IDS[1], (vec![], vec![(P, CanonicalScalar::Null.into())])),
             (
                 IDS[2],
-                (vec![LabelId(1)], vec![(P, CanonicalScalar::Int(1))]),
+                (vec![LabelId(1)], vec![(P, CanonicalScalar::Int(1).into())]),
             ),
         ]);
         let mut edges = BTreeMap::new();
@@ -78,7 +86,9 @@ impl Fixture {
                     IDS[src],
                     rel,
                     IDS[dst],
-                    value.map(|v| vec![(P, v)]).unwrap_or_default(),
+                    value
+                        .map(|v| vec![(P, CanonicalPropertyValue::Scalar(v))])
+                        .unwrap_or_default(),
                 ),
             );
         }
@@ -92,8 +102,11 @@ impl Fixture {
             visits: Arc::new(AtomicUsize::new(0)),
         }
     }
-    fn value(&self, vertex: VId) -> Option<&CanonicalScalar> {
+    fn stored(&self, vertex: VId) -> Option<&CanonicalPropertyValue> {
         self.vertices[&vertex].1.first().map(|(_, value)| value)
+    }
+    fn value(&self, vertex: VId) -> Option<&CanonicalScalar> {
+        self.stored(vertex).map(|value| value.as_scalar().unwrap())
     }
 }
 impl EdgeScanSource for Fixture {
@@ -171,7 +184,7 @@ fn oracle(
             GlaDirection::Undirected if src == dst => vec![(*src, *dst)],
             _ => vec![(*src, *dst), (*dst, *src)],
         };
-        let edge_value = props.first().map(|(_, v)| v);
+        let edge_value = props.first().map(|(_, v)| v.as_scalar().unwrap());
         for (a, b) in endpoints {
             let accept = match filter {
                 0 => true,
@@ -238,7 +251,7 @@ fn directed_reverse_undirected_parallel_null_and_predicate_results_match_indepen
                                     p.matches(&fixture.vertices[&id].0, &fixture.vertices[&id].1)
                                 }))
                             },
-                            |id, _| Ok(fixture.value(id)),
+                            |id, _| Ok(fixture.stored(id)),
                             |id, _| Ok(fixture.edges[&id].3.first().map(|(_, v)| v)),
                             policy(),
                             || Ok::<_, ()>(()),
@@ -426,9 +439,9 @@ fn directed_edge_identity_alone_orders_properties_parallel_edges_and_self_loops(
                         if !only_edge {
                             row.extend([
                                 GraphValue::Scalar(
-                                    properties
-                                        .first()
-                                        .map_or(CanonicalScalar::Null, |(_, v)| v.clone()),
+                                    properties.first().map_or(CanonicalScalar::Null, |(_, v)| {
+                                        v.as_scalar().unwrap().clone()
+                                    }),
                                 ),
                                 GraphValue::Vertex(b),
                                 GraphValue::Scalar(
@@ -450,7 +463,7 @@ fn directed_edge_identity_alone_orders_properties_parallel_edges_and_self_loops(
                                 .iter()
                                 .map(|(&id, (a, r, b, _))| (id, *a, *r, *b)),
                             |_, _| Ok::<_, ()>(true),
-                            |id, _| Ok(fixture.value(id)),
+                            |id, _| Ok(fixture.stored(id)),
                             |id, _| Ok(fixture.edges[&id].3.first().map(|(_, v)| v)),
                             policy(),
                             || Ok::<_, ()>(()),

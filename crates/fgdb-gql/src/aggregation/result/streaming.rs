@@ -513,8 +513,8 @@ mod tests {
             (VId(2), RelationId(1), VId(11)),
             (VId(3), RelationId(1), VId(12)),
         ];
-        let boolean = CanonicalScalar::Bool(true);
-        let integer = CanonicalScalar::Int(1);
+        let boolean = CanonicalPropertyValue::from(CanonicalScalar::Bool(true));
+        let integer = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
         for tail in [
             "HAVING least > 0",
             "HAVING TRUE OR least > 0",

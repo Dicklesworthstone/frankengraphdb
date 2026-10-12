@@ -13,7 +13,7 @@ use std::sync::{
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
-type Edge = (VId, VId, Vec<(PropertyKeyId, CanonicalScalar)>);
+type Edge = (VId, VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>);
 #[derive(Clone)]
 struct Source {
     edges: BTreeMap<EId, Edge>,
@@ -123,7 +123,7 @@ fn source(mask: usize) -> Source {
                         ids[a],
                         ids[b],
                         p.into_iter()
-                            .map(|p| (P, CanonicalScalar::Int(p)))
+                            .map(|p| (P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(p))))
                             .collect(),
                     ),
                 )
@@ -240,7 +240,9 @@ fn oracle(
 ) -> Vec<GraphAggregateRow> {
     let mut oriented = Vec::new();
     for (&id, (a, b, p)) in &s.edges {
-        let value = p.first().map(|(_, p)| GraphValue::Scalar(p.clone()));
+        let value = p
+            .first()
+            .map(|(_, p)| GraphValue::Scalar(p.as_scalar().unwrap().clone()));
         let (a, b) = if dir == 1 { (*b, *a) } else { (*a, *b) };
         oriented.push((id, a, b, value.clone()));
         if dir == 2 && a != b {

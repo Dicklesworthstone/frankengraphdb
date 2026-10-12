@@ -8,7 +8,7 @@ mod query_source {
     use fgdb_gql::algebra::{
         GlaIdentityOutput, GlaOutput, GlaPlan, PreparedGraphPattern, VertexPredicate,
     };
-    use fgdb_types::{CanonicalScalar, EId, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
     use std::collections::{BTreeMap, BTreeSet};
 
     include!("aggregate_queries.rs");
@@ -18,12 +18,15 @@ mod query_source {
     type IdentifiedEdge = (EId, VId, RelationId, VId);
     struct VertexView<'a> {
         labels: &'a [LabelId],
-        props: &'a [(PropertyKeyId, CanonicalScalar)],
+        props: &'a [(PropertyKeyId, CanonicalPropertyValue)],
         label_edits: BTreeMap<LabelId, bool>,
-        property_edits: BTreeMap<PropertyKeyId, Option<&'a CanonicalScalar>>,
+        property_edits: BTreeMap<PropertyKeyId, Option<&'a CanonicalPropertyValue>>,
     }
     impl<'a> VertexView<'a> {
-        fn new(labels: &'a [LabelId], props: &'a [(PropertyKeyId, CanonicalScalar)]) -> Self {
+        fn new(
+            labels: &'a [LabelId],
+            props: &'a [(PropertyKeyId, CanonicalPropertyValue)],
+        ) -> Self {
             Self {
                 labels,
                 props,
@@ -31,7 +34,7 @@ mod query_source {
                 property_edits: BTreeMap::new(),
             }
         }
-        fn property(&self, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+        fn property(&self, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
             if let Some(value) = self.property_edits.get(&key) {
                 *value
             } else {
@@ -41,7 +44,9 @@ mod query_source {
                     .map(|at| &self.props[at].1)
             }
         }
-        fn effective_properties(&self) -> impl Iterator<Item = (PropertyKeyId, &CanonicalScalar)> {
+        fn effective_properties(
+            &self,
+        ) -> impl Iterator<Item = (PropertyKeyId, &CanonicalPropertyValue)> {
             self.props
                 .iter()
                 .filter(move |(key, _)| !self.property_edits.contains_key(key))
@@ -82,17 +87,17 @@ mod query_source {
     }
 
     struct EdgeView<'a> {
-        props: &'a [(PropertyKeyId, CanonicalScalar)],
-        edits: BTreeMap<PropertyKeyId, Option<&'a CanonicalScalar>>,
+        props: &'a [(PropertyKeyId, CanonicalPropertyValue)],
+        edits: BTreeMap<PropertyKeyId, Option<&'a CanonicalPropertyValue>>,
     }
     impl<'a> EdgeView<'a> {
-        fn new(props: &'a [(PropertyKeyId, CanonicalScalar)]) -> Self {
+        fn new(props: &'a [(PropertyKeyId, CanonicalPropertyValue)]) -> Self {
             Self {
                 props,
                 edits: BTreeMap::new(),
             }
         }
-        fn property(&self, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+        fn property(&self, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
             if let Some(value) = self.edits.get(&key) {
                 *value
             } else {
@@ -102,7 +107,9 @@ mod query_source {
                     .map(|at| &self.props[at].1)
             }
         }
-        fn effective_properties(&self) -> impl Iterator<Item = (PropertyKeyId, &CanonicalScalar)> {
+        fn effective_properties(
+            &self,
+        ) -> impl Iterator<Item = (PropertyKeyId, &CanonicalPropertyValue)> {
             self.props
                 .iter()
                 .filter(move |(key, _)| !self.edits.contains_key(key))
@@ -134,7 +141,10 @@ mod query_source {
                 Some(Err(id)) => Err(WriteTxnError::Read(crate::ReadError::UnmappedLabel(*id))),
             }
         }
-        pub(super) fn edge_type(&self, eid: EId) -> Result<Option<&CanonicalScalar>, WriteTxnError> {
+        pub(super) fn edge_type(
+            &self,
+            eid: EId,
+        ) -> Result<Option<&CanonicalScalar>, WriteTxnError> {
             match self.types.get(&eid) {
                 None => Ok(None),
                 Some(Ok(name)) => Ok(Some(name)),
@@ -188,7 +198,9 @@ mod query_source {
         /// as NULL.
         pub(super) fn catalog_names(&self) -> CatalogNames {
             let reverse = self.logical.reverse_catalog.as_deref();
-            let name = |text: Option<&String>| text.and_then(|text| CanonicalScalar::ucs_basic_text(text).ok());
+            let name = |text: Option<&String>| {
+                text.and_then(|text| CanonicalScalar::ucs_basic_text(text).ok())
+            };
             let mut labels = BTreeMap::new();
             if self.logical.projects_labels() {
                 for (vid, view) in &self.vertices {
@@ -266,7 +278,11 @@ mod query_source {
                         .all(|predicate| self.vertices[at].1.matches(predicate))
                 })
         }
-        pub(super) fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+        pub(super) fn property(
+            &self,
+            vid: VId,
+            key: PropertyKeyId,
+        ) -> Option<&CanonicalPropertyValue> {
             let at = self
                 .vertices
                 .binary_search_by_key(&vid, |(vid, _)| *vid)
@@ -277,7 +293,7 @@ mod query_source {
             &self,
             eid: EId,
             key: PropertyKeyId,
-        ) -> Option<&CanonicalScalar> {
+        ) -> Option<&CanonicalPropertyValue> {
             let at = self
                 .edges
                 .binary_search_by_key(&eid, |(edge, _)| edge.0)

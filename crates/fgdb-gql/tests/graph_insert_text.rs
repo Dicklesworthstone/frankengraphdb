@@ -8,7 +8,9 @@ use fgdb_gql::{
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
     PreparedGraphMutationText,
 };
-use fgdb_types::{CanonicalDate, CanonicalScalar, CanonicalScalarKind, EId, VId};
+use fgdb_types::{
+    CanonicalDate, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, EId, VId,
+};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -16,7 +18,7 @@ const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const COPY: LabelId = LabelId(9);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 type ResultOf = Result<GraphInsertBatch, GqlQueryError<GraphInsertError<(), ()>, ()>>;
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -115,8 +117,8 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
         (VId(2), R, VId(3)),
     ];
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(10)),
-        ((VId(2), P), CanonicalScalar::Int(20)),
+        ((VId(1), P), CanonicalScalar::Int(10).into()),
+        ((VId(2), P), CanonicalScalar::Int(20).into()),
     ]);
     let result = run(&query, &[VId(1), VId(2), VId(3)], &edges, &props).unwrap();
     assert_eq!(
@@ -400,7 +402,7 @@ fn missing_optional_endpoints_are_not_silently_turned_into_partial_creations() {
         &query,
         &[VId(1)],
         &[],
-        &Props::from([((VId(1), P), CanonicalScalar::Int(2))]),
+        &Props::from([((VId(1), P), CanonicalScalar::Int(2).into())]),
     )
     .unwrap();
     assert!(

@@ -1013,7 +1013,9 @@ mod tests {
 
     #[test]
     fn scalar_operand_payload_is_allocation_admitted_before_the_vm_copies_it() {
-        let value = CanonicalScalar::ucs_basic_text(&"large".repeat(100)).unwrap();
+        let value = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"large".repeat(100)).unwrap(),
+        );
         let scalar =
             crate::GraphIntegerExpression::prepare_scalar(&[crate::GraphIntegerOp::ScalarColumn(
                 0,
@@ -1075,7 +1077,7 @@ mod tests {
                         .evaluate(
                             &[],
                             &mut |_, _| {
-                                Err::<Option<&CanonicalScalar>, _>(Failure::Source(
+                                Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
                                     "unexpected source",
                                 ))
                             },
@@ -1120,10 +1122,11 @@ mod tests {
                 Op::Not,
             ]);
             for value in &values {
+                let stored = value.clone().map(CanonicalPropertyValue::Scalar);
                 let actual = program
                     .evaluate(
                         &[Some(VId(0))],
-                        &mut |_, _| Ok::<_, Failure<()>>(value.as_ref()),
+                        &mut |_, _| Ok::<_, Failure<()>>(stored.as_ref()),
                         &mut |_| Ok(()),
                     )
                     .unwrap();
@@ -1145,7 +1148,7 @@ mod tests {
         assert!(
             null.evaluate(
                 &[None],
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source("null read")),
+                &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source("null read")),
                 &mut |_| Ok(())
             )
             .unwrap()
@@ -1154,7 +1157,7 @@ mod tests {
 
     #[test]
     fn mixed_numeric_literals_do_not_round_large_integer_properties() {
-        let actual = CanonicalScalar::Int(9_007_199_254_740_993);
+        let actual = CanonicalPropertyValue::from(CanonicalScalar::Int(9_007_199_254_740_993));
         let literal =
             CanonicalScalar::Float(fgdb_types::CanonicalF64::new(9_007_199_254_740_992.0));
         for (comparison, expected) in [
@@ -1208,7 +1211,7 @@ mod tests {
                 &mut |vid, _| {
                     assert_eq!(vid, VId(u128::MAX));
                     reads += 1;
-                    Err::<Option<&CanonicalScalar>, _>(Failure::Source("unreadable"))
+                    Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source("unreadable"))
                 },
                 &mut |_| Ok(()),
             );
@@ -1360,12 +1363,13 @@ mod tests {
             },
             Op::Or,
         ]);
+        let stored = CanonicalPropertyValue::Scalar(value.clone());
         let mut calls = 0;
         assert!(
             expression
                 .evaluate(
                     &[Some(VId(0)), None],
-                    &mut |_, _| Ok::<_, Failure<usize>>(Some(&value)),
+                    &mut |_, _| Ok::<_, Failure<usize>>(Some(&stored)),
                     &mut |_| {
                         calls += 1;
                         Ok(())
@@ -1378,7 +1382,7 @@ mod tests {
             let mut at = 0;
             let result = expression.evaluate(
                 &[Some(VId(0)), None],
-                &mut |_, _| Ok(Some(&value)),
+                &mut |_, _| Ok(Some(&stored)),
                 &mut |_| {
                     at += 1;
                     if at == stop {
@@ -1541,7 +1545,7 @@ mod tests {
         let mut reads = 0;
         let mut source = |_, _| {
             reads += 1;
-            Err::<Option<&CanonicalScalar>, _>(Failure::Source("unexpected source"))
+            Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source("unexpected source"))
         };
         assert_eq!(
             expression
@@ -1604,6 +1608,7 @@ mod tests {
             Some(CanonicalScalar::Int(7)),
             Some(CanonicalScalar::Int(8)),
         ] {
+            let actual = actual.map(CanonicalPropertyValue::Scalar);
             let expected = expression
                 .evaluate(
                     &[Some(VId(1))],
@@ -1636,16 +1641,17 @@ mod tests {
         assert_eq!(
             eager.evaluate_vertex_binding(
                 &[Some(VId(1))],
-                &mut |_, _| Err::<Option<&CanonicalScalar>, _>(Failure::Source("source")),
+                &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source("source")),
                 &mut |_| Ok(())
             ),
             Err(Failure::Source("source"))
         );
+        let stored = CanonicalPropertyValue::Scalar(value.clone());
         let mut calls = 0;
         let expected = eager
             .evaluate_vertex_binding(
                 &[Some(VId(1))],
-                &mut |_, _| Ok::<_, Failure<usize>>(Some(&value)),
+                &mut |_, _| Ok::<_, Failure<usize>>(Some(&stored)),
                 &mut |_| {
                     calls += 1;
                     Ok(())
@@ -1657,7 +1663,7 @@ mod tests {
             assert_eq!(
                 eager.evaluate_vertex_binding(
                     &[Some(VId(1))],
-                    &mut |_, _| Ok(Some(&value)),
+                    &mut |_, _| Ok(Some(&stored)),
                     &mut |_| {
                         seen += 1;
                         if seen == stop {
@@ -1674,7 +1680,7 @@ mod tests {
                 eager
                     .evaluate_vertex_binding(
                         &[Some(VId(1))],
-                        &mut |_, _| Ok::<_, Failure<usize>>(Some(&value)),
+                        &mut |_, _| Ok::<_, Failure<usize>>(Some(&stored)),
                         &mut |_| Ok(())
                     )
                     .unwrap(),

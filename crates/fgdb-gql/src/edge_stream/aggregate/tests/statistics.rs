@@ -81,7 +81,7 @@ fn all_nine_functions_and_full_width_identities_match_eager_for_576_multigraphs(
             VId(0),
             R,
             VId(u128::MAX),
-            vec![(P, CanonicalScalar::Int(5))],
+            vec![(P, CanonicalScalar::Int(5).into())],
         ),
     );
     let row = run(&q, s, policy()).next().unwrap().unwrap();
@@ -175,7 +175,7 @@ fn late_nonnumeric_or_unavailable_input_does_not_expose_a_partial_distinct_count
             "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS edges,{function} AS value"
         ));
         let mut s = source(63);
-        s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true))];
+        s.edges.get_mut(&EId(6)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true).into())];
         let dropped = s.drops.clone();
         let mut cursor = run(&q, s, policy());
         let error = cursor.next().unwrap().unwrap_err();
@@ -211,7 +211,12 @@ fn exact_distinct_average_and_scalar_extrema_keep_their_original_domains() {
     for (id, value) in [(0, i64::MAX), (1, i64::MAX - 1), (2, i64::MAX)] {
         s.edges.insert(
             EId(id),
-            (VId(0), R, VId(1), vec![(P, CanonicalScalar::Int(value))]),
+            (
+                VId(0),
+                R,
+                VId(1),
+                vec![(P, CanonicalScalar::Int(value).into())],
+            ),
         );
     }
     let row = run(&q, s, policy()).next().unwrap().unwrap();
@@ -228,10 +233,14 @@ fn exact_distinct_average_and_scalar_extrema_keep_their_original_domains() {
         "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r.p) AS different,MIN(r.p) AS lo,MAX(r.p) AS hi",
     );
     let mut s = source(63);
-    s.edges.get_mut(&EId(1)).unwrap().3 =
-        vec![(P, CanonicalScalar::ucs_basic_text(&"é".repeat(64)).unwrap())];
+    s.edges.get_mut(&EId(1)).unwrap().3 = vec![(
+        P,
+        CanonicalScalar::ucs_basic_text(&"é".repeat(64))
+            .unwrap()
+            .into(),
+    )];
     s.edges.get_mut(&EId(6)).unwrap().3 =
-        vec![(P, CanonicalScalar::bytes(vec![255; 512]).unwrap())];
+        vec![(P, CanonicalScalar::bytes(vec![255; 512]).unwrap().into())];
     let expected = eager(&q, &s);
     assert_eq!(run(&q, s, policy()).next().unwrap().unwrap(), expected);
 }
