@@ -16,7 +16,9 @@ use crate::application::member::{PinnedApplication, ReadApplication, ReadState};
 use crate::application::tests::{
     Command, MemoryApplication, MemoryState, Mode, genesis, immediate, memory, oid,
 };
-use crate::application::{ApplicationBatch, ApplicationError, ApplicationProgress, AppliedPosition};
+use crate::application::{
+    ApplicationBatch, ApplicationError, ApplicationProgress, AppliedPosition,
+};
 use crate::replica::Replica;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

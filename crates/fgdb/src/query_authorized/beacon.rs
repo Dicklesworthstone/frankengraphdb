@@ -68,7 +68,14 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<Rows, BeaconReadError<ReadError, QueryError>> {
         self.beacon_search_filtered_authorized(
-            cx, authority, token, branch, options, query, |_| true, clock,
+            cx,
+            authority,
+            token,
+            branch,
+            options,
+            query,
+            |_| true,
+            clock,
         )
     }
 
@@ -183,7 +190,15 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<Vec<GraphHybridHit>, BeaconReadError<ReadError, QueryError>> {
         self.beacon_search_graph_filtered_authorized(
-            cx, authority, token, branch, options, query, expansion, |_| true, clock,
+            cx,
+            authority,
+            token,
+            branch,
+            options,
+            query,
+            expansion,
+            |_| true,
+            clock,
         )
     }
 
@@ -615,8 +630,13 @@ mod graph_tests {
 
     fn grant() -> Grant {
         let mut grant = Grant::read_only(
-            "main", 1000,
-            QueryLimits { max_nodes: 3, max_work: 1_000_000, max_rows: 1 },
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 3,
+                max_work: 1_000_000,
+                max_rows: 1,
+            },
         );
         grant.labels = Scope::only([LabelId(1)]);
         grant.relations = Scope::only([RelationId(1)]);
@@ -636,8 +656,13 @@ mod graph_tests {
                 db.write(&c.commit(), edge).await.unwrap();
             }
             let authority = Authority::new(
-                AuthKey::from_seed(3301), NS, "filtered-host", SchemaEpoch(0), 1,
-            ).unwrap();
+                AuthKey::from_seed(3301),
+                NS,
+                "filtered-host",
+                SchemaEpoch(0),
+                1,
+            )
+            .unwrap();
             let token = authority.issue_at(&grant(), 100).unwrap();
             let eligible = |id| {
                 assert_ne!(id, VId(90), "a result predicate must never see hidden IDs");
@@ -645,24 +670,58 @@ mod graph_tests {
             };
             let options = filtered_options();
             for query in [
-                Search::Text { query: "graph", k: 1, mode: TextMatch::Any },
-                Search::Vector { query: &[0.0], k: 1, mode: VectorSearch::Exact },
+                Search::Text {
+                    query: "graph",
+                    k: 1,
+                    mode: TextMatch::Any,
+                },
+                Search::Vector {
+                    query: &[0.0],
+                    k: 1,
+                    mode: VectorSearch::Exact,
+                },
                 Search::Hybrid(filtered_query().retrieval),
             ] {
-                let actual = full.beacon_search_filtered_authorized(
-                    &c.query(), &authority, &token, "main", &options, query, eligible, || 100,
-                ).unwrap();
-                let expected = clean.beacon_search_filtered(&c.query(), &options, query, eligible).unwrap();
+                let actual = full
+                    .beacon_search_filtered_authorized(
+                        &c.query(),
+                        &authority,
+                        &token,
+                        "main",
+                        &options,
+                        query,
+                        eligible,
+                        || 100,
+                    )
+                    .unwrap();
+                let expected = clean
+                    .beacon_search_filtered(&c.query(), &options, query, eligible)
+                    .unwrap();
                 assert_eq!(actual, expected);
                 assert_eq!(actual.len(), 1);
             }
-            let actual = full.beacon_search_graph_filtered_authorized(
-                &c.query(), &authority, &token, "main", &options,
-                filtered_query(), filtered_expansion(), eligible, || 100,
-            ).unwrap();
-            let expected = clean.beacon_search_graph_filtered(
-                &c.query(), &options, filtered_query(), filtered_expansion(), eligible,
-            ).unwrap();
+            let actual = full
+                .beacon_search_graph_filtered_authorized(
+                    &c.query(),
+                    &authority,
+                    &token,
+                    "main",
+                    &options,
+                    filtered_query(),
+                    filtered_expansion(),
+                    eligible,
+                    || 100,
+                )
+                .unwrap();
+            let expected = clean
+                .beacon_search_graph_filtered(
+                    &c.query(),
+                    &options,
+                    filtered_query(),
+                    filtered_expansion(),
+                    eligible,
+                )
+                .unwrap();
             assert_eq!(actual, expected);
             assert_eq!(actual[0].id, VId(3));
             assert_eq!(actual[0].graph_hops, Some(2));
@@ -675,10 +734,19 @@ mod graph_tests {
             let mut masked_grant = grant();
             masked_grant.properties = Scope::only([PropertyKeyId(1)]);
             let masked = authority.issue_at(&masked_grant, 100).unwrap();
-            let hits = full.beacon_search_graph_filtered_authorized(
-                &c.query(), &authority, &masked, "main", &options,
-                filtered_query(), filtered_expansion(), eligible, || 100,
-            ).unwrap();
+            let hits = full
+                .beacon_search_graph_filtered_authorized(
+                    &c.query(),
+                    &authority,
+                    &masked,
+                    "main",
+                    &options,
+                    filtered_query(),
+                    filtered_expansion(),
+                    eligible,
+                    || 100,
+                )
+                .unwrap();
             assert_eq!(hits[0].vector_rank, None);
             assert_eq!(hits[0].vector_distance, None);
             assert_eq!(hits[0].text_rank.unwrap().get(), 1);
@@ -693,38 +761,76 @@ mod graph_tests {
             let c = PurposeContexts::narrow_runtime_root(&root);
             let full = graph(&c.commit(), true).await;
             let authority = Authority::new(
-                AuthKey::from_seed(3302), NS, "filtered-host", SchemaEpoch(0), 1,
-            ).unwrap();
+                AuthKey::from_seed(3302),
+                NS,
+                "filtered-host",
+                SchemaEpoch(0),
+                1,
+            )
+            .unwrap();
             let token = authority.issue_at(&grant(), 100).unwrap();
             let observed = std::cell::Cell::new(false);
             let result = full.beacon_search_graph_filtered_authorized(
-                &c.query(), &authority, &token, "wrong-branch", &filtered_options(),
-                filtered_query(), filtered_expansion(),
-                |_| { observed.set(true); true }, || 100,
+                &c.query(),
+                &authority,
+                &token,
+                "wrong-branch",
+                &filtered_options(),
+                filtered_query(),
+                filtered_expansion(),
+                |_| {
+                    observed.set(true);
+                    true
+                },
+                || 100,
             );
-            assert!(matches!(result, Err(BeaconReadError::Interrupted(QueryError::Authorization(_)))));
+            assert!(matches!(
+                result,
+                Err(BeaconReadError::Interrupted(QueryError::Authorization(_)))
+            ));
             assert!(!observed.get());
 
             let mut limited_grant = grant();
             limited_grant.limits.max_nodes = 2;
             let limited = authority.issue_at(&limited_grant, 100).unwrap();
             let result = full.beacon_search_filtered_authorized(
-                &c.query(), &authority, &limited, "main", &filtered_options(),
-                Search::Hybrid(filtered_query().retrieval), |_| false, || 100,
+                &c.query(),
+                &authority,
+                &limited,
+                "main",
+                &filtered_options(),
+                Search::Hybrid(filtered_query().retrieval),
+                |_| false,
+                || 100,
             );
-            assert!(matches!(result, Err(BeaconReadError::Interrupted(QueryError::Authorization(
-                WardenError::LimitExceeded(LimitDimension::Nodes)
-            )))));
+            assert!(matches!(
+                result,
+                Err(BeaconReadError::Interrupted(QueryError::Authorization(
+                    WardenError::LimitExceeded(LimitDimension::Nodes)
+                )))
+            ));
 
             for accept in [false, true] {
                 let now = std::cell::Cell::new(100_u64);
                 let result = full.beacon_search_graph_filtered_authorized(
-                    &c.query(), &authority, &token, "main", &filtered_options(),
-                    filtered_query(), filtered_expansion(),
-                    |_| { now.set(1001); accept }, || now.get(),
+                    &c.query(),
+                    &authority,
+                    &token,
+                    "main",
+                    &filtered_options(),
+                    filtered_query(),
+                    filtered_expansion(),
+                    |_| {
+                        now.set(1001);
+                        accept
+                    },
+                    || now.get(),
                 );
                 assert_eq!(now.get(), 1001, "expiry must happen during retrieval");
-                assert!(matches!(result, Err(BeaconReadError::Interrupted(QueryError::Authorization(_)))));
+                assert!(matches!(
+                    result,
+                    Err(BeaconReadError::Interrupted(QueryError::Authorization(_)))
+                ));
             }
         });
         assert!(report.lab_test_passed(), "{report:?}");

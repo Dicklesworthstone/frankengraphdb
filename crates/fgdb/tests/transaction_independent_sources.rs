@@ -6,12 +6,12 @@ use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch, WriteError, WriteTxnError
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GlaOperator, GraphValue, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::{
-    GqlBudgetDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregate,
-    GraphSymbol, GraphSymbolKind, PreparedGraphAggregate, PreparedGraphText,
+    GqlBudgetDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregate, GraphSymbol,
+    GraphSymbolKind, PreparedGraphAggregate, PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
-    EmbeddedTxnCompletion, PurposeContexts, VId,
+    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -40,12 +40,17 @@ fn query(text: &str) -> PreparedGraphPattern<GraphValueRow> {
 
 fn independent(text: &str) -> PreparedGraphPattern<GraphValueRow> {
     let pattern = query(text);
-    assert!(pattern.plan().scans_edges(), "must exercise the edge-root source");
-    assert!(pattern
-        .plan()
-        .operators()
-        .iter()
-        .any(|op| matches!(op, GlaOperator::ScanVertices)));
+    assert!(
+        pattern.plan().scans_edges(),
+        "must exercise the edge-root source"
+    );
+    assert!(
+        pattern
+            .plan()
+            .operators()
+            .iter()
+            .any(|op| matches!(op, GlaOperator::ScanVertices))
+    );
     pattern
 }
 
@@ -85,7 +90,11 @@ async fn fixture(cx: &CommitCx) -> Database<MemVfs> {
     seed.create_vertex(VId(1), vec![ROOT], vec![(P, CanonicalScalar::Int(10))]);
     seed.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(20))]);
     for id in [3, 4] {
-        seed.create_vertex(VId(id), vec![TAG], vec![(P, CanonicalScalar::Int(id as i64 * 10))]);
+        seed.create_vertex(
+            VId(id),
+            vec![TAG],
+            vec![(P, CanonicalScalar::Int(id as i64 * 10))],
+        );
     }
     // Parallel relationships must retain bag multiplicity. V3/V4 are isolates.
     seed.add_edge(EId(10), VId(1), VId(2), vec![]);
@@ -105,20 +114,39 @@ fn edge_rooted_products_include_isolates_and_charge_both_domains_once() {
         let pinned = db.read_session().unwrap();
         let mut txn = db.begin(&txcx).unwrap();
         for (text, expected) in [
-            ("MATCH (a)-[:R]->(b), (n) RETURN n.p", vec![10, 10, 20, 20, 30, 30, 40, 40]),
-            ("MATCH (a:Root)-[:R]->(b), (n:Tag) RETURN n.p", vec![30, 30, 40, 40]),
-            ("MATCH (a)-[:R]->(b), (n) RETURN DISTINCT n.p SKIP 1 LIMIT 2", vec![20, 30]),
+            (
+                "MATCH (a)-[:R]->(b), (n) RETURN n.p",
+                vec![10, 10, 20, 20, 30, 30, 40, 40],
+            ),
+            (
+                "MATCH (a:Root)-[:R]->(b), (n:Tag) RETURN n.p",
+                vec![30, 30, 40, 40],
+            ),
+            (
+                "MATCH (a)-[:R]->(b), (n) RETURN DISTINCT n.p SKIP 1 LIMIT 2",
+                vec![20, 30],
+            ),
         ] {
             let pattern = independent(text);
-            let actual = txn.execute_graph_pattern_governed(&db, &qcx, &pattern, policy()).unwrap();
-            let native = pinned.execute_graph_pattern_governed(&qcx, &pattern, policy()).unwrap();
+            let actual = txn
+                .execute_graph_pattern_governed(&db, &qcx, &pattern, policy())
+                .unwrap();
+            let native = pinned
+                .execute_graph_pattern_governed(&qcx, &pattern, policy())
+                .unwrap();
             assert_eq!(cells(&actual.value), integers(&expected), "{text}");
             assert_eq!(actual.value, native.value);
-            assert_eq!(actual.rows.snapshot_records, 6, "four vertices plus two edges, once");
+            assert_eq!(
+                actual.rows.snapshot_records, 6,
+                "four vertices plus two edges, once"
+            );
             assert_eq!(actual.rows.snapshot_records, native.rows.snapshot_records);
         }
         let head = db.frontier().unwrap();
-        assert!(matches!(txn.finish(&mut db, &cx).await, Ok(EmbeddedTxnCompletion::ReadClosed { .. })));
+        assert!(matches!(
+            txn.finish(&mut db, &cx).await,
+            Ok(EmbeddedTxnCompletion::ReadClosed { .. })
+        ));
         assert_eq!(db.frontier().unwrap(), head);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -144,18 +172,41 @@ fn independent_vertex_overlay_applies_properties_labels_births_and_retirement() 
         txn.write(&mut db, edit).unwrap();
         let all = independent("MATCH (a)-[:R]->(b), (n) RETURN n.p");
         let tagged = independent("MATCH (a:Root)-[:R]->(b), (n:Tag) RETURN n.p");
-        let staged = txn.execute_graph_pattern_governed(&db, &qcx, &all, policy()).unwrap();
-        assert_eq!(cells(&staged.value), integers(&[10, 10, 20, 20, 33, 33, 50, 50]));
+        let staged = txn
+            .execute_graph_pattern_governed(&db, &qcx, &all, policy())
+            .unwrap();
+        assert_eq!(
+            cells(&staged.value),
+            integers(&[10, 10, 20, 20, 33, 33, 50, 50])
+        );
         assert_eq!(staged.rows.snapshot_records, 6);
-        let selected = txn.execute_graph_pattern_governed(&db, &qcx, &tagged, policy()).unwrap();
+        let selected = txn
+            .execute_graph_pattern_governed(&db, &qcx, &tagged, policy())
+            .unwrap();
         assert_eq!(cells(&selected.value), integers(&[50, 50]));
         assert_eq!(db.frontier().unwrap(), head);
         assert!(db.vertex(VId(5)).unwrap().is_none());
         assert!(db.vertex(VId(4)).unwrap().is_some());
-        assert_eq!(txn.commit(&mut db, &cx).await.unwrap(), CommitSeq(head.0 + 1));
+        assert_eq!(
+            txn.commit(&mut db, &cx).await.unwrap(),
+            CommitSeq(head.0 + 1)
+        );
         assert_eq!(db.delta_since(head).unwrap().count(), 1);
-        assert_eq!(db.execute_graph_pattern_governed(&qcx, &all, policy()).unwrap().value, staged.value);
-        assert_eq!(cells(&pinned.execute_graph_pattern_governed(&qcx, &tagged, policy()).unwrap().value), integers(&[30, 30, 40, 40]));
+        assert_eq!(
+            db.execute_graph_pattern_governed(&qcx, &all, policy())
+                .unwrap()
+                .value,
+            staged.value
+        );
+        assert_eq!(
+            cells(
+                &pinned
+                    .execute_graph_pattern_governed(&qcx, &tagged, policy())
+                    .unwrap()
+                    .value
+            ),
+            integers(&[30, 30, 40, 40])
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -176,7 +227,12 @@ fn empty_independent_results_and_zero_pages_keep_insertion_witnesses_after_rollb
             let mut txn = db.begin(&txcx).unwrap();
             txn.savepoint(&db, "before-read").unwrap();
             let pattern = independent(text);
-            assert!(txn.execute_graph_pattern_governed(&db, &qcx, &pattern, policy()).unwrap().value.is_empty());
+            assert!(
+                txn.execute_graph_pattern_governed(&db, &qcx, &pattern, policy())
+                    .unwrap()
+                    .value
+                    .is_empty()
+            );
             txn.rollback_to_savepoint(&db, "before-read").unwrap();
             let mut winner = WriteBatch::new(R);
             winner.create_vertex(VId(9), vec![EMPTY], vec![(P, CanonicalScalar::Int(90))]);
@@ -206,7 +262,9 @@ fn source_quota_counts_isolates_before_returning_even_one_result() {
             if error.dimension == GqlBudgetDimension::SnapshotRecords
                 && error.limit == 5 && error.observed == 6));
         let exact = GqlQueryPolicy::new(6, 1, 1_000_000, 1_000_000);
-        let result = txn.execute_graph_pattern_governed(&db, &qcx, &pattern, exact).unwrap();
+        let result = txn
+            .execute_graph_pattern_governed(&db, &qcx, &pattern, exact)
+            .unwrap();
         assert_eq!(cells(&result.value), integers(&[10]));
         assert_eq!(result.rows.snapshot_records, 6);
         let mut winner = WriteBatch::new(R);
@@ -232,10 +290,19 @@ fn independent_rows_stay_at_the_original_snapshot_after_a_writer_advances() {
         winner.create_vertex(VId(9), vec![TAG], vec![(P, CanonicalScalar::Int(90))]);
         db.write(&cx, winner).await.unwrap();
         let pattern = independent("MATCH (a)-[:R]->(b), (n:Tag) RETURN n.p");
-        let historic = txn.execute_graph_pattern_governed(&db, &qcx, &pattern, policy()).unwrap();
+        let historic = txn
+            .execute_graph_pattern_governed(&db, &qcx, &pattern, policy())
+            .unwrap();
         assert_eq!(cells(&historic.value), integers(&[30, 30, 40, 40]));
         assert_eq!(historic.rows.snapshot_records, 6);
-        assert_eq!(cells(&db.execute_graph_pattern_governed(&qcx, &pattern, policy()).unwrap().value), integers(&[31, 31, 40, 40, 90, 90]));
+        assert_eq!(
+            cells(
+                &db.execute_graph_pattern_governed(&qcx, &pattern, policy())
+                    .unwrap()
+                    .value
+            ),
+            integers(&[31, 31, 40, 40, 90, 90])
+        );
         assert!(read_conflict(txn.finish(&mut db, &cx).await));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -253,23 +320,54 @@ fn aggregate_and_independent_probes_consume_the_same_complete_vertex_domain() {
         let mut txn = db.begin(&txcx).unwrap();
         let input = independent("MATCH (a)-[:R]->(b), (n:Tag) RETURN n.p").with_duplicates();
         let aggregate = PreparedGraphAggregate::prepare(
-            input, &[], &[GraphAggregate::count_rows("count"), GraphAggregate::sum_int("total", 0)], 0, None,
-        ).unwrap();
-        let result = txn.execute_graph_aggregate_governed(&db, &qcx, &aggregate, policy()).unwrap();
+            input,
+            &[],
+            &[
+                GraphAggregate::count_rows("count"),
+                GraphAggregate::sum_int("total", 0),
+            ],
+            0,
+            None,
+        )
+        .unwrap();
+        let result = txn
+            .execute_graph_aggregate_governed(&db, &qcx, &aggregate, policy())
+            .unwrap();
         assert_eq!(result.value.len(), 1);
         assert_eq!(result.value[0].get(0).unwrap().as_count(), Some(4));
         assert_eq!(result.value[0].get(1).unwrap().as_integer(), Some(140));
         assert_eq!(result.rows.snapshot_records, 6);
-        assert_eq!(result.value, db.execute_graph_aggregate_governed(&qcx, &aggregate, policy()).unwrap().value);
+        assert_eq!(
+            result.value,
+            db.execute_graph_aggregate_governed(&qcx, &aggregate, policy())
+                .unwrap()
+                .value
+        );
         for (text, expected) in [
-            ("MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (n:Tag) } RETURN a.p", vec![10, 10]),
-            ("MATCH (a)-[:R]->(b) WHERE NOT EXISTS { MATCH (n:Tag) } RETURN a.p", vec![]),
-            ("MATCH (a)-[:R]->(b) WHERE NOT EXISTS { MATCH (n:Empty) } RETURN a.p", vec![10, 10]),
+            (
+                "MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (n:Tag) } RETURN a.p",
+                vec![10, 10],
+            ),
+            (
+                "MATCH (a)-[:R]->(b) WHERE NOT EXISTS { MATCH (n:Tag) } RETURN a.p",
+                vec![],
+            ),
+            (
+                "MATCH (a)-[:R]->(b) WHERE NOT EXISTS { MATCH (n:Empty) } RETURN a.p",
+                vec![10, 10],
+            ),
         ] {
             let pattern = independent(text);
-            let actual = txn.execute_graph_pattern_governed(&db, &qcx, &pattern, policy()).unwrap();
+            let actual = txn
+                .execute_graph_pattern_governed(&db, &qcx, &pattern, policy())
+                .unwrap();
             assert_eq!(cells(&actual.value), integers(&expected), "{text}");
-            assert_eq!(actual.value, db.execute_graph_pattern_governed(&qcx, &pattern, policy()).unwrap().value);
+            assert_eq!(
+                actual.value,
+                db.execute_graph_pattern_governed(&qcx, &pattern, policy())
+                    .unwrap()
+                    .value
+            );
             assert_eq!(actual.rows.snapshot_records, 6);
         }
         txn.finish(&mut db, &cx).await.unwrap();
@@ -289,14 +387,28 @@ fn connected_edge_queries_do_not_gain_an_unrelated_vertex_scan_witness() {
         let mut txn = db.begin(&txcx).unwrap();
         let pattern = query("MATCH (a:Root)-[:R]->(b) RETURN a.p");
         assert!(pattern.plan().scans_edges());
-        assert!(!pattern.plan().operators().iter().any(|op| matches!(op, GlaOperator::ScanVertices)));
-        let result = txn.execute_graph_pattern_governed(&db, &qcx, &pattern, policy()).unwrap();
+        assert!(
+            !pattern
+                .plan()
+                .operators()
+                .iter()
+                .any(|op| matches!(op, GlaOperator::ScanVertices))
+        );
+        let result = txn
+            .execute_graph_pattern_governed(&db, &qcx, &pattern, policy())
+            .unwrap();
         assert_eq!(cells(&result.value), integers(&[10, 10]));
-        assert_eq!(result.rows.snapshot_records, 2, "only the original edge domain is charged");
+        assert_eq!(
+            result.rows.snapshot_records, 2,
+            "only the original edge domain is charged"
+        );
         let mut winner = WriteBatch::new(R);
         winner.create_vertex(VId(9), vec![TAG], vec![]);
         db.write(&cx, winner).await.unwrap();
-        assert!(matches!(txn.finish(&mut db, &cx).await, Ok(EmbeddedTxnCompletion::ReadClosed { .. })));
+        assert!(matches!(
+            txn.finish(&mut db, &cx).await,
+            Ok(EmbeddedTxnCompletion::ReadClosed { .. })
+        ));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

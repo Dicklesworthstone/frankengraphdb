@@ -1215,7 +1215,6 @@ fn an_authorized_read_hosts_call_over_the_masked_projection() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-
 /// fgdb-luq0b: a named selection uses the same capability-protected analytics
 /// source. Selecting a forbidden relation cannot reveal it, and an explicitly
 /// selected hidden weight is absent before its payload is inspected.
@@ -1252,7 +1251,15 @@ fn named_projection_applies_authority_before_relation_and_weight_selection() {
         ] {
             let masked = db
                 .query_authorized(
-                    &cx, &issuer, &token, BRANCH, text, &params, symbols, policy, || 100,
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
                 )
                 .unwrap();
             assert_eq!(
@@ -1274,7 +1281,15 @@ fn named_projection_applies_authority_before_relation_and_weight_selection() {
                     YIELD vertex, distance RETURN vertex, distance ORDER BY vertex";
         let masked = db
             .query_authorized(
-                &cx, &issuer, &token, BRANCH, text, &params, symbols, policy, || 100,
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                text,
+                &params,
+                symbols,
+                policy,
+                || 100,
             )
             .unwrap();
         assert_eq!(
@@ -1288,7 +1303,6 @@ fn named_projection_applies_authority_before_relation_and_weight_selection() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
-
 
 #[test]
 fn inline_projection_is_applied_inside_the_capability_and_before_weight_inspection() {
@@ -1335,15 +1349,35 @@ fn inline_projection_is_applied_inside_the_capability_and_before_weight_inspecti
         ];
         for query in queries {
             let expected = oracle.query(&cx, query, &params, symbols, policy).unwrap();
-            let actual = db.query_authorized(
-                &cx, &issuer, &token, BRANCH, query, &params, symbols, policy, || 100,
-            ).unwrap();
+            let actual = db
+                .query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    query,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
+                )
+                .unwrap();
             assert_eq!(actual, expected, "{query}");
             assert!(matches!(
                 db.query_authorized(
-                    &cx, &issuer, &tight, BRANCH, query, &params, symbols, policy, || 100,
+                    &cx,
+                    &issuer,
+                    &tight,
+                    BRANCH,
+                    query,
+                    &params,
+                    symbols,
+                    policy,
+                    || 100,
                 ),
-                Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Nodes)))
+                Err(QueryError::Authorization(Error::LimitExceeded(
+                    LimitDimension::Nodes
+                )))
             ));
         }
         // Without the capability's induced mask, malformed hidden weights are

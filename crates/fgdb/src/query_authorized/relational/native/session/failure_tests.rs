@@ -315,8 +315,7 @@ fn result_snapshot_metadata_tracks_temporal_binding_and_the_session_pin() {
             (expected(99), CommitSeq(2))
         );
 
-        let temporal =
-            "AT BRANCH $route MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.p AS p";
+        let temporal = "AT BRANCH $route MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.p AS p";
         let arguments = |at| {
             GqlParameters::new()
                 .with_text("route", BRANCH)
@@ -443,7 +442,15 @@ fn all_native_host_facades_keep_branch_framing_and_one_trailing_terminator() {
             assert_eq!(native.facade_class(), class);
             let (mut session, prepared) = db
                 .authorized_prepared_read_session(
-                    &cx, &issuer, &token, BRANCH, symbols, policy(), || 100, selector, native,
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    symbols,
+                    policy(),
+                    || 100,
+                    selector,
+                    native,
                 )
                 .unwrap();
             assert_eq!(prepared.facade_class(), class);
@@ -539,7 +546,9 @@ fn retained_host_templates_share_metadata_but_earn_fresh_pins_and_exact_session_
             expected,
             "an existing session keeps its original pin after the writer advances"
         );
-        let wrong_branch = GqlParameters::new().with_text("route", "elsewhere").unwrap();
+        let wrong_branch = GqlParameters::new()
+            .with_text("route", "elsewhere")
+            .unwrap();
         refusal(
             second.stream_send(&cx, &second_handle, &wrong_branch),
             AuthorizationError::ScopeDenied,
@@ -600,9 +609,8 @@ fn host_template_import_checks_source_coherence_and_identity_after_authenticatio
         session.close();
         assert_eq!(Arc::strong_count(&db.snapshot), refs);
 
-        let mismatch = Arc::new(
-            PreparedGraphBranchText::prepare("MATCH (n:L) RETURN n.p AS p").unwrap(),
-        );
+        let mismatch =
+            Arc::new(PreparedGraphBranchText::prepare("MATCH (n:L) RETURN n.p AS p").unwrap());
         for (now, expected) in [
             (100, AuthorizationError::WrongAuthority),
             (1000, AuthorizationError::Expired),
@@ -729,8 +737,10 @@ fn imported_templates_use_current_scope_and_keep_stream_credentials_live() {
         let db = database(&c.commit()).await;
         let issuer = issuer(623);
         let params = GqlParameters::new();
-        let (selector, native) =
-            retained_read("MATCH (n) WHERE n.p >= 0 RETURN n AS node,n.p AS p", &params);
+        let (selector, native) = retained_read(
+            "MATCH (n) WHERE n.p >= 0 RETURN n AS node,n.p AS p",
+            &params,
+        );
         let refs = Arc::strong_count(&db.snapshot);
         for (case, rows) in [(0, 3), (1, 2), (2, 0)] {
             let mut scope = grant();

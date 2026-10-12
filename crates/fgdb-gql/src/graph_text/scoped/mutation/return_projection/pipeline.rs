@@ -359,9 +359,9 @@ impl<'a> Parser<'a> {
                     if let Some((source, function)) = metadata_source(word, token.at, &lexer)?
                         && let Some(variable) =
                             boundary_metadata_binding(head, offset, source.text, function)
-                        && !functions.iter().any(|&(alias, known, _)| {
-                            alias == source.text && known == function
-                        })
+                        && !functions
+                            .iter()
+                            .any(|&(alias, known, _)| alias == source.text && known == function)
                     {
                         let name = BOUNDARY_READ_NAMES
                             .iter()
@@ -370,10 +370,7 @@ impl<'a> Parser<'a> {
                                 head.outputs.iter().all(|(output, _)| output.text != *name)
                             })
                             .ok_or_else(|| {
-                                expected(
-                                    source.at,
-                                    "at most 16 carried-element reads after a WITH",
-                                )
+                                expected(source.at, "at most 16 carried-element reads after a WITH")
                             })?;
                         let input = self.projection_slot(
                             &mut head.inputs,

@@ -615,7 +615,9 @@ fn resolve_fnx_projection(
         }
     }
     if missing.is_some() && weight.is_none() {
-        return Err(expected("a weight property when specifying its missing policy"));
+        return Err(expected(
+            "a weight property when specifying its missing policy",
+        ));
     }
     let mut symbol = |kind, name| {
         let found = resolve(kind, name)
@@ -677,7 +679,9 @@ fn projection_selection_name(
         [name] => projection_text(name, at).map(Some),
         _ => Err(error(
             at,
-            GraphPatternTextErrorKind::Expected("at most one schema name in the induced projection"),
+            GraphPatternTextErrorKind::Expected(
+                "at most one schema name in the induced projection",
+            ),
         )),
     }
 }
@@ -768,9 +772,7 @@ mod projection_schema_tests {
                          weight => 'cost') YIELD node RETURN node";
         let mut calls = Vec::new();
         let resolve = |kind, name: &str| match (kind, name) {
-            (GraphSymbolKind::Label, "Person" | "Human") => {
-                Some(GraphSymbol::Label(LabelId(7)))
-            }
+            (GraphSymbolKind::Label, "Person" | "Human") => Some(GraphSymbol::Label(LabelId(7))),
             _ => symbols(kind, name),
         };
         let prepared = PreparedGraphSetText::prepare(statement, |kind, name| {
@@ -793,7 +795,10 @@ mod projection_schema_tests {
             resolve,
         )
         .unwrap();
-        assert_eq!(prepared.canonical_template_bytes(), alias.canonical_template_bytes());
+        assert_eq!(
+            prepared.canonical_template_bytes(),
+            alias.canonical_template_bytes()
+        );
         let changed = PreparedGraphSetText::prepare(statement, |kind, name| {
             if kind == GraphSymbolKind::Relation {
                 Some(GraphSymbol::Relation(RelationId(2)))
@@ -802,7 +807,10 @@ mod projection_schema_tests {
             }
         })
         .unwrap();
-        assert_ne!(prepared.canonical_template_bytes(), changed.canonical_template_bytes());
+        assert_ne!(
+            prepared.canonical_template_bytes(),
+            changed.canonical_template_bytes()
+        );
     }
 
     #[test]
@@ -818,7 +826,9 @@ mod projection_schema_tests {
             let error = PreparedGraphSetText::prepare(&statement, |_, _| None).unwrap_err();
             assert_eq!(
                 error.kind,
-                crate::GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::UnknownSymbol(kind))
+                crate::GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::UnknownSymbol(
+                    kind
+                ))
             );
             let found = if kind == GraphSymbolKind::Label {
                 GraphSymbol::Relation(RelationId(1))
@@ -838,11 +848,13 @@ mod projection_schema_tests {
                     "CALL fnx.pagerank({argument} => {value}) YIELD node RETURN node LIMIT 0"
                 );
                 let mut calls = 0;
-                assert!(PreparedGraphSetText::prepare(&statement, |_, _| {
-                    calls += 1;
-                    None
-                })
-                .is_err());
+                assert!(
+                    PreparedGraphSetText::prepare(&statement, |_, _| {
+                        calls += 1;
+                        None
+                    })
+                    .is_err()
+                );
                 assert_eq!(calls, 0, "{statement}");
             }
         }

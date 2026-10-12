@@ -384,7 +384,10 @@ mod filtered_tests {
                 id,
                 vec![],
                 vec![
-                    (PropertyKeyId(1), CanonicalScalar::ucs_basic_text("red").unwrap()),
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::ucs_basic_text("red").unwrap(),
+                    ),
                     (PropertyKeyId(2), CanonicalScalar::Int(coordinate)),
                 ],
             );
@@ -401,8 +404,16 @@ mod filtered_tests {
 
     fn queries() -> [Search<'static>; 3] {
         [
-            Search::Text { query: "red", k: 1, mode: TextMatch::Any },
-            Search::Vector { query: &[0.0], k: 1, mode: VectorSearch::Exact },
+            Search::Text {
+                query: "red",
+                k: 1,
+                mode: TextMatch::Any,
+            },
+            Search::Vector {
+                query: &[0.0],
+                k: 1,
+                mode: VectorSearch::Exact,
+            },
             Search::Hybrid(ExactHybridQuery {
                 vector: &[0.0],
                 text: "red",
@@ -445,12 +456,14 @@ mod filtered_tests {
                     assert_eq!(hits[0].score.numerator(), 2);
                     assert_eq!(hits[0].score.denominator(), 61);
                 }
-                assert!(db
-                    .beacon_search_filtered(&cx, &options(), query, |_| false)
-                    .unwrap()
-                    .is_empty());
+                assert!(
+                    db.beacon_search_filtered(&cx, &options(), query, |_| false)
+                        .unwrap()
+                        .is_empty()
+                );
                 assert_eq!(
-                    db.beacon_search_filtered(&cx, &options(), query, |_| true).unwrap(),
+                    db.beacon_search_filtered(&cx, &options(), query, |_| true)
+                        .unwrap(),
                     baseline
                 );
             }
@@ -474,15 +487,17 @@ mod filtered_tests {
             let mut changes = WriteBatch::new(RelationId(1));
             changes.delete_vertex(SECOND);
             db.write(&commit, changes).await.unwrap();
-            assert!(db
-                .beacon_search_filtered(&cx, &options(), query, |id| id == SECOND)
-                .unwrap()
-                .is_empty());
+            assert!(
+                db.beacon_search_filtered(&cx, &options(), query, |id| id == SECOND)
+                    .unwrap()
+                    .is_empty()
+            );
             db.compact(&commit).await.unwrap();
             let mut historical = options();
             historical.as_of = Some(at);
             assert_eq!(
-                db.beacon_search_filtered(&cx, &historical, query, |id| id == SECOND).unwrap(),
+                db.beacon_search_filtered(&cx, &historical, query, |id| id == SECOND)
+                    .unwrap(),
                 before
             );
             historical.as_of = Some(CommitSeq(at.0 + 1));
@@ -492,7 +507,9 @@ mod filtered_tests {
             ));
             drop(db);
             assert_eq!(
-                pinned.beacon_search_filtered(&cx, &options(), query, |id| id == SECOND).unwrap(),
+                pinned
+                    .beacon_search_filtered(&cx, &options(), query, |id| id == SECOND)
+                    .unwrap(),
                 before
             );
         });
@@ -502,7 +519,10 @@ mod filtered_tests {
     #[test]
     fn reject_all_never_bypasses_source_limits_or_any_work_checkpoint() {
         #[derive(Default)]
-        struct Cut { calls: usize, stop: Option<usize> }
+        struct Cut {
+            calls: usize,
+            stop: Option<usize>,
+        }
         impl WorkControl for Cut {
             fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
                 self.calls += 1;
@@ -522,10 +542,21 @@ mod filtered_tests {
             let manifest = db.manifest().unwrap();
             for query in queries() {
                 let run = |stop| {
-                    let work = RefCell::new(Cut { stop, ..Cut::default() });
+                    let work = RefCell::new(Cut {
+                        stop,
+                        ..Cut::default()
+                    });
                     let result = evaluate_filtered(
-                        &db.snapshot, at, &options(), query, &work, Scan::Metered,
-                        |_| Ok(true), |_| true, |_| true, |_| false,
+                        &db.snapshot,
+                        at,
+                        &options(),
+                        query,
+                        &work,
+                        Scan::Metered,
+                        |_| Ok(true),
+                        |_| true,
+                        |_| true,
+                        |_| false,
                     );
                     (result, work.into_inner().calls)
                 };
@@ -541,7 +572,10 @@ mod filtered_tests {
                 limited.policy.max_staging_rows = 0;
                 assert!(matches!(
                     db.beacon_search_filtered(&cx, &limited, query, |_| false),
-                    Err(Error::Index(BeaconError::ResourceLimit { resource: "staged vertices", .. }))
+                    Err(Error::Index(BeaconError::ResourceLimit {
+                        resource: "staged vertices",
+                        ..
+                    }))
                 ));
             }
             assert_eq!(db.frontier().unwrap(), at);

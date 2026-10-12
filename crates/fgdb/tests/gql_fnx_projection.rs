@@ -25,8 +25,7 @@ const S: RelationId = RelationId(12);
 const COST: PropertyKeyId = PropertyKeyId(13);
 const PRIVATE: PropertyKeyId = PropertyKeyId(14);
 const BRANCH: &str = "projection-test";
-const WEIGHTED: &str =
-    "CALL fnx.single_source_dijkstra_path_length(args => [1], label => 'Person', \
+const WEIGHTED: &str = "CALL fnx.single_source_dijkstra_path_length(args => [1], label => 'Person', \
      relation => 'R', weight => 'cost') YIELD node, distance \
      RETURN node, distance ORDER BY node";
 
@@ -86,7 +85,12 @@ async fn database(cx: &CommitCx, extra: bool) -> Database<MemVfs> {
     db.write(cx, batch).await.unwrap();
     if extra {
         let mut shortcut = WriteBatch::new(S);
-        shortcut.add_edge(EId(5), VId(1), VId(3), vec![(COST, CanonicalScalar::Int(2))]);
+        shortcut.add_edge(
+            EId(5),
+            VId(1),
+            VId(3),
+            vec![(COST, CanonicalScalar::Int(2))],
+        );
         db.write(cx, shortcut).await.unwrap();
     }
     db
@@ -174,34 +178,53 @@ fn named_projection_selects_labels_relations_weights_and_direction() {
             .collect();
         assert_eq!(converted, expected);
         assert_eq!(
-            rows(query(&db, cx,
+            rows(query(
+                &db,
+                cx,
                 "CALL fnx.single_source_dijkstra_path_length(args => [1], label => 'Person', \
                  relation => 'S', weight => 'cost') YIELD node, distance \
-                 RETURN node, distance ORDER BY node")),
+                 RETURN node, distance ORDER BY node"
+            )),
             expected_distances(&[(1, 0.0), (3, 2.0)]),
         );
         assert_eq!(
-            rows(query(&db, cx,
+            rows(query(
+                &db,
+                cx,
                 "CALL fnx.single_source_dijkstra_path_length(args => [3], label => 'Person', \
                  relation => 'R', weight => 'cost', direction => 'reversed') YIELD node, distance \
-                 RETURN node, distance ORDER BY node")),
+                 RETURN node, distance ORDER BY node"
+            )),
             expected_distances(&[(1, 7.0), (2, 4.0), (3, 0.0)]),
         );
         // Omitting the label really does admit the malformed Other edges.
-        assert!(db.query(cx,
-            "CALL fnx.single_source_dijkstra_path_length(args => [1], relation => 'R', \
+        assert!(
+            db.query(
+                cx,
+                "CALL fnx.single_source_dijkstra_path_length(args => [1], relation => 'R', \
              weight => 'cost') YIELD node RETURN node",
-            &GqlParameters::new(), symbols, policy()).is_err());
+                &GqlParameters::new(),
+                symbols,
+                policy()
+            )
+            .is_err()
+        );
         // Isolated selected vertices must not be lost by selecting endpoints.
-        let components = rows(query(&db, cx,
+        let components = rows(query(
+            &db,
+            cx,
             "CALL fnx.weakly_connected_components(label => 'Person', relation => 'R') \
-             YIELD node, component RETURN node, component ORDER BY node"));
-        assert_eq!(components, vec![
-            vec![GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(1))],
-            vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(1))],
-            vec![GraphValue::Vertex(VId(3)), GraphValue::Vertex(VId(1))],
-            vec![GraphValue::Vertex(VId(5)), GraphValue::Vertex(VId(5))],
-        ]);
+             YIELD node, component RETURN node, component ORDER BY node",
+        ));
+        assert_eq!(
+            components,
+            vec![
+                vec![GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(1))],
+                vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(1))],
+                vec![GraphValue::Vertex(VId(3)), GraphValue::Vertex(VId(1))],
+                vec![GraphValue::Vertex(VId(5)), GraphValue::Vertex(VId(5))],
+            ]
+        );
     });
 }
 
@@ -210,21 +233,35 @@ fn kernel_parameters_and_positional_defaults_are_preserved() {
     run(async |commit, cx, _| {
         let db = database(commit, false).await;
         let params = GqlParameters::new()
-            .with_int64("source", 1).unwrap()
-            .with_int64("cutoff", 1).unwrap();
-        let actual = db.query(cx,
-            "CALL fnx.single_source_shortest_path_length(args => [$source, $cutoff], \
+            .with_int64("source", 1)
+            .unwrap()
+            .with_int64("cutoff", 1)
+            .unwrap();
+        let actual = db
+            .query(
+                cx,
+                "CALL fnx.single_source_shortest_path_length(args => [$source, $cutoff], \
              label => 'Person', relation => 'R') YIELD node RETURN node ORDER BY node",
-            &params, symbols, policy()).unwrap();
-        assert_eq!(rows(actual), vec![
-            vec![GraphValue::Vertex(VId(1))],
-            vec![GraphValue::Vertex(VId(2))],
-        ]);
-        for algorithm in ["pagerank", "connected_components", "weakly_connected_components"] {
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        assert_eq!(
+            rows(actual),
+            vec![
+                vec![GraphValue::Vertex(VId(1))],
+                vec![GraphValue::Vertex(VId(2))],
+            ]
+        );
+        for algorithm in [
+            "pagerank",
+            "connected_components",
+            "weakly_connected_components",
+        ] {
             let positional = format!("CALL fnx.{algorithm}() YIELD node RETURN node ORDER BY node");
-            let named = format!(
-                "CALL fnx.{algorithm}(args => []) YIELD node RETURN node ORDER BY node"
-            );
+            let named =
+                format!("CALL fnx.{algorithm}(args => []) YIELD node RETURN node ORDER BY node");
             assert_eq!(query(&db, cx, &positional), query(&db, cx, &named));
         }
     });
@@ -235,20 +272,35 @@ fn reduction_and_loop_policies_apply_before_discarded_weight_observation() {
     run(async |commit, cx, _| {
         let mut db = database(commit, true).await;
         let mut extra = WriteBatch::new(R);
-        extra.add_edge(EId(20), VId(1), VId(2), vec![(COST, CanonicalScalar::Int(8))]);
-        extra.add_edge(EId(21), VId(2), VId(2), vec![(COST, CanonicalScalar::Bool(true))]);
+        extra.add_edge(
+            EId(20),
+            VId(1),
+            VId(2),
+            vec![(COST, CanonicalScalar::Int(8))],
+        );
+        extra.add_edge(
+            EId(21),
+            VId(2),
+            VId(2),
+            vec![(COST, CanonicalScalar::Bool(true))],
+        );
         db.write(commit, extra).await.unwrap();
         for (parallel, to_two, to_three) in [
-            ("min", 3.0, 7.0), ("max", 8.0, 12.0),
-            ("sum", 11.0, 15.0), ("collapse", 1.0, 2.0),
+            ("min", 3.0, 7.0),
+            ("max", 8.0, 12.0),
+            ("sum", 11.0, 15.0),
+            ("collapse", 1.0, 2.0),
         ] {
             let text = format!(
                 "CALL fnx.single_source_dijkstra_path_length(args => [1], label => 'Person', \
                  relation => 'R', weight => 'cost', parallel => '{parallel}', \
                  self_loops => 'drop') YIELD node, distance RETURN node, distance ORDER BY node"
             );
-            assert_eq!(rows(query(&db, cx, &text)),
-                expected_distances(&[(1, 0.0), (2, to_two), (3, to_three)]), "{parallel}");
+            assert_eq!(
+                rows(query(&db, cx, &text)),
+                expected_distances(&[(1, 0.0), (2, to_two), (3, to_three)]),
+                "{parallel}"
+            );
         }
         for policies in [
             "parallel => 'reject', self_loops => 'drop'",
@@ -260,7 +312,8 @@ fn reduction_and_loop_policies_apply_before_discarded_weight_observation() {
                  relation => 'R', weight => 'cost', {policies}) YIELD node RETURN node LIMIT 0"
             );
             assert!(
-                db.query(cx, &text, &GqlParameters::new(), symbols, policy()).is_err(),
+                db.query(cx, &text, &GqlParameters::new(), symbols, policy())
+                    .is_err(),
                 "{text}"
             );
         }
@@ -274,15 +327,20 @@ fn missing_weights_require_an_explicit_policy() {
         let mut remove = WriteBatch::new(R);
         remove.set_edge_property(EId(2), COST, None);
         db.write(commit, remove).await.unwrap();
-        assert!(db.query(cx, WEIGHTED, &GqlParameters::new(), symbols, policy()).is_err());
+        assert!(
+            db.query(cx, WEIGHTED, &GqlParameters::new(), symbols, policy())
+                .is_err()
+        );
         for (missing, distance) in [("unit", 4.0), ("zero", 3.0)] {
             let text = format!(
                 "CALL fnx.single_source_dijkstra_path_length(args => [1], relation => 'R', \
                  weight => 'cost', missing => '{missing}') YIELD node, distance \
                  RETURN node, distance ORDER BY node"
             );
-            assert_eq!(rows(query(&db, cx, &text)),
-                expected_distances(&[(1, 0.0), (2, 3.0), (3, distance)]));
+            assert_eq!(
+                rows(query(&db, cx, &text)),
+                expected_distances(&[(1, 0.0), (2, 3.0), (3, distance)])
+            );
         }
     });
 }
@@ -296,23 +354,40 @@ fn projection_certificates_and_pinned_views_retain_the_exact_source() {
         let (before, certificate) = db
             .execute_certified(cx, WEIGHTED, &params, symbols, policy())
             .unwrap();
-        assert_eq!(rows(before.clone()), expected_distances(&[(1, 0.0), (2, 3.0), (3, 7.0)]));
-        let (same_rows, different_recipe) = db.execute_certified(cx,
-            "CALL fnx.single_source_dijkstra_path_length(args => [1], label => 'Person', \
+        assert_eq!(
+            rows(before.clone()),
+            expected_distances(&[(1, 0.0), (2, 3.0), (3, 7.0)])
+        );
+        let (same_rows, different_recipe) = db
+            .execute_certified(
+                cx,
+                "CALL fnx.single_source_dijkstra_path_length(args => [1], label => 'Person', \
              relation => 'R', weight => 'cost', missing => 'unit') YIELD node, distance \
              RETURN node, distance ORDER BY node",
-            &params, symbols, policy()).unwrap();
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap();
         // All selected edges have weights: these policies give the SAME rows.
         // The procedure evidence must still distinguish the input recipes.
         assert_eq!(same_rows, before);
         assert_eq!(certificate.procedures.len(), 1);
         assert_eq!(different_recipe.procedures.len(), 1);
-        assert_ne!(certificate.procedures[0].evidence_digest,
-            different_recipe.procedures[0].evidence_digest);
-        let (_, unweighted) = db.execute_certified(cx,
-            "CALL fnx.single_source_dijkstra_path_length(args => [1], label => 'Person', \
+        assert_ne!(
+            certificate.procedures[0].evidence_digest,
+            different_recipe.procedures[0].evidence_digest
+        );
+        let (_, unweighted) = db
+            .execute_certified(
+                cx,
+                "CALL fnx.single_source_dijkstra_path_length(args => [1], label => 'Person', \
              relation => 'R') YIELD node, distance RETURN node, distance ORDER BY node",
-            &params, symbols, policy()).unwrap();
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap();
         assert_eq!(certificate.procedures.len(), 1);
         assert_ne!(certificate.canonical_bytes(), unweighted.canonical_bytes());
         let mut update = WriteBatch::new(R);
@@ -322,8 +397,16 @@ fn projection_certificates_and_pinned_views_retain_the_exact_source() {
             rows(query(&db, cx, WEIGHTED)),
             expected_distances(&[(1, 0.0), (2, 3.0), (3, 23.0)])
         );
-        assert_eq!(view.query(cx, WEIGHTED, &params, symbols, policy()).unwrap(), before);
-        assert_eq!(db.replay(cx, &certificate, &params, symbols, policy()).unwrap(), before);
+        assert_eq!(
+            view.query(cx, WEIGHTED, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            db.replay(cx, &certificate, &params, symbols, policy())
+                .unwrap(),
+            before
+        );
     });
 }
 
@@ -340,11 +423,15 @@ fn transaction_projection_reads_staged_weights_and_savepoint_rollback() {
         let actual = txn
             .query(&db, cx, WEIGHTED, &GqlParameters::new(), symbols, policy())
             .unwrap();
-        assert_eq!(rows(actual), expected_distances(&[(1, 0.0), (2, 3.0), (3, 4.0)]));
+        assert_eq!(
+            rows(actual),
+            expected_distances(&[(1, 0.0), (2, 3.0), (3, 4.0)])
+        );
         assert_eq!(query(&db, cx, WEIGHTED), before);
         txn.rollback_to_savepoint(&db, "before_weight").unwrap();
         assert_eq!(
-            txn.query(&db, cx, WEIGHTED, &GqlParameters::new(), symbols, policy()).unwrap(),
+            txn.query(&db, cx, WEIGHTED, &GqlParameters::new(), symbols, policy())
+                .unwrap(),
             before
         );
         txn.abort();
@@ -358,11 +445,22 @@ fn query_projection_cannot_widen_capability_scope_or_observe_hidden_weights() {
         let db = database(commit, true).await;
         let control = database(commit, false).await;
         let issuer = Authority::new(
-            AuthKey::from_seed(701), NS, "projection-graph", SchemaEpoch(0), 1,
-        ).unwrap();
-        let mut grant = Grant::read_only(BRANCH, 1000, QueryLimits {
-            max_nodes: 1000, max_work: 1_000_000, max_rows: 1000,
-        });
+            AuthKey::from_seed(701),
+            NS,
+            "projection-graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            BRANCH,
+            1000,
+            QueryLimits {
+                max_nodes: 1000,
+                max_work: 1_000_000,
+                max_rows: 1000,
+            },
+        );
         grant.labels = Scope::only([PERSON]);
         grant.relations = Scope::only([R]);
         grant.properties = Scope::only([COST]);
@@ -377,16 +475,44 @@ fn query_projection_cannot_widen_capability_scope_or_observe_hidden_weights() {
              YIELD node, component RETURN node, component ORDER BY node",
         ] {
             let read = |database: &Database<MemVfs>| {
-                database.query_authorized(cx, &issuer, &token, BRANCH, text,
-                    &GqlParameters::new(), symbols, policy(), || 100).unwrap()
+                database
+                    .query_authorized(
+                        cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &GqlParameters::new(),
+                        symbols,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap()
             };
             let actual = read(&db);
             assert_eq!(actual, read(&control), "{text}");
-            assert!(!rows(actual).is_empty(), "non-vacuous visible projection: {text}");
+            assert!(
+                !rows(actual).is_empty(),
+                "non-vacuous visible projection: {text}"
+            );
         }
-        let actual = db.query_authorized(cx, &issuer, &token, BRANCH, WEIGHTED,
-            &GqlParameters::new(), symbols, policy(), || 100).unwrap();
-        assert_eq!(rows(actual), expected_distances(&[(1, 0.0), (2, 3.0), (3, 7.0)]));
+        let actual = db
+            .query_authorized(
+                cx,
+                &issuer,
+                &token,
+                BRANCH,
+                WEIGHTED,
+                &GqlParameters::new(),
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap();
+        assert_eq!(
+            rows(actual),
+            expected_distances(&[(1, 0.0), (2, 3.0), (3, 7.0)])
+        );
     });
 }
 
@@ -396,14 +522,22 @@ fn invalid_projection_options_and_enclosing_limits_refuse_without_side_effects()
         let db = database(commit, false).await;
         let frontier = db.frontier().unwrap();
         for arguments in [
-            "direction => 'sideways'", "direction => 1", "parallel => 'ignore'",
-            "self_loops => 'ignore'", "missing => 'unit'", "args => 1",
-            "args => ['not a number']", "snapshot => 1", "max_work => 999999",
-            "weight => 'cost', missing => 'ignore'", "label => ['Person']",
+            "direction => 'sideways'",
+            "direction => 1",
+            "parallel => 'ignore'",
+            "self_loops => 'ignore'",
+            "missing => 'unit'",
+            "args => 1",
+            "args => ['not a number']",
+            "snapshot => 1",
+            "max_work => 999999",
+            "weight => 'cost', missing => 'ignore'",
+            "label => ['Person']",
         ] {
             let text = format!("CALL fnx.pagerank({arguments}) YIELD node RETURN node LIMIT 0");
             assert!(
-                db.query(cx, &text, &GqlParameters::new(), symbols, policy()).is_err(),
+                db.query(cx, &text, &GqlParameters::new(), symbols, policy())
+                    .is_err(),
                 "{text}"
             );
         }
@@ -413,7 +547,10 @@ fn invalid_projection_options_and_enclosing_limits_refuse_without_side_effects()
             GqlQueryPolicy::new(100_000, 100, 0, 100_000),
             GqlQueryPolicy::new(100_000, 100, 1_000_000, 0),
         ] {
-            assert!(db.query(cx, WEIGHTED, &GqlParameters::new(), symbols, tight).is_err());
+            assert!(
+                db.query(cx, WEIGHTED, &GqlParameters::new(), symbols, tight)
+                    .is_err()
+            );
         }
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(

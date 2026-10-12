@@ -3,8 +3,12 @@
 
 use super::*;
 use crate::application::member::{PinnedApplication, ReadApplication, ReadState};
-use crate::application::tests::{Command, MemoryApplication, Mode, genesis, immediate, memory, oid};
-use crate::application::{ApplicationBatch, ApplicationError, ApplicationProgress, AppliedPosition};
+use crate::application::tests::{
+    Command, MemoryApplication, Mode, genesis, immediate, memory, oid,
+};
+use crate::application::{
+    ApplicationBatch, ApplicationError, ApplicationProgress, AppliedPosition,
+};
 use crate::replica::{Replica, ReplicaError};
 use fgdb_order::{Configuration, Domain, Envelope, Event, Limits, MemberId, PersistentState};
 use std::cell::{Cell, RefCell};
@@ -14,7 +18,11 @@ use std::rc::Rc;
 use std::task::{Context, Waker};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum PinFault { Healthy, Error, Pending }
+enum PinFault {
+    Healthy,
+    Error,
+    Pending,
+}
 
 struct Pins {
     calls: usize,
@@ -35,7 +43,9 @@ struct View {
 }
 
 impl Drop for View {
-    fn drop(&mut self) { self.active.set(self.active.get() - 1); }
+    fn drop(&mut self) {
+        self.active.set(self.active.get() - 1);
+    }
 }
 
 impl Application<Command> for Backend {
@@ -73,16 +83,23 @@ impl ReadApplication<Command> for Backend {
         &mut self,
         basis: &ApplicationProgress,
         at: AppliedPosition,
-    ) -> impl Future<Output = Result<PinnedApplication<View>, <Self as Application<Command>>::Error>> {
+    ) -> impl Future<Output = Result<PinnedApplication<View>, <Self as Application<Command>>::Error>>
+    {
         let store = self.app.0.borrow();
         assert_eq!(store.progress, *basis);
         assert!(at.index <= basis.visible_index);
-        let selected: Vec<_> = store.values.iter()
-            .filter(|(index, _)| *index <= at.index).copied().collect();
+        let selected: Vec<_> = store
+            .values
+            .iter()
+            .filter(|(index, _)| *index <= at.index)
+            .copied()
+            .collect();
         let state_root = if at == basis.applied {
             basis.state_root
         } else {
-            selected.last().map_or(oid(10), |(index, _)| oid(1000 + index))
+            selected
+                .last()
+                .map_or(oid(10), |(index, _)| oid(1000 + index))
         };
         let mut pins = self.pins.borrow_mut();
         pins.calls += 1;
@@ -100,8 +117,14 @@ impl ReadApplication<Command> for Backend {
         drop(store);
         drop(pins);
         async move {
-            if fault == PinFault::Pending { pending::<()>().await; }
-            if fault == PinFault::Error { Err("pin refused") } else { Ok(pinned) }
+            if fault == PinFault::Pending {
+                pending::<()>().await;
+            }
+            if fault == PinFault::Error {
+                Err("pin refused")
+            } else {
+                Ok(pinned)
+            }
         }
     }
 }
@@ -109,23 +132,31 @@ impl ReadApplication<Command> for Backend {
 type Member = AppliedReplica<Command, Backend>;
 
 fn cluster(count: u128, application_limit: usize, replica_limit: usize) -> Vec<Member> {
-    let configuration = Configuration::stable(
-        Domain([1; 32]), [2; 32], (1..=count).map(MemberId), [],
-    ).unwrap();
-    (1..=count).map(|id| {
-        let replica = Replica::new(
-            MemberId(id), configuration.clone(), Limits::default(), replica_limit,
-        ).unwrap();
-        let (app, _) = memory(genesis());
-        let backend = Backend {
-            app,
-            pins: Rc::new(RefCell::new(Pins {
-                calls: 0, active: Rc::new(Cell::new(0)),
-                fault: PinFault::Healthy, consensus: None, fail_publication: false,
-            })),
-        };
-        immediate(Member::recover(replica, backend, 1, application_limit)).unwrap()
-    }).collect()
+    let configuration =
+        Configuration::stable(Domain([1; 32]), [2; 32], (1..=count).map(MemberId), []).unwrap();
+    (1..=count)
+        .map(|id| {
+            let replica = Replica::new(
+                MemberId(id),
+                configuration.clone(),
+                Limits::default(),
+                replica_limit,
+            )
+            .unwrap();
+            let (app, _) = memory(genesis());
+            let backend = Backend {
+                app,
+                pins: Rc::new(RefCell::new(Pins {
+                    calls: 0,
+                    active: Rc::new(Cell::new(0)),
+                    fault: PinFault::Healthy,
+                    consensus: None,
+                    fail_publication: false,
+                })),
+            };
+            immediate(Member::recover(replica, backend, 1, application_limit)).unwrap()
+        })
+        .collect()
 }
 
 fn pump(members: &mut [Member], messages: Vec<Envelope<Command>>) -> Vec<ReadIndexId> {
@@ -135,8 +166,8 @@ fn pump(members: &mut [Member], messages: Vec<Envelope<Command>>) -> Vec<ReadInd
     while let Some(message) = queue.pop_front() {
         count += 1;
         assert!(count < 4096, "replication must quiesce");
-        let output = immediate(members[message.to.0 as usize - 1].step(Event::Receive(message)))
-            .unwrap();
+        let output =
+            immediate(members[message.to.0 as usize - 1].step(Event::Receive(message))).unwrap();
         queue.extend(output.consensus.messages);
         lost.extend(output.leadership_lost);
     }
@@ -160,26 +191,37 @@ fn quorum_ready_batch_keeps_every_application_slot_until_pin_or_cancel() {
     assert_eq!(member.replica.pending_reads(), 0);
     assert_eq!(member.pending_reads(), 3);
     for id in &ids {
-        assert!(matches!(immediate(member.try_read(id)),
-            Ok(ReadState::PendingApplication { required: 1, applied: 0 })));
+        assert!(matches!(
+            immediate(member.try_read(id)),
+            Ok(ReadState::PendingApplication {
+                required: 1,
+                applied: 0
+            })
+        ));
         assert!(member.read_index_probes(id).unwrap().is_empty());
     }
-    assert!(matches!(immediate(member.read_index_batch(1)),
-        Err(MemberError::State(ApplicationStateError::ReadBackpressure))));
+    assert!(matches!(
+        immediate(member.read_index_batch(1)),
+        Err(MemberError::State(ApplicationStateError::ReadBackpressure))
+    ));
     immediate(member.apply_next()).unwrap().unwrap();
     let ReadState::Ready(read) = immediate(member.try_read(&ids[0])).unwrap() else {
         panic!("application is visible");
     };
     assert_eq!(read.id(), &ids[0]);
     assert_eq!(member.pending_reads(), 2);
-    assert!(matches!(immediate(member.read_index_batch(2)),
-        Err(MemberError::State(ApplicationStateError::ReadBackpressure))));
+    assert!(matches!(
+        immediate(member.read_index_batch(2)),
+        Err(MemberError::State(ApplicationStateError::ReadBackpressure))
+    ));
     assert!(member.cancel_read(&ids[1]));
     let (replacement, _) = immediate(member.read_index_batch(2)).unwrap();
     assert_eq!(replacement.len(), 2);
     assert_eq!(member.pending_reads(), 3);
-    assert!(matches!(immediate(member.try_read(&ids[0])),
-        Err(ApplicationError::State(ApplicationStateError::UnknownRead))));
+    assert!(matches!(
+        immediate(member.try_read(&ids[0])),
+        Err(ApplicationError::State(ApplicationStateError::UnknownRead))
+    ));
     drop(read);
 }
 
@@ -193,8 +235,13 @@ fn whole_batch_waits_for_audit_and_never_pins_the_later_hidden_suffix() {
     immediate(member.apply_next()).unwrap().unwrap();
     let (ids, _) = immediate(member.read_index_batch(3)).unwrap();
     for id in &ids {
-        assert!(matches!(immediate(member.try_read(id)),
-            Ok(ReadState::PendingAudit { required: 2, visible: 1 })));
+        assert!(matches!(
+            immediate(member.try_read(id)),
+            Ok(ReadState::PendingAudit {
+                required: 2,
+                visible: 1
+            })
+        ));
     }
     assert_eq!(member.application.application.pins.borrow().calls, 0);
     immediate(member.step(Event::Propose(Command::ReleaseThrough(2)))).unwrap();
@@ -226,12 +273,20 @@ fn pin_failure_and_cancelled_pin_leave_other_batch_members_usable() {
     let (ids, _) = immediate(member.read_index_batch(3)).unwrap();
     let pins = Rc::clone(&member.application.application.pins);
     pins.borrow_mut().fault = PinFault::Error;
-    assert!(matches!(immediate(member.try_read(&ids[0])), Err(ApplicationError::Backend(_))));
+    assert!(matches!(
+        immediate(member.try_read(&ids[0])),
+        Err(ApplicationError::Backend(_))
+    ));
     assert_eq!(member.pending_reads(), 3);
     assert_eq!(pins.borrow().active.get(), 0);
     pins.borrow_mut().fault = PinFault::Pending;
     let mut waiting = Box::pin(member.try_read(&ids[0]));
-    assert!(waiting.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
     assert_eq!(pins.borrow().active.get(), 1);
     drop(waiting);
     assert_eq!(pins.borrow().active.get(), 0);
@@ -253,16 +308,22 @@ fn inner_replica_capacity_failure_cannot_create_orphan_application_waiters() {
     let mut members = cluster(3, 4, 2);
     elect(&mut members);
     let member = &mut members[0];
-    assert!(matches!(immediate(member.read_index_batch(3)),
-        Err(MemberError::Replica(ReplicaError::ReadBackpressure))));
+    assert!(matches!(
+        immediate(member.read_index_batch(3)),
+        Err(MemberError::Replica(ReplicaError::ReadBackpressure))
+    ));
     assert_eq!(member.pending_reads(), 0);
     assert_eq!(member.replica.pending_reads(), 0);
-    assert!(matches!(immediate(member.read_index_batch(0)),
-        Err(MemberError::State(ApplicationStateError::InvalidLimits))));
+    assert!(matches!(
+        immediate(member.read_index_batch(0)),
+        Err(MemberError::State(ApplicationStateError::InvalidLimits))
+    ));
     let (ids, _) = immediate(member.read_index_batch(2)).unwrap();
     assert_eq!(member.pending_reads(), 2);
     assert_eq!(member.replica.pending_reads(), 2);
-    for id in &ids { assert!(member.cancel_read(id)); }
+    for id in &ids {
+        assert!(member.cancel_read(id));
+    }
     assert_eq!(member.pending_reads(), 0);
     assert_eq!(member.replica.pending_reads(), 0);
 }
@@ -281,8 +342,10 @@ fn stepdown_retires_all_quorum_ready_batch_requests_before_they_can_pin() {
     assert_eq!(output.leadership_lost, ids);
     assert_eq!(members[0].pending_reads(), 0);
     for id in &ids {
-        assert!(matches!(immediate(members[0].try_read(id)),
-            Err(ApplicationError::State(ApplicationStateError::UnknownRead))));
+        assert!(matches!(
+            immediate(members[0].try_read(id)),
+            Err(ApplicationError::State(ApplicationStateError::UnknownRead))
+        ));
     }
     assert_eq!(members[0].application.application.pins.borrow().calls, 0);
 }
@@ -296,12 +359,18 @@ fn application_publication_failure_fences_the_entire_admitted_batch() {
     member.application.application.app.0.borrow_mut().mode = Mode::FailAfter;
     assert!(immediate(member.apply_next()).is_err());
     for id in &ids {
-        assert!(matches!(immediate(member.try_read(id)),
-            Err(ApplicationError::State(ApplicationStateError::RecoveryRequired))));
+        assert!(matches!(
+            immediate(member.try_read(id)),
+            Err(ApplicationError::State(
+                ApplicationStateError::RecoveryRequired
+            ))
+        ));
         assert!(member.read_index_probes(id).is_err());
     }
-    assert!(matches!(immediate(member.read_index_batch(1)),
-        Err(MemberError::State(ApplicationStateError::RecoveryRequired))));
+    assert!(matches!(
+        immediate(member.read_index_batch(1)),
+        Err(MemberError::State(ApplicationStateError::RecoveryRequired))
+    ));
     assert_eq!(member.application.application.pins.borrow().calls, 0);
 }
 
@@ -320,18 +389,36 @@ fn uncertain_raft_publication_fences_quorum_ready_batch_before_application() {
     // The driver must not serve the older ready batch from this uncertain root.
     let published = pins.borrow().consensus.clone().unwrap();
     assert_eq!(published.commit_index(), 2);
-    assert_eq!(published.entries().last().unwrap().command, Some(Command::Put(23)));
+    assert_eq!(
+        published.entries().last().unwrap().command,
+        Some(Command::Put(23))
+    );
     for id in &ids {
-        assert!(matches!(immediate(member.try_read(id)),
+        assert!(matches!(
+            immediate(member.try_read(id)),
             Err(ApplicationError::State(ApplicationStateError::Raft(
                 fgdb_order::Error::RecoveryRequired
-            )))));
+            )))
+        ));
         assert!(member.read_index_probes(id).is_err());
     }
-    assert!(matches!(immediate(member.read_index_batch(1)),
+    assert!(matches!(
+        immediate(member.read_index_batch(1)),
         Err(MemberError::State(ApplicationStateError::Raft(
             fgdb_order::Error::RecoveryRequired
-        )))));
+        )))
+    ));
     assert_eq!(pins.borrow().calls, 0);
-    assert_eq!(member.application.application.app.0.borrow().progress.applied.index, 0);
+    assert_eq!(
+        member
+            .application
+            .application
+            .app
+            .0
+            .borrow()
+            .progress
+            .applied
+            .index,
+        0
+    );
 }

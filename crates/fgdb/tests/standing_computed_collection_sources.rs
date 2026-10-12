@@ -8,8 +8,8 @@ use fgdb::{
 use fgdb_delta_types::{LabelId, LimbLimit, PropertyKeyId, RelationId, ZSet};
 use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder, GraphValue};
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphAggregate, GraphSetProjection, GraphSetValue,
-    GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
+    GqlParameters, GqlQueryPolicy, GraphAggregate, GraphSetProjection, GraphSetValue, GraphSymbol,
+    GraphSymbolKind, PreparedGraphAggregate,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
@@ -226,9 +226,10 @@ fn limit_zero_does_not_hide_a_later_collection_input_exception() {
         // A maintained-query failure fences that view, not a durable write or
         // another independently registered query.
         db.write(&commit, change).await.unwrap();
-        assert!(db
-            .query(&cx, text, &GqlParameters::new(), symbols, policy())
-            .is_err());
+        assert!(
+            db.query(&cx, text, &GqlParameters::new(), symbols, policy())
+                .is_err()
+        );
         assert!(db.standing_native_query(&cx, &handle, policy()).is_err());
         differential(&db, &cx, healthy_text, &healthy);
         assert!(db.rebuild_standing_query(&cx, &handle, policy()).is_err());
@@ -258,9 +259,10 @@ fn denied_setup_does_not_damage_an_existing_collection_and_can_retry() {
             GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 0),
             GqlQueryPolicy::new(0, 100_000, 10_000_000, 10_000_000),
         ] {
-            assert!(db
-                .register_standing_native(&cx, text, &GqlParameters::new(), symbols, denied)
-                .is_err());
+            assert!(
+                db.register_standing_native(&cx, text, &GqlParameters::new(), symbols, denied)
+                    .is_err()
+            );
             assert_eq!(differential(&db, &cx, text, &original), expected);
         }
         let retried = register(&mut db, &cx, text);
@@ -282,7 +284,11 @@ fn normalization_does_not_invent_an_unprojected_join_occurrence_order() {
         .edge("b", R, fgdb_gql::algebra::GlaDirection::Forward, "c")
         .unwrap();
     let input = builder
-        .prepare_values(&[GraphColumn::property("_fgdb_collect_order_0", "c", P)], 0, None)
+        .prepare_values(
+            &[GraphColumn::property("_fgdb_collect_order_0", "c", P)],
+            0,
+            None,
+        )
         .unwrap()
         .with_duplicates();
     let aggregates = [GraphAggregate::collect("bag", 0)];
@@ -290,7 +296,10 @@ fn normalization_does_not_invent_an_unprojected_join_occurrence_order() {
     assert!(raw.incremental_collection_relation().is_none());
     let projected = PreparedGraphAggregate::prepare_projected(
         input,
-        vec![GraphSetProjection::new("_fgdb_collect_order_1", GraphSetValue::Column(0))],
+        vec![GraphSetProjection::new(
+            "_fgdb_collect_order_1",
+            GraphSetValue::Column(0),
+        )],
         &[],
         &aggregates,
         0,

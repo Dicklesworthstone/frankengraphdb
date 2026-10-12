@@ -3108,12 +3108,7 @@ fn historical_snapshot_metadata_agrees_across_eager_prepared_http_and_streamed_r
             .unwrap();
         owner.select(cx, "social").await.unwrap();
         owner
-            .execute(
-                cx,
-                ExecuteMode::Write,
-                "CREATE (:Person {age:10})",
-                vec![],
-            )
+            .execute(cx, ExecuteMode::Write, "CREATE (:Person {age:10})", vec![])
             .await
             .unwrap();
         owner
@@ -3178,9 +3173,8 @@ fn historical_snapshot_metadata_agrees_across_eager_prepared_http_and_streamed_r
                     assert_eq!(streamed, eager, "{statement}");
                 }
 
-                let request = format!(
-                    r#"{{"statement":"{statement}","parameters":{{"route":"main"}}}}"#
-                );
+                let request =
+                    format!(r#"{{"statement":"{statement}","parameters":{{"route":"main"}}}}"#);
                 let (status, body) = http(
                     http_addr,
                     "POST",
@@ -3225,10 +3219,7 @@ fn historical_snapshot_metadata_agrees_across_eager_prepared_http_and_streamed_r
                 ),
                 ErrorCode::Execution
             );
-            let handle = reader
-                .prepare_read(cx, &future, arguments())
-                .await
-                .unwrap();
+            let handle = reader.prepare_read(cx, &future, arguments()).await.unwrap();
             assert_eq!(
                 server_code(
                     reader

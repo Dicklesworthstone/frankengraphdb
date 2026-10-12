@@ -8,8 +8,8 @@ use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError, GqlQueryExecution,
     GqlQueryPolicy, GraphSetExecutionError, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
     PreparedGraphSet, PreparedGraphSetText, PreparedProcedureCall, ProcedureGraphDirection,
-    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight,
-    ProcedureParallelEdges, ProcedureSelfLoops, ReverseSymbolCatalog,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops, ReverseSymbolCatalog,
 };
 use fgdb_types::{CanonicalScalar, EId, VId};
 use std::cell::RefCell;
@@ -165,34 +165,68 @@ fn graph_projection_defaults_and_every_option_have_one_typed_meaning() {
     let cases = [
         ("{}", base),
         ("{labels:[], relations:[]}", base),
-        ("{direction:'directed'}", ProcedureGraphProjection {
-            direction: Some(ProcedureGraphDirection::Directed), ..base
-        }),
-        ("{direction:'undirected'}", ProcedureGraphProjection {
-            direction: Some(ProcedureGraphDirection::Undirected), ..base
-        }),
-        ("{parallel:'collapse'}", ProcedureGraphProjection {
-            parallel_edges: ProcedureParallelEdges::CollapseUnit, ..base
-        }),
-        ("{parallel:'min'}", ProcedureGraphProjection {
-            parallel_edges: ProcedureParallelEdges::Minimum, ..base
-        }),
-        ("{parallel:'sum'}", ProcedureGraphProjection {
-            parallel_edges: ProcedureParallelEdges::Sum, ..base
-        }),
-        ("{self_loops:'reject'}", ProcedureGraphProjection {
-            self_loops: ProcedureSelfLoops::Reject, ..base
-        }),
-        ("{weight:'p'}", ProcedureGraphProjection {
-            weight: ProcedureGraphWeight::Property {
-                key: P, missing: ProcedureMissingWeight::Reject,
-            }, ..base
-        }),
-        ("{weight:'p', missing:'zero'}", ProcedureGraphProjection {
-            weight: ProcedureGraphWeight::Property {
-                key: P, missing: ProcedureMissingWeight::Zero,
-            }, ..base
-        }),
+        (
+            "{direction:'directed'}",
+            ProcedureGraphProjection {
+                direction: Some(ProcedureGraphDirection::Directed),
+                ..base
+            },
+        ),
+        (
+            "{direction:'undirected'}",
+            ProcedureGraphProjection {
+                direction: Some(ProcedureGraphDirection::Undirected),
+                ..base
+            },
+        ),
+        (
+            "{parallel:'collapse'}",
+            ProcedureGraphProjection {
+                parallel_edges: ProcedureParallelEdges::CollapseUnit,
+                ..base
+            },
+        ),
+        (
+            "{parallel:'min'}",
+            ProcedureGraphProjection {
+                parallel_edges: ProcedureParallelEdges::Minimum,
+                ..base
+            },
+        ),
+        (
+            "{parallel:'sum'}",
+            ProcedureGraphProjection {
+                parallel_edges: ProcedureParallelEdges::Sum,
+                ..base
+            },
+        ),
+        (
+            "{self_loops:'reject'}",
+            ProcedureGraphProjection {
+                self_loops: ProcedureSelfLoops::Reject,
+                ..base
+            },
+        ),
+        (
+            "{weight:'p'}",
+            ProcedureGraphProjection {
+                weight: ProcedureGraphWeight::Property {
+                    key: P,
+                    missing: ProcedureMissingWeight::Reject,
+                },
+                ..base
+            },
+        ),
+        (
+            "{weight:'p', missing:'zero'}",
+            ProcedureGraphProjection {
+                weight: ProcedureGraphWeight::Property {
+                    key: P,
+                    missing: ProcedureMissingWeight::Zero,
+                },
+                ..base
+            },
+        ),
     ];
     for (projection, expected) in cases {
         let text = format!("CALL fnx.test({projection}) YIELD value RETURN value");
@@ -281,10 +315,19 @@ fn projection_identity_is_canonical_and_pins_every_answer_affecting_option() {
     };
     let first = prepare("{labels:['Person'],relations:['R'],weight:'p',missing:'unit'}");
     let reordered = prepare("{missing:'unit',weight:'p',relations:['R'],labels:['Person']}");
-    assert_eq!(first.canonical_template_bytes(), reordered.canonical_template_bytes());
     assert_eq!(
-        first.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes(),
-        reordered.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes()
+        first.canonical_template_bytes(),
+        reordered.canonical_template_bytes()
+    );
+    assert_eq!(
+        first
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes(),
+        reordered
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
     );
     let default = prepare("{}");
     for projection in [
@@ -303,10 +346,19 @@ fn projection_identity_is_canonical_and_pins_every_answer_affecting_option() {
         "{self_loops:'reject'}",
     ] {
         let changed = prepare(projection);
-        assert_ne!(default.canonical_template_bytes(), changed.canonical_template_bytes());
         assert_ne!(
-            default.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes(),
-            changed.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes(),
+            default.canonical_template_bytes(),
+            changed.canonical_template_bytes()
+        );
+        assert_ne!(
+            default
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+                .canonical_bytes(),
+            changed
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+                .canonical_bytes(),
             "{projection}"
         );
     }
@@ -319,7 +371,10 @@ fn projection_identity_is_canonical_and_pins_every_answer_affecting_option() {
         },
     )
     .unwrap();
-    assert_ne!(first.canonical_template_bytes(), same_names_other_catalog.canonical_template_bytes());
+    assert_ne!(
+        first.canonical_template_bytes(),
+        same_names_other_catalog.canonical_template_bytes()
+    );
 }
 
 #[test]
@@ -328,19 +383,24 @@ fn non_prism_map_arguments_keep_their_value_domain() {
         "CALL t.echo({labels:['Person'],weight:'p'}) YIELD value RETURN value",
         &GqlParameters::new(),
     );
-    let result = query.execute_governed_with_procedures(
-        wide(),
-        no_graph,
-        |call, arguments, _| {
-            assert!(call.graph_projection().is_none());
-            assert_eq!(arguments.len(), 1);
-            assert!(matches!(arguments[0], GraphValue::Map { .. }));
-            host(call, arguments)
-        },
-        || Ok::<_, usize>(()),
-    ).unwrap();
+    let result = query
+        .execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |call, arguments, _| {
+                assert!(call.graph_projection().is_none());
+                assert_eq!(arguments.len(), 1);
+                assert!(matches!(arguments[0], GraphValue::Map { .. }));
+                host(call, arguments)
+            },
+            || Ok::<_, usize>(()),
+        )
+        .unwrap();
     assert_eq!(result.value.len(), 1);
-    assert!(matches!(result.value[0].values()[0], GraphValue::Map { .. }));
+    assert!(matches!(
+        result.value[0].values()[0],
+        GraphValue::Map { .. }
+    ));
 }
 
 #[test]
@@ -781,7 +841,6 @@ fn a_property_read_of_a_yielded_output_implies_its_identity_match() {
     assert_eq!(unwound.columns(), ["x.p"]);
 }
 
-
 #[derive(Clone, Copy)]
 struct MetadataCatalog;
 impl GraphSymbolResolver for MetadataCatalog {
@@ -946,8 +1005,7 @@ fn yielded_labels_and_complete_maps_use_the_native_graph_boundary() {
 
 #[test]
 fn procedure_metadata_preserves_source_masks_budgets_and_scalar_refusals() {
-    let statement =
-        "CALL t.scores() YIELD vertex AS n,score RETURN labels(n),properties(n),score";
+    let statement = "CALL t.scores() YIELD vertex AS n,score RETURN labels(n),properties(n),score";
     let graph = MetadataGraph::new((0..5).map(VId).collect());
     let visible = MetadataGraph::new(vec![VId(0), VId(1), VId(3)]);
     let full = graph.query(statement, wide()).unwrap();
@@ -1051,7 +1109,6 @@ fn carried_vertex_edge_and_path_metadata_matches_direct_native_projection() {
     }
 }
 
-
 #[test]
 fn fnx_projection_schema_names_bind_once_before_procedure_execution() {
     let text = "CALL fnx.pagerank(label=>'Scoped',relation=>'LINK',weight=>'weight') \
@@ -1062,9 +1119,7 @@ fn fnx_projection_schema_names_bind_once_before_procedure_execution() {
         match (kind, name) {
             (GraphSymbolKind::Label, "Scoped") => Some(GraphSymbol::Label(LabelId(7))),
             (GraphSymbolKind::Relation, "LINK") => Some(GraphSymbol::Relation(RelationId(11))),
-            (GraphSymbolKind::Property, "weight") => {
-                Some(GraphSymbol::Property(PropertyKeyId(13)))
-            }
+            (GraphSymbolKind::Property, "weight") => Some(GraphSymbol::Property(PropertyKeyId(13))),
             _ => None,
         }
     })

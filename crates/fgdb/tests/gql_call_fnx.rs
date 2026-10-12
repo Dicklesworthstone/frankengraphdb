@@ -1064,7 +1064,6 @@ fn transaction_call_sources_share_one_allowance_across_union_and_aggregate() {
     });
 }
 
-
 /// fgdb-luq0b: projection arguments reach every host, including the overlay's
 /// effective labels and property edits. The expected distances are enumerated
 /// independently; excluded topology carries invalid weights as a read control.
@@ -1074,15 +1073,9 @@ fn named_projection_reads_the_selected_weighted_graph_and_staged_changes() {
         let mut db = Database::open_memory(commit, keys()).await.unwrap();
         let mut seed = WriteBatch::new(R);
         for id in 1..=4 {
-            seed.create_vertex(
-                VId(id),
-                if id <= 3 { vec![PERSON] } else { vec![] },
-                vec![],
-            );
+            seed.create_vertex(VId(id), if id <= 3 { vec![PERSON] } else { vec![] }, vec![]);
         }
-        for (eid, source, target, weight) in
-            [(1, 1, 2, 10), (2, 2, 3, 2), (3, 1, 3, 20)]
-        {
+        for (eid, source, target, weight) in [(1, 1, 2, 10), (2, 2, 3, 2), (3, 1, 3, 20)] {
             seed.add_edge(
                 EId(eid),
                 VId(source),
@@ -1124,7 +1117,10 @@ fn named_projection_reads_the_selected_weighted_graph_and_staged_changes() {
             distances
                 .iter()
                 .map(|&(id, distance)| {
-                    vec![GraphValue::Vertex(VId(id)), value(FnxValue::Float(distance))]
+                    vec![
+                        GraphValue::Vertex(VId(id)),
+                        value(FnxValue::Float(distance)),
+                    ]
                 })
                 .collect::<Vec<_>>()
         };
@@ -1161,7 +1157,11 @@ fn named_projection_reads_the_selected_weighted_graph_and_staged_changes() {
         let pinned = db.read_session().unwrap();
         let mut txn = db.begin(txcx).unwrap();
         assert_eq!(
-            rows(txn.query(&db, cx, text, &params, symbols, policy()).unwrap()).1,
+            rows(
+                txn.query(&db, cx, text, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
             before,
         );
         let mut changes = WriteBatch::new(R);
@@ -1171,7 +1171,11 @@ fn named_projection_reads_the_selected_weighted_graph_and_staged_changes() {
         txn.write_ordered(&mut db, vec![changes]).unwrap();
         let after = expected(&[(1, 0.0), (2, 1.0), (3, 3.0), (4, 4.0)]);
         assert_eq!(
-            rows(txn.query(&db, cx, text, &params, symbols, policy()).unwrap()).1,
+            rows(
+                txn.query(&db, cx, text, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
             after,
         );
         assert_eq!(
@@ -1207,16 +1211,22 @@ fn named_projection_policies_are_not_ignored_or_silently_defaulted() {
         let collapse = "CALL fnx.single_source_dijkstra_path_length(\
                         args => [1], weight => 'p', parallel => 'collapse') \
                         YIELD vertex, distance RETURN vertex, distance ORDER BY vertex";
-        let expected = [(1, 0.0), (2, 1.0), (3, 2.0), (4, 3.0), (5, 4.0)]
-            .map(|(id, distance)| {
-                vec![GraphValue::Vertex(VId(id)), value(FnxValue::Float(distance))]
-            });
+        let expected = [(1, 0.0), (2, 1.0), (3, 2.0), (4, 3.0), (5, 4.0)].map(|(id, distance)| {
+            vec![
+                GraphValue::Vertex(VId(id)),
+                value(FnxValue::Float(distance)),
+            ]
+        });
         assert_eq!(
             rows(db.query(cx, collapse, &params, symbols, policy()).unwrap()).1,
             expected,
         );
         assert_eq!(
-            rows(txn.query(&db, cx, collapse, &params, symbols, policy()).unwrap()).1,
+            rows(
+                txn.query(&db, cx, collapse, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
             expected,
         );
         for text in [
@@ -1232,9 +1242,13 @@ fn named_projection_policies_are_not_ignored_or_silently_defaulted() {
              args => [1], weight => 'p', parallel => 'min', missing => 'zero') \
              YIELD vertex RETURN vertex LIMIT 0",
         ] {
-            assert!(db.query(cx, text, &params, symbols, policy()).is_err(), "{text}");
             assert!(
-                txn.query(&db, cx, text, &params, symbols, policy()).is_err(),
+                db.query(cx, text, &params, symbols, policy()).is_err(),
+                "{text}"
+            );
+            assert!(
+                txn.query(&db, cx, text, &params, symbols, policy())
+                    .is_err(),
                 "transaction: {text}",
             );
         }
@@ -1263,7 +1277,10 @@ fn named_projection_certificates_bind_selection_and_replay_the_old_graph() {
             .execute_certified(cx, whole, &params, symbols, policy())
             .unwrap();
         assert_eq!(before, same_rows);
-        assert_ne!(certificate.canonical_bytes(), different_selection.canonical_bytes());
+        assert_ne!(
+            certificate.canonical_bytes(),
+            different_selection.canonical_bytes()
+        );
         let mut changes = WriteBatch::new(R);
         changes.add_edge(EId(6), VId(6), VId(1), vec![]);
         db.write(commit, changes).await.unwrap();
@@ -1272,7 +1289,8 @@ fn named_projection_certificates_bind_selection_and_replay_the_old_graph() {
             before,
         );
         assert_eq!(
-            db.replay(cx, &certificate, &params, symbols, policy()).unwrap(),
+            db.replay(cx, &certificate, &params, symbols, policy())
+                .unwrap(),
             before,
         );
     });
@@ -1310,7 +1328,11 @@ fn named_projection_missing_weights_follow_staged_property_presence() {
                 expected,
             );
             assert_eq!(
-                rows(txn.query(&db, cx, &text, &params, symbols, policy()).unwrap()).1,
+                rows(
+                    txn.query(&db, cx, &text, &params, symbols, policy())
+                        .unwrap()
+                )
+                .1,
                 expected,
             );
         }
@@ -1323,12 +1345,19 @@ fn named_projection_missing_weights_follow_staged_property_presence() {
         let text = "CALL fnx.single_source_dijkstra_path_length(\
                     args => [1], weight => 'p', missing => 'zero') \
                     YIELD vertex, distance RETURN vertex, distance ORDER BY vertex";
-        let expected = [(1, 0.0), (2, 10.0), (3, 10.0), (4, 10.0), (5, 10.0)]
-            .map(|(id, distance)| {
-                vec![GraphValue::Vertex(VId(id)), value(FnxValue::Float(distance))]
+        let expected =
+            [(1, 0.0), (2, 10.0), (3, 10.0), (4, 10.0), (5, 10.0)].map(|(id, distance)| {
+                vec![
+                    GraphValue::Vertex(VId(id)),
+                    value(FnxValue::Float(distance)),
+                ]
             });
         assert_eq!(
-            rows(txn.query(&db, cx, text, &params, symbols, policy()).unwrap()).1,
+            rows(
+                txn.query(&db, cx, text, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
             expected,
         );
         let mut removal = WriteBatch::new(R);
@@ -1338,7 +1367,11 @@ fn named_projection_missing_weights_follow_staged_property_presence() {
             .map(|id| vec![GraphValue::Vertex(VId(id)), value(FnxValue::Float(0.0))])
             .collect::<Vec<_>>();
         assert_eq!(
-            rows(txn.query(&db, cx, text, &params, symbols, policy()).unwrap()).1,
+            rows(
+                txn.query(&db, cx, text, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
             zero,
         );
         assert_eq!(
@@ -1350,11 +1383,12 @@ fn named_projection_missing_weights_follow_staged_property_presence() {
     });
 }
 
-
 /// An induced weighted graph with an isolate, parallel edges, and malformed
 /// weights that must be excluded before inspection.
 async fn projected_database(commit: &fgdb_types::CommitCx) -> Database<MemVfs> {
-    let mut db = Database::<MemVfs>::open_memory(commit, keys()).await.unwrap();
+    let mut db = Database::<MemVfs>::open_memory(commit, keys())
+        .await
+        .unwrap();
     let mut batch = WriteBatch::new(R);
     for id in 1..=5 {
         batch.create_vertex(
@@ -1363,22 +1397,29 @@ async fn projected_database(commit: &fgdb_types::CommitCx) -> Database<MemVfs> {
             vec![(P, CanonicalScalar::Int(id as i64 * 10))],
         );
     }
-    for (edge, from, to, weight) in [
-        (1, 1, 2, 7), (2, 1, 2, 2), (3, 2, 3, 3), (4, 1, 3, 10),
-    ] {
+    for (edge, from, to, weight) in [(1, 1, 2, 7), (2, 1, 2, 2), (3, 2, 3, 3), (4, 1, 3, 10)] {
         batch.add_edge(
-            EId(edge), VId(from), VId(to), vec![(P, CanonicalScalar::Int(weight))],
+            EId(edge),
+            VId(from),
+            VId(to),
+            vec![(P, CanonicalScalar::Int(weight))],
         );
     }
     for (edge, from, to) in [(5, 3, 3), (6, 1, 5), (7, 5, 3)] {
         batch.add_edge(
-            EId(edge), VId(from), VId(to), vec![(P, CanonicalScalar::Bool(true))],
+            EId(edge),
+            VId(from),
+            VId(to),
+            vec![(P, CanonicalScalar::Bool(true))],
         );
     }
     db.write(commit, batch).await.unwrap();
     let mut excluded_relation = WriteBatch::new(RelationId(2));
     excluded_relation.add_edge(
-        EId(8), VId(1), VId(3), vec![(P, CanonicalScalar::Bool(true))],
+        EId(8),
+        VId(1),
+        VId(3),
+        vec![(P, CanonicalScalar::Bool(true))],
     );
     db.write(commit, excluded_relation).await.unwrap();
     db
@@ -1395,12 +1436,15 @@ fn projected_dijkstra(direction: &str, parallel: &str, source: &str) -> String {
 }
 
 fn distances(expected: &[(u128, f64)]) -> Vec<Vec<GraphValue>> {
-    expected.iter().map(|&(vertex, distance)| {
-        vec![
-            GraphValue::Vertex(VId(vertex)),
-            GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(distance))),
-        ]
-    }).collect()
+    expected
+        .iter()
+        .map(|&(vertex, distance)| {
+            vec![
+                GraphValue::Vertex(VId(vertex)),
+                GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(distance))),
+            ]
+        })
+        .collect()
 }
 
 #[test]
@@ -1421,15 +1465,22 @@ fn inline_projection_controls_weights_direction_and_parallel_edges_in_every_read
             let expected = distances(&expected);
             assert_eq!(
                 rows(db.query(cx, &query, &params, symbols, policy()).unwrap()).1,
-                expected, "database: {query}",
+                expected,
+                "database: {query}",
             );
             assert_eq!(
                 rows(view.query(cx, &query, &params, symbols, policy()).unwrap()).1,
-                expected, "pinned view: {query}",
+                expected,
+                "pinned view: {query}",
             );
             assert_eq!(
-                rows(txn.query(&db, cx, &query, &params, symbols, policy()).unwrap()).1,
-                expected, "transaction: {query}",
+                rows(
+                    txn.query(&db, cx, &query, &params, symbols, policy())
+                        .unwrap()
+                )
+                .1,
+                expected,
+                "transaction: {query}",
             );
             // The concurrently introduced named envelope must select the same
             // graph in every host, including a transaction's effective source.
@@ -1442,27 +1493,43 @@ fn inline_projection_controls_weights_direction_and_parallel_edges_in_every_read
             );
             assert_eq!(
                 rows(db.query(cx, &named, &params, symbols, policy()).unwrap()).1,
-                expected, "named database: {named}",
+                expected,
+                "named database: {named}",
             );
             assert_eq!(
-                rows(txn.query(&db, cx, &named, &params, symbols, policy()).unwrap()).1,
-                expected, "named transaction: {named}",
+                rows(
+                    txn.query(&db, cx, &named, &params, symbols, policy())
+                        .unwrap()
+                )
+                .1,
+                expected,
+                "named transaction: {named}",
             );
         }
         // Omitted direction follows the registered procedure's undirected law.
         let components = "CALL fnx.connected_components(\
             {labels:['Person'], relations:['R'], parallel:'collapse', self_loops:'drop'}) \
             YIELD vertex, component RETURN vertex, component ORDER BY vertex";
-        let expected: Vec<_> = [(1, 1), (2, 1), (3, 1), (4, 4)].into_iter().map(|(v, c)| {
-            vec![GraphValue::Vertex(VId(v)), GraphValue::Vertex(VId(c))]
-        }).collect();
+        let expected: Vec<_> = [(1, 1), (2, 1), (3, 1), (4, 4)]
+            .into_iter()
+            .map(|(v, c)| vec![GraphValue::Vertex(VId(v)), GraphValue::Vertex(VId(c))])
+            .collect();
         assert_eq!(
-            rows(db.query(cx, components, &params, symbols, policy()).unwrap()).1,
+            rows(
+                db.query(cx, components, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
             expected,
         );
         assert_eq!(
-            rows(txn.query(&db, cx, components, &params, symbols, policy()).unwrap()).1,
-            expected, "the selected isolated vertex must not disappear",
+            rows(
+                txn.query(&db, cx, components, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            expected,
+            "the selected isolated vertex must not disappear",
         );
         txn.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -1481,7 +1548,10 @@ fn inline_missing_weight_and_refusal_policies_are_explicit_and_consistent() {
         let reject = projected_dijkstra("directed", "min", "1");
         for query in [reject.clone(), format!("{reject} LIMIT 0")] {
             assert!(db.query(cx, &query, &params, symbols, policy()).is_err());
-            assert!(txn.query(&db, cx, &query, &params, symbols, policy()).is_err());
+            assert!(
+                txn.query(&db, cx, &query, &params, symbols, policy())
+                    .is_err()
+            );
         }
         for (missing, last) in [("unit", 3.0), ("zero", 2.0)] {
             let query = reject.replace("missing:'reject'", &format!("missing:'{missing}'"));
@@ -1491,7 +1561,11 @@ fn inline_missing_weight_and_refusal_policies_are_explicit_and_consistent() {
                 expected,
             );
             assert_eq!(
-                rows(txn.query(&db, cx, &query, &params, symbols, policy()).unwrap()).1,
+                rows(
+                    txn.query(&db, cx, &query, &params, symbols, policy())
+                        .unwrap()
+                )
+                .1,
                 expected,
             );
         }
@@ -1507,14 +1581,24 @@ fn inline_missing_weight_and_refusal_policies_are_explicit_and_consistent() {
             expected,
         );
         assert_eq!(
-            rows(txn.query(&db, cx, &collapse, &params, symbols, policy()).unwrap()).1,
+            rows(
+                txn.query(&db, cx, &collapse, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
             expected,
         );
         assert!(db.query(cx, &reject, &params, symbols, policy()).is_err());
-        assert!(txn.query(&db, cx, &reject, &params, symbols, policy()).is_err());
+        assert!(
+            txn.query(&db, cx, &reject, &params, symbols, policy())
+                .is_err()
+        );
         let loops = collapse.replace("self_loops:'drop'", "self_loops:'reject'");
         assert!(db.query(cx, &loops, &params, symbols, policy()).is_err());
-        assert!(txn.query(&db, cx, &loops, &params, symbols, policy()).is_err());
+        assert!(
+            txn.query(&db, cx, &loops, &params, symbols, policy())
+                .is_err()
+        );
         txn.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -1533,7 +1617,11 @@ fn projected_analytics_see_staged_weights_and_keep_their_conflict_dependencies()
         let params = GqlParameters::new();
         let expected = distances(&[(1, 0.0), (2, 4.0), (3, 7.0)]);
         assert_eq!(
-            rows(txn.query(&db, cx, &query, &params, symbols, policy()).unwrap()).1,
+            rows(
+                txn.query(&db, cx, &query, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
             expected,
         );
         assert_eq!(txn.staged_effect_digest().unwrap(), digest);
@@ -1542,8 +1630,13 @@ fn projected_analytics_see_staged_weights_and_keep_their_conflict_dependencies()
             direction=>'directed', parallel=>'min', self_loops=>'drop', args=>[1,NULL,true]) \
             YIELD vertex, distance RETURN vertex, distance ORDER BY vertex";
         assert_eq!(
-            rows(txn.query(&db, cx, named, &params, symbols, policy()).unwrap()).1,
-            expected, "named projections must read the same staged weights",
+            rows(
+                txn.query(&db, cx, named, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            expected,
+            "named projections must read the same staged weights",
         );
         assert_eq!(
             rows(db.query(cx, &query, &params, symbols, policy()).unwrap()).1,
@@ -1553,13 +1646,20 @@ fn projected_analytics_see_staged_weights_and_keep_their_conflict_dependencies()
         winner.set_edge_property(EId(3), P, Some(CanonicalScalar::Int(1)));
         db.write(commit, winner).await.unwrap();
         assert_eq!(
-            rows(txn.query(&db, cx, &query, &params, symbols, policy()).unwrap()).1,
-            expected, "the source must stay pinned while retaining its weight dependency",
+            rows(
+                txn.query(&db, cx, &query, &params, symbols, policy())
+                    .unwrap()
+            )
+            .1,
+            expected,
+            "the source must stay pinned while retaining its weight dependency",
         );
         let frontier = db.frontier().unwrap();
         assert!(matches!(
             txn.finish(&mut db, commit).await,
-            Err(fgdb::WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins { .. }))
+            Err(fgdb::WriteTxnError::Write(
+                fgdb::WriteError::FirstCommitterWins { .. }
+            ))
         ));
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -1573,39 +1673,56 @@ fn projection_identity_and_algorithm_parameters_survive_certified_replay() {
         let query = projected_dijkstra("directed", "min", "$source");
         let other = projected_dijkstra("directed", "max", "$source");
         let params = GqlParameters::new().with_int64("source", 1).unwrap();
-        let (result, certificate) =
-            db.execute_certified(cx, &query, &params, symbols, policy()).unwrap();
-        let (_, different) =
-            db.execute_certified(cx, &other, &params, symbols, policy()).unwrap();
+        let (result, certificate) = db
+            .execute_certified(cx, &query, &params, symbols, policy())
+            .unwrap();
+        let (_, different) = db
+            .execute_certified(cx, &other, &params, symbols, policy())
+            .unwrap();
         assert_ne!(certificate.plan, different.plan);
         assert_ne!(certificate.procedures, different.procedures);
         let mut standalone_options = explicit(false);
         standalone_options.selection = FnxSelection {
             vertex_label: Some(PERSON),
             relation: Some(R),
-            weight: FnxWeightSpec::Property { key: P, missing: MissingWeightPolicy::Reject },
+            weight: FnxWeightSpec::Property {
+                key: P,
+                missing: MissingWeightPolicy::Reject,
+            },
         };
         standalone_options.projection.parallel_edges = ParallelEdgePolicy::Minimum;
         standalone_options.projection.self_loops = SelfLoopPolicy::Drop;
-        let standalone = db.call_fnx(
-            cx,
-            "CALL fnx.single_source_dijkstra_path_length(1,NULL,true) YIELD vertex,distance",
-            &FnxParameters::new(),
-            standalone_options,
-        ).unwrap().analytics;
-        let expected: Vec<Vec<_>> = standalone.rows.into_iter()
-            .map(|row| row.into_iter().map(value).collect()).collect();
+        let standalone = db
+            .call_fnx(
+                cx,
+                "CALL fnx.single_source_dijkstra_path_length(1,NULL,true) YIELD vertex,distance",
+                &FnxParameters::new(),
+                standalone_options,
+            )
+            .unwrap()
+            .analytics;
+        let expected: Vec<Vec<_>> = standalone
+            .rows
+            .into_iter()
+            .map(|row| row.into_iter().map(value).collect())
+            .collect();
         assert_eq!(rows(result.clone()).1, expected);
         assert_eq!(
             certificate.procedures,
-            [fgdb::NativeProcedureEvidence::from_fnx(&standalone.certificate)],
+            [fgdb::NativeProcedureEvidence::from_fnx(
+                &standalone.certificate
+            )],
         );
         let mut later = WriteBatch::new(R);
         later.set_edge_property(EId(2), P, Some(CanonicalScalar::Int(4)));
         db.write(commit, later).await.unwrap();
-        assert_ne!(db.query(cx, &query, &params, symbols, policy()).unwrap(), result);
+        assert_ne!(
+            db.query(cx, &query, &params, symbols, policy()).unwrap(),
+            result
+        );
         assert_eq!(
-            db.replay(cx, &certificate, &params, symbols, policy()).unwrap(),
+            db.replay(cx, &certificate, &params, symbols, policy())
+                .unwrap(),
             result,
         );
         let rebound = GqlParameters::new().with_int64("source", 2).unwrap();

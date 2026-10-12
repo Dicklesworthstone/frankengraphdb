@@ -11,8 +11,8 @@
 use crate::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, BodyError, Credential, Empty, ErrorBody,
     ErrorCode, Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping,
-    Prepare, Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared, ResultChunk, ResultEnd,
-    SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
+    Prepare, Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared, ResultChunk,
+    ResultEnd, SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
 };
 use crate::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, TransportError, split_duplex,

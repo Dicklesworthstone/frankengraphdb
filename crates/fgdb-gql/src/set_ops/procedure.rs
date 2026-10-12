@@ -74,7 +74,10 @@ pub enum ProcedureSelfLoops {
 
 impl ProcedureGraphProjection {
     pub(crate) fn append_transcript(&self, bytes: &mut Vec<u8>) {
-        for id in [self.vertex_label.map(|id| id.0), self.relation.map(|id| id.0)] {
+        for id in [
+            self.vertex_label.map(|id| id.0),
+            self.relation.map(|id| id.0),
+        ] {
             match id {
                 None => bytes.push(0),
                 Some(id) => {
@@ -313,7 +316,10 @@ mod tests {
         let mut unprojected = Vec::new();
         call.append_template_transcript(&mut unprojected);
         assert_eq!(unprojected[0], 5);
-        if let ReadStageTemplate::Call { graph_projection, .. } = &mut call {
+        if let ReadStageTemplate::Call {
+            graph_projection, ..
+        } = &mut call
+        {
             *graph_projection = Some(ProcedureGraphProjection {
                 vertex_label: None,
                 relation: None,
@@ -330,7 +336,10 @@ mod tests {
             order: Vec::new(),
             offset: ReadPageNumber::Literal(0),
             count: None,
-            computed: Some(ReadOrderProjection { values: Vec::new(), visible: 0 }),
+            computed: Some(ReadOrderProjection {
+                values: Vec::new(),
+                visible: 0,
+            }),
         };
         let mut computed = Vec::new();
         page.append_template_transcript(&mut computed);

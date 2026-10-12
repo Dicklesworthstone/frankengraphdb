@@ -1048,7 +1048,10 @@ mod source_tests {
                 .insert_edge(from, to, ExpansionDirection::Outgoing, &mut work)
                 .unwrap();
         }
-        let expected = vec![GraphHit { id: ids[2], hops: 2 }];
+        let expected = vec![GraphHit {
+            id: ids[2],
+            hops: 2,
+        }];
         for include in [false, true] {
             assert_eq!(
                 graph
@@ -1086,7 +1089,11 @@ mod source_tests {
             assert_eq!(input.calls, [ids[0], ids[1]]);
             assert_eq!(
                 observed,
-                if include { ids.to_vec() } else { ids[1..].to_vec() }
+                if include {
+                    ids.to_vec()
+                } else {
+                    ids[1..].to_vec()
+                }
             );
             let mut input = source(arcs.clone());
             assert_eq!(
@@ -1227,7 +1234,13 @@ mod source_tests {
             (result, work.calls)
         };
         let (result, count) = run(usize::MAX);
-        assert_eq!(result.unwrap(), [GraphHit { id: VId(2), hops: 2 }]);
+        assert_eq!(
+            result.unwrap(),
+            [GraphHit {
+                id: VId(2),
+                hops: 2
+            }]
+        );
         for stop in 1..=count {
             let (result, seen) = run(stop);
             assert_eq!(result.unwrap_err(), BeaconError::Cancelled);
@@ -1259,14 +1272,7 @@ mod source_tests {
         .unwrap();
         let eligible = |id| id == VId(3);
         let candidates = graph
-            .expand_filtered(
-                &[VId(1)],
-                2,
-                false,
-                1,
-                |id, _| Ok(eligible(id)),
-                &mut work,
-            )
+            .expand_filtered(&[VId(1)], 2, false, 1, |id, _| Ok(eligible(id)), &mut work)
             .unwrap();
         let rows = index
             .snapshot()
@@ -1314,7 +1320,12 @@ mod source_tests {
                     if bits & (1 << (from * 3 + to)) != 0 {
                         distance[from][to] = distance[from][to].min(1);
                         graph
-                            .insert_edge(ids[from], ids[to], ExpansionDirection::Outgoing, &mut work)
+                            .insert_edge(
+                                ids[from],
+                                ids[to],
+                                ExpansionDirection::Outgoing,
+                                &mut work,
+                            )
                             .unwrap();
                     }
                 }

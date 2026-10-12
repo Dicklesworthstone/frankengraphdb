@@ -1,8 +1,6 @@
 //! Batch quorum admission through the same bounded application read owner.
 
-use crate::application::member::{
-    AppliedReplica, AppliedReplicaOutput, MemberError, WaitingRead,
-};
+use crate::application::member::{AppliedReplica, AppliedReplicaOutput, MemberError, WaitingRead};
 use crate::application::{Application, ApplicationStateError};
 use crate::driver::RaftPublisher;
 use crate::replica::ReadIndexId;

@@ -68,7 +68,9 @@ impl<C: Clone + Eq> Replica<C> {
                 .begin_read_index()
                 .map_err(|error| match error {
                     ReadIndexError::Raft(error) => ReplicaError::Raft(error),
-                    ReadIndexError::CurrentTermNotCommitted => ReplicaError::CurrentTermNotCommitted,
+                    ReadIndexError::CurrentTermNotCommitted => {
+                        ReplicaError::CurrentTermNotCommitted
+                    }
                     error => ReplicaError::ReadIndex(error),
                 })?;
             let id = ReadIndexId {

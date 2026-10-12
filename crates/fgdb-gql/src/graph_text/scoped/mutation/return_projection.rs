@@ -870,8 +870,7 @@ impl<'a> Parser<'a> {
                             .property_map_function(inputs)
                             .map(|column| Some(width + column));
                     }
-                    if pipeline::metadata_source(word, parser.current.at, &parser.lexer)?
-                        .is_some()
+                    if pipeline::metadata_source(word, parser.current.at, &parser.lexer)?.is_some()
                     {
                         let Operand::Column(column) = parser.mutation_operand(inputs)? else {
                             unreachable!("native metadata projects one source column");

@@ -20,8 +20,8 @@ use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
     Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping, Prepare,
-    Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase,
-    WindowUpdate, WireValue,
+    Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared, ResultChunk, ResultEnd,
+    SelectDatabase, WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -989,12 +989,10 @@ impl Lane {
             return delivered;
         }
         let source = match &statement {
-            Statement::Native(statement) if statement.mode == ExecuteMode::ReadStream => {
-                Some((
-                    source_stream::SourceStatement::Text(statement.statement.as_str()),
-                    statement.parameters.as_slice(),
-                ))
-            }
+            Statement::Native(statement) if statement.mode == ExecuteMode::ReadStream => Some((
+                source_stream::SourceStatement::Text(statement.statement.as_str()),
+                statement.parameters.as_slice(),
+            )),
             Statement::Prepared {
                 definition: Ok(definition),
                 mode: PreparedReadMode::SourceStream,

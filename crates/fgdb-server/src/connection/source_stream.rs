@@ -442,24 +442,22 @@ mod tests {
                 .unwrap();
             let query = contexts.query();
             let parameters = GqlParameters::new();
-            for text in [
-                "MATCH (n) RETURN n",
-                "MATCH (n) RETURN count(*) AS n",
-            ] {
-                let definition = accepted(crate::execute::prepare_read(
-                    &root,
-                    db,
-                    &token,
-                    &Prepare {
-                        statement: text.into(),
-                        parameters: vec![],
-                    },
-                )
-                .await);
+            for text in ["MATCH (n) RETURN n", "MATCH (n) RETURN count(*) AS n"] {
+                let definition = accepted(
+                    crate::execute::prepare_read(
+                        &root,
+                        db,
+                        &token,
+                        &Prepare {
+                            statement: text.into(),
+                            parameters: vec![],
+                        },
+                    )
+                    .await,
+                );
                 let (mut session, prepared) =
                     accepted(read_prepared_session(&root, db, &token, &definition).await);
-                let mut source =
-                    accepted(session.stream_prepared(&query, &prepared, &parameters));
+                let mut source = accepted(session.stream_prepared(&query, &prepared, &parameters));
                 let mut chunks = Chunks::new(source.columns().to_vec());
                 let mut pull = || source.next().map(|row| (row, source.exhausted()));
                 let metadata = accepted(chunks.next(128, 0, 128, &mut pull)).unwrap();
@@ -473,16 +471,18 @@ mod tests {
                 );
                 assert!(!chunks.done());
             }
-            let definition = accepted(crate::execute::prepare_read(
-                &root,
-                db,
-                &token,
-                &Prepare {
-                    statement: "MATCH (n) RETURN 1 AS value".into(),
-                    parameters: vec![],
-                },
-            )
-            .await);
+            let definition = accepted(
+                crate::execute::prepare_read(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        statement: "MATCH (n) RETURN 1 AS value".into(),
+                        parameters: vec![],
+                    },
+                )
+                .await,
+            );
             let (mut session, prepared) =
                 accepted(read_prepared_session(&root, db, &token, &definition).await);
             assert_eq!(
@@ -495,10 +495,7 @@ mod tests {
                 "profile refusal must precede the zero-node execution limit"
             );
             drop(session);
-            for text in [
-                "MATCH (n) RETURN id(n)",
-                "MATCH (n) RETURN elementId(n)",
-            ] {
+            for text in ["MATCH (n) RETURN id(n)", "MATCH (n) RETURN elementId(n)"] {
                 assert_eq!(
                     crate::execute::prepare_read(
                         &root,

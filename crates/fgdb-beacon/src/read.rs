@@ -542,11 +542,7 @@ mod filtered_search_tests {
                 .unwrap();
             assert_eq!(ids(&unfiltered), [VId(1)]);
             let filtered = query
-                .execute_filtered(
-                    &snapshot,
-                    |id| id == VId(2),
-                    &mut WorkBudget::new(100_000),
-                )
+                .execute_filtered(&snapshot, |id| id == VId(2), &mut WorkBudget::new(100_000))
                 .unwrap();
             assert_eq!(ids(&filtered), [VId(2)]);
             if let Rows::Hybrid(hits) = filtered {
@@ -602,11 +598,7 @@ mod filtered_search_tests {
             }
             assert_eq!(
                 query
-                    .execute_filtered(
-                        &snapshot,
-                        |id| id == VId(2),
-                        &mut WorkBudget::new(count.0),
-                    )
+                    .execute_filtered(&snapshot, |id| id == VId(2), &mut WorkBudget::new(count.0),)
                     .unwrap(),
                 expected
             );

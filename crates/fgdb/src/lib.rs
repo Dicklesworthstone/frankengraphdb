@@ -1883,9 +1883,9 @@ impl CheckpointVersionBasis {
                     .and(version))
             }
             ElementId::Edge(eid) => {
-                let index = self.edges.get_or_init(|| {
-                    gql_exec::source::StatementHistoryIndex::edges(&self.blocks)
-                });
+                let index = self
+                    .edges
+                    .get_or_init(|| gql_exec::source::StatementHistoryIndex::edges(&self.blocks));
                 let mut history = index.coordinates(eid).peekable();
                 let mut winner = None;
                 while let Some((created_at, block, row)) = history.next() {
@@ -2852,7 +2852,10 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
     ) -> Result<&std::collections::BTreeMap<ElementId, ObjectId>, ReadError> {
         self.ensure_readable()?;
-        self.heads.versions.materialized().map_err(ReadError::VersionHead)
+        self.heads
+            .versions
+            .materialized()
+            .map_err(ReadError::VersionHead)
     }
 
     // Type-erased because every constructor funnels through this bind: a
@@ -3601,7 +3604,10 @@ impl<V: Vfs + Clone> Database<V> {
                     let before_version = prefix_versions
                         .get(&ElementId::Edge(eid))
                         .copied()
-                        .map_or_else(|| self.heads.versions.get(&ElementId::Edge(eid)), |head| Ok(Some(head)))?
+                        .map_or_else(
+                            || self.heads.versions.get(&ElementId::Edge(eid)),
+                            |head| Ok(Some(head)),
+                        )?
                         .expect("a live edge always has a version chain head");
                     prefix_deleted_edges.insert(eid);
                     DeltaRow::DeleteEdge {
@@ -3622,7 +3628,10 @@ impl<V: Vfs + Clone> Database<V> {
                     let before_version = prefix_versions
                         .get(&ElementId::Vertex(vid))
                         .copied()
-                        .map_or_else(|| self.heads.versions.get(&ElementId::Vertex(vid)), |head| Ok(Some(head)))?
+                        .map_or_else(
+                            || self.heads.versions.get(&ElementId::Vertex(vid)),
+                            |head| Ok(Some(head)),
+                        )?
                         .expect("a live vertex always has a version chain head");
                     // The cascade image is the incident set the FOLD will
                     // see when it applies this DeleteVertex. NENF emits
@@ -7722,17 +7731,18 @@ mod root_capacity_laws {
         // The uninterrupted origin fold has no checkpoint derivation. Compare
         // every prepared template too, including birth ordinals and deletes'
         // before-version images, before either side commits it.
-        let write_both = |db: &mut Database<MemVfs>,
-                          oracle: &mut Database<MemVfs>,
-                          batch: WriteBatch| {
-            let prepared = db.prepare_write(batch.clone()).unwrap();
-            let expected = oracle.prepare_write(batch).unwrap();
-            assert_eq!(prepared.template, expected.template);
-            assert_eq!(
-                runtime.block_on(db.commit_prepared(&cx, prepared)).unwrap(),
-                runtime.block_on(oracle.commit_prepared(&cx, expected)).unwrap()
-            );
-        };
+        let write_both =
+            |db: &mut Database<MemVfs>, oracle: &mut Database<MemVfs>, batch: WriteBatch| {
+                let prepared = db.prepare_write(batch.clone()).unwrap();
+                let expected = oracle.prepare_write(batch).unwrap();
+                assert_eq!(prepared.template, expected.template);
+                assert_eq!(
+                    runtime.block_on(db.commit_prepared(&cx, prepared)).unwrap(),
+                    runtime
+                        .block_on(oracle.commit_prepared(&cx, expected))
+                        .unwrap()
+                );
+            };
         let mut initial = WriteBatch::new(RelationId(1));
         for vid in 1..=12 {
             initial.create_vertex(
@@ -7770,10 +7780,19 @@ mod root_capacity_laws {
         let vfs = db.vfs.clone();
         drop(db);
         let mut db = runtime
-            .block_on(Database::open_with_vfs(&cx, vfs.clone(), &path, keys.clone()))
+            .block_on(Database::open_with_vfs(
+                &cx,
+                vfs.clone(),
+                &path,
+                keys.clone(),
+            ))
             .unwrap();
         let basis = Arc::clone(db.heads.versions.checkpoint.as_ref().unwrap());
-        let derivations = || basis.head_derivations.load(std::sync::atomic::Ordering::Relaxed);
+        let derivations = || {
+            basis
+                .head_derivations
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
         assert_eq!(derivations(), 0);
         assert!(db.heads.versions.changed.is_empty());
         assert!(db.heads.versions.complete.get().is_none());
@@ -7787,28 +7806,24 @@ mod root_capacity_laws {
         append.create_vertex(VId(100), vec![LabelId(3)], vec![]);
         append.add_edge(EId(100), VId(1), VId(100), vec![]);
         write_both(&mut db, &mut oracle, append);
-        assert_eq!(derivations(), 0, "new identities have no checkpoint predecessor");
+        assert_eq!(
+            derivations(),
+            0,
+            "new identities have no checkpoint predecessor"
+        );
         assert_eq!(db.heads.versions.changed.len(), 2);
         assert!(basis.edges.get().is_none());
 
         for turn in 10..=11 {
             let mut vertex = WriteBatch::new(RelationId(1));
-            vertex.set_vertex_property(
-                VId(1),
-                PropertyKeyId(1),
-                Some(CanonicalScalar::Int(turn)),
-            );
+            vertex.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(turn)));
             write_both(&mut db, &mut oracle, vertex);
             assert_eq!(derivations(), 1, "later updates use the changed head");
             assert!(basis.edges.get().is_none());
         }
         for turn in 20..=21 {
             let mut edge = WriteBatch::new(RelationId(1));
-            edge.set_edge_property(
-                EId(1),
-                PropertyKeyId(1),
-                Some(CanonicalScalar::Int(turn)),
-            );
+            edge.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(turn)));
             write_both(&mut db, &mut oracle, edge);
             assert_eq!(derivations(), 2);
             assert!(basis.edges.get().is_some());
@@ -7817,8 +7832,16 @@ mod root_capacity_laws {
         deletion.delete_vertex(VId(4));
         deletion.delete_edge(EId(10));
         write_both(&mut db, &mut oracle, deletion);
-        assert_eq!(derivations(), 4, "a cascade masks its edges without hashing them");
-        for elem in [ElementId::Vertex(VId(4)), ElementId::Edge(EId(3)), ElementId::Edge(EId(10))] {
+        assert_eq!(
+            derivations(),
+            4,
+            "a cascade masks its edges without hashing them"
+        );
+        for elem in [
+            ElementId::Vertex(VId(4)),
+            ElementId::Edge(EId(3)),
+            ElementId::Edge(EId(10)),
+        ] {
             assert_eq!(db.heads.versions.changed.get(&elem), Some(&None));
             assert_eq!(db.heads.versions.get(&elem).unwrap(), None);
         }
@@ -7829,12 +7852,18 @@ mod root_capacity_laws {
         for vid in [4, 12] {
             let mut reused = WriteBatch::new(RelationId(1));
             reused.create_vertex(VId(vid), vec![], vec![]);
-            assert!(matches!(db.prepare_write(reused), Err(WriteError::IdentitySpent { .. })));
+            assert!(matches!(
+                db.prepare_write(reused),
+                Err(WriteError::IdentitySpent { .. })
+            ));
         }
         for eid in [2, 3] {
             let mut reused = WriteBatch::new(RelationId(1));
             reused.add_edge(EId(eid), VId(1), VId(2), vec![]);
-            assert!(matches!(db.prepare_write(reused), Err(WriteError::IdentitySpent { .. })));
+            assert!(matches!(
+                db.prepare_write(reused),
+                Err(WriteError::IdentitySpent { .. })
+            ));
         }
         assert_eq!(db.heads.next_birth_ordinal, births);
         assert_recovered_history_matches(&db, &oracle);
@@ -7842,7 +7871,10 @@ mod root_capacity_laws {
         runtime.block_on(db.compact(&cx)).unwrap();
         assert!(db.heads.versions.changed.is_empty());
         assert!(db.heads.versions.complete.get().is_none());
-        assert!(!Arc::ptr_eq(db.heads.versions.checkpoint.as_ref().unwrap(), &basis));
+        assert!(!Arc::ptr_eq(
+            db.heads.versions.checkpoint.as_ref().unwrap(),
+            &basis
+        ));
         let mut next = WriteBatch::new(RelationId(1));
         next.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(99)));
         next.create_vertex(VId(101), vec![], vec![]);
@@ -7851,7 +7883,13 @@ mod root_capacity_laws {
         drop(db);
         for force_rebuild in [false, true] {
             let reopened = runtime
-                .block_on(Database::bind_with_vfs(&cx, vfs.clone(), &path, keys.clone(), force_rebuild))
+                .block_on(Database::bind_with_vfs(
+                    &cx,
+                    vfs.clone(),
+                    &path,
+                    keys.clone(),
+                    force_rebuild,
+                ))
                 .unwrap();
             assert_recovered_history_matches(&reopened, &oracle);
         }
@@ -7871,14 +7909,22 @@ mod root_capacity_laws {
         let mut initial = WriteBatch::new(RelationId(1));
         initial.create_vertex(VId(1), vec![], vec![]);
         initial.create_vertex(VId(2), vec![], vec![]);
-        initial.add_edge(EId(1), VId(1), VId(2), vec![(PropertyKeyId(1), CanonicalScalar::Int(1))]);
+        initial.add_edge(
+            EId(1),
+            VId(1),
+            VId(2),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+        );
         runtime.block_on(db.write(&cx, initial)).unwrap();
         runtime.block_on(db.compact(&cx)).unwrap();
         let old_basis = Arc::downgrade(db.heads.versions.checkpoint.as_ref().unwrap());
         let old_block = Arc::downgrade(&db.snapshot.blocks[0]);
         let expected = db.element_versions().unwrap().clone();
         runtime.block_on(db.compact(&cx)).unwrap();
-        assert!(db.preparation_anchor.is_none(), "origin history needs no checkpoint anchor");
+        assert!(
+            db.preparation_anchor.is_none(),
+            "origin history needs no checkpoint anchor"
+        );
         assert!(old_basis.upgrade().is_none());
         assert!(old_block.upgrade().is_none());
         assert_eq!(db.element_versions().unwrap(), &expected);

@@ -99,8 +99,7 @@ mod procedures {
             let mut edges = Vec::new();
             for &((eid, from, relation, to), ref view) in &source.edges {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                if options.selection.relation.is_some()
-                    || options.selection.vertex_label.is_some()
+                if options.selection.relation.is_some() || options.selection.vertex_label.is_some()
                 {
                     usage.observe(policy, SourceEvent::Work)?;
                     if options
@@ -126,20 +125,19 @@ mod procedures {
                         SelfLoopPolicy::Keep => {}
                     }
                 }
-                let weight = if options.projection.parallel_edges
-                    == ParallelEdgePolicy::CollapseUnit
-                {
-                    1.0
-                } else {
-                    let value = options
-                        .selection
-                        .weight
-                        .property_key()
-                        .and_then(|key| view.property(key));
-                    options.selection.weight.resolve(value).map_err(|reason| {
-                        prism_failure(FnxReadError::Weight { edge: eid, reason })
-                    })?
-                };
+                let weight =
+                    if options.projection.parallel_edges == ParallelEdgePolicy::CollapseUnit {
+                        1.0
+                    } else {
+                        let value = options
+                            .selection
+                            .weight
+                            .property_key()
+                            .and_then(|key| view.property(key));
+                        options.selection.weight.resolve(value).map_err(|reason| {
+                            prism_failure(FnxReadError::Weight { edge: eid, reason })
+                        })?
+                    };
                 usage.observe(policy, SourceEvent::ScratchEntry)?;
                 crate::query::push_prism_staged(
                     &mut edges,

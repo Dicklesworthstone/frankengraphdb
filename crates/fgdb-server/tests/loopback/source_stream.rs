@@ -559,7 +559,10 @@ fn prepared_source_reads_preserve_scope_and_rebind_unsigned_historical_cuts() {
         assert!(rows.rows.iter().all(|row| row[1] == WireValue::Null));
         assert_eq!(
             rows,
-            reader.execute(cx, ExecuteMode::Read, ROWS, vec![]).await.unwrap()
+            reader
+                .execute(cx, ExecuteMode::Read, ROWS, vec![])
+                .await
+                .unwrap()
         );
         reader.release_prepared(cx, rows_handle).await.unwrap();
 

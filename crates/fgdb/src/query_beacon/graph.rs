@@ -777,19 +777,22 @@ mod tests {
             assert_eq!(hits[0].score.numerator(), 102);
             assert_eq!(hits[0].score.denominator(), 61);
             assert_eq!(
-                db.beacon_search_graph_filtered(&cx, &options(), q, spec, |_| true).unwrap(),
+                db.beacon_search_graph_filtered(&cx, &options(), q, spec, |_| true)
+                    .unwrap(),
                 db.beacon_search_graph(&cx, &options(), q, spec).unwrap()
             );
-            assert!(db
-                .beacon_search_graph_filtered(&cx, &options(), q, spec, |_| false)
-                .unwrap()
-                .is_empty());
+            assert!(
+                db.beacon_search_graph_filtered(&cx, &options(), q, spec, |_| false)
+                    .unwrap()
+                    .is_empty()
+            );
             let mut denied = spec;
             denied.limits.max_visited_vertices = 2;
             assert!(matches!(
                 db.beacon_search_graph_filtered(&cx, &options(), q, denied, |_| false),
                 Err(Error::Index(BeaconError::ResourceLimit {
-                    resource: "expansion visited vertices", limit: 2,
+                    resource: "expansion visited vertices",
+                    limit: 2,
                 }))
             ));
             q.graph_weight = 0;
@@ -829,12 +832,15 @@ mod tests {
             let mut historical = options();
             historical.as_of = Some(at);
             assert_eq!(
-                db.beacon_search_graph_filtered(&cx, &historical, query(), spec, |id| id == HIGH).unwrap(),
+                db.beacon_search_graph_filtered(&cx, &historical, query(), spec, |id| id == HIGH)
+                    .unwrap(),
                 before
             );
             drop(db);
             assert_eq!(
-                pinned.beacon_search_graph_filtered(&cx, &options(), query(), spec, |id| id == HIGH).unwrap(),
+                pinned
+                    .beacon_search_graph_filtered(&cx, &options(), query(), spec, |id| id == HIGH)
+                    .unwrap(),
                 before
             );
         });
@@ -843,11 +849,18 @@ mod tests {
 
     #[test]
     fn filtered_graph_refuses_every_interruption_without_publishing_a_prefix() {
-        struct Cut { calls: usize, stop: usize }
+        struct Cut {
+            calls: usize,
+            stop: usize,
+        }
         impl WorkControl for Cut {
             fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
                 self.calls += 1;
-                if self.calls == self.stop { Err(BeaconError::Cancelled) } else { Ok(()) }
+                if self.calls == self.stop {
+                    Err(BeaconError::Cancelled)
+                } else {
+                    Ok(())
+                }
             }
         }
         let ((), report) = run_async_under_lab(0xbeac_3203, |root| async move {
@@ -859,9 +872,19 @@ mod tests {
                 let run = |stop| {
                     let work = RefCell::new(Cut { calls: 0, stop });
                     let result = evaluate_filtered(
-                        &db.snapshot, at, &options(), query(), expansion(&[VId(1)]),
-                        &work, Scan::Metered, |_| Ok(true), |_| true, |_| true,
-                        |_| true, || Ok(()), |id| accept && id == HIGH,
+                        &db.snapshot,
+                        at,
+                        &options(),
+                        query(),
+                        expansion(&[VId(1)]),
+                        &work,
+                        Scan::Metered,
+                        |_| Ok(true),
+                        |_| true,
+                        |_| true,
+                        |_| true,
+                        || Ok(()),
+                        |id| accept && id == HIGH,
                     );
                     (result, work.into_inner().calls)
                 };

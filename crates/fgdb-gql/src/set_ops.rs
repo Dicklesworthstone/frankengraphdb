@@ -472,13 +472,7 @@ impl PreparedGraphSet {
         vertices: Vec<usize>,
     ) -> Result<Self, GraphSetProjectionError> {
         self.procedure_call_with_projection(
-            namespace,
-            name,
-            arguments,
-            names,
-            outputs,
-            vertices,
-            None,
+            namespace, name, arguments, names, outputs, vertices, None,
         )
     }
 

@@ -154,7 +154,10 @@ impl PreparedGraphAggregate {
                         ..,
                         GlaOperator::ProjectValues { columns },
                         GlaOperator::OrderByValues,
-                        GlaOperator::Limit { offset: 0, count: None },
+                        GlaOperator::Limit {
+                            offset: 0,
+                            count: None,
+                        },
                     ] = self.input.plan().operators()
                     else {
                         return None;

@@ -775,7 +775,8 @@ mod query_source {
                 control(SourceEvent::ScratchEntry)?;
                 edge_rows.push(((eid, src, relation, dst), props));
             }
-            let snapshot_records = edge_rows.len() + if vertex_scan { vertex_rows.len() } else { 0 };
+            let snapshot_records =
+                edge_rows.len() + if vertex_scan { vertex_rows.len() } else { 0 };
             Ok(OverlayGraphTables {
                 vertices: vertex_rows,
                 edges: edge_rows,

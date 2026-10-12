@@ -4,8 +4,8 @@
 use super::*;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
-    ProcedureGraphDirection, ProcedureGraphWeight, ProcedureMissingWeight,
-    ProcedureParallelEdges, ProcedureSelfLoops,
+    ProcedureGraphDirection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops,
 };
 use fgdb_prism::{FnxExecutionError, FnxGraphKind, FnxWeightSpec, MissingWeightPolicy};
 
@@ -53,7 +53,10 @@ fn symbol_id<T: TryFrom<i64>, C>(
     index: usize,
 ) -> Result<T, GqlQueryError<GqlError, C>> {
     let GraphValue::Scalar(CanonicalScalar::Int(value)) = value else {
-        return Err(invalid(index, "a catalog-bound projection identity is required"));
+        return Err(invalid(
+            index,
+            "a catalog-bound projection identity is required",
+        ));
     };
     T::try_from(*value).map_err(|_| invalid(index, "projection identity is out of range"))
 }
@@ -65,12 +68,22 @@ pub(crate) fn bind_procedure<C>(
     arguments: &[GraphValue],
 ) -> Result<BoundProcedure, GqlQueryError<GqlError, C>> {
     const FIELDS: [&str; 8] = [
-        "args", "label", "relation", "weight", "direction", "parallel", "self_loops", "missing",
+        "args",
+        "label",
+        "relation",
+        "weight",
+        "direction",
+        "parallel",
+        "self_loops",
+        "missing",
     ];
     let names = call.argument_names();
     let named = !names.is_empty();
     if named && call.graph_projection().is_some() {
-        return Err(invalid(0, "inline and named projections cannot be combined"));
+        return Err(invalid(
+            0,
+            "inline and named projections cannot be combined",
+        ));
     }
     let mut kernel_arguments = if named { &[][..] } else { arguments };
     let mut args_index = None;
@@ -159,7 +172,10 @@ pub(crate) fn bind_procedure<C>(
     if let Some(key) = weight {
         options.selection.weight = FnxWeightSpec::Property { key, missing };
     } else if let Some(index) = missing_index {
-        return Err(invalid(index, "missing requires an explicit weight property"));
+        return Err(invalid(
+            index,
+            "missing requires an explicit weight property",
+        ));
     }
     if let Some(projection) = call.graph_projection() {
         options.selection.vertex_label = projection.vertex_label;

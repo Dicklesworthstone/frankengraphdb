@@ -170,7 +170,11 @@ fn a_full_append_window_does_not_block_a_read_or_fake_a_data_ack() {
     // release the already-consumed read a second time.
     pump(&mut nodes, stalled.consensus.messages);
     assert_eq!(
-        leader(&mut nodes).replica.durable_state().unwrap().commit_index(),
+        leader(&mut nodes)
+            .replica
+            .durable_state()
+            .unwrap()
+            .commit_index(),
         2
     );
 }
@@ -249,23 +253,38 @@ fn cancelled_rounds_and_invalid_bindings_cannot_pollute_the_next_read() {
     let good = ack(&nodes, &id, 2);
     let cases = [
         (
-            ReadIndexAck { domain: Domain([9; 32]), ..good },
+            ReadIndexAck {
+                domain: Domain([9; 32]),
+                ..good
+            },
             ReadIndexError::Raft(RaftError::WrongDomain),
         ),
         (
-            ReadIndexAck { configuration: [9; 32], ..good },
+            ReadIndexAck {
+                configuration: [9; 32],
+                ..good
+            },
             ReadIndexError::Raft(RaftError::WrongConfiguration),
         ),
         (
-            ReadIndexAck { from: MemberId(4), ..good },
+            ReadIndexAck {
+                from: MemberId(4),
+                ..good
+            },
             ReadIndexError::Raft(RaftError::NotVoter),
         ),
         (
-            ReadIndexAck { to: MemberId(3), ..good },
+            ReadIndexAck {
+                to: MemberId(3),
+                ..good
+            },
             ReadIndexError::Raft(RaftError::WrongRecipient),
         ),
         (
-            ReadIndexAck { term: good.term + 1, ..good },
+            ReadIndexAck {
+                term: good.term + 1,
+                ..good
+            },
             ReadIndexError::WrongTerm,
         ),
     ];
@@ -273,7 +292,11 @@ fn cancelled_rounds_and_invalid_bindings_cannot_pollute_the_next_read() {
         let actual = leader(&mut nodes).replica.confirm_read_index(&id, bad);
         assert!(matches!(actual, Err(error) if error == expected));
         assert_eq!(
-            leader(&mut nodes).replica.read_index_probes(&id).unwrap().len(),
+            leader(&mut nodes)
+                .replica
+                .read_index_probes(&id)
+                .unwrap()
+                .len(),
             2
         );
     }
@@ -292,7 +315,11 @@ fn later_commits_do_not_raise_the_probe_rounds_captured_floor() {
     let write = leader(&mut nodes).step(Event::Propose(42));
     let (id, _) = leader(&mut nodes).read();
     let delayed = ack(&nodes, &id, 2);
-    let before = leader(&mut nodes).replica.durable_state().unwrap().commit_index();
+    let before = leader(&mut nodes)
+        .replica
+        .durable_state()
+        .unwrap()
+        .commit_index();
     // This append was issued BEFORE read admission. Its delayed success can
     // commit the write, but is deliberately too old to confirm the read.
     let request = write
@@ -310,7 +337,11 @@ fn later_commits_do_not_raise_the_probe_rounds_captured_floor() {
     ));
     assert!(output.reads.is_empty());
     assert_eq!(
-        leader(&mut nodes).replica.durable_state().unwrap().commit_index(),
+        leader(&mut nodes)
+            .replica
+            .durable_state()
+            .unwrap()
+            .commit_index(),
         before + 1
     );
     let ready = leader(&mut nodes)
@@ -330,7 +361,12 @@ fn publication_failure_fences_probes_and_acknowledgements() {
     let follower = nodes.get_mut(&MemberId(2)).unwrap();
     follower.root.fail = true;
     assert!(
-        immediate(follower.replica.step(&mut follower.root, Event::ElectionTimeout)).is_err()
+        immediate(
+            follower
+                .replica
+                .step(&mut follower.root, Event::ElectionTimeout)
+        )
+        .is_err()
     );
     assert_eq!(
         follower.replica.acknowledge_read_index(request),
@@ -361,7 +397,10 @@ fn recovery_and_leadership_transfer_cannot_reuse_or_admit_probe_rounds() {
         8,
     )
     .unwrap();
-    assert_eq!(recovered.read_index_probes(&id), Err(ReadIndexError::ForeignRound));
+    assert_eq!(
+        recovered.read_index_probes(&id),
+        Err(ReadIndexError::ForeignRound)
+    );
     assert!(matches!(
         recovered.confirm_read_index(&id, response),
         Err(ReadIndexError::ForeignRound)
@@ -374,7 +413,9 @@ fn recovery_and_leadership_transfer_cannot_reuse_or_admit_probe_rounds() {
     ));
     assert_eq!(
         node.replica.read_index_probes(&id),
-        Err(ReadIndexError::Raft(RaftError::LeadershipTransferInProgress))
+        Err(ReadIndexError::Raft(
+            RaftError::LeadershipTransferInProgress
+        ))
     );
     assert_eq!(node.replica.pending_reads(), 1);
 }
