@@ -150,7 +150,7 @@ fn external_order_preserves_masked_keys_distinct_prepared_history_and_join_bags(
         let parameters = vec![
             ("cut".into(), WireValue::Count(1)),
             ("minimum".into(), WireValue::Int(3)),
-            ("take".into(), WireValue::Int(4)),
+            ("take".into(), WireValue::Count(4)),
         ];
         let handle = reader
             .prepare_read(cx, historical, parameters.clone())
@@ -205,7 +205,7 @@ fn external_order_preserves_masked_keys_distinct_prepared_history_and_join_bags(
                     vec![
                         ("cut".into(), WireValue::Count(2)),
                         ("minimum".into(), WireValue::Int(103)),
-                        ("take".into(), WireValue::Int(2))
+                        ("take".into(), WireValue::Count(2))
                     ],
                     |_| Ok(()),
                     |row| {

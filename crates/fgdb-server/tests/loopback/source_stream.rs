@@ -81,17 +81,24 @@ fn native_aggregate_stream_preserves_exact_values_masking_history_and_group_wind
             )
             .await
             .unwrap();
-        assert_eq!(
-            expressions.rows,
-            [vec![
-                WireValue::List(vec![
-                    WireValue::Int(10),
-                    WireValue::Int(11),
-                    WireValue::Int(12)
-                ]),
-                WireValue::Int(66),
-            ]]
-        );
+        // collect() follows the native input order (vertex identity, hashed
+        // ids), which openCypher leaves to the input; the values are exact.
+        let [row] = expressions.rows.as_slice() else {
+            panic!("one aggregate row")
+        };
+        let WireValue::List(ages) = &row[0] else {
+            panic!("a list of ages")
+        };
+        let mut ages: Vec<i64> = ages
+            .iter()
+            .map(|age| match age {
+                WireValue::Int(age) => *age,
+                other => panic!("an integer age, not {other:?}"),
+            })
+            .collect();
+        ages.sort_unstable();
+        assert_eq!(ages, [10, 11, 12]);
+        assert_eq!(row[1], WireValue::Int(66));
 
         let groups = "MATCH (n:Person) RETURN n.age AS age, count(*) AS n, n.age AS repeated GROUP BY n.age ORDER BY age DESC";
         let streamed = reader
