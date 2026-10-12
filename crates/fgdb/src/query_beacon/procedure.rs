@@ -32,11 +32,19 @@
 //! own rank and score are separate outputs, null where that lane did not
 //! return the vertex. Rows arrive best first, ties by ascending vertex.
 //!
+//! Immutable reads use seed-directed historical adjacency: only reached
+//! vertices below max_hops open incidence cursors. Graph limits count admitted
+//! incidence visits (parallel edges separately, undirected edges at each
+//! expanded endpoint), not the whole edge population. There is no full-graph
+//! retry on refusal. The selected vertex directory is still prepared once.
+//! Transaction overlays retain their own canonical staged-edge source and
+//! conservative conflict witnesses; they never consult a committed-only index.
+//!
 //! Requested indexes are built for this one execution from the read's snapshot.
 //! This is exact fusion of selected candidates, not an exhaustive hybrid
 //! top-k; `ann` remains approximate. It is not a durable index definition.
 
-use super::graph;
+use super::indexed;
 use super::{Meter, Options, Scan, SharedWork};
 use crate::query::ProcedureError;
 use crate::{GqlError, ReadError, Snapshot, VertexRow};
@@ -645,7 +653,7 @@ impl HybridSearch {
             remaining.evaluator.max_scratch_entries,
             &mut SharedWork(work),
         )?;
-        let result = graph::evaluate_filtered(
+        let result = indexed::evaluate_filtered(
             snapshot,
             at,
             &self.options,
@@ -762,3 +770,7 @@ pub(crate) fn privileged(
         value,
     })
 }
+
+#[cfg(test)]
+#[path = "procedure/indexed_tests.rs"]
+mod indexed_tests;
