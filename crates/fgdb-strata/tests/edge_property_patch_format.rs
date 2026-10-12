@@ -9,9 +9,9 @@
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_strata::edge_props::{
     EdgePropertyPatchError, EdgePropertyPatchVersion, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS,
-    PROPERTY_PATCH_FORMAT_V1, PROPERTY_PATCH_FORMAT_V2, PROPERTY_PATCH_MAGIC,
-    decode_property_patch, encode_property_patch, property_patch_id, read_property_patch,
-    validate_block_patch_consistency, validate_locator_sequence,
+    PROPERTY_PATCH_FORMAT_V1, PROPERTY_PATCH_FORMAT_V2, PROPERTY_PATCH_FORMAT_V3,
+    PROPERTY_PATCH_MAGIC, decode_property_patch, encode_property_patch, property_patch_id,
+    read_property_patch, validate_block_patch_consistency, validate_locator_sequence,
 };
 use fgdb_strata::{
     AdjacencyEntry, BLOCK_FORMAT_V4, BlockError, decode_block, decode_block_with_properties,
@@ -115,12 +115,14 @@ fn wrong_magic_future_format_and_identity_are_distinct_refusals() {
         Err(EdgePropertyPatchError::NotAPropertyPatch)
     );
 
+    // One past the newest format: V3 (stored collections, fgdb-k3nub) is
+    // now a format this reader knows.
     let mut future = bytes.clone();
-    future[4..6].copy_from_slice(&(PROPERTY_PATCH_FORMAT_V2 + 1).to_le_bytes());
+    future[4..6].copy_from_slice(&(PROPERTY_PATCH_FORMAT_V3 + 1).to_le_bytes());
     assert_eq!(
         decode_property_patch(&future),
         Err(EdgePropertyPatchError::UnsupportedFormat {
-            format: PROPERTY_PATCH_FORMAT_V2 + 1
+            format: PROPERTY_PATCH_FORMAT_V3 + 1
         })
     );
 

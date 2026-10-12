@@ -8,9 +8,9 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_strata::vertex::{
-    MAX_PATCH_ROWS, VERTEX_PATCH_FORMAT_V2, VERTEX_PATCH_FORMAT_V3, VERTEX_PATCH_MAGIC,
-    VertexPatchError, VertexPatchVersion, VertexRow, decode_patch, encode_patch, read_patch,
-    vertex_patch_id,
+    MAX_PATCH_ROWS, VERTEX_PATCH_FORMAT_V2, VERTEX_PATCH_FORMAT_V3, VERTEX_PATCH_FORMAT_V4,
+    VERTEX_PATCH_MAGIC, VertexPatchError, VertexPatchVersion, VertexRow, decode_patch,
+    encode_patch, read_patch, vertex_patch_id,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{
@@ -208,12 +208,14 @@ fn wrong_magic_and_future_format_are_distinct_refusals() {
         "a block is not a vertex patch"
     );
 
+    // One past the newest format: V4 (stored collections, fgdb-k3nub) is
+    // now a format this reader knows.
     let mut future = bytes;
-    future[4..6].copy_from_slice(&(VERTEX_PATCH_FORMAT_V3 + 1).to_le_bytes());
+    future[4..6].copy_from_slice(&(VERTEX_PATCH_FORMAT_V4 + 1).to_le_bytes());
     assert_eq!(
         decode_patch(&future),
         Err(VertexPatchError::UnsupportedFormat {
-            format: VERTEX_PATCH_FORMAT_V3 + 1
+            format: VERTEX_PATCH_FORMAT_V4 + 1
         }),
         "a newer version of our file is not \"not our file\""
     );
