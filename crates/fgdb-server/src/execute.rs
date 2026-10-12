@@ -14,7 +14,8 @@ use asupersync::Cx;
 use fgdb::{QueryError, QueryResult};
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GqlQueryError, GraphMutationPolicy, GraphVertexMergePolicy, GraphVertexUpsertPolicy,
+    GqlQueryError, GraphEdgeMergePolicy, GraphMutationPolicy, GraphVertexMergePolicy,
+    GraphVertexUpsertPolicy, PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText,
     PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphMutationQuery,
     PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
     PreparedGraphVertexUpsertQueryText,
@@ -541,6 +542,7 @@ enum Returning {
     Insert(Box<PreparedGraphInsertQuery>),
     Mutation(Box<PreparedGraphMutationQuery>),
     Merge(Box<PreparedGraphVertexUpsertQuery>),
+    EdgeMerge(Box<PreparedGraphEdgeMergeQuery>),
 }
 
 impl Returning {
@@ -592,6 +594,19 @@ impl Returning {
                 .map(|query| Some(Self::Merge(Box::new(query))))
                 .map_err(|e| refusal(&e));
         }
+        if PreparedGraphEdgeMergeQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
+            let template = PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
+                text,
+                db.write_relation,
+                &declarations,
+                db.symbols.clone(),
+            )
+            .map_err(|e| refusal(&e))?;
+            return template
+                .bind_parameters(parameters)
+                .map(|query| Some(Self::EdgeMerge(Box::new(query))))
+                .map_err(|e| refusal(&e));
+        }
         Ok(None)
     }
 
@@ -600,6 +615,7 @@ impl Returning {
             Self::Insert(query) => query.columns(),
             Self::Mutation(query) => query.columns(),
             Self::Merge(query) => query.columns(),
+            Self::EdgeMerge(query) => query.columns(),
         }
     }
 }
@@ -663,6 +679,21 @@ async fn write_returning(
             )
             .await
             .map(|(_, _, rows, completion)| (rows, completion))
+            .map_err(returning_refusal),
+        Returning::EdgeMerge(prepared) => guard
+            .execute_graph_edge_merge_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &db.authority,
+                token,
+                TRUNK,
+                prepared,
+                GraphEdgeMergePolicy::new(db.query_policy).with_creation_limit(MAX_CREATED),
+                unix_millis,
+            )
+            .await
+            .map(|(_, rows, completion)| (rows, completion))
             .map_err(returning_refusal),
     };
     drop(guard);

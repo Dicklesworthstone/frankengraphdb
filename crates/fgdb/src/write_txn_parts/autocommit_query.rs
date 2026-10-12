@@ -51,6 +51,52 @@ impl<V: Vfs + Clone> Database<V> {
         Ok((stats, rows, completion))
     }
 
+    /// Execute `MATCH ... MERGE (a)-[r:R]->(b) RETURN ...` in one private
+    /// transaction (fgdb-at06q). RETURN reads the post-statement edges, never
+    /// a later live snapshot, and a refusal anywhere discards every effect of
+    /// this call. Identity allocation remains caller-owned; matched pairs
+    /// never call the allocator.
+    pub async fn execute_graph_edge_merge_query_autocommit_governed<A>(
+        &mut self,
+        txcx: &TxnCx,
+        query_cx: &fgdb_types::QueryCx,
+        commit_cx: &CommitCx,
+        query: &fgdb_gql::PreparedGraphEdgeMergeQuery,
+        policy: fgdb_gql::GraphEdgeMergePolicy,
+        allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        (
+            fgdb_gql::GraphEdgeMergeStats,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+            EmbeddedTxnCompletion,
+        ),
+        TxnGqlError<fgdb_gql::GraphEdgeMergeQueryError<WriteTxnError, A>>,
+    > {
+        use fgdb_gql::{GqlQueryError, GraphEdgeMergeError, GraphEdgeMergeQueryError};
+        let infrastructure = |error| {
+            GqlQueryError::Source(GraphEdgeMergeQueryError::Merge(
+                GraphEdgeMergeError::Source(error),
+            ))
+        };
+        let mut transaction = self
+            .begin(txcx)
+            .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
+        let (stats, rows) = match transaction
+            .execute_graph_edge_merge_query_governed(self, query_cx, query, policy, allocate)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
+        };
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
+        Ok((stats, rows, completion))
+    }
+
     /// Execute vertex MERGE, its ON CREATE/ON MATCH actions and trailing SET,
     /// then RETURN, and finish one ordinary transaction. The result reads the
     /// selected vertex's post-clause state, not a later live database snapshot.

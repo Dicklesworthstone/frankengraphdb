@@ -362,6 +362,37 @@ fn signed_and_native_limits_span_all_pulls_and_errors_are_not_silent_eof() {
         ));
         assert!(cursor.next().is_none());
         drop(cursor);
+        // The aggregate cursors admit roots through the cooperative step
+        // (next_vertex_step), which charges the same node. count(*) reads no
+        // record either. Two roots are visible (VId 1 and 3). Under max_nodes
+        // 1 the second refuses before any group is delivered, never a short
+        // count. Under max_nodes 2 the count is exact.
+        let prepared = session
+            .prepare(&cx, "MATCH (n) RETURN count(*) AS n", &args)
+            .unwrap();
+        let mut cursor = session.stream_aggregate(&cx, &prepared, &args).unwrap();
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Nodes
+            ))))
+        ));
+        assert!(cursor.next().is_none());
+        drop(cursor);
+        let mut exact = grant();
+        exact.limits.max_nodes = 2;
+        let token = issuer.issue_at(&exact, 100).unwrap();
+        let mut session = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let prepared = session
+            .prepare(&cx, "MATCH (n) RETURN count(*) AS n", &args)
+            .unwrap();
+        let mut cursor = session.stream_aggregate(&cx, &prepared, &args).unwrap();
+        let row = cursor.next().unwrap().unwrap();
+        assert_eq!(row.get(0).and_then(|value| value.as_count()), Some(2));
+        assert!(cursor.next().is_none());
+        drop(cursor);
         let token = issuer.issue_at(&grant(), 100).unwrap();
         let mut session = db
             .authorized_read_session(

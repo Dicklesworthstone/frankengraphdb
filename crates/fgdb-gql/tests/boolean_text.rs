@@ -547,9 +547,12 @@ fn a_label_test_value_is_label_membership_or_type_equality() {
             "MATCH (a) RETURN (a:L) AS result",
             "MATCH (a) RETURN ('L' IN labels(a)) AS result",
         ),
+        // Spelled with parentheses: an unparenthesized `x IN labels(a) AND
+        // ...` lets the IN's list operand swallow the AND, a separate
+        // pre-existing parser defect (fgdb-klah2).
         (
             "MATCH (a) RETURN a:L:M AS result",
-            "MATCH (a) RETURN 'L' IN labels(a) AND 'M' IN labels(a) AS result",
+            "MATCH (a) RETURN ('L' IN labels(a)) AND ('M' IN labels(a)) AS result",
         ),
         (
             "MATCH (a)-[r:R]->(b) RETURN r, r:R AS result",

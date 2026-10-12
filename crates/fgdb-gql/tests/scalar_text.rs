@@ -361,9 +361,18 @@ fn resolved_literals_are_reused_when_numeric_parameters_are_rebound() {
         .unwrap();
     assert_ne!(old, second.canonical_bytes());
     assert_eq!(old, first.canonical_bytes());
-    assert!(matches!(
+    // fgdb-3dnpu: a non-negative Int64 LIMIT is that UInt64; a negative one
+    // still refuses as a type mismatch.
+    assert_eq!(
         template
             .bind_parameters(&GqlParameters::new().with_int64("take", 1).unwrap())
+            .unwrap()
+            .canonical_bytes(),
+        old
+    );
+    assert!(matches!(
+        template
+            .bind_parameters(&GqlParameters::new().with_int64("take", -1).unwrap())
             .unwrap_err()
             .kind,
         GraphPatternTextErrorKind::ParameterTypeMismatch { .. }

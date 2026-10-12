@@ -242,6 +242,48 @@ where
         )
     }
 }
+/// A pulled set (fgdb-7xqxb): each scanned source row takes the set's own
+/// projection, through the eager per-row evaluator, before it enters the
+/// private sort. Every evaluation step is a signed checkpoint, as in the
+/// unordered set pull, and an arithmetic failure is the eager Projection
+/// error at the same source ordinal.
+struct SetInput<S, F, M> {
+    rows: VertexInput<S, F>,
+    pull: GraphSetRowPull,
+    ordinal: u64,
+    meter: M,
+}
+impl<S, F, M> InputCursor for SetInput<S, F, M>
+where
+    S: VertexScanSource<Error = QueryError> + Send,
+    F: FnMut() -> core::result::Result<(), QueryError> + Send,
+    M: FnMut(GlaExecutionEvent) -> core::result::Result<(), QueryError> + Send,
+{
+    fn pull(&mut self) -> Option<Result<SpoolRow>> {
+        let row = match self.rows.0.next()? {
+            Ok(row) => row,
+            Err(error) => return Some(Err(authorized(scan_error(error)))),
+        };
+        let ordinal = self.ordinal;
+        self.ordinal += 1;
+        let projected = self
+            .pull
+            .project(&row, ordinal, &mut self.meter, |column, error| {
+                QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    row: usize::try_from(ordinal).unwrap_or(usize::MAX),
+                    column,
+                    error,
+                }))
+            });
+        Some(projected.map(SpoolRow::governed).map_err(authorized))
+    }
+    fn state(&self) -> ScanState {
+        self.rows.state()
+    }
+    fn stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
+        self.rows.stats()
+    }
+}
 struct EdgeInput<S, F>(EdgeScanCursor<S, F>);
 impl<S, F> InputCursor for EdgeInput<S, F>
 where
@@ -303,11 +345,21 @@ fn compile_ordered(
             .map_err(plan_error)
     }
 }
+/// A bound ordered plan: the physical input, its sort tail, its cut, the
+/// output columns and, for a pulled set, the projection each row takes first.
+type BoundOrder = (
+    RowPlan,
+    ScanSortTail,
+    CommitSeq,
+    Vec<String>,
+    Option<GraphSetRowPull>,
+);
+
 fn bind_ordered(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
     default: CommitSeq,
-) -> core::result::Result<(RowPlan, ScanSortTail, CommitSeq, Vec<String>), QueryError> {
+) -> core::result::Result<BoundOrder, QueryError> {
     let (query, at) = match prepared {
         PreparedNativeRead::Pattern(prepared) => (
             prepared
@@ -321,6 +373,28 @@ fn bind_ordered(
                 .map_err(QueryError::TemporalText)?;
             (bound.pattern().clone(), bound.as_of())
         }
+        // `MATCH (n) RETURN 1 AS value ORDER BY value` (fgdb-7xqxb): a set
+        // over one vertex scan projects each scanned row, then the external
+        // sort applies the set's own ORDER BY and page.
+        PreparedNativeRead::Set(set) => {
+            let query = set.bind_parameters(params).map_err(QueryError::SetText)?;
+            let (pull, tail) =
+                query
+                    .ordered_row_pull()
+                    .ok_or(QueryError::StreamingUnsupported {
+                        facade: prepared.facade_class(),
+                    })?;
+            let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
+                unreachable!("an ordered row pull is rooted at its one vertex scan")
+            };
+            return Ok((
+                RowPlan::Vertex(plan),
+                tail,
+                default,
+                query.columns().to_vec(),
+                Some(pull),
+            ));
+        }
         _ => {
             return Err(QueryError::StreamingUnsupported {
                 facade: prepared.facade_class(),
@@ -328,7 +402,7 @@ fn bind_ordered(
         }
     };
     let (plan, tail) = compile_ordered(&query)?;
-    Ok((plan, tail, at, query.columns().to_vec()))
+    Ok((plan, tail, at, query.columns().to_vec(), None))
 }
 
 struct OpenedOrder<'q, C> {
@@ -382,7 +456,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
             params,
             *policy,
             bind_ordered,
-            |(plan, tail, at, columns), view, cx, execution, policy| {
+            |(plan, tail, at, columns, pull), view, cx, execution, policy| {
                 execution.borrow_mut().reserve_work(limits.max_sort_work)?;
                 let input_policy = GqlQueryPolicy {
                     rows: match policy.rows.max_snapshot_records() {
@@ -398,12 +472,27 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
                             inner: view.vertex_scan_source(cx, at).map_err(QueryError::Read)?,
                             execution: execution.clone(),
                         };
-                        Box::new(VertexInput(VertexScanCursor::new(
+                        let rows = VertexInput(VertexScanCursor::new(
                             source,
                             plan,
                             input_policy,
                             move || control.borrow_mut().checkpoint(),
-                        )))
+                        ));
+                        match pull {
+                            Some(pull) => {
+                                let meter = execution.clone();
+                                Box::new(SetInput {
+                                    rows,
+                                    pull,
+                                    ordinal: 0,
+                                    meter: move |event| match event {
+                                        GlaExecutionEvent::Work => meter.borrow_mut().checkpoint(),
+                                        _ => Ok(()),
+                                    },
+                                })
+                            }
+                            None => Box::new(rows),
+                        }
                     }
                     RowPlan::Edge(plan) => {
                         let source =

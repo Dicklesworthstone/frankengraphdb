@@ -381,7 +381,26 @@ fn native_aggregate_announces_and_services_controls_during_input_without_scratch
                 "recovery" => assert!(matches!(result, Err(Stop::Recovery(_)))),
                 _ => unreachable!(),
             }
-            assert_eq!(wire.lock().unwrap().outgoing, outgoing);
+            let after = wire.lock().unwrap().outgoing.clone();
+            assert_eq!(after[..outgoing.len()], outgoing[..]);
+            let tail = &after[outgoing.len()..];
+            match stop {
+                // FABRIC_PROTOCOL.md: a QUERY_CANCEL is answered with one
+                // stream-scoped `cancelled` ERROR. That is the stream's only
+                // terminal, and no partial aggregate row precedes it.
+                "cancel" => {
+                    let terminal = decoder.decode(tail, |_| Ok(())).unwrap();
+                    assert_eq!(terminal.consumed, tail.len());
+                    let frame = terminal.frame.expect("the cancel is answered");
+                    assert_eq!(frame.header().kind(), FrameKind::Error);
+                    assert_eq!(frame.header().stream_id(), stream);
+                    let refusal = ErrorBody::decode(frame.payload()).unwrap();
+                    assert_eq!(refusal.code, ErrorCode::Cancelled);
+                }
+                // Recovery retires the generation; nothing more is written.
+                "recovery" => assert!(tail.is_empty()),
+                _ => unreachable!(),
+            }
         }
         server.join_database_workers(&root).await;
     });

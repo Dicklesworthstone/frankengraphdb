@@ -301,16 +301,49 @@ impl core::fmt::Display for GraphVertexMergeTextError {
 }
 impl core::error::Error for GraphVertexMergeTextError {}
 
-/// Native `MATCH ... MERGE (a)-[:R]->(b)` over already-bound endpoint variables.
-/// Relationship properties are intentionally absent: the current typed edge
-/// MERGE matches relation+endpoints only, so accepting a property map here would
-/// silently misstate pattern identity semantics.
+/// Native `MATCH ... MERGE (a)-[r:R {k: v}]->(b)` over already-bound
+/// endpoint variables, its reverse arrow, or an undirected `-[:R]-`. The
+/// property map's values are the MERGE's exact-equality predicates and its
+/// creation fields (fgdb-at06q).
 #[derive(Clone)]
 pub struct PreparedGraphEdgeMergeText {
     pub(crate) selection: PreparedGraphText,
     pub(crate) relation: RelationId,
     pub(crate) source: usize,
     pub(crate) destination: usize,
+    pub(crate) properties: Vec<(PropertyKeyId, VertexMergeValueTemplate)>,
+    pub(crate) undirected: bool,
+}
+
+/// `MATCH ... MERGE (a)-[r:R {k: v}]->(b) RETURN ...` (fgdb-at06q). Every
+/// selected row continues once per relationship its endpoint pair resolved
+/// to. RETURN reads MATCH bindings, the relationship `r`, `r.k` after the
+/// statement, and `startNode(r)` / `endNode(r)` with their properties.
+#[derive(Clone)]
+pub struct PreparedGraphEdgeMergeQueryText {
+    pub(crate) statement: String,
+    pub(crate) merge: PreparedGraphEdgeMergeText,
+    pub(crate) returning: EdgeMergeReturnTemplate,
+}
+impl core::fmt::Debug for PreparedGraphEdgeMergeQueryText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphEdgeMergeQueryText")
+            .field("output_columns", &self.returning.projection.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct EdgeMergeReturnTemplate {
+    pub bindings: Vec<crate::GraphEdgeMergeBinding>,
+    pub projection: Vec<crate::set_text::ReadProjectionTemplate>,
+    pub grouping: Option<WriteReturnGroupTemplate>,
+    pub quantifier: crate::GraphSetQuantifier,
+    pub order: Vec<crate::algebra::GraphValueOrder>,
+    pub offset: crate::set_text::ReadPageNumber,
+    pub count: Option<crate::set_text::ReadPageNumber>,
+    pub at: usize,
 }
 impl core::fmt::Debug for PreparedGraphEdgeMergeText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -329,6 +362,21 @@ pub struct GraphEdgeMergeTextError {
 pub enum GraphEdgeMergeTextErrorKind {
     Query(GraphPatternTextErrorKind),
     Build(GraphEdgeMergeBuildError),
+    /// A RETURN expression, page or projection name after MERGE (fgdb-at06q).
+    Relation(crate::GraphSetTextErrorKind),
+    ReturnBuild(crate::GraphEdgeMergeQueryBuildError),
+}
+impl From<crate::GraphSetTextError> for GraphEdgeMergeTextError {
+    fn from(error: crate::GraphSetTextError) -> Self {
+        let kind = match error.kind {
+            crate::GraphSetTextErrorKind::Pattern(kind) => GraphEdgeMergeTextErrorKind::Query(kind),
+            kind => GraphEdgeMergeTextErrorKind::Relation(kind),
+        };
+        Self {
+            offset: error.offset,
+            kind,
+        }
+    }
 }
 impl From<GraphPatternTextError> for GraphEdgeMergeTextError {
     fn from(error: GraphPatternTextError) -> Self {

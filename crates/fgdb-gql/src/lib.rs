@@ -16,6 +16,7 @@ pub mod csv_records;
 pub mod csv_write_script;
 mod deletion;
 mod edge_merge;
+mod edge_merge_query;
 pub mod edge_stream;
 mod edge_upsert;
 mod edge_upsert_query;
@@ -113,6 +114,10 @@ pub use edge_merge::{
     GraphEdgeMergeRequest, GraphEdgeMergeStats, MAX_GRAPH_EDGE_MERGE_PROPERTIES,
     PreparedGraphEdgeMerge,
 };
+pub use edge_merge_query::{
+    GraphEdgeMergeBinding, GraphEdgeMergeQueryBuildError, GraphEdgeMergeQueryError,
+    PreparedGraphEdgeMergeQuery,
+};
 pub use edge_upsert::{
     GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphEdgeUpsertBuildError, GraphEdgeUpsertError,
     GraphEdgeUpsertPolicy, GraphEdgeUpsertStats, GraphEdgeUpsertValue,
@@ -183,8 +188,8 @@ pub use mutation_text::{
     GraphDeleteTextError, GraphDeleteTextErrorKind, GraphEdgeMergeTextError,
     GraphEdgeMergeTextErrorKind, GraphMutationTextError, GraphMutationTextErrorKind,
     GraphVertexMergeTextError, GraphVertexMergeTextErrorKind, PreparedGraphDeleteText,
-    PreparedGraphEdgeMergeText, PreparedGraphMutationQueryText, PreparedGraphMutationText,
-    PreparedGraphVertexMergeText,
+    PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeMergeText, PreparedGraphMutationQueryText,
+    PreparedGraphMutationText, PreparedGraphVertexMergeText,
 };
 pub use native_write_text::{BoundNativeGraphWrite, NativeGraphWriteBindError};
 pub use overlay_evidence::GqlOverlayResultCertificate;

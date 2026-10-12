@@ -332,7 +332,17 @@ mod tests {
     use asupersync::lab::run_async_under_lab;
     use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbolKind};
     use fgdb_types::{EId, VId};
-    use fgdb_warden::{Grant, QueryLimits};
+    use fgdb_warden::{Grant, QueryLimits, Scope};
+
+    /// A read-only grant that sees every label. `Grant::read_only` scopes
+    /// labels to `Only(∅)`, whose one clause no vertex satisfies, an unlabeled
+    /// one included: the input would be invisible and never charge a node.
+    fn visible_read(limits: QueryLimits) -> Grant {
+        Grant {
+            labels: Scope::All,
+            ..Grant::read_only(crate::TRUNK, u64::MAX / 2, limits)
+        }
+    }
 
     fn accepted<T>(result: Result<T, Refusal>) -> T {
         result.unwrap_or_else(|error| panic!("unexpected refusal: {}", error.message))
@@ -448,15 +458,11 @@ mod tests {
             let token = db
                 .authority
                 .issue_at(
-                    &Grant::read_only(
-                        crate::TRUNK,
-                        u64::MAX / 2,
-                        QueryLimits {
-                            max_nodes: 0,
-                            max_work: 100_000,
-                            max_rows: 1,
-                        },
-                    ),
+                    &visible_read(QueryLimits {
+                        max_nodes: 0,
+                        max_work: 100_000,
+                        max_rows: 1,
+                    }),
                     crate::unix_millis(),
                 )
                 .unwrap();
@@ -505,15 +511,11 @@ mod tests {
             let token = db
                 .authority
                 .issue_at(
-                    &Grant::read_only(
-                        crate::TRUNK,
-                        u64::MAX / 2,
-                        QueryLimits {
-                            max_nodes: 0,
-                            max_work: 100_000,
-                            max_rows: 4,
-                        },
-                    ),
+                    &visible_read(QueryLimits {
+                        max_nodes: 0,
+                        max_work: 100_000,
+                        max_rows: 4,
+                    }),
                     crate::unix_millis(),
                 )
                 .unwrap();

@@ -2,15 +2,16 @@
 //! through native prepared text, one canonical overlay and one atomic program.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, WriteBatch};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::{GraphInsertLimitDimension, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeMergeError, GraphEdgeMergeOutcome,
-    GraphMutationProgramDimension, GraphMutationProgramError, GraphSymbol, GraphSymbolKind,
-    GraphVertexMergeOutcome, GraphWriteProgramError, GraphWriteProgramPolicy,
-    PreparedGraphEdgeMergeText, PreparedGraphVertexMergeText, PreparedGraphWriteProgram,
-    PreparedGraphWriteProgramTemplate,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateValue, GraphEdgeMergeError,
+    GraphEdgeMergeOutcome, GraphMutationProgramDimension, GraphMutationProgramError, GraphSymbol,
+    GraphSymbolKind, GraphVertexMergeOutcome, GraphWriteIdentityRequest, GraphWriteProgramError,
+    GraphWriteProgramPolicy, PreparedGraphEdgeMergeText, PreparedGraphVertexMergeText,
+    PreparedGraphWriteProgram, PreparedGraphWriteProgramTemplate,
 };
 use fgdb_types::{
     CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
@@ -97,9 +98,18 @@ async fn seed_pairs(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) {
         batch.add_edge(EId(edge), VId(1), VId(destination), vec![]);
     }
     db.write(cx, batch).await.unwrap();
+    // The MERGE map {p:7} is a match predicate (fgdb-at06q): edge 21 matches
+    // on p and keeps its property outside the map unchanged.
     let mut existing = WriteBatch::new(S);
-    existing.add_edge(EId(21), VId(1), VId(3), vec![(P, CanonicalScalar::Int(99))]);
+    existing.add_edge(EId(21), VId(1), VId(3), existing_props());
     db.write(cx, existing).await.unwrap();
+}
+
+fn existing_props() -> Vec<(PropertyKeyId, CanonicalScalar)> {
+    vec![
+        (P, CanonicalScalar::Int(7)),
+        (PropertyKeyId(2), CanonicalScalar::Int(99)),
+    ]
 }
 
 #[test]
@@ -188,10 +198,12 @@ fn all_pairs_merge_deduplicates_rows_preserves_pair_slots_and_is_idempotent() {
             );
             assert_eq!(record.props, vec![(P, CanonicalScalar::Int(7).into())]);
         }
-        assert_eq!(
-            db.edge(EId(21)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(99).into())]
-        );
+        // Edge 21 matched on p and keeps its field outside the map.
+        let stored: Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)> = existing_props()
+            .into_iter()
+            .map(|(key, value)| (key, value.into()))
+            .collect();
+        assert_eq!(db.edge(EId(21)).unwrap().unwrap().props, stored);
         let frontier = db.frontier().unwrap();
         let mut txn = db.begin(&txcx).unwrap();
         let repeated = txn
@@ -351,8 +363,12 @@ fn all_pair_source_work_and_scratch_share_exact_program_boundaries() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// A program keeps every parallel match of a pair (fgdb-at06q), so a pair
+/// with two matching edges is two matches, not an ambiguity. Either way the
+/// later pair's allocator refusal stages nothing and keeps the negative
+/// witnesses after rollback.
 #[test]
-fn later_pair_ambiguity_or_allocator_refusal_keeps_negative_witnesses_after_rollback() {
+fn parallel_matches_and_a_late_allocator_refusal_keep_negative_witnesses_after_rollback() {
     for parallel in [false, true] {
         let ((), report) =
             run_async_under_lab(0xed9e_4012 + u64::from(parallel), move |root| async move {
@@ -364,7 +380,7 @@ fn later_pair_ambiguity_or_allocator_refusal_keeps_negative_witnesses_after_roll
                 seed_pairs(&mut db, &commit).await;
                 if parallel {
                     let mut duplicate = WriteBatch::new(S);
-                    duplicate.add_edge(EId(22), VId(1), VId(3), vec![]);
+                    duplicate.add_edge(EId(22), VId(1), VId(3), existing_props());
                     db.write(&commit, duplicate).await.unwrap();
                 }
                 let mut txn = db.begin(&txcx).unwrap();
@@ -394,29 +410,18 @@ fn later_pair_ambiguity_or_allocator_refusal_keeps_negative_witnesses_after_roll
                         },
                     )
                     .unwrap_err();
-                if parallel {
-                    assert!(matches!(
-                        error,
-                        GraphWriteProgramError::EdgeMerge {
-                            statement: 0,
-                            source: GqlQueryError::Source(
-                                GraphEdgeMergeError::AmbiguousRelationships { observed: 2 }
-                            ),
-                        }
-                    ));
-                    assert_eq!(requests.len(), 1);
-                } else {
-                    assert!(matches!(
-                        error,
-                        GraphWriteProgramError::EdgeMerge {
-                            statement: 0,
-                            source: GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(
-                                "late-allocator-refusal"
-                            )),
-                        }
-                    ));
-                    assert_eq!(requests.len(), 2);
-                }
+                assert!(matches!(
+                    error,
+                    GraphWriteProgramError::EdgeMerge {
+                        statement: 0,
+                        source: GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(
+                            "late-allocator-refusal"
+                        )),
+                    }
+                ));
+                // Only the two missing pairs ask for an identity; the matched
+                // pair (one or two parallel edges) never allocates.
+                assert_eq!(requests.len(), 2);
                 assert_eq!(txn.staged_effect_digest().unwrap(), before);
                 txn.rollback_to_savepoint(&db, "before-pairs").unwrap();
                 let mut competing = WriteBatch::new(S);
@@ -694,6 +699,253 @@ fn relationship_allocator_failure_retains_statement_index_and_rolls_back_graph_p
         txn.abort();
         assert!(db.vertex(VId(10)).unwrap().is_none());
         assert!(db.vertex(VId(11)).unwrap().is_none());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-at06q: the MERGE map filters existing edges, every matching parallel
+/// edge is a match, and an undirected MERGE accepts either orientation. A miss
+/// creates one edge from source to destination carrying exactly the map.
+#[test]
+fn merge_maps_filter_matches_keep_parallel_edges_and_undirected_accepts_either_orientation() {
+    let ((), report) = run_async_under_lab(0xed9e_4020, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in [1, 2] {
+            batch.create_vertex(VId(id), vec![PERSON], vec![]);
+        }
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(&commit, batch).await.unwrap();
+        let mut existing = WriteBatch::new(S);
+        for (eid, src, dst, p) in [(40, 1, 2, 7), (41, 1, 2, 8), (42, 1, 2, 7), (43, 2, 1, 9)] {
+            existing.add_edge(
+                EId(eid),
+                VId(src),
+                VId(dst),
+                vec![(P, CanonicalScalar::Int(p))],
+            );
+        }
+        db.write(&commit, existing).await.unwrap();
+        let program = |text: &str| {
+            let merge = PreparedGraphEdgeMergeText::prepare(text, R, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            PreparedGraphWriteProgram::prepare(vec![merge.into()]).unwrap()
+        };
+        let mut txn = db.begin(&txcx).unwrap();
+        // Both parallel p=7 edges match; the p=8 edge is filtered out.
+        let parallel = txn
+            .execute_graph_write_program_returning_governed(
+                &mut db,
+                &query,
+                &program("MATCH (a:Person)-[:R]->(b:Person) MERGE (a)-[e:S {p: 7}]->(b)"),
+                policy(0, 0),
+                // A matched pair never allocates; an allocation would refuse.
+                |_| Err::<ElementId, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(
+            parallel.steps()[0].merged_edges(),
+            Some(
+                &[
+                    GraphEdgeMergeOutcome::Matched(EId(40)),
+                    GraphEdgeMergeOutcome::Matched(EId(42)),
+                ][..]
+            )
+        );
+        // Undirected: the reverse p=9 edge matches.
+        let undirected = txn
+            .execute_graph_write_program_returning_governed(
+                &mut db,
+                &query,
+                &program("MATCH (a:Person)-[:R]->(b:Person) MERGE (a)-[:S {p: 9}]-(b)"),
+                policy(0, 0),
+                // An undirected match never allocates either.
+                |_| Err::<ElementId, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(
+            undirected.steps()[0].merged_edge(),
+            Some(GraphEdgeMergeOutcome::Matched(EId(43)))
+        );
+        // Directed: the reverse edge does not match, so one edge is created
+        // from a to b with exactly the map.
+        let directed = txn
+            .execute_graph_write_program_returning_governed(
+                &mut db,
+                &query,
+                &program("MATCH (a:Person)-[:R]->(b:Person) MERGE (a)-[:S {p: 9}]->(b)"),
+                policy(0, 1),
+                |_| Ok::<_, ()>(ElementId::Edge(EId(50))),
+            )
+            .unwrap();
+        assert_eq!(
+            directed.steps()[0].merged_edge(),
+            Some(GraphEdgeMergeOutcome::Created(EId(50)))
+        );
+        txn.finish(&mut db, &commit).await.unwrap();
+        let created = db.edge(EId(50)).unwrap().unwrap();
+        assert_eq!(
+            (created.entry.src, created.entry.dst, created.entry.relation),
+            (VId(1), VId(2), S)
+        );
+        assert_eq!(created.props, vec![(P, CanonicalScalar::Int(9))]);
+        for (eid, p) in [(40, 7), (41, 8), (42, 7), (43, 9)] {
+            assert_eq!(
+                db.edge(EId(eid)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(p))]
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-at06q: MERGE ... RETURN through the public write dispatch yields one
+/// row per selected row and resolved edge. Each parallel match is a row, an
+/// undirected match reports the edge's own orientation, and a created edge's
+/// properties read back from the staged graph. Autocommit rows follow commit.
+#[test]
+fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
+    type Allocate<'a> = &'a mut dyn FnMut(GraphWriteIdentityRequest) -> Result<ElementId, ()>;
+    let ((), report) = run_async_under_lab(0xed9e_4030, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in [1, 2] {
+            batch.create_vertex(VId(id), vec![PERSON], vec![]);
+        }
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(&commit, batch).await.unwrap();
+        let mut existing = WriteBatch::new(S);
+        for (eid, src, dst, p) in [(40, 1, 2, 7), (41, 1, 2, 8), (42, 1, 2, 7), (43, 2, 1, 9)] {
+            existing.add_edge(
+                EId(eid),
+                VId(src),
+                VId(dst),
+                vec![(P, CanonicalScalar::Int(p))],
+            );
+        }
+        db.write(&commit, existing).await.unwrap();
+        // RETURN rows as graph values; None if the statement was dispatched
+        // to the no-result program engine or a cell left the value domain.
+        let rows = |result: QueryResult, names: &[&str]| -> Option<Vec<Vec<GraphValue>>> {
+            let QueryResult::Rows { columns, rows } = result else {
+                return None;
+            };
+            assert_eq!(columns, names);
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| match cell {
+                            GraphAggregateValue::Value(value) => Some(value),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let edge = |id| GraphValue::Edge(EId(id));
+        let vertex = |id| GraphValue::Vertex(VId(id));
+        let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        // A matched pair never allocates; an allocation would refuse.
+        let mut none = |_: GraphWriteIdentityRequest| Err::<ElementId, ()>(());
+        let arguments = GqlParameters::new();
+        let selected = "MATCH (a:Person)-[:R]->(b:Person) MERGE ";
+
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = |text: &str, edges: u64, allocate: Allocate<'_>| {
+            txn.query_write(
+                &mut db,
+                &query,
+                &format!("{selected}{text}"),
+                &arguments,
+                symbols,
+                R,
+                policy(0, edges),
+                allocate,
+            )
+            .unwrap()
+        };
+        // Both parallel p=7 edges are rows, in identity order.
+        assert_eq!(
+            rows(
+                staged(
+                    "(a)-[e:S {p: 7}]->(b) RETURN e, e.p AS p, startNode(e) AS s, endNode(e) AS t",
+                    0,
+                    &mut none,
+                ),
+                &["e", "p", "s", "t"],
+            ),
+            Some(vec![
+                vec![edge(40), int(7), vertex(1), vertex(2)],
+                vec![edge(42), int(7), vertex(1), vertex(2)],
+            ])
+        );
+        // The reverse p=9 edge matches undirected; its own orientation shows.
+        assert_eq!(
+            rows(
+                staged(
+                    "(a)-[e:S {p: 9}]-(b) RETURN startNode(e) AS s, endNode(e) AS t, b",
+                    0,
+                    &mut none,
+                ),
+                &["s", "t", "b"],
+            ),
+            Some(vec![vec![vertex(2), vertex(1), vertex(2)]])
+        );
+        assert_eq!(
+            rows(
+                staged("(a)-[e:S {p: 7}]->(b) RETURN count(e) AS n", 0, &mut none),
+                &["n"],
+            ),
+            Some(vec![vec![int(2)]])
+        );
+        // A miss creates one edge; RETURN reads it from the staged graph.
+        let created = staged(
+            "(a)-[e:S {p: 5}]->(b) RETURN e.p AS p, e",
+            1,
+            &mut |request| {
+                assert_eq!(request.statement, 0);
+                Ok(ElementId::Edge(EId(60)))
+            },
+        );
+        assert_eq!(
+            rows(created, &["p", "e"]),
+            Some(vec![vec![int(5), edge(60)]])
+        );
+        txn.finish(&mut db, &commit).await.unwrap();
+
+        let committed = db
+            .query_write(
+                &txcx,
+                &query,
+                &commit,
+                &format!("{selected}(a)-[e:S {{p: 5}}]->(b) RETURN e"),
+                &arguments,
+                symbols,
+                R,
+                policy(0, 0),
+                none,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows(committed, &["e"]), Some(vec![vec![edge(60)]]));
+        let stored = db.edge(EId(60)).unwrap().unwrap();
+        assert_eq!(
+            (stored.entry.src, stored.entry.dst, stored.entry.relation),
+            (VId(1), VId(2), S)
+        );
+        assert_eq!(stored.props, vec![(P, CanonicalScalar::Int(5))]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

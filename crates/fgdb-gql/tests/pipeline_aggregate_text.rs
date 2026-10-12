@@ -884,7 +884,8 @@ fn computed_terminal_definition_limits_and_invalid_scopes_refuse_before_resoluti
         "MATCH (n) WITH n.p AS x WITH x AS y RETURN SUM(x+1) AS total",
         "MATCH (n) WITH n.p AS x RETURN SUM(x+$p) AS total LIMIT $p",
         "MATCH (n) WITH n.p AS x RETURN COUNT(DISTINCT *)",
-        "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS rows,SUM(x)+1 AS total",
+        // `SUM(x)+1` combines aggregate results after WITH since fgdb-4avot
+        // (9cc5346a); it is no longer a refusal.
         &too_deep,
     ] {
         let mut calls = 0;
@@ -898,6 +899,11 @@ fn computed_terminal_definition_limits_and_invalid_scopes_refuse_before_resoluti
         );
         assert_eq!(calls, 0, "{text}");
     }
+    PreparedGraphPipelineAggregateText::prepare(
+        "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS rows,SUM(x)+1 AS total",
+        symbols,
+    )
+    .unwrap();
     // Unaliased computed keys and repeated summaries take their source text.
     for (text, columns) in [
         (

@@ -255,9 +255,16 @@ fn repeated_parameters_are_exact_typed_and_never_substituted_into_text() {
         missing.kind,
         GraphCheapestPathTextErrorKind::Pattern(GraphPatternTextErrorKind::MissingParameter)
     );
+    // fgdb-3dnpu: a non-negative Int64 argument for the UInt64 K is that
+    // UInt64; a negative one still refuses as a type mismatch.
     let signed = GqlParameters::new().with_int64("n", 1).unwrap();
+    assert_eq!(
+        q.bind(VId(0), VId(1), &signed).unwrap().ranked_count(),
+        Some(1)
+    );
+    let negative = GqlParameters::new().with_int64("n", -1).unwrap();
     assert!(matches!(
-        q.bind(VId(0), VId(1), &signed).unwrap_err().kind,
+        q.bind(VId(0), VId(1), &negative).unwrap_err().kind,
         GraphCheapestPathTextErrorKind::Pattern(
             GraphPatternTextErrorKind::ParameterTypeMismatch { .. }
         )

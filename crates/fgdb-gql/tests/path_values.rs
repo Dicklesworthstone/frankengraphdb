@@ -611,13 +611,35 @@ fn chain_rows(
         .unwrap_or_else(|error| panic!("{text}: {error:?}"))
         .bind_parameters(&GqlParameters::new())
         .unwrap();
+    // Every chain edge has relation R, so `type(r)` reads its name (fgdb-fj106).
+    // A conjunction with `type(r)` filters inside the pattern, so its accessors
+    // serve the same names and weights as the row reader above.
+    let edge_type = CanonicalScalar::ucs_basic_text("R").unwrap();
+    let names = [
+        CanonicalScalar::ucs_basic_text("a").unwrap(),
+        CanonicalScalar::ucs_basic_text("b").unwrap(),
+    ];
+    let weights = edges.map(|(EId(id), ..)| CanonicalScalar::Int(id as i64));
     let patterns = |pattern: &PreparedGraphPattern<GraphValueRow>, remaining: GqlQueryPolicy| {
-        pattern.plan().execute_governed_with_identified_properties(
+        pattern.plan().execute_governed_with_element_accessors(
             edges.len() as u64 + 4,
             (1..=4).map(VId),
             edges.iter().copied(),
             |_, _| Ok::<_, ()>(true),
-            |_, _| Ok(None),
+            |vertex, key| {
+                Ok(match (vertex, key) {
+                    (VId(id @ 1..=2), PropertyKeyId(7)) => Some(&names[id as usize - 1]),
+                    _ => None,
+                })
+            },
+            |edge, key| {
+                Ok((key == PropertyKeyId(8))
+                    .then(|| edges.iter().position(|(id, ..)| *id == edge))
+                    .flatten()
+                    .map(|at| &weights[at]))
+            },
+            |_| Ok(None),
+            |_| Ok(Some(&edge_type)),
             remaining,
             || Ok::<_, ()>(()),
         )
