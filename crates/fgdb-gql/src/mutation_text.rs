@@ -301,16 +301,18 @@ impl core::fmt::Display for GraphVertexMergeTextError {
 }
 impl core::error::Error for GraphVertexMergeTextError {}
 
-/// Native `MATCH ... MERGE (a)-[:R]->(b)` over already-bound endpoint variables.
-/// Relationship properties are intentionally absent: the current typed edge
-/// MERGE matches relation+endpoints only, so accepting a property map here would
-/// silently misstate pattern identity semantics.
+/// Native `MATCH ... MERGE (a)-[r:R {k: v}]->(b)` over already-bound
+/// endpoint variables, its reverse arrow, or an undirected `-[:R]-`. The
+/// property map's values are the MERGE's exact-equality predicates and its
+/// creation fields (fgdb-at06q).
 #[derive(Clone)]
 pub struct PreparedGraphEdgeMergeText {
     pub(crate) selection: PreparedGraphText,
     pub(crate) relation: RelationId,
     pub(crate) source: usize,
     pub(crate) destination: usize,
+    pub(crate) properties: Vec<(PropertyKeyId, VertexMergeValueTemplate)>,
+    pub(crate) undirected: bool,
 }
 impl core::fmt::Debug for PreparedGraphEdgeMergeText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

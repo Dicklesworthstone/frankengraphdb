@@ -10,6 +10,8 @@ struct ParsedEdgeMerge<'a> {
     source: Name<'a>,
     destination: Name<'a>,
     relation: Name<'a>,
+    properties: Vec<super::merge::MergeProperty<'a>>,
+    undirected: bool,
 }
 fn build_error(at: usize, source: crate::GraphEdgeMergeBuildError) -> GraphEdgeMergeTextError {
     GraphEdgeMergeTextError {
@@ -19,6 +21,10 @@ fn build_error(at: usize, source: crate::GraphEdgeMergeBuildError) -> GraphEdgeM
 }
 
 impl<'a> Parser<'a> {
+    /// `MERGE (a)-[r:R {k: v}]->(b)`, its reverse arrow, or no arrow for an
+    /// undirected MERGE. The relationship variable and the property map are
+    /// optional; a named variable must be distinct from every vertex
+    /// variable (fgdb-at06q).
     fn edge_merge_pattern(&mut self) -> Result<ParsedEdgeMerge<'a>, GraphEdgeMergeTextError> {
         self.word("MERGE")?;
         self.punct(b'(', "(")?;
@@ -28,15 +34,45 @@ impl<'a> Parser<'a> {
         let incoming = self.take(b'<')?;
         self.punct(b'-', "-")?;
         self.punct(b'[', "[")?;
+        if !self.is_punct(b':') {
+            let relationship = self.name()?;
+            if self
+                .syntax
+                .variables
+                .iter()
+                .any(|variable| variable.text == relationship.text)
+            {
+                return Err(error(
+                    relationship.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "a relationship variable distinct from vertex variables",
+                    ),
+                )
+                .into());
+            }
+        }
         self.punct(b':', ":")?;
         let relation = self.name()?;
+        let properties = self.merge_property_map().map_err(|refusal| match refusal {
+            super::merge::MergeMapError::Pattern(error) => error.into(),
+            super::merge::MergeMapError::TooManyFields { at, observed } => build_error(
+                at,
+                crate::GraphEdgeMergeBuildError::TooManyProperties {
+                    limit: crate::MAX_GRAPH_EDGE_MERGE_PROPERTIES,
+                    observed,
+                },
+            ),
+            super::merge::MergeMapError::DuplicateProperty { at } => {
+                build_error(at, crate::GraphEdgeMergeBuildError::DuplicateProperty)
+            }
+        })?;
         self.punct(b']', "]")?;
         self.punct(b'-', "-")?;
         let outgoing = self.take(b'>')?;
-        if incoming == outgoing {
+        if incoming && outgoing {
             return Err(error(
                 relation.at,
-                GraphPatternTextErrorKind::Expected("exactly one relationship direction"),
+                GraphPatternTextErrorKind::Expected("at most one relationship direction"),
             )
             .into());
         }
@@ -45,27 +81,29 @@ impl<'a> Parser<'a> {
         let right = self.variable()?;
         self.punct(b')', ")")?;
         self.end()?;
-        Ok(if incoming {
-            ParsedEdgeMerge {
-                source: right,
-                destination: left,
-                relation,
-            }
+        // An undirected MERGE creates left to right, as openCypher does.
+        let (source, destination) = if incoming {
+            (right, left)
         } else {
-            ParsedEdgeMerge {
-                source: left,
-                destination: right,
-                relation,
-            }
+            (left, right)
+        };
+        Ok(ParsedEdgeMerge {
+            source,
+            destination,
+            relation,
+            properties,
+            undirected: !incoming && !outgoing,
         })
     }
 }
 
 impl PreparedGraphEdgeMergeText {
-    /// Prepare `MATCH ... MERGE (a)-[:R]->(b)` or its reverse-arrow spelling.
-    /// Both endpoints must already be visible MATCH variables. Relationship
-    /// variables, property maps, undirected relationships, endpoint declarations
-    /// and ON MATCH/ON CREATE clauses refuse rather than being partially ignored.
+    /// Prepare `MATCH ... MERGE (a)-[r:R {k: v}]->(b)`, its reverse arrow,
+    /// or the undirected `(a)-[:R]-(b)` (fgdb-at06q). Both endpoints must
+    /// already be visible MATCH variables. Map values are non-null literals
+    /// or parameters; they filter existing edges and fill a created one.
+    /// Endpoint declarations, ON MATCH/ON CREATE clauses and RETURN refuse
+    /// here rather than being partially ignored.
     pub fn prepare(
         statement: &str,
         relation: RelationId,
@@ -146,6 +184,14 @@ impl PreparedGraphEdgeMergeText {
         else {
             unreachable!("symbol domain checked by shared resolver")
         };
+        let mut properties = Vec::new();
+        for property in parsed.properties {
+            let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, property.key)?
+            else {
+                unreachable!("symbol domain checked by shared resolver")
+            };
+            properties.push((key, property.value));
+        }
 
         let columns = projections
             .into_iter()
@@ -187,6 +233,8 @@ impl PreparedGraphEdgeMergeText {
             relation: found,
             source,
             destination,
+            properties,
+            undirected: parsed.undirected,
         })
     }
 
@@ -206,13 +254,30 @@ impl PreparedGraphEdgeMergeText {
     ) -> Result<PreparedGraphEdgeMerge, GraphEdgeMergeTextError> {
         let values = self.selection.checked_arguments(arguments)?;
         let selection = self.selection.bind_values(&values)?;
-        PreparedGraphEdgeMerge::prepare(
+        let mut properties = Vec::with_capacity(self.properties.len());
+        for (key, template) in &self.properties {
+            let value = match template {
+                crate::mutation_text::VertexMergeValueTemplate::Bound(value) => value.clone(),
+                crate::mutation_text::VertexMergeValueTemplate::Parameter { index, at } => {
+                    scalar(values[*index].clone(), *at)?
+                }
+            };
+            properties.push((*key, value));
+        }
+        // A NULL argument refuses as NullProperty: it can neither match nor
+        // be created.
+        let merge = PreparedGraphEdgeMerge::prepare(
             selection,
             self.relation,
             self.source,
             self.destination,
-            Vec::new(),
+            properties,
         )
-        .map_err(|source| build_error(self.selection.return_at, source))
+        .map_err(|source| build_error(self.selection.return_at, source))?;
+        Ok(if self.undirected {
+            merge.with_undirected()
+        } else {
+            merge
+        })
     }
 }

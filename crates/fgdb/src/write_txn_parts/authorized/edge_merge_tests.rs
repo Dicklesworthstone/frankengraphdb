@@ -726,13 +726,15 @@ async fn seed_multiple_pairs(db: &mut Database<MemVfs>, cx: &CommitCx, hidden: b
         }
     }
     db.write(cx, batch).await.unwrap();
+    // The MERGE map {p: 7} is a match predicate (fgdb-at06q): edge 21 matches
+    // on its visible p and keeps its hidden SECRET unchanged.
     let mut existing = WriteBatch::new(S);
     existing.add_edge(
         EId(21),
         VId(1),
         VId(3),
         vec![
-            (P, CanonicalScalar::Int(99)),
+            (P, CanonicalScalar::Int(7)),
             (SECRET, CanonicalScalar::Int(101)),
         ],
     );

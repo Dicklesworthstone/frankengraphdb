@@ -65,13 +65,70 @@ fn forward_reverse_and_renamed_forms_compile_to_the_same_directed_definition() {
     assert_eq!(forward.canonical_bytes(), renamed.canonical_bytes());
 }
 
+/// fgdb-at06q: a relationship variable, a property map and an undirected
+/// pattern all compile. The variable names nothing the plain MERGE uses, so
+/// its definition is the anonymous one. The map's values bind to exact
+/// properties. An undirected MERGE is its own definition, distinct from the
+/// directed one with the same endpoints.
 #[test]
-fn malformed_or_semantically_unimplemented_relationship_forms_refuse_before_catalog() {
+fn relationship_variables_property_maps_and_undirected_merges_compile() {
+    use fgdb_types::CanonicalScalar;
+    let bind = |text: &str, args: &GqlParameters| {
+        PreparedGraphEdgeMergeText::prepare(text, R, symbols)
+            .unwrap()
+            .bind_parameters(args)
+            .unwrap()
+    };
+    let none = GqlParameters::new();
+    let anonymous = bind("MATCH (a),(b) MERGE (a)-[:R]->(b)", &none);
+    let named = bind("MATCH (a),(b) MERGE (a)-[e:R]->(b)", &none);
+    assert_eq!(named.canonical_bytes(), anonymous.canonical_bytes());
+    assert!(!anonymous.undirected());
+    assert!(anonymous.properties().is_empty());
+
+    let literal = bind("MATCH (a),(b) MERGE (a)-[e:R {p: 1}]->(b)", &none);
+    let parameter = bind(
+        "MATCH (a),(b) MERGE (a)-[e:R {p: $p}]->(b)",
+        &GqlParameters::new().with_int64("p", 1).unwrap(),
+    );
+    assert_eq!(literal.properties().len(), 1);
+    assert_eq!(literal.properties()[0].0, P);
+    assert_eq!(literal.properties()[0].1.value(), &CanonicalScalar::Int(1));
+    assert_eq!(literal.canonical_bytes(), parameter.canonical_bytes());
+    assert_ne!(literal.canonical_bytes(), anonymous.canonical_bytes());
+
+    let undirected = bind("MATCH (a),(b) MERGE (a)-[:R]-(b)", &none);
+    assert!(undirected.undirected());
+    assert_eq!(
+        (undirected.source_column(), undirected.destination_column()),
+        (0, 1)
+    );
+    assert_ne!(undirected.canonical_bytes(), anonymous.canonical_bytes());
+
+    // A NULL map value can neither match nor be created.
+    let null = fgdb_gql::GqlScalarParameter::new(CanonicalScalar::Null).unwrap();
+    assert_eq!(
+        fgdb_gql::PreparedGraphEdgeMerge::prepare(
+            anonymous.selection().clone(),
+            R,
+            0,
+            1,
+            vec![(P, null)],
+        )
+        .unwrap_err(),
+        fgdb_gql::GraphEdgeMergeBuildError::NullProperty { key: P }
+    );
+}
+
+#[test]
+fn malformed_relationship_forms_refuse_before_catalog() {
     for text in [
-        "MATCH (a),(b) MERGE (a)-[:R]-(b)",
         "MATCH (a),(b) MERGE (a)<-[:R]->(b)",
-        "MATCH (a),(b) MERGE (a)-[e:R]->(b)",
-        "MATCH (a),(b) MERGE (a)-[:R {p:1}]->(b)",
+        "MATCH (a),(b) MERGE (a)-[a:R]->(b)",
+        "MATCH (a),(b) MERGE (a)-[:R {}]->(b)",
+        "MATCH (a),(b) MERGE (a)-[:R {p: null}]->(b)",
+        "MATCH (a),(b) MERGE (a)-[:R {p: 1, p: 2}]->(b)",
+        "MATCH (a),(b) MERGE (a)-[:R {p: a.p}]->(b)",
         "MATCH (a),(b) MERGE (a:Label)-[:R]->(b)",
         "MATCH (a) MERGE (a)-[:R]->(missing)",
         "MATCH (a),(b) MERGE (a)-[:R]->(b) ON CREATE SET a.p=1",

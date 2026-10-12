@@ -12,6 +12,9 @@ struct EdgeMergeProposal<Output = fgdb_gql::GraphEdgeMergeOutcome> {
 // cardinality and receipt ownership. They share selection, existence decisions,
 // creation admission and staging. Singular calls allocate no new receipt vector.
 trait EdgeMergeOutput: Sized {
+    /// Whether one pair may match several parallel edges (fgdb-at06q). The
+    /// singular primitive refuses them as ambiguous; a program keeps each.
+    const PARALLEL: bool;
     fn for_pairs(pairs: usize) -> Option<Self>;
     fn record<C>(
         &mut self,
@@ -22,6 +25,8 @@ trait EdgeMergeOutput: Sized {
 }
 
 impl EdgeMergeOutput for fgdb_gql::GraphEdgeMergeOutcome {
+    const PARALLEL: bool = false;
+
     fn for_pairs(pairs: usize) -> Option<Self> {
         (pairs <= 1).then_some(Self::NoInput)
     }
@@ -41,6 +46,8 @@ impl EdgeMergeOutput for fgdb_gql::GraphEdgeMergeOutcome {
 }
 
 impl EdgeMergeOutput for fgdb_gql::GraphWriteStepReceipt {
+    const PARALLEL: bool = true;
+
     fn for_pairs(pairs: usize) -> Option<Self> {
         Some(if pairs <= 1 {
             Self::EdgeMerge {
@@ -60,6 +67,21 @@ impl EdgeMergeOutput for fgdb_gql::GraphWriteStepReceipt {
         control: &mut impl FnMut(Option<fgdb_gql::GlaExecutionEvent>) -> Result<(), C>,
     ) -> Result<(), C> {
         match self {
+            // One pair matching parallel edges (fgdb-at06q) reports every
+            // match, so its singular receipt becomes the batch receipt.
+            Self::EdgeMerge { outcome } if outcome.edge().is_some() => {
+                let first = *outcome;
+                control(Some(fgdb_gql::GlaExecutionEvent::ScratchEntry))?;
+                control(Some(fgdb_gql::GlaExecutionEvent::ScratchEntry))?;
+                let created = match first {
+                    fgdb_gql::GraphEdgeMergeOutcome::Created(edge) => vec![edge],
+                    _ => Vec::new(),
+                };
+                *self = Self::EdgeMergeBatch {
+                    outcomes: vec![first, next],
+                    created,
+                };
+            }
             Self::EdgeMerge { outcome } => *outcome = next,
             Self::EdgeMergeBatch { outcomes, created } => {
                 control(Some(fgdb_gql::GlaExecutionEvent::ScratchEntry))?;
@@ -217,24 +239,44 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
         }
         overlay_edges = observed as u64;
 
-        let mut matching = None;
+        // An edge matches when its relation and orientation agree and every
+        // property of the MERGE map equals its stored value (fgdb-at06q).
+        // Each map comparison is one charged step. A program keeps every
+        // match in identity order; the singular primitive refuses a second.
+        let mut matching = Vec::new();
         for edge in &edges {
             event(Some(GlaExecutionEvent::Work))?;
-            if edge.entry.relation == merge.relation()
-                && edge.entry.src == source
-                && edge.entry.dst == destination
+            if edge.entry.relation != merge.relation()
+                || !merge
+                    .accepts_orientation((source, destination), (edge.entry.src, edge.entry.dst))
             {
-                if matching.is_some() {
-                    return Err(GqlQueryError::Source(
-                        GraphEdgeMergeError::AmbiguousRelationships { observed: 2 },
-                    ));
-                }
-                event(Some(GlaExecutionEvent::ScratchEntry))?;
-                matching = Some(edge.entry.eid);
+                continue;
             }
+            for _ in merge.properties() {
+                event(Some(GlaExecutionEvent::Work))?;
+            }
+            let stored = |key| {
+                edge.props
+                    .binary_search_by_key(&key, |(candidate, _)| *candidate)
+                    .ok()
+                    .map(|at| &edge.props[at].1)
+            };
+            if !merge.matches_properties(stored) {
+                continue;
+            }
+            if !Output::PARALLEL && !matching.is_empty() {
+                return Err(GqlQueryError::Source(
+                    GraphEdgeMergeError::AmbiguousRelationships { observed: 2 },
+                ));
+            }
+            event(Some(GlaExecutionEvent::ScratchEntry))?;
+            matching.push(edge.entry.eid);
         }
-        if let Some(edge) = matching {
-            outcome.record(GraphEdgeMergeOutcome::Matched(edge), &mut event)?;
+        if !matching.is_empty() {
+            matching.sort_unstable();
+            for edge in matching {
+                outcome.record(GraphEdgeMergeOutcome::Matched(edge), &mut event)?;
+            }
             continue;
         }
 

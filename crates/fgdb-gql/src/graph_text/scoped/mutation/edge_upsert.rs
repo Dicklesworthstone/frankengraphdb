@@ -357,11 +357,15 @@ impl PreparedGraphEdgeUpsertText {
             return_at: at,
             reverse_catalog: None,
         };
+        // The ON MATCH / ON CREATE form keeps the directed, map-free pattern
+        // until its own per-match action contract is in place (fgdb-at06q).
         let merge = PreparedGraphEdgeMergeText {
             selection,
             relation: found,
             source,
             destination,
+            properties: Vec::new(),
+            undirected: false,
         };
         Ok(Self {
             merge,

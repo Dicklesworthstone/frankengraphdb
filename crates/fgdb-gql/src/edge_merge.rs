@@ -1,28 +1,45 @@
-//! Bounded directed relationship MERGE definition.
+//! Bounded relationship MERGE definition.
 //!
 //! A prepared MATCH produces source/destination vertex columns. Duplicate rows
 //! for the same endpoint pair collapse. The singular primitive refuses multiple
 //! distinct pairs; native write programs resolve every pair in canonical order
 //! and stage their complete batch atomically. The write-capable host resolves
-//! the exact relation in its canonical edge overlay: zero edges creates one,
-//! one edge matches, parallel edges are ambiguous.
-//! Creation properties are already-bound canonical scalars. Relationship pattern
-//! predicates, undirected creation and ON MATCH/ON CREATE actions remain above
-//! this primitive.
+//! the relation in its canonical edge overlay (fgdb-at06q):
+//! - An existing edge matches when its relation and orientation agree and
+//!   every property of the MERGE map equals the edge's stored value. An
+//!   undirected MERGE accepts either orientation.
+//! - Zero matching edges creates one, source to destination, carrying exactly
+//!   the map's properties.
+//! - Every matching edge is a match. The singular primitive refuses parallel
+//!   matches as ambiguous; native write programs keep each one.
+//!
+//! Map values are already-bound non-null canonical scalars. ON MATCH/ON CREATE
+//! actions remain above this primitive.
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
 use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryPolicy, GqlScalarParameter};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::EId;
+use fgdb_types::{CanonicalScalar, EId, VId};
 
 pub const MAX_GRAPH_EDGE_MERGE_PROPERTIES: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphEdgeMergeBuildError {
-    SourceColumn { column: usize },
-    DestinationColumn { column: usize },
-    TooManyProperties { limit: usize, observed: usize },
+    SourceColumn {
+        column: usize,
+    },
+    DestinationColumn {
+        column: usize,
+    },
+    TooManyProperties {
+        limit: usize,
+        observed: usize,
+    },
     DuplicateProperty,
+    /// A NULL map value can neither match nor be created (openCypher).
+    NullProperty {
+        key: PropertyKeyId,
+    },
 }
 impl core::fmt::Display for GraphEdgeMergeBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -173,6 +190,7 @@ pub struct PreparedGraphEdgeMerge {
     source: usize,
     destination: usize,
     properties: Vec<(PropertyKeyId, GqlScalarParameter)>,
+    undirected: bool,
 }
 impl core::fmt::Debug for PreparedGraphEdgeMerge {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -212,12 +230,60 @@ impl PreparedGraphEdgeMerge {
         if properties.windows(2).any(|pair| pair[0].0 == pair[1].0) {
             return Err(GraphEdgeMergeBuildError::DuplicateProperty);
         }
+        if let Some((key, _)) = properties
+            .iter()
+            .find(|(_, value)| matches!(value.value(), CanonicalScalar::Null))
+        {
+            return Err(GraphEdgeMergeBuildError::NullProperty { key: *key });
+        }
         Ok(Self {
             selection,
             relation,
             source,
             destination,
             properties,
+            undirected: false,
+        })
+    }
+
+    /// An undirected MERGE, `(a)-[:R]-(b)` (fgdb-at06q): an existing edge in
+    /// either orientation matches, and a new edge goes source to destination.
+    #[must_use]
+    pub fn with_undirected(mut self) -> Self {
+        self.undirected = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn undirected(&self) -> bool {
+        self.undirected
+    }
+
+    /// Whether `(src, dst)` is an orientation this MERGE accepts for the
+    /// endpoint pair `(source, destination)`.
+    #[must_use]
+    pub fn accepts_orientation(
+        &self,
+        (source, destination): (VId, VId),
+        (src, dst): (VId, VId),
+    ) -> bool {
+        (src == source && dst == destination)
+            || (self.undirected && src == destination && dst == source)
+    }
+
+    /// Whether an existing edge's stored properties satisfy this MERGE's map:
+    /// every map property is present and `=` its value, as a relationship
+    /// pattern map filters MATCH. Properties outside the map are ignored, and
+    /// an empty map accepts every edge.
+    #[must_use]
+    pub fn matches_properties<'s>(
+        &self,
+        mut stored: impl FnMut(PropertyKeyId) -> Option<&'s CanonicalScalar>,
+    ) -> bool {
+        self.properties.iter().all(|(key, wanted)| {
+            crate::algebra::IntegerComparison::Equal
+                .evaluate_scalar_pair(stored(*key), Some(wanted.value()))
+                == Some(true)
         })
     }
 
@@ -244,7 +310,12 @@ impl PreparedGraphEdgeMerge {
 
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"fgdb:directed-edge-merge:v1\0".to_vec();
+        // A directed definition keeps its original transcript.
+        let mut bytes = if self.undirected {
+            b"fgdb:undirected-edge-merge:v1\0".to_vec()
+        } else {
+            b"fgdb:directed-edge-merge:v1\0".to_vec()
+        };
         bytes.extend_from_slice(&self.relation.0.to_be_bytes());
         bytes.extend_from_slice(&(self.source as u64).to_be_bytes());
         bytes.extend_from_slice(&(self.destination as u64).to_be_bytes());

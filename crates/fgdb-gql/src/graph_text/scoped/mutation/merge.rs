@@ -20,10 +20,23 @@ use crate::{
 };
 use mutation_query::{ReturnLeaves, ReturnMapInput};
 
-struct MergeProperty<'a> {
-    key: Name<'a>,
+pub(super) struct MergeProperty<'a> {
+    pub(super) key: Name<'a>,
     filter: Number,
-    value: VertexMergeValueTemplate,
+    pub(super) value: VertexMergeValueTemplate,
+}
+
+/// A MERGE property map refusal, mapped by each MERGE form onto its own
+/// error type: too many fields, a repeated key, or a malformed value.
+pub(super) enum MergeMapError {
+    Pattern(GraphPatternTextError),
+    TooManyFields { at: usize, observed: usize },
+    DuplicateProperty { at: usize },
+}
+impl From<GraphPatternTextError> for MergeMapError {
+    fn from(error: GraphPatternTextError) -> Self {
+        Self::Pattern(error)
+    }
 }
 
 #[derive(Clone)]
@@ -102,6 +115,28 @@ impl<'a> Parser<'a> {
             }
             labels.push(label);
         }
+        let properties = self.merge_property_map().map_err(|refusal| match refusal {
+            MergeMapError::Pattern(error) => error.into(),
+            MergeMapError::TooManyFields { at, observed } => insert_error(
+                at,
+                GraphInsertBuildError::TooManyFields {
+                    limit: crate::insertion::MAX_GRAPH_INSERT_FIELDS,
+                    observed,
+                },
+            ),
+            MergeMapError::DuplicateProperty { at } => insert_error(
+                at,
+                GraphInsertBuildError::DuplicateProperty { declaration: 0 },
+            ),
+        })?;
+        self.punct(b')', ")")?;
+        Ok((variable, labels, properties))
+    }
+
+    /// An optional `{key: value, ...}` MERGE property map: one or more
+    /// distinct keys, each a non-null literal or a parameter. The same values
+    /// are the MERGE's exact-equality predicates and its creation fields.
+    pub(super) fn merge_property_map(&mut self) -> Result<Vec<MergeProperty<'a>>, MergeMapError> {
         let mut properties = Vec::new();
         if self.take(b'{')? {
             if self.is_punct(b'}') {
@@ -113,23 +148,17 @@ impl<'a> Parser<'a> {
             }
             loop {
                 if properties.len() >= crate::insertion::MAX_GRAPH_INSERT_FIELDS {
-                    return Err(insert_error(
-                        self.current.at,
-                        GraphInsertBuildError::TooManyFields {
-                            limit: crate::insertion::MAX_GRAPH_INSERT_FIELDS,
-                            observed: properties.len() + 1,
-                        },
-                    ));
+                    return Err(MergeMapError::TooManyFields {
+                        at: self.current.at,
+                        observed: properties.len() + 1,
+                    });
                 }
                 let key = self.name()?;
                 if properties
                     .iter()
                     .any(|previous: &MergeProperty<'a>| previous.key.text == key.text)
                 {
-                    return Err(insert_error(
-                        key.at,
-                        GraphInsertBuildError::DuplicateProperty { declaration: 0 },
-                    ));
+                    return Err(MergeMapError::DuplicateProperty { at: key.at });
                 }
                 self.punct(b':', ":")?;
                 let at = self.current.at;
@@ -187,8 +216,7 @@ impl<'a> Parser<'a> {
             }
             self.punct(b'}', "}")?;
         }
-        self.punct(b')', ")")?;
-        Ok((variable, labels, properties))
+        Ok(properties)
     }
 
     fn upsert_branch_actions(
