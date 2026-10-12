@@ -913,6 +913,18 @@ impl Node {
             count: None,
         })
     }
+    /// Whether every ORDER BY key names an output column of `schema`, exactly
+    /// as validate resolves a single read's keys.
+    fn order_resolves(&self, schema: &Schema) -> bool {
+        self.order.iter().all(|key| match &key.variable {
+            None => schema.columns.contains(&key.name),
+            Some(variable) => schema.returned.iter().any(|source| {
+                source
+                    .as_ref()
+                    .is_some_and(|(v, p)| v == variable && *p == key.name)
+            }),
+        })
+    }
     fn validate(&mut self, schemas: &[Schema]) -> Result<Schema, GraphSetTextError> {
         // Every subtree returns its derived schema. A leftmost leaf alone is
         // insufficient once a descendant set widens a concrete column to Any.
@@ -1726,57 +1738,84 @@ impl PreparedGraphSetText {
         if !matches!(parser.current().kind, TextKind::End) {
             return Err(expected(parser.current().at, "end of compound statement"));
         }
-        let mut pending = Vec::new();
-        let mut schemas = Vec::new();
-        let mut uses = parser.page_parameters;
-        let mut operands = 0;
-        for span in &parser.spans {
-            let names: BTreeSet<_> = parser.tokens[span.first_token..span.last_token]
-                .iter()
-                .filter_map(|token| match token.kind {
-                    TextKind::Parameter(name) => Some(name),
-                    _ => None,
-                })
-                .collect();
-            let local: Vec<_> = declarations
-                .iter()
-                .copied()
-                .filter(|(name, _)| names.contains(name))
-                .collect();
-            let input = PreparedGraphText::unresolved_read_input(
-                &statement[span.start..span.end],
-                &local,
-                &parser.tokens[span.first_token..span.last_token],
-                zones.as_ref(),
-            )
-            .map_err(|error| rebase_error(span.start, error))?;
-            operands += input.operand_count();
-            if operands > MAX_GRAPH_SET_OPERANDS {
-                return Err(fail(
-                    span.start,
-                    GraphSetTextErrorKind::SetBuild(GraphSetBuildError::TooManyOperands {
-                        limit: MAX_GRAPH_SET_OPERANDS,
-                        observed: operands,
-                    }),
-                ));
+        let page_parameters = std::mem::take(&mut parser.page_parameters);
+        let tokens = &parser.tokens;
+        let compile = |spans: &[Span],
+                       mut uses: Vec<(usize, GqlParameterSpec)>|
+         -> Result<
+            (Vec<_>, Vec<Schema>, Vec<(usize, GqlParameterSpec)>),
+            GraphSetTextError,
+        > {
+            let mut pending = Vec::new();
+            let mut schemas = Vec::new();
+            let mut operands = 0;
+            for span in spans {
+                let names: BTreeSet<_> = tokens[span.first_token..span.last_token]
+                    .iter()
+                    .filter_map(|token| match token.kind {
+                        TextKind::Parameter(name) => Some(name),
+                        _ => None,
+                    })
+                    .collect();
+                let local: Vec<_> = declarations
+                    .iter()
+                    .copied()
+                    .filter(|(name, _)| names.contains(name))
+                    .collect();
+                let input = PreparedGraphText::unresolved_read_input(
+                    &statement[span.start..span.end],
+                    &local,
+                    &tokens[span.first_token..span.last_token],
+                    zones.as_ref(),
+                )
+                .map_err(|error| rebase_error(span.start, error))?;
+                operands += input.operand_count();
+                if operands > MAX_GRAPH_SET_OPERANDS {
+                    return Err(fail(
+                        span.start,
+                        GraphSetTextErrorKind::SetBuild(GraphSetBuildError::TooManyOperands {
+                            limit: MAX_GRAPH_SET_OPERANDS,
+                            observed: operands,
+                        }),
+                    ));
+                }
+                let (columns, types) = input.column_schema();
+                let returned =
+                    returned_properties(&tokens[span.first_token..span.last_token], &columns);
+                schemas.push(Schema {
+                    columns,
+                    types,
+                    depth: input.depth(),
+                    returned,
+                });
+                for (spec, offset) in input
+                    .parameter_schema()
+                    .iter()
+                    .zip(input.parameter_offsets())
+                {
+                    uses.push((span.start + *offset, spec.clone()));
+                }
+                pending.push(input);
             }
-            let (columns, types) = input.column_schema();
-            let returned =
-                returned_properties(&parser.tokens[span.first_token..span.last_token], &columns);
-            schemas.push(Schema {
-                columns,
-                types,
-                depth: input.depth(),
-                returned,
-            });
-            for (spec, offset) in input
-                .parameter_schema()
-                .iter()
-                .zip(input.parameter_offsets())
-            {
-                uses.push((span.start + *offset, spec.clone()));
-            }
-            pending.push(input);
+            Ok((pending, schemas, uses))
+        };
+        let (mut pending, mut schemas, mut uses) = compile(&parser.spans, page_parameters)?;
+        // A single read's ORDER BY that names no output column ranks by the
+        // read's own scope, as `RETURN n ORDER BY k` after `WITH ..., x AS k`
+        // or `UNWIND ... AS k` (fgdb-ujuga). Only a compound set's tail is
+        // limited to output columns, so recompile that read with the complete
+        // tail it owns. A tail naming only outputs keeps its column template.
+        if let NodeKind::Leaf(leaf) = root.kind
+            && !root.order_resolves(&schemas[leaf])
+        {
+            let (end, last_token) = (parser.current().at, parser.at);
+            parser.spans[leaf].end = end;
+            parser.spans[leaf].last_token = last_token;
+            root.order.clear();
+            root.offset = PageNumber::Literal(0);
+            root.count = None;
+            // Only this tail recorded page parameters: the read now owns them.
+            (pending, schemas, uses) = compile(&parser.spans, Vec::new())?;
         }
         let schema = root.validate(&schemas)?;
         uses.sort_by_key(|(offset, _)| *offset);

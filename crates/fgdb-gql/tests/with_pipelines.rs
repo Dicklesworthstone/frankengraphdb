@@ -1093,6 +1093,66 @@ fn formerly_refused_with_count_executes_over_real_nonempty_and_empty_graph_input
 }
 
 #[test]
+fn a_single_reads_order_by_ranks_by_input_columns_it_does_not_return() {
+    // fgdb-ujuga: ORDER BY reads any variable the RETURN can see. A key that
+    // is no output column ranks by the read's own scope and is not returned.
+    // Only a compound set's tail is limited to its output columns.
+    let values = [3, 1, 2].map(CanonicalScalar::Int);
+    for (text, expected) in [
+        (
+            "MATCH (n) WITH n.p AS k, n.p * 10 AS v RETURN v ORDER BY k",
+            vec![10, 20, 30],
+        ),
+        (
+            "MATCH (n) WITH n.p AS k, n.p * 10 AS v RETURN v ORDER BY k DESC LIMIT $top",
+            vec![30, 20],
+        ),
+        (
+            "MATCH (n) WITH n.p AS k RETURN k * 10 AS v ORDER BY k DESC SKIP 1",
+            vec![20, 10],
+        ),
+        (
+            "MATCH (n) WITH n.p AS k, 0 - n.p AS v RETURN v ORDER BY v, k",
+            vec![-3, -2, -1],
+        ),
+        (
+            "UNWIND [3, 1, 2] AS k RETURN k * 10 AS v ORDER BY k DESC",
+            vec![30, 20, 10],
+        ),
+    ] {
+        let template = PreparedGraphSetText::prepare(text, symbols).unwrap();
+        assert_eq!(template.columns(), ["v"], "{text}");
+        let arguments = if text.contains("$top") {
+            GqlParameters::new().with_uint64("top", 2).unwrap()
+        } else {
+            GqlParameters::new()
+        };
+        let query = template.bind_parameters(&arguments).unwrap();
+        let result = run(&query, &values, wide(), &mut || Ok(())).unwrap();
+        let expected: Vec<_> = expected.into_iter().map(Some).collect();
+        assert_eq!(ints(&result.value, 0), expected, "{text}");
+    }
+    for text in [
+        // openCypher: under DISTINCT a key must be projected.
+        "MATCH (n) WITH n.p AS k, n.p * 10 AS v RETURN DISTINCT v ORDER BY k",
+        // A compound set's ORDER BY ranks the set's output columns only.
+        "MATCH (n) WITH n.p AS k RETURN k AS v UNION MATCH (n) WITH n.p AS k RETURN k AS v ORDER BY k",
+        "MATCH (n) WITH n.p AS k RETURN k AS v ORDER BY missing",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+}
+
+#[test]
 fn parameter_contracts_and_original_utf8_offsets_span_all_stages() {
     let text = "\u{2003}MATCH (n) WITH n.p+$add AS score LIMIT $top WHERE score>$min RETURN score*$scale AS answer";
     let template = PreparedGraphSetText::prepare(text, symbols).unwrap();
