@@ -1,0 +1,271 @@
+//! Native hybrid CALL uses one seed-directed source, including graph-only
+//! and capability-scoped execution. Whole-graph work is a negative control.
+
+use super::*;
+use crate::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
+use asupersync::lab::run_async_under_lab;
+use asupersync::security::key::AuthKey;
+use fgdb_beacon::WorkBudget;
+use fgdb_delta_types::SchemaEpoch;
+use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind};
+use fgdb_types::{CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts};
+use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
+
+const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x74; 32]);
+const TEXT: PropertyKeyId = PropertyKeyId(1);
+const X: PropertyKeyId = PropertyKeyId(2);
+const R: RelationId = RelationId(1);
+
+fn policy() -> GqlQueryPolicy {
+    GqlQueryPolicy::new(100_000, 100, 10_000_000, 1_000_000)
+}
+
+async fn fixture(cx: &CommitCx, disconnected: usize, hidden: bool) -> Database<MemVfs> {
+    let mut db = Database::open_memory(cx, DatabaseKeys::new([0x73; 32], NS, [0x75; 32]))
+        .await.unwrap();
+    let mut batch = WriteBatch::new(R);
+    for id in [1, 2, 3, 9] {
+        batch.create_vertex(VId(id), vec![LabelId(1)], vec![
+            (TEXT, CanonicalScalar::ucs_basic_text("graph").unwrap()),
+            (X, CanonicalScalar::Int(id as i64)),
+        ]);
+    }
+    batch.add_edge(EId(1), VId(1), VId(2), vec![]);
+    batch.add_edge(EId(2), VId(2), VId(3), vec![]);
+    for id in 0..disconnected {
+        batch.add_edge(EId(100 + id as u128), VId(9), VId(9), vec![]);
+    }
+    if hidden {
+        batch.create_vertex(VId(90), vec![LabelId(99)], vec![
+            (TEXT, CanonicalScalar::ucs_basic_text("graph graph").unwrap()),
+            (X, CanonicalScalar::Int(0)),
+        ]);
+        batch.add_edge(EId(90), VId(1), VId(90), vec![]);
+        batch.add_edge(EId(91), VId(90), VId(3), vec![]);
+    }
+    db.write(cx, batch).await.unwrap();
+    if hidden {
+        let mut shortcut = WriteBatch::new(RelationId(99));
+        shortcut.add_edge(EId(92), VId(1), VId(3), vec![]);
+        db.write(cx, shortcut).await.unwrap();
+    }
+    db
+}
+
+/// Construct the bound execution value directly for source-work controls;
+/// public text/parameter binding and Warden delivery are exercised below.
+fn search(vector: bool, text: bool) -> HybridSearch {
+    let mut options = Options::text(TEXT);
+    options.vertex_label = Some(LabelId(1));
+    options.projection.vector = vec![X];
+    options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
+    let profile = if vector || text {
+        ExactRrfProfile::new(60, u16::from(vector), u16::from(text)).unwrap()
+    } else {
+        GraphHybridQuery::graph_only(1, 1, 100, 60).unwrap().retrieval.profile
+    };
+    HybridSearch {
+        options, text: "graph".into(), text_mode: TextMatch::Any,
+        vector: vec![0.0], vector_mode: VectorSearch::Exact,
+        k: 1, candidates: 1, profile, seeds: vec![VId(1)], relation: None,
+        direction: ExpansionDirection::Outgoing, max_hops: 2, include_seeds: false,
+        graph_candidates: 1, graph_weight: 100, outputs: vec![0, 7, 2, 3],
+        graph_access: GraphAccess::Indexed,
+    }
+}
+
+fn execute(
+    search: &HybridSearch,
+    db: &Database<MemVfs>,
+    eligible: Option<&[GraphValue]>,
+    work: &RefCell<impl WorkControl>,
+) -> Result<(Vec<GraphHybridHit>, u64), BeaconError> {
+    search.execute_filtered(
+        eligible, policy(), &db.snapshot, db.frontier().unwrap(), work,
+        Scan::Metered, |_| Ok(true), |_| true, |_| true, |_| true,
+    )
+}
+
+#[test]
+fn native_stage_ignores_disconnected_incidence_for_all_modality_combinations() {
+    let ((), report) = run_async_under_lab(0xbeac_3701, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let sparse = fixture(&c.commit(), 0, false).await;
+        let dense = fixture(&c.commit(), 1024, false).await;
+        let eligible = [GraphValue::Vertex(VId(3))];
+        for (vector, text) in [(false, false), (false, true), (true, false), (true, true)] {
+            let search = search(vector, text);
+            let work = RefCell::new(WorkBudget::new(1_000_000));
+            let (expected, scratch) = execute(&search, &sparse, Some(&eligible), &work).unwrap();
+            let spent = 1_000_000 - work.into_inner().remaining();
+            assert_eq!(scratch, 1);
+            assert_eq!(expected.len(), 1);
+            let hit = &expected[0];
+            assert_eq!(hit.id, VId(3));
+            assert_eq!(hit.graph_hops, Some(2));
+            assert_eq!(hit.graph_rank.map(|rank| rank.get()), Some(1));
+            assert_eq!(hit.vector_rank.map(|rank| rank.get()), vector.then_some(1));
+            assert_eq!(hit.text_rank.map(|rank| rank.get()), text.then_some(1));
+            // The exact allowance from the sparse source also admits the
+            // graph containing 1024 unreachable edges. No elapsed-time claim.
+            let work = RefCell::new(WorkBudget::new(spent));
+            assert_eq!(execute(&search, &dense, Some(&eligible), &work).unwrap().0, expected);
+            assert_eq!(work.into_inner().remaining(), 0);
+            let short = RefCell::new(WorkBudget::new(spent - 1));
+            assert!(matches!(execute(&search, &dense, Some(&eligible), &short),
+                Err(BeaconError::WorkBudgetExceeded)));
+            // Mutation control: selecting the old whole-graph execution body
+            // must not fit that same allowance, even though its answer agrees.
+            let work = RefCell::new(WorkBudget::new(spent));
+            let control = crate::query::beacon::graph::evaluate_filtered(
+                &dense.snapshot, dense.frontier().unwrap(), &search.options,
+                search.query(), search.expansion(), &work, Scan::Metered,
+                |_| Ok(true), |_| true, |_| true, |_| true, || Ok(()), |id| id == VId(3),
+            );
+            assert!(matches!(control, Err(BeaconError::WorkBudgetExceeded)));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+    match (kind, name) {
+        (GraphSymbolKind::Property, "body") => Some(GraphSymbol::Property(TEXT)),
+        (GraphSymbolKind::Property, "x") => Some(GraphSymbol::Property(X)),
+        _ => None,
+    }
+}
+
+fn statement(modalities: &str) -> String {
+    format!("CALL hybrid.search({modalities} seeds => [1], max_hops => 2, \
+        eligible => $eligible, k => 1, candidates => 1, graph_candidates => 1, \
+        graph_weight => 100) YIELD node, graph_hops, vector_rank, text_rank \
+        RETURN node.x AS x, graph_hops, vector_rank, text_rank")
+}
+
+fn params(ids: &[i64]) -> GqlParameters {
+    GqlParameters::new().with_list("eligible", ids.iter().map(|id|
+        GraphValue::Scalar(CanonicalScalar::Int(*id))).collect()).unwrap()
+}
+
+fn rows(result: QueryResult) -> Vec<Vec<QueryValue>> {
+    match result {
+        QueryResult::Rows { rows, .. } => rows,
+        _ => panic!("hybrid read returned a write"),
+    }
+}
+
+fn expected(vector: bool, text: bool) -> Vec<Vec<QueryValue>> {
+    vec![vec![Some(3), Some(2), vector.then_some(1), text.then_some(1)]
+        .into_iter().map(|v| QueryValue::Value(GraphValue::Scalar(
+            v.map_or(CanonicalScalar::Null, CanonicalScalar::Int)))).collect()]
+}
+
+#[test]
+fn query_and_authorized_prepared_calls_share_filtered_indexed_semantics() {
+    let ((), report) = run_async_under_lab(0xbeac_3702, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let clean = fixture(&c.commit(), 16, false).await;
+        let full = fixture(&c.commit(), 16, true).await;
+        let authority = Authority::new(AuthKey::from_seed(3702), NS, "native-hybrid", SchemaEpoch(0), 1)
+            .unwrap();
+        let mut grant = Grant::read_only("main", 1000, QueryLimits {
+            max_nodes: 1000, max_work: 10_000_000, max_rows: 10,
+        });
+        grant.labels = Scope::only([LabelId(1)]);
+        grant.relations = Scope::only([R]);
+        grant.properties = Scope::only([TEXT, X]);
+        let token = authority.issue_at(&grant, 100).unwrap();
+        let mut session = full.authorized_read_session(
+            &c.query(), &authority, &token, "main", symbols, policy(), || 100,
+        ).unwrap();
+        for (modalities, vector, text) in [
+            ("", false, false),
+            ("text => 'graph', text_property => 'body',", false, true),
+            ("vector => [0], vector_properties => ['x'],", true, false),
+            ("text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x'],", true, true),
+        ] {
+            let statement = statement(modalities);
+            assert_eq!(rows(clean.query(&c.query(), &statement, &params(&[3]), symbols, policy()).unwrap()),
+                expected(vector, text));
+            let prepared = session.prepare(&c.query(), &statement, &params(&[3])).unwrap();
+            assert_eq!(rows(session.execute(&c.query(), &prepared, &params(&[90, 3, 3])).unwrap()),
+                expected(vector, text));
+            assert!(rows(session.execute(&c.query(), &prepared, &params(&[])).unwrap()).is_empty());
+            assert!(session.execute(&c.query(), &prepared, &params(&[-1])).is_err());
+            assert_eq!(rows(session.execute(&c.query(), &prepared, &params(&[3])).unwrap()),
+                expected(vector, text));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_native_pin_keeps_historical_edges_but_checks_live_expiry() {
+    let ((), report) = run_async_under_lab(0xbeac_3703, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = fixture(&c.commit(), 0, false).await;
+        let authority = Authority::new(AuthKey::from_seed(3703), NS, "native-hybrid", SchemaEpoch(0), 1)
+            .unwrap();
+        let mut grant = Grant::read_only("main", 1000, QueryLimits {
+            max_nodes: 1000, max_work: 10_000_000, max_rows: 10,
+        });
+        grant.labels = Scope::only([LabelId(1)]);
+        grant.relations = Scope::only([R]);
+        grant.properties = Scope::only([TEXT, X]);
+        let token = authority.issue_at(&grant, 100).unwrap();
+        let now = Cell::new(100_u64);
+        let mut session = db.authorized_read_session(
+            &c.query(), &authority, &token, "main", symbols, policy(), || now.get(),
+        ).unwrap();
+        let text = statement("");
+        let parameters = params(&[3]);
+        let prepared = session.prepare(&c.query(), &text, &parameters).unwrap();
+        let mut changes = WriteBatch::new(R);
+        changes.delete_edge(EId(2));
+        changes.set_vertex_property(VId(3), X, Some(CanonicalScalar::Int(33)));
+        db.write(&c.commit(), changes).await.unwrap();
+        db.compact(&c.commit()).await.unwrap();
+        assert!(rows(db.query(&c.query(), &text, &parameters, symbols, policy()).unwrap()).is_empty());
+        drop(db);
+        assert_eq!(rows(session.execute(&c.query(), &prepared, &parameters).unwrap()), expected(false, false));
+        now.set(1001);
+        assert!(matches!(session.execute(&c.query(), &prepared, &parameters),
+            Err(crate::QueryError::Authorization(fgdb_warden::Error::Expired))));
+        assert!(session.is_closed());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn every_native_indexed_checkpoint_can_cancel_even_when_filter_rejects_all() {
+    struct Cut { calls: usize, stop: usize }
+    impl WorkControl for Cut {
+        fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
+            if self.calls == self.stop { return Err(BeaconError::Cancelled); }
+            self.calls += 1;
+            if self.calls == self.stop { Err(BeaconError::Cancelled) } else { Ok(()) }
+        }
+    }
+    let ((), report) = run_async_under_lab(0xbeac_3704, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = fixture(&c.commit(), 0, false).await;
+        let selected = [GraphValue::Vertex(VId(3))];
+        for modalities in [(false, false), (true, true)] {
+            let search = search(modalities.0, modalities.1);
+            for eligible in [&[][..], &selected[..]] {
+                let work = RefCell::new(Cut { calls: 0, stop: usize::MAX });
+                let rows = execute(&search, &db, Some(eligible), &work).unwrap().0;
+                assert_eq!(rows.len(), usize::from(!eligible.is_empty()));
+                let calls = work.into_inner().calls;
+                for stop in 1..=calls {
+                    let work = RefCell::new(Cut { calls: 0, stop });
+                    assert!(matches!(execute(&search, &db, Some(eligible), &work),
+                        Err(BeaconError::Cancelled)), "cut {stop}");
+                    assert_eq!(work.into_inner().calls, stop);
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

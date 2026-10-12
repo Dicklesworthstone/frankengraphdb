@@ -25,6 +25,7 @@ mod trie;
 pub use execute::{FreeJoin, FreeJoinCursor, JoinBinding, MultiplicityOverflow};
 pub use factor::{
     FactorNodeKind, FactorizedBatch, FactorizedColumns, FactorizedCursor, FactorizedReadError,
+    FreeJoinBatchCursor,
 };
 pub use graph::{GraphTrie, GraphTrieCursor, GraphTrieError};
 pub use plan::{FreeJoinPlan, JoinPlanError, JoinVariable, MAX_JOIN_RELATIONS, MAX_JOIN_VARIABLES};

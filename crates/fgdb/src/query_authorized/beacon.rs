@@ -306,7 +306,7 @@ pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
 > {
     use beacon::procedure::{HybridSearch, failure, refuse};
     let (search, eligible) =
-        HybridSearch::bind_filtered(call, arguments, at, remaining).map_err(refuse)?;
+        HybridSearch::bind_snapshot_filtered(call, arguments, at, remaining).map_err(refuse)?;
     let spent = core::cell::Cell::new(0_u64);
     let admitted = core::cell::Cell::new(0_u64);
     let work = RefCell::new(Meter::new(
