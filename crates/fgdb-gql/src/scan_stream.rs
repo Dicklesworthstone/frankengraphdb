@@ -174,7 +174,9 @@ impl<E: core::error::Error + 'static> core::error::Error for ScanError<E> {
 /// retaining the same interruption type. No extra allocation or meter is added.
 pub enum ScanCursor<VS, VF, ES, EF> {
     Vertex(VertexScanCursor<VS, VF, GraphValueRow>),
-    Edge(EdgeScanCursor<ES, EF>),
+    /// Boxed: the edge cursor's join and resumable-quantum state is twice
+    /// the vertex cursor's size (clippy::large_enum_variant).
+    Edge(Box<EdgeScanCursor<ES, EF>>),
 }
 impl<VS, VF, ES, EF> ScanCursor<VS, VF, ES, EF>
 where

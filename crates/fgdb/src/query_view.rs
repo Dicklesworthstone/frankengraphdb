@@ -291,10 +291,10 @@ fn open_pattern_stream<'q>(
         query.plan().operators().first(),
         Some(GlaOperator::ScanEdges { .. })
     ) {
-        ScanCursor::Edge(
+        ScanCursor::Edge(Box::new(
             view.stream_graph_edges_governed_at(cx, query, as_of, policy)
                 .map_err(QueryError::EdgeStream)?,
-        )
+        ))
     } else {
         ScanCursor::Vertex(
             view.stream_graph_values_governed_at(cx, query, as_of, policy)

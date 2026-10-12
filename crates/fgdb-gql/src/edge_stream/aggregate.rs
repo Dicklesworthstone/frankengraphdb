@@ -326,7 +326,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
     pub fn poll_next<C>(
         &mut self,
         context: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Option<Result<GraphAggregateRow, EdgeAggregateError<S::Error, C>>>>
+    ) -> crate::stream::aggregate::AggregatePoll<EdgeAggregateError<S::Error, C>>
     where
         F: FnMut() -> Result<(), C>,
     {

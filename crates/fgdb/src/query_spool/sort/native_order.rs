@@ -99,12 +99,12 @@ fn open<'q>(
         cx.with_restriction(|| cx.checkpoint())
             .map_err(|e| QueryError::EdgeStream(GqlQueryError::Interrupted(e)))?;
         (
-            ScanCursor::Edge(EdgeScanCursor::new(
+            ScanCursor::Edge(Box::new(EdgeScanCursor::new(
                 source,
                 plan,
                 input_policy(policy, max_input_rows),
                 move || cx.with_restriction(|| cx.checkpoint()),
-            )),
+            ))),
             tail,
         )
     } else {
