@@ -741,7 +741,8 @@ fn merge_maps_filter_matches_keep_parallel_edges_and_undirected_accepts_either_o
                 &query,
                 &program("MATCH (a:Person)-[:R]->(b:Person) MERGE (a)-[e:S {p: 7}]->(b)"),
                 policy(0, 0),
-                |_| -> Result<ElementId, ()> { panic!("a matched pair cannot allocate") },
+                // A matched pair never allocates; an allocation would refuse.
+                |_| Err::<ElementId, ()>(()),
             )
             .unwrap();
         assert_eq!(
@@ -760,7 +761,8 @@ fn merge_maps_filter_matches_keep_parallel_edges_and_undirected_accepts_either_o
                 &query,
                 &program("MATCH (a:Person)-[:R]->(b:Person) MERGE (a)-[:S {p: 9}]-(b)"),
                 policy(0, 0),
-                |_| -> Result<ElementId, ()> { panic!("an undirected match cannot allocate") },
+                // An undirected match never allocates either.
+                |_| Err::<ElementId, ()>(()),
             )
             .unwrap();
         assert_eq!(
@@ -829,17 +831,19 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
             );
         }
         db.write(&commit, existing).await.unwrap();
-        let rows = |result: QueryResult, names: &[&str]| -> Vec<Vec<GraphValue>> {
+        // RETURN rows as graph values; None if the statement was dispatched
+        // to the no-result program engine or a cell left the value domain.
+        let rows = |result: QueryResult, names: &[&str]| -> Option<Vec<Vec<GraphValue>>> {
             let QueryResult::Rows { columns, rows } = result else {
-                panic!("MERGE RETURN was dispatched to the no-result program engine")
+                return None;
             };
             assert_eq!(columns, names);
             rows.into_iter()
                 .map(|row| {
                     row.into_iter()
                         .map(|cell| match cell {
-                            GraphAggregateValue::Value(value) => value,
-                            other => panic!("write RETURN cells are graph values: {other:?}"),
+                            GraphAggregateValue::Value(value) => Some(value),
+                            _ => None,
                         })
                         .collect()
                 })
@@ -848,9 +852,8 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
         let edge = |id| GraphValue::Edge(EId(id));
         let vertex = |id| GraphValue::Vertex(VId(id));
         let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
-        let mut none = |_: GraphWriteIdentityRequest| -> Result<ElementId, ()> {
-            panic!("a matched pair cannot allocate")
-        };
+        // A matched pair never allocates; an allocation would refuse.
+        let mut none = |_: GraphWriteIdentityRequest| Err::<ElementId, ()>(());
         let arguments = GqlParameters::new();
         let selected = "MATCH (a:Person)-[:R]->(b:Person) MERGE ";
 
@@ -878,10 +881,10 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
                 ),
                 &["e", "p", "s", "t"],
             ),
-            vec![
+            Some(vec![
                 vec![edge(40), int(7), vertex(1), vertex(2)],
                 vec![edge(42), int(7), vertex(1), vertex(2)],
-            ]
+            ])
         );
         // The reverse p=9 edge matches undirected; its own orientation shows.
         assert_eq!(
@@ -893,14 +896,14 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
                 ),
                 &["s", "t", "b"],
             ),
-            vec![vec![vertex(2), vertex(1), vertex(2)]]
+            Some(vec![vec![vertex(2), vertex(1), vertex(2)]])
         );
         assert_eq!(
             rows(
                 staged("(a)-[e:S {p: 7}]->(b) RETURN count(e) AS n", 0, &mut none),
                 &["n"],
             ),
-            vec![vec![int(2)]]
+            Some(vec![vec![int(2)]])
         );
         // A miss creates one edge; RETURN reads it from the staged graph.
         let created = staged(
@@ -911,7 +914,10 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
                 Ok(ElementId::Edge(EId(60)))
             },
         );
-        assert_eq!(rows(created, &["p", "e"]), vec![vec![int(5), edge(60)]]);
+        assert_eq!(
+            rows(created, &["p", "e"]),
+            Some(vec![vec![int(5), edge(60)]])
+        );
         txn.finish(&mut db, &commit).await.unwrap();
 
         let committed = db
@@ -928,7 +934,7 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
             )
             .await
             .unwrap();
-        assert_eq!(rows(committed, &["e"]), vec![vec![edge(60)]]);
+        assert_eq!(rows(committed, &["e"]), Some(vec![vec![edge(60)]]));
         let stored = db.edge(EId(60)).unwrap().unwrap();
         assert_eq!(
             (stored.entry.src, stored.entry.dst, stored.entry.relation),

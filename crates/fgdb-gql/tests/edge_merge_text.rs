@@ -262,21 +262,20 @@ fn relationship_merge_return_binds_the_edge_its_endpoints_and_match_bindings() {
     );
     assert_eq!(query.columns(), &["r", "rp", "s", "ep", "ap"]);
     assert!(query.merge().undirected());
-    let [
-        GraphEdgeMergeBinding::Edge,
-        GraphEdgeMergeBinding::Property(rp),
-        GraphEdgeMergeBinding::Endpoint { start: true },
-        GraphEdgeMergeBinding::EndpointProperty {
-            start: false,
-            key: ep,
-        },
-        GraphEdgeMergeBinding::Input(ap),
-    ] = query.bindings()
-    else {
-        panic!("unexpected bindings {:?}", query.bindings());
-    };
-    assert_eq!((*rp, *ep), (P, P));
-    // The endpoints lead the selection; a.p follows them.
+    // The endpoints lead the selection, so a.p is its third column.
+    assert_eq!(
+        query.bindings(),
+        &[
+            GraphEdgeMergeBinding::Edge,
+            GraphEdgeMergeBinding::Property(P),
+            GraphEdgeMergeBinding::Endpoint { start: true },
+            GraphEdgeMergeBinding::EndpointProperty {
+                start: false,
+                key: P,
+            },
+            GraphEdgeMergeBinding::Input(2),
+        ]
+    );
     assert_eq!(
         (
             query.merge().source_column(),
@@ -284,7 +283,6 @@ fn relationship_merge_return_binds_the_edge_its_endpoints_and_match_bindings() {
         ),
         (0, 1)
     );
-    assert_eq!(*ap, 2);
 
     let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
     let count =

@@ -981,12 +981,13 @@ fn returning(text: &str) -> PreparedGraphEdgeMergeQuery {
         .bind_parameters(&GqlParameters::new())
         .unwrap()
 }
-fn query_authorization(error: QueryFault) -> Error {
+/// The authorization refusal a MERGE RETURN fault carries, if it is one.
+fn query_authorization(error: QueryFault) -> Option<Error> {
     match error {
         GqlQueryError::Source(GraphEdgeMergeQueryError::Merge(GraphEdgeMergeError::Source(
             WriteTxnError::Authorization(error),
-        ))) => error,
-        other => panic!("expected authorization refusal, got {other:?}"),
+        ))) => Some(error),
+        _ => None,
     }
 }
 
@@ -1067,7 +1068,7 @@ fn authorized_merge_return_masks_hidden_fields_and_matches_either_orientation() 
             )
             .await
             .unwrap_err();
-        assert_eq!(query_authorization(error), Error::ScopeDenied);
+        assert_eq!(query_authorization(error), Some(Error::ScopeDenied));
         assert_eq!((db.frontier().unwrap(), db.edges().unwrap()), before);
 
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
@@ -1091,10 +1092,15 @@ fn authorized_merge_return_masks_hidden_fields_and_matches_either_orientation() 
             .unwrap();
         assert_eq!(stats.created_edges, 1);
         assert_eq!(cells(&result), vec![vec![int(3)], vec![int(3)]]);
-        let EmbeddedTxnCompletion::WriteCommitted { commit_seq } = completion else {
-            panic!("a created relationship commits: {completion:?}")
-        };
-        assert_eq!(db.frontier().unwrap(), commit_seq);
+        // A created relationship commits, at the new frontier.
+        let frontier = db.frontier().unwrap();
+        assert!(
+            matches!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { commit_seq } if commit_seq == frontier
+            ),
+            "{completion:?}"
+        );
         let created: Vec<_> = db
             .edges()
             .unwrap()
