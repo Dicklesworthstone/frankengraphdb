@@ -61,13 +61,14 @@ impl ReadAggregateStage {
         let input = input
             .group_by(&self.keys, &declarations(&self.aggregates))
             .map_err(|kind| aggregate_error(at, kind))?;
-        let outputs = self
-            .outputs
-            .iter()
-            .map(|(name, column, _)| {
-                GraphSetProjection::new(name.clone(), GraphSetValue::Column(*column))
-            })
-            .collect();
+        let mut outputs = Vec::with_capacity(self.outputs.len());
+        for (position, (name, column, _)) in self.outputs.iter().enumerate() {
+            let value = match self.computed.iter().find(|(at, _)| *at == position) {
+                Some((_, template)) => bind_read_value(template, values)?,
+                None => GraphSetValue::Column(*column),
+            };
+            outputs.push(GraphSetProjection::new(name.clone(), value));
+        }
         input
             .project(outputs, self.quantifier)
             .map_err(|kind| GraphSetTextError {
@@ -81,6 +82,16 @@ impl ReadAggregateStage {
 enum Output {
     Key(usize),
     Aggregate(usize),
+    /// An item combining aggregate results; its value is a computed output.
+    Computed,
+}
+
+/// One leaf of a combined WITH item (fgdb-4avot): an input slot that must
+/// be a grouping key, or a summary the item computes.
+#[derive(Clone, Copy)]
+enum Leaf {
+    Key(usize),
+    Summary(usize),
 }
 
 /// A native-token lookahead only. The caller still parses every token normally.
@@ -325,6 +336,206 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Whether the WITH item here combines an aggregate call with other
+    /// operands (`count(*) + 1`, `me.age + count(you.age)`, fgdb-4avot): it
+    /// contains a call, and it is not exactly one call. Lookahead only.
+    fn starts_combined_aggregate(&self) -> Result<bool, GraphPatternTextError> {
+        const ENDS: [&str; 14] = [
+            "AS",
+            "WHERE",
+            "ORDER",
+            "SKIP",
+            "LIMIT",
+            "RETURN",
+            "WITH",
+            "MATCH",
+            "OPTIONAL",
+            "UNWIND",
+            "UNION",
+            "EXCEPT",
+            "INTERSECT",
+            "CALL",
+        ];
+        let single = matches!(self.current.kind, TokenKind::Word(word) if function(word).is_some())
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut depth = 0_usize;
+        let mut calls = 0_usize;
+        let mut closed = None;
+        let mut seen = 0_usize;
+        loop {
+            let next = lexer.clone().next()?;
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b',') if depth == 0 => break,
+                TokenKind::Word(word)
+                    if depth == 0 && ENDS.iter().any(|end| word.eq_ignore_ascii_case(end)) =>
+                {
+                    break;
+                }
+                TokenKind::Word(word)
+                    if function(word).is_some() && matches!(next.kind, TokenKind::Punct(b'(')) =>
+                {
+                    calls += 1;
+                }
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && closed.is_none() {
+                        closed = Some(seen + 1);
+                    }
+                }
+                _ => {}
+            }
+            seen += 1;
+            token = lexer.next()?;
+        }
+        Ok(calls > 0 && !(single && closed == Some(seen)))
+    }
+
+    /// A WITH item combining aggregate results (fgdb-4avot). Its aggregate
+    /// calls become summaries. Every other leaf is a row column or a carried
+    /// property read (`me.age` through the boundary), and must be one of this
+    /// grouping's keys. Returns the item over its leaves.
+    fn with_combined_item(
+        &mut self,
+        schema: &pipeline::RowSchema<'a>,
+        inputs: &mut Vec<ReadProjectionTemplate>,
+        aggregates: &mut Vec<ReadAggregateSpec>,
+    ) -> Result<(ReadValueTemplate, Vec<Leaf>), GraphSetTextError> {
+        let mut leaves = Vec::new();
+        let mut failure = None;
+        let template = self.read_resolved_item(
+            &mut |parser| {
+                if failure.is_some() {
+                    return Ok(None);
+                }
+                let start = parser.current.at;
+                let refuse = || {
+                    error(
+                        start,
+                        GraphPatternTextErrorKind::Expected("a combined WITH aggregate operand"),
+                    )
+                };
+                if let TokenKind::Word(word) = parser.current.kind
+                    && let Some(call) = function(word)
+                    && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                {
+                    return match parser.with_summary_call(call, schema, inputs, aggregates, start) {
+                        Ok((index, _)) => {
+                            leaves.push(Leaf::Summary(index));
+                            Ok(Some(leaves.len() - 1))
+                        }
+                        Err(error) => {
+                            failure = Some(error);
+                            Err(refuse())
+                        }
+                    };
+                }
+                let column = if let Some(column) = parser.boundary_read(schema.len())? {
+                    column
+                } else {
+                    let TokenKind::Word(word) = parser.current.kind else {
+                        return Ok(None);
+                    };
+                    if matches!(
+                        parser.lexer.clone().next()?.kind,
+                        TokenKind::Punct(b'(' | b'.')
+                    ) {
+                        return Ok(None);
+                    }
+                    let visible = parser.visible_width(schema);
+                    let Some(column) = schema[..visible]
+                        .iter()
+                        .position(|(name, _)| name.text == word)
+                    else {
+                        return Ok(None);
+                    };
+                    parser.advance()?;
+                    column
+                };
+                match parser.input_slot(inputs, ReadValueTemplate::Column(column)) {
+                    Ok(slot) => {
+                        leaves.push(Leaf::Key(slot));
+                        Ok(Some(leaves.len() - 1))
+                    }
+                    Err(error) => {
+                        failure = Some(error);
+                        Err(refuse())
+                    }
+                }
+            },
+            0,
+        );
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok((template?, leaves))
+    }
+
+    /// One aggregate call at the current token as a WITH summary. Its
+    /// argument becomes an input slot. Returns the summary index and kind.
+    fn with_summary_call(
+        &mut self,
+        mut function: Function,
+        schema: &pipeline::RowSchema<'a>,
+        inputs: &mut Vec<ReadProjectionTemplate>,
+        aggregates: &mut Vec<ReadAggregateSpec>,
+        item_at: usize,
+    ) -> Result<(usize, GraphSetColumnType), GraphSetTextError> {
+        self.advance()?;
+        self.punct(b'(', "(")?;
+        let unique = self.take_word("DISTINCT")?;
+        if !unique {
+            self.take_word("ALL")?;
+        }
+        let (column, input_kind) = if self.take(b'*')? {
+            if function != Function::Count || unique {
+                return Err(expected(item_at, "COUNT(*) without DISTINCT"));
+            }
+            function = Function::CountRows;
+            (None, GraphSetColumnType::Scalar)
+        } else {
+            // rand() in the argument is a non-constant expression.
+            let outer = core::mem::replace(&mut self.aggregate_argument, true);
+            let input = self.with_input(schema, inputs);
+            self.aggregate_argument = outer;
+            let (column, kind, _) = input?;
+            (Some(column), kind)
+        };
+        self.punct(b')', "one expression as the aggregate argument")?;
+        if matches!(function, Function::SumInt | Function::AverageInt)
+            && !matches!(
+                input_kind,
+                GraphSetColumnType::Scalar | GraphSetColumnType::Any
+            )
+        {
+            return Err(expected(item_at, "scalar input for a numeric aggregate"));
+        }
+        if unique {
+            function = match function {
+                Function::Count => Function::CountDistinct,
+                Function::SumInt => Function::SumIntDistinct,
+                Function::AverageInt => Function::AverageIntDistinct,
+                Function::Collect => Function::CollectDistinct,
+                other => other,
+            };
+        }
+        let kind = match function {
+            Function::Min | Function::Max => input_kind,
+            Function::Collect | Function::CollectDistinct => GraphSetColumnType::List,
+            _ => GraphSetColumnType::Scalar,
+        };
+        let index = aggregates.len();
+        aggregates.push(ReadAggregateSpec {
+            name: format!("__with_summary_{index}"),
+            function,
+            column,
+        });
+        Ok((index, kind))
+    }
+
     pub(super) fn with_aggregate_stage(
         &mut self,
         schema: &pipeline::RowSchema<'a>,
@@ -340,6 +551,7 @@ impl<'a> Parser<'a> {
         let mut aggregates = Vec::new();
         let mut returned: Vec<(Name<'a>, Output, GraphSetColumnType)> = Vec::new();
         let mut sources = Vec::new();
+        let mut combined = Vec::new();
         loop {
             self.capacity(
                 returned.len(),
@@ -347,6 +559,27 @@ impl<'a> Parser<'a> {
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
             let item_at = self.current.at;
+            if self.starts_combined_aggregate()? {
+                let (template, leaves) =
+                    self.with_combined_item(schema, &mut inputs, &mut aggregates)?;
+                let name = if self.take_word("AS")? {
+                    self.name()?
+                } else {
+                    return Err(expected(item_at, "AS alias for a computed WITH value"));
+                };
+                if returned.iter().any(|(prior, _, _)| prior.text == name.text) {
+                    return Err(aggregate_error(
+                        name.at,
+                        crate::GraphAggregateBuildError::DuplicateName,
+                    ));
+                }
+                combined.push((returned.len(), item_at, template, leaves));
+                returned.push((name, Output::Computed, GraphSetColumnType::Any));
+                if !self.take(b',')? {
+                    break;
+                }
+                continue;
+            }
             let summary = match self.current.kind {
                 TokenKind::Word(word)
                     if matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')) =>
@@ -355,56 +588,14 @@ impl<'a> Parser<'a> {
                 }
                 _ => None,
             };
-            let (output, kind, default_name) = if let Some(mut function) = summary {
-                self.advance()?;
-                self.punct(b'(', "(")?;
-                let unique = self.take_word("DISTINCT")?;
-                if !unique {
-                    self.take_word("ALL")?;
-                }
-                let (column, input_kind) = if self.take(b'*')? {
-                    if function != Function::Count || unique {
-                        return Err(expected(item_at, "COUNT(*) without DISTINCT"));
-                    }
-                    function = Function::CountRows;
-                    (None, GraphSetColumnType::Scalar)
-                } else {
-                    // rand() in the argument is a non-constant expression.
-                    let outer = core::mem::replace(&mut self.aggregate_argument, true);
-                    let input = self.with_input(schema, &mut inputs);
-                    self.aggregate_argument = outer;
-                    let (column, kind, _) = input?;
-                    (Some(column), kind)
-                };
-                self.punct(b')', "one expression as the aggregate argument")?;
-                if matches!(function, Function::SumInt | Function::AverageInt)
-                    && !matches!(
-                        input_kind,
-                        GraphSetColumnType::Scalar | GraphSetColumnType::Any
-                    )
-                {
-                    return Err(expected(item_at, "scalar input for a numeric aggregate"));
-                }
-                if unique {
-                    function = match function {
-                        Function::Count => Function::CountDistinct,
-                        Function::SumInt => Function::SumIntDistinct,
-                        Function::AverageInt => Function::AverageIntDistinct,
-                        Function::Collect => Function::CollectDistinct,
-                        other => other,
-                    };
-                }
-                let kind = match function {
-                    Function::Min | Function::Max => input_kind,
-                    Function::Collect | Function::CollectDistinct => GraphSetColumnType::List,
-                    _ => GraphSetColumnType::Scalar,
-                };
-                let index = aggregates.len();
-                aggregates.push(ReadAggregateSpec {
-                    name: format!("__with_summary_{index}"),
+            let (output, kind, default_name) = if let Some(function) = summary {
+                let (index, kind) = self.with_summary_call(
                     function,
-                    column,
-                });
+                    schema,
+                    &mut inputs,
+                    &mut aggregates,
+                    item_at,
+                )?;
                 (Output::Aggregate(index), kind, None)
             } else {
                 let (column, kind, name) = self.with_input(schema, &mut inputs)?;
@@ -455,6 +646,26 @@ impl<'a> Parser<'a> {
                 ),
             });
         }
+        // A combined item reads the grouped row: every key, then every
+        // aggregate. A non-aggregate leaf must be a key; it never becomes one
+        // implicitly, as in openCypher.
+        let mut computed = Vec::with_capacity(combined.len());
+        for (position, item_at, mut template, leaves) in combined {
+            let mut columns = Vec::with_capacity(leaves.len());
+            for leaf in leaves {
+                columns.push(match leaf {
+                    Leaf::Key(slot) => keys.iter().position(|&key| key == slot).ok_or_else(|| {
+                        expected(
+                            item_at,
+                            "a grouping key for every nonaggregate operand of a combined WITH item",
+                        )
+                    })?,
+                    Leaf::Summary(index) => keys.len() + index,
+                });
+            }
+            crate::graph_text::aggregate::remap_output_columns(&mut template, &columns);
+            computed.push((position, template));
+        }
         let output_schema: pipeline::RowSchema<'a> = returned
             .iter()
             .map(|(name, _, kind)| (*name, *kind))
@@ -465,6 +676,7 @@ impl<'a> Parser<'a> {
                 let column = match output {
                     Output::Key(at) => at,
                     Output::Aggregate(at) => keys.len() + at,
+                    Output::Computed => 0,
                 };
                 (name.text.to_owned(), column, kind)
             })
@@ -486,6 +698,7 @@ impl<'a> Parser<'a> {
                     keys,
                     aggregates,
                     outputs,
+                    computed,
                     quantifier: if distinct {
                         crate::GraphSetQuantifier::Distinct
                     } else {

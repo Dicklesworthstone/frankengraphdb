@@ -1646,3 +1646,47 @@ fn a_with_where_filters_by_list_quantifiers() {
         .is_none_or(|query| run(&query, &[], wide(), &mut || Ok(())).is_err());
     assert!(failed, "{text}");
 }
+
+/// fgdb-4avot: an aggregating WITH item may combine aggregate results with
+/// arithmetic and grouping keys (TCK With6 [6], [7]): `COUNT(*) + 1`, or
+/// `x * 10 + COUNT(*)` beside the key `x`, including a carried element's
+/// property read at the graph boundary (`n.p + COUNT(*)`). The rows equal
+/// the two-stage form, which groups first and computes over the grouped
+/// columns in a second WITH. A non-aggregate operand that is not a grouping
+/// key refuses, as in openCypher.
+#[test]
+fn an_aggregating_with_combines_aggregate_results_like_a_second_stage() {
+    let values = [5, 5, 9, 7].map(CanonicalScalar::Int);
+    let rows = |text: &str| {
+        let mut rows = run(&prepare(text), &values, wide(), &mut || Ok(()))
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .value;
+        rows.sort();
+        rows
+    };
+    for (combined, staged) in [
+        (
+            "MATCH (n) WITH n.p AS x WITH x, COUNT(*) + 1 AS c RETURN x, c",
+            "MATCH (n) WITH n.p AS x WITH x, COUNT(*) AS c0 WITH x, c0 + 1 AS c RETURN x, c",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x WITH x, x * 10 + COUNT(*) AS c RETURN x, c",
+            "MATCH (n) WITH n.p AS x WITH x, COUNT(*) AS c0 WITH x, x * 10 + c0 AS c RETURN x, c",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x, n.p + COUNT(*) AS c RETURN x, c",
+            "MATCH (n) WITH n.p AS x, COUNT(*) AS c0 WITH x, x + c0 AS c RETURN x, c",
+        ),
+    ] {
+        let found = rows(combined);
+        assert_eq!(found, rows(staged), "{combined}");
+        assert_eq!(found.len(), 3, "{combined}");
+    }
+    assert!(
+        PreparedGraphSetText::prepare(
+            "MATCH (n) WITH n.p AS x, n.p AS y WITH x, y + COUNT(*) AS c RETURN x, c",
+            symbols
+        )
+        .is_err()
+    );
+}
