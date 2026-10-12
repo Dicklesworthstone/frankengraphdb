@@ -88,6 +88,7 @@ impl<'a> Parser<'a> {
         }
         let visible = outputs.len();
         let mut reads: Vec<(&'a str, Name<'a>, usize)> = Vec::new();
+        let mut functions: Vec<(&'a str, GraphPathFunction, usize)> = Vec::new();
         // Items that keep a binding as a bare key (`p` or `p AS q`), as
         // (output alias, binding). `item` holds an item's first tokens.
         let mut kept: Vec<(&'a str, &'a str)> = Vec::new();
@@ -137,6 +138,32 @@ impl<'a> Parser<'a> {
                                 column,
                             ));
                         }
+                    }
+                    // `length(p)`, `nodes(p)`, `relationships(p)`, `labels(n)`
+                    // or `type(r)` in a key or an aggregate argument reads the
+                    // graph source once, as a hidden head column.
+                    if let Some((source, function)) =
+                        pipeline::metadata_source(word, token.at, &lexer)?
+                        && let Some(variable) =
+                            self.grouping_metadata_binding(&bindings, source.text, function)
+                        && !functions
+                            .iter()
+                            .any(|&(owner, known, _)| owner == source.text && known == function)
+                    {
+                        if optional && incoming.iter().any(|(name, _)| name.text == source.text) {
+                            return Err(expected(
+                                source.at,
+                                "project carried graph functions before OPTIONAL MATCH",
+                            ));
+                        }
+                        let column = self.hidden_function(
+                            &mut outputs,
+                            &mut inputs,
+                            width,
+                            (variable, function),
+                            source.at,
+                        )?;
+                        functions.push((source.text, function, column));
                     }
                     let mut lookahead = lexer.clone();
                     if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
@@ -229,7 +256,7 @@ impl<'a> Parser<'a> {
                 visible,
                 width: outputs.len(),
                 reads,
-                functions: Vec::new(),
+                functions,
                 grouped,
                 scoped: Vec::new(),
             });
@@ -265,6 +292,71 @@ impl<'a> Parser<'a> {
             .find(|name| outputs.iter().all(|(output, _)| output.text != *name))
             .ok_or_else(|| expected(at, "bounded grouping property reads"))?;
         let column = self.mutation_projection(inputs, variable, Some(property))?;
+        outputs.push((
+            Name { text: name, at },
+            ReadValueTemplate::Column(width + column),
+        ));
+        Ok(outputs.len() - 1)
+    }
+
+    /// The binding a grouping metadata read applies to, only where its domain
+    /// is certain without consuming the call: labels() of a root vertex,
+    /// type() of one root relationship, and length(), nodes() or
+    /// relationships() of the named path. Anything else is left to the
+    /// ordinary item compiler, which refuses it as before.
+    fn grouping_metadata_binding(
+        &self,
+        bindings: &[Name<'a>],
+        name: &str,
+        function: GraphPathFunction,
+    ) -> Option<Name<'a>> {
+        let binding = bindings
+            .iter()
+            .copied()
+            .find(|binding| binding.text == name)?;
+        let admitted = match function {
+            GraphPathFunction::Labels => self.syntax.variables[..self.syntax.root_variables]
+                .iter()
+                .any(|variable| variable.text == name),
+            GraphPathFunction::Type => self
+                .syntax
+                .visible_edge(name)
+                .is_some_and(|(edge, scoped)| !scoped && edge.walk.is_none()),
+            GraphPathFunction::Length | GraphPathFunction::Nodes | GraphPathFunction::Edges => {
+                self.syntax.path.is_some_and(|path| path.text == name)
+            }
+            _ => false,
+        };
+        admitted.then_some(binding)
+    }
+
+    /// The hidden head column reading one metadata function of `variable`.
+    fn hidden_function(
+        &mut self,
+        outputs: &mut Vec<(Name<'a>, ReadValueTemplate)>,
+        inputs: &mut Vec<Projection<'a>>,
+        width: usize,
+        (variable, function): (Name<'a>, GraphPathFunction),
+        at: usize,
+    ) -> Result<usize, GraphSetTextError> {
+        self.capacity(
+            outputs.len(),
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        let name = HIDDEN_NAMES
+            .iter()
+            .copied()
+            .find(|name| outputs.iter().all(|(output, _)| output.text != *name))
+            .ok_or_else(|| expected(at, "bounded grouping function reads"))?;
+        let column = self.projection_slot(
+            inputs,
+            Projection {
+                variable,
+                property: None,
+                path: Some(function),
+            },
+        )?;
         outputs.push((
             Name { text: name, at },
             ReadValueTemplate::Column(width + column),
