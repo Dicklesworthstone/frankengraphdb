@@ -268,13 +268,14 @@ impl<'a> Parser<'a> {
                     self.insertion_source_value(inputs, schema)?
                 };
                 self.scalar_property_value(value, at, schema, inputs)?
-            } else if self.starts_let_operand()? {
+            } else if self.starts_let_operand()? || self.is_punct(b'[') {
                 // A temporal constructor, a quantifier, a list function,
                 // keys() or size() is a value-language operand that the
                 // scalar compiler reads only through a let slot, which a
                 // CREATE property has none of: read the whole property in
                 // the value language, as a row-fed CREATE does
-                // (fgdb-txbg9, fgdb-o5o9t).
+                // (fgdb-txbg9, fgdb-o5o9t). So is a list literal, which a
+                // stored List property may now be (fgdb-k3nub).
                 let value = self.insertion_source_value(inputs, &[])?;
                 self.scalar_property_value(value, at, &[], inputs)?
             } else if matches!(self.current.kind, TokenKind::Parameter(name)

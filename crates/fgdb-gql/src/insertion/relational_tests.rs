@@ -541,15 +541,28 @@ fn multiple_graph_leaves_share_source_admission_and_late_failure_precedes_alloca
 
 #[test]
 fn schema_and_cross_owner_depth_are_checked_during_preparation() {
-    let list = PreparedGraphSet::singleton()
-        .project(
-            vec![GraphSetProjection::new("list", GraphSetValue::List(vec![]))],
-            GraphSetQuantifier::All,
+    let column = |value| {
+        PreparedGraphSet::singleton()
+            .project(
+                vec![GraphSetProjection::new("value", value)],
+                GraphSetQuantifier::All,
+            )
+            .unwrap()
+    };
+    // A list column is a stored List property since fgdb-k3nub; a column
+    // of graph elements is still no property value.
+    assert!(
+        PreparedGraphInsert::prepare_relation(
+            column(GraphSetValue::List(vec![])),
+            R,
+            vec![vertex(GraphMutationValue::Column(0))],
+            vec![]
         )
-        .unwrap();
+        .is_ok()
+    );
     assert!(matches!(
         PreparedGraphInsert::prepare_relation(
-            list,
+            column(GraphSetValue::TypedNull(GraphSetColumnType::Vertex)),
             R,
             vec![vertex(GraphMutationValue::Column(0))],
             vec![]
