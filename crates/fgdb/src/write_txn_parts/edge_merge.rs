@@ -2,10 +2,85 @@
 // Source adapters own visibility and conflict witnesses, never uniqueness,
 // creation semantics, cumulative budgets or a second commit mechanism.
 
-struct EdgeMergeProposal {
+struct EdgeMergeProposal<Output = fgdb_gql::GraphEdgeMergeOutcome> {
     stats: fgdb_gql::GraphEdgeMergeStats,
-    outcome: fgdb_gql::GraphEdgeMergeOutcome,
+    outcome: Output,
     creation: Option<WriteBatch>,
+}
+
+// The singular primitive and the native program differ only in admitted
+// cardinality and receipt ownership. They share selection, existence decisions,
+// creation admission and staging. Singular calls allocate no new receipt vector.
+trait EdgeMergeOutput: Sized {
+    fn for_pairs(pairs: usize) -> Option<Self>;
+    fn record<C>(
+        &mut self,
+        outcome: fgdb_gql::GraphEdgeMergeOutcome,
+        control: &mut impl FnMut(Option<fgdb_gql::GlaExecutionEvent>) -> Result<(), C>,
+    ) -> Result<(), C>;
+    fn result_rows(&self) -> u64;
+}
+
+impl EdgeMergeOutput for fgdb_gql::GraphEdgeMergeOutcome {
+    fn for_pairs(pairs: usize) -> Option<Self> {
+        (pairs <= 1).then_some(Self::NoInput)
+    }
+
+    fn record<C>(
+        &mut self,
+        outcome: Self,
+        _control: &mut impl FnMut(Option<fgdb_gql::GlaExecutionEvent>) -> Result<(), C>,
+    ) -> Result<(), C> {
+        *self = outcome;
+        Ok(())
+    }
+
+    fn result_rows(&self) -> u64 {
+        u64::from(self.edge().is_some())
+    }
+}
+
+impl EdgeMergeOutput for fgdb_gql::GraphWriteStepReceipt {
+    fn for_pairs(pairs: usize) -> Option<Self> {
+        Some(if pairs <= 1 {
+            Self::EdgeMerge {
+                outcome: fgdb_gql::GraphEdgeMergeOutcome::NoInput,
+            }
+        } else {
+            Self::EdgeMergeBatch {
+                outcomes: Vec::new(),
+                created: Vec::new(),
+            }
+        })
+    }
+
+    fn record<C>(
+        &mut self,
+        next: fgdb_gql::GraphEdgeMergeOutcome,
+        control: &mut impl FnMut(Option<fgdb_gql::GlaExecutionEvent>) -> Result<(), C>,
+    ) -> Result<(), C> {
+        match self {
+            Self::EdgeMerge { outcome } => *outcome = next,
+            Self::EdgeMergeBatch { outcomes, created } => {
+                control(Some(fgdb_gql::GlaExecutionEvent::ScratchEntry))?;
+                if let fgdb_gql::GraphEdgeMergeOutcome::Created(edge) = next {
+                    control(Some(fgdb_gql::GlaExecutionEvent::ScratchEntry))?;
+                    created.push(edge);
+                }
+                outcomes.push(next);
+            }
+            _ => unreachable!("MERGE collector owns its receipt kind"),
+        }
+        Ok(())
+    }
+
+    fn result_rows(&self) -> u64 {
+        match self {
+            Self::EdgeMerge { outcome } => outcome.result_rows(),
+            Self::EdgeMergeBatch { outcomes, .. } => outcomes.len() as u64,
+            _ => unreachable!("MERGE collector owns its receipt kind"),
+        }
+    }
 }
 
 type EdgeMergeFault<E, A, C> = fgdb_gql::GqlQueryError<fgdb_gql::GraphEdgeMergeError<E, A>, C>;
@@ -14,23 +89,25 @@ type EdgeMergeSelection<E, C> = Result<
     fgdb_gql::GqlQueryError<E, C>,
 >;
 
-// Private trusted seam: edge_source is called only after one distinct non-null
-// endpoint pair was selected. It must retain ALL matching live EIds in its
-// admitted domain and native absence witnesses; it cannot normalize parallels.
-fn collect_edge_merge<E, A, C>(
+// Private trusted seam: all endpoint rows are selected and validated before
+// any existence inspection. Each callback must retain ALL matching live EIds
+// in its admitted domain and native absence witnesses, including on refusal.
+// Canonical duplicate pairs collapse for plain MERGE; actions use the separate
+// singular upsert owner until a per-occurrence action contract is implemented.
+fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
     merge: &fgdb_gql::PreparedGraphEdgeMerge,
     policy: fgdb_gql::GraphEdgeMergePolicy,
     source: impl FnOnce(
         &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
         fgdb_gql::GqlQueryPolicy,
     ) -> EdgeMergeSelection<E, C>,
-    edge_source: impl FnOnce(VId, VId) -> Result<Vec<EdgeRecord>, fgdb_gql::GqlQueryError<E, C>>,
-    mut allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
+    mut edge_source: impl FnMut(VId, VId) -> Result<Vec<EdgeRecord>, fgdb_gql::GqlQueryError<E, C>>,
+    mut allocate: impl FnMut(usize) -> Result<ElementId, A>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
-) -> Result<EdgeMergeProposal, EdgeMergeFault<E, A, C>> {
+) -> Result<EdgeMergeProposal<Output>, EdgeMergeFault<E, A, C>> {
     use fgdb_gql::{
         GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlQueryError,
-        GraphEdgeMergeError, GraphEdgeMergeOutcome, GraphEdgeMergeRequest, GraphEdgeMergeStats,
+        GraphEdgeMergeError, GraphEdgeMergeOutcome, GraphEdgeMergeStats,
     };
     let selected = source(merge.selection(), policy.query)
         .map_err(|error| error.map_source(GraphEdgeMergeError::Source))?;
@@ -110,114 +187,94 @@ fn collect_edge_merge<E, A, C>(
         }
     }
     event(None)?;
-    if pairs.len() > 1 {
-        return Err(GqlQueryError::Source(
-            GraphEdgeMergeError::AmbiguousEndpointPairs {
-                observed: pairs.len() as u64,
-            },
-        ));
-    }
-    let Some((source, destination)) = pairs.into_iter().next() else {
-        return Ok(EdgeMergeProposal {
-            stats: GraphEdgeMergeStats {
-                match_selection: selected.rows,
-                overlay_edges: 0,
-                evaluator,
-                created_edges: 0,
-            },
-            outcome: GraphEdgeMergeOutcome::NoInput,
-            creation: None,
-        });
-    };
+    let mut outcome = Output::for_pairs(pairs.len()).ok_or_else(|| {
+        GqlQueryError::Source(GraphEdgeMergeError::AmbiguousEndpointPairs {
+            observed: pairs.len() as u64,
+        })
+    })?;
+    let mut overlay_edges = 0u64;
+    let mut created_edges = 0u64;
+    let mut creation: Option<WriteBatch> = None;
+    for (pair_at, (source, destination)) in pairs.into_iter().enumerate() {
+        // A scoped host admits candidates BEFORE they reach these counters or
+        // the uniqueness reducer. Repeated physical scans spend the SAME cap.
+        let edges = edge_source(source, destination)
+            .map_err(|error| error.map_source(GraphEdgeMergeError::Source))?;
+        let observed = u128::from(overlay_edges) + edges.len() as u128;
+        let records = u128::from(selected.rows.snapshot_records) + observed;
+        policy
+            .query
+            .rows
+            .check(
+                GqlBudgetDimension::SnapshotRecords,
+                records.try_into().unwrap_or(u64::MAX),
+            )
+            .map_err(GqlQueryError::Rows)?;
+        if records > u128::from(u64::MAX) {
+            return Err(GqlQueryError::Source(
+                GraphEdgeMergeError::InvalidSourceStatistics,
+            ));
+        }
+        overlay_edges = observed as u64;
 
-    // The host supplies its canonical edge domain and retains the native
-    // negative/topology witness. A scoped host admits candidates BEFORE
-    // they reach these counters or the uniqueness reducer.
-    let edges = edge_source(source, destination)
-        .map_err(|error| error.map_source(GraphEdgeMergeError::Source))?;
-    let overlay_edges = u64::try_from(edges.len()).expect("in-memory edge count fits u64");
-    let cumulative_records = selected
-        .rows
-        .snapshot_records
-        .checked_add(overlay_edges)
-        .expect("two in-memory source counts fit u64");
-    policy
-        .query
-        .rows
-        .check(GqlBudgetDimension::SnapshotRecords, cumulative_records)
-        .map_err(GqlQueryError::Rows)?;
-
-    let mut matching = Vec::new();
-    for edge in &edges {
-        event(Some(GlaExecutionEvent::Work))?;
-        if edge.entry.relation == merge.relation()
-            && edge.entry.src == source
-            && edge.entry.dst == destination
-        {
-            if matching.is_empty() {
+        let mut matching = None;
+        for edge in &edges {
+            event(Some(GlaExecutionEvent::Work))?;
+            if edge.entry.relation == merge.relation()
+                && edge.entry.src == source
+                && edge.entry.dst == destination
+            {
+                if matching.is_some() {
+                    return Err(GqlQueryError::Source(
+                        GraphEdgeMergeError::AmbiguousRelationships { observed: 2 },
+                    ));
+                }
                 event(Some(GlaExecutionEvent::ScratchEntry))?;
-            }
-            matching.push(edge.entry.eid);
-            if matching.len() > 1 {
-                return Err(GqlQueryError::Source(
-                    GraphEdgeMergeError::AmbiguousRelationships {
-                        observed: matching.len() as u64,
-                    },
-                ));
+                matching = Some(edge.entry.eid);
             }
         }
-    }
-    if let Some(edge) = matching.first().copied() {
-        return Ok(EdgeMergeProposal {
-            stats: GraphEdgeMergeStats {
-                match_selection: selected.rows,
-                overlay_edges,
-                evaluator,
-                created_edges: 0,
-            },
-            outcome: GraphEdgeMergeOutcome::Matched(edge),
-            creation: None,
-        });
-    }
+        if let Some(edge) = matching {
+            outcome.record(GraphEdgeMergeOutcome::Matched(edge), &mut event)?;
+            continue;
+        }
 
-    // Match and NoInput do not spend creation quota. A missing edge does:
-    // refuse before payload cloning or any external identity is issued.
-    if policy.max_created_edges == 0 {
-        return Err(GqlQueryError::Source(GraphEdgeMergeError::CreationLimit {
-            limit: policy.max_created_edges,
-            observed: 1,
-        }));
+        // Refuse the cumulative creation count before payload ownership or the
+        // allocator. Existing matches never consume this separate allowance.
+        let observed = u128::from(created_edges) + 1;
+        if observed > u128::from(policy.max_created_edges) {
+            return Err(GqlQueryError::Source(GraphEdgeMergeError::CreationLimit {
+                limit: policy.max_created_edges,
+                observed,
+            }));
+        }
+        let mut properties = Vec::with_capacity(merge.properties().len());
+        for (key, value) in merge.properties() {
+            event(Some(GlaExecutionEvent::ScratchEntry))?;
+            properties.push((*key, value.value().clone()));
+        }
+        event(None)?;
+        let identity = allocate(pair_at)
+            .map_err(|error| GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(error)))?;
+        let ElementId::Edge(edge) = identity else {
+            return Err(GqlQueryError::Source(GraphEdgeMergeError::IdentityKind));
+        };
+        outcome.record(GraphEdgeMergeOutcome::Created(edge), &mut event)?;
+        creation
+            .get_or_insert_with(|| WriteBatch::new(merge.relation()))
+            .add_edge(edge, source, destination, properties);
+        created_edges += 1;
+        // All proposals remain private until every pair has succeeded.
+        event(None)?;
     }
-
-    // Freeze creation payload before allocation. The prepared definition
-    // already admitted scalar sizes/types; reserve one logical entry per
-    // owned property copy under the same evaluator allowance.
-    let mut properties = Vec::with_capacity(merge.properties().len());
-    for (key, value) in merge.properties() {
-        event(Some(GlaExecutionEvent::ScratchEntry))?;
-        properties.push((*key, value.value().clone()));
-    }
-    event(None)?;
-    let identity = allocate(GraphEdgeMergeRequest)
-        .map_err(|error| GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(error)))?;
-    let ElementId::Edge(edge) = identity else {
-        return Err(GqlQueryError::Source(GraphEdgeMergeError::IdentityKind));
-    };
-
-    let mut batch = WriteBatch::new(merge.relation());
-    batch.add_edge(edge, source, destination, properties);
-    // Last cancellable boundary before synchronous atomic staging. Never
-    // report cancellation after the workspace changes.
-    event(None)?;
     Ok(EdgeMergeProposal {
         stats: GraphEdgeMergeStats {
             match_selection: selected.rows,
             overlay_edges,
             evaluator,
-            created_edges: 1,
+            created_edges,
         },
-        outcome: GraphEdgeMergeOutcome::Created(edge),
-        creation: Some(batch),
+        outcome,
+        creation,
     })
 }
 
@@ -239,12 +296,58 @@ impl WriteTxn {
         cx: &fgdb_types::QueryCx,
         merge: &fgdb_gql::PreparedGraphEdgeMerge,
         policy: fgdb_gql::GraphEdgeMergePolicy,
-        allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
+        mut allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
     ) -> Result<
         (
             fgdb_gql::GraphEdgeMergeStats,
             fgdb_gql::GraphEdgeMergeOutcome,
         ),
+        TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
+    > {
+        self.execute_graph_edge_merge_output_governed(database, cx, merge, policy, |_| {
+            allocate(fgdb_gql::GraphEdgeMergeRequest)
+        })
+    }
+
+    /// Resolve every distinct directed endpoint pair from one frozen MATCH.
+    /// Canonical pair order fixes decisions, allocation requests and receipts;
+    /// repeated pairs create at most one edge. Existing parallel matches still
+    /// refuse. This plain MERGE owner does not execute ON or trailing actions.
+    ///
+    /// Selection, every existence scan, receipt ownership and all creations
+    /// share the original allowances. A later refusal stages none of the new
+    /// edges, while observations and issued identity reservations remain. The
+    /// complete ordinary WriteBatch is staged once after every pair succeeds.
+    /// Zero/one pair retains the singular receipt; multiple pairs return the
+    /// explicit EdgeMergeBatch receipt. No transaction is committed here.
+    pub fn execute_graph_edge_merges_governed<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        merge: &fgdb_gql::PreparedGraphEdgeMerge,
+        policy: fgdb_gql::GraphEdgeMergePolicy,
+        mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        (
+            fgdb_gql::GraphEdgeMergeStats,
+            fgdb_gql::GraphWriteStepReceipt,
+        ),
+        TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
+    > {
+        self.execute_graph_edge_merge_output_governed(database, cx, merge, policy, |row| {
+            allocate(fgdb_gql::insertion::GraphInsertRequest::Edge { row, edge: 0 })
+        })
+    }
+
+    fn execute_graph_edge_merge_output_governed<Output: EdgeMergeOutput, V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        merge: &fgdb_gql::PreparedGraphEdgeMerge,
+        policy: fgdb_gql::GraphEdgeMergePolicy,
+        allocate: impl FnMut(usize) -> Result<ElementId, A>,
+    ) -> Result<
+        (fgdb_gql::GraphEdgeMergeStats, Output),
         TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
     > {
         use fgdb_gql::{GqlQueryError, GraphEdgeMergeError};
@@ -276,7 +379,7 @@ impl WriteTxn {
         }
 
         cx.with_restriction(|| {
-            let proposal = collect_edge_merge(
+            let proposal = collect_edge_merge_output(
                 merge,
                 policy,
                 |pattern, allowance| {

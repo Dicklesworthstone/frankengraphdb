@@ -138,6 +138,8 @@ mod prepared_write;
 mod query;
 mod scrub;
 mod standing_query;
+#[cfg(not(target_arch = "wasm32"))]
+pub use scrub::CapsuleRecoveryError;
 pub use scrub::{LostCapsule, ScrubCrashPoint, ScrubSummary};
 pub use standing_query::{
     NativeSubscription, NativeSubscriptionSetup, StandingNativeCursor, StandingNativeDeltaCursor,
@@ -2893,16 +2895,34 @@ impl<V: Vfs + Clone> Database<V> {
         force_rebuild: bool,
         replay_capacity: ReplayRootCapacity,
     ) -> Result<Self, OpenError> {
-        let mut coordinator =
+        let coordinator =
             CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
+        Self::bind_with_coordinator(
+            cx,
+            vfs,
+            path,
+            keys,
+            force_rebuild,
+            replay_capacity,
+            coordinator,
+        )
+        .await
+    }
+
+    // Recovery that restores authenticated capsule storage enters the SAME
+    // admission and replay path without dropping Chronicle's writer lease.
+    async fn bind_with_coordinator(
+        cx: &CommitCx,
+        vfs: V,
+        path: &Path,
+        keys: DatabaseKeys,
+        force_rebuild: bool,
+        replay_capacity: ReplayRootCapacity,
+        mut coordinator: CommitCoordinator<V>,
+    ) -> Result<Self, OpenError> {
         // Hold Chronicle's writer lease while authenticating the selected
         // root, before either checkpoint replay or forced rebuilding.
-        let probe = RootStore::with_vfs(vfs.clone(), path);
-        match probe.current(cx).await {
-            Ok(slot) => validate_plain_slot(&slot, &keys, path)?,
-            Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(OpenError::Slot(error)),
-        }
+        let probe = authenticated_root_store(cx, &vfs, path, &keys).await?;
         // The product instance is first-committer-wins from the first commit
         // (fgdb-fcw-writebatch-6cxf): every `Database` constructor funnels
         // through this bind, so no product handle ever commits under
@@ -5672,6 +5692,23 @@ async fn require_database_dir<V: Vfs>(
         }
         Err(error) => Err(OpenError::Io(error)),
     }
+}
+
+/// Authenticate the selected opener before reading or repairing its storage.
+/// Callers hold Chronicle's writer lease throughout this check and admission.
+async fn authenticated_root_store<V: Vfs + Clone>(
+    cx: &CommitCx,
+    vfs: &V,
+    path: &Path,
+    keys: &DatabaseKeys,
+) -> Result<RootStore<V>, OpenError> {
+    let probe = RootStore::with_vfs(vfs.clone(), path);
+    match probe.current(cx).await {
+        Ok(slot) => validate_plain_slot(&slot, keys, path)?,
+        Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(OpenError::Slot(error)),
+    }
+    Ok(probe)
 }
 
 /// The Strata block store under `path`, opened through the handle's one

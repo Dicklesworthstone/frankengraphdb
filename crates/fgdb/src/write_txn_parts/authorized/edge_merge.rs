@@ -1,7 +1,7 @@
 //! Directed relationship get-or-create on the same native MERGE collector.
 //! Selection is masked; existence candidates are confined to its admitted pair.
 
-use super::super::collect_edge_merge;
+use super::super::{EdgeMergeOutput, collect_edge_merge_output};
 use super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxn,
     WriteTxnError, redacted, selection, stage,
@@ -132,13 +132,61 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
 ) -> Result<(GraphEdgeMergeStats, GraphEdgeMergeOutcome), Fault> {
+    apply_with_output(
+        transaction,
+        database,
+        cx,
+        merge,
+        policy,
+        scope,
+        execution,
+        returning,
+    )
+}
+
+/// Native write programs use every distinct selected pair; the public singular
+/// primitive and ON actions retain their independently useful one-pair contract.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_many<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    merge: &PreparedGraphEdgeMerge,
+    policy: GraphEdgeMergePolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+) -> Result<(GraphEdgeMergeStats, fgdb_gql::GraphWriteStepReceipt), Fault> {
+    apply_with_output(
+        transaction,
+        database,
+        cx,
+        merge,
+        policy,
+        scope,
+        execution,
+        returning,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    merge: &PreparedGraphEdgeMerge,
+    policy: GraphEdgeMergePolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+) -> Result<(GraphEdgeMergeStats, Output), Fault> {
     if !scope.allows_relation(merge.relation()) {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
     let proposal = cx.with_restriction(|| {
         let database = RefCell::new(&mut *database);
         let controls = RefCell::new(&mut *execution);
-        collect_edge_merge(
+        collect_edge_merge_output(
             merge,
             policy,
             |pattern, allowance| {
@@ -196,10 +244,10 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 }
                 Ok(admitted)
             },
-            |_| {
+            |row| {
                 database
                     .borrow_mut()
-                    .allocate_identity(cx, GraphInsertRequest::Edge { row: 0, edge: 0 })
+                    .allocate_identity(cx, GraphInsertRequest::Edge { row, edge: 0 })
             },
             || {
                 cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
@@ -216,10 +264,11 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
             stage(transaction, database, batch.relation, row, execution).map_err(source)?;
         }
     }
-    if returning && proposal.outcome.edge().is_some() {
+    let result_rows = proposal.outcome.result_rows();
+    if returning && result_rows != 0 {
         execution
             .permit
-            .charge_rows_at((execution.clock)(), 1)
+            .charge_rows_at((execution.clock)(), result_rows)
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
     }
     Ok((proposal.stats, proposal.outcome))

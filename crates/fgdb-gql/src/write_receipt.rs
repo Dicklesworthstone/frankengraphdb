@@ -29,6 +29,13 @@ pub enum GraphWriteStepReceipt {
     EdgeMerge {
         outcome: GraphEdgeMergeOutcome,
     },
+    /// One outcome per distinct directed endpoint pair, in canonical pair
+    /// order. Only a multi-pair plain MERGE uses this arm; zero/one pair keep
+    /// `EdgeMerge`. `created` retains exactly the Created IDs in that order.
+    EdgeMergeBatch {
+        outcomes: Vec<GraphEdgeMergeOutcome>,
+        created: Vec<EId>,
+    },
     EdgeUpsert {
         outcome: GraphEdgeMergeOutcome,
     },
@@ -48,6 +55,7 @@ impl GraphWriteStepReceipt {
             | Self::VertexMerge { .. }
             | Self::VertexUpsert { .. }
             | Self::EdgeMerge { .. }
+            | Self::EdgeMergeBatch { .. }
             | Self::EdgeUpsert { .. } => None,
         }
     }
@@ -98,6 +106,7 @@ impl GraphWriteStepReceipt {
             } => Some(&[]),
             Self::Mutation { .. }
             | Self::EdgeMerge { .. }
+            | Self::EdgeMergeBatch { .. }
             | Self::EdgeUpsert { .. }
             | Self::Delete { .. } => None,
         }
@@ -107,6 +116,7 @@ impl GraphWriteStepReceipt {
     pub fn created_edges(&self) -> Option<&[EId]> {
         match self {
             Self::Insert { edges, .. } => Some(edges),
+            Self::EdgeMergeBatch { created, .. } => Some(created),
             Self::EdgeMerge {
                 outcome: GraphEdgeMergeOutcome::Created(edge),
             }
@@ -128,6 +138,7 @@ impl GraphWriteStepReceipt {
             Self::Mutation { .. }
             | Self::Insert { .. }
             | Self::EdgeMerge { .. }
+            | Self::EdgeMergeBatch { .. }
             | Self::EdgeUpsert { .. }
             | Self::Delete { .. } => None,
         }
@@ -135,6 +146,7 @@ impl GraphWriteStepReceipt {
 
     /// Some(NoInput) distinguishes a relationship step with no endpoints from
     /// a different statement kind; Some(Matched(_)) never claims a creation.
+    /// A multi-pair MERGE returns None; inspect `merged_edges` for its results.
     #[must_use]
     pub const fn merged_edge(&self) -> Option<GraphEdgeMergeOutcome> {
         match self {
@@ -143,7 +155,18 @@ impl GraphWriteStepReceipt {
             | Self::Insert { .. }
             | Self::VertexMerge { .. }
             | Self::VertexUpsert { .. }
+            | Self::EdgeMergeBatch { .. }
             | Self::Delete { .. } => None,
+        }
+    }
+
+    /// Canonical pair outcomes of a multi-pair plain relationship MERGE.
+    /// Singular statements retain their existing `merged_edge` accessor.
+    #[must_use]
+    pub fn merged_edges(&self) -> Option<&[GraphEdgeMergeOutcome]> {
+        match self {
+            Self::EdgeMergeBatch { outcomes, .. } => Some(outcomes),
+            _ => None,
         }
     }
 }
@@ -174,6 +197,12 @@ impl core::fmt::Debug for GraphWriteStepReceipt {
             Self::EdgeMerge { outcome } => f
                 .debug_struct("EdgeMerge")
                 .field("outcome", outcome)
+                .finish(),
+            Self::EdgeMergeBatch { outcomes, created } => f
+                .debug_struct("EdgeMergeBatch")
+                .field("pairs", &outcomes.len())
+                .field("created", &created.len())
+                .field("identities", &"[REDACTED]")
                 .finish(),
             Self::EdgeUpsert { outcome } => f
                 .debug_struct("EdgeUpsert")
@@ -230,6 +259,33 @@ impl core::fmt::Debug for GraphWriteProgramReceipt {
 mod tests {
     use super::*;
     use crate::{GlaExecutionStats, GqlExecutionStats};
+
+    #[test]
+    fn batch_relationship_receipt_preserves_order_and_separates_created_ids() {
+        let created = EId(u128::MAX);
+        let matched = EId(u128::MAX - 1);
+        let outcomes = vec![
+            GraphEdgeMergeOutcome::Created(created),
+            GraphEdgeMergeOutcome::Matched(matched),
+        ];
+        let receipt = GraphWriteStepReceipt::EdgeMergeBatch {
+            outcomes: outcomes.clone(),
+            created: vec![created],
+        };
+        assert_eq!(receipt.merged_edges(), Some(outcomes.as_slice()));
+        assert_eq!(receipt.created_edges(), Some(&[created][..]));
+        assert_eq!(receipt.merged_edge(), None);
+        assert_eq!(receipt.merged_vertex(), None);
+        assert_eq!(receipt.created_vertices(), None);
+        assert_eq!(receipt.mutation_targets(), None);
+        assert_eq!(receipt.mutation_edges(), None);
+        let debug = format!("{receipt:?}");
+        assert!(debug.contains("pairs: 2"));
+        assert!(debug.contains("created: 1"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&created.0.to_string()));
+        assert!(!debug.contains(&matched.0.to_string()));
+    }
 
     #[test]
     fn accessors_preserve_step_kind_and_debug_redacts_identities() {

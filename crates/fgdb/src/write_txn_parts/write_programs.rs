@@ -80,6 +80,9 @@ impl WriteTxn {
     /// precedes owner, health and basis preflight. MERGE's create
     /// branch observes the same remaining creation cap as ordinary insertion;
     /// existing matches and empty endpoint selections do not allocate identities.
+    /// Plain relationship MERGE handles every distinct directed endpoint pair
+    /// in its frozen selection. ON/trailing actions retain the singular pair
+    /// contract. Multi-pair receipts preserve canonical pair order explicitly.
     ///
     /// Quotas sum source visits (including relationship existence scans),
     /// selected occurrences, work, scratch, mutation intents, created vertices
@@ -160,20 +163,12 @@ impl WriteTxn {
                         .map_err(GraphWriteStepError::VertexUpsert),
                     GraphWriteStatement::EdgeMerge(input) => workspace
                         .txn
-                        .execute_graph_edge_merge_governed(
+                        .execute_graph_edge_merges_governed(
                             database,
                             cx,
                             input,
                             remaining.edge_merge_policy(),
-                            |_| {
-                                allocate(GraphWriteIdentityRequest {
-                                    statement,
-                                    request: fgdb_gql::insertion::GraphInsertRequest::Edge {
-                                        row: 0,
-                                        edge: 0,
-                                    },
-                                })
-                            },
+                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
                         )
                         .map(|(stats, _)| GraphWriteStepStats::EdgeMerge(stats))
                         .map_err(GraphWriteStepError::EdgeMerge),
@@ -318,23 +313,15 @@ impl WriteTxn {
                         .map_err(GraphWriteStepError::VertexUpsert),
                     GraphWriteStatement::EdgeMerge(input) => workspace
                         .txn
-                        .execute_graph_edge_merge_governed(
+                        .execute_graph_edge_merges_governed(
                             database,
                             cx,
                             input,
                             remaining.edge_merge_policy(),
-                            |_| {
-                                allocate(GraphWriteIdentityRequest {
-                                    statement,
-                                    request: fgdb_gql::insertion::GraphInsertRequest::Edge {
-                                        row: 0,
-                                        edge: 0,
-                                    },
-                                })
-                            },
+                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
                         )
-                        .map(|(stats, outcome)| {
-                            receipts.push(GraphWriteStepReceipt::EdgeMerge { outcome });
+                        .map(|(stats, receipt)| {
+                            receipts.push(receipt);
                             GraphWriteStepStats::EdgeMerge(stats)
                         })
                         .map_err(GraphWriteStepError::EdgeMerge),

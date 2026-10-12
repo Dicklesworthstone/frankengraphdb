@@ -31,6 +31,10 @@ mod window;
 mod row;
 mod sink;
 
+#[cfg(test)]
+#[path = "standing_query/typed_group_tests.rs"]
+mod typed_group_tests;
+
 use crate::{Database, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{LogicalDeltaBatch, RelationId, ZSet, ZSetError, ZSetEvent};
@@ -415,20 +419,39 @@ impl<V: Vfs + Clone> Database<V> {
     /// that prefix; unbounded ranking materializes the complete ordered result.
     /// Use ordered_rows() for query order and rows() for its selected Z-set bag.
     ///
-    /// A definition with a relational input owns the complete maintained input
+    /// Eligible numeric and collection definitions use the same complete-row
+    /// circuit as native text registration, chosen from the definition before
+    /// reading data. SUM/AVG retain exact mixed integer/binary64 support and
+    /// retract back to integer/rational results when the last float disappears.
+    /// COLLECT retains its separately proved occurrence order. Count/extremum-
+    /// only definitions keep the direct source engine; no runtime error retries
+    /// through a different engine or treats an unsupported source as empty.
+    ///
+    /// A relational or normalized definition owns the COMPLETE maintained input
     /// circuit, not only its first graph leaf. Its final row allowance applies
-    /// to group outputs; private input nodes retain source/work/scratch limits.
-    /// standing_group_delta exposes its latest accepted final-output change.
+    /// to group outputs; each private node retains source/work/scratch limits.
+    /// These are per-node logical budgets, not a combined byte-memory ceiling.
+    /// Maintenance stats describe the selected result owner. standing_query_delta
+    /// exposes its accepted final-output change; rebuild repairs the whole owned
+    /// circuit, including a failed private source, without changing the handle.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,
         definition: PreparedGraphAggregate,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        self.ensure_readable().map_err(StandingQueryError::Read)?;
         if definition.input_relation().is_some() {
             let definition = fgdb_gql::PreparedGraphSetAggregate::from_relation(definition)
                 .ok_or(StandingQueryError::Unsupported)?;
             return self.register_standing_relation_aggregate(cx, &definition, policy);
+        }
+        if let Some(relation) = definition.incremental_group_relation() {
+            // Reuse the ordinary all-or-nothing registry transaction. Keeping
+            // its owned-circuit handle is essential for whole-circuit rebuild;
+            // publishing just the group node would orphan its private sources.
+            return self.register_standing_relation_aggregate(cx, &relation, policy);
         }
         let query = self.prepare_registered_aggregate(cx, definition, policy)?;
         Ok(self.store_standing_query(query))
