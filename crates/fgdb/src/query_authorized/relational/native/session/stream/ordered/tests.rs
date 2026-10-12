@@ -678,7 +678,11 @@ fn limit_zero_keeps_input_budget_and_pending_query_cancellation_is_nonterminal()
         let db = database(&contexts.commit()).await;
         // Separate cancellation ownership keeps the lab's root task alive so
         // it can inspect the interrupted operation's resource/session state.
-        let cancel_root = asupersync::Cx::for_testing();
+        // A runtime request context owns it, as fgdb's other cancellation
+        // laws do: `Cx::for_testing` needs asupersync's test-internals, which
+        // this package never enables (`cargo test -p fgdb` did not compile).
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let cancel_root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
         let query_contexts = PurposeContexts::narrow_runtime_root(&cancel_root);
         let cx = query_contexts.query();
         let issuer = authority();

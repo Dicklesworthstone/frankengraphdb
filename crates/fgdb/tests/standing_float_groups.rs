@@ -298,13 +298,15 @@ fn numeric_subscription_replay_delivers_exact_float_and_type_transition_deltas()
             assert!(!frame.is_snapshot());
             assert_eq!(frame.frontier(), at);
             let redelivered = subscription.poll(&db, &cx, policy()).unwrap().unwrap();
-            assert_eq!(redelivered.receipt(), frame.receipt());
+            assert_eq!(redelivered.frontier(), frame.frontier());
             assert_eq!(redelivered.rows(), frame.rows());
             accepted
                 .integrate(frame.rows(), LimbLimit::new(4), &mut |_| Ok::<_, ()>(()))
                 .unwrap();
             assert_eq!(accepted, expected);
-            subscription.acknowledge(frame.receipt()).unwrap();
+            // A receipt is an ACK capability with no equality. The redelivered
+            // frame's receipt names this same delivery: it acknowledges `at`.
+            assert_eq!(subscription.acknowledge(redelivered.receipt()).unwrap(), at);
         }
         assert!(subscription.poll(&db, &cx, policy()).unwrap().is_none());
     });
