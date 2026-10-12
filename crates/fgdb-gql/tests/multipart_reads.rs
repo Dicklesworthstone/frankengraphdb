@@ -433,3 +433,57 @@ fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join()
         assert_eq!(calls, 0, "{text}");
     }
 }
+
+/// `MATCH (a) WITH a MATCH (b) WHERE a = b` correlates `b` with the carried
+/// element: the identity form of the same join key, answering what reusing
+/// the name `MATCH (a)` answers (TCK Comparison1 [4]/[5], MatchWhere6 [5]).
+#[test]
+fn a_top_level_where_identity_with_an_imported_element_is_the_reused_name_join() {
+    assert_eq!(
+        execute("MATCH (a) WITH a MATCH (b) WHERE a = b RETURN a, b ORDER BY a"),
+        [1, 2, 3, 4].map(|id| vertices(&[id, id])).to_vec()
+    );
+    // Parallel edges keep their multiplicity, in either operand order.
+    let out = [(1, 2), (1, 2), (1, 3), (2, 3), (3, 4)].map(|(a, m)| vertices(&[a, m]));
+    for text in [
+        "MATCH (a) WITH a MATCH (b)-[:R]->(m) WHERE b = a RETURN a, m ORDER BY a, m",
+        "MATCH (a) WITH a MATCH (b)-[:R]->(m) WHERE a = b AND m.p > 0 RETURN a, m ORDER BY a, m",
+        "MATCH (a) WITH a MATCH (a)-[:R]->(m) RETURN a, m ORDER BY a, m",
+    ] {
+        assert_eq!(execute(text), out.to_vec(), "{text}");
+    }
+    // OPTIONAL: the equality decides the match before null extension, so
+    // vertex 4, which has no outgoing edge, keeps one row with a NULL m.
+    let mut optional = out.to_vec();
+    optional.push(GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(4)),
+        GraphValue::Scalar(CanonicalScalar::Null),
+    ]));
+    assert_eq!(
+        execute(
+            "MATCH (a) WITH a OPTIONAL MATCH (b)-[:R]->(m) WHERE b = a RETURN a, m ORDER BY a, m"
+        ),
+        optional
+    );
+    let edges = execute("MATCH ()-[r:R]->() WITH r MATCH ()-[s:R]->() WHERE r = s RETURN r, s");
+    assert_eq!(edges.len(), 5);
+    assert!(edges.iter().all(|row| row.values()[0] == row.values()[1]));
+    // Not a top-level AND conjunct, or not equality: refused before any
+    // catalog call, as for the property form.
+    for text in [
+        "MATCH (a) WITH a MATCH (b) WHERE a = b OR b.p = 1 RETURN b",
+        "MATCH (a) WITH a MATCH (b) WHERE NOT a = b RETURN b",
+        "MATCH (a) WITH a MATCH (b) WHERE a <> b RETURN b",
+    ] {
+        let mut calls = 0;
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls, 0, "{text}");
+    }
+}

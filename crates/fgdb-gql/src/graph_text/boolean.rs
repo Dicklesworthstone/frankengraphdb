@@ -34,8 +34,9 @@ struct Parsed<'a> {
     extended: bool,
     /// `q.v = m` against an imported row column (fgdb-ezgeq): variable,
     /// property, row column and offset. Valid only as a top-level AND
-    /// conjunct, where it is the join key `(q {v: m})` already makes.
-    correlations: Vec<(Name<'a>, Name<'a>, usize, usize)>,
+    /// conjunct, where it is the join key `(q {v: m})` already makes. With
+    /// no property, `q = m` equates the element itself with the row value.
+    correlations: Vec<(Name<'a>, Option<Name<'a>>, usize, usize)>,
     /// `v:L` label predicates. Valid only as top-level AND conjuncts, where
     /// each is the label `(v:L)` writes inline in this scope.
     labels: Vec<(Name<'a>, Name<'a>)>,
@@ -306,10 +307,15 @@ impl<'a> Parser<'a> {
     /// matches and kinds never coerce. Inside an OPTIONAL or EXISTS scope the
     /// row columns are hidden, so nothing here matches. Any other shape (an
     /// operator after `m`, `<`, `<>`) consumes nothing and parses as before.
+    ///
+    /// `x = m` or `m = x`, where `x` is a root vertex or a root relationship
+    /// of this MATCH, is the identity form of the same key: openCypher's
+    /// `MATCH (a) WITH a MATCH (b) WHERE a = b` correlates `b` with the
+    /// carried `a` exactly as `MATCH (a)` reusing the name does.
     #[allow(clippy::type_complexity)]
     fn row_correlation(
         &mut self,
-    ) -> Result<Option<(Name<'a>, Name<'a>, usize, usize)>, GraphPatternTextError> {
+    ) -> Result<Option<(Name<'a>, Option<Name<'a>>, usize, usize)>, GraphPatternTextError> {
         if self.read_row_bindings.is_empty() {
             return Ok(None);
         }
@@ -322,6 +328,46 @@ impl<'a> Parser<'a> {
             lexer.next()?.kind,
             lexer.next()?.kind,
         ];
+        if let [
+            TokenKind::Word(left),
+            TokenKind::Punct(b'='),
+            TokenKind::Word(right),
+            TokenKind::End | TokenKind::Word(_) | TokenKind::Punct(b')'),
+            _,
+        ] = tokens
+        {
+            let row = |word: &str| {
+                (self.read_row_bindings.iter()).position(|binding| binding.text == word)
+            };
+            let element = |word: &str| {
+                (self.syntax.variables[..self.syntax.root_variables].iter())
+                    .copied()
+                    .find(|variable| variable.text == word)
+                    .or_else(|| {
+                        self.syntax
+                            .visible_edge(word)
+                            .filter(|(edge, scoped)| !*scoped && edge.walk.is_none())
+                            .and_then(|(edge, _)| edge.variable)
+                    })
+            };
+            let pair = match (row(left), element(left), row(right), element(right)) {
+                (Some(row), None, None, Some(variable))
+                | (None, Some(variable), Some(row), None) => Some((row, variable)),
+                _ => None,
+            };
+            if let Some((row, variable)) = pair {
+                self.capacity(
+                    self.predicates,
+                    MAX_PATTERN_PREDICATES,
+                    crate::algebra::PatternLimitDimension::Predicates,
+                )?;
+                self.advance()?;
+                self.punct(b'=', "=")?;
+                self.advance()?;
+                self.predicates += 1;
+                return Ok(Some((variable, None, row, at)));
+            }
+        }
         // The atom must end at its fifth token.
         if !matches!(
             lexer.next()?.kind,
@@ -368,7 +414,7 @@ impl<'a> Parser<'a> {
             self.advance()?;
         }
         self.predicates += 1;
-        Ok(Some((variable, key, row, at)))
+        Ok(Some((variable, Some(key), row, at)))
     }
 
     fn literal_starts_in_list(&self) -> Result<bool, GraphPatternTextError> {

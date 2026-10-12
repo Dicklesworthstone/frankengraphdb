@@ -451,6 +451,62 @@ fn exact_cumulative_quotas_and_every_cancellation_checkpoint_span_join_and_group
     }
 }
 
+/// openCypher: RETURN after a MATCH reads every visible binding. A
+/// continuation's aggregate RETURN therefore aggregates exactly what the same
+/// RETURN after `WITH *` does; the first part still needs its WITH.
+#[test]
+fn a_continuation_aggregate_return_reads_its_bindings_through_the_implied_with_star() {
+    for (implied, star) in [
+        (
+            "MATCH (n) WITH n MATCH (n) RETURN COUNT(*) AS rows",
+            "MATCH (n) WITH n MATCH (n) WITH * RETURN COUNT(*) AS rows",
+        ),
+        (
+            "MATCH (a) WITH a MATCH (b) WHERE a = b RETURN COUNT(b) AS c",
+            "MATCH (a) WITH a MATCH (b) WHERE a = b WITH * RETURN COUNT(b) AS c",
+        ),
+        (
+            "MATCH (n) WITH n MATCH (n)-[:R]->(m) RETURN n, COUNT(m) AS out ORDER BY n",
+            "MATCH (n) WITH n MATCH (n)-[:R]->(m) WITH * RETURN n, COUNT(m) AS out ORDER BY n",
+        ),
+        (
+            "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) RETURN n, COUNT(m) AS out ORDER BY n",
+            "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) WITH * RETURN n, COUNT(m) AS out ORDER BY n",
+        ),
+    ] {
+        assert_eq!(execute(implied), execute(star), "{implied}");
+    }
+    for text in [
+        "MATCH (n) WITH n MATCH (n) RETURN COUNT(*) AS rows",
+        "MATCH (a) WITH a MATCH (b) WHERE a = b RETURN COUNT(b) AS c",
+    ] {
+        let rows = execute(text);
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(rows[0].values()[0].as_count(), Some(4), "{text}");
+    }
+    // Out-degree per vertex from the independent edge bag; vertex 4 has none
+    // and keeps its group through the OPTIONAL null extension.
+    let degrees = execute(
+        "MATCH (n) WITH n OPTIONAL MATCH (n)-[:R]->(m) RETURN n, COUNT(m) AS out ORDER BY n",
+    );
+    assert_eq!(degrees.len(), 4);
+    for (row, vid) in degrees.iter().zip(1..=4) {
+        let out = EDGES
+            .iter()
+            .filter(|(start, _, _)| *start == VId(vid))
+            .count();
+        assert_eq!(row.keys(), &[GraphValue::Vertex(VId(vid))]);
+        assert_eq!(row.values()[0].as_count(), Some(out as u64));
+    }
+    assert!(
+        PreparedGraphPipelineAggregateText::prepare(
+            "MATCH (n) RETURN COUNT(*) AS rows MATCH (m) RETURN COUNT(*) AS more",
+            symbols
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
     // An aggregate WITH stage is legal since fgdb-ezgeq. It drops `n`, so the
@@ -461,7 +517,6 @@ fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
     assert_eq!(staged.len(), 1);
     assert_eq!(staged[0].values()[0].as_count(), Some(4));
     for text in [
-        "MATCH (n) WITH n MATCH (n) RETURN COUNT(*) AS rows",
         "MATCH (n) WITH n MATCH (n) WITH n RETURN SUM(n) AS bad",
         "MATCH (n) WITH n MATCH (n) WITH n AS kept RETURN n,COUNT(*) AS rows",
         "MATCH (n) WITH n MATCH (n) WITH n RETURN COUNT(*) AS rows HAVING missing>0",

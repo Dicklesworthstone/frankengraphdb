@@ -614,7 +614,7 @@ impl<'a> Parser<'a> {
                 }
             }
             for (variable, key, row) in correlations {
-                let index = self.mutation_projection(&mut inputs, variable, Some(key))?;
+                let index = self.mutation_projection(&mut inputs, variable, key)?;
                 bound_correlations.push((row, index));
             }
             // A CALL output matched as a vertex must be one (fgdb-luq0b):
