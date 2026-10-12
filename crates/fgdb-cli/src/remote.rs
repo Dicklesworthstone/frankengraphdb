@@ -504,24 +504,33 @@ async fn stream_read(
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
-    let sink = core::cell::RefCell::new(ReadOutput {
+    // Both callbacks write through one sink across the read's awaits. A Mutex
+    // keeps that future Send for a Send writer; it is never contended, and a
+    // panicking callback has already ended the read.
+    let sink = std::sync::Mutex::new(ReadOutput {
         out,
         robot,
         width: None,
         sent: 0,
         failed: None,
     });
+    let lock = || {
+        sink.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
     let result = client
         .execute_streaming(
             cx,
             mode,
             statement,
             parameters,
-            |columns| sink.borrow_mut().columns(cx, columns),
-            |row| sink.borrow_mut().row(cx, &row),
+            |columns| lock().columns(cx, columns),
+            |row| lock().row(cx, &row),
         )
         .await;
-    sink.into_inner().finish(result)
+    sink.into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .finish(result)
 }
 
 struct ReadOutput<'a, W> {

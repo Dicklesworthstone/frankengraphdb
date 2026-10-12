@@ -60,5 +60,5 @@ fn scratch_is_anonymous_private_distinct_and_session_capacity_is_refunded() {
         drop(accepted(host.files(&root, &query).await));
         assert_eq!(host.active.load(Ordering::Acquire), 0);
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -256,6 +256,7 @@ Robot stdout: versioned NDJSON; errors include message strings in diagnostics.
 Exit codes: 0 success, 2 usage/schema, 3 query refusal, 4 open/key, 5 I/O/corruption.
 ";
 
+#[derive(Debug)]
 struct Failure {
     code: u8,
     class: &'static str,

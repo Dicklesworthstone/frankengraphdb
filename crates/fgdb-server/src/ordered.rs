@@ -134,7 +134,7 @@ impl OrderedReads {
         query: &QueryCx,
     ) -> Result<(SpillFile<File>, SpillFile<File>, OrderLease), Refusal> {
         self.active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < self.config.max_concurrent).then(|| count + 1)
             })
             .map_err(|_| {

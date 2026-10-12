@@ -233,7 +233,7 @@ fn ping_credit_and_cancel_preserve_one_pending_order_future() {
         }
         server.join_database_workers(&root).await;
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn pending_admission_releases_on_disconnect_drain_shutdown_and_recovery_before_s
             server.join_database_workers(&root).await;
         }
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

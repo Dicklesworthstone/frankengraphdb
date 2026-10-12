@@ -134,7 +134,7 @@ fn ordered_admission_is_authenticated_bounded_and_old_cursors_fail_after_recover
         drop(fresh);
         server.join_database_workers(&root).await;
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -164,5 +164,5 @@ fn a_pending_order_does_not_hold_a_recovery_operation() {
         assert!(db.admits(&token));
         server.join_database_workers(&root).await;
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }

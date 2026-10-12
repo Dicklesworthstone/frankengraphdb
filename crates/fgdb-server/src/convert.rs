@@ -365,8 +365,8 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(bound.get("cut"), Some(&GqlParameterValue::UInt64(u64::MAX)));
-        assert_eq!(bound.get("signed"), Some(&GqlParameterValue::Int64(-1)));
+        assert_eq!(bound.get("cut"), Some(GqlParameterValue::UInt64(u64::MAX)));
+        assert_eq!(bound.get("signed"), Some(GqlParameterValue::Int64(-1)));
         for value in [
             WireValue::List(vec![WireValue::Count(1)]),
             WireValue::Map(vec![("cut".into(), WireValue::Count(1))]),

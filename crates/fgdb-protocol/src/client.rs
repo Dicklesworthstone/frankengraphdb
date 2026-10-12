@@ -942,6 +942,7 @@ mod tests {
     use asupersync::lab::run_async_under_lab;
     use core::pin::Pin;
     use core::task::{Context, Poll};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct ScriptIo {
         input: Vec<u8>,
@@ -1235,7 +1236,7 @@ mod tests {
                 client.select(&root, "test").await.unwrap();
                 let text = "MATCH (n) RETURN n.p AS value ORDER BY value LIMIT $limit";
                 let parameters = vec![("limit".into(), WireValue::Count(2))];
-                let callbacks = std::cell::Cell::new(0);
+                let callbacks = AtomicUsize::new(0);
                 let result = if prepared {
                     assert_eq!(
                         client
@@ -1251,11 +1252,11 @@ mod tests {
                             handle,
                             parameters.clone(),
                             |_| {
-                                callbacks.set(callbacks.get() + 1);
+                                callbacks.fetch_add(1, Ordering::Relaxed);
                                 Ok(())
                             },
                             |_| {
-                                callbacks.set(callbacks.get() + 1);
+                                callbacks.fetch_add(1, Ordering::Relaxed);
                                 Ok(())
                             },
                         )
@@ -1268,11 +1269,11 @@ mod tests {
                             text,
                             parameters.clone(),
                             |_| {
-                                callbacks.set(callbacks.get() + 1);
+                                callbacks.fetch_add(1, Ordering::Relaxed);
                                 Ok(())
                             },
                             |_| {
-                                callbacks.set(callbacks.get() + 1);
+                                callbacks.fetch_add(1, Ordering::Relaxed);
                                 Ok(())
                             },
                         )
@@ -1285,7 +1286,7 @@ mod tests {
                         ..
                     })
                 ));
-                assert_eq!(callbacks.get(), 0);
+                assert_eq!(callbacks.load(Ordering::Relaxed), 0);
                 let answer = client
                     .execute(&root, ExecuteMode::Read, "MATCH (n) RETURN n", vec![])
                     .await
@@ -1388,15 +1389,15 @@ mod tests {
                     let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
                     client.select(&root, "test").await.unwrap();
                     let text = "MATCH (n) RETURN n.p AS value ORDER BY value";
-                    let columns = std::cell::Cell::new(0);
-                    let rows = std::cell::Cell::new(0);
+                    let columns = AtomicUsize::new(0);
+                    let rows = AtomicUsize::new(0);
                     let on_columns = |names: &[String]| {
                         assert_eq!(names, &["value"]);
-                        columns.set(columns.get() + 1);
+                        columns.fetch_add(1, Ordering::Relaxed);
                         Err(ClientError::Io(std::io::ErrorKind::BrokenPipe))
                     };
                     let on_row = |_| {
-                        rows.set(rows.get() + 1);
+                        rows.fetch_add(1, Ordering::Relaxed);
                         Ok(())
                     };
                     let result = if prepared {
@@ -1420,7 +1421,13 @@ mod tests {
                         result,
                         Err(ClientError::Io(std::io::ErrorKind::BrokenPipe))
                     ));
-                    assert_eq!((columns.get(), rows.get()), (1, 0));
+                    assert_eq!(
+                        (
+                            columns.load(Ordering::Relaxed),
+                            rows.load(Ordering::Relaxed)
+                        ),
+                        (1, 0)
+                    );
                     assert_eq!(
                         client
                             .execute(&root, ExecuteMode::Read, "MATCH (n) RETURN n", vec![])
