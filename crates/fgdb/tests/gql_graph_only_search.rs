@@ -225,7 +225,7 @@ fn transaction_typed_graph_only_reads_need_no_index_or_projected_properties() {
         let cx = contexts.query();
         let txcx = contexts.txn();
         let mut db = database(&commit, false).await;
-        let mut txn = db.begin(&txcx).unwrap();
+        let txn = db.begin(&txcx).unwrap();
         let mut options = ReadOptions {
             as_of: None,
             vertex_label: Some(PERSON),
@@ -506,7 +506,7 @@ fn graph_only_transaction_queries_share_work_scratch_and_record_allowances() {
         let cx = contexts.query();
         let txcx = contexts.txn();
         let mut db = database(&commit, false).await;
-        let mut txn = db.begin(&txcx).unwrap();
+        let txn = db.begin(&txcx).unwrap();
         let params = GqlParameters::new();
         let text = reach("[4]");
         let prepare = |text: &str| {
