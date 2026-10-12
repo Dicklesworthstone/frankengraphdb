@@ -131,6 +131,9 @@ impl core::fmt::Debug for VertexAggregatePlan {
 }
 
 pub type VertexAggregateError<E, C> = GqlQueryError<GraphAggregateError<VertexScanError<E>>, C>;
+/// One cooperative aggregate poll: Pending, the next finished group, its
+/// error, or the end of the groups.
+pub type AggregatePoll<E> = core::task::Poll<Option<Result<GraphAggregateRow, E>>>;
 type Groups = BTreeMap<Vec<GraphValue>, Vec<NumericState>>;
 type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Vec<NumericState>>;
 
@@ -459,7 +462,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
     pub fn poll_next<C>(
         &mut self,
         context: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Option<Result<GraphAggregateRow, VertexAggregateError<S::Error, C>>>>
+    ) -> AggregatePoll<VertexAggregateError<S::Error, C>>
     where
         F: FnMut() -> Result<(), C>,
     {
