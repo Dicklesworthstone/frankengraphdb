@@ -131,6 +131,86 @@ fn fixed_path_functions_preserve_traversal_order_and_filter_rows() {
     );
 }
 
+/// fgdb-tk2u6: a captured path may revisit a vertex, and a variable-length
+/// relationship may sit anywhere in a chain (TCK Match6 [8], [12] to [14],
+/// [17]). Whichever end the plan expands an edge or walk from, the path keeps
+/// its declared order. Expected paths are enumerated by hand over parallel
+/// R edges 91 and 92 from 1 to 2, R edge 93 from 2 to 3, and S edge 94 from
+/// 3 to 4, with each relationship used at most once per path.
+#[test]
+fn captured_paths_revisit_vertices_and_chain_variable_length_relationships() {
+    use fgdb_types::{EId, VId};
+    let edges = [
+        (EId(91), VId(1), RelationId(1), VId(2)),
+        (EId(92), VId(1), RelationId(1), VId(2)),
+        (EId(93), VId(2), RelationId(1), VId(3)),
+        (EId(94), VId(3), RelationId(2), VId(4)),
+    ];
+    let path = |start: u128, steps: &[(u128, u128)]| {
+        (
+            VId(start),
+            steps
+                .iter()
+                .map(|&(eid, vid)| (EId(eid), VId(vid)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    for (text, expected) in [
+        (
+            "MATCH p = (n)-[:R]->(k)<-[:R]-(n) RETURN p",
+            vec![path(1, &[(91, 2), (92, 1)]), path(1, &[(92, 2), (91, 1)])],
+        ),
+        (
+            "MATCH p = (n)-[:R]-(k)-[:R]-(n) RETURN p",
+            vec![
+                path(1, &[(91, 2), (92, 1)]),
+                path(1, &[(92, 2), (91, 1)]),
+                path(2, &[(91, 1), (92, 2)]),
+                path(2, &[(92, 1), (91, 2)]),
+            ],
+        ),
+        (
+            "MATCH p = (a)-[:R]->(b)-[:R*0..1]->(c) RETURN p",
+            vec![
+                path(1, &[(91, 2)]),
+                path(1, &[(91, 2), (93, 3)]),
+                path(1, &[(92, 2)]),
+                path(1, &[(92, 2), (93, 3)]),
+                path(2, &[(93, 3)]),
+            ],
+        ),
+        (
+            "MATCH p = (a)-[:R*1..2]->(b)-[:S]->(c) RETURN p",
+            vec![
+                path(1, &[(91, 2), (93, 3), (94, 4)]),
+                path(1, &[(92, 2), (93, 3), (94, 4)]),
+                path(2, &[(93, 3), (94, 4)]),
+            ],
+        ),
+        (
+            "MATCH p = (a)<-[:S]-(b)-[:R*2..2]-(c) RETURN p",
+            vec![
+                path(4, &[(94, 3), (93, 2), (91, 1)]),
+                path(4, &[(94, 3), (93, 2), (92, 1)]),
+            ],
+        ),
+    ] {
+        let mut found: Vec<_> = execute(text, &edges)
+            .iter()
+            .map(|row| {
+                let captured = row.values()[0]
+                    .as_path()
+                    .unwrap_or_else(|| panic!("{text}: {row:?}"));
+                (captured.start(), captured.steps().to_vec())
+            })
+            .collect();
+        found.sort();
+        let mut expected = expected;
+        expected.sort();
+        assert_eq!(found, expected, "{text}");
+    }
+}
+
 /// fgdb-j687q: openCypher `length(p)` is PATH_LENGTH, in RETURN, WHERE and
 /// ORDER BY, with the identical plan.
 #[test]

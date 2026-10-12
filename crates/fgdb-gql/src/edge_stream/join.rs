@@ -300,6 +300,9 @@ fn compile_output(
 #[derive(Clone, Copy)]
 struct Choice {
     eid: EId,
+    /// The bound endpoint the edge was expanded from. A captured path reads
+    /// an edge from whichever endpoint it already stands on (fgdb-tk2u6).
+    from: VId,
     target: VId,
 }
 
@@ -491,7 +494,11 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
         if depth == 0 {
             traversal.bindings.push(Some(from));
         }
-        traversal.choices.push(Choice { eid, target: to });
+        traversal.choices.push(Choice {
+            eid,
+            from,
+            target: to,
+        });
         traversal.bindings.push(Some(to));
         // Probe candidates share this very meter, but never count as output.
         // The two short-lived borrows cannot overlap: source callbacks return
@@ -602,17 +609,28 @@ fn test_stage<S: EdgeScanSource, C>(
                     control(GlaExecutionEvent::ScratchEntry)?;
                     control(GlaExecutionEvent::ScratchEntry)?;
                 }
-                let steps = segments
-                    .iter()
-                    .map(|slot| {
-                        let choice = traversal.choices[slot.ordinal() as usize - 1];
-                        (choice.eid, choice.target)
-                    })
-                    .collect::<Vec<_>>();
-                paths.push(Some(GraphPath::new(
-                    ids[start.ordinal() as usize].expect("captured start"),
-                    steps.into_boxed_slice(),
-                )));
+                // A closing edge back to a bound vertex was expanded from its
+                // other end: step to whichever endpoint the path is not on.
+                let start = ids[start.ordinal() as usize].expect("captured start");
+                let mut endpoint = start;
+                let mut steps = Vec::with_capacity(segments.len());
+                for slot in segments {
+                    let choice = traversal.choices[slot.ordinal() as usize - 1];
+                    endpoint = if choice.from == endpoint {
+                        choice.target
+                    } else if choice.target == endpoint {
+                        choice.from
+                    } else {
+                        break;
+                    };
+                    steps.push((choice.eid, endpoint));
+                }
+                // Same as the eager executor: a chain that does not connect
+                // captures no path rather than a fabricated one.
+                paths.push(
+                    (steps.len() == segments.len())
+                        .then(|| GraphPath::new(start, steps.into_boxed_slice())),
+                );
             }
             Instruction::Native(GlaOperator::DifferentEdges { segments }) => {
                 // Every admitted segment is one retained fixed edge. Compare

@@ -669,9 +669,10 @@ impl GraphPatternBuilder {
         if self.variables.is_empty() {
             return Err(PatternBuildError::EmptyPattern);
         }
-        if self.variables.iter().any(|variable| variable.outer)
-            || (self.edges.len() > 1 && self.edges.iter().any(|edge| edge.walk.is_some()))
-        {
+        // A path may revisit a vertex and chain walks (openCypher): the
+        // executor reads a segment backwards when its expansion began at the
+        // far end (fgdb-tk2u6). It must still be one connected chain.
+        if self.variables.iter().any(|variable| variable.outer) {
             return Err(PatternBuildError::InvalidPathCapture);
         }
         let start = self.edges.first().map_or(0, |edge| edge.source);
@@ -686,9 +687,6 @@ impl GraphPatternBuilder {
             } else {
                 return Err(PatternBuildError::InvalidPathCapture);
             };
-            if visited[endpoint] && self.edges.len() > 1 {
-                return Err(PatternBuildError::InvalidPathCapture);
-            }
             visited[endpoint] = true;
         }
         if visited.iter().any(|visited| !visited) {
