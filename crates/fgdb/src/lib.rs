@@ -165,12 +165,13 @@ pub use query::{
     AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
     AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
     AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor, ExplainRow,
-    HYBRID_SEARCH_OUTPUTS, HybridCallError, NativeAggregateCursor, NativeAggregateSpool,
-    NativeAggregateSpoolCursor, NativeAggregateSpoolError, NativeAggregateSpoolRow,
-    NativeExplainCertificate, NativeResultCertificate, NativeResultSpool, NativeSpoolCursor,
-    NativeSpoolError, PinnedIndex, PreparedBufferedAggregate, PreparedBufferedOrder,
-    PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue, QueryWriteError,
-    RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
+    HYBRID_SEARCH_OUTPUTS, HybridCallError, MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError,
+    MaintainedBeaconFailure, MaintainedBeaconIndex, MaintainedBeaconStatus, NativeAggregateCursor,
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
+    NativeAggregateSpoolRow, NativeExplainCertificate, NativeResultCertificate, NativeResultSpool,
+    NativeSpoolCursor, NativeSpoolError, PinnedIndex, PreparedBufferedAggregate,
+    PreparedBufferedOrder, PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue,
+    QueryWriteError, RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,
@@ -2371,6 +2372,9 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// This is not a durable identity or an authorization/session protocol.
     handle_owner: Arc<()>,
     standing_queries: Vec<standing_query::StandingQuery>,
+    /// Rebuildable resident search generations fed only after successful
+    /// durable publication. Registrations belong to this opened lifetime.
+    maintained_beacon: query::BeaconRegistry,
     coordinator: CommitCoordinator<V>,
     store: BlockStore<V>,
     /// The ONE mutable object in the directory (doctrine 5): the dual-slot
@@ -3056,6 +3060,7 @@ impl<V: Vfs + Clone> Database<V> {
             preparation_anchor: None,
             handle_owner: Arc::new(()),
             standing_queries: Vec::new(),
+            maintained_beacon: query::BeaconRegistry::default(),
         })
     }
 
@@ -4439,13 +4444,14 @@ impl<V: Vfs + Clone> Database<V> {
         };
         // Maintenance is derived, synchronous and fail-closed. A refusal must
         // never turn this already-durable successful publication into an abort.
-        if !self.standing_queries.is_empty() {
+        if !self.standing_queries.is_empty() || !self.maintained_beacon.is_empty() {
             let batch = self
                 .snapshot
                 .delta_index
                 .get(frontier)
                 .expect("successful publication retains its committed delta");
             standing_query::publish(&mut self.standing_queries, cx, batch);
+            self.maintained_beacon.publish(cx, &self.snapshot, batch);
         }
         Ok(self.snapshot.frontier)
     }

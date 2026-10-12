@@ -25,42 +25,11 @@ pub(super) struct DeferredWrite {
 /// Foreign bookmarks, impersonation and unsupported timeouts never silently
 /// turn into a write with weaker semantics.
 fn write_options(extra: &Map, database: &str) -> Result<CommitSeq, Failure> {
-    match get(extra, "mode") {
-        None => {}
-        Some(Value::String(mode)) if mode == "w" => {}
-        Some(Value::String(mode)) if mode == "r" => return Err(read_only()),
-        _ => return Err(Failure::invalid("mode must be 'r' or 'w'")),
+    let options = causal::options(extra, database)?;
+    if options.mode == causal::AccessMode::Read {
+        return Err(read_only());
     }
-    for option in ["tx_timeout", "imp_user"] {
-        if !matches!(get(extra, option), None | Some(Value::Null)) {
-            return Err(Failure::invalid(format!(
-                "{option} is not supported for Bolt autocommit writes"
-            )));
-        }
-    }
-    let mut minimum = 0;
-    match get(extra, "bookmarks") {
-        None | Some(Value::Null) => {}
-        Some(Value::List(bookmarks)) => {
-            let prefix = format!("fgdb:{database}:");
-            for bookmark in bookmarks {
-                let sequence = bookmark
-                    .as_str()
-                    .and_then(|bookmark| bookmark.strip_prefix(&prefix))
-                    .filter(|sequence| {
-                        !sequence.is_empty()
-                            && sequence.len() <= 20
-                            && sequence.bytes().all(|byte| byte.is_ascii_digit())
-                            && (sequence.len() == 1 || !sequence.starts_with('0'))
-                    })
-                    .and_then(|sequence| sequence.parse::<u64>().ok())
-                    .ok_or_else(|| Failure::invalid("invalid or foreign database bookmark"))?;
-                minimum = minimum.max(sequence);
-            }
-        }
-        Some(_) => return Err(Failure::invalid("bookmarks must be a list of strings")),
-    }
-    Ok(CommitSeq(minimum))
+    Ok(options.minimum_seq)
 }
 
 /// The old keyword detector is only a hint, never execution authority. A

@@ -21,7 +21,12 @@ pub(crate) mod indexed;
 pub(crate) mod procedure;
 #[path = "query_beacon/resident.rs"]
 mod resident;
-pub use resident::{Error as ResidentIndexError, PinnedIndex, RefreshReport, ResidentIndex};
+pub(crate) use resident::Registry as BeaconRegistry;
+pub use resident::{
+    Error as ResidentIndexError, MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError,
+    MaintainedBeaconFailure, MaintainedBeaconIndex, MaintainedBeaconStatus, PinnedIndex,
+    RefreshReport, ResidentIndex,
+};
 
 pub(crate) type Options = ReadOptions<PropertyKeyId, LabelId>;
 type Cancel = Box<asupersync::error::Error>;
