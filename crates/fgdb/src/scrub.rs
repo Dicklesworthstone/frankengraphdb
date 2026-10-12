@@ -10,6 +10,50 @@ use std::collections::BTreeMap;
 use crate::Database;
 use fgdb_chronicle::scrub::LostReason;
 pub use fgdb_chronicle::scrub::{LostCapsule, ScrubCrashPoint};
+#[cfg(not(target_arch = "wasm32"))]
+use fgdb_chronicle::{commit::restore::CapsuleRestoreError, transfer::VerifiedObject};
+
+/// A recovered capsule failed admission/restoration, or ordinary database
+/// admission still refused the repaired storage. Neither error returns a
+/// database handle that could serve retained, unauthenticated graph state.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub enum CapsuleRecoveryError {
+    Open(crate::OpenError),
+    Capsule {
+        object_id: ObjectId,
+        source: CapsuleRestoreError,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl core::fmt::Display for CapsuleRecoveryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Open(error) => write!(f, "database capsule recovery: {error}"),
+            Self::Capsule { object_id, source } => {
+                write!(f, "database capsule recovery for {object_id:?}: {source}")
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl core::error::Error for CapsuleRecoveryError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Open(error) => Some(error),
+            Self::Capsule { source, .. } => Some(source),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<crate::OpenError> for CapsuleRecoveryError {
+    fn from(error: crate::OpenError) -> Self {
+        Self::Open(error)
+    }
+}
 
 /// Capsule repair results and separate audits of the current generation's data
 /// (FGSB/FGSP/FGVP) and metadata (manifest, root, root segments). Strata objects
@@ -70,6 +114,106 @@ fn checkpoint(cx: &CommitCx) -> Result<(), CommitError> {
     cx.checkpoint().map_err(|error| {
         CommitError::Io(std::io::Error::new(std::io::ErrorKind::Interrupted, error))
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Database<asupersync::fs::UnixVfs> {
+    /// Reopen a damaged database using authenticated copies of committed
+    /// capsules, including capsules that local redundancy cannot recover.
+    ///
+    /// `recovered` must come through Chronicle's authenticated object transfer.
+    /// The recovered marker chain and local identity keys select which objects
+    /// may be restored; donor keys, encoding layouts and arbitrary paths never
+    /// become local storage authority. Every supplied object's identity,
+    /// namespace, capsule format and chain membership are checked before any
+    /// capsule is replaced, and the selected root opener authenticates first.
+    ///
+    /// The exclusive writer lease stays held from chain recovery through
+    /// capsule replacement and ordinary root admission/replay. A successful
+    /// result is the same healthy database that [`Database::open`] produces.
+    /// Repair appends no markers and does not advance the committed frontier.
+    /// Missing or damaged derived objects can still make admission fail.
+    ///
+    /// Storage errors or cancellation can leave an already verified subset
+    /// restored. They return no serving handle; retrying with the same objects
+    /// is safe. Capsule files must still be inside an existing database
+    /// directory, under the same fail-closed rules as [`Database::open`].
+    pub async fn open_restoring_capsules(
+        cx: &CommitCx,
+        path: impl AsRef<std::path::Path>,
+        keys: crate::DatabaseKeys,
+        recovered: &[VerifiedObject],
+    ) -> Result<Self, CapsuleRecoveryError> {
+        Self::open_restoring_capsules_with_vfs(
+            cx,
+            asupersync::fs::UnixVfs::new(),
+            path,
+            keys,
+            recovered,
+        )
+        .await
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<V: Vfs + Clone> Database<V> {
+    /// The caller-selected filesystem form of
+    /// [`Database::open_restoring_capsules`], with identical admission and
+    /// writer-lease rules. The supplied VFS owns both repairs and normal reopen.
+    pub async fn open_restoring_capsules_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        path: impl AsRef<std::path::Path>,
+        keys: crate::DatabaseKeys,
+        recovered: &[VerifiedObject],
+    ) -> Result<Self, CapsuleRecoveryError> {
+        let path = path.as_ref();
+        crate::require_database_dir(cx, &vfs, path).await?;
+        let mut coordinator = fgdb_chronicle::CommitCoordinator::open_with_vfs(
+            cx,
+            vfs.clone(),
+            path,
+            keys.capsule_keys(),
+        )
+        .await
+        .map_err(crate::OpenError::from)?;
+        // An otherwise valid recovered capsule must not let a wrong DEK or a
+        // foreign selected root mutate this database's physical encoding.
+        crate::authenticated_root_store(cx, &vfs, path, &keys).await?;
+        for object in recovered {
+            checkpoint(cx).map_err(crate::OpenError::from)?;
+            let object_id = object.object_id();
+            coordinator
+                .validate_capsule_restore(object_id, object)
+                .map_err(|source| CapsuleRecoveryError::Capsule { object_id, source })?;
+        }
+        let mut verification = Vec::new();
+        for object in recovered {
+            checkpoint(cx).map_err(crate::OpenError::from)?;
+            let object_id = object.object_id();
+            coordinator
+                .restore_capsule(cx, object_id, object, &mut verification)
+                .await
+                .map_err(|source| CapsuleRecoveryError::Capsule { object_id, source })?;
+        }
+        // Move the lease-owning coordinator into the ordinary binder. Dropping
+        // it and calling open would admit an intervening writer between repair
+        // and replay. Keep the same erased Send boundary as ordinary open.
+        let admission: crate::SendFuture<'_, Result<Self, crate::OpenError>> =
+            Box::pin(Self::bind_with_coordinator(
+                cx,
+                vfs,
+                path,
+                keys,
+                false,
+                crate::ReplayRootCapacity::DURABLE,
+                coordinator,
+            ));
+        let mut database = admission.await?;
+        verification.append(&mut database.crypto_verification_events);
+        database.crypto_verification_events = verification;
+        Ok(database)
+    }
 }
 
 impl<V: Vfs + Clone> Database<V> {
