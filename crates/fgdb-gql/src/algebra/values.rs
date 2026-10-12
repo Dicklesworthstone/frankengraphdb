@@ -521,6 +521,96 @@ impl GraphValue {
         visit(self, 0, &mut remaining)
     }
 
+    /// A stored property value as a query value (fgdb-k3nub): a scalar is
+    /// itself, a List keeps its element order and a Map its text keys. `None`
+    /// when the value exceeds the bounds [`Self::validate_bounds`] enforces: a
+    /// stored value is admitted under its own format bounds, and a query value
+    /// is never a truncated copy of one.
+    #[must_use]
+    pub fn from_property_value(value: &fgdb_types::CanonicalPropertyValue) -> Option<Self> {
+        fn visit(
+            value: &fgdb_types::CanonicalPropertyValue,
+            depth: usize,
+            remaining: &mut usize,
+        ) -> Option<GraphValue> {
+            use fgdb_types::CanonicalPropertyValue;
+            if depth > GraphValue::MAX_LIST_DEPTH || *remaining == 0 {
+                return None;
+            }
+            *remaining -= 1;
+            Some(match value {
+                CanonicalPropertyValue::Scalar(scalar) => GraphValue::Scalar(scalar.clone()),
+                CanonicalPropertyValue::List(list) => GraphValue::List(
+                    list.values()
+                        .iter()
+                        .map(|value| visit(value, depth + 1, remaining))
+                        .collect::<Option<Vec<_>>>()?
+                        .into_boxed_slice(),
+                ),
+                CanonicalPropertyValue::Map(map) => GraphValue::map(
+                    map.entries()
+                        .iter()
+                        .map(|entry| {
+                            Some((
+                                Box::<str>::from(entry.key().as_str()),
+                                visit(entry.value(), depth + 1, remaining)?,
+                            ))
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                )?,
+            })
+        }
+        let mut remaining = Self::MAX_LIST_NODES;
+        visit(value, 0, &mut remaining)
+    }
+
+    /// This value as a stored property value (fgdb-k3nub). `None` for a value
+    /// no property can hold: a vertex, edge, path or element list at any depth,
+    /// a map key that is not UCS_BASIC text, or a collection beyond the stored
+    /// format's bounds. Depth is checked before descending.
+    #[must_use]
+    pub fn to_property_value(&self) -> Option<fgdb_types::CanonicalPropertyValue> {
+        fn visit(value: &GraphValue, depth: usize) -> Option<fgdb_types::CanonicalPropertyValue> {
+            use fgdb_types::{
+                CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue,
+                CanonicalText,
+            };
+            if depth > GraphValue::MAX_LIST_DEPTH {
+                return None;
+            }
+            match value {
+                GraphValue::Scalar(scalar) => Some(CanonicalPropertyValue::Scalar(scalar.clone())),
+                GraphValue::List(values) => CanonicalList::try_new(
+                    values
+                        .iter()
+                        .map(|value| visit(value, depth + 1))
+                        .collect::<Option<Vec<_>>>()?,
+                )
+                .ok()
+                .map(CanonicalPropertyValue::List),
+                GraphValue::Map { keys, values } => CanonicalMap::try_new(
+                    keys.iter()
+                        .zip(values.iter())
+                        .map(|(key, value)| {
+                            Some(CanonicalMapEntry::new(
+                                CanonicalText::new_ucs_basic(key).ok()?,
+                                visit(value, depth + 1)?,
+                            ))
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                )
+                .ok()
+                .map(CanonicalPropertyValue::Map),
+                GraphValue::Vertex(_)
+                | GraphValue::Path(_)
+                | GraphValue::Vertices(_)
+                | GraphValue::Edges(_)
+                | GraphValue::Edge(_) => None,
+            }
+        }
+        visit(self, 0)
+    }
+
     /// Self-delimiting, domain-separated identity bytes. Encoding is iterative;
     /// even externally constructed deep values never recurse on the stack.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, fgdb_types::ScalarEncodeError> {

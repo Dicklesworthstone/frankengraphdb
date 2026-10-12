@@ -44,7 +44,9 @@ use fgdb_delta_types::{
     CanonicalError, CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, PropertyKeyId,
     RelationId, SchemaEpoch,
 };
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, GraphId, LogicalCommandSeq, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalPropertyValue, CommitSeq, GraphId, LogicalCommandSeq, ObjectId, VId,
+};
 use std::collections::BTreeSet;
 
 /// A transaction reading at a fixed sequence, writing into a private workspace.
@@ -464,7 +466,7 @@ impl Transaction {
         &mut self,
         elem: ElementId,
         property: PropertyKeyId,
-    ) -> Option<CanonicalScalar> {
+    ) -> Option<CanonicalPropertyValue> {
         self.read_set.insert(ConflictKey::Element(elem));
         match elem {
             ElementId::Vertex(vid) => self.workspace.vertex(vid)?.props.get(&property).cloned(),
