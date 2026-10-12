@@ -8,7 +8,7 @@ use super::{BindingSlot, MAX_PATTERN_VERTICES};
 use crate::GlaExecutionEvent;
 use crate::algebra_exec::ProjectedRows;
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 
@@ -527,13 +527,12 @@ impl GraphValue {
     /// stored value is admitted under its own format bounds, and a query value
     /// is never a truncated copy of one.
     #[must_use]
-    pub fn from_property_value(value: &fgdb_types::CanonicalPropertyValue) -> Option<Self> {
+    pub fn from_property_value(value: &CanonicalPropertyValue) -> Option<Self> {
         fn visit(
-            value: &fgdb_types::CanonicalPropertyValue,
+            value: &CanonicalPropertyValue,
             depth: usize,
             remaining: &mut usize,
         ) -> Option<GraphValue> {
-            use fgdb_types::CanonicalPropertyValue;
             if depth > GraphValue::MAX_LIST_DEPTH || *remaining == 0 {
                 return None;
             }
@@ -564,17 +563,64 @@ impl GraphValue {
         visit(value, 0, &mut remaining)
     }
 
+    /// A stored property value as an owned query value for an executor
+    /// (fgdb-k3nub). Every node is admitted as a scratch entry and every
+    /// scalar payload quantum as work and scratch, all before the copy is
+    /// built, as a scalar operand is admitted before it is cloned. A value
+    /// beyond the query bounds raises `StoredValueBounds`; it is never NULL.
+    pub(crate) fn admit_property_value<E: From<crate::GraphIntegerError>>(
+        value: &CanonicalPropertyValue,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        fn charge<E>(
+            value: &CanonicalPropertyValue,
+            control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            control(crate::GlaExecutionEvent::ScratchEntry)?;
+            match value {
+                CanonicalPropertyValue::Scalar(scalar) => {
+                    crate::algebra_exec::charge_payload(scalar, &mut |event| {
+                        control(event)?;
+                        control(crate::GlaExecutionEvent::ScratchEntry)
+                    })
+                }
+                CanonicalPropertyValue::List(list) => list
+                    .values()
+                    .iter()
+                    .try_for_each(|value| charge(value, &mut *control)),
+                CanonicalPropertyValue::Map(map) => map.entries().iter().try_for_each(|entry| {
+                    let key = entry.key().as_str().len();
+                    for _ in 0..=key.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                        control(crate::GlaExecutionEvent::ScratchEntry)?;
+                    }
+                    charge(entry.value(), &mut *control)
+                }),
+            }
+        }
+        if value.is_collection() {
+            charge(value, control)?;
+        } else if let Some(scalar) = value.as_scalar() {
+            crate::algebra_exec::charge_payload(scalar, &mut |event| {
+                control(event)?;
+                control(crate::GlaExecutionEvent::ScratchEntry)
+            })?;
+        }
+        Self::from_property_value(value).ok_or_else(|| {
+            E::from(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::StoredValueBounds,
+            })
+        })
+    }
+
     /// This value as a stored property value (fgdb-k3nub). `None` for a value
     /// no property can hold: a vertex, edge, path or element list at any depth,
     /// a map key that is not UCS_BASIC text, or a collection beyond the stored
     /// format's bounds. Depth is checked before descending.
     #[must_use]
-    pub fn to_property_value(&self) -> Option<fgdb_types::CanonicalPropertyValue> {
-        fn visit(value: &GraphValue, depth: usize) -> Option<fgdb_types::CanonicalPropertyValue> {
-            use fgdb_types::{
-                CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue,
-                CanonicalText,
-            };
+    pub fn to_property_value(&self) -> Option<CanonicalPropertyValue> {
+        fn visit(value: &GraphValue, depth: usize) -> Option<CanonicalPropertyValue> {
+            use fgdb_types::{CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalText};
             if depth > GraphValue::MAX_LIST_DEPTH {
                 return None;
             }
@@ -1131,16 +1177,21 @@ impl RowKey for GraphValueRow {
         self.values.len()
     }
     fn cell(&self, at: usize) -> ValueRef<'_> {
-        match &self.values[at] {
-            GraphValue::Scalar(value) => ValueRef::Scalar(value),
-            GraphValue::Vertex(value) => ValueRef::Vertex(*value),
-            GraphValue::Path(value) => ValueRef::Path(value),
-            GraphValue::Vertices(value) => ValueRef::Vertices(value),
-            GraphValue::Edges(value) => ValueRef::Edges(value),
-            GraphValue::Edge(value) => ValueRef::Edge(*value),
-            GraphValue::List(value) => ValueRef::List(value),
-            GraphValue::Map { keys, values } => ValueRef::Map { keys, values },
-        }
+        value_ref(&self.values[at])
+    }
+}
+
+/// An owned value as the borrowed cell lookups and retention compare.
+fn value_ref(value: &GraphValue) -> ValueRef<'_> {
+    match value {
+        GraphValue::Scalar(value) => ValueRef::Scalar(value),
+        GraphValue::Vertex(value) => ValueRef::Vertex(*value),
+        GraphValue::Path(value) => ValueRef::Path(value),
+        GraphValue::Vertices(value) => ValueRef::Vertices(value),
+        GraphValue::Edges(value) => ValueRef::Edges(value),
+        GraphValue::Edge(value) => ValueRef::Edge(*value),
+        GraphValue::List(value) => ValueRef::List(value),
+        GraphValue::Map { keys, values } => ValueRef::Map { keys, values },
     }
 }
 impl<'a> Borrow<dyn RowKey + 'a> for GraphValueRow {
@@ -1171,22 +1222,22 @@ impl Ord for dyn RowKey + '_ {
     }
 }
 
-pub(super) fn collect_values<'a, E>(
+pub(super) fn collect_values<'a, E: From<crate::GraphIntegerError>>(
     columns: &[ValueProjection],
     bindings: &[Option<VId>],
     projected: &mut ProjectedRows<GraphValueRow>,
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     collect_values_with_paths(columns, bindings, &[], projected, property, control)
 }
 
-pub(super) fn collect_values_with_paths<'a, E>(
+pub(super) fn collect_values_with_paths<'a, E: From<crate::GraphIntegerError>>(
     columns: &[ValueProjection],
     bindings: &[Option<VId>],
     paths: &[Option<GraphPath>],
     projected: &mut ProjectedRows<GraphValueRow>,
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     collect_values_with_element_properties(
@@ -1203,13 +1254,13 @@ pub(super) fn collect_values_with_paths<'a, E>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn collect_values_with_element_properties<'a, E>(
+pub(super) fn collect_values_with_element_properties<'a, E: From<crate::GraphIntegerError>>(
     columns: &[ValueProjection],
     bindings: &[Option<VId>],
     paths: &[Option<GraphPath>],
     projected: &mut ProjectedRows<GraphValueRow>,
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
     edge_type: &mut impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -1249,13 +1300,13 @@ pub(crate) fn property_map_parts(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn collect_values_with_element_maps<'a, E>(
+pub(super) fn collect_values_with_element_maps<'a, E: From<crate::GraphIntegerError>>(
     columns: &[ValueProjection],
     bindings: &[Option<VId>],
     paths: &[Option<GraphPath>],
     projected: &mut ProjectedRows<GraphValueRow>,
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
     edge_type: &mut impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
     vertex_properties: &mut impl FnMut(VId) -> Result<PropertyMapParts<'a>, E>,
@@ -1299,6 +1350,12 @@ pub(super) fn collect_values_with_element_maps<'a, E>(
             }
         };
     }
+    // Stored List and Map properties (fgdb-k3nub) are admitted as owned query
+    // values here, after every selected field is read, so their cells can
+    // borrow them exactly as path-function cells borrow `computed`.
+    let mut stored: [Option<GraphValue>; MAX_PATTERN_VERTICES] = core::array::from_fn(|_| None);
+    let mut collections: [Option<&'a CanonicalPropertyValue>; MAX_PATTERN_VERTICES] =
+        [None; MAX_PATTERN_VERTICES];
     let mut key = [ValueRef::Scalar(&null); MAX_PATTERN_VERTICES];
     for (at, column) in columns.iter().enumerate() {
         control(GlaExecutionEvent::Work)?;
@@ -1313,7 +1370,14 @@ pub(super) fn collect_values_with_element_maps<'a, E>(
                     Some(vid) => property(vid, *key)?,
                     None => None,
                 };
-                ValueRef::Scalar(value.unwrap_or(&null))
+                match value {
+                    Some(CanonicalPropertyValue::Scalar(value)) => ValueRef::Scalar(value),
+                    Some(value) => {
+                        collections[at] = Some(value);
+                        ValueRef::Scalar(&null)
+                    }
+                    None => ValueRef::Scalar(&null),
+                }
             }
             ValueProjection::EdgeProperty { capture, key } => {
                 let value = match paths.get(*capture as usize).and_then(Option::as_ref) {
@@ -1325,7 +1389,14 @@ pub(super) fn collect_values_with_element_maps<'a, E>(
                     }
                     None => None,
                 };
-                ValueRef::Scalar(value.unwrap_or(&null))
+                match value {
+                    Some(CanonicalPropertyValue::Scalar(value)) => ValueRef::Scalar(value),
+                    Some(value) => {
+                        collections[at] = Some(value);
+                        ValueRef::Scalar(&null)
+                    }
+                    None => ValueRef::Scalar(&null),
+                }
             }
             ValueProjection::Labels { slot } => match bindings[slot.ordinal() as usize] {
                 Some(vid) => match vertex_labels(vid)? {
@@ -1384,6 +1455,16 @@ pub(super) fn collect_values_with_element_maps<'a, E>(
             control(GlaExecutionEvent::Work)?;
         }
     }
+    for at in 0..columns.len() {
+        if let Some(value) = collections[at] {
+            stored[at] = Some(GraphValue::admit_property_value(value, control)?);
+        }
+    }
+    for (cell, value) in key.iter_mut().zip(&stored) {
+        if let Some(value) = value {
+            *cell = value_ref(value);
+        }
+    }
     let borrowed = BorrowedRow(&key[..columns.len()]);
     // Resolve ALL selected fields before testing the page cutoff. A later
     // unreadable property is an error even when an earlier cell already sorts
@@ -1404,15 +1485,17 @@ pub(super) fn collect_values_with_element_maps<'a, E>(
     }
     let mut copied: [Option<GraphValue>; MAX_PATTERN_VERTICES] = core::array::from_fn(|_| None);
     for at in 0..columns.len() {
-        if computed[at].is_none() {
+        if computed[at].is_none() && stored[at].is_none() {
             copied[at] = Some(key[at].into_owned());
         }
     }
+    // An admitted stored collection moves into the row; it is never copied.
     for at in 0..columns.len() {
         values.push(
             copied[at]
                 .take()
                 .or_else(|| computed[at].take())
+                .or_else(|| stored[at].take())
                 .expect("resolved cell"),
         );
     }

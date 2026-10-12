@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod map_overlay_tests;
-mod membership;
+pub(crate) mod membership;
 mod subscript;
 mod temporal;
 

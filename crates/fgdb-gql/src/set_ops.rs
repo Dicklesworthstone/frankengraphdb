@@ -19,7 +19,7 @@ mod incremental;
 mod join;
 mod merge;
 mod procedure;
-mod projection;
+pub(crate) mod projection;
 pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;

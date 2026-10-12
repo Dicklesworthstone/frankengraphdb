@@ -330,16 +330,23 @@ pub enum GraphIntegerErrorKind {
     TemporalConstruction,
     /// A field a temporal value does not have, such as `d.hour` of a date.
     TemporalField,
+    /// A stored List or Map property exceeds the query value bounds
+    /// (`GraphValue::MAX_LIST_NODES`, `MAX_LIST_DEPTH`), so no complete
+    /// query value can hold it (fgdb-k3nub). It is never truncated.
+    StoredValueBounds,
 }
 impl GraphIntegerErrorKind {
-    /// An arithmetic data exception (GQL class 22: division by zero, numeric
-    /// overflow) that every statement family raises, a WHERE predicate
-    /// included. The other kinds are a value that does not fit its operator.
-    /// A Boolean predicate reads those as UNKNOWN, so a property holding
-    /// mixed types never escapes as a query error.
+    /// A data exception that every statement family raises, a WHERE predicate
+    /// included: division by zero, numeric overflow (GQL class 22), and a
+    /// stored value too large to read whole. The other kinds are a value that
+    /// does not fit its operator. A Boolean predicate reads those as UNKNOWN,
+    /// so a property holding mixed types never escapes as a query error.
     #[must_use]
     pub const fn is_arithmetic_exception(self) -> bool {
-        matches!(self, Self::DivisionByZero | Self::Overflow)
+        matches!(
+            self,
+            Self::DivisionByZero | Self::Overflow | Self::StoredValueBounds
+        )
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -293,7 +293,7 @@ impl Topology {
                     &operators[self.projection],
                     &slots[..self.slots.len()],
                     &mut projected,
-                    &mut |_, _| -> Result<Option<&CanonicalScalar>, E> {
+                    &mut |_, _| -> Result<Option<&fgdb_types::CanonicalPropertyValue>, E> {
                         unreachable!("the selected projection contains only vertex identities")
                     },
                     control,

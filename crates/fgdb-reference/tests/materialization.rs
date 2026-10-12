@@ -17,7 +17,8 @@ use fgdb_delta_types::{
 };
 use fgdb_reference::{ApplyError, ReferenceDatabase, ReferenceGraph};
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq,
+    ObjectId, VId,
 };
 
 fn oid(seed: u8) -> ObjectId {
@@ -39,7 +40,8 @@ fn create_vertex(vid: u128, ordinal: u64, name: &str) -> DeltaRow {
             PROP_NAME,
             CanonicalScalar::Text(
                 fgdb_types::CanonicalText::new_ucs_basic(name).expect("bounded text"),
-            ),
+            )
+            .into(),
         )],
         valid_time: None,
     }
@@ -58,8 +60,9 @@ fn create_edge(eid: u128, ordinal: u64, src: u128, relation: RelationId, dst: u1
     }
 }
 
-fn text(value: &str) -> CanonicalScalar {
+fn text(value: &str) -> CanonicalPropertyValue {
     CanonicalScalar::Text(fgdb_types::CanonicalText::new_ucs_basic(value).expect("bounded text"))
+        .into()
 }
 
 /// A three-vertex social graph, built the only way this database can build

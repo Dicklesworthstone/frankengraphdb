@@ -36,7 +36,7 @@ pub(crate) use values::{RowKey, ValueRef};
 use crate::{BoundPlan, EdgeDirection, ReturnProjection};
 use core::marker::PhantomData;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 /// An ordinal in the binding table, independent of a parser variable's name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -266,7 +266,7 @@ impl VertexPredicate {
     pub fn matches(
         &self,
         labels: &[LabelId],
-        properties: &[(PropertyKeyId, CanonicalScalar)],
+        properties: &[(PropertyKeyId, CanonicalPropertyValue)],
     ) -> bool {
         self.matches_borrowed(
             labels.iter().copied(),
@@ -274,12 +274,16 @@ impl VertexPredicate {
         )
     }
 
-    /// Evaluate borrowed canonical fields without cloning scalar payloads.
+    /// Evaluate borrowed canonical fields without cloning their payloads.
+    ///
+    /// A stored List or Map (fgdb-k3nub) is a present, non-NULL value, and
+    /// every predicate here compares a property against a scalar literal: such
+    /// a comparison is UNKNOWN, exactly as for an absent property, and rejects.
     #[must_use]
     pub fn matches_borrowed<'a>(
         &self,
         labels: impl IntoIterator<Item = LabelId>,
-        properties: impl IntoIterator<Item = (PropertyKeyId, &'a CanonicalScalar)>,
+        properties: impl IntoIterator<Item = (PropertyKeyId, &'a CanonicalPropertyValue)>,
     ) -> bool {
         match self {
             Self::HasLabel(label) => labels.into_iter().any(|actual| actual == *label),
@@ -287,16 +291,18 @@ impl VertexPredicate {
                 key,
                 comparison,
                 value,
-            } => properties.into_iter().any(|(actual_key, scalar)| {
+            } => properties.into_iter().any(|(actual_key, value_ref)| {
                 actual_key == *key
-                    && comparison
-                        .accepts_scalar_pair(Some(scalar), Some(&CanonicalScalar::Int(*value)))
+                    && comparison.accepts_scalar_pair(
+                        value_ref.as_scalar(),
+                        Some(&CanonicalScalar::Int(*value)),
+                    )
             }),
             Self::ScalarProperty { key, predicate } => {
                 let actual = properties
                     .into_iter()
                     .find(|(actual_key, _)| actual_key == key)
-                    .map(|(_, value)| value);
+                    .and_then(|(_, value)| value.as_scalar());
                 predicate.matches(actual)
             }
             Self::PropertyNull { key, is_null } => {
@@ -304,7 +310,9 @@ impl VertexPredicate {
                     .into_iter()
                     .find(|(actual_key, _)| actual_key == key)
                     .map(|(_, value)| value);
-                actual.is_none_or(|value| matches!(value, CanonicalScalar::Null)) == *is_null
+                actual.is_none_or(|value| {
+                    matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))
+                }) == *is_null
             }
         }
     }

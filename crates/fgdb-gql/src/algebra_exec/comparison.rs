@@ -1,9 +1,31 @@
 //! Borrowed, binding-dependent property selection in the shared GLA visitor.
 
 use crate::GlaExecutionEvent;
-use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator};
+use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator, GraphValue, IntegerComparison};
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
+
+/// Two stored List or Map property values compare as composite values do:
+/// element by element, three-valued (fgdb-9cawv, fgdb-k3nub). Both are
+/// admitted as owned query values first; a collection against a scalar,
+/// vertex or edge is the caller's UNKNOWN and never reaches here.
+pub(crate) fn compare_stored<E: From<crate::GraphIntegerError>>(
+    comparison: IntegerComparison,
+    left: &CanonicalPropertyValue,
+    right: &CanonicalPropertyValue,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<bool>, E> {
+    use crate::set_ops::projection::membership;
+    let left = GraphValue::admit_property_value(left, control)?;
+    let right = GraphValue::admit_property_value(right, control)?;
+    match comparison {
+        IntegerComparison::Equal => membership::equal(&left, &right, control),
+        IntegerComparison::NotEqual => {
+            Ok(membership::equal(&left, &right, control)?.map(|equal| !equal))
+        }
+        ordered => membership::order(ordered, &left, &right, control),
+    }
+}
 
 /// Both source reads are explicit and fallible; no source failure is a missing
 /// value. A null binding has no property source and rejects without a read.
@@ -14,11 +36,11 @@ pub(crate) fn compare_element_properties<'a, E: From<crate::GraphIntegerError>>(
     operator: &GlaOperator,
     bindings: &[Option<VId>],
     paths: &[Option<crate::algebra::GraphPath>],
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     edge_property: &mut impl FnMut(
         fgdb_types::EId,
         PropertyKeyId,
-    ) -> Result<Option<&'a CanonicalScalar>, E>,
+    ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<bool, E> {
     if let GlaOperator::SelectBoolean { expression } = operator {
@@ -33,7 +55,7 @@ pub(crate) fn compare_element_properties<'a, E: From<crate::GraphIntegerError>>(
 pub(crate) fn compare_properties<'a, E: From<crate::GraphIntegerError>>(
     operator: &GlaOperator,
     bindings: &[Option<VId>],
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<bool, E> {
     if let GlaOperator::SelectBoolean { expression } = operator {
@@ -59,6 +81,18 @@ pub(crate) fn compare_properties<'a, E: From<crate::GraphIntegerError>>(
     let left = property(*left, *left_key)?;
     control(GlaExecutionEvent::Work)?;
     let right = property(*right, *right_key)?;
+    if let (Some(left), Some(right)) = (left, right)
+        && left.is_collection()
+        && right.is_collection()
+    {
+        control(GlaExecutionEvent::Work)?;
+        return Ok(compare_stored(*comparison, left, right, control)? == Some(true));
+    }
+    // A collection against a scalar compares UNKNOWN, as an absent value does.
+    let (left, right) = (
+        left.and_then(CanonicalPropertyValue::as_scalar),
+        right.and_then(CanonicalPropertyValue::as_scalar),
+    );
     for value in [left, right].into_iter().flatten() {
         charge_payload(value, control)?;
     }

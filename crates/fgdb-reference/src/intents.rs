@@ -272,7 +272,12 @@ impl StatementFailure {
     /// failure. An accessor so a caller can `.expect(..)` rather than write an
     /// irrefutable-pattern escape hatch.
     #[allow(clippy::type_complexity)]
-    pub fn mismatch_values(&self) -> Option<(Option<&CanonicalPropertyValue>, Option<&CanonicalPropertyValue>)> {
+    pub fn mismatch_values(
+        &self,
+    ) -> Option<(
+        Option<&CanonicalPropertyValue>,
+        Option<&CanonicalPropertyValue>,
+    )> {
         match self {
             Self::Mismatch {
                 expected, actual, ..
@@ -289,7 +294,11 @@ impl StatementFailure {
     /// The property and both values of a conflicting-duplicate refusal.
     pub fn conflicting_values(
         &self,
-    ) -> Option<(PropertyKeyId, &CanonicalPropertyValue, &CanonicalPropertyValue)> {
+    ) -> Option<(
+        PropertyKeyId,
+        &CanonicalPropertyValue,
+        &CanonicalPropertyValue,
+    )> {
         match self {
             Self::ConflictingPropertyValues {
                 property,

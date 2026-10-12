@@ -18,7 +18,9 @@ use fgdb_strata::{
     encode_block, encode_block_with_properties,
 };
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{CanonicalLocalTime, CanonicalScalar, CanonicalTime, CommitSeq, EId, VId};
+use fgdb_types::{
+    CanonicalLocalTime, CanonicalPropertyValue, CanonicalScalar, CanonicalTime, CommitSeq, EId, VId,
+};
 
 const K_OID: [u8; 32] = [0x5a; 32];
 
@@ -33,11 +35,13 @@ fn distinct_rows() -> Vec<EdgePropertyRow> {
         vec![
             (
                 PropertyKeyId(41),
-                CanonicalScalar::ucs_basic_text("ada").expect("admissible"),
+                CanonicalScalar::ucs_basic_text("ada")
+                    .expect("admissible")
+                    .into(),
             ),
-            (PropertyKeyId(59), CanonicalScalar::Int(-1815)),
+            (PropertyKeyId(59), CanonicalScalar::Int(-1815).into()),
         ],
-        vec![(PropertyKeyId(67), CanonicalScalar::Bool(true))],
+        vec![(PropertyKeyId(67), CanonicalScalar::Bool(true).into())],
     ]
 }
 
@@ -152,7 +156,7 @@ fn a_profile_2_value_and_only_one_makes_the_patch_v2() {
     let time = CanonicalLocalTime::from_hms_nano(21, 40, 32, 142_000_000).expect("a time");
     rows[1].push((
         PropertyKeyId(71),
-        CanonicalScalar::Time(CanonicalTime::new(time, 3_600).expect("an offset time")),
+        CanonicalScalar::Time(CanonicalTime::new(time, 3_600).expect("an offset time")).into(),
     ));
     let temporal = encode_property_patch(&rows).expect("encodes");
     assert_eq!(temporal[4..6], PROPERTY_PATCH_FORMAT_V2.to_le_bytes());
@@ -185,8 +189,8 @@ fn empty_and_unsorted_rows_are_refused_in_both_directions() {
         Err(EdgePropertyPatchError::EmptyRow { at: 0 })
     );
     let unsorted: Vec<EdgePropertyRow> = vec![vec![
-        (PropertyKeyId(59), CanonicalScalar::Int(1)),
-        (PropertyKeyId(41), CanonicalScalar::Int(2)),
+        (PropertyKeyId(59), CanonicalScalar::Int(1).into()),
+        (PropertyKeyId(41), CanonicalScalar::Int(2).into()),
     ]];
     assert_eq!(
         encode_property_patch(&unsorted),
@@ -209,7 +213,10 @@ fn empty_and_unsorted_rows_are_refused_in_both_directions() {
 #[test]
 fn the_row_ceiling_is_shared_with_the_locator_in_both_directions() {
     let row = |seed: u64| -> EdgePropertyRow {
-        vec![(PropertyKeyId(seed), CanonicalScalar::Int(seed as i64))]
+        vec![(
+            PropertyKeyId(seed),
+            CanonicalScalar::Int(seed as i64).into(),
+        )]
     };
     let too_many: Vec<EdgePropertyRow> = (1..=u64::from(MAX_PROPERTY_PATCH_ROWS) + 1)
         .map(row)
@@ -261,7 +268,12 @@ fn a_full_locator_column_at_the_row_ceiling_is_lawful() {
         })
         .collect();
     let rows: Vec<EdgePropertyRow> = (1..=n as u64)
-        .map(|i| vec![(PropertyKeyId(i), CanonicalScalar::Int(i as i64))])
+        .map(|i| {
+            vec![(
+                PropertyKeyId(i),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(i as i64)),
+            )]
+        })
         .collect();
     encode_block_with_properties(0, None, &entries, ObjectId([0xab; 32]), &locators, &rows)
         .expect("a full 255-row hosted patch encodes");
