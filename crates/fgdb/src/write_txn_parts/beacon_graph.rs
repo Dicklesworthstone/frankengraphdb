@@ -16,6 +16,9 @@ use std::collections::{BTreeMap, btree_map::Entry};
 
 type Incidence = (VId, RelationId, VId);
 
+#[path = "beacon_graph/indexed.rs"]
+mod indexed;
+
 /// Edge history, overlay identities and new edge-read witnesses count against
 /// BOTH the shared source allowance and the graph-specific scratch ceiling.
 /// No per-lane reset of work or source scratch is possible.
@@ -162,6 +165,31 @@ impl WriteTxn {
             Result<Vec<GraphHybridHit>, BeaconError>,
         ) -> Result<Vec<GraphHybridHit>, BeaconError>,
     ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
+        self.beacon_search_graph_with_access_observed(
+            database, cx, options, query, expansion, false, observer,
+            prepare_filter, eligible, finish_filter,
+        )
+    }
+
+    /// The access choice changes only adjacency production. Corpus selection,
+    /// projection, filtering, fusion and all enclosing admissions stay shared.
+    /// Neither source is a fallback after failure in the other source.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn beacon_search_graph_with_access_observed<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        indexed: bool,
+        observer: Option<Observer<'_>>,
+        prepare_filter: impl FnOnce(&RefCell<Control<'_>>) -> Result<(), BeaconError>,
+        eligible: impl Fn(VId, &RefCell<Control<'_>>) -> bool,
+        finish_filter: impl FnOnce(
+            Result<Vec<GraphHybridHit>, BeaconError>,
+        ) -> Result<Vec<GraphHybridHit>, BeaconError>,
+    ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
         let graph = RefCell::new(None);
         self.beacon_read(
             database,
@@ -198,17 +226,24 @@ impl WriteTxn {
             |index, snapshot, work| {
                 let result = (|| {
                     let hits = if let Some(mut graph) = graph.borrow_mut().take() {
-                        if expansion.max_hops != 0 && !expansion.seeds.is_empty() {
-                            self.beacon_graph_edges(snapshot, &mut graph, expansion, work)?;
+                        if indexed {
+                            indexed::expand(
+                                self, snapshot, &graph, expansion, query.graph_candidates,
+                                work, |id| eligible(id, work),
+                            )?
+                        } else {
+                            if expansion.max_hops != 0 && !expansion.seeds.is_empty() {
+                                self.beacon_graph_edges(snapshot, &mut graph, expansion, work)?;
+                            }
+                            graph.expand_filtered(
+                                expansion.seeds,
+                                expansion.max_hops,
+                                expansion.include_seeds,
+                                query.graph_candidates,
+                                |id, _| Ok(eligible(id, work)),
+                                &mut Shared(work),
+                            )?
                         }
-                        graph.expand_filtered(
-                            expansion.seeds,
-                            expansion.max_hops,
-                            expansion.include_seeds,
-                            query.graph_candidates,
-                            |id, _| Ok(eligible(id, work)),
-                            &mut Shared(work),
-                        )?
                     } else {
                         Vec::new()
                     };
@@ -250,6 +285,54 @@ impl WriteTxn {
             scratch: Cell::new(0),
             limit: expansion.limits.max_source_scratch,
         };
+        let mut changes = self.beacon_graph_changes(&edge_work)?;
+        let mut emit = |incidence: Incidence| -> Result<(), BeaconError> {
+            edge_work.source(SourceEvent::Work)?;
+            work.borrow_mut().record()?;
+            let (src, relation, dst) = incidence;
+            if expansion
+                .relation
+                .is_none_or(|requested| requested == relation)
+                && graph.contains(src)
+                && graph.contains(dst)
+            {
+                graph.insert_edge(src, dst, expansion.direction, &mut Shared(work))?;
+            }
+            Ok(())
+        };
+        source::visit_edges(
+            &snapshot.blocks,
+            self.basis,
+            &mut |event| edge_work.source(event),
+            |edge, _| {
+                edge_work.observe(self, ElementId::Edge(edge.eid))?;
+                edge_work.observe(self, ElementId::Vertex(edge.src))?;
+                let after =
+                    changes
+                        .remove(&edge.eid)
+                        .unwrap_or(Some((edge.src, edge.relation, edge.dst)));
+                if let Some(incidence) = after {
+                    emit(incidence)?;
+                }
+                Ok(())
+            },
+        )?;
+        for (_, after) in changes {
+            edge_work.source(SourceEvent::Work)?;
+            if let Some(incidence) = after {
+                emit(incidence)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Canonical prepared incidence, shared by materialized and indexed reads.
+    /// Raw intents supply negative observations only; ENSURE aliases and
+    /// cascade retirements must come from the prepared net, never be replayed.
+    fn beacon_graph_changes(
+        &self,
+        edge_work: &EdgeWork<'_, '_>,
+    ) -> Result<BTreeMap<EId, Option<Incidence>>, BeaconError> {
         // Input spelling supplies negative-read dependencies ONLY. It must
         // never be interpreted as an unconditional insertion or deletion.
         for row in self.staged.iter().flat_map(|batch| &batch.rows) {
@@ -267,9 +350,7 @@ impl WriteTxn {
                 _ => {}
             }
         }
-        // Only changed identities are staged. Native winners stream directly
-        // into the bounded graph, rather than cloning the entire edge table or
-        // reapplying every intent once per edge.
+        // Only changed identities are retained, never the entire edge table.
         let mut changes = BTreeMap::new();
         if let Some(prepared) = &self.prepared {
             for coordinate in prepared.template.coordinate_entries() {
@@ -329,44 +410,7 @@ impl WriteTxn {
                 }
             }
         }
-        let mut emit = |incidence: Incidence| -> Result<(), BeaconError> {
-            edge_work.source(SourceEvent::Work)?;
-            work.borrow_mut().record()?;
-            let (src, relation, dst) = incidence;
-            if expansion
-                .relation
-                .is_none_or(|requested| requested == relation)
-                && graph.contains(src)
-                && graph.contains(dst)
-            {
-                graph.insert_edge(src, dst, expansion.direction, &mut Shared(work))?;
-            }
-            Ok(())
-        };
-        source::visit_edges(
-            &snapshot.blocks,
-            self.basis,
-            &mut |event| edge_work.source(event),
-            |edge, _| {
-                edge_work.observe(self, ElementId::Edge(edge.eid))?;
-                edge_work.observe(self, ElementId::Vertex(edge.src))?;
-                let after =
-                    changes
-                        .remove(&edge.eid)
-                        .unwrap_or(Some((edge.src, edge.relation, edge.dst)));
-                if let Some(incidence) = after {
-                    emit(incidence)?;
-                }
-                Ok(())
-            },
-        )?;
-        for (_, after) in changes {
-            edge_work.source(SourceEvent::Work)?;
-            if let Some(incidence) = after {
-                emit(incidence)?;
-            }
-        }
-        Ok(())
+        Ok(changes)
     }
 }
 
