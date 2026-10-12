@@ -13,6 +13,7 @@ mod execute;
 pub(crate) use aggregate::{WriteReturnGroup, WriteReturnGroupSpec};
 pub(crate) use execute::{
     finish_owned_aggregate, finish_owned_projection, finish_owned_tail, owned_head_policy,
+    sort_canonical_values,
 };
 mod filter;
 mod incremental;

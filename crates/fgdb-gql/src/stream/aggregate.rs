@@ -758,8 +758,8 @@ pub(crate) enum NumericState {
     },
 }
 impl NumericState {
-    // Order-sensitive cells need an additional physical source-order proof;
-    // keep them out of supports(), the commutative reducer admission contract.
+    // Order-sensitive cells need an additional source-order or finalization
+    // proof; keep them out of supports(), the commutative reducer contract.
     pub(crate) fn collects(function: GraphAggregateFunction) -> bool {
         matches!(
             function,
@@ -806,6 +806,27 @@ impl NumericState {
                 Self::Distinct(Box::new(DistinctState::new(function)))
             }
         })
+    }
+
+    /// Finalize a collection whose caller has proved that canonical value
+    /// order equals its logical child's order within every group. Ordinary
+    /// source-ordered collections keep using finish_governed unchanged.
+    /// DISTINCT support retires before sorting the retained values in place;
+    /// no keys, payloads or input rows are copied for this ordering step.
+    pub(crate) fn finish_canonical_collection_governed<E>(
+        self,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
+    ) -> Result<GraphAggregateValue, E> {
+        let mut state = match self {
+            Self::Distinct(state) => (*state).into_numeric(),
+            state => state,
+        };
+        if let Self::Collect(values) = &mut state {
+            crate::set_ops::sort_canonical_values(values, &mut |event| {
+                control(input_event(event))
+            })?;
+        }
+        state.finish_governed(control)
     }
 
     /// Move extrema and retire DISTINCT support. Normalization keeps the exact

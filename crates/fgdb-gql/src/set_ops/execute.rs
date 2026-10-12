@@ -709,6 +709,18 @@ pub(crate) fn finish_owned_tail<E, C>(
     })
 }
 
+/// Restore canonical child order for a proved plain aggregate input. The
+/// caller admits the scalar, identity and path projection domains; this does
+/// not admit arbitrary computed collections or explicit ORDER BY semantics.
+/// The shared fallible sort moves retained values in place and charges every
+/// comparison, scalar/path payload examination and swap to the same control.
+pub(crate) fn sort_canonical_values<E>(
+    values: &mut [GraphValue],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    merge::sort(values, control, &mut compare_value)
+}
+
 fn compare_value<E>(
     a: &GraphValue,
     b: &GraphValue,

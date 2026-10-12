@@ -374,8 +374,10 @@ fn computed_collections_keep_original_child_order_and_unproved_shapes_refuse() {
     );
     for text in [
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(b) AS values",
-        "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(a) AS starts,COLLECT(r) AS edges",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(b) AS ends,COLLECT(r.p) AS values",
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values,COLLECT(r) AS edges",
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p + 1) AS values",
     ] {
         assert!(
             matches!(
@@ -384,6 +386,232 @@ fn computed_collections_keep_original_child_order_and_unproved_shapes_refuse() {
             ),
             "{text}"
         );
+    }
+}
+
+// Independent property-order oracle. The child orders its projected columns;
+// within a group, the first varying column is the collected integer property.
+// Edge identities intentionally visit [9, -4, 9, NULL, 7], a different order.
+fn property_collections(s: &Source, direction: usize, grouped: bool) -> Vec<GraphAggregateRow> {
+    let mut groups: BTreeMap<Vec<GraphValue>, Vec<i64>> = BTreeMap::new();
+    if !grouped {
+        groups.insert(Vec::new(), Vec::new());
+    }
+    for (a, b, properties) in s.edges.values() {
+        let (a, b) = if direction == 1 { (*b, *a) } else { (*a, *b) };
+        let ends = if direction == 2 && a != b {
+            vec![b, a]
+        } else {
+            vec![b]
+        };
+        for end in ends {
+            let key = if grouped {
+                vec![GraphValue::Vertex(end)]
+            } else {
+                Vec::new()
+            };
+            let values = groups.entry(key).or_default();
+            if let Some((_, CanonicalScalar::Int(value))) = properties.first() {
+                values.push(*value);
+            }
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(keys, mut values)| {
+            values.sort();
+            let all = integer_list(&values);
+            values.dedup();
+            GraphAggregateRow::from_group_values(keys, vec![all, integer_list(&values)])
+        })
+        .collect()
+}
+
+fn integer_list(values: &[i64]) -> GraphAggregateValue {
+    list(
+        values
+            .iter()
+            .map(|&value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+            .collect(),
+    )
+}
+
+#[test]
+fn canonical_property_collections_match_identified_batch_order_and_independent_lists() {
+    for mask in 0..32 {
+        for (direction, pattern) in [
+            (0, "(a)-[r:R]->(b)"),
+            (1, "(a)<-[r:R]-(b)"),
+            (2, "(a)-[r:R]-(b)"),
+            (0, "(a)-[r]->(b)"),
+        ] {
+            for grouped in [false, true] {
+                let key = if grouped { "b AS endpoint," } else { "" };
+                let text = format!(
+                    "MATCH {pattern} RETURN {key}COLLECT(r.p) AS values, \
+                     COLLECT(DISTINCT r.p) AS support"
+                );
+                let q = prepare(&text);
+                let before = q.canonical_bytes();
+                let s = source(mask);
+                let expected = property_collections(&s, direction, grouped);
+                assert_eq!(batch(&q, &s), expected, "eager: {mask}: {text}");
+                let drops = s.drops.clone();
+                let mut cursor = EdgeAggregateCursor::new(
+                    s,
+                    EdgeAggregatePlan::compile(&q).unwrap(),
+                    wide(),
+                    || Ok::<_, ()>(()),
+                );
+                assert_eq!(
+                    cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                    expected,
+                    "stream: {mask}: {text}"
+                );
+                assert_eq!(cursor.row_stats().result_rows, expected.len() as u64);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert!(cursor.next().is_none());
+                assert_eq!(q.canonical_bytes(), before);
+            }
+        }
+    }
+    assert_eq!(
+        property_collections(&source(31), 0, false)[0].values(),
+        &[integer_list(&[-4, 7, 9, 9]), integer_list(&[-4, 7, 9])]
+    );
+}
+
+#[test]
+fn canonical_collection_order_precedes_output_expressions_and_group_windows() {
+    for (text, expected) in [
+        (
+            "MATCH (a)-[r:R]->(b) RETURN \
+             [x IN COLLECT(r.p) WHERE x > 0 | x + 1] AS values",
+            vec![GraphAggregateRow::from_group_values(
+                vec![],
+                vec![integer_list(&[8, 10, 10])],
+            )],
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN b AS endpoint, COLLECT(r.p) AS values \
+             ORDER BY endpoint DESC SKIP 1 LIMIT 1",
+            vec![GraphAggregateRow::from_group_values(
+                vec![GraphValue::Vertex(VId(1))],
+                vec![integer_list(&[-4])],
+            )],
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN DISTINCT COLLECT(r.p) AS values",
+            vec![GraphAggregateRow::from_group_values(
+                vec![],
+                vec![integer_list(&[-4, 7, 9, 9])],
+            )],
+        ),
+    ] {
+        let q = prepare(text);
+        let s = source(31);
+        assert_eq!(batch(&q, &s), expected, "eager: {text}");
+        let actual =
+            EdgeAggregateCursor::new(s, EdgeAggregatePlan::compile(&q).unwrap(), wide(), || {
+                Ok::<_, ()>(())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(actual, expected, "stream: {text}");
+    }
+}
+
+#[test]
+fn canonical_collection_sort_shares_limits_and_every_cancellation_is_terminal() {
+    let q = prepare(
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values, \
+         COLLECT(DISTINCT r.p) AS support",
+    );
+    let plan = EdgeAggregatePlan::compile(&q).unwrap();
+    let mut calls = 0;
+    let mut complete = EdgeAggregateCursor::new(source(31), plan.clone(), wide(), || {
+        calls += 1;
+        Ok::<_, usize>(())
+    });
+    let expected = complete.next().unwrap().unwrap();
+    assert_eq!(
+        expected.values(),
+        &[integer_list(&[-4, 7, 9, 9]), integer_list(&[-4, 7, 9])]
+    );
+    let rows = complete.row_stats();
+    let evaluator = complete.evaluator_stats();
+    drop(complete);
+    let exact = GqlQueryPolicy::new(
+        rows.snapshot_records,
+        1,
+        evaluator.work_units,
+        evaluator.scratch_entries,
+    );
+    assert_eq!(
+        EdgeAggregateCursor::new(source(31), plan.clone(), exact, || Ok::<_, ()>(()))
+            .next()
+            .unwrap()
+            .unwrap(),
+        expected
+    );
+    for policy in [
+        GqlQueryPolicy::new(u64::MAX, 1, evaluator.work_units - 1, u64::MAX),
+        GqlQueryPolicy::new(u64::MAX, 1, u64::MAX, evaluator.scratch_entries - 1),
+    ] {
+        let s = source(31);
+        let drops = s.drops.clone();
+        let mut cursor = EdgeAggregateCursor::new(s, plan.clone(), policy, || Ok::<_, ()>(()));
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Evaluator(_)))
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(cursor.next().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+    for stop in 1..=calls {
+        let s = source(31);
+        let drops = s.drops.clone();
+        let mut at = 0;
+        let mut cursor = EdgeAggregateCursor::new(s, plan.clone(), exact, || {
+            at += 1;
+            if at == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Interrupted(at))) if at == stop
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(cursor.next().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn canonical_collection_pages_do_not_hide_a_late_source_failure() {
+    for count in [0, 1] {
+        let q = prepare(&format!(
+            "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values LIMIT {count}"
+        ));
+        let mut s = source(31);
+        s.fail = Some(EId(5));
+        let drops = s.drops.clone();
+        let mut cursor =
+            EdgeAggregateCursor::new(s, EdgeAggregatePlan::compile(&q).unwrap(), wide(), || {
+                Ok::<_, ()>(())
+            });
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(GraphAggregateError::Source(
+                EdgeScanError::Source("late edge failure")
+            ))))
+        ));
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(cursor.next().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 }
 

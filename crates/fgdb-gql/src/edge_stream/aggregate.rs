@@ -58,12 +58,20 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// Output DISTINCT retains only the best SKIP+LIMIT projected classes and
 /// their best-ranked complete representatives. Both rank and class support
 /// obey this prefix bound; upstream group accumulation is separately resident.
-/// COLLECT and COLLECT DISTINCT require the ordinary edge row-stream order
-/// proof on the complete child: root edge identity, root source identity, then
-/// each joined edge identity. Batch identified inputs sort that child before
-/// aggregation; an unordered private projection cannot be substituted for it.
-/// Row-local input expressions run after this ordered child. Relational input
-/// remains outside this profile. Collection payloads are metered, not spilled.
+/// COLLECT and COLLECT DISTINCT preserve the ordinary edge row-stream order
+/// proof on the complete child: root edge identity, root source identity when
+/// orientation requires it, then each joined edge identity. Row-local input
+/// expressions run after this ordered child.
+///
+/// Plain identified inputs also admit collections of one shared argument when
+/// every preceding input column is a grouping key. Batch execution sorts the
+/// complete child canonically before aggregation. Within each group that
+/// prefix is constant, so sorting the retained collection values reproduces
+/// the child's order; later columns distinguish only equal collected values.
+/// This in-place finalization shares the source's cumulative work allowance
+/// and cancellation checks. It retains no extra input or ordering table.
+/// Relational input remains outside this profile. Collection payloads are
+/// metered, not spilled.
 /// Every child operator and
 /// column is checked before opening the source; a failed plan is never retried
 /// as another source or an eager query. The ordinary row stream's identity
@@ -72,6 +80,7 @@ impl core::error::Error for EdgeAggregateBuildError {
 pub struct EdgeAggregatePlan {
     input: EdgeScanPlan,
     aggregate: PreparedGraphAggregate,
+    canonical_collections: bool,
 }
 impl EdgeAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, EdgeAggregateBuildError> {
@@ -87,16 +96,25 @@ impl EdgeAggregatePlan {
             .aggregates()
             .iter()
             .any(|spec| NumericState::collects(spec.function()));
-        if collects {
-            // Reuse the full canonical order proof, including every appended
-            // edge and undirected orientation. Numeric reducers may relax the
-            // output prefix because they commute; ordered lists cannot.
-            EdgeScanPlan::compile(aggregate.input_pattern().plan())
-                .map_err(EdgeAggregateBuildError::Scan)?;
-        }
+        let canonical_collections = if collects {
+            // Preserve the complete existing source-order proof and its
+            // finalization path. Only a separately proved plain input may
+            // recover the batch order by sorting its retained values.
+            match EdgeScanPlan::compile(aggregate.input_pattern().plan()) {
+                Ok(_) => false,
+                Err(_) if canonical_collection_order_proven(&aggregate) => true,
+                Err(error) => return Err(EdgeAggregateBuildError::Scan(error)),
+            }
+        } else {
+            false
+        };
         let input = join::compile_aggregate(aggregate.input_pattern().plan())
             .map_err(EdgeAggregateBuildError::Scan)?;
-        Ok(Self { input, aggregate })
+        Ok(Self {
+            input,
+            aggregate,
+            canonical_collections,
+        })
     }
     #[must_use]
     pub fn columns(&self) -> &[String] {
@@ -107,6 +125,29 @@ impl EdgeAggregatePlan {
         self.aggregate.key_columns()
     }
 }
+
+fn canonical_collection_order_proven(aggregate: &PreparedGraphAggregate) -> bool {
+    if aggregate.input_projection().is_some()
+        || !aggregate.input_pattern().plan().requires_identified_edges()
+    {
+        return false;
+    }
+    let mut collections = aggregate
+        .aggregates()
+        .iter()
+        .filter(|spec| NumericState::collects(spec.function()));
+    let Some(column) = collections.next().and_then(|spec| spec.argument_column()) else {
+        return false;
+    };
+    // Group equality fixes every earlier column in the child's canonical
+    // lexicographic order. All collections then share this one argument's
+    // value order, including DISTINCT's canonical equality representatives.
+    // The join compiler still validates every child operator, projection and
+    // unpaginated ALL tail; this proof cannot discard an input modifier.
+    collections.all(|spec| spec.argument_column() == Some(column))
+        && (0..column).all(|prior| aggregate.group_key_columns().contains(&prior))
+}
+
 impl core::fmt::Debug for EdgeAggregatePlan {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("EdgeAggregatePlan([REDACTED])")
@@ -141,6 +182,7 @@ struct Accumulation {
 pub struct EdgeAggregateCursor<S, F> {
     input: EdgeScanCursor<S, F>,
     aggregate: PreparedGraphAggregate,
+    canonical_collections: bool,
     state: EdgeScanState,
     pending: Option<PendingGroups>,
     completed: Option<std::vec::IntoIter<GraphAggregateRow>>,
@@ -151,6 +193,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
         Self {
             input: EdgeScanCursor::new(source, plan.input, policy, checkpoint),
             aggregate: plan.aggregate,
+            canonical_collections: plan.canonical_collections,
             state: EdgeScanState::Open,
             pending: None,
             completed: None,
@@ -381,6 +424,11 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
             // share the vertex reducer's governed ownership/normalization.
             let value = match state {
                 basic @ (NumericState::Count(_) | NumericState::Sum(_)) => basic.finish(),
+                other if self.canonical_collections => {
+                    other.finish_canonical_collection_governed(&mut |event| {
+                        meter.event(value_event(event)).map_err(lift)
+                    })?
+                }
                 other => other
                     .finish_governed(&mut |event| meter.event(value_event(event)).map_err(lift))?,
             };
