@@ -183,7 +183,7 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
     if !scope.allows_relation(merge.relation()) {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
-    let proposal = cx.with_restriction(|| {
+    let proposal: super::super::EdgeMergeProposal<Output> = cx.with_restriction(|| {
         let database = RefCell::new(&mut *database);
         let controls = RefCell::new(&mut *execution);
         collect_edge_merge_output(

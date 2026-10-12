@@ -194,6 +194,7 @@ mod query_source {
                 for (vid, view) in &self.vertices {
                     let names = view
                         .effective_labels()
+                        .into_iter()
                         .map(|id| {
                             name(reverse.and_then(|catalog| catalog.labels.get(&id)))
                                 .map(fgdb_gql::algebra::GraphValue::Scalar)
