@@ -165,30 +165,50 @@ fn an_alternation_scans_exactly_its_member_relations() {
         third.add_edge(EId(13), VId(3), VId(7), vec![]);
         db.write(cx, third).await.expect("THIRD edge commits");
 
-        let bind = RelationBind::new()
-            .with_relation("R", R)
-            .with_relation("OTHER", OTHER)
-            .with_relation("THIRD", THIRD);
-        let scan = |text: &str| db.execute_gql(text, &bind).expect(text);
-        assert_eq!(
-            scan("MATCH (a)-[:R|OTHER]->(b) RETURN b"),
-            vec![VId(2), VId(5), VId(9)]
-        );
-        assert_eq!(
-            scan("MATCH (a)-[:OTHER|:R|R]->(b) RETURN b"),
-            vec![VId(2), VId(5), VId(9)]
-        );
-        assert_eq!(
-            scan("MATCH (a)-[:R|OTHER|THIRD]->(b) RETURN b"),
-            scan("MATCH (a)-->(b) RETURN b")
-        );
-
         let symbols = |kind: GraphSymbolKind, name: &str| match (kind, name) {
             (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
             (GraphSymbolKind::Relation, "OTHER") => Some(GraphSymbol::Relation(OTHER)),
             (GraphSymbolKind::Relation, "THIRD") => Some(GraphSymbol::Relation(THIRD)),
             _ => None,
         };
+        // The GQL text surface reads alternation (6405889e). The legacy
+        // RelationBind slice behind execute_gql has one relation per hop and
+        // never read it, so these targets go through the query surface.
+        let targets = |text: &str| -> Vec<VId> {
+            let QueryResult::Rows { rows, .. } = db
+                .query(
+                    &query,
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    GqlQueryPolicy::new(1_000, 1_000, 1_000_000, 1_000_000),
+                )
+                .expect(text)
+            else {
+                panic!("{text} is a row query");
+            };
+            let mut targets: Vec<_> = rows
+                .iter()
+                .map(|row| match &row[..] {
+                    [QueryValue::Value(GraphValue::Vertex(vid))] => *vid,
+                    _ => panic!("{text}: not one vertex cell"),
+                })
+                .collect();
+            targets.sort();
+            targets
+        };
+        assert_eq!(
+            targets("MATCH (a)-[:R|OTHER]->(b) RETURN b"),
+            vec![VId(2), VId(5), VId(9)]
+        );
+        assert_eq!(
+            targets("MATCH (a)-[:OTHER|:R|R]->(b) RETURN b"),
+            vec![VId(2), VId(5), VId(9)]
+        );
+        assert_eq!(
+            targets("MATCH (a)-[:R|OTHER|THIRD]->(b) RETURN b"),
+            targets("MATCH (a)-->(b) RETURN b")
+        );
         // A count cell is Count, Integer or a scalar Int by executor.
         let count = |text: &str| -> i128 {
             let QueryResult::Rows { rows, .. } = db
