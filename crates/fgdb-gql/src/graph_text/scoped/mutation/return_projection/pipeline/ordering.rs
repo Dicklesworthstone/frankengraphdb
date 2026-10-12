@@ -4,6 +4,74 @@
 use super::*;
 use crate::set_text::ReadOrderProjection;
 
+impl crate::set_text::CompoundOrderTemplate {
+    pub(crate) fn prepare<'a>(
+        text: &'a str,
+        declarations: &[(&str, GqlParameterType)],
+        columns: &'a [String],
+        types: &[GraphSetColumnType],
+    ) -> Result<Self, GraphSetTextError> {
+        let mut parser = Parser::new_with_parameter_types(text, declarations)?;
+        let schema: Vec<_> = columns
+            .iter()
+            .zip(types)
+            .map(|(name, kind)| {
+                (
+                    Name {
+                        text: name.as_str(),
+                        at: 0,
+                    },
+                    *kind,
+                )
+            })
+            .collect();
+        let stage = parser
+            .row_expression_page(&schema)?
+            .ok_or_else(|| expected(parser.current.at, "ORDER BY over set output columns"))?;
+        if !matches!(parser.current.kind, TokenKind::End) {
+            return Err(expected(parser.current.at, "end of compound ordering"));
+        }
+        // Declarations may be used by another arm or enclosing page. The
+        // compound owner performs the one complete unused/type check after
+        // gathering actual uses from every leaf and page. Never validate a
+        // partial declaration map as though it were the whole statement.
+        Ok(Self {
+            stage,
+            parameters: parser.syntax.parameters,
+            parameter_offsets: parser.syntax.parameter_offsets,
+        })
+    }
+
+    pub(crate) fn bind(
+        &self,
+        input: PreparedGraphSet,
+        arguments: &GqlParameters,
+    ) -> Result<PreparedGraphSet, GraphSetTextError> {
+        let mut values = Vec::with_capacity(self.parameters.len());
+        for (spec, &at) in self.parameters.iter().zip(&self.parameter_offsets) {
+            let value = arguments
+                .get(&spec.name)
+                .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
+            if !spec.parameter_type.accepts(value.parameter_type()) {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::ParameterTypeMismatch {
+                        expected: spec.parameter_type,
+                        found: value.parameter_type(),
+                    },
+                )
+                .into());
+            }
+            values.push(value);
+        }
+        // Reuse the native page lowering, including its ordered projection
+        // that removes private keys. Set arithmetic has already completed;
+        // adding a key therefore cannot change UNION/DISTINCT multiplicity.
+        // Execution still uses the same cumulative budget and checkpoints.
+        bind_stages(input, std::slice::from_ref(&self.stage), &values)
+    }
+}
+
 struct ExpressionPage {
     at: usize,
     keys: Vec<(ReadValueTemplate, GraphValueOrder)>,
