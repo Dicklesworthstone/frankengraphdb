@@ -328,7 +328,7 @@ impl<K: Copy> Projection<K> {
         work.charge(1)?;
         let text = if config.text.is_some() {
             match self.text.and_then(&mut property) {
-                value if is_null(value) => None,
+                None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
                 Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Text(text))) => {
                     let text = text.as_str();
                     if text.len() > config.max_text_bytes {
@@ -444,7 +444,7 @@ fn packed<'a, K>(
     work.charge(1)?;
     let vector = match property(key) {
         // An absent (including capability-masked) vector omits the lane.
-        value if is_null(value) => None,
+        None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
         Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Bytes(bytes))) => {
             let bytes = bytes.as_slice();
             if dimensions.checked_mul(4) != Some(bytes.len()) {

@@ -945,7 +945,7 @@ impl EdgeScanPlan {
         }
         Ok(Some(paths))
     }
-    fn project<E>(
+    fn project<E: From<crate::GraphIntegerError>>(
         &self,
         row: &Binding<'_>,
         paths: &[Option<GraphPath>],

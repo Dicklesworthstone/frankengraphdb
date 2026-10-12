@@ -614,7 +614,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
 
 // A bounded transient row, using the same sealed GLA collector as row streams.
 // The generic bound exposes its inherited projection without a second encoder.
-fn project_input_row<Row: VertexScanOutput, E>(
+fn project_input_row<Row: VertexScanOutput, E: From<crate::GraphIntegerError>>(
     vid: VId,
     row: VertexScanRow<'_>,
     projection: &GlaOperator,

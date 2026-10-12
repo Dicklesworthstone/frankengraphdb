@@ -66,7 +66,7 @@ mod sealed {
 
     pub trait Projection: Sized {
         fn accepts_projection(projection: &GlaOperator, order: &GlaOperator) -> bool;
-        fn project<E>(
+        fn project<E: From<crate::GraphIntegerError>>(
             vid: VId,
             row: VertexScanRow<'_>,
             projection: &GlaOperator,
@@ -78,7 +78,7 @@ mod sealed {
             matches!(projection, GlaOperator::Project { slot } if slot.ordinal() == 0)
                 && matches!(order, GlaOperator::OrderByVertexId)
         }
-        fn project<E>(
+        fn project<E: From<crate::GraphIntegerError>>(
             vid: VId,
             _row: VertexScanRow<'_>,
             _projection: &GlaOperator,
@@ -101,7 +101,7 @@ mod sealed {
                     _ => false,
                 })
         }
-        fn project<E>(
+        fn project<E: From<crate::GraphIntegerError>>(
             vid: VId,
             row: VertexScanRow<'_>,
             projection: &GlaOperator,
