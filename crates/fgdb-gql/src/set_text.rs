@@ -837,6 +837,17 @@ pub(crate) struct ReadOrderProjection {
     pub(crate) values: Vec<ReadValueTemplate>,
     pub(crate) visible: usize,
 }
+
+/// A catalog-free output-row page compiled by the shared expression parser.
+/// Parameter ordinals are local to this page; the compound statement admits
+/// their names and types together with every leaf before resolving any symbol.
+#[derive(Clone)]
+pub(crate) struct CompoundOrderTemplate {
+    pub(crate) stage: ReadStageTemplate,
+    pub(crate) parameters: Vec<GqlParameterSpec>,
+    pub(crate) parameter_offsets: Vec<usize>,
+}
+
 #[derive(Clone)]
 pub(crate) struct BoundSetTextInput {
     pub(crate) selection: Option<PreparedGraphText>,
@@ -900,6 +911,21 @@ struct OrderKey {
     at: usize,
     order: GraphValueOrder,
 }
+/// Source spans exist only during compound preparation. Once validated, the
+/// page holds a native expression template; binding never scans the span again.
+#[derive(Clone)]
+struct OrderExpression {
+    span: std::ops::Range<usize>,
+    template: Option<CompoundOrderTemplate>,
+}
+impl OrderExpression {
+    fn prepared(&self) -> &CompoundOrderTemplate {
+        self.template
+            .as_ref()
+            .expect("compound ordering is checked before catalog access")
+    }
+}
+
 #[derive(Clone)]
 enum NodeKind {
     Leaf(usize),
@@ -919,6 +945,7 @@ struct Node {
     order: Vec<OrderKey>,
     offset: PageNumber,
     count: Option<PageNumber>,
+    expression_order: Option<OrderExpression>,
 }
 impl Node {
     fn new(kind: NodeKind, at: usize, depth: usize) -> Result<Self, GraphSetTextError> {
@@ -938,6 +965,7 @@ impl Node {
             order: Vec::new(),
             offset: PageNumber::Literal(0),
             count: None,
+            expression_order: None,
         })
     }
     /// Whether every ORDER BY key names an output column of `schema`, exactly
@@ -952,7 +980,13 @@ impl Node {
             }),
         })
     }
-    fn validate(&mut self, schemas: &[Schema]) -> Result<Schema, GraphSetTextError> {
+    fn validate(
+        &mut self,
+        schemas: &[Schema],
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        uses: &mut Vec<(usize, GqlParameterSpec)>,
+    ) -> Result<Schema, GraphSetTextError> {
         // Every subtree returns its derived schema. A leftmost leaf alone is
         // insufficient once a descendant set widens a concrete column to Any.
         let mut schema = match &mut self.kind {
@@ -961,7 +995,7 @@ impl Node {
                 schemas[*at].clone()
             }
             NodeKind::Scope(input) => {
-                let schema = input.validate(schemas)?;
+                let schema = input.validate(schemas, statement, declarations, uses)?;
                 self.depth = input.depth + 1;
                 schema
             }
@@ -971,8 +1005,8 @@ impl Node {
                 right,
                 ..
             } => {
-                let mut left_schema = left.validate(schemas)?;
-                let right_schema = right.validate(schemas)?;
+                let mut left_schema = left.validate(schemas, statement, declarations, uses)?;
+                let right_schema = right.validate(schemas, statement, declarations, uses)?;
                 let alignment = (*operation == GraphSetOperation::Union)
                     .then(|| union_column_order(&left_schema.columns, &right_schema.columns))
                     .transpose()
@@ -1007,6 +1041,22 @@ impl Node {
                 left_schema
             }
         };
+        if let Some(order) = &mut self.expression_order {
+            let template = CompoundOrderTemplate::prepare(
+                &statement[order.span.clone()],
+                declarations,
+                &schema.columns,
+                &schema.types,
+            )
+            .map_err(|error| rebase_error(order.span.start, error))?;
+            // The ordinary native page adds both its key projection and its
+            // order-preserving private-column removal to the physical depth.
+            self.depth += template.stage.depth();
+            for (spec, offset) in template.parameters.iter().zip(&template.parameter_offsets) {
+                uses.push((order.span.start + *offset, spec.clone()));
+            }
+            order.template = Some(template);
+        }
         if self.depth > MAX_GRAPH_SET_DEPTH {
             return Err(fail(
                 self.at,
@@ -1108,10 +1158,17 @@ impl Node {
                 .with_order_by(&order)
                 .map_err(|kind| fail(self.at, GraphSetTextErrorKind::OrderBuild(kind)))?;
         }
-        Ok(bound.with_page(
+        bound = bound.with_page(
             self.offset.value(arguments),
             self.count.as_ref().map(|n| n.value(arguments)),
-        ))
+        );
+        if let Some(order) = &self.expression_order {
+            bound = order
+                .prepared()
+                .bind(bound, arguments)
+                .map_err(|error| rebase_error(order.span.start, error))?;
+        }
+        Ok(bound)
     }
 }
 #[derive(Clone)]
@@ -1304,35 +1361,68 @@ impl<'a> Composition<'a> {
                 height,
             )?;
         }
-        if let NodeKind::Leaf(leaf) = node.kind
-            && self.has_expression_order()
-        {
-            // A single read owns its complete ORDER BY expression scope. The
-            // shared graph/row parser compiles the untouched source once;
-            // compound set tails retain their output-column-only contract.
-            let mut depth = 0_usize;
-            loop {
-                let token = self.current();
-                if matches!(token.kind, TextKind::End)
-                    || (depth == 0 && (token.punct(b')') || token.punct(b';')))
-                {
-                    break;
-                }
-                match token.kind {
-                    TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
-                    TextKind::Punct(b')' | b']' | b'}') => {
-                        depth = depth.saturating_sub(1);
-                    }
-                    _ => {}
-                }
-                self.advance();
+        if self.has_expression_order() {
+            let start = self.current().at;
+            let end = self.expression_order_end()?;
+            if let NodeKind::Leaf(leaf) = node.kind {
+                // A single read keeps its existing graph/row expression scope.
+                self.spans[leaf].end = end;
+                self.spans[leaf].last_token = self.at;
+            } else {
+                // A compound page sees only the completed output schema. Keep
+                // the original bytes, including original diagnostic positions;
+                // no synthetic RETURN/MATCH text or execution-time parser.
+                node.expression_order = Some(OrderExpression {
+                    span: start..end,
+                    template: None,
+                });
             }
-            self.spans[leaf].end = self.current().at;
-            self.spans[leaf].last_token = self.at;
         } else {
             self.tail(&mut node)?;
         }
         Ok(node)
+    }
+
+    /// Find one untouched page span using the already admitted token stream.
+    /// An enclosing set parenthesis is not part of the scalar expression.
+    /// Check delimiter kinds as well as depth before any catalog callback.
+    fn expression_order_end(&mut self) -> Result<usize, GraphSetTextError> {
+        let mut delimiters = Vec::new();
+        loop {
+            let token = self.current();
+            if matches!(token.kind, TextKind::End)
+                || (delimiters.is_empty() && (token.punct(b')') || token.punct(b';')))
+            {
+                break;
+            }
+            match token.kind {
+                TextKind::Punct(ch @ (b'(' | b'[' | b'{')) => {
+                    if delimiters.len() == MAX_GRAPH_SET_DEPTH {
+                        return Err(expected(token.at, "bounded graph-expression nesting"));
+                    }
+                    delimiters.push(ch);
+                }
+                TextKind::Punct(ch @ (b')' | b']' | b'}')) => {
+                    let opening = match ch {
+                        b')' => b'(',
+                        b']' => b'[',
+                        _ => b'{',
+                    };
+                    if delimiters.pop() != Some(opening) {
+                        return Err(expected(token.at, "matching graph-expression delimiter"));
+                    }
+                }
+                _ => {}
+            }
+            self.advance();
+        }
+        if !delimiters.is_empty() {
+            return Err(expected(
+                self.current().at,
+                "closing graph-expression delimiter",
+            ));
+        }
+        Ok(self.current().at)
     }
 
     /// Routing over admitted tokens only. The ordinary scalar compiler owns
@@ -1687,7 +1777,11 @@ impl PreparedGraphSetText {
     /// unparenthesized UNION chain must use ALL throughout or DISTINCT throughout.
     /// Parentheses preserve operand-local order/page. An unparenthesized final
     /// ORDER BY/SKIP/LIMIT applies to the complete set, never only its last arm.
-    /// ORDER BY accepts leftmost output names, ASC/DESC and NULLS FIRST/LAST.
+    /// Compound ORDER BY accepts expressions over leftmost output columns,
+    /// including parameters, ASC/DESC and NULLS FIRST/LAST. Private arm bindings
+    /// are out of scope. Keys are evaluated after set arithmetic, before
+    /// ranking/windowing, then removed from the ordered public output.
+    /// Existing output-column-only pages keep their exact plan encoding.
     /// Without a set operator it also accepts `var.prop` when the RETURN
     /// projected exactly that property, aliased or not, and orders by that
     /// output column.
@@ -1839,7 +1933,7 @@ impl PreparedGraphSetText {
             // Only this tail recorded page parameters: the read now owns them.
             (pending, schemas, uses) = compile(&parser.spans, Vec::new())?;
         }
-        let schema = root.validate(&schemas)?;
+        let schema = root.validate(&schemas, statement, declarations, &mut uses)?;
         uses.sort_by_key(|(offset, _)| *offset);
         let mut parameters: Vec<GqlParameterSpec> = Vec::new();
         let mut parameter_offsets = Vec::new();
@@ -1940,6 +2034,11 @@ impl PreparedGraphSetText {
             }
         }
         fn node(bytes: &mut Vec<u8>, tree: &Node) {
+            // Tag 3 is an expression-page wrapper around the existing node
+            // encoding. Unaffected trees retain their exact v1 transcript.
+            if tree.expression_order.is_some() {
+                bytes.push(3);
+            }
             match &tree.kind {
                 NodeKind::Leaf(input) => {
                     bytes.push(0);
@@ -1982,6 +2081,18 @@ impl PreparedGraphSetText {
                 Some(count) => {
                     bytes.push(1);
                     page(bytes, count);
+                }
+            }
+            if let Some(order) = &tree.expression_order {
+                let template = order.prepared();
+                template.stage.append_template_transcript(bytes);
+                // Expressions use page-local parameter ordinals. Retaining
+                // their names prevents different global argument bindings
+                // from aliasing the same resolved-unbound plan identity.
+                ordinal(bytes, template.parameters.len());
+                for spec in &template.parameters {
+                    name(bytes, &spec.name);
+                    bytes.push(parameter_type_tag(spec.parameter_type));
                 }
             }
         }
@@ -2040,6 +2151,30 @@ impl PreparedGraphSetText {
             }
             if !matches!(tree.offset, PageNumber::Literal(0)) || tree.count.is_some() {
                 operators.push("Limit");
+            }
+            if let Some(expression) = &tree.expression_order {
+                let ReadStageTemplate::Page {
+                    order,
+                    offset,
+                    count,
+                    computed,
+                    ..
+                } = &expression.prepared().stage
+                else {
+                    unreachable!("compound ordering compiles only a native page");
+                };
+                if computed.is_some() {
+                    operators.push("ProjectOrderKeys");
+                }
+                if !order.is_empty() {
+                    operators.push("OrderByValues");
+                }
+                if !matches!(offset, ReadPageNumber::Literal(0)) || count.is_some() {
+                    operators.push("Limit");
+                }
+                if computed.is_some() {
+                    operators.push("ProjectOrderedOutput");
+                }
             }
         }
         let mut operators = Vec::new();
