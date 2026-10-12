@@ -21,6 +21,8 @@ use fgdb_warden::{Authority, Grant, QueryLimits, Rights, Scope};
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x6d; 32]);
 const THING: LabelId = LabelId(1);
+const FOO: LabelId = LabelId(2);
+const BAR: LabelId = LabelId(3);
 const R: RelationId = RelationId(1);
 const SCORE: PropertyKeyId = PropertyKeyId(1);
 const NAME: PropertyKeyId = PropertyKeyId(2);
@@ -38,6 +40,8 @@ impl GraphSymbolResolver for Catalog {
     fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         match (kind, name) {
             (GraphSymbolKind::Label, "Thing") => Some(GraphSymbol::Label(THING)),
+            (GraphSymbolKind::Label, "Foo") => Some(GraphSymbol::Label(FOO)),
+            (GraphSymbolKind::Label, "Bar") => Some(GraphSymbol::Label(BAR)),
             (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
             (GraphSymbolKind::Property, "score") => Some(GraphSymbol::Property(SCORE)),
             (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(NAME)),
@@ -49,6 +53,8 @@ impl GraphSymbolResolver for Catalog {
     fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
         let mut catalog = ReverseSymbolCatalog::new();
         catalog.insert_label(THING, "Thing");
+        catalog.insert_label(FOO, "Foo");
+        catalog.insert_label(BAR, "Bar");
         catalog.insert_relation(R, "R");
         catalog.insert_property(NAME, "name");
         catalog.insert_property(NOTE, "edge-note");
@@ -1413,6 +1419,196 @@ fn authorized_merge_maps_mask_final_fields_and_preserve_hidden_storage() {
                 after
             );
         }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+// fgdb-iufb7: MERGE ... RETURN labels(n) reads the chosen vertex after every
+// clause (TCK Merge1 [2], Merge2 [1], Merge3 [2]), named in identity order.
+#[test]
+fn merge_return_labels_follow_both_branches_and_the_prior_overlay() {
+    let ((), report) = run_async_under_lab(0x6d61_0016, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let params = GqlParameters::new();
+        let statement = "MERGE (n:Thing {name:'merge-key'}) ON CREATE SET n:Foo ON MATCH SET n:Bar \
+                         RETURN labels(n) AS labels,n.name AS name";
+        // ON CREATE adds Foo to the MERGE label, then ON MATCH adds Bar. The
+        // list is in identity order (Thing, Foo, Bar), not name order.
+        for expected in [&["Thing", "Foo"][..], &["Thing", "Foo", "Bar"][..]] {
+            let returned = db
+                .query_write_engine(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    statement,
+                    &params,
+                    Catalog::Full,
+                    R,
+                    write_policy(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                cells(returned),
+                vec![vec![list(expected), text("merge-key")]]
+            );
+        }
+        // The returned list equals a later read of the committed vertex.
+        assert_eq!(
+            cells(
+                db.query(
+                    &cx,
+                    "MATCH (n:Thing) RETURN labels(n) AS labels",
+                    &params,
+                    Catalog::Full,
+                    policy()
+                )
+                .unwrap()
+            ),
+            vec![vec![list(&["Thing", "Foo", "Bar"])]],
+        );
+        let vid = db.vertices().unwrap()[0].vid;
+        // RETURN reads the transaction's earlier label edits too.
+        let mut transaction = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.set_vertex_label(vid, FOO, false);
+        transaction.write(&mut db, prefix).unwrap();
+        let returned = transaction
+            .query_write_engine(
+                &mut db,
+                &cx,
+                "MERGE (n:Thing {name:'merge-key'}) RETURN labels(n) AS labels",
+                &params,
+                Catalog::Full,
+                R,
+                write_policy(),
+            )
+            .unwrap();
+        assert_eq!(cells(returned), vec![vec![list(&["Thing", "Bar"])]]);
+        transaction.abort();
+
+        // A label the host cannot name refuses; it is never omitted, and the
+        // refused statement stages nothing.
+        let mut unnamed = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(
+            VId(1),
+            vec![THING, LabelId(99)],
+            vec![(NAME, CanonicalScalar::ucs_basic_text("unnamed").unwrap())],
+        );
+        let before = unnamed.write(&commit, seed).await.unwrap();
+        let mut transaction = unnamed.begin(&txcx).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let Err(error) = transaction.query_write_engine(
+            &mut unnamed,
+            &cx,
+            "MERGE (n:Thing {name:'unnamed'}) ON MATCH SET n:Foo RETURN labels(n) AS labels",
+            &params,
+            Catalog::Full,
+            R,
+            write_policy(),
+        ) else {
+            panic!("an unnamed label refuses")
+        };
+        assert!(
+            format!("{error:?}").contains("UnmappedLabel(LabelId(99))"),
+            "{error:?}"
+        );
+        assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        transaction.abort();
+        assert_eq!(unnamed.frontier().unwrap(), before);
+        assert_eq!(
+            unnamed.vertex(VId(1)).unwrap().unwrap().labels,
+            vec![THING, LabelId(99)]
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_merge_labels_omit_hidden_labels_and_preserve_them_in_storage() {
+    let ((), report) = run_async_under_lab(0x6d61_0017, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = Authority::new(
+            AuthKey::from_seed(0x6d61_0022),
+            NS,
+            "graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 100_000,
+                max_work: 10_000_000,
+                max_rows: 100_000,
+            },
+        );
+        grant.rights = Rights::ReadWrite;
+        grant.labels = Scope::only([THING, FOO]);
+        grant.relations = Scope::only([R]);
+        grant.properties = Scope::only([NAME]);
+        let token = issuer.issue_at(&grant, 100).unwrap();
+        let params = GqlParameters::new();
+        let statement = PreparedGraphVertexUpsertQueryText::prepare(
+            "MERGE (n:Thing {name:'one'}) ON MATCH SET n:Foo RETURN labels(n) AS labels",
+            R,
+            Catalog::Full,
+        )
+        .unwrap()
+        .bind_parameters(&params)
+        .unwrap();
+        let mut observed = Vec::new();
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            // Bar is named but outside the grant; LabelId(99) is unnamed.
+            // Neither may be named, refuse the statement, or be removed.
+            let mut labels = vec![THING];
+            if hidden {
+                labels.extend([BAR, LabelId(99)]);
+            }
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(
+                VId(1),
+                labels,
+                vec![(NAME, CanonicalScalar::ucs_basic_text("one").unwrap())],
+            );
+            db.write(&commit, seed).await.unwrap();
+            let (_, _, returned, _) = db
+                .execute_graph_vertex_upsert_query_authorized(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &statement,
+                    upsert_policy(),
+                    || 100,
+                )
+                .await
+                .unwrap();
+            let rows: Vec<_> = returned
+                .value
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect();
+            assert_eq!(rows, vec![vec![list(&["Thing", "Foo"])]]);
+            let mut stored = vec![THING, FOO];
+            if hidden {
+                stored.extend([BAR, LabelId(99)]);
+            }
+            assert_eq!(db.vertex(VId(1)).unwrap().unwrap().labels, stored);
+            observed.push(rows);
+        }
+        assert_eq!(observed[0], observed[1]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

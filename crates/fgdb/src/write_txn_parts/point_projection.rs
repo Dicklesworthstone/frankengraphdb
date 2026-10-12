@@ -39,6 +39,42 @@ impl<'a> PointProperties<'a> {
     }
 }
 
+/// The whole-label sibling of `PointProperties` (fgdb-iufb7): the selected
+/// historical row's labels and the prepared NET membership edits, borrowed.
+struct PointLabels<'a> {
+    base: &'a [LabelId],
+    edits: std::collections::BTreeMap<LabelId, bool>,
+}
+
+impl<'a> PointLabels<'a> {
+    fn new(base: &'a [LabelId]) -> Self {
+        Self {
+            base,
+            edits: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Effective labels in identity order: every unedited historical label
+    /// and every label a staged edit sets, each once.
+    fn effective_labels(&self) -> Vec<LabelId> {
+        let mut labels: Vec<_> = self
+            .base
+            .iter()
+            .copied()
+            .filter(|label| !self.edits.contains_key(label))
+            .chain(
+                self.edits
+                    .iter()
+                    .filter(|(_, member)| **member)
+                    .map(|(label, _)| *label),
+            )
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        labels
+    }
+}
+
 // A controlled binary search over canonical sorted fields. No property value
 // is inspected or copied to locate its key; each comparison is cancellable.
 fn point_find<'a, T, K: Ord + Copy, E>(
@@ -209,6 +245,65 @@ impl WriteTxn {
             }
         }
         Ok(properties)
+    }
+
+    /// Borrow the selected vertex's effective labels from the same admitted
+    /// basis and NET effects as `vertex_properties_with_control` (fgdb-iufb7).
+    /// A label `visible` rejects adds no charge and no retained edit; the
+    /// caller masks the historical labels the same way before naming them.
+    fn vertex_labels_with_control<'a, V: Vfs + Clone, E>(
+        &'a self,
+        database: &'a Database<V>,
+        vertex: VId,
+        visible: &mut impl FnMut(LabelId) -> bool,
+        poll: &mut impl FnMut() -> Result<(), E>,
+        control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+        source_error: &impl Fn(WriteTxnError) -> E,
+    ) -> Result<Option<PointLabels<'a>>, E> {
+        use crate::gql_exec::source::{SourceEvent, find_vertex};
+        use fgdb_delta_types::DeltaRow;
+        let snapshot = self.query_snapshot(database).map_err(source_error)?;
+        control(SourceEvent::Work)?;
+        let mut labels = match find_vertex(snapshot, vertex, self.basis, control)? {
+            Some(row) => {
+                control(SourceEvent::SnapshotRecord)?;
+                Some(PointLabels::new(&row.labels))
+            }
+            None => None,
+        };
+        if let Some(prepared) = &self.prepared {
+            for coordinate in prepared.template.coordinate_entries() {
+                poll()?;
+                for effect in &coordinate.rows {
+                    poll()?;
+                    match effect {
+                        DeltaRow::CreateVertex {
+                            vid,
+                            labels: created,
+                            ..
+                        } if *vid == vertex => {
+                            control(SourceEvent::Work)?;
+                            labels = Some(PointLabels::new(created));
+                        }
+                        DeltaRow::DeleteVertex { vid, .. } if *vid == vertex => {
+                            control(SourceEvent::Work)?;
+                            labels = None;
+                        }
+                        DeltaRow::LabelMembership {
+                            vid, label, after, ..
+                        } if *vid == vertex && visible(*label) => {
+                            control(SourceEvent::Work)?;
+                            if let Some(labels) = &mut labels {
+                                control(SourceEvent::ScratchEntry)?;
+                                labels.edits.insert(*label, *after);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(labels)
     }
 
     fn point_projection<'a, V: Vfs + Clone>(

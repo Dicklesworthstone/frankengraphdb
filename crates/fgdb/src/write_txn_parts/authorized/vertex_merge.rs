@@ -6,8 +6,8 @@ use crate::write_txn::authorized::{
     WriteTxnError, selection, stage,
 };
 use crate::write_txn::{
-    collect_vertex_merge, vertex_upsert_actions, vertex_upsert_properties, vertex_upsert_property,
-    vertex_upsert_query_selection_policy, vertex_upsert_returning,
+    collect_vertex_merge, vertex_upsert_actions, vertex_upsert_labels, vertex_upsert_properties,
+    vertex_upsert_property, vertex_upsert_query_selection_policy, vertex_upsert_returning,
 };
 use fgdb_gql::insertion::GraphInsertIntent;
 use fgdb_gql::{
@@ -33,7 +33,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// Hidden scalar fields yield NULL before lookup, source admission or
     /// field-witness creation. Whole maps omit hidden fields before naming,
     /// payload inspection or charges, and conservatively witness the selected
-    /// vertex including absent keys. Neither projection rematches the graph.
+    /// vertex including absent keys. labels() omits hidden labels the same
+    /// way, under the same witness. No projection rematches the graph.
     ///
     /// The native evaluator allowance spans actions and projection. Only final
     /// projected rows consume the signed result allowance, so LIMIT 0 still
@@ -185,6 +186,26 @@ impl<V: Vfs + Clone> Database<V> {
                                 outcome.vertex(),
                                 query.property_catalog(),
                                 |key| verified.predicates().allows_property(key),
+                                || {
+                                    query_cx
+                                        .checkpoint()
+                                        .map_err(WriteTxnError::Interrupted)
+                                        .map_err(GqlQueryError::Interrupted)?;
+                                    controls
+                                        .borrow_mut()
+                                        .poll()
+                                        .map_err(GqlQueryError::Interrupted)
+                                },
+                                control,
+                            )
+                        },
+                        |control| {
+                            vertex_upsert_labels(
+                                transaction,
+                                self,
+                                outcome.vertex(),
+                                query.property_catalog(),
+                                |label| verified.predicates().allows_label(label),
                                 || {
                                     query_cx
                                         .checkpoint()
