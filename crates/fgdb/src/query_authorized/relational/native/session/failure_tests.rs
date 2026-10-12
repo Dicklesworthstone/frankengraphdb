@@ -288,9 +288,14 @@ fn result_snapshot_metadata_tracks_temporal_binding_and_the_session_pin() {
             .authorized_read_session(&cx, &issuer, &token, BRANCH, symbols, policy(), || 100)
             .unwrap();
         let value = |n| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(n)));
-        let expected = |first| QueryResult::Rows {
-            columns: vec!["p".to_owned()],
-            rows: vec![vec![value(first)], vec![value(30)]],
+        // RETURN without ORDER BY is canonical row order (owner ruling 2026-10-09).
+        let expected = |first: i64| {
+            let mut values = [first, 30];
+            values.sort_unstable();
+            QueryResult::Rows {
+                columns: vec!["p".to_owned()],
+                rows: values.into_iter().map(|n| vec![value(n)]).collect(),
+            }
         };
         let plain = "MATCH (n) RETURN n.p AS p";
         let params = GqlParameters::new();

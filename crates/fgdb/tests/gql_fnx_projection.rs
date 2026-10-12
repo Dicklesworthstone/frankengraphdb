@@ -370,13 +370,19 @@ fn projection_certificates_and_pinned_views_retain_the_exact_source() {
             )
             .unwrap();
         // All selected edges have weights: these policies give the SAME rows.
-        // The procedure evidence must still distinguish the input recipes.
+        // Procedure evidence binds the result and witness, not the projection
+        // recipe (9ab35ec5), so it is equal. The certificate binds the
+        // statement, so it still distinguishes the input recipes.
         assert_eq!(same_rows, before);
         assert_eq!(certificate.procedures.len(), 1);
         assert_eq!(different_recipe.procedures.len(), 1);
-        assert_ne!(
+        assert_eq!(
             certificate.procedures[0].evidence_digest,
             different_recipe.procedures[0].evidence_digest
+        );
+        assert_ne!(
+            certificate.canonical_bytes(),
+            different_recipe.canonical_bytes()
         );
         let (_, unweighted) = db
             .execute_certified(

@@ -38,18 +38,29 @@ fn query(text: &str) -> PreparedGraphPattern<GraphValueRow> {
         .unwrap()
 }
 
+// A comma product reads edges beside an independent vertex domain. The planner
+// roots it at ScanVertices (11dadc0c), so it reads edges through Expand.
 fn independent(text: &str) -> PreparedGraphPattern<GraphValueRow> {
     let pattern = query(text);
-    assert!(
-        pattern.plan().scans_edges(),
-        "must exercise the edge-root source"
-    );
+    assert!(pattern.plan().reads_edges(), "{text}");
     assert!(
         pattern
             .plan()
             .operators()
             .iter()
-            .any(|op| matches!(op, GlaOperator::ScanVertices))
+            .any(|op| matches!(op, GlaOperator::ScanVertices)),
+        "{text}"
+    );
+    pattern
+}
+
+// An uncorrelated EXISTS keeps the edge root, so it must exercise the
+// edge-root source's independent vertex domain.
+fn edge_rooted(text: &str) -> PreparedGraphPattern<GraphValueRow> {
+    let pattern = independent(text);
+    assert!(
+        pattern.plan().scans_edges(),
+        "must exercise the edge-root source: {text}"
     );
     pattern
 }
@@ -357,7 +368,7 @@ fn aggregate_and_independent_probes_consume_the_same_complete_vertex_domain() {
                 vec![10, 10],
             ),
         ] {
-            let pattern = independent(text);
+            let pattern = edge_rooted(text);
             let actual = txn
                 .execute_graph_pattern_governed(&db, &qcx, &pattern, policy())
                 .unwrap();
