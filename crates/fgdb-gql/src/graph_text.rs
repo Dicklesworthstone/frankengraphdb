@@ -594,6 +594,10 @@ struct Syntax<'a> {
     /// path: `MATCH (a)-[r*1..2]->(b)` captures the path of its only edge
     /// under `r`, and a bare `r` is that path's edge list (openCypher).
     path_edges: bool,
+    /// Paths named by a later required or OPTIONAL MATCH (`OPTIONAL MATCH
+    /// p = (a)-->(b)`), in clause order. Each is exported like the clause's
+    /// vertices, and is NULL where an OPTIONAL clause has no witness.
+    scope_paths: Vec<Name<'a>>,
     root_variables: usize,
     labels: Vec<(Name<'a>, Name<'a>)>,
     edges: Vec<Edge<'a>>,
@@ -624,11 +628,19 @@ impl<'a> Syntax<'a> {
             } else {
                 GraphPathFunction::Value
             })
+        } else if self.scope_paths.iter().any(|path| path.text == name) {
+            Some(GraphPathFunction::Value)
         } else if self.visible_edge(name).is_some() {
             Some(GraphPathFunction::Edge)
         } else {
             None
         }
+    }
+
+    /// Whether `name` is a path bound by the root MATCH or a later clause.
+    fn names_path(&self, name: &str) -> bool {
+        self.path.is_some_and(|path| path.text == name)
+            || self.scope_paths.iter().any(|path| path.text == name)
     }
 
     /// The root's relationship patterns, then those exported by each required
@@ -771,6 +783,7 @@ impl<'a> Parser<'a> {
                 variables: Vec::new(),
                 path: None,
                 path_edges: false,
+                scope_paths: Vec::new(),
                 root_variables: 0,
                 labels: Vec::new(),
                 edges: Vec::new(),
@@ -973,9 +986,7 @@ impl<'a> Parser<'a> {
         {
             return Ok(());
         }
-        if self.syntax.path.is_some_and(|path| path.text == name.text)
-            || self.syntax.visible_edge(name.text).is_some()
-        {
+        if self.syntax.names_path(name.text) || self.syntax.visible_edge(name.text).is_some() {
             return Err(error(
                 name.at,
                 GraphPatternTextErrorKind::Expected("single fixed-length relationship or vertex"),
@@ -1115,7 +1126,7 @@ impl<'a> Parser<'a> {
             *self.syntax.variables.last().expect("just pushed")
         } else {
             let name = self.name()?;
-            if self.syntax.path.is_some_and(|path| path.text == name.text) {
+            if self.syntax.names_path(name.text) {
                 return Err(error(
                     name.at,
                     GraphPatternTextErrorKind::Expected("vertex distinct from path binding"),
@@ -1354,7 +1365,11 @@ impl<'a> Parser<'a> {
                         alias: name,
                     }),
             );
-            if let Some(name) = self.syntax.path {
+            let paths: Vec<_> = (self.syntax.path.iter())
+                .chain(&self.syntax.scope_paths)
+                .copied()
+                .collect();
+            for name in paths {
                 self.capacity(
                     self.syntax.columns.len(),
                     MAX_PATTERN_VERTICES,
@@ -1574,7 +1589,7 @@ impl<'a> Parser<'a> {
     fn path_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let name = self.name()?;
         self.require_unshadowed_graph_binding(name)?;
-        if !self.syntax.path.is_some_and(|path| path.text == name.text) {
+        if !self.syntax.names_path(name.text) {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
         }
         Ok(name)
@@ -1586,7 +1601,7 @@ impl<'a> Parser<'a> {
         let name = self.name()?;
         self.require_unshadowed_graph_binding(name)?;
         if !self.syntax.variables.iter().any(|v| v.text == name.text)
-            && !self.syntax.path.is_some_and(|path| path.text == name.text)
+            && !self.syntax.names_path(name.text)
             && self.syntax.visible_edge(name.text).is_none()
         {
             return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));

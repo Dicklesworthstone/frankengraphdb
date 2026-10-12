@@ -131,6 +131,177 @@ fn fixed_path_functions_preserve_traversal_order_and_filter_rows() {
     );
 }
 
+/// fgdb-tk2u6: a captured path may revisit a vertex, and a variable-length
+/// relationship may sit anywhere in a chain (TCK Match6 [8], [12] to [14],
+/// [17]). Whichever end the plan expands an edge or walk from, the path keeps
+/// its declared order. Expected paths are enumerated by hand over parallel
+/// R edges 91 and 92 from 1 to 2, R edge 93 from 2 to 3, and S edge 94 from
+/// 3 to 4, with each relationship used at most once per path.
+#[test]
+fn captured_paths_revisit_vertices_and_chain_variable_length_relationships() {
+    use fgdb_types::{EId, VId};
+    let edges = [
+        (EId(91), VId(1), RelationId(1), VId(2)),
+        (EId(92), VId(1), RelationId(1), VId(2)),
+        (EId(93), VId(2), RelationId(1), VId(3)),
+        (EId(94), VId(3), RelationId(2), VId(4)),
+    ];
+    let path = |start: u128, steps: &[(u128, u128)]| {
+        (
+            VId(start),
+            steps
+                .iter()
+                .map(|&(eid, vid)| (EId(eid), VId(vid)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    for (text, expected) in [
+        (
+            "MATCH p = (n)-[:R]->(k)<-[:R]-(n) RETURN p",
+            vec![path(1, &[(91, 2), (92, 1)]), path(1, &[(92, 2), (91, 1)])],
+        ),
+        (
+            "MATCH p = (n)-[:R]-(k)-[:R]-(n) RETURN p",
+            vec![
+                path(1, &[(91, 2), (92, 1)]),
+                path(1, &[(92, 2), (91, 1)]),
+                path(2, &[(91, 1), (92, 2)]),
+                path(2, &[(92, 1), (91, 2)]),
+            ],
+        ),
+        (
+            "MATCH p = (a)-[:R]->(b)-[:R*0..1]->(c) RETURN p",
+            vec![
+                path(1, &[(91, 2)]),
+                path(1, &[(91, 2), (93, 3)]),
+                path(1, &[(92, 2)]),
+                path(1, &[(92, 2), (93, 3)]),
+                path(2, &[(93, 3)]),
+            ],
+        ),
+        (
+            "MATCH p = (a)-[:R*1..2]->(b)-[:S]->(c) RETURN p",
+            vec![
+                path(1, &[(91, 2), (93, 3), (94, 4)]),
+                path(1, &[(92, 2), (93, 3), (94, 4)]),
+                path(2, &[(93, 3), (94, 4)]),
+            ],
+        ),
+        (
+            "MATCH p = (a)<-[:S]-(b)-[:R*2..2]-(c) RETURN p",
+            vec![
+                path(4, &[(94, 3), (93, 2), (91, 1)]),
+                path(4, &[(94, 3), (93, 2), (92, 1)]),
+            ],
+        ),
+    ] {
+        let mut found: Vec<_> = execute(text, &edges)
+            .iter()
+            .map(|row| {
+                let captured = row.values()[0]
+                    .as_path()
+                    .unwrap_or_else(|| panic!("{text}: {row:?}"));
+                (captured.start(), captured.steps().to_vec())
+            })
+            .collect();
+        found.sort();
+        let mut expected = expected;
+        expected.sort();
+        assert_eq!(found, expected, "{text}");
+    }
+}
+
+/// A later required or OPTIONAL MATCH may name its path (TCK Match7 [16] to
+/// [20], Match9 [9], Comparison1 [14]). The path is exported like the
+/// clause's vertices: NULL where an OPTIONAL clause has no witness, and in
+/// declared order even when the clause is anchored at its far end. Expected
+/// rows are enumerated by hand over R edge 91 from 1 to 2 and S edge 92 from
+/// 2 to 3, with vertex 4 isolated.
+#[test]
+fn a_later_or_optional_match_names_its_path() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::{EId, VId};
+    let edges = [
+        (EId(91), VId(1), RelationId(1), VId(2)),
+        (EId(92), VId(2), RelationId(2), VId(3)),
+    ];
+    type Path = Option<(VId, Vec<(EId, VId)>)>;
+    let path = |start: u128, steps: &[(u128, u128)]| -> Path {
+        Some((
+            VId(start),
+            steps
+                .iter()
+                .map(|&(eid, vid)| (EId(eid), VId(vid)))
+                .collect(),
+        ))
+    };
+    let cell = |value: &GraphValue| -> Path {
+        match value {
+            GraphValue::Scalar(fgdb_types::CanonicalScalar::Null) => None,
+            value => {
+                let captured = value.as_path().unwrap_or_else(|| panic!("{value:?}"));
+                Some((captured.start(), captured.steps().to_vec()))
+            }
+        }
+    };
+    for (text, expected) in [
+        (
+            "MATCH (a) OPTIONAL MATCH p = (a)-[:R]->(b) RETURN p",
+            vec![
+                vec![path(1, &[(91, 2)])],
+                vec![None],
+                vec![None],
+                vec![None],
+            ],
+        ),
+        (
+            "MATCH (a)-[:R]->(b) MATCH p = (b)-[:S]->(c) RETURN p",
+            vec![vec![path(2, &[(92, 3)])]],
+        ),
+        (
+            "MATCH p1 = (a)-[:R]->(b) MATCH p2 = (b)-[:S]->(c) RETURN p1, p2",
+            vec![vec![path(1, &[(91, 2)]), path(2, &[(92, 3)])]],
+        ),
+        (
+            // Anchored at its correlated last vertex, read in declared order.
+            "MATCH (c) OPTIONAL MATCH p = (a)-[:R]->(b)-[:S]->(c) RETURN p",
+            vec![
+                vec![path(1, &[(91, 2), (92, 3)])],
+                vec![None],
+                vec![None],
+                vec![None],
+            ],
+        ),
+        (
+            "MATCH (a) OPTIONAL MATCH p = (a)-[:R]->(b)-[:S*1..2]->(c) RETURN p",
+            vec![
+                vec![path(1, &[(91, 2), (92, 3)])],
+                vec![None],
+                vec![None],
+                vec![None],
+            ],
+        ),
+    ] {
+        let mut found: Vec<Vec<Path>> = execute(text, &edges)
+            .iter()
+            .map(|row| row.values().iter().map(cell).collect())
+            .collect();
+        found.sort();
+        let mut expected = expected;
+        expected.sort();
+        assert_eq!(found, expected, "{text}");
+    }
+    for text in [
+        // An existential body's locals never escape, so it names no path.
+        "MATCH (a) WHERE EXISTS { MATCH p = (a)-->() } RETURN a",
+        // A clause's path name must be fresh.
+        "MATCH (a) OPTIONAL MATCH a = (a)-[:R]->(b) RETURN a",
+        "MATCH p = (a)-[:R]->(b) OPTIONAL MATCH p = (b)-[:S]->(c) RETURN p",
+    ] {
+        assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
+    }
+}
+
 /// fgdb-j687q: openCypher `length(p)` is PATH_LENGTH, in RETURN, WHERE and
 /// ORDER BY, with the identical plan.
 #[test]

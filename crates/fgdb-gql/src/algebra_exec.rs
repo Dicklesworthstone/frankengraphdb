@@ -1033,15 +1033,34 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                                 complete = false;
                                 break;
                             };
-                            if segment.start() != endpoint {
+                            // A segment is recorded from the vertex its edge was
+                            // expanded from. A closing edge back to a bound vertex,
+                            // or a walk the plan expanded from its far end, ends
+                            // where the path stands instead: read it backwards,
+                            // so the path keeps its declared order (fgdb-tk2u6).
+                            let raw = segment.steps();
+                            let end = raw.last().map_or(segment.start(), |step| step.1);
+                            let forward = segment.start() == endpoint;
+                            if !forward && end != endpoint {
                                 complete = false;
                                 break;
                             }
-                            for step in segment.steps() {
+                            for index in 0..raw.len() {
                                 (self.control)(GlaExecutionEvent::Work)?;
                                 (self.control)(GlaExecutionEvent::ScratchEntry)?;
                                 (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                                steps.push(*step);
+                                let step = if forward {
+                                    raw[index]
+                                } else {
+                                    let at = raw.len() - 1 - index;
+                                    let previous = if at == 0 {
+                                        segment.start()
+                                    } else {
+                                        raw[at - 1].1
+                                    };
+                                    (raw[at].0, previous)
+                                };
+                                steps.push(step);
                                 endpoint = step.1;
                             }
                         }

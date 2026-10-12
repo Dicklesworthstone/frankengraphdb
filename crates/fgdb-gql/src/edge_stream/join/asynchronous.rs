@@ -421,7 +421,11 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
             if depth == 0 {
                 frame.traversal.bindings.push(Some(from));
             }
-            frame.traversal.choices.push(Choice { eid, target: to });
+            frame.traversal.choices.push(Choice {
+                eid,
+                from,
+                target: to,
+            });
             frame.traversal.bindings.push(Some(to));
             frame.records.push(record);
             let local = FrameSource::<_, S::Error> {
