@@ -527,6 +527,20 @@ impl PreparedGraphInsert {
         }
     }
 
+    /// A created vertex's labels, in identity order (sorted at preparation).
+    pub(crate) fn return_label_ids(
+        &self,
+        binding: crate::GraphInsertBinding,
+    ) -> Option<&[LabelId]> {
+        match binding {
+            crate::GraphInsertBinding::VertexLabels(vertex) => self
+                .vertices
+                .get(vertex)
+                .map(|vertex| vertex.labels.as_slice()),
+            _ => None,
+        }
+    }
+
     /// Execute the frozen selection once; validate every row/endpoint/property;
     /// then allocate typed IDs and assemble one complete private proposal.
     /// The source callback is not called for standalone or source-free relational

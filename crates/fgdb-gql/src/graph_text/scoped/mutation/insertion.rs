@@ -900,6 +900,7 @@ impl PreparedGraphInsertText {
                     binding,
                     crate::GraphInsertBinding::VertexProperties(_)
                         | crate::GraphInsertBinding::EdgeProperties(_)
+                        | crate::GraphInsertBinding::VertexLabels(_)
                 )
             })
         });

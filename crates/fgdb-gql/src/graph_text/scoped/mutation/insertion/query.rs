@@ -18,6 +18,7 @@ enum Binding<'a> {
     EdgeProperty(usize, Name<'a>),
     VertexProperties(usize),
     EdgeProperties(usize),
+    VertexLabels(usize),
 }
 impl Binding<'_> {
     fn same(self, other: Self) -> bool {
@@ -26,7 +27,8 @@ impl Binding<'_> {
             | (Self::Vertex(a), Self::Vertex(b))
             | (Self::Edge(a), Self::Edge(b))
             | (Self::VertexProperties(a), Self::VertexProperties(b))
-            | (Self::EdgeProperties(a), Self::EdgeProperties(b)) => a == b,
+            | (Self::EdgeProperties(a), Self::EdgeProperties(b))
+            | (Self::VertexLabels(a), Self::VertexLabels(b)) => a == b,
             (Self::VertexProperty(a, ak), Self::VertexProperty(b, bk))
             | (Self::EdgeProperty(a, ak), Self::EdgeProperty(b, bk)) => {
                 a == b && ak.text == bk.text
@@ -168,6 +170,31 @@ impl<'a> ParsedReturn<'a> {
         if let Ok(function) = Parser::path_function(name)
             && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
+            // labels() of a vertex this CREATE makes is its CREATE labels:
+            // known without a graph read (openCypher Graph3).
+            if function == GraphPathFunction::Labels {
+                let mut lookahead = parser.lexer.clone();
+                lookahead.next()?;
+                if let TokenKind::Word(variable) = lookahead.next()?.kind
+                    && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+                    && let Some(vertex) = syntax
+                        .vertices
+                        .iter()
+                        .position(|vertex| vertex.name.is_some_and(|old| old.text == variable))
+                {
+                    parser.advance()?;
+                    parser.punct(b'(', "(")?;
+                    parser.name()?;
+                    parser.punct(b')', ")")?;
+                    return self
+                        .column(
+                            Binding::VertexLabels(vertex),
+                            name,
+                            GraphSetColumnType::List,
+                        )
+                        .map(Some);
+                }
+            }
             let kind = match function {
                 GraphPathFunction::Value => GraphSetColumnType::Path,
                 GraphPathFunction::Length | GraphPathFunction::Type => GraphSetColumnType::Scalar,
@@ -380,6 +407,7 @@ impl<'a> ParsedReturn<'a> {
                 Binding::Edge(edge) => GraphInsertBinding::CreatedEdge(edge),
                 Binding::VertexProperties(vertex) => GraphInsertBinding::VertexProperties(vertex),
                 Binding::EdgeProperties(edge) => GraphInsertBinding::EdgeProperties(edge),
+                Binding::VertexLabels(vertex) => GraphInsertBinding::VertexLabels(vertex),
                 Binding::VertexProperty(vertex, name) => {
                     let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)?
                     else {
