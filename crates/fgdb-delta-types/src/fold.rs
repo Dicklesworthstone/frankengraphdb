@@ -10,7 +10,7 @@
 //! family of net rows for the same intent sequence.
 
 use crate::{DeltaRow, ElementId, LabelId, PropertyKeyId, ValidTimePeriod};
-use fgdb_types::{CanonicalScalar, EId, ObjectId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, ObjectId, VId};
 use std::collections::BTreeMap;
 
 /// Collapse `rows` (evaluation order) so remaining rows are target-disjoint
@@ -375,16 +375,22 @@ struct VertexNet {
     created: Option<CreatedVertex>,
     deleted: Option<DeletedVertex>,
     cancelled: bool,
-    props: BTreeMap<PropertyKeyId, (Option<CanonicalScalar>, Option<CanonicalScalar>)>,
+    props: BTreeMap<PropertyKeyId, PropertyImages>,
     labels: BTreeMap<LabelId, (bool, bool)>,
     valid_time: Option<(Option<ValidTimePeriod>, Option<ValidTimePeriod>)>,
     valid_time_contract: Option<ObjectId>,
 }
 
+/// One property's net (before, after) images; `None` is absent.
+type PropertyImages = (
+    Option<CanonicalPropertyValue>,
+    Option<CanonicalPropertyValue>,
+);
+
 struct CreatedVertex {
     birth_ordinal: u64,
     labels: Vec<LabelId>,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     valid_time: Option<ValidTimePeriod>,
 }
 
@@ -403,7 +409,7 @@ struct EdgeNet {
     /// tag-ordered (`DeleteVertex` before `DeleteEdge` / `Property`), so a
     /// leftover row would hit a retired edge (fgdb-qgk9).
     cascade_owned: bool,
-    props: BTreeMap<PropertyKeyId, (Option<CanonicalScalar>, Option<CanonicalScalar>)>,
+    props: BTreeMap<PropertyKeyId, PropertyImages>,
     valid_time: Option<(Option<ValidTimePeriod>, Option<ValidTimePeriod>)>,
     valid_time_contract: Option<ObjectId>,
 }
@@ -414,7 +420,7 @@ struct CreatedEdge {
     relation: crate::RelationId,
     dst: VId,
     canonical_key: Option<CanonicalScalar>,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     valid_time: Option<ValidTimePeriod>,
 }
 
@@ -478,9 +484,9 @@ fn absorb_edge_with_delete(edges: &mut BTreeMap<EId, EdgeNet>, eid: EId, before_
 }
 
 fn apply_prop_map(
-    props: &mut Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: &mut Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     key: PropertyKeyId,
-    after: Option<CanonicalScalar>,
+    after: Option<CanonicalPropertyValue>,
 ) {
     if let Some(at) = props.iter().position(|(k, _)| *k == key) {
         match after {
@@ -509,10 +515,10 @@ fn apply_label_list(labels: &mut Vec<LabelId>, label: LabelId, after: bool) {
 }
 
 fn fold_prop(
-    map: &mut BTreeMap<PropertyKeyId, (Option<CanonicalScalar>, Option<CanonicalScalar>)>,
+    map: &mut BTreeMap<PropertyKeyId, PropertyImages>,
     key: PropertyKeyId,
-    before: Option<CanonicalScalar>,
-    after: Option<CanonicalScalar>,
+    before: Option<CanonicalPropertyValue>,
+    after: Option<CanonicalPropertyValue>,
 ) {
     let entry = map.entry(key).or_insert((before, after.clone()));
     entry.1 = after;
@@ -521,7 +527,7 @@ fn fold_prop(
 fn emit_props(
     out: &mut Vec<DeltaRow>,
     elem: ElementId,
-    props: BTreeMap<PropertyKeyId, (Option<CanonicalScalar>, Option<CanonicalScalar>)>,
+    props: BTreeMap<PropertyKeyId, PropertyImages>,
 ) {
     for (property, (before, after)) in props {
         if before != after {
