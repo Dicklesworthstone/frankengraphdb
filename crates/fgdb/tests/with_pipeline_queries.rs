@@ -380,3 +380,84 @@ fn parallel_edges_keep_bag_multiplicity_through_with_and_union() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// fgdb-xnd7x: `x.p` over a path's nodes or relationships reads the stored
+/// property at the query's own cut: the frontier, a pinned read view and an
+/// older sequence each see their own value. A key the catalog lacks is NULL.
+#[test]
+fn path_elements_read_their_properties_at_the_query_cut() {
+    use fgdb_gql::algebra::GraphValue;
+    let ((), report) = run_async_under_lab(0x71f0_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let mut edges = WriteBatch::new(R);
+        edges.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(7))]);
+        edges.add_edge(EId(11), VId(2), VId(3), vec![(P, CanonicalScalar::Int(8))]);
+        let old = db.write(&commit, edges).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        db.write(&commit, change(2, 20)).await.unwrap();
+        let ints = |value: &GraphValue| -> Vec<Option<i64>> {
+            let GraphValue::List(items) = value else {
+                panic!("a list")
+            };
+            items
+                .iter()
+                .map(|item| match item.as_scalar() {
+                    Some(CanonicalScalar::Int(value)) => Some(*value),
+                    Some(CanonicalScalar::Null) => None,
+                    _ => panic!("an integer or NULL"),
+                })
+                .collect()
+        };
+        let paths = query(
+            "MATCH p = (a)-[:R]->(b)-[:R]->(c) \
+             RETURN [x IN nodes(p) | x.p] AS v, [e IN relationships(p) | e.p] AS w, \
+             [x IN nodes(p) | x.q] AS missing",
+        );
+        let answer = |rows: Vec<GraphValueRow>| {
+            assert_eq!(rows.len(), 1);
+            let row = &rows[0];
+            (
+                ints(row.get(0).unwrap()),
+                ints(row.get(1).unwrap()),
+                ints(row.get(2).unwrap()),
+            )
+        };
+        let edges = vec![Some(7), Some(8)];
+        let missing = vec![None, None, None];
+        assert_eq!(
+            answer(
+                db.execute_graph_set_governed(&cx, &paths, policy())
+                    .unwrap()
+                    .value
+            ),
+            (
+                vec![Some(1), Some(20), Some(3)],
+                edges.clone(),
+                missing.clone()
+            )
+        );
+        let before = (vec![Some(1), Some(2), Some(3)], edges, missing);
+        assert_eq!(
+            answer(
+                pinned
+                    .execute_graph_set_governed(&cx, &paths, policy())
+                    .unwrap()
+                    .value
+            ),
+            before
+        );
+        assert_eq!(
+            answer(
+                db.execute_graph_set_governed_at(&cx, &paths, old, policy())
+                    .unwrap()
+                    .value
+            ),
+            before
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
