@@ -330,9 +330,10 @@ impl PreparedGraphAggregate {
     /// before releasing the row. This does not project, order or paginate it.
     ///
     /// MIN/MAX and keys preserve the completed input's native value domains.
-    /// Counts cannot be NULL; SUM/AVG may be NULL but never narrow into an
-    /// ordinary scalar. Any arguments require per-input runtime numeric checks
-    /// by the producer. Schema and collection bounds are checked here too.
+    /// Counts cannot be NULL. Integer SUM/AVG keep their wide/rational domains;
+    /// a binary64 input permits a Float result, including canonical nonfinite
+    /// values. Any arguments require per-input runtime numeric checks by the
+    /// producer. Schema and collection bounds are checked here too.
     pub fn materialize_incremental_row(
         &self,
         keys: Vec<GraphValue>,
@@ -372,6 +373,10 @@ impl PreparedGraphAggregate {
             let argument = aggregate
                 .column
                 .and_then(|column| self.incremental_input_column_type(column));
+            let floating = matches!(
+                value,
+                GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Float(_)))
+            );
             let accepted = match aggregate.function {
                 GraphAggregateFunction::CountRows => {
                     aggregate.column.is_none() && matches!(value, GraphAggregateValue::Count(_))
@@ -381,11 +386,11 @@ impl PreparedGraphAggregate {
                 }
                 GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
                     matches!(argument, Some(Scalar | Any))
-                        && (matches!(value, GraphAggregateValue::Integer(_)) || value.is_null())
+                        && (matches!(value, GraphAggregateValue::Integer(_)) || floating || value.is_null())
                 }
                 GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
                     matches!(argument, Some(Scalar | Any))
-                        && (matches!(value, GraphAggregateValue::Average(_)) || value.is_null())
+                        && (matches!(value, GraphAggregateValue::Average(_)) || floating || value.is_null())
                 }
                 GraphAggregateFunction::Min | GraphAggregateFunction::Max => match value {
                     GraphAggregateValue::Value(value) => accepts(argument, value),
@@ -573,6 +578,20 @@ mod tests {
             .unwrap();
         assert_eq!(row.keys(), key);
         assert_eq!(row.values(), values);
+        for number in [0.0, 0.5, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let mut floating = values.clone();
+            for index in [1, 2] {
+                floating[index] = GraphAggregateValue::Value(GraphValue::Scalar(
+                    CanonicalScalar::Float(CanonicalF64::new(number)),
+                ));
+            }
+            assert!(definition.materialize_incremental_row(key.clone(), floating).is_some());
+        }
+        for index in [1, 2] {
+            let mut narrowed = values.clone();
+            narrowed[index] = GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1)));
+            assert!(definition.materialize_incremental_row(key.clone(), narrowed).is_none());
+        }
         assert!(
             definition
                 .materialize_incremental_row(vec![], values.clone())

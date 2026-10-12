@@ -2,6 +2,7 @@
 //! aggregate kernel. This adapter owns no graph source or expression evaluator.
 
 mod collection;
+mod float_support;
 
 use super::GroupDefinition;
 use crate::algebra::{GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
@@ -78,7 +79,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GroupError<E> {
             Self::InputSchema => f.write_str("invalid native aggregate input row"),
             Self::NegativeMultiplicity => f.write_str("negative native aggregate input count"),
             Self::NonInteger { column } => {
-                write!(f, "aggregate input {column} requires Int64 or NULL")
+                write!(f, "aggregate input {column} requires Int64, Float or NULL")
             }
             Self::Arithmetic => {
                 f.write_str("native aggregate result is outside its bounded exact domain")
@@ -200,6 +201,7 @@ fn render<'a, D: GroupDefinition, E>(
         bool,
         &mut dyn FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<GraphValue, GroupError<E>>,
+    floats: (&float_support::Update<'_>, bool),
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<Option<GraphAggregateRow>, GroupError<E>> {
     let mut keys = Vec::new();
@@ -213,6 +215,14 @@ fn render<'a, D: GroupDefinition, E>(
         charge(control, ZSetEvent::Work)?;
         charge(control, ZSetEvent::ScratchEntry)?;
         let state = get(index);
+        if float_support::supports(function)
+            && let Some(value) = floats.0.render(
+                &primary(group, index), function, state, floats.1, control,
+            )?
+        {
+            values.push(value);
+            continue;
+        }
         let null = Value::Value(GraphValue::Scalar(CanonicalScalar::Null));
         let value = match function {
             Function::CountRows => Value::Count(state.map_or(Ok(0), |s| count(s.count_rows()))?),
@@ -297,7 +307,11 @@ fn render<'a, D: GroupDefinition, E>(
 /// Completed relational rows may contain any bounded native value: keys,
 /// COUNT/DISTINCT retain canonical typed equality. Extrema use language
 /// orderability with a canonical representation tie-break. Numeric
-/// reducers admit Scalar or Any and check every changed operand for Int64/NULL.
+/// reducers admit Scalar or Any and check every changed operand for Int64,
+/// binary64 or NULL. Float support retracts exactly and uses the shared
+/// integer-only binary64 kernel; integer-only groups retain wide integer sums
+/// and exact rational averages. Float occurrences (or DISTINCT support) and
+/// mixed average denominators are bounded by u64, never expanded into rows.
 #[derive(PartialEq, Eq)]
 pub struct IncrementalGroupAggregate<D: GroupDefinition> {
     definition: D,
@@ -305,6 +319,7 @@ pub struct IncrementalGroupAggregate<D: GroupDefinition> {
     input: ZSet<GraphValueRow>,
     aggregate: IncrementalAggregate<Key>,
     collections: Option<collection::State>,
+    floats: float_support::State,
     rows: ZSet<GraphAggregateRow>,
     initialized: bool,
 }
@@ -369,6 +384,7 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
             input: ZSet::new(),
             aggregate: IncrementalAggregate::new(),
             collections,
+            floats: float_support::State::default(),
             rows: ZSet::new(),
             initialized: false,
         })
@@ -427,7 +443,9 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
             for (index, (function, column)) in self.definition.aggregate_specs().enumerate() {
                 charge(control, ZSetEvent::Work)?;
                 let value = column.map(|column| &row.values()[column]);
-                if support(function) {
+                let floating = float_support::supports(function)
+                    && matches!(value, Some(GraphValue::Scalar(CanonicalScalar::Float(_))));
+                if support(function) || floating {
                     charge(control, ZSetEvent::ScratchEntry)?;
                     contributions.push((
                         (primary(&group, index), None),
@@ -489,7 +507,11 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
             }
             let was = old.is_some_and(|n| !n.is_zero());
             let now = !next.is_zero();
-            if was != now {
+            // Float numeric support has a separate retractable summary. It
+            // must not add synthetic nonnull zeroes to the integer reducer.
+            if was != now
+                && !float_support::supports(float_support::function(&self.definition, key.1, control)?)
+            {
                 charge(control, ZSetEvent::ScratchEntry)?;
                 crossings.push((
                     (primary(&key.0, key.1), Some(0)),
@@ -506,6 +528,7 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                 state.prepare(changes, self.definition.group_key_columns(), limbs, control)
             })
             .transpose()?;
+        let floats = self.floats.prepare(&self.definition, &self.aggregate, &delta, limbs, control)?;
         let mut groups = BTreeSet::new();
         // Argument replacements and sort-key changes can leave COUNT exactly
         // unchanged. The collection index, not count crossings, invalidates
@@ -548,6 +571,7 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                             .ok_or(GroupError::InvalidResult)?
                             .render(&group, column, distinct, false, &mut |event| c(event))
                     },
+                    (&floats, false),
                     control,
                 )?
             } else {
@@ -582,6 +606,7 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                             .ok_or(GroupError::InvalidResult)?
                             .render(&group, column, distinct, true, &mut |event| c(event))
                     },
+                    (&floats, true),
                     control,
                 )?
             } else {
@@ -630,6 +655,7 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
             input,
             aggregate,
             collections,
+            floats,
             output,
             initialized: &mut self.initialized,
             delta,
@@ -650,6 +676,7 @@ pub struct GroupUpdate<'a> {
     input: ZSetUpdate<'a, GraphValueRow>,
     aggregate: AggregateUpdate<'a, Key>,
     collections: Option<collection::Update<'a>>,
+    floats: float_support::Update<'a>,
     output: ZSetUpdate<'a, GraphAggregateRow>,
     initialized: &'a mut bool,
     delta: ZSet<GraphAggregateRow>,
@@ -663,6 +690,7 @@ impl GroupUpdate<'_> {
             input,
             aggregate,
             collections,
+            floats,
             output,
             initialized,
             delta,
@@ -672,6 +700,7 @@ impl GroupUpdate<'_> {
         if let Some(collections) = collections {
             collections.commit();
         }
+        floats.commit();
         output.commit();
         *initialized = true;
         delta
