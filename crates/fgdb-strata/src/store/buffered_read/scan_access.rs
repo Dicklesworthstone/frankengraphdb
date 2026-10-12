@@ -5,6 +5,7 @@ use super::*;
 use crate::tiered::edge_scan::{BufferedEdgeScan, BufferedEdgeScanEvent, EdgeScanWork};
 
 pub(crate) type BufferedBlockImage = (Vec<AdjacencyEntry>, Option<BlockProps>);
+type BufferedBlockKeys = (Vec<AdjacencyEntry>, Option<Vec<u8>>);
 
 impl<V: Vfs> BufferedPartition<V> {
     /// Open a pull-driven scan in stable EId order at one retained cut. Only
@@ -23,7 +24,7 @@ impl<V: Vfs> BufferedPartition<V> {
     }
 
     pub(crate) fn edge_scan_first(&self, at: usize) -> Option<(EId, CommitSeq)> {
-        self.blocks[at].first_edge
+        self.blocks[at].summary.map(|summary| summary.first_edge)
     }
 
     pub(crate) fn reserve_scan_bytes(
@@ -41,9 +42,74 @@ impl<V: Vfs> BufferedPartition<V> {
         self.reserve_scan_bytes(cx, OBJECT_WORKSPACE_BYTES)
     }
 
-    // One refault decoder for point/adjacency reads and streaming reads.
-    // The caller admits block I/O, decoded rows and the workspace. The hosted
-    // property's additional visit is admitted HERE, immediately before its pin.
+    // Refault the admitted topology and its positional locators without
+    // fetching unrelated property values. Initial root admission already proved
+    // the block/patch bijection and joint logical digest; immutable extent
+    // checksums preserve that proof on every later fault.
+    pub(super) async fn block_keys(
+        &mut self,
+        cx: &QueryCx,
+        at: usize,
+        admission: Admission,
+    ) -> Result<BufferedBlockKeys, BufferedReadError> {
+        let descriptor = self.blocks[at];
+        let bytes = self.pin(cx, descriptor.block, admission).await?;
+        let (entries, patch) = crate::decode_block_with_properties(bytes.as_ref())
+            .map_err(StoreError::Malformed)
+            .map_err(BufferedReadError::from)?;
+        drop(bytes);
+        if entries.len() != descriptor.rows
+            || BlockSummary::from_entries(&entries) != descriptor.summary
+        {
+            return Err(BufferError::InvalidLoad.into());
+        }
+        let locators = match (patch, descriptor.properties) {
+            (Some((id, locators)), Some(key)) if id == key.object() => Some(locators),
+            (None, None) => None,
+            _ => return Err(BufferError::InvalidLoad.into()),
+        };
+        Ok((entries, locators))
+    }
+
+    async fn block_property_patch(
+        &mut self,
+        cx: &QueryCx,
+        at: usize,
+        admission: Admission,
+    ) -> Result<Vec<EdgePropertyRow>, BufferedReadError> {
+        let key = self.blocks[at].properties.ok_or(BufferError::InvalidLoad)?;
+        let bytes = self.pin(cx, key, admission).await?;
+        crate::edge_props::read_property_patch_inner(
+            self.store.k_oid.expose(),
+            self.store.namespace,
+            bytes.as_ref(),
+            crate::edge_props::EdgePropertyPatchVersion(key.object()),
+            self.store.decode_resolver(),
+        )
+        .map_err(StoreError::MalformedEdgePropertyPatch)
+        .map_err(BufferedReadError::from)
+    }
+
+    pub(super) async fn block_property_row(
+        &mut self,
+        cx: &QueryCx,
+        at: usize,
+        locator: u8,
+        admission: Admission,
+    ) -> Result<EdgePropertyRow, BufferedReadError> {
+        let row = usize::from(locator)
+            .checked_sub(1)
+            .ok_or(BufferError::InvalidLoad)?;
+        self.block_property_patch(cx, at, admission)
+            .await?
+            .get(row)
+            .cloned()
+            .ok_or_else(|| BufferError::InvalidLoad.into())
+    }
+
+    // Streaming callers still receive the complete native block image. Both
+    // lanes share the exact same topology/property decoders and reservations.
+    // The hosted property's additional visit is admitted before its pin.
     pub(super) async fn block_controlled<C: Send>(
         &mut self,
         cx: &QueryCx,
@@ -51,29 +117,16 @@ impl<V: Vfs> BufferedPartition<V> {
         admission: Admission,
         observe: &mut (impl FnMut() -> Result<(), BufferedScanError<C>> + Send),
     ) -> Result<BufferedBlockImage, BufferedScanError<C>> {
-        let descriptor = self.blocks[at];
-        let bytes = self.pin(cx, descriptor.block, admission).await?;
-        let (entries, patch) = crate::decode_block_with_properties(bytes.as_ref())
-            .map_err(StoreError::Malformed)
-            .map_err(BufferedReadError::from)?;
-        drop(bytes);
-        let properties = match (patch, descriptor.properties) {
-            (Some((_, locators)), Some(key)) => {
-                observe()?;
-                let bytes = self.pin(cx, key, admission).await?;
-                let rows = crate::edge_props::read_property_patch_inner(
-                    self.store.k_oid.expose(),
-                    self.store.namespace,
-                    bytes.as_ref(),
-                    crate::edge_props::EdgePropertyPatchVersion(key.object()),
-                    self.store.decode_resolver(),
-                )
+        let (entries, locators) = self.block_keys(cx, at, admission).await?;
+        let properties = if let Some(locators) = locators {
+            observe()?;
+            let rows = self.block_property_patch(cx, at, admission).await?;
+            crate::edge_props::validate_block_patch_consistency(&locators, rows.len())
                 .map_err(StoreError::MalformedEdgePropertyPatch)
                 .map_err(BufferedReadError::from)?;
-                Some(BlockProps { locators, rows })
-            }
-            (None, None) => None,
-            _ => return Err(BufferedReadError::Buffer(BufferError::InvalidLoad).into()),
+            Some(BlockProps { locators, rows })
+        } else {
+            None
         };
         Ok((entries, properties))
     }
@@ -96,11 +149,6 @@ impl<V: Vfs> BufferedPartition<V> {
                 work.step(cx, observe)
             })
             .await?;
-        if image.0.len() != descriptor.rows
-            || image.0.iter().map(|row| (row.eid, row.created_at)).min() != descriptor.first_edge
-        {
-            return Err(BufferedReadError::Buffer(BufferError::InvalidLoad).into());
-        }
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         Ok(BufferedValue::from_reserved(image, charge))
     }
@@ -120,10 +168,7 @@ impl<V: Vfs> BufferedPartition<V> {
         for at in 0..self.patches.len() {
             work.step(cx, observe)?;
             let descriptor = self.patches[at];
-            if self.root.vertex_patches[at].first_seq > as_of
-                || descriptor.first.is_none_or(|(first, _)| vid < first)
-                || descriptor.last.is_none_or(|last| vid > last)
-            {
+            if self.root.vertex_patches[at].first_seq > as_of || !descriptor.may_contain(vid) {
                 continue;
             }
             // Charge the complete bounded decode before fetching a patch.

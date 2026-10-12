@@ -9,14 +9,15 @@ use fgdb_strata::store::{
     BlockStore, BufferedReadError, BufferedReadLimits, BufferedScanError, BufferedScanEvent,
     StoreError,
 };
-use fgdb_strata::tiered::buffer::{BufferError, BufferLimits};
+use fgdb_strata::tiered::buffer::{BufferError, BufferLimits, BufferStats};
 use fgdb_strata::tiered::memory::{MemoryError, MemoryPool};
 use fgdb_strata::vertex::{VertexRow, encode_patch};
 use fgdb_strata::{
-    AdjacencyEntry, PartitionRootVersion, encode_block, encode_block_with_properties,
+    AdjacencyEntry, DeltaBlockVersion, PartitionRootVersion, encode_block,
+    encode_block_with_properties,
 };
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, GraphId,
+    BranchId, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, GraphId,
     PurposeContexts, VId,
 };
 use std::future::Future;
@@ -236,6 +237,565 @@ async fn fixture(
     };
     let id = store.put_root(&cx, &root).await.unwrap();
     (store, id)
+}
+
+async fn propertied_block(
+    store: &BlockStore,
+    cx: &CommitCx,
+    predecessor: Option<DeltaBlockVersion>,
+    entries: &[AdjacencyEntry],
+    values: &[Option<i64>],
+) -> DeltaBlockVersion {
+    assert_eq!(entries.len(), values.len());
+    let mut rows = Vec::new();
+    let mut locators = Vec::new();
+    for value in values {
+        if let Some(value) = value {
+            rows.push(vec![(PropertyKeyId(11), CanonicalScalar::Int(*value))]);
+            locators.push(u8::try_from(rows.len()).unwrap());
+        } else {
+            locators.push(0);
+        }
+    }
+    let patch = store
+        .put_edge_property_patch(cx, &encode_property_patch(&rows).unwrap())
+        .await
+        .unwrap();
+    store
+        .put(
+            cx,
+            &encode_block_with_properties(0, predecessor, entries, patch.0, &locators, &rows)
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn routed_fixture(
+    contexts: &PurposeContexts,
+    dir: &std::path::Path,
+) -> (BlockStore, PartitionRootVersion) {
+    let cx = contexts.commit();
+    let store = BlockStore::open(&cx, dir, KEY, NS).await.unwrap();
+    // Neither end of adjacency order supplies the EId interval: 20 is
+    // interior, while the maximum 90 is the first physical entry.
+    let first = propertied_block(
+        &store,
+        &cx,
+        None,
+        &[
+            edge(90, 1, 2, 1, None),
+            edge(20, 1, 3, 1, None),
+            edge(80, 1, 5, 1, None),
+        ],
+        &[Some(900), None, Some(800)],
+    )
+    .await;
+    let initial_vertex = store
+        .put_patch(&cx, &encode_patch(&[vertex(1, None, 11)]).unwrap())
+        .await
+        .unwrap();
+    let mut blocks = vec![BlockRef {
+        block_id: first.0,
+        first_seq: CommitSeq(1),
+        last_seq: CommitSeq(1),
+    }];
+    let mut patches = vec![PatchRef {
+        patch_id: initial_vertex.0,
+        first_seq: CommitSeq(1),
+        last_seq: CommitSeq(1),
+    }];
+    for index in 0..20 {
+        let unrelated = propertied_block(
+            &store,
+            &cx,
+            None,
+            &[edge(1000 + index, 100 + index, 1000 + index, 1, None)],
+            &[Some(index as i64)],
+        )
+        .await;
+        blocks.push(BlockRef {
+            block_id: unrelated.0,
+            first_seq: CommitSeq(1),
+            last_seq: CommitSeq(1),
+        });
+        let patch = store
+            .put_patch(
+                &cx,
+                &encode_patch(&[scan_vertex(100 + index, 1, None, index as i64)]).unwrap(),
+            )
+            .await
+            .unwrap();
+        patches.push(PatchRef {
+            patch_id: patch.0,
+            first_seq: CommitSeq(1),
+            last_seq: CommitSeq(1),
+        });
+    }
+    let other_relation = propertied_block(
+        &store,
+        &cx,
+        None,
+        &[AdjacencyEntry {
+            relation: RelationId(9),
+            ..edge(4, 1, 2, 2, None)
+        }],
+        &[Some(40)],
+    )
+    .await;
+    blocks.push(BlockRef {
+        block_id: other_relation.0,
+        first_seq: CommitSeq(2),
+        last_seq: CommitSeq(2),
+    });
+    let successor = propertied_block(
+        &store,
+        &cx,
+        Some(first),
+        &[
+            edge(90, 1, 2, 1, Some(3)),
+            edge(90, 1, 2, 3, None),
+            edge(91, 1, 2, 3, None),
+            edge(20, 1, 3, 1, Some(3)),
+        ],
+        &[Some(900), Some(901), Some(910), None],
+    )
+    .await;
+    blocks.push(BlockRef {
+        block_id: successor.0,
+        first_seq: CommitSeq(1),
+        last_seq: CommitSeq(3),
+    });
+    let latest_vertex = store
+        .put_patch(
+            &cx,
+            &encode_patch(&[vertex(1, Some(3), 11), vertex(3, None, 13)]).unwrap(),
+        )
+        .await
+        .unwrap();
+    patches.push(PatchRef {
+        patch_id: latest_vertex.0,
+        first_seq: CommitSeq(1),
+        last_seq: CommitSeq(3),
+    });
+    let id = store
+        .put_root(
+            &cx,
+            &PartitionRoot {
+                graph: GraphId(1),
+                branch: BranchId(2),
+                partition: 0,
+                published_at: CommitSeq(3),
+                blocks,
+                vertex_patches: patches,
+            },
+        )
+        .await
+        .unwrap();
+    (store, id)
+}
+
+fn extent_visits(stats: BufferStats) -> u64 {
+    stats.hits + stats.misses
+}
+
+#[test]
+fn cold_points_select_all_matching_histories_and_only_the_winning_property_patch() {
+    run(|contexts, dir| async move {
+        let (store, id) = routed_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        assert_eq!(extent_visits(view.stats()), 0);
+        for (cut, expected) in [(1, vertex(1, Some(3), 11)), (3, vertex(3, None, 13))] {
+            let before = extent_visits(view.stats());
+            let row = view
+                .vertex_at(&cx, VId(1), CommitSeq(cut))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.as_ref(), &expected);
+            assert_eq!(extent_visits(view.stats()) - before, 2);
+        }
+        for (eid, cut, expected, props, visits) in [
+            (
+                90,
+                1,
+                Some(edge(90, 1, 2, 1, Some(3))),
+                vec![(PropertyKeyId(11), CanonicalScalar::Int(900))],
+                3,
+            ),
+            (
+                90,
+                3,
+                Some(edge(90, 1, 2, 3, None)),
+                vec![(PropertyKeyId(11), CanonicalScalar::Int(901))],
+                3,
+            ),
+            (
+                80,
+                3,
+                Some(edge(80, 1, 5, 1, None)),
+                vec![(PropertyKeyId(11), CanonicalScalar::Int(800))],
+                3,
+            ),
+            (20, 1, Some(edge(20, 1, 3, 1, Some(3))), vec![], 2),
+            (20, 3, None, vec![], 2),
+            (85, 3, None, vec![], 2),
+            (u128::MAX, 3, None, vec![], 0),
+            (90, 0, None, vec![], 0),
+        ] {
+            let before = extent_visits(view.stats());
+            let row = view.edge_at(&cx, EId(eid), CommitSeq(cut)).await.unwrap();
+            assert_eq!(
+                row.as_ref().map(|row| row.entry),
+                expected,
+                "edge {eid} at {cut}"
+            );
+            assert_eq!(
+                row.as_ref().map_or(&[][..], |row| row.props.as_slice()),
+                props
+            );
+            assert_eq!(
+                extent_visits(view.stats()) - before,
+                visits,
+                "edge {eid} at {cut}"
+            );
+        }
+        let before = extent_visits(view.stats());
+        assert!(
+            view.vertex_at(&cx, VId(u128::MAX), CommitSeq(3))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(extent_visits(view.stats()), before);
+        let held = view
+            .edge_at(&cx, EId(90), CommitSeq(3))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(view);
+        assert!(pool.used() > 0);
+        assert_eq!(
+            held.props,
+            vec![(PropertyKeyId(11), CanonicalScalar::Int(901))]
+        );
+        drop(held);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn cold_adjacency_routes_by_direction_and_relation_without_property_payloads() {
+    run(|contexts, dir| async move {
+        let (store, id) = routed_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        for (endpoint, relation, incoming, cut, expected, visits) in [
+            (
+                1,
+                Some(REL),
+                false,
+                1,
+                vec![
+                    edge(90, 1, 2, 1, Some(3)),
+                    edge(20, 1, 3, 1, Some(3)),
+                    edge(80, 1, 5, 1, None),
+                ],
+                2,
+            ),
+            (
+                1,
+                Some(REL),
+                false,
+                3,
+                vec![
+                    edge(90, 1, 2, 3, None),
+                    edge(91, 1, 2, 3, None),
+                    edge(80, 1, 5, 1, None),
+                ],
+                2,
+            ),
+            (
+                2,
+                None,
+                true,
+                3,
+                vec![
+                    edge(90, 1, 2, 3, None),
+                    edge(91, 1, 2, 3, None),
+                    AdjacencyEntry {
+                        relation: RelationId(9),
+                        ..edge(4, 1, 2, 2, None)
+                    },
+                ],
+                3,
+            ),
+            (
+                1,
+                Some(RelationId(9)),
+                false,
+                3,
+                vec![AdjacencyEntry {
+                    relation: RelationId(9),
+                    ..edge(4, 1, 2, 2, None)
+                }],
+                1,
+            ),
+            // A destination interval can contain holes. Native matching still
+            // decides membership after its conservative route has been read.
+            (4, Some(REL), true, 3, vec![], 1),
+            (u128::MAX, None, true, 3, vec![], 0),
+            (1, Some(RelationId(99)), false, 3, vec![], 0),
+            (1, None, false, 0, vec![], 0),
+        ] {
+            let before = extent_visits(view.stats());
+            let found = view
+                .adjacency_at(&cx, VId(endpoint), relation, incoming, CommitSeq(cut), 32)
+                .await
+                .unwrap();
+            assert_eq!(found.as_ref(), &expected);
+            assert_eq!(extent_visits(view.stats()) - before, visits);
+        }
+        // Retired identities count toward admission even though the final
+        // page contains only three live rows at the selected cut.
+        assert!(matches!(
+            view.adjacency_at(&cx, VId(1), Some(REL), false, CommitSeq(3), 3)
+                .await,
+            Err(BufferedReadError::Limit {
+                resource: "buffered adjacency identities",
+                ..
+            })
+        ));
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn pruned_payloads_remain_mandatory_at_open_and_authenticate_when_requested() {
+    run(|contexts, dir| async move {
+        let (store, id) = routed_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        for vertex_payload in [false, true] {
+            let object = if vertex_payload {
+                view.root().vertex_patches[1].patch_id
+            } else {
+                view.root().blocks[1].block_id
+            };
+            let path = store.path(object);
+            let original = std::fs::read(&path).unwrap();
+            let mut corrupt = original.clone();
+            let last = corrupt.len() - 1;
+            corrupt[last] ^= 1;
+            std::fs::write(&path, corrupt).unwrap();
+            // An admitted range excludes this unrelated payload. Neither
+            // point lookup nor adjacency needs to refault its bytes.
+            let before = extent_visits(view.stats());
+            let found = view
+                .edge_at(&cx, EId(90), CommitSeq(3))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                found.props,
+                vec![(PropertyKeyId(11), CanonicalScalar::Int(901))]
+            );
+            assert_eq!(extent_visits(view.stats()) - before, 3);
+            drop(found);
+            let found = view
+                .vertex_at(&cx, VId(1), CommitSeq(3))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.as_ref(), &vertex(3, None, 13));
+            drop(found);
+            let found = view
+                .adjacency_at(&cx, VId(1), Some(REL), false, CommitSeq(3), 4)
+                .await
+                .unwrap();
+            assert_eq!(
+                found.as_ref(),
+                &vec![
+                    edge(90, 1, 2, 3, None),
+                    edge(91, 1, 2, 3, None),
+                    edge(80, 1, 5, 1, None)
+                ]
+            );
+            drop(found);
+            let requested = if vertex_payload {
+                view.vertex_at(&cx, VId(100), CommitSeq(3))
+                    .await
+                    .map(|_| ())
+            } else {
+                view.edge_at(&cx, EId(1000), CommitSeq(3)).await.map(|_| ())
+            };
+            assert!(matches!(
+                requested,
+                Err(BufferedReadError::Buffer(BufferError::ChecksumMismatch))
+            ));
+            let before_open = pool.used();
+            assert!(
+                matches!(
+                    store
+                        .open_buffered_root(&cx, id, pool.clone(), limits())
+                        .await,
+                    Err(BufferedReadError::Store(_))
+                ),
+                "new admission must authenticate even an unrelated object"
+            );
+            assert_eq!(
+                pool.used(),
+                before_open,
+                "failed admission refunds its entire reservation"
+            );
+            std::fs::write(&path, original).unwrap();
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn cold_topology_and_propertyless_points_do_not_refault_an_unneeded_property_patch() {
+    run(|contexts, dir| async move {
+        let (store, id) = routed_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let block = view.root().blocks.last().unwrap().block_id;
+        let bytes = std::fs::read(store.path(block)).unwrap();
+        let (_, patch) = fgdb_strata::decode_block_with_properties(&bytes).unwrap();
+        let patch = patch.unwrap().0;
+        let path = store.path(patch);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        let before = extent_visits(view.stats());
+        let found = view
+            .adjacency_at(&cx, VId(1), Some(REL), false, CommitSeq(3), 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            found.as_ref(),
+            &vec![
+                edge(90, 1, 2, 3, None),
+                edge(91, 1, 2, 3, None),
+                edge(80, 1, 5, 1, None)
+            ]
+        );
+        assert_eq!(extent_visits(view.stats()) - before, 2);
+        drop(found);
+        let found = view
+            .edge_at(&cx, EId(20), CommitSeq(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.entry, edge(20, 1, 3, 1, Some(3)));
+        assert!(found.props.is_empty());
+        drop(found);
+        assert!(
+            view.edge_at(&cx, EId(20), CommitSeq(3))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // E80's winning value is in the original block's patch, even though
+        // the newer block's conservative EId interval also contains E80.
+        let found = view
+            .edge_at(&cx, EId(80), CommitSeq(3))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            found.props,
+            vec![(PropertyKeyId(11), CanonicalScalar::Int(800))]
+        );
+        drop(found);
+        for cut in [1, 3] {
+            assert!(
+                matches!(
+                    view.edge_at(&cx, EId(90), CommitSeq(cut)).await,
+                    Err(BufferedReadError::Buffer(BufferError::ChecksumMismatch))
+                ),
+                "a selected property is always authenticated, including a retired restatement"
+            );
+        }
+        assert!(matches!(
+            store
+                .open_buffered_root(&cx, id, pool.clone(), limits())
+                .await,
+            Err(BufferedReadError::Store(_))
+        ));
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn cold_selective_reads_refuse_unfunded_decode_and_result_storage_before_io() {
+    run(|contexts, dir| async move {
+        let (store, id) = routed_fixture(&contexts, &dir).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        // One point result fits, but retaining it while decoding its source
+        // does not. A larger bounded adjacency answer also refuses up front.
+        let held = pool.reserve(&cx, pool.available() - 1536 * 1024).unwrap();
+        let baseline = pool.used();
+        for kind in 0..3 {
+            let refusal = match kind {
+                0 => view.vertex_at(&cx, VId(1), CommitSeq(3)).await.map(|_| ()),
+                1 => view.edge_at(&cx, EId(90), CommitSeq(3)).await.map(|_| ()),
+                _ => view
+                    .adjacency_at(&cx, VId(1), Some(REL), false, CommitSeq(3), 4096)
+                    .await
+                    .map(|_| ()),
+            };
+            assert!(matches!(
+                refusal,
+                Err(BufferedReadError::Buffer(BufferError::Memory(
+                    MemoryError::ResourceExhausted { .. }
+                )))
+            ));
+            assert_eq!(extent_visits(view.stats()), 0);
+            assert_eq!(pool.used(), baseline);
+        }
+        drop(held);
+        let found = view
+            .edge_at(&cx, EId(90), CommitSeq(3))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.entry, edge(90, 1, 2, 3, None));
+        assert_eq!(
+            found.props,
+            vec![(PropertyKeyId(11), CanonicalScalar::Int(901))]
+        );
+        drop(found);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
 }
 
 #[test]

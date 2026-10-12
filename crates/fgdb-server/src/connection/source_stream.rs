@@ -13,14 +13,14 @@ pub(super) enum SourceStatement<'a> {
     Prepared(&'a PreparedRead),
 }
 
-struct Chunks {
+pub(super) struct Chunks {
     columns: Option<Vec<String>>,
     pending: Option<(Vec<WireValue>, usize)>,
     ended: bool,
 }
 
 impl Chunks {
-    fn new(columns: Vec<String>) -> Self {
+    pub(super) fn new(columns: Vec<String>) -> Self {
         Self {
             columns: Some(columns),
             pending: None,
@@ -28,14 +28,14 @@ impl Chunks {
         }
     }
 
-    fn done(&self) -> bool {
+    pub(super) fn done(&self) -> bool {
         self.ended && self.pending.is_none() && self.columns.is_none()
     }
 
     /// Pull only when there is credit for a row and its smallest possible
     /// encoding. Exact byte length is known after native projection, so one
     /// row may wait for byte credit. It is never pulled again or requeries.
-    fn next(
+    pub(super) fn next(
         &mut self,
         byte_room: usize,
         row_room: usize,
@@ -64,27 +64,7 @@ impl Chunks {
                 }
                 let (row, ended) = pull()?;
                 let empty = row.is_none();
-                self.pending = match row {
-                    Some(row) => {
-                        // row_len validates/encodes recursively. Measure once,
-                        // never again for a ping or insufficient credit grant.
-                        let length = ResultChunk::row_len(&row).map_err(|_| {
-                            Refusal::new(
-                                ErrorCode::Execution,
-                                "a result value exceeds the wire bounds",
-                            )
-                        })?;
-                        if length > frame_budget {
-                            return Err(Refusal::new(
-                                ErrorCode::Execution,
-                                "a result row exceeds the negotiated frame limit",
-                            ));
-                        }
-                        Some((row, length))
-                    }
-                    None => None,
-                };
-                self.ended = ended || empty;
+                self.accept(row, ended || empty, frame_budget)?;
             }
             let Some((_, length)) = &self.pending else {
                 break;
@@ -102,6 +82,49 @@ impl Chunks {
             columns: self.columns.take(),
             rows,
         }))
+    }
+
+    /// Ordered reads arrive asynchronously. Admit exactly one pending row
+    /// outside the synchronous chunk assembler, then share its measuring and
+    /// credit rules. No row future starts without room for its minimum frame.
+    pub(super) fn needs_row(&self, byte_room: usize, row_room: usize) -> bool {
+        let metadata = self.columns.as_ref().map_or(0, |names| {
+            4 + names.iter().map(|name| 4 + name.len()).sum::<usize>()
+        });
+        self.pending.is_none()
+            && !self.ended
+            && row_room > 0
+            && metadata.saturating_add(4) <= byte_room
+    }
+
+    pub(super) fn accept(
+        &mut self,
+        row: Option<Vec<WireValue>>,
+        ended: bool,
+        frame_budget: usize,
+    ) -> Result<(), Refusal> {
+        // row_len validates/encodes recursively. Measure once, never again
+        // for a ping or insufficient credit grant.
+        self.pending = match row {
+            Some(row) => {
+                let length = ResultChunk::row_len(&row).map_err(|_| {
+                    Refusal::new(
+                        ErrorCode::Execution,
+                        "a result value exceeds the wire bounds",
+                    )
+                })?;
+                if length > frame_budget {
+                    return Err(Refusal::new(
+                        ErrorCode::Execution,
+                        "a result row exceeds the negotiated frame limit",
+                    ));
+                }
+                Some((row, length))
+            }
+            None => None,
+        };
+        self.ended = ended || self.pending.is_none();
+        Ok(())
     }
 }
 

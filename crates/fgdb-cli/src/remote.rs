@@ -52,6 +52,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut positional = Vec::new();
     let mut parameters: Vec<(String, WireValue)> = Vec::new();
     let mut max_batches = None;
+    let mut read_mode = None;
     let mut tls_server_name = None;
     let mut tls_ca_file = None;
     let mut at = 0;
@@ -85,6 +86,18 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--tls-ca-file" if tls_ca_file.is_none() => {
                 tls_ca_file = Some(PathBuf::from(value()?));
             }
+            "--read-mode" if read_mode.is_none() => {
+                read_mode = Some(match value()?.as_str() {
+                    "buffered" => ExecuteMode::Read,
+                    "source" => ExecuteMode::ReadStream,
+                    "ordered" => ExecuteMode::ReadOrdered,
+                    _ => {
+                        return Err(Failure::usage(
+                            "--read-mode needs buffered, source or ordered",
+                        ));
+                    }
+                });
+            }
             "--max-batches" if max_batches.is_none() => {
                 let raw = value()?;
                 if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
@@ -115,11 +128,14 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let [verb, statement] = <[String; 2]>::try_from(positional)
         .map_err(|_| Failure::usage("remote needs query|write|subscribe and one statement"))?;
     let mode = match verb.as_str() {
-        "query" => ExecuteMode::Read,
+        "query" => read_mode.unwrap_or(ExecuteMode::Read),
         "write" => ExecuteMode::Write,
         "subscribe" => ExecuteMode::Subscribe,
         _ => return Err(Failure::usage("remote needs query, write or subscribe")),
     };
+    if read_mode.is_some() && verb != "query" {
+        return Err(Failure::usage("--read-mode applies only to query"));
+    }
     if max_batches.is_some() && mode != ExecuteMode::Subscribe {
         return Err(Failure::usage("--max-batches applies only to subscribe"));
     }
@@ -247,11 +263,20 @@ async fn connect(cx: &asupersync::Cx, options: &RemoteOptions) -> Result<Client,
         .map_err(failure)
 }
 
-/// The local CLI's parameter spellings, as wire values: `int:`, `float:`,
+/// The local CLI's parameter spellings, as wire values: `int:`, `uint:`, `float:`,
 /// `text:`, `bool:true|false`, `null`, `json:<array|object>` (nested lists
 /// and maps), `bytes:<hex>`, and `vector:<x,y,...>` (an embedding as
 /// packed little-endian f32 bytes).
 fn parameter(raw: &str) -> Result<WireValue, Failure> {
+    if let Some(value) = raw.strip_prefix("uint:") {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Failure::usage("invalid uint parameter"));
+        }
+        return value
+            .parse()
+            .map(WireValue::Count)
+            .map_err(|_| Failure::usage("uint parameter exceeds u64"));
+    }
     if let Some(value) = raw.strip_prefix("int:") {
         return value
             .parse()
@@ -374,6 +399,30 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
     if options.mode == ExecuteMode::Subscribe {
         return runtime.block_on(subscribe(&cx, options, robot, out));
     }
+    if matches!(
+        options.mode,
+        ExecuteMode::ReadStream | ExecuteMode::ReadOrdered
+    ) {
+        return runtime.block_on(async {
+            let mut client = connect(&cx, &options).await?;
+            client
+                .select(&cx, &options.database)
+                .await
+                .map_err(failure)?;
+            stream_read(
+                &cx,
+                &mut client,
+                options.mode,
+                &options.statement,
+                options.parameters,
+                robot,
+                out,
+            )
+            .await?;
+            let _ = client.close(&cx).await;
+            Ok(())
+        });
+    }
     let answer = runtime.block_on(async {
         let mut client = connect(&cx, &options).await?;
         client
@@ -442,6 +491,144 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
         }
     }
 }
+
+/// Adapt one native remote read to the local incremental output contract.
+/// The wire client owns at most one decoded frame. This adapter retains only
+/// schema width and a delivery count between callbacks, never a result bag.
+async fn stream_read(
+    cx: &asupersync::Cx,
+    client: &mut Client,
+    mode: ExecuteMode,
+    statement: &str,
+    parameters: Vec<(String, WireValue)>,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let sink = core::cell::RefCell::new(ReadOutput {
+        out,
+        robot,
+        width: None,
+        sent: 0,
+        failed: None,
+    });
+    let result = client
+        .execute_streaming(
+            cx,
+            mode,
+            statement,
+            parameters,
+            |columns| sink.borrow_mut().columns(cx, columns),
+            |row| sink.borrow_mut().row(cx, &row),
+        )
+        .await;
+    sink.into_inner().finish(result)
+}
+
+struct ReadOutput<'a, W> {
+    out: &'a mut W,
+    robot: bool,
+    width: Option<usize>,
+    sent: u64,
+    failed: Option<Failure>,
+}
+impl<W: Write> ReadOutput<'_, W> {
+    fn capture(&mut self, result: Result<(), Failure>) -> Result<(), ClientError> {
+        if let Err(error) = result {
+            self.failed.get_or_insert(error);
+            // Keep the original CLI error and exit class. This marker only
+            // asks the wire client to cancel and drain its one active stream.
+            Err(ClientError::Io(std::io::ErrorKind::BrokenPipe))
+        } else {
+            Ok(())
+        }
+    }
+    fn columns(&mut self, cx: &asupersync::Cx, columns: &[String]) -> Result<(), ClientError> {
+        let result = (|| {
+            cx.checkpoint().map_err(Failure::query)?;
+            // FGP reports the query's effective snapshot in END. SELECT's
+            // frontier is not the cut of a later or historical statement.
+            let line = if self.robot {
+                format!(
+                    r#"{{"v":1,"event":"columns","stream":true,"columns":[{}]}}"#,
+                    columns
+                        .iter()
+                        .map(|name| fgdb_protocol::json::quote(name))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            } else {
+                columns
+                    .iter()
+                    .map(|name| {
+                        name.chars()
+                            .flat_map(char::escape_default)
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            };
+            emit(self.out, &line)?;
+            self.out.flush().map_err(Failure::io)?;
+            self.width = Some(columns.len());
+            Ok(())
+        })();
+        self.capture(result)
+    }
+    fn row(&mut self, cx: &asupersync::Cx, row: &[WireValue]) -> Result<(), ClientError> {
+        let result = (|| {
+            cx.checkpoint().map_err(Failure::query)?;
+            if self.width != Some(row.len()) {
+                return Err(Failure::io("remote row width does not match its columns"));
+            }
+            let sent = self
+                .sent
+                .checked_add(1)
+                .ok_or_else(|| Failure::query("stream delivery counter overflow"))?;
+            let line = super::stream::row_line(&WireRow(row), self.robot, &mut || {
+                cx.checkpoint().map_err(Failure::query)
+            })?;
+            emit(self.out, &line)?;
+            self.out.flush().map_err(Failure::io)?;
+            self.sent = sent;
+            Ok(())
+        })();
+        self.capture(result)
+    }
+    fn finish(self, result: Result<Outcome, ClientError>) -> Result<(), Failure> {
+        if let Some(error) = self.failed {
+            return Err(super::stream::incomplete(error, self.sent));
+        }
+        let result = (|| {
+            let seq = match result.map_err(failure)? {
+                Outcome::Rows { seq } => seq,
+                _ => return Err(Failure::io("remote read returned a write outcome")),
+            };
+            emit(
+                self.out,
+                &super::stream::summary_line(seq, self.sent, self.robot),
+            )?;
+            self.out.flush().map_err(Failure::io)
+        })();
+        result.map_err(|error| super::stream::incomplete(error, self.sent))
+    }
+}
+struct WireRow<'a>(&'a [WireValue]);
+impl super::stream::DeliveryRow for WireRow<'_> {
+    fn width(&self) -> usize {
+        self.0.len()
+    }
+    fn encode(&self, column: usize, robot: bool) -> Result<String, Failure> {
+        let value = self
+            .0
+            .get(column)
+            .ok_or_else(|| Failure::io("remote row column is absent"))?;
+        Ok(if robot { cell(value) } else { human(value) })
+    }
+}
+
+#[cfg(test)]
+#[path = "remote/stream_tests.rs"]
+mod stream_tests;
 
 /// Stream a subscription: the columns once, then per batch one `change`
 /// record per entry (its signed multiplicity change; a baseline's weights are

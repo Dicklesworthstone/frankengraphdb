@@ -55,12 +55,14 @@ mod convert;
 mod execute;
 mod http;
 mod keys;
+mod ordered;
 mod recovery;
 mod shutdown;
 mod symbols;
 mod tls;
 
 pub use keys::{KeyFileError, parse_key_lines, read_database_keys, read_issuer_key};
+pub use ordered::OrderedReadConfig;
 pub use recovery::DatabaseStatus;
 pub use shutdown::Shutdown;
 pub use symbols::{SymbolConflict, Symbols};
@@ -161,6 +163,10 @@ pub struct DatabaseConfig {
     /// Subscription registrations this database admits over the server's
     /// lifetime: a registration lives as long as the open database.
     pub max_subscriptions: usize,
+    /// External ordered FGP reads are disabled unless the host supplies a
+    /// trusted scratch directory and physical limits. Request bodies cannot
+    /// replace those files, limits or the database's shared resident pool.
+    pub ordered_reads: Option<OrderedReadConfig>,
 }
 
 impl DatabaseConfig {
@@ -179,6 +185,7 @@ impl DatabaseConfig {
             write_policy: GraphWriteProgramPolicy::new(query_policy, 100_000, 100_000, 100_000),
             max_statements: 64,
             max_subscriptions: 64,
+            ordered_reads: None,
         }
     }
 }
@@ -227,6 +234,7 @@ pub enum ServerError {
     InvalidDatabaseName,
     Open(fgdb::OpenError),
     Issuer(fgdb_warden::Error),
+    OrderedScratch(std::io::Error),
     Spawn,
 }
 
@@ -240,6 +248,7 @@ impl core::fmt::Display for ServerError {
             }
             Self::Open(error) => write!(f, "cannot open database: {error}"),
             Self::Issuer(error) => write!(f, "invalid issuer: {error}"),
+            Self::OrderedScratch(error) => write!(f, "cannot configure ordered scratch: {error}"),
             Self::Spawn => f.write_str("the runtime refused to spawn a connection task"),
         }
     }
@@ -286,6 +295,7 @@ pub(crate) struct Served {
     pub(crate) namespace: [u8; 32],
     pub(crate) incarnation: [u8; 32],
     pub(crate) authority_commitment: [u8; 32],
+    pub(crate) ordered_reads: Option<ordered::OrderedReads>,
 }
 
 impl Served {
@@ -365,6 +375,10 @@ impl Server {
         }
         let authority = issuer(config.issuer_key, &config.keys, config.policy_epoch)
             .map_err(ServerError::Issuer)?;
+        let ordered_reads = match config.ordered_reads {
+            Some(config) => Some(ordered::OrderedReads::open(cx, config).await?),
+            None => None,
+        };
         let namespace = config.keys.namespace.0;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
         let db = Database::open(&contexts.commit(), path, config.keys)
@@ -397,6 +411,7 @@ impl Server {
                 namespace,
                 incarnation,
                 authority_commitment,
+                ordered_reads,
             }),
         );
         Ok(())

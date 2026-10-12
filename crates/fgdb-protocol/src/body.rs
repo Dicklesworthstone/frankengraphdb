@@ -899,6 +899,10 @@ pub enum ExecuteMode {
     /// aggregate consumes its input on first demand and then yields completed
     /// groups. No eager fallback is allowed; result framing is unchanged.
     ReadStream,
+    /// Complete an admitted native scan's ORDER BY, DISTINCT and window in
+    /// host-owned bounded scratch, then deliver its final rows under credit.
+    /// Scratch limits are server policy; no eager fallback is allowed.
+    ReadOrdered,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -924,6 +928,7 @@ body!(
             ExecuteMode::Write => 1,
             ExecuteMode::Subscribe => 2,
             ExecuteMode::ReadStream => 3,
+            ExecuteMode::ReadOrdered => 4,
         });
         out.text(&s.statement);
         out.len(s.parameters.len());
@@ -940,6 +945,7 @@ body!(
             1 => ExecuteMode::Write,
             2 => ExecuteMode::Subscribe,
             3 => ExecuteMode::ReadStream,
+            4 => ExecuteMode::ReadOrdered,
             _ => return Err(BodyError::UnknownTag),
         };
         let statement = input.text(MAX_STATEMENT_BYTES)?;
@@ -1004,6 +1010,9 @@ pub enum PreparedReadMode {
     /// Pull an admitted native row or aggregate cursor under FGP flow credit.
     /// Unsupported source profiles refuse without an eager retry.
     SourceStream,
+    /// Complete the native order/window in host-owned bounded scratch before
+    /// delivering final rows under FGP credit. Unsupported profiles refuse.
+    OrderedStream,
 }
 
 /// Rebind and execute at the current visible frontier under live authority.
@@ -1134,6 +1143,7 @@ body!(
         out.u8(match s.mode {
             PreparedReadMode::Buffered => 0,
             PreparedReadMode::SourceStream => 1,
+            PreparedReadMode::OrderedStream => 2,
         });
         put_parameters(&mut out, &s.parameters)?;
     },
@@ -1143,6 +1153,7 @@ body!(
         let mode = match input.u8()? {
             0 => PreparedReadMode::Buffered,
             1 => PreparedReadMode::SourceStream,
+            2 => PreparedReadMode::OrderedStream,
             _ => return Err(BodyError::Noncanonical),
         };
         ExecutePrepared {
@@ -1781,6 +1792,7 @@ mod tests {
         for (mode, tag) in [
             (PreparedReadMode::Buffered, 0),
             (PreparedReadMode::SourceStream, 1),
+            (PreparedReadMode::OrderedStream, 2),
         ] {
             let execution = ExecutePrepared {
                 handle,
@@ -1794,19 +1806,22 @@ mod tests {
             assert_eq!(ExecutePrepared::decode(&bytes).unwrap(), execution);
             every_prefix_refuses::<ExecutePrepared>(&bytes);
         }
-        let mut unknown_mode = vec![0x31; 16];
-        unknown_mode.extend_from_slice(&[2, 0, 0, 0, 0]);
-        assert_eq!(
-            ExecutePrepared::decode(&unknown_mode),
-            Err(BodyError::Noncanonical)
-        );
+        for tag in [3, u8::MAX] {
+            let mut unknown_mode = vec![0x31; 16];
+            unknown_mode.extend_from_slice(&[tag, 0, 0, 0, 0]);
+            assert_eq!(
+                ExecutePrepared::decode(&unknown_mode),
+                Err(BodyError::Noncanonical)
+            );
+        }
 
         let execution = ExecutePrepared {
             handle,
-            mode: PreparedReadMode::SourceStream,
+            mode: PreparedReadMode::OrderedStream,
             parameters: vec![
                 ("a".into(), sample_value()),
                 ("b".into(), WireValue::Int(9)),
+                ("window".into(), WireValue::Count(u64::MAX)),
             ],
         };
         let bytes = execution.encode().unwrap();
@@ -1860,32 +1875,39 @@ mod tests {
     }
 
     #[test]
-    fn native_read_stream_mode_is_explicit_and_retains_existing_discriminators() {
+    fn native_execution_modes_are_explicit_and_retain_existing_discriminators() {
         for (mode, tag) in [
             (ExecuteMode::Read, 0),
             (ExecuteMode::Write, 1),
             (ExecuteMode::Subscribe, 2),
             (ExecuteMode::ReadStream, 3),
+            (ExecuteMode::ReadOrdered, 4),
         ] {
             let statement = Execute {
                 mode,
-                statement: "MATCH (n) RETURN n".into(),
+                statement: "q".into(),
                 parameters: vec![],
             };
             let bytes = statement.encode().unwrap();
-            assert_eq!(bytes[0], tag);
+            assert_eq!(bytes, [tag, 0, 0, 0, 1, b'q', 0, 0, 0, 0]);
             assert_eq!(Execute::decode(&bytes).unwrap(), statement);
             every_prefix_refuses::<Execute>(&bytes);
         }
-        let mut bytes = Execute {
-            mode: ExecuteMode::ReadStream,
-            statement: "MATCH (n) RETURN n".into(),
-            parameters: vec![],
+        let ordered = Execute {
+            mode: ExecuteMode::ReadOrdered,
+            statement: "MATCH (n) RETURN n.p ORDER BY n.p SKIP $skip LIMIT $limit".into(),
+            parameters: vec![
+                ("limit".into(), WireValue::Count(u64::MAX)),
+                ("skip".into(), WireValue::Count(2)),
+            ],
+        };
+        let mut bytes = ordered.encode().unwrap();
+        assert_eq!(Execute::decode(&bytes).unwrap(), ordered);
+        every_prefix_refuses::<Execute>(&bytes);
+        for tag in [5, u8::MAX] {
+            bytes[0] = tag;
+            assert_eq!(Execute::decode(&bytes), Err(BodyError::UnknownTag));
         }
-        .encode()
-        .unwrap();
-        bytes[0] = 4;
-        assert_eq!(Execute::decode(&bytes), Err(BodyError::UnknownTag));
     }
 
     #[test]

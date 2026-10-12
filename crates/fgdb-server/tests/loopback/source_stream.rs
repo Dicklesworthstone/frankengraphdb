@@ -273,7 +273,7 @@ fn native_aggregate_stream_budgets_and_cancellation_count_final_groups() {
                 ExecuteMode::ReadStream,
                 groups,
                 vec![],
-                |_| {},
+                |_| Ok(()),
                 |row| {
                     prefix.push(row);
                     Ok(())
@@ -291,7 +291,7 @@ fn native_aggregate_stream_budgets_and_cancellation_count_final_groups() {
                 ExecuteMode::ReadStream,
                 groups,
                 vec![],
-                |_| {},
+                |_| Ok(()),
                 |_| {
                     callbacks += 1;
                     Err(ClientError::Protocol("stop after one aggregate group"))
@@ -320,7 +320,7 @@ fn native_aggregate_stream_budgets_and_cancellation_count_final_groups() {
                     ExecuteMode::ReadStream,
                     &statement,
                     vec![],
-                    |_| {},
+                    |_| Ok(()),
                     |_| {
                         rows += 1;
                         Ok(())
@@ -429,7 +429,7 @@ fn native_source_stream_cancellation_and_late_budget_keep_the_connection_usable(
                 ExecuteMode::ReadStream,
                 ROWS,
                 vec![],
-                |_| {},
+                |_| Ok(()),
                 |_| {
                     callbacks += 1;
                     Err(ClientError::Protocol(
@@ -468,7 +468,7 @@ fn native_source_stream_cancellation_and_late_budget_keep_the_connection_usable(
                 ExecuteMode::ReadStream,
                 ROWS,
                 vec![],
-                |_| {},
+                |_| Ok(()),
                 |row| {
                     prefix.push(row);
                     Ok(())
@@ -514,7 +514,10 @@ async fn prepared_source(
             PreparedReadMode::SourceStream,
             handle,
             parameters,
-            |names| columns = names.to_vec(),
+            |names| {
+                columns = names.to_vec();
+                Ok(())
+            },
             |row| {
                 rows.push(row);
                 Ok(())
@@ -671,7 +674,7 @@ fn prepared_sources_keep_one_row_allowance_and_drain_cancel_before_handle_reuse(
                     PreparedReadMode::SourceStream,
                     handle,
                     vec![("min".into(), WireValue::Int(0))],
-                    |_| {},
+                    |_| Ok(()),
                     |row| {
                         prefix.push(row);
                         Ok(())
@@ -690,7 +693,7 @@ fn prepared_sources_keep_one_row_allowance_and_drain_cancel_before_handle_reuse(
                     PreparedReadMode::SourceStream,
                     handle,
                     vec![("min".into(), WireValue::Int(0))],
-                    |_| {},
+                    |_| Ok(()),
                     |_| {
                         callbacks += 1;
                         Err(ClientError::Protocol("stop after one prepared row"))

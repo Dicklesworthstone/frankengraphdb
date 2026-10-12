@@ -2,6 +2,7 @@
 //! path every surface (FGP, HTTP and Bolt) shares, so adapters differ only in
 //! framing, never in authority, statement classes or error classes.
 
+pub(crate) mod ordered;
 mod prepared;
 mod subscription;
 pub(crate) use prepared::{PreparedRead, prepare_read, read_prepared, read_prepared_session};

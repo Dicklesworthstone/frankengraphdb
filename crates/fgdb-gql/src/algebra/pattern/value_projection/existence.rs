@@ -38,12 +38,12 @@ impl GraphPatternBuilder {
     /// eliminates the incoming occurrence; OPTIONAL absence null-extends it.
     /// Later positive patterns cannot rebind a null. Explicit outer_vertex
     /// operands instead capture the original nullable value for predicates.
-    /// Every clause may bind fixed relationship identities. Required and
-    /// OPTIONAL clauses export them as projection captures; an OPTIONAL clause
-    /// without a witness leaves its captures null, like its vertices. EXISTS
-    /// identities serve local edge-property predicates only. No clause
-    /// correlates with an outer relationship alias. Full scoped path values
-    /// remain unsupported. EXISTS locals stay private. A complete optional witness remains a witness
+    /// Every clause may bind fixed relationships and the positive compiler's
+    /// bounded path captures. Required and OPTIONAL clauses export them;
+    /// absence leaves OPTIONAL captures null, like its vertices. Path predicates
+    /// belong to their own clause, before absence is decided. EXISTS captures
+    /// stay private. No clause correlates with an outer relationship or path
+    /// alias. A complete optional witness remains a witness
     /// even if a later required clause rejects it. ALL/DISTINCT and pagination
     /// apply only to the final correlated projection.
     ///
@@ -75,18 +75,6 @@ impl GraphPatternBuilder {
         let mut identities = self.identities.len();
         let mut path_captures = self.path_captures.len();
         for clause in clauses {
-            // A scoped clause may bind single relationships (exported by
-            // required/optional clauses, private to probes). Full path values
-            // and path predicates still need their own scoped output contract.
-            if clause
-                .pattern
-                .path_captures
-                .iter()
-                .any(|capture| !capture.edge_identity)
-                || !clause.pattern.path_predicates.is_empty()
-            {
-                return Err(PatternBuildError::InvalidPathCapture);
-            }
             if clause.pattern.variables.iter().any(|variable| {
                 self.path_captures
                     .iter()
@@ -168,7 +156,25 @@ impl GraphPatternBuilder {
             });
             // Only positive pattern vertices may anchor traversal. A predicate
             // capture can be null and must not suppress independent witnesses.
-            let (outer_at, root) = if let Some((edge_at, outer_at)) = edge_anchor {
+            let (outer_at, root) = if inner
+                .path_captures
+                .iter()
+                .any(|capture| !capture.edge_identity)
+            {
+                // CapturePath concatenates traversal segments in DECLARED
+                // order from the declared start. Re-rooting at a correlated
+                // destination reverses a segment; swapping a later edge also
+                // destroys a captured range's order. Keep the native root and
+                // edge order for these clauses. A shared native root can still
+                // be bound directly; other correlations are enforced at their
+                // ordinary binding slots, before any capture or path predicate.
+                // This uses the existing governed scan/expand family, not an
+                // endpoint-to-edge reconstruction or a second path evaluator.
+                let first = inner.edges.first().map(|edge| edge.source).or_else(|| {
+                    inner.variables.iter().position(|variable| !variable.outer)
+                });
+                (first.and_then(correlation), None)
+            } else if let Some((edge_at, outer_at)) = edge_anchor {
                 inner.edges.swap(0, edge_at);
                 // Captures address declared edges, not positions chosen by a
                 // correlated traversal. Preserve that identity when a later
@@ -371,6 +377,28 @@ impl GraphPatternBuilder {
                             capture: map_capture(capture),
                             start: map(start),
                             segments: segments.into_iter().map(map).collect(),
+                        });
+                    }
+                    GlaOperator::SelectPathLength {
+                        capture,
+                        comparison,
+                        value,
+                    } => {
+                        operators.push(GlaOperator::SelectPathLength {
+                            capture: map_capture(capture),
+                            comparison,
+                            value,
+                        });
+                    }
+                    GlaOperator::SelectPathNull {
+                        capture,
+                        function,
+                        is_null,
+                    } => {
+                        operators.push(GlaOperator::SelectPathNull {
+                            capture: map_capture(capture),
+                            function,
+                            is_null,
                         });
                     }
                     GlaOperator::DifferentEdges { segments } => {

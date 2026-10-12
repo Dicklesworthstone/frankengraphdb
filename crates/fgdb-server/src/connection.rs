@@ -35,6 +35,7 @@ use fgdb_warden::{Authority, CapabilityToken, VerifiedCapability};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
+mod ordered_stream;
 mod source_stream;
 
 /// Finished child streams whose late WINDOW_UPDATE/QUERY_CANCEL is benign: a
@@ -988,6 +989,41 @@ impl Lane {
             self.send_generation = None;
             return delivered;
         }
+        let ordered = match &statement {
+            Statement::Native(statement) if statement.mode == ExecuteMode::ReadOrdered => Some((
+                source_stream::SourceStatement::Text(statement.statement.as_str()),
+                statement.parameters.as_slice(),
+            )),
+            Statement::Prepared {
+                definition: Ok(definition),
+                mode: PreparedReadMode::OrderedStream,
+                parameters,
+            } => Some((
+                source_stream::SourceStatement::Prepared(definition),
+                parameters.as_slice(),
+            )),
+            _ => None,
+        };
+        if let Some((statement, parameters)) = ordered {
+            let delivered = self
+                .ordered_read(
+                    cx, waiter, db, token, request, stream, binding, statement, parameters,
+                )
+                .await;
+            let delivered = match delivered {
+                Err(Stop::Recovery(error)) => {
+                    self.refuse(cx, request, stream, binding, error.code(), error.message())
+                        .await
+                }
+                other => other,
+            };
+            let _ = self
+                .conn
+                .child_terminal(stream, generation, ChildTerminus::EphemeralCompleted);
+            self.finish(stream);
+            self.send_generation = None;
+            return delivered;
+        }
         let source = match &statement {
             Statement::Native(statement) if statement.mode == ExecuteMode::ReadStream => Some((
                 source_stream::SourceStatement::Text(statement.statement.as_str()),
@@ -1027,7 +1063,7 @@ impl Lane {
             Statement::Native(statement) => match statement.mode {
                 ExecuteMode::Read => read(cx, db, token, &statement).await,
                 ExecuteMode::Write => write(cx, db, token, &statement).await,
-                ExecuteMode::Subscribe | ExecuteMode::ReadStream => {
+                ExecuteMode::Subscribe | ExecuteMode::ReadStream | ExecuteMode::ReadOrdered => {
                     unreachable!("stream dispatched above")
                 }
             },
@@ -1760,6 +1796,22 @@ impl Lane {
                 Idle::Commit => {}
             }
         };
+        self.stream_control(cx, window, stream, request, binding, &inbound)
+            .await
+    }
+
+    /// The same control handler serves credit waits and in-flight ordered
+    /// I/O. The caller retains its one source future while this handles PING,
+    /// grants or a refusal; cancellation drops that future exactly once.
+    async fn stream_control(
+        &mut self,
+        cx: &Cx,
+        window: &mut FlowWindow,
+        stream: StreamId,
+        request: u64,
+        binding: Binding,
+        inbound: &Frame,
+    ) -> Result<(), Stop> {
         let header = *inbound.header();
         match header.kind() {
             FrameKind::WindowUpdate if header.stream_id() == stream => {
