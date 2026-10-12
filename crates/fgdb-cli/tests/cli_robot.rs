@@ -2118,8 +2118,10 @@ fn cli_named_time_zone_constructs_through_every_read_front_end() {
         "{create} without a tzdb: {}",
         refused.stdout
     );
-    let none = db.command("query", &["MATCH (e:Event) RETURN count(*) AS n"]);
-    assert_rows(&none, r#"[[{"type":"int","value":"0"}]]"#);
+    // Nothing was staged: only the Person vertex exists. (The Event label is
+    // not in the catalog yet, so a query naming it would not resolve.)
+    let none = db.command("query", &["MATCH (n) RETURN count(*) AS n"]);
+    assert_rows(&none, r#"[[{"type":"count","value":"1"}]]"#);
     let written = db.command(
         "write",
         &[

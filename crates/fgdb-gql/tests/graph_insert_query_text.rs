@@ -252,7 +252,9 @@ fn invalid_return_scopes_and_unsupported_queries_refuse_before_any_catalog_call(
         "CREATE (n:Copy) RETURN n AS duplicate,n AS duplicate",
         "CREATE (n:Copy) RETURN n AS renamed,renamed AS bad",
         "CREATE (n:Copy) RETURN count(DISTINCT *) AS count",
-        "CREATE (n:Copy) RETURN labels(n) AS labels",
+        // `RETURN labels(n)` of a created vertex is supported since
+        // fgdb-iufb7 (GraphInsertBinding::VertexLabels); its law is in
+        // insertion_property_maps.rs.
         "CREATE (a)-[e:R]->(b) RETURN type(e) AS kind",
         "CREATE (a)-[a:R]->(b) RETURN a",
         "CREATE (a)-[e:R]->(e) RETURN a",
