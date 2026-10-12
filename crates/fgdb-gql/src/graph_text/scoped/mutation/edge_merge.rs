@@ -677,10 +677,13 @@ impl EdgeMergeReturnTemplate {
 }
 
 impl PreparedGraphEdgeMergeQueryText {
-    /// Classify write text with native token framing: a MATCH-led statement
-    /// whose top level has `MERGE (` and, after it, a RETURN (fgdb-at06q).
-    /// Quoted values, property keys and aliases never become clause words.
-    /// This validates nothing and resolves no symbol; prepare owns that.
+    /// Classify write text with native token framing (fgdb-at06q): a MATCH
+    /// prefix with no other clause, then `MERGE (x)` followed by a
+    /// relationship arrow, and RETURN directly after the pattern's second
+    /// node. A vertex MERGE, a WITH/DELETE/SET before the MERGE, ON branches
+    /// or a second MERGE keep their own owners and diagnostics. Quoted values,
+    /// property keys and aliases never become clause words. This validates
+    /// nothing and resolves no symbol; prepare owns that.
     pub fn has_return_clause(statement: &str) -> Result<bool, GraphEdgeMergeTextError> {
         if statement.len() > crate::MAX_GRAPH_WRITE_SCRIPT_BYTES {
             return Err(error(
@@ -700,7 +703,11 @@ impl PreparedGraphEdgeMergeQueryText {
         {
             return Ok(false);
         }
-        let mut merged = false;
+        // Clauses the MATCH prefix cannot carry before the MERGE.
+        const PREFIX_ENDS: [&str; 10] = [
+            "WITH", "UNWIND", "CREATE", "INSERT", "DELETE", "DETACH", "SET", "REMOVE", "CALL",
+            "RETURN",
+        ];
         let mut depth = 0_usize;
         let mut previous = first.kind;
         loop {
@@ -713,19 +720,54 @@ impl PreparedGraphEdgeMergeQueryText {
                     let alias = matches!(previous, TokenKind::Punct(b'.'))
                         || matches!(previous, TokenKind::Word(word) if word.eq_ignore_ascii_case("AS"));
                     if !alias {
-                        let next = script::next_script_token(&mut lexer.clone())?.kind;
-                        if word.eq_ignore_ascii_case("MERGE")
-                            && matches!(next, TokenKind::Punct(b'('))
+                        if PREFIX_ENDS
+                            .iter()
+                            .any(|name| word.eq_ignore_ascii_case(name))
                         {
-                            merged = true;
-                        } else if merged && word.eq_ignore_ascii_case("RETURN") {
-                            return Ok(true);
+                            return Ok(false);
+                        }
+                        if word.eq_ignore_ascii_case("MERGE")
+                            && matches!(
+                                script::next_script_token(&mut lexer.clone())?.kind,
+                                TokenKind::Punct(b'(')
+                            )
+                        {
+                            return Self::relationship_then_return(&mut lexer);
                         }
                     }
                 }
                 _ => {}
             }
             previous = token.kind;
+        }
+    }
+
+    /// After `MERGE`: the pattern's first node group must be followed by a
+    /// relationship arrow, and RETURN must directly follow its second.
+    fn relationship_then_return(lexer: &mut Lexer<'_>) -> Result<bool, GraphEdgeMergeTextError> {
+        let mut depth = 0_usize;
+        let mut nodes = 0_u8;
+        loop {
+            let token = script::next_script_token(lexer)?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(close @ (b')' | b']' | b'}')) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && close == b')' {
+                        nodes += 1;
+                        let next = script::next_script_token(&mut lexer.clone())?.kind;
+                        if nodes > 1 {
+                            return Ok(matches!(next, TokenKind::Word(word)
+                                if word.eq_ignore_ascii_case("RETURN")));
+                        }
+                        if !matches!(next, TokenKind::Punct(b'-' | b'<')) {
+                            return Ok(false);
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 

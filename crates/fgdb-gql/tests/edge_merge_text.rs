@@ -189,9 +189,10 @@ fn self_loop_uses_one_projected_vertex_column_for_both_endpoints() {
     assert_eq!((merge.source_column(), merge.destination_column()), (0, 0));
 }
 
-/// fgdb-at06q: only a MATCH-led statement whose top level has `MERGE (` and a
-/// later RETURN routes to relationship MERGE RETURN. Quoted text, property
-/// keys and plain reads never do.
+/// fgdb-at06q: only a MATCH prefix, one relationship MERGE and RETURN directly
+/// after the pattern route to relationship MERGE RETURN. A vertex MERGE, a
+/// clause before the MERGE, ON branches or a second MERGE keep their own
+/// owners. Quoted text, property keys and plain reads never route.
 #[test]
 fn only_a_match_merge_with_a_later_top_level_return_routes_to_merge_return() {
     use fgdb_gql::PreparedGraphEdgeMergeQueryText;
@@ -201,12 +202,33 @@ fn only_a_match_merge_with_a_later_top_level_return_routes_to_merge_return() {
             true,
         ),
         ("MATCH (a),(b) MERGE (a)-[:R]-(b) RETURN a", true),
+        (
+            "MATCH (a),(b) WHERE a.p = 1 MERGE (a)<-[:R]-(b) RETURN a",
+            true,
+        ),
         ("MATCH (a),(b) MERGE (a)-[:R]->(b)", false),
         ("MATCH (a),(b) MERGE (a)-[:R {p: 'RETURN'}]->(b)", false),
         ("MATCH (a) RETURN a", false),
         ("MATCH (a) WITH a RETURN a", false),
         ("MERGE (n {p: 1}) RETURN n", false),
         ("CREATE (a) RETURN a", false),
+        // A vertex MERGE after MATCH is not a relationship pattern.
+        ("MATCH (a) MERGE (b:L) RETURN b", false),
+        // Clauses the MATCH prefix cannot carry before the MERGE.
+        ("MATCH (n) WITH n AS a MERGE (a)-[:R]->(a) RETURN a", false),
+        (
+            "MATCH (a)-[t:R]->(b) DELETE t MERGE (a)-[:R]->(b) RETURN a",
+            false,
+        ),
+        // ON branches and a second MERGE before the RETURN.
+        (
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p = 1 RETURN r",
+            false,
+        ),
+        (
+            "MATCH (a),(b) MERGE (a)-[:R]->(b) MERGE (b)-[:R]->(a) RETURN a",
+            false,
+        ),
     ] {
         assert_eq!(
             PreparedGraphEdgeMergeQueryText::has_return_clause(text).unwrap(),
