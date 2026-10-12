@@ -210,7 +210,7 @@ where
             )));
         }
         self.after = Some(eid);
-        if self.visible::<C>(eid, relation.one())?.is_some() {
+        if self.visible::<C>(eid, relation)?.is_some() {
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
             Ok(SourceStep::Item(eid))
         } else {
@@ -395,7 +395,7 @@ where
             return Ok(SourceStep::Exhausted);
         };
         if self
-            .visible::<C>(eid, relation.one())
+            .visible::<C>(eid, relation)
             .map_err(EdgeExpansionSourceError::Read)?
             .is_some()
         {

@@ -27,10 +27,11 @@ mod view;
 pub use crate::gql_cert::NativeResultCertificate;
 pub use aggregate_stream::NativeAggregateCursor;
 pub use authorized::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedOrderExecution,
-    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
-    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
-    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
+    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
+    AuthorizedOrderExecution, AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall,
+    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
+    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
+    AuthorizedSpoolCursor,
 };
 pub(crate) use beacon::BeaconRegistry;
 pub(crate) use beacon::procedure::{
