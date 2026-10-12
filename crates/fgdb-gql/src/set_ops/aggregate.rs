@@ -154,14 +154,6 @@ impl PreparedGraphSetAggregate {
         self.summary = self.summary.with_distinct_output(distinct);
         self
     }
-    /// See [`PreparedGraphAggregate::with_output_projection`] (fgdb-4avot).
-    pub fn with_output_projection(
-        mut self,
-        projection: Vec<crate::GraphSetProjection>,
-    ) -> Result<Self, GraphAggregateBuildError> {
-        self.summary = self.summary.with_output_projection(projection)?;
-        Ok(self)
-    }
 
     /// Reuse the exact aggregate transcript, including the COMPLETE input set.
     /// Equivalent single-source relational aggregates retain identical bytes;

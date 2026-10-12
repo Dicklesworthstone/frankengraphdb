@@ -344,8 +344,8 @@ impl PreparedGraphPipelineAggregateText {
                                     });
                                     Leaf::Summary(summaries.len() - 1)
                                 }
-                                Err(error) => {
-                                    failure = Some(error);
+                                Err(failed) => {
+                                    failure = Some(failed);
                                     return Err(error(
                                         start,
                                         GraphPatternTextErrorKind::Expected(
@@ -372,8 +372,8 @@ impl PreparedGraphPipelineAggregateText {
                                 parser.advance()?;
                                 Leaf::Key(column)
                             }
-                            Err(error) => {
-                                failure = Some(error);
+                            Err(failed) => {
+                                failure = Some(failed);
                                 return Err(error(
                                     start,
                                     GraphPatternTextErrorKind::Expected("an aggregate argument"),
