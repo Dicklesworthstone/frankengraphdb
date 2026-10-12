@@ -345,7 +345,7 @@ enum ListFunction {
     Reduce,
 }
 
-struct GraphProjectionHead<'a> {
+pub(super) struct GraphProjectionHead<'a> {
     with: bool,
     /// A written WITH that neither groups nor deduplicates. openCypher lets
     /// its own WHERE and pages also read the MATCH bindings it drops.
@@ -1133,6 +1133,44 @@ impl<'a> Parser<'a> {
             inputs,
             outputs,
         })
+    }
+
+    /// The read part of a write after WITH (fgdb-sl4ym): the WITH head over
+    /// the MATCH just parsed and every later stage, up to the write clause,
+    /// with the row schema there. The write reads that row and nothing else.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn write_row_prefix(
+        &mut self,
+    ) -> Result<
+        (
+            GraphProjectionHead<'a>,
+            Vec<ReadStageTemplate>,
+            Vec<(Name<'a>, GraphSetColumnType)>,
+        ),
+        GraphSetTextError,
+    > {
+        let mut head = self.graph_projection_head()?;
+        if !head.with {
+            return Err(GraphSetTextError {
+                offset: self.current.at,
+                kind: GraphSetTextErrorKind::Expected("WITH before the write clause"),
+            });
+        }
+        self.hoist_boundary_reads(&mut head, 0)?;
+        let schema = head.schema(&self.syntax.parameters);
+        let (stages, schema, _) = self.row_pipeline_prefix(schema)?;
+        Ok((head, stages, schema))
+    }
+
+    /// The relation [`Self::write_row_prefix`] parsed, once the write and any
+    /// RETURN after it are read: every parameter of the statement is in it.
+    pub(super) fn finish_write_row_prefix(
+        self,
+        statement: &'a str,
+        head: GraphProjectionHead<'a>,
+        stages: Vec<ReadStageTemplate>,
+    ) -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
+        self.finish_graph_projection(statement, head, stages)
     }
 
     fn finish_graph_projection(
