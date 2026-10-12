@@ -74,6 +74,22 @@ pub(crate) fn element_property_at(
     key: PropertyKeyId,
     as_of: CommitSeq,
 ) -> Result<Option<CanonicalScalar>, GqlError> {
+    read_element_property(
+        element,
+        key,
+        |vid| reader.gql_vertex_at(vid, as_of),
+        |eid| reader.gql_edge_at(eid, as_of),
+    )
+}
+
+/// The one property row lookup behind every host's element reader: the
+/// vertex row or edge record at the host's cut, then its key, if present.
+pub(crate) fn read_element_property(
+    element: fgdb_delta_types::ElementId,
+    key: PropertyKeyId,
+    vertex: impl FnOnce(VId) -> Result<Option<VertexRow>, ReadError>,
+    edge: impl FnOnce(EId) -> Result<Option<EdgeRecord>, ReadError>,
+) -> Result<Option<CanonicalScalar>, GqlError> {
     let lookup = |props: &[(PropertyKeyId, CanonicalScalar)]| {
         props
             .binary_search_by_key(&key, |(key, _)| *key)
@@ -81,12 +97,10 @@ pub(crate) fn element_property_at(
             .map(|at| props[at].1.clone())
     };
     Ok(match element {
-        fgdb_delta_types::ElementId::Vertex(vid) => reader
-            .gql_vertex_at(vid, as_of)
+        fgdb_delta_types::ElementId::Vertex(vid) => vertex(vid)
             .map_err(GqlError::Read)?
             .and_then(|row| lookup(&row.props)),
-        fgdb_delta_types::ElementId::Edge(eid) => reader
-            .gql_edge_at(eid, as_of)
+        fgdb_delta_types::ElementId::Edge(eid) => edge(eid)
             .map_err(GqlError::Read)?
             .and_then(|record| lookup(&record.props)),
     })

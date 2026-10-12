@@ -62,7 +62,7 @@ fn set_at<Clock: FnMut() -> u64>(
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphValueRow>, QueryError> {
     query
-        .execute_governed_with_procedures(
+        .execute_governed_with_elements(
             policy,
             |pattern, remaining| {
                 pattern_at(snapshot, at, pattern, scope, execution, remaining)
@@ -70,6 +70,22 @@ fn set_at<Clock: FnMut() -> u64>(
             },
             |call, arguments, remaining| {
                 procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+            },
+            // `x.key` on an element (fgdb-xnd7x). Every element here came out
+            // of a pattern or CALL admitted under this capability, so only
+            // the property scope remains: a property the capability cannot
+            // see reads exactly as an absent one, as the pattern tables mask
+            // it (FG-INV-20).
+            |element, key| {
+                if !scope.allows_property(key) {
+                    return Ok(None);
+                }
+                crate::gql_exec::read_element_property(
+                    element,
+                    key,
+                    |vid| snapshot.vertex_at(vid, at),
+                    |eid| snapshot.edge_at(eid, at),
+                )
             },
             || execution.borrow_mut().checkpoint(),
         )
