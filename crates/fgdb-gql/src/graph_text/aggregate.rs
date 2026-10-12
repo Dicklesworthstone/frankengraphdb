@@ -1083,6 +1083,34 @@ impl<'a> Parser<'a> {
         self.aggregate_scalar_expression(computed, true)
     }
 
+    /// Whether the aggregate argument starting here calls rand() anywhere
+    /// before the call's closing parenthesis, at any nesting.
+    fn argument_calls_random(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut depth = 0_usize;
+        loop {
+            match token.kind {
+                TokenKind::End => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    if depth == 0 {
+                        return Ok(false);
+                    }
+                    depth -= 1;
+                }
+                TokenKind::Word(word)
+                    if word.eq_ignore_ascii_case("RAND")
+                        && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'(')) =>
+                {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            token = lexer.next()?;
+        }
+    }
+
     fn starts_aggregate_call(&self) -> Result<bool, GraphPatternTextError> {
         let TokenKind::Word(word) = self.current.kind else {
             return Ok(false);
@@ -1365,6 +1393,17 @@ impl<'a> Parser<'a> {
                 }
                 (function, false) => function,
             };
+            // rand() anywhere in the argument is a non-constant expression
+            // (Return6 [15]). This reader's own grammar would otherwise read
+            // `rand(` as a path function, so look for it first.
+            if self.argument_calls_random()? {
+                return Err(error(
+                    self.current.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "a deterministic aggregate argument: rand() inside an aggregate is a non-constant expression",
+                    ),
+                ));
+            }
             // The call's own argument, not a grouping key.
             let outer = core::mem::replace(&mut self.aggregate_argument, true);
             let argument = self.aggregate_expression(computed);

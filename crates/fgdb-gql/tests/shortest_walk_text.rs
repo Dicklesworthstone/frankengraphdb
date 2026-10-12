@@ -235,7 +235,6 @@ fn unsupported_shortest_shapes_refuse_even_with_limit_zero_and_before_catalog() 
         "MATCH ALL SHORTEST WALK (a)-[:R*]->(b) RETURN a",
         "MATCH ALL SHORTEST WALK (a)-[:R*1..]->(b) RETURN a",
         "MATCH ALL SHORTEST WALK (a)-[:R*$hops]->(b) RETURN a",
-        "MATCH ALL SHORTEST WALK (a)-[:R*3..1]->(b) RETURN a",
         "MATCH ALL SHORTEST WALK (a)-[:R*1..1025]->(b) RETURN a LIMIT 0",
         "MATCH ALL SHORTEST WALK (a)-[:R*1..3]->(b)-[:R]->(c) RETURN a LIMIT 0",
         "MATCH ALL SHORTEST WALK (a)-[:R*1..3]->(b),(c) RETURN a LIMIT 0",
@@ -253,6 +252,22 @@ fn unsupported_shortest_shapes_refuse_even_with_limit_zero_and_before_catalog() 
         );
         assert_eq!(calls.get(), 0, "{text}");
     }
+    // A reversed Cypher interval is the empty interval under every selector
+    // (a4b1966a, TCK Match5 [11]-[13]): it prepares and matches nothing.
+    let reversed = prepare("MATCH ALL SHORTEST WALK (a)-[:R*3..1]->(b) RETURN a");
+    let rows = reversed
+        .plan()
+        .execute_governed_with_identified_properties(
+            5,
+            [VId(1), VId(2), VId(3)],
+            [(EId(1), VId(1), R, VId(2)), (EId(2), VId(2), R, VId(3))],
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            wide(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert!(rows.value.is_empty());
 }
 
 #[test]

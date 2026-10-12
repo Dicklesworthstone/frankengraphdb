@@ -1325,11 +1325,11 @@ fn coalesce_over_lists_is_the_first_non_null_argument() {
         ),
         // The second argument never runs: n.p / (n.p - 2) divides by zero.
         (
-            "MATCH (n) WITH [1] AS a RETURN coalesce(a, [n.p / (n.p - 2)]) AS r",
+            "MATCH (n) WITH n, [1] AS a RETURN coalesce(a, [n.p / (n.p - 2)]) AS r",
             list(&[1]),
         ),
         (
-            "MATCH (n) WITH null AS b RETURN coalesce(b, [n.p]) AS r",
+            "MATCH (n) WITH n, null AS b RETURN coalesce(b, [n.p]) AS r",
             list(&[2]),
         ),
         (
