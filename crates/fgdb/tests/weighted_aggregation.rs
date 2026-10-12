@@ -333,7 +333,7 @@ fn actual_database_counts_a_billion_parallel_walks_under_a_small_work_allowance(
         }
         db.write(&commit, seed).await.unwrap();
         let aggregate = prepare(&format!(
-            "MATCH (a){} RETURN COUNT(*) AS paths,COUNT(DISTINCT a) AS owners",
+            "MATCH REPEATABLE ELEMENTS (a){} RETURN COUNT(*) AS paths,COUNT(DISTINCT a) AS owners",
             "-[:R]->(a)".repeat(10)
         ));
         let result = db

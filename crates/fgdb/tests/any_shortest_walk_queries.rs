@@ -360,7 +360,7 @@ fn database_any_search_coalesces_parallel_cycles_at_the_maximum_hop_bound() {
         let frontier = db.frontier().unwrap();
         let prepare = |selector| {
             PreparedGraphText::prepare(
-                &format!("MATCH {selector} SHORTEST WALK (a)-[:R*1024]->(b) RETURN ALL b"),
+                &format!("MATCH REPEATABLE ELEMENTS {selector} SHORTEST WALK (a)-[:R*1024]->(b) RETURN ALL b"),
                 symbols,
             )
             .unwrap()

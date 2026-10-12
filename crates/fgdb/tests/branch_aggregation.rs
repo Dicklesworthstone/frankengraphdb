@@ -388,7 +388,7 @@ fn early_billion_assignment_branches_are_folded_before_the_returned_cycle() {
         db.write_atomic(&commit, vec![vertices, root_edge, choices, target, closing])
             .await
             .unwrap();
-        let mut statement = "MATCH (a)-[:R]->(b)".to_owned();
+        let mut statement = "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)".to_owned();
         for at in 0..10 {
             statement.push_str(&format!(",(b)-[:S]->(h{at})"));
         }

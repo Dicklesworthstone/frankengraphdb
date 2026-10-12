@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const T: RelationId = RelationId(3);
-const STATEMENT: &str = "MATCH (a)-[:R]->(b), (b)-[:S]->(c)-[:T]->(d), (b)-[:S]->(e) \
+const STATEMENT: &str = "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b), (b)-[:S]->(c)-[:T]->(d), (b)-[:S]->(e) \
     RETURN a,COUNT(*) AS n,COUNT(b) AS m,COUNT(DISTINCT b) AS distinct_b,MIN(b) AS lo,MAX(b) AS hi \
     GROUP BY a ORDER BY n DESC,a ASC";
 type Summary = (VId, u64, u64, u64, Option<VId>, Option<VId>);
@@ -333,7 +333,7 @@ fn distinct_vertex_assignments_are_factored_in_the_actual_database_entrypoint() 
         db.write_atomic(&commit, vec![vertices, first, choices])
             .await
             .unwrap();
-        let mut statement = "MATCH (a)-[:R]->(b)".to_owned();
+        let mut statement = "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)".to_owned();
         for at in 0..10 {
             statement.push_str(&format!(",(b)-[:S]->(x{at})"));
         }

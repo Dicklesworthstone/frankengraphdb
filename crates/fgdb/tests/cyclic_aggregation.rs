@@ -342,7 +342,7 @@ fn database_counts_eight_hidden_cycles_with_original_source_admission() {
         db.write_atomic(&commit, vec![vertices, first, second, middle, last])
             .await
             .unwrap();
-        let mut statement = "MATCH (a)-[:R]->(b)".to_owned();
+        let mut statement = "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)".to_owned();
         for at in 0..8 {
             statement.push_str(&format!(",(b)-[:S]->(x{at})-[:T]->(y{at})-[:U]->(b)"));
         }
