@@ -75,7 +75,8 @@ fn expected(cut: u64) -> Vec<Vec<GraphValue>> {
             continue;
         }
         for &(s, from, c, sp) in &edges {
-            if b != from || cut >= 3 && s == 2 {
+            // One MATCH binds r and s under DIFFERENT EDGES.
+            if b != from || r == s || cut >= 3 && s == 2 {
                 continue;
             }
             rows.push(vec![

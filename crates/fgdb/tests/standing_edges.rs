@@ -375,9 +375,13 @@ fn untyped_standing_inputs_follow_new_relations_mixed_joins_and_cascades() {
                         edge.entry.src == source && (!only_r || edge.entry.relation == R)
                     })
                     .map(|first| {
+                        // Each two-hop MATCH binds its edges under DIFFERENT EDGES.
                         edges
                             .iter()
-                            .filter(|second| second.entry.src == first.entry.dst)
+                            .filter(|second| {
+                                second.entry.src == first.entry.dst
+                                    && second.entry.eid != first.entry.eid
+                            })
                             .count() as u64
                     })
                     .sum::<u64>()

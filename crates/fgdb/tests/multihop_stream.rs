@@ -114,7 +114,9 @@ fn oracle(
             }
             for s in &edges {
                 for (from, c) in orient(s.entry.src, s.entry.dst) {
-                    if s.entry.relation != R
+                    // One MATCH binds r and s under DIFFERENT EDGES.
+                    if r.entry.eid == s.entry.eid
+                        || s.entry.relation != R
                         || from != (if shape == 1 { a } else { b })
                         || (shape == 2 && c != a)
                     {

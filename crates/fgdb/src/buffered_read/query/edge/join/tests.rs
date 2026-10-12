@@ -161,7 +161,9 @@ fn expected(
         for (a, b) in orient(x, y, dirs[0]) {
             for &(s, x, y, sp) in &edges {
                 for (from, c) in orient(x, y, dirs[1]) {
-                    if from != (if shape == 1 { a } else { b })
+                    // One MATCH binds r and s under DIFFERENT EDGES.
+                    if r == s
+                        || from != (if shape == 1 { a } else { b })
                         || (shape == 2 && c != a)
                         || (filter && (rp < 8 || sp <= property(a)))
                     {

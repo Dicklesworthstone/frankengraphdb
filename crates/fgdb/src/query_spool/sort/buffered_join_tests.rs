@@ -206,10 +206,10 @@ fn cold_multi_hop_order_hidden_keys_distinct_and_computed_stages_preserve_exact_
         let baseline = source_pool.used();
         for cut in [1, 2] {
             let end = if cut == 1 { 4 } else { 14 };
-            let pairs: [(i64, i64); 6] = if cut == 1 {
-                [(16, 1), (17, 4), (17, 1), (18, 4), (18, 1), (19, 4)]
+            let pairs: [(i64, i64); 5] = if cut == 1 {
+                [(16, 1), (17, 4), (17, 1), (18, 4), (19, 4)]
             } else {
-                [(26, 1), (27, 14), (17, 1), (18, 14), (18, 1), (19, 14)]
+                [(26, 1), (27, 14), (17, 1), (18, 14), (19, 14)]
             };
             let mut maps: Vec<_> = pairs
                 .into_iter()
@@ -231,7 +231,7 @@ fn cold_multi_hop_order_hidden_keys_distinct_and_computed_stages_preserve_exact_
                 (
                     "RETURN r.p+s.p AS value ORDER BY value DESC SKIP 1 LIMIT 3",
                     frames(if cut == 1 {
-                        vec![scalar(18), scalar(18), scalar(17)]
+                        vec![scalar(18), scalar(17), scalar(17)]
                     } else {
                         vec![scalar(26), scalar(19), scalar(18)]
                     }),
@@ -292,36 +292,47 @@ fn cold_multi_hop_order_hidden_keys_distinct_and_computed_stages_preserve_exact_
                 assert_eq!(source_pool.used(), baseline);
                 assert_eq!(spill_pool.used(), 0);
             }
-            let text = format!(
-                "{MATCH}-[t:R]->(d) FOR SYSTEM_TIME AS OF SEQ {cut} RETURN d.p AS value ORDER BY value DESC SKIP 1 LIMIT 3"
-            );
-            let prepared = prepare(&text);
-            let (mut scratch, _) = file(&cx, &spill_pool).await;
-            let (mut destination, _) = file(&cx, &spill_pool).await;
-            let (mut auxiliary, _) = file(&cx, &spill_pool).await;
-            let (spool, _) = prepared
-                .spool_in_view(
-                    &mut view,
-                    &cx,
-                    policy(3),
-                    &mut scratch,
-                    &mut destination,
-                    &mut auxiliary,
-                    1,
-                    32,
-                    1,
-                    32,
-                    31,
-                    8192,
-                    100,
-                    WORK,
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                contents(&spool, &mut destination, &cx).await,
-                frames(vec![scalar(end), scalar(end), scalar(1)])
-            );
+            // One MATCH binds r, s and t under DIFFERENT EDGES, so only e1|e2,
+            // e3, e4 reach d. REPEATABLE ELEMENTS keeps the homomorphic rows.
+            for (mode, expected) in [
+                ("", frames(vec![scalar(end)])),
+                (
+                    " REPEATABLE ELEMENTS",
+                    frames(vec![scalar(end), scalar(end), scalar(1)]),
+                ),
+            ] {
+                let text = format!(
+                    "MATCH{mode} (a)-[r:R]->(b)-[s:R]->(c)-[t:R]->(d) FOR SYSTEM_TIME AS OF SEQ {cut} RETURN d.p AS value ORDER BY value DESC SKIP 1 LIMIT 3"
+                );
+                let prepared = prepare(&text);
+                let (mut scratch, _) = file(&cx, &spill_pool).await;
+                let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+                let (spool, _) = prepared
+                    .spool_in_view(
+                        &mut view,
+                        &cx,
+                        policy(3),
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        1,
+                        32,
+                        1,
+                        32,
+                        31,
+                        8192,
+                        100,
+                        WORK,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{text}: {error}"));
+                assert_eq!(
+                    contents(&spool, &mut destination, &cx).await,
+                    expected,
+                    "{text}"
+                );
+            }
         }
         drop(view);
         assert_eq!(source_pool.used(), 0);
@@ -367,7 +378,7 @@ fn cold_join_spill_keeps_input_quota_separate_and_carries_native_and_external_wo
                     32,
                     31,
                     8192,
-                    if trial == 4 { 5 } else { 6 },
+                    if trial == 4 { 4 } else { 5 },
                     if trial == 2 { external - 1 } else { external },
                 )
                 .await;
@@ -441,13 +452,13 @@ fn cold_join_complete_stage_errors_are_not_hidden_by_downstream_zero_limit() {
             )
             .await
             .unwrap_err();
-        // The child's c.p=4 is the fourth canonical row. Fusing the parent
+        // The child's c.p=4 is the third canonical row. Fusing the parent
         // would instead fail at its very first row (value=4). Preserve the barrier.
         assert!(
             matches!(
                 error,
                 NativeSpoolError::SetExecution(fgdb_gql::GraphSetExecutionError::Projection {
-                    row: 3,
+                    row: 2,
                     ..
                 })
             ),

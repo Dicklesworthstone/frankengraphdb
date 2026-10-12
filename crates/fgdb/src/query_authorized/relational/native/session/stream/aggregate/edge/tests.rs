@@ -169,15 +169,15 @@ fn scoped_edges_and_fixed_joins_aggregate_only_admitted_topology_and_fields() {
         ),
         (
             "MATCH (a)-[e:R]->(b)-[f:R]->(c) RETURN COUNT(*) AS n,SUM(f.p) AS total",
-            vec![vec![Count(4), Integer(16)]],
+            vec![vec![Count(3), Integer(16)]],
         ),
         (
             "MATCH (a)-[e]->(b)-[f]->(c) RETURN COUNT(*) AS n,SUM(f.p) AS total",
-            vec![vec![Count(4), Integer(16)]],
+            vec![vec![Count(3), Integer(16)]],
         ),
         (
             "MATCH (a)-[e]->(b)-[f:R]->(c) RETURN COUNT(*) AS n,SUM(f.p) AS total",
-            vec![vec![Count(4), Integer(16)]],
+            vec![vec![Count(3), Integer(16)]],
         ),
         (
             "MATCH (a)-[e:R]->(b) WHERE NOT EXISTS { MATCH (b)-[:S]->(x) } RETURN COUNT(*) AS n",

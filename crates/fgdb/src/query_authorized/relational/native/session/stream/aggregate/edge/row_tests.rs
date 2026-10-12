@@ -261,12 +261,12 @@ fn connected_rows_keep_captured_paths_and_rebind_scoped_predicates() {
     {
         let mut cursor = session.stream(&cx, &prepared, &params).unwrap();
         let got = cells(&mut cursor);
+        // DIFFERENT EDGES: self-loop 13 cannot bind both e and f.
         let expected = [
             (10, 0, 12, 1, 3, Some(8)),
             (11, 0, 12, 1, 3, Some(8)),
             (12, 1, 13, 3, 3, None),
             (12, 1, u128::MAX, 3, u128::MAX, Some(16)),
-            (13, 3, 13, 3, 3, None),
             (13, 3, u128::MAX, 3, u128::MAX, Some(16)),
         ];
         assert_eq!(got.len(), expected.len());

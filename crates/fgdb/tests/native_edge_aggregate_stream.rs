@@ -79,26 +79,30 @@ fn sum(value: Option<i128>) -> GraphAggregateValue {
 // not use GLA, storage readers or the production join/probe/aggregate machine.
 fn oracle(direction: usize, hops: usize) -> Vec<GraphAggregateValue> {
     let mut oriented = Vec::new();
-    for (from, to, score) in EDGES {
+    for (edge, (from, to, score)) in EDGES.into_iter().enumerate() {
         if direction == 1 {
-            oriented.push((to, from, score));
+            oriented.push((edge, to, from, score));
         } else {
-            oriented.push((from, to, score));
+            oriented.push((edge, from, to, score));
             if direction == 2 && from != to {
-                oriented.push((to, from, score));
+                oriented.push((edge, to, from, score));
             }
         }
     }
+    // One MATCH binds its edges under DIFFERENT EDGES. Both orientations of an
+    // undirected edge share its index, so no match uses a stored edge twice.
     let mut matches = Vec::new();
-    for &(from, to, score) in &oriented {
-        matches.push((from, to, score));
+    for &(edge, _, to, score) in &oriented {
+        matches.push((vec![edge], to, score));
     }
     for _ in 1..hops {
         let mut extended = Vec::new();
-        for &(root, end, score) in &matches {
-            for &(from, to, _) in &oriented {
-                if end == from {
-                    extended.push((root, to, score));
+        for (used, end, score) in &matches {
+            for &(edge, from, to, _) in &oriented {
+                if *end == from && !used.contains(&edge) {
+                    let mut used = used.clone();
+                    used.push(edge);
+                    extended.push((used, to, *score));
                 }
             }
         }
