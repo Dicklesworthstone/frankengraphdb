@@ -1751,6 +1751,23 @@ impl<'a> Parser<'a> {
         Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'[')))
     }
 
+    /// Whether a MATCH vertex or fixed-length relationship is subscripted
+    /// here, `n[key]`: openCypher dynamic property access (Graph7), read as
+    /// the subscript of the element's property map.
+    pub(super) fn element_subscript_follows(&self) -> Result<bool, GraphPatternTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        Ok(!self.elements.contains(&word)
+            && !self.syntax.names_path(word)
+            && (self.syntax.variables.iter().any(|name| name.text == word)
+                || self
+                    .syntax
+                    .visible_edge(word)
+                    .is_some_and(|(edge, _)| edge.walk.is_none()))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'[')))
+    }
+
     /// Whether a list operand of a `+` chain starts here (list_operand_at).
     pub(super) fn list_operand_here(
         &self,
@@ -2119,7 +2136,19 @@ impl<'a> Parser<'a> {
                 )
                 && !matches!(self.lexer.clone().next()?.kind,
                     TokenKind::Word(next) if next.eq_ignore_ascii_case("IS"));
-            if bare {
+            if bare && self.element_subscript_follows()? {
+                // `n[key]` subscripts n's property map, so an absent key
+                // reads NULL and a non-text key fails as for any map.
+                let variable = self.property_variable()?;
+                ReadValueTemplate::Column(self.projection_slot(
+                    columns,
+                    Projection {
+                        variable,
+                        property: None,
+                        path: Some(GraphPathFunction::Properties),
+                    },
+                )?)
+            } else if bare {
                 let variable = self.any_variable()?;
                 ReadValueTemplate::Column(self.mutation_projection(columns, variable, None)?)
             } else {
