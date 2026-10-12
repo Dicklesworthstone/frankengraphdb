@@ -682,7 +682,7 @@ pub(crate) fn comparison_tag(comparison: IntegerComparison) -> u8 {
     }
 }
 
-fn append_projection_transcript(bytes: &mut Vec<u8>, items: &[ReadProjectionTemplate]) {
+pub(crate) fn append_projection_transcript(bytes: &mut Vec<u8>, items: &[ReadProjectionTemplate]) {
     bytes.extend_from_slice(&(items.len() as u64).to_be_bytes());
     for item in items {
         item.append_template_transcript(bytes);

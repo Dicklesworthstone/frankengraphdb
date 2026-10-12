@@ -118,6 +118,11 @@ pub struct PreparedGraphPipelineAggregateText {
     pub(crate) count: Option<ReadPageNumber>,
     pub(crate) aggregate_at: usize,
     pub(crate) having_at: usize,
+    /// When a RETURN item combines aggregate results (`sum(v) * 10 /
+    /// count(v)`, fgdb-4avot): every item, in written order, over the
+    /// evaluation row of all keys then all summaries. Output rows then carry
+    /// these values only, and the slots address them in order.
+    pub(crate) output: Option<Vec<crate::set_text::ReadProjectionTemplate>>,
 }
 impl core::fmt::Debug for PreparedGraphPipelineAggregateText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -232,6 +237,12 @@ impl PreparedGraphPipelineAggregateText {
                 bytes.push(1);
                 count.append_template_transcript(&mut bytes);
             }
+        }
+        // Only a computed output extends the transcript, so every plan
+        // without one keeps its exact bytes.
+        if let Some(output) = &self.output {
+            bytes.extend_from_slice(b"fgdb:pipeline-aggregate-output:v1\0");
+            crate::set_text::append_projection_transcript(&mut bytes, output);
         }
         bytes
     }

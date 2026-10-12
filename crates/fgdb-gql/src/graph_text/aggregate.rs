@@ -961,7 +961,10 @@ enum OutputLeaf<'a> {
     Group(Expression<'a>),
 }
 
-fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
+pub(in crate::graph_text) fn remap_output_columns(
+    value: &mut ReadValueTemplate,
+    columns: &[usize],
+) {
     match value {
         ReadValueTemplate::Column(index) => *index = columns[*index],
         ReadValueTemplate::List(items) => {

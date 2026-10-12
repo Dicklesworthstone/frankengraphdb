@@ -1056,3 +1056,63 @@ fn a_leading_unwind_joined_by_match_feeds_an_aggregate_return() {
         ]
     );
 }
+
+/// fgdb-4avot: a terminal RETURN after WITH may combine aggregate results with
+/// arithmetic and grouping keys (`SUM(x) * 10 / COUNT(x)`, `x + COUNT(*)`), as
+/// the plain MATCH ... RETURN facade already does. The rows equal that
+/// facade's answer over the same data. A non-aggregate operand that is not a
+/// grouping key refuses, as in openCypher, and v1 refuses ORDER BY or HAVING
+/// over a combined item.
+#[test]
+fn a_terminal_return_combines_aggregate_results_like_the_graph_facade() {
+    let graph = |text: &str| {
+        fgdb_gql::PreparedGraphAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    let pipeline = |text: &str| {
+        PreparedGraphPipelineAggregateText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    let input = [
+        CanonicalScalar::Int(5),
+        CanonicalScalar::Int(5),
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(9),
+    ];
+    for (with, plain) in [
+        (
+            "MATCH (n) WITH n.p AS x RETURN SUM(x) * 10 / COUNT(x) AS scaled, COUNT(*) + 1 AS more",
+            "MATCH (n) RETURN SUM(n.p) * 10 / COUNT(n.p) AS scaled, COUNT(*) + 1 AS more",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS doubled",
+            "MATCH (n) RETURN n.p AS x, COUNT(*) * 2 AS doubled",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, x + COUNT(*) AS shifted",
+            "MATCH (n) RETURN n.p AS x, n.p + COUNT(*) AS shifted",
+        ),
+    ] {
+        let mut combined = run(&pipeline(with), &input, wide()).value;
+        let mut reference = run(&graph(plain), &input, wide()).value;
+        combined.sort();
+        reference.sort();
+        assert_eq!(combined, reference, "{with}");
+        assert!(!combined.is_empty(), "{with}");
+    }
+    for text in [
+        // y is not a grouping key of the RETURN.
+        "MATCH (n) WITH n.p AS x, n.p AS y RETURN x, y + COUNT(*) AS z",
+        "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS d ORDER BY d",
+        "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS d HAVING x > 1",
+    ] {
+        assert!(
+            PreparedGraphPipelineAggregateText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}

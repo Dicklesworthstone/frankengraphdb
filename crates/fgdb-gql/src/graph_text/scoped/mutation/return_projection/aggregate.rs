@@ -37,6 +37,16 @@ fn build(at: usize, kind: GraphAggregateBuildError) -> Error {
 enum ReturnedValue {
     Key(usize),
     Summary(usize),
+    /// An item combining aggregate results (fgdb-4avot): an index into the
+    /// computed items, each a template over its own leaves.
+    Computed(usize),
+}
+/// One leaf of a computed RETURN item: a grouping key's input column, or a
+/// summary the item computes privately.
+#[derive(Clone, Copy)]
+enum Leaf {
+    Key(usize),
+    Summary(usize),
 }
 struct Returned<'a> {
     name: Name<'a>,
@@ -107,12 +117,76 @@ fn bind_having(
     })
 }
 
+/// The computed output, bound once per execution (fgdb-4avot).
+fn bind_output(
+    output: &[ReadProjectionTemplate],
+    values: &[GqlParameterValue],
+) -> Result<Vec<GraphSetProjection>, Error> {
+    output
+        .iter()
+        .map(|item| {
+            Ok(GraphSetProjection::new(
+                item.name.clone(),
+                bind_read_value(&item.value, values)?,
+            ))
+        })
+        .collect()
+}
+
 impl<'a> Parser<'a> {
     fn starts_pipeline_summary(&self) -> Result<bool, Error> {
         Ok(matches!(self.current.kind, TokenKind::Word(word)
             if ["COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX", "COLLECT"]
                 .iter().any(|name| word.eq_ignore_ascii_case(name)))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+    }
+
+    /// Whether the RETURN item here combines an aggregate call with other
+    /// operands (`sum(v) * 10 / count(v)`, `count(*) + 1`, fgdb-4avot): it
+    /// contains a call, and it is not exactly one call. Lookahead only.
+    fn starts_aggregate_expression(&self) -> Result<bool, Error> {
+        const ENDS: [&str; 7] = ["AS", "GROUP", "HAVING", "ORDER", "SKIP", "OFFSET", "LIMIT"];
+        let single = self.starts_pipeline_summary()?;
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut depth = 0_usize;
+        let mut calls = 0_usize;
+        // The token count at which the leading call's parenthesis closed.
+        let mut closed = None;
+        let mut seen = 0_usize;
+        loop {
+            let next = lexer.clone().next()?;
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b',') if depth == 0 => break,
+                TokenKind::Word(word)
+                    if depth == 0 && ENDS.iter().any(|end| word.eq_ignore_ascii_case(end)) =>
+                {
+                    break;
+                }
+                TokenKind::Word(word)
+                    if matches!(next.kind, TokenKind::Punct(b'('))
+                        && [
+                            "COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX", "COLLECT",
+                        ]
+                        .iter()
+                        .any(|name| word.eq_ignore_ascii_case(name)) =>
+                {
+                    calls += 1;
+                }
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && closed.is_none() {
+                        closed = Some(seen + 1);
+                    }
+                }
+                _ => {}
+            }
+            seen += 1;
+            token = lexer.next()?;
+        }
+        Ok(calls > 0 && !(single && closed == Some(seen)))
     }
 
     fn pipeline_summary(
@@ -241,6 +315,7 @@ impl PreparedGraphPipelineAggregateText {
         let mut returned: Vec<Returned<'_>> = Vec::new();
         let mut summaries = Vec::new();
         let mut inputs = inputs::Inputs::new(schema.len());
+        let mut computed: Vec<(ReadValueTemplate, Vec<Leaf>)> = Vec::new();
         loop {
             parser.capacity(
                 returned.len(),
@@ -248,7 +323,74 @@ impl PreparedGraphPipelineAggregateText {
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
             let at = parser.current.at;
-            let value = if parser.starts_pipeline_summary()? {
+            let value = if parser.starts_aggregate_expression()? {
+                // Aggregate calls become private summaries; every other leaf
+                // must name a row column, which must be a grouping key.
+                let mut leaves = Vec::new();
+                let mut failure = None;
+                let template = parser.read_resolved_item(
+                    &mut |parser| {
+                        if failure.is_some() {
+                            return Ok(None);
+                        }
+                        let start = parser.current.at;
+                        let leaf = match parser.starts_pipeline_summary() {
+                            Ok(true) => match parser.pipeline_summary(&schema, &mut inputs) {
+                                Ok((function, column)) => {
+                                    summaries.push(PipelineSummary {
+                                        name: format!("__return_summary_{}", summaries.len()),
+                                        function,
+                                        column,
+                                    });
+                                    Leaf::Summary(summaries.len() - 1)
+                                }
+                                Err(error) => {
+                                    failure = Some(error);
+                                    return Err(error(
+                                        start,
+                                        GraphPatternTextErrorKind::Expected(
+                                            "an aggregate argument",
+                                        ),
+                                    ));
+                                }
+                            },
+                            Ok(false) => {
+                                let TokenKind::Word(word) = parser.current.kind else {
+                                    return Ok(None);
+                                };
+                                if matches!(
+                                    parser.lexer.clone().next()?.kind,
+                                    TokenKind::Punct(b'(' | b'.')
+                                ) {
+                                    return Ok(None);
+                                }
+                                let Some(column) =
+                                    schema.iter().position(|(name, _)| name.text == word)
+                                else {
+                                    return Ok(None);
+                                };
+                                parser.advance()?;
+                                Leaf::Key(column)
+                            }
+                            Err(error) => {
+                                failure = Some(error);
+                                return Err(error(
+                                    start,
+                                    GraphPatternTextErrorKind::Expected("an aggregate argument"),
+                                ));
+                            }
+                        };
+                        leaves.push(leaf);
+                        Ok(Some(leaves.len() - 1))
+                    },
+                    0,
+                );
+                if let Some(error) = failure {
+                    return Err(error);
+                }
+                computed.push((template?, leaves));
+                ReturnedValue::Computed(computed.len() - 1)
+            } else if parser.starts_pipeline_summary()? {
                 let (function, column) = parser.pipeline_summary(&schema, &mut inputs)?;
                 summaries.push(PipelineSummary {
                     name: String::new(),
@@ -354,6 +496,55 @@ impl PreparedGraphPipelineAggregateText {
                 return Err(build(aggregate_at, GraphAggregateBuildError::DuplicateName));
             }
         }
+        // fgdb-4avot: computed items read the evaluation row, every key and
+        // then every summary. A non-aggregate leaf must be a grouping key; it
+        // never becomes one implicitly, as in openCypher.
+        let output = if computed.is_empty() {
+            None
+        } else {
+            let key_of = |input: usize, at: usize, item: &'static str| {
+                keys.iter()
+                    .position(|column| *column == input)
+                    .ok_or_else(|| expected(at, item))
+            };
+            let mut templates = Vec::with_capacity(returned.len());
+            for item in &returned {
+                let value = match item.value {
+                    ReturnedValue::Key(input) => ReadValueTemplate::Column(key_of(
+                        input,
+                        item.name.at,
+                        "every nonaggregate RETURN alias in GROUP BY",
+                    )?),
+                    ReturnedValue::Summary(at) => ReadValueTemplate::Column(keys.len() + at),
+                    ReturnedValue::Computed(at) => {
+                        let (template, leaves) = &computed[at];
+                        let mut columns = Vec::with_capacity(leaves.len());
+                        for leaf in leaves {
+                            columns.push(match *leaf {
+                                Leaf::Key(input) => key_of(
+                                    input,
+                                    item.name.at,
+                                    "a grouping key for every nonaggregate operand of an aggregate RETURN expression",
+                                )?,
+                                Leaf::Summary(at) => keys.len() + at,
+                            });
+                        }
+                        let mut template = template.clone();
+                        crate::graph_text::aggregate::remap_output_columns(&mut template, &columns);
+                        template
+                    }
+                };
+                templates.push(ReadProjectionTemplate {
+                    name: item.name.text.to_owned(),
+                    value,
+                });
+            }
+            Some(templates)
+        };
+        let computed_at: Vec<usize> = (returned.iter().enumerate())
+            .filter(|(_, item)| matches!(item.value, ReturnedValue::Computed(_)))
+            .map(|(at, _)| at)
+            .collect();
         let mut names = Vec::new();
         let mut slots = Vec::new();
         let mut output_keys = Vec::new();
@@ -409,15 +600,34 @@ impl PreparedGraphPipelineAggregateText {
                         kind,
                     )
                 }
+                // Addressed only through the output projection; HAVING and
+                // ORDER BY over it refuse below.
+                ReturnedValue::Computed(_) => (
+                    GraphAggregateTextSlot::Aggregate(0),
+                    GraphAggregateColumn::Aggregate(0),
+                    GraphSetColumnType::Any,
+                ),
             };
             names.push(item.name.text.to_owned());
             slots.push(slot);
             having_columns.push(column);
             output_schema.push((item.name, kind));
         }
+        if output.is_some() {
+            // Projected output rows hold one value per written item.
+            slots = (0..names.len())
+                .map(GraphAggregateTextSlot::Aggregate)
+                .collect();
+        }
         // HAVING and the page address the output row. A boundary still live
         // here could resolve `n.p` to an output of the same width.
         parser.boundary_reads = None;
+        if !computed_at.is_empty() && parser.is_word("HAVING") {
+            return Err(expected(
+                parser.current.at,
+                "HAVING beside an aggregate RETURN item without a combined expression",
+            ));
+        }
         let having_at = parser.current.at;
         let mut having = Vec::new();
         if parser.take_word("HAVING")? {
@@ -437,6 +647,12 @@ impl PreparedGraphPipelineAggregateText {
         }) = parser.row_page(&output_schema)?
         {
             for key in order {
+                if computed_at.contains(&key.column) {
+                    return Err(expected(
+                        aggregate_at,
+                        "ORDER BY a key or a single aggregate, not a combined aggregate expression",
+                    ));
+                }
                 let column = having_columns[key.column];
                 if ordering
                     .iter()
@@ -488,6 +704,7 @@ impl PreparedGraphPipelineAggregateText {
             count,
             aggregate_at,
             having_at,
+            output,
         })
     }
 
@@ -519,6 +736,11 @@ impl PreparedGraphPipelineAggregateText {
         .with_distinct_output(self.output_distinct)
         .with_result_clauses(&[], &self.ordering)
         .map_err(|kind| build(self.aggregate_at, kind))?;
+        if let Some(output) = &self.output {
+            query = query
+                .with_output_projection(bind_output(output, &values)?)
+                .map_err(|kind| build(self.aggregate_at, kind))?;
+        }
         if !self.having.is_empty() {
             let expression = bind_having(
                 &self.having,

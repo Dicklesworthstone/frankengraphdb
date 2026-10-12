@@ -246,6 +246,11 @@ impl PreparedGraphPipelineAggregateText {
         .with_distinct_output(self.output_distinct)
         .with_result_clauses(&[], &self.ordering)
         .map_err(|kind| build(self.aggregate_at, kind))?;
+        if let Some(output) = &self.output {
+            query = query
+                .with_output_projection(super::bind_output(output, &values)?)
+                .map_err(|kind| build(self.aggregate_at, kind))?;
+        }
         if !self.having.is_empty() {
             let expression = bind_having(
                 &self.having,
