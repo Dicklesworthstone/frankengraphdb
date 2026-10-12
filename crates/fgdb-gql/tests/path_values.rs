@@ -430,7 +430,7 @@ fn element_values_read_their_properties_through_the_host_reader() {
             .unwrap_or_else(|error| panic!("{text}: {error:?}"))
             .bind_parameters(&GqlParameters::new())
             .unwrap();
-        let patterns = |pattern: &fgdb_gql::PreparedGraphPattern<GraphValueRow>,
+        let patterns = |pattern: &fgdb_gql::algebra::PreparedGraphPattern<GraphValueRow>,
                         remaining: GqlQueryPolicy| {
             pattern.plan().execute_governed_with_identified_properties(
                 edges.len() as u64 + 4,
