@@ -10,7 +10,7 @@ use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind,
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 use std::cmp::Ordering;
 
@@ -145,7 +145,9 @@ fn text_pages_match_independent_sort_across_nulls_directions_and_multiplicity() 
                                 value
                             });
                             let scalars = values.map(|value| {
-                                value.map_or(CanonicalScalar::Null, CanonicalScalar::Int)
+                                CanonicalPropertyValue::from(
+                                    value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                                )
                             });
                             let actual = query
                                 .plan()
@@ -273,8 +275,10 @@ fn aliases_star_and_bad_order_references_are_resolved_before_catalog_access() {
     }
     // A non-projected property is an evaluation key, not a public cell.
     let hidden = text("MATCH (x) RETURN x.score AS rank ORDER BY x.payload");
-    let scores = [CanonicalScalar::Int(10), CanonicalScalar::Int(20)];
-    let payloads = [CanonicalScalar::Int(2), CanonicalScalar::Int(1)];
+    let scores =
+        [CanonicalScalar::Int(10), CanonicalScalar::Int(20)].map(CanonicalPropertyValue::from);
+    let payloads =
+        [CanonicalScalar::Int(2), CanonicalScalar::Int(1)].map(CanonicalPropertyValue::from);
     let rows = hidden
         .plan()
         .execute_with_properties_control(
@@ -333,7 +337,8 @@ fn distinct_elements_order_by_their_own_unprojected_property() {
         CanonicalScalar::Int(9),
         CanonicalScalar::Null,
         CanonicalScalar::Int(5),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     for (statement, expected) in [
         (
             "MATCH (x) RETURN DISTINCT x ORDER BY x.score DESC",
@@ -391,7 +396,7 @@ fn optional_nulls_and_parallel_rows_are_ranked_after_scope_completion() {
     let query = text(
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) RETURN a,b.score AS rank ORDER BY rank DESC NULLS FIRST",
     );
-    let score = CanonicalScalar::Int(5);
+    let score = CanonicalPropertyValue::from(CanonicalScalar::Int(5));
     let edges = [
         (VId(0), RelationId(1), VId(10)),
         (VId(0), RelationId(1), VId(10)),
@@ -429,8 +434,10 @@ fn optional_nulls_and_parallel_rows_are_ranked_after_scope_completion() {
 
 #[test]
 fn ranked_pages_do_not_hide_late_source_errors_or_copy_rejected_payloads() {
-    let scores: Vec<_> = (0..32).map(|i| CanonicalScalar::Int(100 - i)).collect();
-    let payload = CanonicalScalar::bytes(vec![7; 4096]).unwrap();
+    let scores: Vec<_> = (0..32)
+        .map(|i| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(100 - i)))
+        .collect();
+    let payload = CanonicalPropertyValue::from(CanonicalScalar::bytes(vec![7; 4096]).unwrap());
     let query =
         text("MATCH (x) RETURN x.score AS rank,x.payload AS data ORDER BY rank DESC LIMIT 1");
     let reads = Cell::new(0);
@@ -489,7 +496,8 @@ fn ordered_text_has_exact_limits_and_propagates_each_interruption() {
         CanonicalScalar::Int(2),
         CanonicalScalar::Null,
         CanonicalScalar::Int(3),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let query =
         text("MATCH (x) RETURN x AS owner,x.score AS rank ORDER BY rank DESC SKIP 1 LIMIT 2");
     let run = |policy, stop: usize| {

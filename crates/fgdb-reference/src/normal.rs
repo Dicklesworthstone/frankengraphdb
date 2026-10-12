@@ -24,7 +24,7 @@ use crate::{Edge, ReferenceGraph, Vertex};
 use fgdb_delta_types::{
     DeltaRow, ElementId, EscrowDomainId, LabelId, OperationKey, PropertyKeyId, ValidTimePeriod,
 };
-use fgdb_types::{CanonicalScalar, EId, ObjectId, VId};
+use fgdb_types::{CanonicalPropertyValue, EId, ObjectId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Why a source row did not survive into the committed form.
@@ -262,8 +262,8 @@ fn push_label_deltas(
 fn push_property_deltas(
     rows: &mut Vec<DeltaRow>,
     elem: ElementId,
-    before: &BTreeMap<PropertyKeyId, CanonicalScalar>,
-    after: &BTreeMap<PropertyKeyId, CanonicalScalar>,
+    before: &BTreeMap<PropertyKeyId, CanonicalPropertyValue>,
+    after: &BTreeMap<PropertyKeyId, CanonicalPropertyValue>,
 ) {
     let keys: BTreeSet<PropertyKeyId> = before.keys().chain(after.keys()).copied().collect();
     for key in keys {
@@ -729,13 +729,13 @@ mod tests {
     use super::{EffectFate, NoOpPolicy, normalize};
     use crate::ReferenceGraph;
     use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
-    use fgdb_types::{CanonicalScalar, EId, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
     const PROP: PropertyKeyId = PropertyKeyId(100);
     const LABEL: LabelId = LabelId(10);
 
-    fn int(value: i64) -> CanonicalScalar {
-        CanonicalScalar::Int(value)
+    fn int(value: i64) -> CanonicalPropertyValue {
+        CanonicalScalar::Int(value).into()
     }
 
     fn create(vid: u128, value: i64) -> DeltaRow {

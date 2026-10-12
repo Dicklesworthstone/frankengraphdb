@@ -1,7 +1,7 @@
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow};
 use crate::{GqlQueryError, GqlQueryPolicy, PreparedGraphSetText};
-use fgdb_types::{EId, VId};
+use fgdb_types::{CanonicalPropertyValue, EId, VId};
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -21,17 +21,17 @@ fn execute(text: &str) -> (Vec<GraphValueRow>, usize) {
     let prepared = PreparedGraphSetText::prepare(text, symbols).unwrap();
     let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
     assert_eq!(prepared.column_types(), bound.column_types());
-    let p = [
-        CanonicalScalar::Int(1),
-        CanonicalScalar::Int(1),
-        CanonicalScalar::Int(2),
+    let p: [CanonicalPropertyValue; 3] = [
+        CanonicalScalar::Int(1).into(),
+        CanonicalScalar::Int(1).into(),
+        CanonicalScalar::Int(2).into(),
     ];
-    let q = [
-        CanonicalScalar::Int(10),
-        CanonicalScalar::Int(20),
-        CanonicalScalar::Int(30),
+    let q: [CanonicalPropertyValue; 3] = [
+        CanonicalScalar::Int(10).into(),
+        CanonicalScalar::Int(20).into(),
+        CanonicalScalar::Int(30).into(),
     ];
-    let edge_p = CanonicalScalar::Int(5);
+    let edge_p = CanonicalPropertyValue::from(CanonicalScalar::Int(5));
     let mut calls = 0;
     let result = bound
         .execute_governed(
@@ -263,7 +263,7 @@ fn direct_grouping_failure_is_not_suppressed_by_limit_zero() {
             .unwrap()
             .bind_parameters(&GqlParameters::new())
             .unwrap();
-    let zero = CanonicalScalar::Int(0);
+    let zero = CanonicalPropertyValue::from(CanonicalScalar::Int(0));
     let result = query.execute_governed(
         GqlQueryPolicy::new(10, 0, 100_000, 100_000),
         |pattern, policy| {

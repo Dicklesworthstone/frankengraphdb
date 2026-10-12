@@ -31,7 +31,10 @@ use fgdb_sim::{
 };
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef,
+    ObjectId, VId,
+};
 use std::path::{Path, PathBuf};
 
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -62,8 +65,9 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn text(value: &str) -> CanonicalScalar {
+fn text(value: &str) -> CanonicalPropertyValue {
     CanonicalScalar::Text(fgdb_types::CanonicalText::new_ucs_basic(value).expect("bounded text"))
+        .into()
 }
 
 fn under_lab<T, Fut>(seed: u64, test: impl FnOnce(CommitCx) -> Fut + Send + 'static) -> T

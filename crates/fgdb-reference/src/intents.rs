@@ -42,7 +42,7 @@
 
 use crate::{ApplyError, ConflictKey, ReferenceGraph};
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, EId, VId};
 use std::collections::BTreeSet;
 
 /// What a failed `CompareAndSet` precondition means (Appendix B, verbatim
@@ -69,19 +69,19 @@ pub enum Intent {
     CreateVertex {
         vid: VId,
         labels: Vec<LabelId>,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
     AddEdge {
         eid: EId,
         src: VId,
         etype: RelationId,
         dst: VId,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
     SetProp {
         elem: ElementId,
         name: PropertyKeyId,
-        value: CanonicalScalar,
+        value: CanonicalPropertyValue,
     },
     /// Create the edge only if no edge with this exact `(src, etype, dst)` triple
     /// already exists. IDEMPOTENT by construction: the second evaluation emits
@@ -118,7 +118,7 @@ pub enum Intent {
         src: VId,
         etype: RelationId,
         dst: VId,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
     /// Retire a vertex and everything hanging off it.
     ///
@@ -147,14 +147,14 @@ pub enum Intent {
     EnsureVertex {
         vid: VId,
         labels: Vec<LabelId>,
-        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+        props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
     /// Set `name` to `value` only if it currently equals `expected`.
     CompareAndSet {
         elem: ElementId,
         name: PropertyKeyId,
-        expected: Option<CanonicalScalar>,
-        value: CanonicalScalar,
+        expected: Option<CanonicalPropertyValue>,
+        value: CanonicalPropertyValue,
         mismatch: MismatchPolicy,
     },
 }
@@ -228,14 +228,14 @@ impl Statement {
 pub enum StatementFailure {
     /// A `CompareAndSet` precondition failed under `StatementError`.
     ///
-    /// The scalars are boxed because a `CanonicalScalar` carries owned text, and
-    /// an enum as wide as its largest payload makes every `Result` carrying it
-    /// that wide too.
+    /// The values are boxed because a `CanonicalPropertyValue` carries owned
+    /// text and collections, and an enum as wide as its largest payload makes
+    /// every `Result` carrying it that wide too.
     Mismatch {
         elem: ElementId,
         name: PropertyKeyId,
-        expected: Option<Box<CanonicalScalar>>,
-        actual: Option<Box<CanonicalScalar>>,
+        expected: Option<Box<CanonicalPropertyValue>>,
+        actual: Option<Box<CanonicalPropertyValue>>,
     },
     /// An intent reduced to an effect the graph refused.
     Rejected(ApplyError),
@@ -262,8 +262,8 @@ pub enum StatementFailure {
     /// fact twice rather than two conflicting facts.
     ConflictingPropertyValues {
         property: PropertyKeyId,
-        first: Box<CanonicalScalar>,
-        second: Box<CanonicalScalar>,
+        first: Box<CanonicalPropertyValue>,
+        second: Box<CanonicalPropertyValue>,
     },
 }
 
@@ -272,7 +272,12 @@ impl StatementFailure {
     /// failure. An accessor so a caller can `.expect(..)` rather than write an
     /// irrefutable-pattern escape hatch.
     #[allow(clippy::type_complexity)]
-    pub fn mismatch_values(&self) -> Option<(Option<&CanonicalScalar>, Option<&CanonicalScalar>)> {
+    pub fn mismatch_values(
+        &self,
+    ) -> Option<(
+        Option<&CanonicalPropertyValue>,
+        Option<&CanonicalPropertyValue>,
+    )> {
         match self {
             Self::Mismatch {
                 expected, actual, ..
@@ -289,7 +294,11 @@ impl StatementFailure {
     /// The property and both values of a conflicting-duplicate refusal.
     pub fn conflicting_values(
         &self,
-    ) -> Option<(PropertyKeyId, &CanonicalScalar, &CanonicalScalar)> {
+    ) -> Option<(
+        PropertyKeyId,
+        &CanonicalPropertyValue,
+        &CanonicalPropertyValue,
+    )> {
         match self {
             Self::ConflictingPropertyValues {
                 property,
@@ -680,7 +689,7 @@ fn property_of(
     state: &ReferenceGraph,
     elem: ElementId,
     name: PropertyKeyId,
-) -> Option<CanonicalScalar> {
+) -> Option<CanonicalPropertyValue> {
     match elem {
         ElementId::Vertex(vid) => state.vertex(vid)?.props.get(&name).cloned(),
         ElementId::Edge(eid) => state.edge(eid)?.props.get(&name).cloned(),
@@ -716,11 +725,11 @@ fn sorted_labels(labels: &[LabelId]) -> Vec<LabelId> {
 /// after the effects have been discarded. Identical duplicates collapse;
 /// conflicting ones are a statement failure naming the property and both values.
 fn canonical_props(
-    props: &[(PropertyKeyId, CanonicalScalar)],
-) -> Result<Vec<(PropertyKeyId, CanonicalScalar)>, StatementFailure> {
+    props: &[(PropertyKeyId, CanonicalPropertyValue)],
+) -> Result<Vec<(PropertyKeyId, CanonicalPropertyValue)>, StatementFailure> {
     let mut out = props.to_vec();
     out.sort();
-    let mut deduped: Vec<(PropertyKeyId, CanonicalScalar)> = Vec::with_capacity(out.len());
+    let mut deduped: Vec<(PropertyKeyId, CanonicalPropertyValue)> = Vec::with_capacity(out.len());
     for (key, value) in out {
         match deduped.last() {
             Some((previous, seen)) if *previous == key => {

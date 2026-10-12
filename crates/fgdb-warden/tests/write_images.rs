@@ -2,7 +2,9 @@
 //! Warden validator, not database execution, storage constraints or publication.
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
-use fgdb_types::{CanonicalF64, CanonicalScalar, DatabaseSecurityNamespaceId, EId, VId};
+use fgdb_types::{
+    CanonicalF64, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId, VId,
+};
 use fgdb_warden::{
     Authority, EdgeWriteImage, Error, ExecutionPermit, Grant, LimitDimension, QueryLimits,
     Restriction, Rights, Scope, Usage, VertexWriteFields, VertexWriteImage, WriteAccess,
@@ -49,7 +51,7 @@ fn grant() -> Grant {
 }
 fn vertex<'a>(
     labels: &'a [LabelId],
-    properties: &'a [(PropertyKeyId, CanonicalScalar)],
+    properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 ) -> VertexWriteImage<'a> {
     VertexWriteImage {
         id: VId(u128::MAX),
@@ -60,7 +62,7 @@ fn vertex<'a>(
 fn edge<'a>(
     source_labels: &'a [LabelId],
     destination_labels: &'a [LabelId],
-    properties: &'a [(PropertyKeyId, CanonicalScalar)],
+    properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 ) -> EdgeWriteImage<'a> {
     EdgeWriteImage {
         id: EId(u128::MAX),
@@ -89,8 +91,8 @@ fn with_permit<T>(
 
 #[test]
 fn create_update_delete_vertices_and_edges_share_one_permit() {
-    let one = [(P, CanonicalScalar::Int(1))];
-    let two = [(P, CanonicalScalar::Int(2))];
+    let one = [(P, CanonicalScalar::Int(1).into())];
+    let two = [(P, CanonicalScalar::Int(2).into())];
     let a = vertex(&[L], &one);
     let b = vertex(&[L], &two);
     let fields = VertexWriteFields {
@@ -122,19 +124,25 @@ fn create_update_delete_vertices_and_edges_share_one_permit() {
         assert_eq!(permit.usage().rows, 0);
         assert!(permit.usage().work > 12);
     });
-    assert_eq!(one[0].1, CanonicalScalar::Int(1));
-    assert_eq!(two[0].1, CanonicalScalar::Int(2));
+    assert_eq!(
+        one[0].1,
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1))
+    );
+    assert_eq!(
+        two[0].1,
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2))
+    );
 }
 
 #[test]
 fn unchanged_hidden_fields_survive_but_cannot_be_written_or_deleted() {
     let old = [
-        (P, CanonicalScalar::Int(1)),
-        (SECRET, CanonicalScalar::Int(9)),
+        (P, CanonicalScalar::Int(1).into()),
+        (SECRET, CanonicalScalar::Int(9).into()),
     ];
     let new = [
-        (P, CanonicalScalar::Int(2)),
-        (SECRET, CanonicalScalar::Int(9)),
+        (P, CanonicalScalar::Int(2).into()),
+        (SECRET, CanonicalScalar::Int(9).into()),
     ];
     let before = vertex(&[L, HIDDEN], &old);
     let after = vertex(&[L, HIDDEN], &new);
@@ -209,9 +217,9 @@ fn unchanged_hidden_fields_survive_but_cannot_be_written_or_deleted() {
 
 #[test]
 fn changed_or_absent_fields_cannot_escape_touched_field_admission() {
-    let one = [(P, CanonicalScalar::Int(1))];
-    let two = [(P, CanonicalScalar::Int(2))];
-    let hidden = [(SECRET, CanonicalScalar::Null)];
+    let one = [(P, CanonicalScalar::Int(1).into())];
+    let two = [(P, CanonicalScalar::Int(2).into())];
+    let hidden = [(SECRET, CanonicalScalar::Null.into())];
     for (before, after) in [
         (Some(vertex(&[L], &one)), Some(vertex(&[L], &two))),
         (Some(vertex(&[L], &[])), Some(vertex(&[L], &one))),
@@ -394,10 +402,13 @@ fn inconsistent_self_loops_and_noncanonical_images_are_rejected_not_repaired() {
             Err(Error::InvalidWriteImage)
         );
     });
-    let duplicate = [(P, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(2))];
+    let duplicate = [
+        (P, CanonicalScalar::Int(1).into()),
+        (P, CanonicalScalar::Int(2).into()),
+    ];
     let reversed = [
-        (SECRET, CanonicalScalar::Int(1)),
-        (P, CanonicalScalar::Int(2)),
+        (SECRET, CanonicalScalar::Int(1).into()),
+        (P, CanonicalScalar::Int(2).into()),
     ];
     for image in [
         vertex(&[L, L], &[]),
@@ -476,8 +487,8 @@ fn untouched_scalars_use_exact_canonical_equality_not_encoding_length() {
     ];
     for old in &values {
         for new in &values {
-            let a = [(SECRET, old.clone())];
-            let b = [(SECRET, new.clone())];
+            let a = [(SECRET, old.clone().into())];
+            let b = [(SECRET, new.clone().into())];
             with_permit(&grant(), |permit| {
                 let result = permit.check_vertex_write_at(
                     NOW,
@@ -502,7 +513,9 @@ fn exact_limits_succeed_one_below_fails_and_checks_do_not_refresh_allowances() {
     // image tests in write_budget_noninterference cover that separate law.
     let properties = [(
         P,
-        CanonicalScalar::ucs_basic_text(&"s".repeat(4096)).unwrap(),
+        CanonicalScalar::ucs_basic_text(&"s".repeat(4096))
+            .unwrap()
+            .into(),
     )];
     let image = vertex(&[L, HIDDEN], &properties);
     let measured = with_permit(&grant(), |permit| {
@@ -592,7 +605,9 @@ fn write_only_is_sufficient_read_only_is_not_and_debug_is_redacted() {
     ));
     let secret = [(
         SECRET,
-        CanonicalScalar::ucs_basic_text("do-not-print").unwrap(),
+        CanonicalScalar::ucs_basic_text("do-not-print")
+            .unwrap()
+            .into(),
     )];
     assert_eq!(
         format!("{:?}", vertex(&[L, HIDDEN], &secret)),
@@ -617,7 +632,7 @@ fn all_small_property_transitions_match_independent_field_authority_oracle() {
         let token = authority.issue_at(&grant, NOW).unwrap();
         let verified = authority.verify_at(&token, BRANCH, NOW).unwrap();
         // A property has four states: absent, null, zero, one.
-        let state = |bits: u8| -> Vec<(PropertyKeyId, CanonicalScalar)> {
+        let state = |bits: u8| -> Vec<(PropertyKeyId, CanonicalPropertyValue)> {
             (0..2)
                 .filter_map(|bit| {
                     let value = match (bits >> (2 * bit)) & 3 {
@@ -626,7 +641,7 @@ fn all_small_property_transitions_match_independent_field_authority_oracle() {
                         2 => CanonicalScalar::Int(0),
                         _ => CanonicalScalar::Int(1),
                     };
-                    Some((PropertyKeyId(bit + 1), value))
+                    Some((PropertyKeyId(bit + 1), CanonicalPropertyValue::from(value)))
                 })
                 .collect()
         };
@@ -741,7 +756,7 @@ fn explicit_property_denials_survive_later_wildcards_for_both_row_kinds() {
         .attenuate(Restriction::Properties(Scope::All))
         .unwrap();
     let verified = authority.verify_at(&token, BRANCH, NOW).unwrap();
-    let props = [(SECRET, CanonicalScalar::Int(5))];
+    let props = [(SECRET, CanonicalScalar::Int(5).into())];
     let image = vertex(&[L], &props);
     let mut permit = verified.begin_write_at(BRANCH, NOW).unwrap();
     permit

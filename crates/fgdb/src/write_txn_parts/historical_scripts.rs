@@ -235,19 +235,19 @@ mod historical_script_tests {
                 assert_eq!(txn.basis(), basis);
                 assert_eq!(
                     txn.vertex(&db, VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(expected))]
+                    vec![(P, CanonicalScalar::Int(expected).into())]
                 );
                 assert_eq!(db.frontier().unwrap(), head);
                 assert_eq!(
                     db.vertex(VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(0))]
+                    vec![(P, CanonicalScalar::Int(0).into())]
                 );
             }
             txn.commit(&mut db, &cx).await.unwrap();
             assert_eq!(db.delta_since(head).unwrap().count(), 1);
             assert_eq!(
                 db.vertex(VId(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(2))]
+                vec![(P, CanonicalScalar::Int(2).into())]
             );
             assert!(db.vertex(VId(99)).unwrap().is_some());
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -301,7 +301,7 @@ mod historical_script_tests {
             assert!(db.vertex(vid).unwrap().is_none());
             assert_eq!(
                 txn.vertex(&db, vid).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(5))]
+                vec![(P, CanonicalScalar::Int(5).into())]
             );
             txn.commit(&mut db, &cx).await.unwrap();
             assert_eq!(db.delta_since(head).unwrap().count(), 1);
@@ -312,7 +312,7 @@ mod historical_script_tests {
             let reopened = Database::open_with_vfs(&cx, vfs, path, keys).await.unwrap();
             assert_eq!(
                 reopened.vertex(vid).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(5))]
+                vec![(P, CanonicalScalar::Int(5).into())]
             );
             assert!(reopened.vertex(VId(99)).unwrap().is_some());
             assert_eq!(reopened.vertices().unwrap().len(), 3);
@@ -384,11 +384,11 @@ mod historical_script_tests {
             assert!(db.vertex(VId(201)).unwrap().is_none());
             assert_eq!(
                 db.vertex(VId(202)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(5))]
+                vec![(P, CanonicalScalar::Int(5).into())]
             );
             assert_eq!(
                 db.vertex(VId(203)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(6))]
+                vec![(P, CanonicalScalar::Int(6).into())]
             );
             assert_eq!(db.delta_since(head).unwrap().count(), 1);
             assert_eq!(txcx.outstanding_obligations(), 0);

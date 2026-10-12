@@ -94,7 +94,7 @@ fn mutation_autocommit_commits_targets_while_zero_match_closes_read_only() {
         assert_eq!(committed.0, seeded.0 + 1);
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(11))]
+            vec![(P, CanonicalScalar::Int(11).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
 
@@ -149,7 +149,7 @@ fn execution_and_allocator_refusals_abort_and_release_the_snapshot_pin() {
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(10))]
+            vec![(P, CanonicalScalar::Int(10).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
 
@@ -194,7 +194,7 @@ fn execution_and_allocator_refusals_abort_and_release_the_snapshot_pin() {
         ));
         assert_eq!(
             db.vertex(VId(100)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7))]
+            vec![(P, CanonicalScalar::Int(7).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -250,7 +250,7 @@ fn mixed_autocommit_withholds_receipt_until_dependent_program_is_durable() {
         assert_eq!(receipt.steps()[1].mutation_edges(), Some(&[][..]));
         assert_eq!(
             db.vertex(VId(200)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(6))]
+            vec![(P, CanonicalScalar::Int(6).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
 

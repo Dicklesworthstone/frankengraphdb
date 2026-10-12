@@ -13,7 +13,8 @@ use fgdb_gql::{
     GraphSymbol, GraphSymbolKind, PreparedGraphSet, PreparedGraphSetText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -103,8 +104,8 @@ fn integer(row: &VertexRow, key: PropertyKeyId) -> Option<i64> {
         .find(|(property, _)| *property == key)
         .map(|(_, value)| value)
     {
-        Some(CanonicalScalar::Int(value)) => Some(*value),
-        Some(CanonicalScalar::Null) | None => None,
+        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => Some(*value),
+        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) | None => None,
         _ => panic!("unexpected oracle input kind"),
     }
 }

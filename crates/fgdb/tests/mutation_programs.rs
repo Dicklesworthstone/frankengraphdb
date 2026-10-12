@@ -9,14 +9,19 @@ use fgdb_gql::{
     GraphSymbolKind, PreparedGraphMutationProgram, PreparedGraphMutationText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const MARKED: LabelId = LabelId(1);
-type Logical = Vec<(VId, Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type Logical = Vec<(
+    VId,
+    Vec<LabelId>,
+    Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+)>;
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -75,7 +80,7 @@ fn property(row: &VertexRow, key: PropertyKeyId) -> Option<&CanonicalScalar> {
     row.props
         .iter()
         .find(|(property, _)| *property == key)
-        .map(|(_, value)| value)
+        .map(|(_, value)| value.as_scalar().expect("scalar fixture"))
 }
 fn prefix() -> WriteBatch {
     let mut batch = WriteBatch::new(R);

@@ -240,7 +240,7 @@ fn rejected_staging_keeps_exposed_cas_reads_without_discarding_prior_effects() {
                     assert!(matches!(result,
                         Err(WriteTxnError::Write(WriteError::CompareAndSetMismatch(mismatch)))
                             if mismatch.elem == target
-                                && mismatch.actual == Some(CanonicalScalar::Int(if edge_target { 7 } else { 0 }))
+                                && mismatch.actual == Some(CanonicalScalar::Int(if edge_target { 7 } else { 0 }).into())
                     ));
                     assert_eq!(txn.staged_effect_digest().unwrap(), digest);
                     assert_eq!(db.frontier().unwrap(), frontier);

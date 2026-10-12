@@ -8,7 +8,7 @@ use fgdb_gql::{
     MAX_GRAPH_SET_OPERANDS, MAX_GRAPH_TEXT_BYTES, PreparedGraphAggregateText, PreparedGraphSet,
     PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -51,7 +51,7 @@ fn values() -> [Option<CanonicalScalar>; 6] {
     ]
 }
 fn run(query: &PreparedGraphSet) -> Vec<GraphValueRow> {
-    let values = values();
+    let values = values().map(|value| value.map(CanonicalPropertyValue::from));
     query
         .execute_governed(
             policy(),

@@ -11,7 +11,7 @@ use fgdb_gql::{
     GraphAggregateRow, GraphAggregateValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
     PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 
 mod streamed_edge_rank_distinct {
     pub(super) mod distinct_output;
@@ -28,10 +28,15 @@ use std::sync::{
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
-type Edge = (VId, RelationId, VId, Vec<(PropertyKeyId, CanonicalScalar)>);
+type Edge = (
+    VId,
+    RelationId,
+    VId,
+    Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+);
 #[derive(Clone)]
 struct Source {
-    vertices: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalScalar)>>,
+    vertices: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>>,
     edges: BTreeMap<EId, Edge>,
     incident: BTreeMap<(VId, u8), BTreeSet<EId>>,
     after: Option<EId>,
@@ -123,9 +128,18 @@ impl EdgeScanSource for Source {
 fn source(mask: u32) -> Source {
     let ids = [VId(0), VId(1), VId(u128::MAX)];
     let vertices = BTreeMap::from([
-        (ids[0], vec![(P, CanonicalScalar::Int(-3))]),
-        (ids[1], vec![(P, CanonicalScalar::Null)]),
-        (ids[2], vec![(P, CanonicalScalar::Int(7))]),
+        (
+            ids[0],
+            vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-3)))],
+        ),
+        (
+            ids[1],
+            vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))],
+        ),
+        (
+            ids[2],
+            vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7)))],
+        ),
     ]);
     let mut edges = BTreeMap::new();
     let mut incident: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
@@ -145,7 +159,7 @@ fn source(mask: u32) -> Source {
         let from = ids[a];
         let to = ids[b];
         let properties = weight
-            .map(|w| vec![(P, CanonicalScalar::Int(w))])
+            .map(|w| vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(w)))])
             .unwrap_or_default();
         edges.insert(eid, (from, rel, to, properties));
         for key in [(from, 0), (to, 1), (from, 2), (to, 2)] {
@@ -180,9 +194,11 @@ fn run(
 ) -> EdgeAggregateCursor<Source, impl FnMut() -> Result<(), ()>> {
     EdgeAggregateCursor::new(s, EdgeAggregatePlan::compile(q).unwrap(), p, || Ok(()))
 }
-fn integer(props: &[(PropertyKeyId, CanonicalScalar)]) -> Option<i128> {
+fn integer(props: &[(PropertyKeyId, CanonicalPropertyValue)]) -> Option<i128> {
     props.iter().find_map(|(key, value)| match value {
-        CanonicalScalar::Int(value) if *key == P => Some(i128::from(*value)),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) if *key == P => {
+            Some(i128::from(*value))
+        }
         _ => None,
     })
 }

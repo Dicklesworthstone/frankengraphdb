@@ -12,7 +12,7 @@ use fgdb_strata::{
     decode_block_with_properties, encode_block, encode_block_with_properties,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 
 const KEY: [u8; 32] = [0x57; 32];
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x93; 32]);
@@ -33,7 +33,10 @@ fn two_families_and_properties_round_trip_without_changing_v7_members() {
     let plain_entries = [entry(3, 7, 11, 5)];
     let plain = encode_block(41, None, &plain_entries).unwrap();
     let entries = [entry(13, 17, 19, 2), entry(13, 23, 19, 3)];
-    let rows = vec![vec![(PropertyKeyId(31), CanonicalScalar::Int(-37))]];
+    let rows = vec![vec![(
+        PropertyKeyId(31),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-37)),
+    )]];
     let patch = encode_property_patch(&rows).unwrap();
     let patch_id = property_patch_id(&KEY, NS, &patch);
     let prior = encode_block(41, None, &[entry(13, 47, 19, 1)]).unwrap();
@@ -106,7 +109,10 @@ fn set_total(bytes: &mut [u8]) {
 #[test]
 fn framing_rejects_every_prefix_even_with_a_repaired_total_length() {
     let block = encode_block(41, None, &[entry(3, 7, 11, 5)]).unwrap();
-    let rows = vec![vec![(PropertyKeyId(31), CanonicalScalar::Int(-37))]];
+    let rows = vec![vec![(
+        PropertyKeyId(31),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-37)),
+    )]];
     let patch = encode_property_patch(&rows).unwrap();
     let propertied = encode_block_with_properties(
         41,
@@ -331,8 +337,14 @@ fn repeated_family_chunks_keep_publication_order_and_predecessor_bytes() {
 #[test]
 fn hosted_patch_presence_identity_bijection_and_joint_digest_are_enforced() {
     let entries = [entry(13, 17, 19, 2), entry(13, 23, 19, 3)];
-    let rows = vec![vec![(PropertyKeyId(31), CanonicalScalar::Int(-37))]];
-    let different_rows = vec![vec![(PropertyKeyId(31), CanonicalScalar::Int(-41))]];
+    let rows = vec![vec![(
+        PropertyKeyId(31),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-37)),
+    )]];
+    let different_rows = vec![vec![(
+        PropertyKeyId(31),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-41)),
+    )]];
     let patch = encode_property_patch(&rows).unwrap();
     let different_patch = encode_property_patch(&different_rows).unwrap();
     let id = property_patch_id(&KEY, NS, &patch);

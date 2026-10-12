@@ -196,9 +196,14 @@ fn all_pairs_merge_deduplicates_rows_preserves_pair_slots_and_is_idempotent() {
                 (record.entry.src, record.entry.dst, record.entry.relation),
                 (VId(1), VId(destination), S)
             );
-            assert_eq!(record.props, vec![(P, CanonicalScalar::Int(7))]);
+            assert_eq!(record.props, vec![(P, CanonicalScalar::Int(7).into())]);
         }
-        assert_eq!(db.edge(EId(21)).unwrap().unwrap().props, existing_props());
+        // Edge 21 matched on p and keeps its field outside the map.
+        let stored: Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)> = existing_props()
+            .into_iter()
+            .map(|(key, value)| (key, value.into()))
+            .collect();
+        assert_eq!(db.edge(EId(21)).unwrap().unwrap().props, stored);
         let frontier = db.frontier().unwrap();
         let mut txn = db.begin(&txcx).unwrap();
         let repeated = txn
@@ -790,11 +795,11 @@ fn merge_maps_filter_matches_keep_parallel_edges_and_undirected_accepts_either_o
             (created.entry.src, created.entry.dst, created.entry.relation),
             (VId(1), VId(2), S)
         );
-        assert_eq!(created.props, vec![(P, CanonicalScalar::Int(9))]);
+        assert_eq!(created.props, vec![(P, CanonicalScalar::Int(9).into())]);
         for (eid, p) in [(40, 7), (41, 8), (42, 7), (43, 9)] {
             assert_eq!(
                 db.edge(EId(eid)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(p))]
+                vec![(P, CanonicalScalar::Int(p).into())]
             );
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -940,7 +945,7 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
             (stored.entry.src, stored.entry.dst, stored.entry.relation),
             (VId(1), VId(2), S)
         );
-        assert_eq!(stored.props, vec![(P, CanonicalScalar::Int(5))]);
+        assert_eq!(stored.props, vec![(P, CanonicalScalar::Int(5).into())]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

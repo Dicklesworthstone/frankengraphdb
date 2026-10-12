@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphIntegerExpression, GraphIntegerOp, GraphMutationValue, GraphSymbol, GraphSymbolKind,
     PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -90,7 +90,7 @@ fn source(
     plan: &PreparedGraphPattern<GraphValueRow>,
     allowance: GqlQueryPolicy,
     edges: &[(VId, RelationId, VId)],
-    values: &BTreeMap<VId, CanonicalScalar>,
+    values: &BTreeMap<VId, CanonicalPropertyValue>,
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, usize>> {
     plan.plan().execute_governed_with_properties(
         (3 + edges.len()) as u64,
@@ -110,10 +110,10 @@ fn edges() -> Vec<(VId, RelationId, VId)> {
         (VId(2), R, VId(3)),
     ]
 }
-fn values() -> BTreeMap<VId, CanonicalScalar> {
+fn values() -> BTreeMap<VId, CanonicalPropertyValue> {
     BTreeMap::from([
-        (VId(1), CanonicalScalar::Int(10)),
-        (VId(2), CanonicalScalar::Int(20)),
+        (VId(1), CanonicalScalar::Int(10).into()),
+        (VId(2), CanonicalScalar::Int(20).into()),
     ])
 }
 fn run(plan: &PreparedGraphInsert, policy: GraphInsertPolicy) -> ResultOf {
@@ -148,8 +148,8 @@ fn repeated_matches_create_distinct_row_local_structures_with_frozen_properties(
             vertex,
             labels: vec![LabelId(9)],
             properties: vec![
-                (P, CanonicalScalar::Int(value)),
-                (Q, CanonicalScalar::Int(value + 1)),
+                (P, CanonicalScalar::Int(value).into()),
+                (Q, CanonicalScalar::Int(value + 1).into()),
             ],
         });
         for (edge, from, to, properties) in [
@@ -158,7 +158,7 @@ fn repeated_matches_create_distinct_row_local_structures_with_frozen_properties(
                 1,
                 vertex,
                 destination,
-                vec![(P, CanonicalScalar::Int(value))],
+                vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(value)))],
             ),
         ] {
             let ElementId::Edge(id) = identity(GraphInsertRequest::Edge { row, edge }).unwrap()
@@ -288,7 +288,7 @@ fn null_endpoints_and_late_bad_values_refuse_before_any_identity_request() {
     assert_eq!(calls.get(), 0);
     for bad in [CanonicalScalar::Int(i64::MAX), CanonicalScalar::Bool(true)] {
         let mut inputs = values();
-        inputs.insert(VId(2), bad);
+        inputs.insert(VId(2), bad.into());
         let result = standard().execute_governed(
             policy(),
             |plan, allowance| source(plan, allowance, &edges(), &inputs),

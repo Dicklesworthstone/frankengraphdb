@@ -157,7 +157,7 @@ fn engine_identities_follow_the_counters_across_fast_open_rebuild_and_compaction
             let mut db = Database::open(&commit, &path, keys()).await.unwrap();
             assert_eq!(
                 db.vertex(vertex(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(11))]
+                vec![(P, CanonicalScalar::Int(11).into())]
             );
             let created = db.edge(edge(1)).unwrap().unwrap();
             assert_eq!((created.entry.src, created.entry.dst), (VId(7), vertex(1)));
@@ -185,7 +185,7 @@ fn engine_identities_follow_the_counters_across_fast_open_rebuild_and_compaction
                 .unwrap();
             assert_eq!(
                 db.vertex(vertex(3)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(13))]
+                vec![(P, CanonicalScalar::Int(13).into())]
             );
             let created = db.edge(edge(2)).unwrap().unwrap();
             assert_eq!(
@@ -589,7 +589,7 @@ fn engine_insert_create_and_merge_programs_need_no_caller_allocator() {
         txn.commit(&mut db, &commit).await.unwrap();
         assert_eq!(
             db.vertex(vertex(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(30))]
+            vec![(P, CanonicalScalar::Int(30).into())]
         );
         let (stats, completion) = db
             .execute_graph_insert_autocommit_engine_governed(

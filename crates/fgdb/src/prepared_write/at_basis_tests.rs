@@ -30,7 +30,11 @@ fn change_vertex(id: u128, value: i64) -> WriteBatch {
 }
 
 fn value(db: &Database<MemVfs>, id: u128) -> CanonicalScalar {
-    db.vertex(VId(id)).unwrap().unwrap().props[0].1.clone()
+    db.vertex(VId(id)).unwrap().unwrap().props[0]
+        .1
+        .as_scalar()
+        .unwrap()
+        .clone()
 }
 
 fn expect_conflict(result: Result<CommitSeq, WriteError>) {
@@ -70,7 +74,7 @@ fn historical_preparation_keeps_exact_effects_and_commits_beside_disjoint_writes
         assert_eq!(value(&db, 3), CanonicalScalar::Int(99));
         assert_eq!(
             pinned.vertex(VId(1)).unwrap().unwrap().props[0].1,
-            CanonicalScalar::Int(10)
+            CanonicalScalar::Int(10).into()
         );
         drop(snapshot_before);
         drop(db);
@@ -164,7 +168,7 @@ fn reopened_preparation_anchors_and_basis_folds_share_every_sealed_payload() {
         assert_eq!(value(&reopened, 3), CanonicalScalar::Int(99));
         assert_eq!(
             reopened.edge(EId(10)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(10))]
+            vec![(P, CanonicalScalar::Int(10).into())]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

@@ -11,7 +11,7 @@ use fgdb_gql::{
     GraphSetProjection, GraphSetQuantifier, GraphSetValue, GraphWalkBounds, PreparedGraphAggregate,
     PreparedGraphSet,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -23,10 +23,10 @@ const EDGES: [(EId, VId, RelationId, VId); 4] = [
     (EId(13), VId(2), R, VId(3)),
     (EId(11), VId(1), R, VId(2)),
 ];
-static VALUES: [CanonicalScalar; 3] = [
-    CanonicalScalar::Int(1),
-    CanonicalScalar::Int(2),
-    CanonicalScalar::Int(3),
+static VALUES: [CanonicalPropertyValue; 3] = [
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1)),
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2)),
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(3)),
 ];
 fn wide() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100, 100, 1_000_000, 1_000_000)

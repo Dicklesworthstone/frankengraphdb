@@ -92,7 +92,10 @@ fn native_upsert_executes_the_selected_branch_and_publishes_once() {
         assert_eq!(row.labels, vec![PERSON, SEEN]);
         assert_eq!(
             row.props,
-            vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(100))]
+            vec![
+                (P, CanonicalScalar::Int(7).into()),
+                (Q, CanonicalScalar::Int(100).into())
+            ]
         );
 
         let created = template.bind_parameters(&args(9, 100, 200)).unwrap();
@@ -117,7 +120,10 @@ fn native_upsert_executes_the_selected_branch_and_publishes_once() {
         assert_eq!(row.labels, vec![PERSON, CREATED]);
         assert_eq!(
             row.props,
-            vec![(P, CanonicalScalar::Int(9)), (Q, CanonicalScalar::Int(200))]
+            vec![
+                (P, CanonicalScalar::Int(9).into()),
+                (Q, CanonicalScalar::Int(200).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -166,7 +172,7 @@ fn unconfigured_match_branch_stays_read_only() {
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7))]
+            vec![(P, CanonicalScalar::Int(7).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

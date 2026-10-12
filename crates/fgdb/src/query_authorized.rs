@@ -47,7 +47,7 @@ type Fault = GqlQueryError<ReadError, QueryError>;
 type Governed<T> = Result<GqlQueryExecution<T>, Fault>;
 type Edge<'a> = (
     (EId, VId, RelationId, VId),
-    &'a [(PropertyKeyId, CanonicalScalar)],
+    &'a [(PropertyKeyId, fgdb_types::CanonicalPropertyValue)],
 );
 
 // The sole live permit spans source admission, evaluation and final delivery.
@@ -461,7 +461,7 @@ impl<'a> Tables<'a> {
         vid: VId,
         key: PropertyKeyId,
         scope: &PlannerPredicates,
-    ) -> Option<&CanonicalScalar> {
+    ) -> Option<&fgdb_types::CanonicalPropertyValue> {
         if !scope.allows_property(key) {
             return None;
         }
@@ -476,7 +476,7 @@ impl<'a> Tables<'a> {
         eid: EId,
         key: PropertyKeyId,
         scope: &PlannerPredicates,
-    ) -> Option<&CanonicalScalar> {
+    ) -> Option<&fgdb_types::CanonicalPropertyValue> {
         if !scope.allows_property(key) {
             return None;
         }

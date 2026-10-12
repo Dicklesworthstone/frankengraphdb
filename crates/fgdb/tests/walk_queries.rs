@@ -13,7 +13,8 @@ use fgdb_gql::{
     PreparedGraphAggregate, PreparedGraphAggregateText, PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -112,7 +113,7 @@ fn changes() -> WriteBatch {
 }
 fn integer(row: &VertexRow) -> Option<i64> {
     row.props.iter().find_map(|(key, value)| match value {
-        CanonicalScalar::Int(value) if *key == N => Some(*value),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) if *key == N => Some(*value),
         _ => None,
     })
 }

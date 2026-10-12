@@ -156,13 +156,20 @@ pub(super) fn keeps(
                 meter.charge(ZSetEvent::Work)?;
                 meter.units(
                     ZSetEvent::Work,
-                    left.map_or(0, scalar_units)
-                        .max(right.map_or(0, scalar_units)),
+                    left.map_or(0, stored_units)
+                        .max(right.map_or(0, stored_units)),
                 )?;
                 // Ordinary WHERE keeps only TRUE; NULL/missing and incompatible
                 // kinds do not pass even !=. This bool must never be negated as
-                // though it represented a three-valued Boolean expression.
-                if !comparison.accepts_scalar_pair(left, right) {
+                // though it represented a three-valued Boolean expression. A
+                // stored List or Map pair compares as the snapshot executor
+                // compares it (fgdb-k3nub); the units above reserve its work.
+                if !comparison
+                    .accepts_property_pair(left, right, &mut |_| {
+                        Ok::<(), fgdb_gql::GraphIntegerError>(())
+                    })
+                    .map_err(StandingQueryFailure::PredicateExpression)?
+                {
                     return Ok(false);
                 }
             }
@@ -194,12 +201,16 @@ fn projected_value<'a>(
         }
         ValueProjection::Property { slot, key } => {
             let state = binding(slot.ordinal())?;
-            let null = CanonicalScalar::Null;
-            let value = state
-                .and_then(|(_, state)| state.props.get(&key))
-                .unwrap_or(&null);
-            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
-            Ok(GraphValue::Scalar(value.clone()))
+            let Some(value) = state.and_then(|(_, state)| state.props.get(&key)) else {
+                meter.units(
+                    ZSetEvent::ScratchEntry,
+                    scalar_units(&CanonicalScalar::Null),
+                )?;
+                return Ok(GraphValue::Scalar(CanonicalScalar::Null));
+            };
+            meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
+            // A stored List or Map projects as the value it is (fgdb-k3nub).
+            GraphValue::from_property_value(value).ok_or(StandingQueryFailure::InvalidDelta)
         }
         _ => Err(StandingQueryFailure::InvalidDelta),
     }
@@ -260,9 +271,12 @@ pub(super) fn project_contributions<'a>(
             Some(ValueProjection::Vertex { slot }) => binding(slot.ordinal())?.map(|_| 0),
             Some(ValueProjection::Property { slot, key }) => {
                 match binding(slot.ordinal())?.and_then(|(_, state)| state.props.get(&key)) {
-                    None | Some(CanonicalScalar::Null) => None,
+                    None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
                     Some(_) if aggregate.function() == GraphAggregateFunction::Count => Some(0),
-                    Some(CanonicalScalar::Int(value)) => Some(i128::from(*value)),
+                    Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => {
+                        Some(i128::from(*value))
+                    }
+                    // A stored List or Map is not an integer (fgdb-k3nub).
                     _ => return Err(StandingQueryFailure::NonIntegerSum),
                 }
             }

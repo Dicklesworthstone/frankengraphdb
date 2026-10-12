@@ -13,8 +13,8 @@ use fgdb_gql::{
     PreparedGraphSetAggregate, PreparedGraphSetText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
-    PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 use std::collections::BTreeMap;
 
@@ -93,7 +93,9 @@ fn top_oracle(vertices: &[VertexRow]) -> Vec<(i64, u64, i128)> {
             .filter(|row| row.labels.contains(&label))
             .filter_map(|row| {
                 row.props.iter().find_map(|(key, value)| match value {
-                    CanonicalScalar::Int(value) if *key == P => Some(*value),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) if *key == P => {
+                        Some(*value)
+                    }
                     _ => None,
                 })
             })
@@ -415,7 +417,7 @@ fn late_second_operand_arithmetic_failure_preserves_outer_effects_and_observatio
                 assert!(db.vertex(VId(777)).unwrap().is_some());
                 assert_eq!(
                     db.vertex(VId(2)).unwrap().unwrap().props[0].1,
-                    CanonicalScalar::Int(0)
+                    CanonicalScalar::Int(0).into()
                 );
             }
         }

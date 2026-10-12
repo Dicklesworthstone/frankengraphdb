@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphSymbolKind, GraphSymbolResolver, PreparedGraphMutation, PreparedGraphMutationQuery,
     PreparedGraphMutationQueryText, PreparedGraphText, ReverseSymbolCatalog,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -102,6 +102,20 @@ fn property(value: Option<&GraphValue>, key: PropertyKeyId) -> Option<&Canonical
     let (keys, values) = value?.as_map()?;
     values[keys.binary_search_by(|key| key.as_ref().cmp(name)).ok()?].as_scalar()
 }
+/// The stored property values `property` reads from the current maps.
+fn stored<Id: Copy + Ord>(
+    maps: &BTreeMap<Id, GraphValue>,
+) -> BTreeMap<(Id, PropertyKeyId), CanonicalPropertyValue> {
+    let mut stored = BTreeMap::new();
+    for (&id, value) in maps {
+        for key in [P, Q, OLD, KEEP] {
+            if let Some(scalar) = property(Some(value), key) {
+                stored.insert((id, key), CanonicalPropertyValue::from(scalar.clone()));
+            }
+        }
+    }
+    stored
+}
 
 struct Fixture {
     vertices: BTreeMap<VId, GraphValue>,
@@ -130,13 +144,15 @@ impl Fixture {
         pattern: &PreparedGraphPattern<GraphValueRow>,
         policy: GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+        let vertex_properties = stored(&self.vertices);
+        let edge_properties = stored(&self.edge_maps);
         pattern.plan().execute_governed_with_element_maps(
             (self.vertices.len() + self.edges.len()) as u64,
             self.vertices.keys().copied(),
             self.edges.iter().copied(),
             |_, _| Ok(true),
-            |vid, key| Ok(property(self.vertices.get(&vid), key)),
-            |eid, key| Ok(property(self.edge_maps.get(&eid), key)),
+            |vid, key| Ok(vertex_properties.get(&(vid, key))),
+            |eid, key| Ok(edge_properties.get(&(eid, key))),
             |_| Ok(None),
             |_| Ok(None),
             |vid| Ok(self.vertices.get(&vid)),

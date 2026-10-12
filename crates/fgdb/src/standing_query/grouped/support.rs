@@ -239,9 +239,10 @@ mod tests {
     }
 
     fn state(group: i64, value: Option<CanonicalScalar>) -> VertexState {
-        let mut props = BTreeMap::from([(PropertyKeyId(1), CanonicalScalar::Int(group))]);
+        let mut props: BTreeMap<_, fgdb_types::CanonicalPropertyValue> =
+            BTreeMap::from([(PropertyKeyId(1), CanonicalScalar::Int(group).into())]);
         if let Some(value) = value {
-            props.insert(PropertyKeyId(2), value);
+            props.insert(PropertyKeyId(2), value.into());
         }
         VertexState {
             labels: BTreeSet::new(),

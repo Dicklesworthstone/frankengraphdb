@@ -73,14 +73,14 @@ fn projected_rows_see_simultaneous_assignments_and_only_masked_inputs() {
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
             vec![
-                (P, CanonicalScalar::Int(11)),
-                (SECRET, CanonicalScalar::Int(71)),
-                (Q, CanonicalScalar::Int(10))
+                (P, CanonicalScalar::Int(11).into()),
+                (SECRET, CanonicalScalar::Int(71).into()),
+                (Q, CanonicalScalar::Int(10).into())
             ]
         );
         assert_eq!(
             db.vertex(VId(3)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(30))]
+            vec![(P, CanonicalScalar::Int(30).into())]
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -193,7 +193,7 @@ fn limit_zero_still_updates_and_remove_returns_null_without_empty_commit() {
                     .unwrap()
                     .unwrap()
                     .props
-                    .contains(&(Q, CanonicalScalar::Int(value)))
+                    .contains(&(Q, CanonicalScalar::Int(value).into()))
             );
         }
         let token = authority.issue_at(&grant(), NOW).unwrap();

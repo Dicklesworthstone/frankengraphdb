@@ -1,7 +1,7 @@
 use super::*;
 use crate::algebra::{GraphColumn, GraphPatternBuilder, IntegerComparison};
 use crate::{GqlParameters, PreparedGraphSetText};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 fn row(values: &[Option<i64>]) -> GraphValueRow {
     GraphValueRow::from_owned_values(
@@ -367,7 +367,10 @@ fn native_ordered_unwind_match_with_queries_use_the_same_topk_path() {
     assert!(supports(&query));
     let frozen = query.canonical_bytes();
     let mut calls = 0;
-    let (s1, s2) = (CanonicalScalar::Int(1), CanonicalScalar::Int(2));
+    let (s1, s2) = (
+        CanonicalPropertyValue::from(CanonicalScalar::Int(1)),
+        CanonicalPropertyValue::from(CanonicalScalar::Int(2)),
+    );
     let observed = query
         .execute_governed(
             policy(),

@@ -23,7 +23,7 @@
 use super::{ExecutionPermit, WriteAccess};
 use crate::{Error, LimitDimension};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, EId, VId};
 
 /// Logical comparison charge, not an allocation or latency measurement.
 const COMPARE_BYTES_PER_UNIT: usize = 64;
@@ -34,7 +34,7 @@ const COMPARE_BYTES_PER_UNIT: usize = 64;
 pub struct VertexWriteImage<'a> {
     pub id: VId,
     pub labels: &'a [LabelId],
-    pub properties: &'a [(PropertyKeyId, CanonicalScalar)],
+    pub properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 }
 
 /// Original attempted field writes, including no-ops and removal of absent
@@ -63,7 +63,7 @@ pub struct EdgeWriteImage<'a> {
     pub relation: RelationId,
     pub source: WriteEndpoint<'a>,
     pub destination: WriteEndpoint<'a>,
-    pub properties: &'a [(PropertyKeyId, CanonicalScalar)],
+    pub properties: &'a [(PropertyKeyId, CanonicalPropertyValue)],
 }
 
 impl core::fmt::Debug for VertexWriteImage<'_> {
@@ -301,15 +301,17 @@ impl ExecutionPermit<'_, WriteAccess> {
     fn admit_write_properties(
         &mut self,
         now_ms: u64,
-        properties: &[(PropertyKeyId, CanonicalScalar)],
+        properties: &[(PropertyKeyId, CanonicalPropertyValue)],
     ) -> Result<(), Error> {
         let mut previous = None;
-        for (key, scalar) in properties {
+        for (key, value) in properties {
             self.charge_property_work(now_ms, *key, 1)?;
             if previous.is_some_and(|old| old >= *key) {
                 return Err(Error::InvalidWriteImage);
             }
-            scalar
+            // A stored List or Map (fgdb-k3nub) is checked as one canonical
+            // value, exactly like a scalar.
+            value
                 .canonical_encoded_len()
                 .map_err(|_| Error::InvalidWriteImage)?;
             previous = Some(*key);
@@ -366,8 +368,8 @@ impl ExecutionPermit<'_, WriteAccess> {
     fn check_changed_properties(
         &mut self,
         now_ms: u64,
-        mut before: &[(PropertyKeyId, CanonicalScalar)],
-        mut after: &[(PropertyKeyId, CanonicalScalar)],
+        mut before: &[(PropertyKeyId, CanonicalPropertyValue)],
+        mut after: &[(PropertyKeyId, CanonicalPropertyValue)],
         touched: &[PropertyKeyId],
     ) -> Result<(), Error> {
         while !before.is_empty() || !after.is_empty() {

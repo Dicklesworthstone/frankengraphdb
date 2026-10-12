@@ -42,8 +42,9 @@ use fgdb_delta_types::{
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitSeq, CommitSeqExhausted as CommitSeqExhaustion, DatabaseId,
-    EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq,
+    CommitSeqExhausted as CommitSeqExhaustion, DatabaseId, EId, GraphId, LogicalCommandSeq,
+    ObjectId, VId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -75,7 +76,7 @@ fn vertex_statement_transcript(
     vid: VId,
     birth_ordinal: u64,
     labels: impl Iterator<Item = LabelId>,
-    props: impl Iterator<Item = (PropertyKeyId, CanonicalScalar)>,
+    props: impl Iterator<Item = (PropertyKeyId, CanonicalPropertyValue)>,
 ) -> Result<Vec<u8>, ApplyError> {
     let mut out = vec![0x01];
     out.extend_from_slice(&vid.0.to_le_bytes());
@@ -96,7 +97,7 @@ fn edge_statement_transcript(
     src: VId,
     relation: RelationId,
     dst: VId,
-    props: impl Iterator<Item = (PropertyKeyId, CanonicalScalar)>,
+    props: impl Iterator<Item = (PropertyKeyId, CanonicalPropertyValue)>,
 ) -> Result<Vec<u8>, ApplyError> {
     let mut out = vec![0x02];
     out.extend_from_slice(&eid.0.to_le_bytes());
@@ -109,14 +110,23 @@ fn edge_statement_transcript(
 
 fn append_props_transcript(
     out: &mut Vec<u8>,
-    props: impl Iterator<Item = (PropertyKeyId, CanonicalScalar)>,
+    props: impl Iterator<Item = (PropertyKeyId, CanonicalPropertyValue)>,
 ) -> Result<(), ApplyError> {
-    let props: Vec<(PropertyKeyId, CanonicalScalar)> = props.collect();
+    let props: Vec<(PropertyKeyId, CanonicalPropertyValue)> = props.collect();
     out.extend_from_slice(&(props.len() as u32).to_le_bytes());
     for (key, value) in props {
-        let encoded = value.encode().map_err(|_| {
-            ApplyError::VersionIdentityEncoding(fgdb_delta_types::CanonicalError::Scalar)
-        })?;
+        // A scalar keeps its scalar bytes; a List or Map is its canonical
+        // value encoding (fgdb-k3nub).
+        let encoded = match value.as_scalar() {
+            Some(scalar) => scalar.encode().map_err(|_| {
+                ApplyError::VersionIdentityEncoding(fgdb_delta_types::CanonicalError::Scalar)
+            })?,
+            None => value.encode().map_err(|error| {
+                ApplyError::VersionIdentityEncoding(
+                    fgdb_delta_types::CanonicalError::PropertyValue(Box::new(error)),
+                )
+            })?,
+        };
         out.extend_from_slice(&key.0.to_le_bytes());
         out.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
         out.extend_from_slice(&encoded);
@@ -137,7 +147,7 @@ pub struct Vertex {
     pub version: ObjectId,
     pub birth_ordinal: u64,
     pub labels: BTreeSet<LabelId>,
-    pub props: BTreeMap<PropertyKeyId, CanonicalScalar>,
+    pub props: BTreeMap<PropertyKeyId, CanonicalPropertyValue>,
     pub valid_time: Option<ValidTimePeriod>,
 }
 
@@ -151,7 +161,7 @@ pub struct Edge {
     pub relation: RelationId,
     pub dst: VId,
     pub canonical_key: Option<CanonicalScalar>,
-    pub props: BTreeMap<PropertyKeyId, CanonicalScalar>,
+    pub props: BTreeMap<PropertyKeyId, CanonicalPropertyValue>,
     pub valid_time: Option<ValidTimePeriod>,
 }
 
@@ -310,14 +320,14 @@ pub enum ApplyError {
         declared: bool,
         actual: bool,
     },
-    /// Boxed because a `CanonicalScalar` carries owned text, and an error enum
-    /// as wide as its largest payload makes every `Result` in the crate that
-    /// wide too.
+    /// Boxed because a `CanonicalPropertyValue` carries owned text and
+    /// collections, and an error enum as wide as its largest payload makes
+    /// every `Result` in the crate that wide too.
     PropertyBeforeMismatch {
         elem: ElementId,
         property: PropertyKeyId,
-        declared: Option<Box<CanonicalScalar>>,
-        actual: Option<Box<CanonicalScalar>>,
+        declared: Option<Box<CanonicalPropertyValue>>,
+        actual: Option<Box<CanonicalPropertyValue>>,
     },
     ValidTimeBeforeMismatch {
         elem: ElementId,
@@ -3466,7 +3476,10 @@ mod version_transcript_laws {
     /// binds it — and nothing else does.
     #[test]
     fn the_chain_steps_over_statement_transcripts() {
-        let props = [(PropertyKeyId(3), CanonicalScalar::Int(1))];
+        let props = [(
+            PropertyKeyId(3),
+            fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1)),
+        )];
         let edge = edge_statement_transcript(
             EId(10),
             VId(1),

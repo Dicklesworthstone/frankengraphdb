@@ -12,7 +12,8 @@ use fgdb_gql::{
     GqlExecutionBudget, GqlQueryError, GqlQueryPolicy, PreparedGqlQuery,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, QueryCx, VId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -108,7 +109,11 @@ fn oracle(txn: &WriteTxn, db: &Database<MemVfs>) -> Vec<(Vec<VId>, u64)> {
     let qualifies = |vid: VId| {
         vertices.get(&vid).is_some_and(|row| {
             row.props.iter().any(|(key, scalar)| {
-                *key == N && matches!(scalar, CanonicalScalar::Int(n) if *n >= 3)
+                *key == N
+                    && matches!(
+                        scalar,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)) if *n >= 3
+                    )
             })
         })
     };

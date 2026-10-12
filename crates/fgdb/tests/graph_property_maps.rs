@@ -658,8 +658,8 @@ fn mutation_return_maps_compose_with_prior_overlay_and_remove_fields() {
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
             vec![
-                (SCORE, CanonicalScalar::Int(10)),
-                (NAME, CanonicalScalar::ucs_basic_text("one").unwrap()),
+                (SCORE, CanonicalScalar::Int(10).into()),
+                (NAME, CanonicalScalar::ucs_basic_text("one").unwrap().into()),
             ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -719,7 +719,7 @@ fn mutation_return_map_aggregation_and_limit_do_not_limit_effects() {
         for id in [VId(1), VId(2)] {
             assert_eq!(
                 db.vertex(id).unwrap().unwrap().props[0],
-                (SCORE, CanonicalScalar::Int(9))
+                (SCORE, CanonicalScalar::Int(9).into())
             );
         }
     });
@@ -773,7 +773,7 @@ fn mutation_return_map_failures_preserve_prior_staging_and_durable_state() {
         transaction.abort();
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props[0].1,
-            CanonicalScalar::Int(10)
+            CanonicalScalar::Int(10).into()
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -852,10 +852,10 @@ fn authorized_write_return_maps_exclude_hidden_fields_and_preserve_them_in_stora
                     ]],
                 );
                 let props = db.vertex(VId(1)).unwrap().unwrap().props;
-                assert_eq!(props[0], (SCORE, CanonicalScalar::Int(11)));
+                assert_eq!(props[0], (SCORE, CanonicalScalar::Int(11).into()));
                 assert_eq!(
                     props[1],
-                    (NAME, CanonicalScalar::ucs_basic_text("one").unwrap())
+                    (NAME, CanonicalScalar::ucs_basic_text("one").unwrap().into())
                 );
                 assert_eq!(props.len(), if hidden { 22 } else { 2 });
                 let before = (
@@ -959,15 +959,18 @@ fn creation_return_maps_describe_the_durable_fields_before_projection_overrides(
                 ],
             );
             let fields = vec![
-                (SCORE, CanonicalScalar::Int(2)),
-                (NAME, CanonicalScalar::ucs_basic_text("created").unwrap()),
-                (NOTE, CanonicalScalar::Null),
+                (SCORE, CanonicalScalar::Int(2).into()),
+                (
+                    NAME,
+                    CanonicalScalar::ucs_basic_text("created").unwrap().into(),
+                ),
+                (NOTE, CanonicalScalar::Null.into()),
             ];
             assert_eq!(db.vertex(*a).unwrap().unwrap().props, fields);
             assert!(db.vertex(*b).unwrap().unwrap().props.is_empty());
             let edge = db.edge(*r).unwrap().unwrap();
             assert_eq!((edge.entry.src, edge.entry.dst), (*a, *b));
-            assert_eq!(edge.props, vec![(SCORE, CanonicalScalar::Int(3))]);
+            assert_eq!(edge.props, vec![(SCORE, CanonicalScalar::Int(3).into())]);
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             db.compact(&commit).await.unwrap();
             drop(db);
@@ -1037,11 +1040,11 @@ fn insertion_return_maps_preserve_imported_rows_and_the_transaction_source() {
         transaction.abort();
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props[0].1,
-            CanonicalScalar::Int(10)
+            CanonicalScalar::Int(10).into()
         );
         assert_eq!(
             db.edge(EId(1)).unwrap().unwrap().props[0].1,
-            CanonicalScalar::Int(3)
+            CanonicalScalar::Int(3).into()
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -1112,7 +1115,7 @@ fn insertion_map_catalog_and_late_return_failures_keep_prior_staging_intact() {
         transaction.abort();
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props[0].1,
-            CanonicalScalar::Int(10)
+            CanonicalScalar::Int(10).into()
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -1173,9 +1176,12 @@ fn merge_return_maps_follow_both_branches_and_the_final_set_clause() {
             assert_eq!(
                 vertex.props,
                 vec![
-                    (SCORE, CanonicalScalar::Int(score)),
-                    (NAME, CanonicalScalar::ucs_basic_text("merge-key").unwrap()),
-                    (NOTE, CanonicalScalar::Int(score + 1)),
+                    (SCORE, CanonicalScalar::Int(score).into()),
+                    (
+                        NAME,
+                        CanonicalScalar::ucs_basic_text("merge-key").unwrap().into()
+                    ),
+                    (NOTE, CanonicalScalar::Int(score + 1).into()),
                 ],
             );
         }
@@ -1302,8 +1308,8 @@ fn merge_map_return_reads_prior_overlay_and_rolls_back_every_failing_clause() {
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
             vec![
-                (SCORE, CanonicalScalar::Int(10)),
-                (NAME, CanonicalScalar::ucs_basic_text("one").unwrap())
+                (SCORE, CanonicalScalar::Int(10).into()),
+                (NAME, CanonicalScalar::ucs_basic_text("one").unwrap().into())
             ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -1386,8 +1392,10 @@ fn authorized_merge_maps_mask_final_fields_and_preserve_hidden_storage() {
                 ]]
             );
             let props = db.vertex(VId(1)).unwrap().unwrap().props;
-            assert!(props.contains(&(NAME, CanonicalScalar::ucs_basic_text("one").unwrap())));
-            assert!(props.contains(&(NOTE, CanonicalScalar::Null)));
+            assert!(
+                props.contains(&(NAME, CanonicalScalar::ucs_basic_text("one").unwrap().into()))
+            );
+            assert!(props.contains(&(NOTE, CanonicalScalar::Null.into())));
             assert_eq!(props.len(), if hidden { 23 } else { 3 });
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             let after = (

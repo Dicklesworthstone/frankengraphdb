@@ -52,7 +52,7 @@ fn template(vid: u128) -> LogicalDeltaTemplate {
                 vid: VId(vid),
                 birth_ordinal: vid as u64,
                 labels: vec![LabelId(1)],
-                props: vec![(PropertyKeyId(1), CanonicalScalar::Int(vid as i64))],
+                props: vec![(PropertyKeyId(1), CanonicalScalar::Int(vid as i64).into())],
                 valid_time: None,
             }],
         }],

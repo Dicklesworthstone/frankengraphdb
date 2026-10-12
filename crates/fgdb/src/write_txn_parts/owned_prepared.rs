@@ -39,6 +39,7 @@ fn execute_budgeted_at<R: crate::gql_exec::GqlSnapshotReader + ?Sized>(
                 fgdb_gql::BudgetedGqlError::Execution(GqlError::Read(error))
             }
             fgdb_gql::BudgetedGqlError::Budget(error) => fgdb_gql::BudgetedGqlError::Budget(error),
+            fgdb_gql::BudgetedGqlError::Data(error) => fgdb_gql::BudgetedGqlError::Data(error),
         })
 }
 

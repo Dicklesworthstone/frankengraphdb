@@ -14,7 +14,9 @@ use fgdb_gql::{
     GraphIntegerOp, GraphSetProjection, GraphSetValue, GraphSymbol, GraphSymbolKind,
     PreparedGraphPipelineAggregateText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 const B: PropertyKeyId = PropertyKeyId(1);
@@ -212,8 +214,8 @@ fn independent<V: Vfs + Clone>(
     let mut source = BTreeMap::new();
     for vertex in db.vertices_at(db.frontier().unwrap()).unwrap() {
         let get = |key| match vertex.props.iter().find(|(k, _)| *k == key).map(|(_, v)| v) {
-            Some(CanonicalScalar::Int(n)) => Some(*n),
-            None | Some(CanonicalScalar::Null) => None,
+            Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n))) => Some(*n),
+            None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
             _ => panic!("integer fixture"),
         };
         *source.entry((get(B), get(N))).or_insert(0_usize) += 1;

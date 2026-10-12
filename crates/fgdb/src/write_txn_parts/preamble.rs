@@ -6,8 +6,9 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::{ElementId, LabelId, RelationId};
 use fgdb_strata::AdjacencyEntry;
 use fgdb_types::{
-    Acquired, CanonicalScalar, CommitCx, CommitSeq, EId, EmbeddedTxnCompletion, EmbeddedTxnState,
-    ObligationAcquireError, ObligationId, PurposeObligation, TxnCx, VId,
+    Acquired, CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, EId,
+    EmbeddedTxnCompletion, EmbeddedTxnState, ObligationAcquireError, ObligationId,
+    PurposeObligation, TxnCx, VId,
 };
 
 /// The keyed permutation that turns an engine allocation counter into an

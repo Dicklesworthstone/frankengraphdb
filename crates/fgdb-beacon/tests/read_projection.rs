@@ -3,7 +3,7 @@ use fgdb_beacon::{
     BeaconError, DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, IndexConfig,
     TextMatch, VectorSearch, WorkBudget, WorkControl,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, VId};
 
 fn config() -> IndexConfig {
     IndexConfig {
@@ -31,7 +31,8 @@ fn scalar_coordinates_keep_order_and_do_not_invent_missing_modalities() {
         text("search this"),
         CanonicalScalar::Int(7),
         CanonicalScalar::Float(CanonicalF64::new(0.5)),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let p = Projection {
         text: Some(0_u8),
         vector: vec![2, 1],
@@ -82,7 +83,9 @@ fn exact_f32_admission_rejects_rounding_nonfinite_and_wrong_scalar_types() {
         CanonicalScalar::Float(CanonicalF64::new(f64::INFINITY)),
         CanonicalScalar::Float(CanonicalF64::new(f64::MAX)),
         text("1"),
-    ] {
+    ]
+    .map(CanonicalPropertyValue::from)
+    {
         assert!(matches!(
             p.project(VId(1), &c, |_| Some(&value), &mut budget()),
             Err(BeaconError::InvalidQuery(_))
@@ -93,7 +96,9 @@ fn exact_f32_admission_rejects_rounding_nonfinite_and_wrong_scalar_types() {
         CanonicalScalar::Int(16_777_216),
         CanonicalScalar::Float(CanonicalF64::new(f64::from(f32::from_bits(1)))),
         CanonicalScalar::Float(CanonicalF64::new(f64::from(f32::MAX))),
-    ] {
+    ]
+    .map(CanonicalPropertyValue::from)
+    {
         assert!(
             p.project(VId(1), &c, |_| Some(&value), &mut budget())
                 .is_ok()
@@ -108,7 +113,8 @@ fn an_incomplete_vector_does_not_validate_the_other_coordinates() {
         text("visible"),
         CanonicalScalar::Float(CanonicalF64::new(f64::NAN)),
         CanonicalScalar::Null,
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let row = p
         .project(
             VId(1),
@@ -142,7 +148,7 @@ fn unused_lanes_are_not_validated_or_resolved() {
         mode: TextMatch::Any,
     };
     let config = options.config_for(query).unwrap();
-    let value = text("x");
+    let value = CanonicalPropertyValue::from(text("x"));
     let row = options
         .projection
         .project(
@@ -186,7 +192,7 @@ fn projection_and_result_limits_refuse_instead_of_truncating() {
             limit: 1
         })
     ));
-    let value = text("12345");
+    let value = CanonicalPropertyValue::from(text("12345"));
     options.index.max_text_bytes = 4;
     assert!(matches!(
         options
@@ -223,7 +229,8 @@ fn exact_projection_budget_succeeds_but_every_shorter_allowance_refuses() {
         text("red blue"),
         CanonicalScalar::Int(3),
         CanonicalScalar::Int(4),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let p = projection();
     let mut count = Count::default();
     p.project(VId(1), &config(), |k| props.get(usize::from(k)), &mut count)
@@ -267,7 +274,7 @@ fn packed_f32_vectors_decode_exactly_or_refuse() {
         encoding: VectorEncoding::PackedF32Le,
     };
     assert!(p.fits(3) && p.fits(768) && !p.fits(0));
-    let stored = packed(&[0.25, -1.5, 3.0e-3]);
+    let stored = CanonicalPropertyValue::from(packed(&[0.25, -1.5, 3.0e-3]));
     let row = p
         .project(VId(1), &c, |_| Some(&stored), &mut budget())
         .unwrap();
@@ -281,7 +288,9 @@ fn packed_f32_vectors_decode_exactly_or_refuse() {
         packed(&[f32::INFINITY, 0.0, 1.0]),
         CanonicalScalar::Float(CanonicalF64::new(0.5)),
         text("not a vector"),
-    ] {
+    ]
+    .map(CanonicalPropertyValue::from)
+    {
         assert!(
             p.project(VId(1), &c, |_| Some(&refused), &mut budget())
                 .is_err()

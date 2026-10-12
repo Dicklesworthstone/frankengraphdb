@@ -8,12 +8,14 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_strata::vertex::{
-    MAX_PATCH_ROWS, VERTEX_PATCH_FORMAT_V2, VERTEX_PATCH_FORMAT_V3, VERTEX_PATCH_MAGIC,
-    VertexPatchError, VertexPatchVersion, VertexRow, decode_patch, encode_patch, read_patch,
-    vertex_patch_id,
+    MAX_PATCH_ROWS, VERTEX_PATCH_FORMAT_V2, VERTEX_PATCH_FORMAT_V3, VERTEX_PATCH_FORMAT_V4,
+    VERTEX_PATCH_MAGIC, VertexPatchError, VertexPatchVersion, VertexRow, decode_patch,
+    encode_patch, read_patch, vertex_patch_id,
 };
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{CanonicalDate, CanonicalDuration, CanonicalScalar, CommitSeq, VId};
+use fgdb_types::{
+    CanonicalDate, CanonicalDuration, CanonicalPropertyValue, CanonicalScalar, CommitSeq, VId,
+};
 
 const K_OID: [u8; 32] = [0x5a; 32];
 
@@ -34,9 +36,11 @@ fn distinct_rows() -> Vec<VertexRow> {
             props: vec![
                 (
                     PropertyKeyId(41),
-                    CanonicalScalar::ucs_basic_text("ada").expect("admissible text"),
+                    CanonicalScalar::ucs_basic_text("ada")
+                        .expect("admissible text")
+                        .into(),
                 ),
-                (PropertyKeyId(59), CanonicalScalar::Int(-1815)),
+                (PropertyKeyId(59), CanonicalScalar::Int(-1815).into()),
             ],
         },
         VertexRow {
@@ -45,7 +49,7 @@ fn distinct_rows() -> Vec<VertexRow> {
             created_at: CommitSeq(5),
             retired_at: Some(CommitSeq(9)),
             labels: vec![LabelId(31)],
-            props: vec![(PropertyKeyId(67), CanonicalScalar::Bool(true))],
+            props: vec![(PropertyKeyId(67), CanonicalScalar::Bool(true).into())],
         },
         VertexRow {
             vid: VId(303),
@@ -91,11 +95,11 @@ fn a_profile_2_value_and_only_one_makes_the_patch_v3() {
     let mut rows = distinct_rows();
     rows[1].props.push((
         PropertyKeyId(71),
-        CanonicalScalar::Date(CanonicalDate::from_civil(2015, 7, 21).expect("a date")),
+        CanonicalScalar::Date(CanonicalDate::from_civil(2015, 7, 21).expect("a date")).into(),
     ));
     rows[2].props.push((
         PropertyKeyId(73),
-        CanonicalScalar::Duration(CanonicalDuration::new(14, -3, 5).expect("a duration")),
+        CanonicalScalar::Duration(CanonicalDuration::new(14, -3, 5).expect("a duration")).into(),
     ));
     let temporal = encode_patch(&rows).expect("encodes");
     assert_eq!(temporal[4..6], VERTEX_PATCH_FORMAT_V3.to_le_bytes());
@@ -127,16 +131,21 @@ fn storage_admission_matches_exact_encoded_row_boundary_without_changing_format(
     let limit = 16_384_u64;
     let mut row = distinct_rows().remove(0);
     row.props = (0..776)
-        .map(|key| (PropertyKeyId(key), CanonicalScalar::Int(1)))
+        .map(|key| {
+            (
+                PropertyKeyId(key),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1)),
+            )
+        })
         .collect();
     row.props
-        .push((PropertyKeyId(776), CanonicalScalar::Bool(true)));
+        .push((PropertyKeyId(776), CanonicalScalar::Bool(true).into()));
     for excess in [0, 1] {
         if excess == 1 {
             // An empty byte scalar encodes one byte longer than an integer.
             // Measure the full patch below rather than assuming payload size
             // grows linearly through canonical byte-group framing.
-            row.props[0].1 = CanonicalScalar::bytes(vec![]).expect("bytes");
+            row.props[0].1 = CanonicalScalar::bytes(vec![]).expect("bytes").into();
         }
         let encoded =
             encode_patch(core::slice::from_ref(&row)).expect("format still permits this row");
@@ -199,12 +208,14 @@ fn wrong_magic_and_future_format_are_distinct_refusals() {
         "a block is not a vertex patch"
     );
 
+    // One past the newest format: V4 (stored collections, fgdb-k3nub) is
+    // now a format this reader knows.
     let mut future = bytes;
-    future[4..6].copy_from_slice(&(VERTEX_PATCH_FORMAT_V3 + 1).to_le_bytes());
+    future[4..6].copy_from_slice(&(VERTEX_PATCH_FORMAT_V4 + 1).to_le_bytes());
     assert_eq!(
         decode_patch(&future),
         Err(VertexPatchError::UnsupportedFormat {
-            format: VERTEX_PATCH_FORMAT_V3 + 1
+            format: VERTEX_PATCH_FORMAT_V4 + 1
         }),
         "a newer version of our file is not \"not our file\""
     );
@@ -269,8 +280,8 @@ fn canonical_shape_refusals_hold_in_both_directions() {
 
     let mut dup_prop = base.clone();
     dup_prop[0].props = vec![
-        (PropertyKeyId(41), CanonicalScalar::Int(1)),
-        (PropertyKeyId(41), CanonicalScalar::Int(2)),
+        (PropertyKeyId(41), CanonicalScalar::Int(1).into()),
+        (PropertyKeyId(41), CanonicalScalar::Int(2).into()),
     ];
     assert_eq!(
         encode_patch(&dup_prop),
@@ -379,7 +390,7 @@ fn chained_rows() -> Vec<VertexRow> {
             created_at: CommitSeq(3),
             retired_at: Some(CommitSeq(5)),
             labels: vec![LabelId(11)],
-            props: vec![(PropertyKeyId(41), CanonicalScalar::Int(1))],
+            props: vec![(PropertyKeyId(41), CanonicalScalar::Int(1).into())],
         },
         VertexRow {
             vid: VId(101),
@@ -387,7 +398,7 @@ fn chained_rows() -> Vec<VertexRow> {
             created_at: CommitSeq(5),
             retired_at: None,
             labels: vec![LabelId(11), LabelId(23)],
-            props: vec![(PropertyKeyId(41), CanonicalScalar::Int(2))],
+            props: vec![(PropertyKeyId(41), CanonicalScalar::Int(2).into())],
         },
     ]
 }
@@ -409,13 +420,19 @@ fn a_version_chain_round_trips_and_merges_by_visibility() {
         merge_vertex(&patches, VId(101), CommitSeq(4))
             .expect("the first version answers inside its interval")
             .props,
-        vec![(PropertyKeyId(41), CanonicalScalar::Int(1))]
+        vec![(
+            PropertyKeyId(41),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1))
+        )]
     );
     assert_eq!(
         merge_vertex(&patches, VId(101), CommitSeq(5))
             .expect("the successor answers AT the update sequence — half-open")
             .props,
-        vec![(PropertyKeyId(41), CanonicalScalar::Int(2))]
+        vec![(
+            PropertyKeyId(41),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2))
+        )]
     );
 }
 
@@ -430,7 +447,7 @@ fn point_search_matches_full_scan_across_gaps_and_restatements() {
             created_at: CommitSeq(1),
             retired_at: None,
             labels: vec![],
-            props: vec![(PropertyKeyId(41), CanonicalScalar::Int(1))],
+            props: vec![(PropertyKeyId(41), CanonicalScalar::Int(1).into())],
         })
         .collect();
     let mut updates = Vec::new();
@@ -440,7 +457,7 @@ fn point_search_matches_full_scan_across_gaps_and_restatements() {
         updates.push(retired);
         let mut successor = row.clone();
         successor.created_at = CommitSeq(5);
-        successor.props[0].1 = CanonicalScalar::Int(2);
+        successor.props[0].1 = CanonicalScalar::Int(2).into();
         updates.push(successor);
     }
     let mut deleted = updates[1].clone();

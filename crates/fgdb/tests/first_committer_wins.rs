@@ -166,7 +166,7 @@ fn overlapping_prepared_batches_abort_the_second_committer() {
             // The abort is a verdict, not damage: the same handle still
             // serves reads and accepts a fresh write.
             let row = db.vertex(VId(1)).expect("reads").expect("live row");
-            assert_eq!(row.props, vec![(PROP, int(1))]);
+            assert_eq!(row.props, vec![(PROP, int(1).into())]);
             let mut fresh = WriteBatch::new(KNOWS);
             fresh.set_vertex_property(VId(2), PROP, Some(int(9)));
             db.write(cx, fresh)
@@ -179,12 +179,12 @@ fn overlapping_prepared_batches_abort_the_second_committer() {
         let row = db.vertex(VId(1)).expect("reads").expect("durable row");
         assert_eq!(
             row.props,
-            vec![(PROP, int(1))],
+            vec![(PROP, int(1).into())],
             "only the first committer's property survives the reopen; the \
              loser left no durable trace"
         );
         let bystander = db.vertex(VId(2)).expect("reads").expect("durable row");
-        assert_eq!(bystander.props, vec![(PROP, int(9))]);
+        assert_eq!(bystander.props, vec![(PROP, int(9).into())]);
     });
 }
 
@@ -219,11 +219,11 @@ fn disjoint_prepared_batches_both_commit() {
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
-            vec![(PROP, int(1))]
+            vec![(PROP, int(1).into())]
         );
         assert_eq!(
             db.vertex(VId(2)).expect("reads").expect("row").props,
-            vec![(PROP, int(2))]
+            vec![(PROP, int(2).into())]
         );
     });
 }
@@ -256,13 +256,13 @@ fn sequential_overlapping_writes_do_not_false_abort() {
             );
 
             let row = db.vertex(VId(1)).expect("reads").expect("live row");
-            assert_eq!(row.props, vec![(PROP, int(2))]);
+            assert_eq!(row.props, vec![(PROP, int(2).into())]);
         }
 
         let db = Database::open(cx, &dir, keys()).await.expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
-            vec![(PROP, int(2))]
+            vec![(PROP, int(2).into())]
         );
     });
 }
@@ -345,6 +345,6 @@ fn overlapping_abort_is_attributable_to_fcw_not_the_fold() {
         // The loser's value must be nowhere: not in the live fold now, and
         // (per the overlap test's reopen) never durable.
         let row = db.vertex(VId(1)).expect("reads").expect("live row");
-        assert_eq!(row.props, vec![(PROP, int(41))]);
+        assert_eq!(row.props, vec![(PROP, int(41).into())]);
     });
 }

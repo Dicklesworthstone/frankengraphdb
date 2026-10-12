@@ -76,7 +76,10 @@ impl PreparedGraphCheapestPath {
         &self,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        mut property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<GraphCheapestPathCursor, GraphCheapestPathError<E>> {
         GraphCheapestPathCursor::create(
@@ -97,7 +100,10 @@ impl PreparedGraphCheapestPath {
         count: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        mut property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<GraphCostPath>, GraphCheapestPathError<E>> {
         collect(
@@ -121,7 +127,10 @@ impl PreparedGraphCheapestPath {
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        mut property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphCostPath>, GqlQueryError<GraphCheapestPathError<E>, C>> {
@@ -179,7 +188,10 @@ pub(super) fn collect<'a, E>(
     count: u64,
     vertices: impl IntoIterator<Item = VId>,
     edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-    property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(
+        EId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     failure: &impl Fn(GraphPathCostError) -> E,
 ) -> Result<Vec<GraphCostPath>, E> {
@@ -201,7 +213,10 @@ impl GraphCheapestPathCursor {
         query: &PreparedGraphCheapestPath,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: &mut impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         failure: &impl Fn(GraphPathCostError) -> E,
     ) -> Result<Self, E> {

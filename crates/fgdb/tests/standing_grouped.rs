@@ -142,7 +142,12 @@ fn oracle(db: &Database<MemVfs>, grouped: bool, identity: bool) -> Vec<Summary> 
         groups.insert(Vec::new(), Vec::new());
     }
     for row in db.vertices().unwrap() {
-        let get = |key| row.props.iter().find(|(k, _)| *k == key).map(|(_, v)| v);
+        let get = |key| {
+            row.props
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.as_scalar().expect("scalar fixture"))
+        };
         if !row.labels.contains(&PERSON)
             || !matches!(get(SELECTED), Some(CanonicalScalar::Int(value)) if *value >= 1)
         {

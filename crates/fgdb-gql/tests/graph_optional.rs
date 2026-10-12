@@ -9,7 +9,7 @@ use fgdb_gql::algebra::{
     ValueProjection, VertexPredicate,
 };
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy, GraphAggregate, PreparedGraphAggregate};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 type Edge = (VId, RelationId, VId);
 type Row = Vec<Option<VId>>;
@@ -36,7 +36,13 @@ fn builder(
 }
 fn accepts(vid: VId, predicates: &[VertexPredicate]) -> bool {
     predicates.iter().all(|predicate| {
-        predicate.matches(&[], &[(P, CanonicalScalar::Int(i64::from(vid == VId(1))))])
+        predicate.matches(
+            &[],
+            &[(
+                P,
+                CanonicalPropertyValue::from(CanonicalScalar::Int(i64::from(vid == VId(1)))),
+            )],
+        )
     })
 }
 fn plain(rows: &[GraphValueRow]) -> Vec<Row> {
@@ -658,7 +664,7 @@ fn late_predicate_and_property_errors_never_become_successful_null_extensions() 
         .unwrap()
         .with_duplicates();
     let edges = [(VId(0), R, VId(1)), (VId(0), R, VId(2))];
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let predicate_failure = pattern.plan().execute_governed_with_properties(
         3,
         [VId(0)],
@@ -733,7 +739,7 @@ fn streaming_counts_distinguish_outer_rows_from_nullable_vertices_and_properties
         None,
     )
     .unwrap();
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let edges = [(VId(0), R, VId(2)); 2];
     let result = summary
         .execute_governed(

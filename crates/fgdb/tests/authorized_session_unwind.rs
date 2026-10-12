@@ -184,11 +184,17 @@ fn native_session_ingestion_and_existing_prepared_writes_survive_reopen() {
         assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 2));
         assert_eq!(
             db.vertex(first).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(15))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(15).into())
+            ]
         );
         assert_eq!(
             db.vertex(second).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(4))]
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(4).into())
+            ]
         );
         let expected = db.vertices().unwrap();
         db.compact(&commit).await.unwrap();
@@ -258,7 +264,10 @@ fn stats_only_ingestion_exceeds_the_default_64_only_when_the_host_admits_it() {
         assert_eq!(vertices.len(), 1);
         assert_eq!(
             vertices[0].props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(65))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(65).into())
+            ]
         );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
@@ -623,11 +632,17 @@ fn frozen_unwind_inputs_and_receipts_reuse_without_catalog_or_rebinding() {
         assert_eq!(db.vertices().unwrap().len(), 2);
         assert_eq!(
             db.vertex(first).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(10))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(10).into())
+            ]
         );
         assert_eq!(
             db.vertex(second).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(8))]
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(8).into())
+            ]
         );
         let expected = db.vertices().unwrap();
         db.compact(&commit).await.unwrap();

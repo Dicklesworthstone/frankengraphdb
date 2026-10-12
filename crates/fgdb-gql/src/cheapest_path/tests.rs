@@ -1,4 +1,5 @@
 use super::*;
+use fgdb_types::CanonicalPropertyValue;
 
 type Edge = (EId, VId, RelationId, VId);
 type Answer = (i128, Vec<(EId, VId)>);
@@ -32,7 +33,7 @@ fn answer(value: Option<GraphCostPath>) -> Option<Answer> {
 fn oracle(
     query: &PreparedGraphCheapestPath,
     edges: &[Edge],
-    weights: &BTreeMap<EId, CanonicalScalar>,
+    weights: &BTreeMap<EId, CanonicalPropertyValue>,
 ) -> Option<Answer> {
     let mut layer = vec![(query.source(), 0_i128, Vec::<(EId, VId)>::new())];
     let mut candidates = Vec::new();
@@ -68,7 +69,8 @@ fn oracle(
                         destinations
                     }
                 };
-                let CanonicalScalar::Int(weight) = weights[&edge] else {
+                let CanonicalPropertyValue::Scalar(CanonicalScalar::Int(weight)) = weights[&edge]
+                else {
                     panic!("oracle integer fixture");
                 };
                 for destination in destinations {
@@ -99,7 +101,10 @@ fn exhaustive_signed_multigraphs_match_full_walk_enumeration_in_every_direction(
             }
             let edge = EId(at as u128 + 1);
             edges.push((edge, VId(left), RELATION, VId(right)));
-            weights.insert(edge, CanonicalScalar::Int(choice as i64 - 2));
+            weights.insert(
+                edge,
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(choice as i64 - 2)),
+            );
         }
         for direction in [
             GlaDirection::Forward,
@@ -137,9 +142,9 @@ fn costs_dominate_hops_but_equal_costs_use_path_lex_not_shortest_length() {
         (EId(9), VId(0), RELATION, VId(1)),
         (EId(1), VId(0), RELATION, VId(0)),
     ];
-    let weights = BTreeMap::from([
-        (EId(9), CanonicalScalar::Int(7)),
-        (EId(1), CanonicalScalar::Int(0)),
+    let weights: BTreeMap<EId, CanonicalPropertyValue> = BTreeMap::from([
+        (EId(9), CanonicalScalar::Int(7).into()),
+        (EId(1), CanonicalScalar::Int(0).into()),
     ]);
     let query = prepared(0, 1, GlaDirection::Forward, 1, 3);
     let run = |edges: Vec<Edge>| {
@@ -182,9 +187,9 @@ fn lower_hop_bounds_negative_cycles_and_wide_exact_costs_do_not_settle_vertices(
         (EId(1), VId(0), RELATION, VId(1)),
         (EId(2), VId(1), RELATION, VId(1)),
     ];
-    let weights = BTreeMap::from([
-        (EId(1), CanonicalScalar::Int(i64::MAX)),
-        (EId(2), CanonicalScalar::Int(i64::MIN)),
+    let weights: BTreeMap<EId, CanonicalPropertyValue> = BTreeMap::from([
+        (EId(1), CanonicalScalar::Int(i64::MAX).into()),
+        (EId(2), CanonicalScalar::Int(i64::MIN).into()),
     ]);
     let query = prepared(0, 1, GlaDirection::Forward, 2, 4);
     let result = query
@@ -201,7 +206,7 @@ fn lower_hop_bounds_negative_cycles_and_wide_exact_costs_do_not_settle_vertices(
         i128::from(i64::MAX) + 3 * i128::from(i64::MIN)
     );
     assert_eq!(result.path().len(), 4);
-    let positive = CanonicalScalar::Int(i64::MAX);
+    let positive = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(i64::MAX));
     let exact = prepared(0, 1, GlaDirection::Forward, 4, 4)
         .execute_with_control(
             [VId(0), VId(1)],
@@ -227,7 +232,7 @@ fn exponential_parallel_walks_share_states_and_capture_only_the_selected_path() 
             ));
         }
     }
-    let weight = CanonicalScalar::Int(1);
+    let weight = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1));
     let query = prepared(0, 40, GlaDirection::Forward, 40, 40);
     let execution = query
         .execute_governed_with_edge_properties(
@@ -250,7 +255,7 @@ fn exponential_parallel_walks_share_states_and_capture_only_the_selected_path() 
 
 #[test]
 fn maximum_hop_depth_is_iterative_and_does_not_overflow_the_integer_cost_domain() {
-    let weight = CanonicalScalar::Int(i64::MIN);
+    let weight = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(i64::MIN));
     let query = prepared(
         0,
         0,
@@ -289,18 +294,19 @@ fn malformed_weights_topology_and_source_errors_refuse_without_substitution() {
             GraphPathCostError::MissingWeight
         ))
     );
+    let null = CanonicalPropertyValue::Scalar(CanonicalScalar::Null);
     assert_eq!(
         query.execute_with_control(
             [VId(0), VId(1)],
             [edge],
-            |_, _| Ok::<_, ()>(Some(&CanonicalScalar::Null)),
+            |_, _| Ok::<_, ()>(Some(&null)),
             |_| Ok(())
         ),
         Err(GraphCheapestPathError::Cost(
             GraphPathCostError::NonIntegerWeight
         ))
     );
-    let weight = CanonicalScalar::Int(1);
+    let weight = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1));
     assert_eq!(
         query.execute_with_control(
             [VId(0), VId(1)],
@@ -345,7 +351,9 @@ fn malformed_weights_topology_and_source_errors_refuse_without_substitution() {
             .execute_with_control(
                 [VId(0), VId(1)],
                 [(EId(2), VId(0), RelationId(99), VId(1))],
-                |_, _| -> Result<Option<&CanonicalScalar>, ()> { panic!("unrelated cost read") },
+                |_, _| -> Result<Option<&CanonicalPropertyValue>, ()> {
+                    panic!("unrelated cost read")
+                },
                 |_| Ok(())
             )
             .unwrap(),
@@ -366,9 +374,9 @@ fn every_control_refusal_and_every_exact_limit_is_retryable_without_partial_outp
         (EId(7), VId(0), RELATION, VId(1)),
         (EId(2), VId(0), RELATION, VId(0)),
     ];
-    let weights = BTreeMap::from([
-        (EId(7), CanonicalScalar::Int(4)),
-        (EId(2), CanonicalScalar::Int(-1)),
+    let weights: BTreeMap<EId, CanonicalPropertyValue> = BTreeMap::from([
+        (EId(7), CanonicalScalar::Int(4).into()),
+        (EId(2), CanonicalScalar::Int(-1).into()),
     ]);
     let policy = GqlQueryPolicy::new(4, 1, 100_000, 100_000);
     let mut calls = 0;

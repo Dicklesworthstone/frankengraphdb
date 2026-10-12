@@ -19,7 +19,7 @@ use fgdb_gql::{
     GraphSetProjection, GraphSetQuantifier, GraphSetValue, GraphSymbol, GraphSymbolKind,
     PreparedGraphSet, PreparedGraphSetAggregate, PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::BTreeMap;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -72,9 +72,9 @@ fn stage_rows<E>(
 }
 
 struct Graph {
-    properties: Vec<Option<CanonicalScalar>>,
+    properties: Vec<Option<CanonicalPropertyValue>>,
     edges: Vec<(EId, VId, RelationId, VId)>,
-    edge_properties: Vec<CanonicalScalar>,
+    edge_properties: Vec<CanonicalPropertyValue>,
 }
 impl Graph {
     fn sample() -> Self {
@@ -82,7 +82,9 @@ impl Graph {
             // Source identity order and canonical property order disagree.
             properties: [Some(3), Some(1), Some(4), Some(1), Some(2), None]
                 .into_iter()
-                .map(|value| value.map(CanonicalScalar::Int))
+                .map(|value| {
+                    value.map(|value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)))
+                })
                 .collect(),
             edges: vec![
                 (EId(1), VId(1), R, VId(2)),
@@ -90,7 +92,9 @@ impl Graph {
                 (EId(3), VId(2), R, VId(2)),
                 (EId(4), VId(2), R, VId(3)),
             ],
-            edge_properties: [7, 8, 9, 10].map(CanonicalScalar::Int).to_vec(),
+            edge_properties: [7, 8, 9, 10]
+                .map(|value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)))
+                .to_vec(),
         }
     }
     fn execute(
@@ -99,7 +103,7 @@ impl Graph {
         policy: GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<Infallible, ()>> {
         let ranks: Vec<_> = (1..=self.properties.len())
-            .map(|index| CanonicalScalar::Int(index as i64))
+            .map(|index| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(index as i64)))
             .collect();
         pattern.plan().execute_governed_with_element_properties(
             (self.properties.len() + self.edges.len()) as u64,
@@ -945,7 +949,7 @@ fn source_page_precedes_visible_row_canonicalization_and_scopes_preserve_selecte
 fn complete_stage_failure_wins_before_any_downstream_expression_even_limit_zero() {
     let graph = Graph {
         properties: [1, 2, 3]
-            .map(|value| Some(CanonicalScalar::Int(value)))
+            .map(|value| Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))))
             .to_vec(),
         edges: vec![],
         edge_properties: vec![],

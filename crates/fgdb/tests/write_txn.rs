@@ -110,7 +110,7 @@ fn property_storage_admission_checks_combined_transaction_rows() {
         assert_eq!(txn_cx.outstanding_obligations(), baseline);
         assert_eq!(
             db.vertex(VId(1)).expect("read").expect("live").props,
-            vec![(PROP, admitted.clone())]
+            vec![(PROP, admitted.clone().into())]
         );
         drop(db);
         let db = Database::open_rebuilding(&commit, &dir, keys())
@@ -118,7 +118,7 @@ fn property_storage_admission_checks_combined_transaction_rows() {
             .expect("replay admitted transaction");
         assert_eq!(
             db.vertex(VId(1)).expect("read").expect("live").props,
-            vec![(PROP, admitted)]
+            vec![(PROP, admitted.into())]
         );
     });
 }
@@ -304,7 +304,7 @@ fn foreign_handles_refuse_every_read_and_write_without_consuming_the_owner() {
                     .expect("pinned owner read")
                     .expect("row")
                     .props,
-                vec![(PROP, int(5))]
+                vec![(PROP, int(5).into())]
             );
             txn.commit(&mut owner, &commit)
                 .await
@@ -476,7 +476,7 @@ fn foreign_prepared_refusal_preserves_the_receivers_fcw_history() {
                 .expect("receiver row")
                 .expect("present")
                 .props,
-            vec![(PROP, int(1))]
+            vec![(PROP, int(1).into())]
         );
         assert!(
             receiver
@@ -552,7 +552,7 @@ fn overlapping_txns_first_commit_wins_second_aborts_typed() {
             .expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
-            vec![(PROP, int(1))],
+            vec![(PROP, int(1).into())],
             "only the winning txn's property survives the reopen"
         );
     });
@@ -590,7 +590,7 @@ fn abort_releases_the_pin_and_leaves_nothing_durable() {
             );
             assert_eq!(
                 db.vertex(VId(1)).expect("reads").expect("row").props,
-                vec![(PROP, int(0))],
+                vec![(PROP, int(0).into())],
                 "the aborted write is invisible to the live fold"
             );
 
@@ -606,7 +606,7 @@ fn abort_releases_the_pin_and_leaves_nothing_durable() {
             .expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
-            vec![(PROP, int(5))],
+            vec![(PROP, int(5).into())],
             "reopen holds the seed and the post-abort write; the aborted \
              txn's 99 is nowhere"
         );

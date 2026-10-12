@@ -41,7 +41,7 @@ fn vertex(vid: u128) -> DeltaRow {
         vid: VId(vid),
         birth_ordinal: vid as u64,
         labels: vec![LABEL],
-        props: vec![(PROP, CanonicalScalar::Int(vid as i64))],
+        props: vec![(PROP, CanonicalScalar::Int(vid as i64).into())],
         valid_time: None,
     }
 }

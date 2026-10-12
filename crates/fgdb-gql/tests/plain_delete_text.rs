@@ -6,7 +6,7 @@ use fgdb_gql::{
     GraphDeleteTextErrorKind, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     PreparedGraphDeleteText, PreparedGraphMutationText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -52,9 +52,18 @@ fn shared_match_where_optional_and_parameters_bind_once() {
     let vertices = [VId(1), VId(2), VId(3)];
     let edges = [(VId(2), R, VId(3))];
     let props = BTreeMap::from([
-        (VId(1), CanonicalScalar::Int(1)),
-        (VId(2), CanonicalScalar::Int(2)),
-        (VId(3), CanonicalScalar::Int(3)),
+        (
+            VId(1),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1)),
+        ),
+        (
+            VId(2),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2)),
+        ),
+        (
+            VId(3),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(3)),
+        ),
     ]);
     let proposal = deletion
         .execute_governed(

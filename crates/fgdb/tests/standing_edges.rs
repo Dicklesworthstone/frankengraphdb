@@ -11,7 +11,8 @@ use fgdb_gql::{
     PreparedGraphAggregate, PreparedGraphAggregateText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, QueryCx, VId,
 };
 use std::collections::BTreeMap;
 
@@ -140,7 +141,11 @@ fn assert_state(
             let (a, b) = (by_id[&a], by_id[&b]);
             if !a.labels.contains(&SOURCE)
                 || !b.props.iter().any(|(key, value)| {
-                    *key == SELECTED && matches!(value, CanonicalScalar::Int(1))
+                    *key == SELECTED
+                        && matches!(
+                            value,
+                            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1))
+                        )
                 })
             {
                 continue;
@@ -149,15 +154,15 @@ fn assert_state(
                 .props
                 .iter()
                 .find(|(key, _)| *key == BUCKET)
-                .map(|(_, value)| value.clone())
+                .map(|(_, value)| value.as_scalar().expect("scalar fixture").clone())
                 .unwrap_or(CanonicalScalar::Null);
             let amount = b
                 .props
                 .iter()
                 .find(|(key, _)| *key == AMOUNT)
                 .and_then(|(_, value)| match value {
-                    CanonicalScalar::Int(value) => Some(*value),
-                    CanonicalScalar::Null => None,
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => Some(*value),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Null) => None,
                     _ => panic!("integer-only fixture"),
                 });
             expected

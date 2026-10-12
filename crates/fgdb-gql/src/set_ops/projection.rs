@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod map_overlay_tests;
-mod membership;
+pub(crate) mod membership;
 mod subscript;
 mod temporal;
 
@@ -1391,14 +1391,14 @@ pub(crate) fn evaluate_value<E>(
 /// source's cut (fgdb-xnd7x). `Ok(None)` is an absent property. `None` means
 /// this host reads no element properties, so the read stays a typed error,
 /// never a guessed NULL.
-pub(crate) type ElementRead<'r, E> =
-    dyn FnMut(ElementId, PropertyKeyId) -> Option<Result<Option<CanonicalScalar>, E>> + 'r;
+pub(crate) type ElementRead<'r, E> = dyn FnMut(ElementId, PropertyKeyId) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>>
+    + 'r;
 
 /// The element reader of a host that reads no element properties.
 pub(crate) fn no_element_reads<E>(
     _: ElementId,
     _: PropertyKeyId,
-) -> Option<Result<Option<CanonicalScalar>, E>> {
+) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
     None
 }
 
@@ -1931,8 +1931,14 @@ fn evaluate_value_at<E>(
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?
                     .map_err(ProjectionFailure::Control)?
                 {
-                    Some(value) => copy_value(&GraphValue::Scalar(value), control)
-                        .map_err(ProjectionFailure::Control)?,
+                    // A stored List or Map reads as the value it is
+                    // (fgdb-k3nub); copy_value charges every node.
+                    Some(value) => copy_value(
+                        &GraphValue::from_property_value(&value)
+                            .ok_or_else(|| failure(GraphIntegerErrorKind::StoredValueBounds))?,
+                        control,
+                    )
+                    .map_err(ProjectionFailure::Control)?,
                     None => {
                         control(GlaExecutionEvent::ScratchEntry)
                             .map_err(ProjectionFailure::Control)?;

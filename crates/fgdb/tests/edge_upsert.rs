@@ -89,12 +89,12 @@ fn on_match_updates_existing_edge_without_allocating() {
         assert_eq!(stats.action_effects, 1);
         assert_eq!(
             txn.edge(&db, EId(10)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(100))]
+            vec![(W, CanonicalScalar::Int(100).into())]
         );
         txn.commit(&mut db, &commit).await.unwrap();
         assert_eq!(
             db.edge(EId(10)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(100))]
+            vec![(W, CanonicalScalar::Int(100).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -131,7 +131,7 @@ fn on_create_decorates_new_edge_and_survives_reopen() {
         assert_eq!(stats.branch, GraphEdgeUpsertBranch::Create);
         assert_eq!(
             txn.edge(&db, EId(20)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(200))]
+            vec![(W, CanonicalScalar::Int(200).into())]
         );
         txn.commit(&mut db, &commit).await.unwrap();
         db.compact(&commit).await.unwrap();
@@ -141,7 +141,7 @@ fn on_create_decorates_new_edge_and_survives_reopen() {
             .unwrap();
         assert_eq!(
             db.edge(EId(20)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(200))]
+            vec![(W, CanonicalScalar::Int(200).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -268,7 +268,7 @@ fn native_autocommit_creates_then_updates_with_no_second_identity() {
         );
         assert_eq!(
             db.edge(EId(20)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(200))]
+            vec![(W, CanonicalScalar::Int(200).into())]
         );
 
         let mut no_creations = policy(1);
@@ -291,7 +291,7 @@ fn native_autocommit_creates_then_updates_with_no_second_identity() {
         ));
         assert_eq!(
             db.edge(EId(20)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(100))]
+            vec![(W, CanonicalScalar::Int(100).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -348,7 +348,7 @@ fn exact_branch_work_and_scratch_limits_accept_and_one_below_rolls_back() {
                 assert_eq!(result.unwrap().0, expected);
                 assert_eq!(
                     txn.edge(&db, eid).unwrap().unwrap().props,
-                    vec![(W, CanonicalScalar::Int(200))]
+                    vec![(W, CanonicalScalar::Int(200).into())]
                 );
             }
             txn.abort();
@@ -449,7 +449,7 @@ fn inactive_create_actions_need_no_quota_and_matching_can_remain_read_only() {
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(
             db.edge(EId(10)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(1))]
+            vec![(W, CanonicalScalar::Int(1).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

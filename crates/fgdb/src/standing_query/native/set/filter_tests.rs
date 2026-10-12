@@ -10,7 +10,9 @@ use fgdb_gql::{
     GraphSetColumnType, GraphSetOperand, GraphSetPredicateOp as Predicate, GraphSetProjection,
     GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const LIMBS: LimbLimit = LimbLimit::new(4);
@@ -81,7 +83,7 @@ fn expected<V: Vfs + Clone>(
     let mut count = 0;
     for row in db.vertices_at(at).unwrap() {
         if matches!(row.props.iter().find(|(key, _)| *key == P).map(|(_, v)| v),
-            Some(CanonicalScalar::Int(n)) if *n > 0 && n % 2 == 1)
+            Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n))) if *n > 0 && n % 2 == 1)
         {
             count += 2;
         }

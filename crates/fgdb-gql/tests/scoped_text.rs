@@ -9,7 +9,7 @@ use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind,
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 const R: RelationId = RelationId(1);
@@ -276,6 +276,7 @@ fn optional_predicates_are_inside_the_match_and_missing_bindings_never_read_vert
     let q =
         query("MATCH (a:L) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n >= 7 RETURN a,b,b.n AS value");
     let value = CanonicalScalar::Int(7);
+    let stored = CanonicalPropertyValue::from(value.clone());
     let edges = [(VId(0), R, VId(1)), (VId(0), R, VId(2))];
     let result = q
         .plan()
@@ -287,13 +288,18 @@ fn optional_predicates_are_inside_the_match_and_missing_bindings_never_read_vert
                 Ok::<_, &str>(predicates.iter().all(|predicate| {
                     predicate.matches(
                         &[L],
-                        &[(P, CanonicalScalar::Int(if vid == VId(2) { 7 } else { 1 }))],
+                        &[(
+                            P,
+                            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                                if vid == VId(2) { 7 } else { 1 },
+                            )),
+                        )],
                     )
                 }))
             },
             |vid, _| {
                 if vid == VId(2) {
-                    Ok(Some(&value))
+                    Ok(Some(&stored))
                 } else {
                     Err("null binding called the property resolver")
                 }
@@ -570,7 +576,7 @@ fn optional_text_and_aggregate_text_share_zero_preserving_semantics() {
         .with_uint64("take", 10)
         .unwrap();
     let aggregate = template.bind_parameters(&args).unwrap();
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7));
     let rows = aggregate
         .execute_governed(
             7,
@@ -605,7 +611,7 @@ fn optional_text_and_aggregate_text_share_zero_preserving_semantics() {
 #[test]
 fn scoped_text_retains_all_limits_and_errors_never_become_null_extension() {
     let q = query("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n >= 0 RETURN a,b,b.n AS value");
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7));
     let vertices = [VId(0), VId(9)];
     let edges = [(VId(0), R, VId(1)), (VId(0), R, VId(2))];
     let run = |policy| {

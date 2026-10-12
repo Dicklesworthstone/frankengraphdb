@@ -24,8 +24,8 @@ use fgdb::{
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText};
 use fgdb_types::{
-    CanonicalScalar, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts, QueryCx,
-    VId,
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion,
+    PurposeContexts, QueryCx, VId,
 };
 use std::collections::BTreeMap;
 
@@ -36,14 +36,14 @@ const L: LabelId = LabelId(1);
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Node {
     labels: Vec<LabelId>,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 type State = BTreeMap<VId, Node>;
 
 fn node(value: i64, selected: bool) -> Node {
     Node {
         labels: if selected { vec![L] } else { vec![] },
-        props: vec![(P, CanonicalScalar::Int(value))],
+        props: vec![(P, CanonicalScalar::Int(value).into())],
     }
 }
 
@@ -95,7 +95,7 @@ fn interpret(state: &mut State, op: &Op) -> Option<Option<Observation>> {
                 .collect(),
         ))),
         Op::Set(id, value) => {
-            state.get_mut(&id)?.props = vec![(P, CanonicalScalar::Int(value))];
+            state.get_mut(&id)?.props = vec![(P, CanonicalScalar::Int(value).into())];
             Some(None)
         }
         Op::Create(id, value, selected) => {
@@ -206,7 +206,7 @@ fn execute(
                 }
                 Op::Create(id, value, selected) => {
                     let n = node(value, selected);
-                    batch.create_vertex(id, n.labels, n.props);
+                    batch.create_vertex_values(id, n.labels, n.props);
                 }
                 Op::Delete(id) => {
                     batch.delete_vertex(id);
@@ -321,7 +321,7 @@ fn run_seed(seed: u64) {
             .collect();
             let mut batch = WriteBatch::new(R);
             for (id, n) in &initial {
-                batch.create_vertex(*id, n.labels.clone(), n.props.clone());
+                batch.create_vertex_values(*id, n.labels.clone(), n.props.clone());
             }
             db.write(&commit, batch).await.unwrap();
             let scripts = programs(family, seed, value);

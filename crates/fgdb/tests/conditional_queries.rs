@@ -12,7 +12,8 @@ use fgdb_gql::{
     PreparedGraphSet, PreparedGraphSetText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::BTreeMap;
 
@@ -101,8 +102,8 @@ fn property(row: &VertexRow, key: PropertyKeyId) -> Option<i64> {
         .find(|(candidate, _)| *candidate == key)
         .map(|(_, value)| value)
     {
-        Some(CanonicalScalar::Int(value)) => Some(*value),
-        None | Some(CanonicalScalar::Null) => None,
+        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => Some(*value),
+        None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
         _ => panic!("unexpected oracle input"),
     }
 }
@@ -246,8 +247,8 @@ fn conditional_reads_groups_and_frozen_writes_survive_commit_compaction_and_reop
             };
             let next_q = if p == Some(0) { 100 } else { p.unwrap_or(0) };
             row.props = vec![
-                (P, CanonicalScalar::Int(next_p)),
-                (Q, CanonicalScalar::Int(next_q)),
+                (P, CanonicalScalar::Int(next_p).into()),
+                (Q, CanonicalScalar::Int(next_q).into()),
             ];
         }
         let expected = oracle(&expected_vertices);

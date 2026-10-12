@@ -11,7 +11,7 @@ const R: RelationId = RelationId(7);
 const P: PropertyKeyId = PropertyKeyId(9);
 struct Fixture {
     vertices: BTreeSet<VId>,
-    props: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalScalar)>>,
+    props: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>>,
     edges: BTreeMap<EId, (VId, VId)>,
     outgoing: BTreeMap<VId, BTreeSet<EId>>,
     incoming: BTreeMap<VId, BTreeSet<EId>>,
@@ -74,7 +74,7 @@ impl Fixture {
             (2, CanonicalScalar::Int(7)),
             (u128::MAX, CanonicalScalar::Int(i64::MIN)),
         ] {
-            f.props.insert(VId(id), vec![(P, value)]);
+            f.props.insert(VId(id), vec![(P, value.into())]);
         }
         f
     }
@@ -82,7 +82,7 @@ impl Fixture {
         self.props
             .get(&vid)
             .and_then(|p| p.first())
-            .map(|p| p.1.clone())
+            .map(|p| p.1.as_scalar().unwrap().clone())
             .unwrap_or(CanonicalScalar::Null)
     }
 }

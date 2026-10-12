@@ -6,7 +6,7 @@ use fgdb_gql::algebra::{
     PatternBuildError, PreparedGraphPattern,
 };
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy, GraphAggregate, PreparedGraphAggregate};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const R: RelationId = RelationId(1);
@@ -52,6 +52,10 @@ fn run(
     values: &[Option<CanonicalScalar>],
     edges: &[(VId, RelationId, VId)],
 ) -> Vec<(VId, VId)> {
+    let values: Vec<Option<CanonicalPropertyValue>> = values
+        .iter()
+        .map(|value| value.clone().map(CanonicalPropertyValue::from))
+        .collect();
     pattern
         .plan()
         .execute_governed_with_properties(
@@ -141,7 +145,8 @@ fn scope_remapping_preserves_optional_and_existence_witnesses_and_aggregation() 
         CanonicalScalar::Int(8),
         CanonicalScalar::Int(1),
         CanonicalScalar::Int(10),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let edges = [
         (VId(0), R, VId(1)),
         (VId(0), R, VId(1)),
@@ -262,7 +267,8 @@ fn expression_execution_shares_limits_and_never_erases_source_or_interrupt_error
         .prepare_values(&columns(), 0, Some(1))
         .unwrap()
         .with_duplicates();
-    let values = [CanonicalScalar::Int(0), CanonicalScalar::Int(2)];
+    let values =
+        [CanonicalScalar::Int(0), CanonicalScalar::Int(2)].map(CanonicalPropertyValue::from);
     let edges = [(VId(0), R, VId(1)); 2];
     let mut total = 0;
     let measured = query

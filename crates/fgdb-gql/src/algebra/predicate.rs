@@ -392,15 +392,18 @@ mod tests {
             assert_eq!(predicate.property_key(), Some(key));
             assert_eq!(predicate.matches(&[], &[]), null);
             assert_eq!(
-                predicate.matches(&[], &[(key, CanonicalScalar::Null)]),
+                predicate.matches(&[], &[(key, CanonicalScalar::Null.into())]),
                 null
             );
             assert_eq!(
-                predicate.matches(&[], &[(key, CanonicalScalar::Bool(false))]),
+                predicate.matches(&[], &[(key, CanonicalScalar::Bool(false).into())]),
                 !null
             );
             assert_eq!(
-                predicate.matches(&[], &[(PropertyKeyId(8), CanonicalScalar::Bool(false))]),
+                predicate.matches(
+                    &[],
+                    &[(PropertyKeyId(8), CanonicalScalar::Bool(false).into())]
+                ),
                 null
             );
         }
@@ -413,9 +416,9 @@ mod tests {
             .unwrap(),
         };
         assert!(!predicate.matches(&[], &[]));
-        assert!(!predicate.matches(&[], &[(key, CanonicalScalar::Null)]));
-        assert!(!predicate.matches(&[], &[(key, CanonicalScalar::Int(1))]));
-        assert!(predicate.matches(&[], &[(key, CanonicalScalar::Bool(false))]));
+        assert!(!predicate.matches(&[], &[(key, CanonicalScalar::Null.into())]));
+        assert!(!predicate.matches(&[], &[(key, CanonicalScalar::Int(1).into())]));
+        assert!(predicate.matches(&[], &[(key, CanonicalScalar::Bool(false).into())]));
     }
 
     #[test]

@@ -11,7 +11,8 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const KNOWS: RelationId = RelationId(1);
@@ -120,7 +121,11 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord], min: i64) -> Vec<Vec<Gra
                     }
                     if !company.props.iter().any(|(key, scalar)| {
                         *key == SCORE
-                            && matches!(scalar, CanonicalScalar::Int(value) if *value >= min)
+                            && matches!(
+                                scalar,
+                                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))
+                                    if *value >= min
+                            )
                     }) {
                         continue;
                     }
@@ -128,7 +133,7 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord], min: i64) -> Vec<Vec<Gra
                         .props
                         .iter()
                         .find(|(key, _)| *key == NAME)
-                        .map(|(_, value)| value.clone())
+                        .map(|(_, value)| value.as_scalar().expect("scalar fixture").clone())
                         .unwrap_or(CanonicalScalar::Null);
                     result.push(vec![
                         GraphValue::Vertex(owner.vid),

@@ -708,6 +708,7 @@ pub(super) fn execute<E, C>(
 mod tests {
     use super::*;
     use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+    use fgdb_types::CanonicalPropertyValue;
     fn query() -> PreparedGraphPattern<GraphValueRow> {
         PreparedGraphText::prepare("MATCH (a)-[:R]->(b) RETURN a,b.p AS p", |kind, _| {
             Some(match kind {
@@ -743,6 +744,11 @@ mod tests {
         values: &[CanonicalScalar],
         policy: GraphMutationPolicy,
     ) -> ResultOf<GraphMutationBatch, (), ()> {
+        let values: Vec<CanonicalPropertyValue> = values
+            .iter()
+            .cloned()
+            .map(CanonicalPropertyValue::from)
+            .collect();
         mutation.execute_governed(
             policy,
             |plan, policy| {
@@ -931,7 +937,7 @@ mod tests {
 
     #[test]
     fn late_rhs_source_failure_never_returns_an_earlier_partial_assignment() {
-        let value = CanonicalScalar::Int(7);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
         let reads = std::cell::Cell::new(0);
         let result: ResultOf<GraphMutationBatch, &str, ()> = mutation().execute_governed(
             policy(),

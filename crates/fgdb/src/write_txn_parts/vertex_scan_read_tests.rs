@@ -178,7 +178,7 @@ fn membership_entry_then_restoration_is_not_erased_by_the_current_head() {
             }
             assert_eq!(
                 database.vertex(vid).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(2))]
+                vec![(P, CanonicalScalar::Int(2).into())]
             );
             assert!(
                 !transaction

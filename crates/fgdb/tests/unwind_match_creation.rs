@@ -121,12 +121,15 @@ fn bulk_connect_script_observes_staged_sources_and_reopens_at_one_frontier() {
             let destination = engine_vertex(destination);
             let stored = db.edge(engine_edge(edge)).unwrap().unwrap();
             assert_eq!((stored.entry.src, stored.entry.dst), (source, destination));
-            assert_eq!(stored.props, vec![(P, CanonicalScalar::Int(key + 10))]);
+            assert_eq!(
+                stored.props,
+                vec![(P, CanonicalScalar::Int(key + 10).into())]
+            );
             assert_eq!(
                 db.vertex(destination).unwrap().unwrap().props,
                 vec![
-                    (P, CanonicalScalar::Int(key + 100)),
-                    (Q, CanonicalScalar::Int((key + 100) * 2)),
+                    (P, CanonicalScalar::Int(key + 100).into()),
+                    (Q, CanonicalScalar::Int((key + 100) * 2).into()),
                 ]
             );
         }

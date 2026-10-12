@@ -4,6 +4,7 @@ use crate::{DatabaseKeys, MemVfs, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GqlScalarParameter, GraphSymbol, GraphSymbolKind,
     GraphWriteProgramError, GraphWriteProgramPolicy, GraphWriteStepReceipt,
@@ -823,7 +824,7 @@ fn authorized_multi_pair_merge_masks_sources_and_preserves_existing_middle_pair(
                     (edge.entry.src, edge.entry.relation, edge.entry.dst),
                     (src, S, dst)
                 );
-                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(7))]);
+                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(7).into())]);
             }
             assert_eq!(db.edge(EId(21)).unwrap().unwrap().props, existing.props);
             assert_eq!(db.vertices().unwrap(), vertices);
@@ -1112,7 +1113,7 @@ fn authorized_merge_return_masks_hidden_fields_and_matches_either_orientation() 
             (created[0].entry.src, created[0].entry.dst),
             (VId(1), VId(2))
         );
-        assert_eq!(created[0].props, vec![(P, CanonicalScalar::Int(3))]);
+        assert_eq!(created[0].props, vec![(P, CanonicalScalar::Int(3).into())]);
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }

@@ -712,6 +712,15 @@ impl CanonicalPropertyValue {
         !matches!(self, Self::Scalar(_))
     }
 
+    /// Whether `bytes` begin with the List or Map tag. A durable reader
+    /// decodes such bytes with [`Self::decode`] and every other value with
+    /// [`CanonicalScalar::decode`], so scalar bytes keep exactly their scalar
+    /// decoding, errors included (fgdb-k3nub).
+    #[must_use]
+    pub fn is_collection_encoding(bytes: &[u8]) -> bool {
+        matches!(bytes.first(), Some(&(TAG_LIST | TAG_MAP)))
+    }
+
     /// The lowest scalar profile that admits every scalar this value holds,
     /// at any depth. Map keys are text and need no more than version 1.
     #[must_use]

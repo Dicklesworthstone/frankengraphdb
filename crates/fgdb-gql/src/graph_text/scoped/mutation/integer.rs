@@ -1874,7 +1874,7 @@ impl<'a> Parser<'a> {
 mod predicate_boundary_tests {
     use super::*;
     use crate::GqlQueryPolicy;
-    use fgdb_types::VId;
+    use fgdb_types::{CanonicalPropertyValue, VId};
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         match (kind, name) {
@@ -1887,12 +1887,24 @@ mod predicate_boundary_tests {
     fn rows(predicate: &str) -> Vec<VId> {
         let p = PropertyKeyId(1);
         let q = PropertyKeyId(2);
-        let values = [
-            vec![(p, CanonicalScalar::Int(0)), (q, CanonicalScalar::Int(1))],
-            vec![(p, CanonicalScalar::Int(1)), (q, CanonicalScalar::Int(0))],
-            vec![(p, CanonicalScalar::Int(2)), (q, CanonicalScalar::Int(2))],
-            vec![(p, CanonicalScalar::Null), (q, CanonicalScalar::Int(1))],
-            vec![(q, CanonicalScalar::Int(1))],
+        let values: [Vec<(PropertyKeyId, CanonicalPropertyValue)>; 5] = [
+            vec![
+                (p, CanonicalScalar::Int(0).into()),
+                (q, CanonicalScalar::Int(1).into()),
+            ],
+            vec![
+                (p, CanonicalScalar::Int(1).into()),
+                (q, CanonicalScalar::Int(0).into()),
+            ],
+            vec![
+                (p, CanonicalScalar::Int(2).into()),
+                (q, CanonicalScalar::Int(2).into()),
+            ],
+            vec![
+                (p, CanonicalScalar::Null.into()),
+                (q, CanonicalScalar::Int(1).into()),
+            ],
+            vec![(q, CanonicalScalar::Int(1).into())],
         ];
         let pattern =
             PreparedGraphText::prepare(&format!("MATCH (n) WHERE {predicate} RETURN n"), symbols)

@@ -85,7 +85,7 @@ fn zero_count_then_insert_allows_different_keys_but_rejects_the_same_key_race() 
                 ));
                 assert_eq!(
                     database.vertex(VId(51)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(43))]
+                    vec![(P, CanonicalScalar::Int(43).into())]
                 );
             }
             assert!(database.vertex(VId(50)).unwrap().is_some());
@@ -308,7 +308,7 @@ fn aggregate_over_staged_values_keeps_dependencies_after_rollback() {
         ));
         assert_eq!(
             database.vertex(VId(2)).unwrap().unwrap().props[0],
-            (P, CanonicalScalar::Int(2))
+            (P, CanonicalScalar::Int(2).into())
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

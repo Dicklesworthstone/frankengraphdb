@@ -32,7 +32,8 @@ use fgdb_delta_types::{
 };
 use fgdb_reference::{ApplyError, ReferenceDatabase, ReferenceGraph, SnapshotError};
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq,
+    ObjectId, VId,
 };
 
 const GRAPH: GraphId = GraphId(1);
@@ -57,7 +58,7 @@ fn vertex(vid: u128) -> DeltaRow {
         vid: VId(vid),
         birth_ordinal: vid as u64,
         labels: vec![LABEL],
-        props: vec![(PROP, CanonicalScalar::Int(vid as i64))],
+        props: vec![(PROP, CanonicalScalar::Int(vid as i64).into())],
         valid_time: None,
     }
 }
@@ -67,7 +68,7 @@ fn timed_vertex(vid: u128, valid: ValidTimePeriod) -> DeltaRow {
         vid: VId(vid),
         birth_ordinal: vid as u64,
         labels: vec![LABEL],
-        props: vec![(PROP, CanonicalScalar::Int(vid as i64))],
+        props: vec![(PROP, CanonicalScalar::Int(vid as i64).into())],
         valid_time: Some(valid),
     }
 }
@@ -89,8 +90,8 @@ fn set_prop(vid: u128, before: Option<i64>, after: Option<i64>) -> DeltaRow {
     DeltaRow::Property {
         elem: ElementId::Vertex(VId(vid)),
         property: PROP,
-        before: before.map(CanonicalScalar::Int),
-        after: after.map(CanonicalScalar::Int),
+        before: before.map(|value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))),
+        after: after.map(|value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))),
     }
 }
 
@@ -138,7 +139,7 @@ fn vids(graph: &ReferenceGraph) -> Vec<u128> {
 
 fn prop_of(graph: &ReferenceGraph, vid: u128) -> Option<i64> {
     match graph.vertex(VId(vid))?.props.get(&PROP)? {
-        CanonicalScalar::Int(value) => Some(*value),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => Some(*value),
         _ => None,
     }
 }

@@ -108,7 +108,7 @@ fn write_only_vertex_batch_commits_once_and_reopens() {
         assert_eq!(txn.outstanding_obligations(), baseline);
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7))]
+            vec![(P, CanonicalScalar::Int(7).into())]
         );
         assert_eq!(db.vertex(VId(2)).unwrap().unwrap().labels, vec![L]);
         drop(db);
@@ -116,7 +116,7 @@ fn write_only_vertex_batch_commits_once_and_reopens() {
         assert_eq!(reopened.frontier().unwrap(), seq);
         assert_eq!(
             reopened.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7))]
+            vec![(P, CanonicalScalar::Int(7).into())]
         );
         assert!(reopened.vertex(VId(2)).unwrap().is_some());
     });
@@ -151,7 +151,7 @@ fn forbidden_noop_tail_discards_the_entire_allowed_prefix() {
         // The allowed prefix (P = 5) was discarded with the forbidden tail.
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(SECRET, CanonicalScalar::Int(99))]
+            vec![(SECRET, CanonicalScalar::Int(99).into())]
         );
         // No failed workspace prevents a later write.
         let mut retry = WriteBatch::new(R);
@@ -193,8 +193,8 @@ fn permitted_updates_preserve_hidden_fields_and_hide_missing_targets() {
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
             vec![
-                (P, CanonicalScalar::Int(7)),
-                (SECRET, CanonicalScalar::Int(99))
+                (P, CanonicalScalar::Int(7).into()),
+                (SECRET, CanonicalScalar::Int(99).into())
             ]
         );
         let frontier = db.frontier().unwrap();

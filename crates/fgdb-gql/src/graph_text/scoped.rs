@@ -1412,7 +1412,7 @@ pub(super) fn pattern_predicate_follows(
 mod capture_tests {
     use super::*;
     use crate::GqlQueryPolicy;
-    use fgdb_types::{CanonicalScalar, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         match (kind, name) {
@@ -1427,6 +1427,10 @@ mod capture_tests {
         arguments: &GqlParameters,
         values: &BTreeMap<VId, CanonicalScalar>,
     ) -> Vec<Vec<Option<VId>>> {
+        let values: BTreeMap<VId, CanonicalPropertyValue> = values
+            .iter()
+            .map(|(vid, value)| (*vid, value.clone().into()))
+            .collect();
         let pattern = PreparedGraphText::prepare(text, symbols)
             .unwrap()
             .bind_parameters(arguments)

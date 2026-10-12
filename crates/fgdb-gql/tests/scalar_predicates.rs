@@ -6,7 +6,7 @@ use fgdb_gql::algebra::{
     ScalarPredicate, VertexPredicate,
 };
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 
 fn wide() -> GqlQueryPolicy {
@@ -40,11 +40,12 @@ fn scalar_predicate_work_is_reserved_before_source_reads_and_memoized() {
             |_, predicates| {
                 first_read.set(calls.get());
                 reads.set(reads.get() + 1);
-                Ok::<_, usize>(
-                    predicates
-                        .iter()
-                        .all(|predicate| predicate.matches(&[], &[(key, payload.clone())])),
-                )
+                Ok::<_, usize>(predicates.iter().all(|predicate| {
+                    predicate.matches(
+                        &[],
+                        &[(key, CanonicalPropertyValue::Scalar(payload.clone()))],
+                    )
+                }))
             },
             |_| {
                 calls.set(calls.get() + 1);
@@ -108,9 +109,12 @@ fn scalar_predicates_share_exact_limits_and_never_convert_source_errors_to_null(
             |vid, predicates| {
                 Ok::<_, &str>(
                     vid == VId(1)
-                        && predicates
-                            .iter()
-                            .all(|predicate| predicate.matches(&[], &[(key, value.clone())])),
+                        && predicates.iter().all(|predicate| {
+                            predicate.matches(
+                                &[],
+                                &[(key, CanonicalPropertyValue::Scalar(value.clone()))],
+                            )
+                        }),
                 )
             },
             |_, _| Ok(None),
@@ -194,6 +198,8 @@ fn optional_scalar_filters_preserve_null_extension_and_outer_label_scope() {
         (VId(1), RelationId(1), VId(10)),
         (VId(2), RelationId(1), VId(20)),
     ];
+    let accepted = CanonicalPropertyValue::from(accepted);
+    let rejected = CanonicalPropertyValue::from(rejected);
     let result = query
         .plan()
         .execute_governed_with_properties(

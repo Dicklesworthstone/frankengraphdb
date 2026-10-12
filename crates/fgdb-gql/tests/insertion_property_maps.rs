@@ -12,7 +12,7 @@ use fgdb_gql::{
     GraphSetQuantifier, GraphSetValue, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
     PreparedGraphInsertQuery, PreparedGraphInsertQueryText, ReverseSymbolCatalog,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -175,6 +175,16 @@ fn imported_rows_and_matched_maps_use_the_original_source_and_offsets() {
         (VId(2), map(vec![("p", int(20))])),
     ]);
     let edge_map = map(vec![("p", int(5))]);
+    // The scalar property source stores exactly the values the maps hold.
+    let stored: BTreeMap<VId, CanonicalPropertyValue> = vertices
+        .iter()
+        .map(|(vid, value)| {
+            let scalar = value.as_map().unwrap().1[0].as_scalar().unwrap();
+            (*vid, CanonicalPropertyValue::from(scalar.clone()))
+        })
+        .collect();
+    let edge_stored =
+        CanonicalPropertyValue::from(edge_map.as_map().unwrap().1[0].as_scalar().unwrap().clone());
     let query = prepare(
         "UNWIND [2,3] AS bump MATCH (n)-[old:R]->(m) \
         CREATE (c {p:n.p+bump})-[fresh:R {p:old.p}]->(n) RETURN properties(n) AS original,\
@@ -182,40 +192,30 @@ fn imported_rows_and_matched_maps_use_the_original_source_and_offsets() {
         Catalog(Some("p")),
     );
     let calls = Cell::new(0);
-    let batch =
-        query
-            .execute_governed(
-                policy(),
-                |pattern, budget| {
-                    calls.set(calls.get() + 1);
-                    pattern.plan().execute_governed_with_element_maps(
-                        3,
-                        vertices.keys().copied(),
-                        [(EId(11), VId(1), R, VId(2))],
-                        |_, _| Ok::<_, ()>(true),
-                        |vid, key| {
-                            Ok((key == P).then(|| {
-                                vertices.get(&vid).unwrap().as_map().unwrap().1[0]
-                                    .as_scalar()
-                                    .unwrap()
-                            }))
-                        },
-                        |_, key| {
-                            Ok((key == P)
-                                .then(|| edge_map.as_map().unwrap().1[0].as_scalar().unwrap()))
-                        },
-                        |_| Ok(None),
-                        |_| Ok(None),
-                        |vid| Ok(vertices.get(&vid)),
-                        |_| Ok(Some(&edge_map)),
-                        budget,
-                        || Ok::<_, ()>(()),
-                    )
-                },
-                identity,
-                || Ok(()),
-            )
-            .unwrap();
+    let batch = query
+        .execute_governed(
+            policy(),
+            |pattern, budget| {
+                calls.set(calls.get() + 1);
+                pattern.plan().execute_governed_with_element_maps(
+                    3,
+                    vertices.keys().copied(),
+                    [(EId(11), VId(1), R, VId(2))],
+                    |_, _| Ok::<_, ()>(true),
+                    |vid, key| Ok((key == P).then(|| stored.get(&vid).unwrap())),
+                    |_, key| Ok((key == P).then_some(&edge_stored)),
+                    |_| Ok(None),
+                    |_| Ok(None),
+                    |vid| Ok(vertices.get(&vid)),
+                    |_| Ok(Some(&edge_map)),
+                    budget,
+                    || Ok::<_, ()>(()),
+                )
+            },
+            identity,
+            || Ok(()),
+        )
+        .unwrap();
     assert_eq!(calls.get(), 1);
     assert_eq!(
         rows(&batch),

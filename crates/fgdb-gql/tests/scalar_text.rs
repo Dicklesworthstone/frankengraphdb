@@ -9,7 +9,7 @@ use fgdb_gql::{
     PreparedGraphAggregateText, PreparedGraphSetText, PreparedGraphText, PreparedGraphWriteScript,
     PreparedTemporalGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -32,6 +32,10 @@ fn ids(statement: &str, values: &[Option<CanonicalScalar>]) -> Vec<VId> {
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap();
+    let stored: Vec<Option<CanonicalPropertyValue>> = values
+        .iter()
+        .map(|value| value.clone().map(CanonicalPropertyValue::from))
+        .collect();
     query
         .plan()
         .execute_governed_with_properties(
@@ -39,10 +43,10 @@ fn ids(statement: &str, values: &[Option<CanonicalScalar>]) -> Vec<VId> {
             (0..values.len()).map(|i| VId(i as u128)),
             [],
             |vid, predicates| {
-                let property = values[vid.0 as usize].as_ref().map(|value| (P, value));
+                let property = stored[vid.0 as usize].as_ref().map(|value| (P, value));
                 Ok::<_, ()>(predicates.iter().all(|p| p.matches_borrowed([], property)))
             },
-            |vid, _| Ok(values[vid.0 as usize].as_ref()),
+            |vid, _| Ok(stored[vid.0 as usize].as_ref()),
             wide(),
             || Ok::<_, ()>(()),
         )
@@ -455,7 +459,10 @@ fn optional_and_existential_children_share_scalar_lowering_and_aggregate_null_ru
     .unwrap()
     .bind_parameters(&GqlParameters::new())
     .unwrap();
-    let values = [Some(CanonicalScalar::Bool(true)), None];
+    let values = [
+        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(true))),
+        None,
+    ];
     let rows = aggregate
         .execute_governed(
             3,
