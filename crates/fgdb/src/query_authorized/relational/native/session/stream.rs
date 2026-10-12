@@ -296,7 +296,7 @@ impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> ScopedSource
         }
         self.execution
             .borrow_mut()
-            .node()
+            .vertex_node(vid)
             .map_err(VertexScanSourceError::Source)?;
         Ok(Some(row))
     }
@@ -376,6 +376,11 @@ impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> VertexScanSo
                 return Ok(None);
             };
             if self.visible(vid)? {
+                // An admitted root costs its node before any row can use it.
+                self.execution
+                    .borrow_mut()
+                    .root_node(vid)
+                    .map_err(VertexScanSourceError::Source)?;
                 return Ok(Some(vid));
             }
         }
