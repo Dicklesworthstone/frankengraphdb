@@ -117,6 +117,11 @@ pub type EdgeAggregateError<E, C> = GqlQueryError<GraphAggregateError<EdgeScanEr
 type Groups = BTreeMap<Vec<GraphValue>, Vec<NumericState>>;
 type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Vec<NumericState>>;
 
+struct Accumulation {
+    groups: Groups,
+    largest_key: usize,
+}
+
 /// Global empty input yields one zero/null row; grouped empty input yields none.
 /// Every match/probe/source examination and group-state operation shares the
 /// original cumulative policy. ResultRows bounds complete groups, not matched
@@ -139,6 +144,7 @@ pub struct EdgeAggregateCursor<S, F> {
     state: EdgeScanState,
     pending: Option<PendingGroups>,
     completed: Option<std::vec::IntoIter<GraphAggregateRow>>,
+    accumulating: Option<Accumulation>,
 }
 impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
     pub fn new(source: S, plan: EdgeAggregatePlan, policy: GqlQueryPolicy, checkpoint: F) -> Self {
@@ -148,6 +154,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
             state: EdgeScanState::Open,
             pending: None,
             completed: None,
+            accumulating: None,
         }
     }
     #[must_use]
@@ -181,34 +188,56 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
         self.input.close();
         self.pending = None;
         self.completed = None;
+        self.accumulating = None;
     }
 
-    fn accumulate<C>(&mut self) -> Result<Groups, EdgeAggregateError<S::Error, C>>
+    fn accumulate<C>(
+        &mut self,
+        remaining: &mut usize,
+    ) -> Result<Option<Groups>, EdgeAggregateError<S::Error, C>>
     where
         F: FnMut() -> Result<(), C>,
     {
-        self.input
-            .meter
-            .event(GlaExecutionEvent::Work)
-            .map_err(lift)?;
-        let mut groups = Groups::new();
         let global = self.aggregate.group_key_columns().is_empty();
-        if global {
-            // Preserve global zero-budget refusal before driving any source.
-            if !self.aggregate.has_streamed_output_stage() {
-                self.input
-                    .meter
-                    .increment(GqlBudgetDimension::ResultRows, 0)
-                    .map_err(lift)?;
-            }
+        if self.accumulating.is_none() {
             self.input
                 .meter
-                .event(GlaExecutionEvent::ScratchEntry)
+                .event(GlaExecutionEvent::Work)
                 .map_err(lift)?;
-            groups.insert(Vec::new(), states(&self.aggregate, &mut self.input.meter)?);
+            let mut groups = Groups::new();
+            if global {
+                // Preserve global zero-budget refusal before driving any
+                // source, once across every cooperative suspension.
+                if !self.aggregate.has_streamed_output_stage() {
+                    self.input
+                        .meter
+                        .increment(GqlBudgetDimension::ResultRows, 0)
+                        .map_err(lift)?;
+                }
+                self.input
+                    .meter
+                    .event(GlaExecutionEvent::ScratchEntry)
+                    .map_err(lift)?;
+                groups.insert(Vec::new(), states(&self.aggregate, &mut self.input.meter)?);
+            }
+            self.accumulating = Some(Accumulation {
+                groups,
+                largest_key: 0,
+            });
         }
-        let mut largest_key = 0_usize;
-        while let Some(row) = self.input.advance().map_err(lift)? {
+        let Accumulation {
+            groups,
+            largest_key,
+        } = self
+            .accumulating
+            .as_mut()
+            .expect("initialized accumulation");
+        loop {
+            let row = match self.input.advance_bounded(remaining).map_err(lift)? {
+                core::task::Poll::Ready(Some(row)) => row,
+                core::task::Poll::Ready(None) => break,
+                core::task::Poll::Pending => return Ok(None),
+            };
             let meter = &mut self.input.meter;
             // The graph compiler still owns source matching/projection. This
             // single-row transformation completes before any group is changed;
@@ -234,7 +263,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
                         value.copy_with_control(&mut |event| meter.event(event).map_err(lift))?,
                     );
                 }
-                largest_key = largest_key.max(units);
+                *largest_key = (*largest_key).max(units);
                 // Logical B-tree lookup/insertion reservation, including every
                 // variable-sized key. No exact allocator/comparison-count claim.
                 let levels = groups.len().saturating_add(1).ilog2() as usize + 1;
@@ -280,7 +309,60 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
             .meter
             .event(GlaExecutionEvent::Work)
             .map_err(lift)?;
-        Ok(groups)
+        Ok(Some(
+            self.accumulating
+                .take()
+                .expect("completed accumulation")
+                .groups,
+        ))
+    }
+
+    /// Drive at most 64 root/incidence examinations or join transitions before
+    /// yielding Pending. No partial aggregate or private matched row escapes.
+    /// Empty matches and hidden candidates still yield; indexed positions and
+    /// native group/DISTINCT/COLLECT state are retained, without a source bag.
+    /// Single source callbacks, probes and final group selection are synchronous
+    /// governed sections; the quantum is not a wall-clock duration guarantee.
+    pub fn poll_next<C>(
+        &mut self,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Option<Result<GraphAggregateRow, EdgeAggregateError<S::Error, C>>>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != EdgeScanState::Open {
+            return core::task::Poll::Ready(None);
+        }
+        if self.pending.is_none() && self.completed.is_none() {
+            let mut remaining = 64;
+            match self.accumulate(&mut remaining) {
+                Ok(None) => {
+                    context.waker().wake_by_ref();
+                    return core::task::Poll::Pending;
+                }
+                Ok(Some(groups)) => {
+                    self.input.close();
+                    if self.aggregate.has_streamed_output_stage() {
+                        match self.select_output(groups) {
+                            Ok(rows) => self.completed = Some(rows.into_iter()),
+                            Err(error) => {
+                                self.state = EdgeScanState::Failed;
+                                self.close();
+                                return core::task::Poll::Ready(Some(Err(error)));
+                            }
+                        }
+                    } else {
+                        self.pending = Some(groups.into_iter());
+                    }
+                }
+                Err(error) => {
+                    self.state = EdgeScanState::Failed;
+                    self.close();
+                    return core::task::Poll::Ready(Some(Err(error)));
+                }
+            }
+        }
+        core::task::Poll::Ready(self.next())
     }
 
     fn finalize<C>(
@@ -435,7 +517,14 @@ impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> Iterator for EdgeAggrega
             return None;
         }
         if self.pending.is_none() && self.completed.is_none() {
-            let result = self.accumulate();
+            let result = loop {
+                let mut remaining = usize::MAX;
+                match self.accumulate(&mut remaining) {
+                    Ok(Some(groups)) => break Ok(groups),
+                    Ok(None) => {}
+                    Err(error) => break Err(error),
+                }
+            };
             // All retained keys/witnesses/extrema are owned; source release is
             // independent of whether any output has yet been requested.
             self.input.close();
@@ -452,6 +541,7 @@ impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> Iterator for EdgeAggrega
                 Ok(groups) => self.pending = Some(groups.into_iter()),
                 Err(error) => {
                     self.state = EdgeScanState::Failed;
+                    self.accumulating = None;
                     return Some(Err(error));
                 }
             }

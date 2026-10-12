@@ -391,6 +391,21 @@ pub trait VertexScanSource {
         &mut self,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VId>, VertexScanSourceError<Self::Error, C>>;
+
+    /// A cooperative consumer asks for one source examination at a time.
+    /// Sources which internally filter a directory override this to return a
+    /// skipped identity instead of synchronously consuming its unread suffix.
+    /// Skips spend no candidate/result allowance. The ordinary source contract
+    /// remains the default for sources that already return one history per call.
+    fn next_vertex_step<C>(
+        &mut self,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<crate::scan_stream::SourceStep<VId>, VertexScanSourceError<Self::Error, C>> {
+        self.next_vertex(control).map(|next| match next {
+            Some(vid) => crate::scan_stream::SourceStep::Item(vid),
+            None => crate::scan_stream::SourceStep::Exhausted,
+        })
+    }
     fn vertex<'a, C>(
         &'a self,
         vid: VId,

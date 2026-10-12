@@ -134,6 +134,12 @@ pub type VertexAggregateError<E, C> = GqlQueryError<GraphAggregateError<VertexSc
 type Groups = BTreeMap<Vec<GraphValue>, Vec<NumericState>>;
 type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Vec<NumericState>>;
 
+struct Accumulation {
+    groups: Groups,
+    last: Option<VId>,
+    largest_computed_key: usize,
+}
+
 /// The first demand consumes the source; subsequent demands move completed
 /// groups out in canonical result order. Plain reductions move group state;
 /// result clauses finish and validate all groups before exposing a selected page.
@@ -158,6 +164,7 @@ pub struct VertexAggregateCursor<S, F> {
     state: VertexScanState,
     pending: Option<PendingGroups>,
     completed: Option<std::vec::IntoIter<GraphAggregateRow>>,
+    accumulating: Option<Accumulation>,
 }
 impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
     pub fn new(
@@ -182,6 +189,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             state: VertexScanState::Open,
             pending: None,
             completed: None,
+            accumulating: None,
         }
     }
     #[must_use]
@@ -215,25 +223,44 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         self.source = None;
         self.pending = None;
         self.completed = None;
+        self.accumulating = None;
     }
 
-    fn accumulate<C>(&mut self) -> Result<Groups, VertexAggregateError<S::Error, C>>
+    fn accumulate<C>(
+        &mut self,
+        remaining: &mut usize,
+    ) -> Result<Option<Groups>, VertexAggregateError<S::Error, C>>
     where
         F: FnMut() -> Result<(), C>,
     {
         let meter = &mut self.meter;
-        meter.event(VertexScanEvent::Work).map_err(lift)?;
         let global = self.plan.aggregate.group_key_columns().is_empty();
-        let mut groups = Groups::new();
-        if global {
-            // Preserve constant-state global aggregation and its early output
-            // admission, including a zero output budget on empty input.
-            if !self.plan.aggregate.has_streamed_output_stage() {
-                let _ = meter.next_result_count().map_err(lift)?;
+        if self.accumulating.is_none() {
+            meter.event(VertexScanEvent::Work).map_err(lift)?;
+            let mut groups = Groups::new();
+            if global {
+                // Admission happens once, including a zero result allowance
+                // on empty input. Suspending never resets group or meter state.
+                if !self.plan.aggregate.has_streamed_output_stage() {
+                    let _ = meter.next_result_count().map_err(lift)?;
+                }
+                meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
+                groups.insert(Vec::new(), states(&self.plan.aggregate, meter)?);
             }
-            meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
-            groups.insert(Vec::new(), states(&self.plan.aggregate, meter)?);
+            self.accumulating = Some(Accumulation {
+                groups,
+                last: None,
+                largest_computed_key: 0,
+            });
         }
+        let Accumulation {
+            groups,
+            last,
+            largest_computed_key,
+        } = self
+            .accumulating
+            .as_mut()
+            .expect("initialized accumulation");
         let GlaOperator::ProjectValues { columns } = self.plan.input.projection.as_ref() else {
             unreachable!("the immutable physical plan admitted value projections");
         };
@@ -241,14 +268,18 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             .source
             .as_mut()
             .expect("uninitialized cursor owns a source");
-        let mut last = None;
-        let mut largest_computed_key = 0_usize;
         if !self.plan.input.empty {
             loop {
-                let next =
-                    flatten(source.next_vertex(&mut |event| meter.event(event))).map_err(lift)?;
-                let Some(vid) = next else {
-                    break;
+                if *remaining == 0 {
+                    return Ok(None);
+                }
+                *remaining -= 1;
+                let next = flatten(source.next_vertex_step(&mut |event| meter.event(event)))
+                    .map_err(lift)?;
+                let vid = match next {
+                    crate::scan_stream::SourceStep::Item(vid) => vid,
+                    crate::scan_stream::SourceStep::Skipped(_) => continue,
+                    crate::scan_stream::SourceStep::Exhausted => break,
                 };
                 meter.event(VertexScanEvent::Work).map_err(lift)?;
                 if last.is_some_and(|previous| vid <= previous) {
@@ -256,7 +287,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                         VertexScanError::NonIncreasingIdentity,
                     )));
                 }
-                last = Some(vid);
+                *last = Some(vid);
                 meter.record().map_err(lift)?;
                 let record = flatten(source.vertex_record(vid, &mut |event| meter.event(event)))
                     .map_err(lift)?;
@@ -352,7 +383,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                                 .saturating_add(value.payload_units())
                                 .saturating_add(1)
                         });
-                        largest_computed_key = largest_computed_key.max(units);
+                        *largest_computed_key = (*largest_computed_key).max(units);
                         let levels = groups.len().saturating_add(1).ilog2() as usize + 1;
                         for _ in 0..levels
                             .saturating_mul(24)
@@ -410,7 +441,61 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         }
         // Empty grouped results have no emit() call to provide this checkpoint.
         meter.event(VertexScanEvent::Work).map_err(lift)?;
-        Ok(groups)
+        Ok(Some(
+            self.accumulating
+                .take()
+                .expect("completed accumulation")
+                .groups,
+        ))
+    }
+
+    /// Cooperatively complete at most 64 source examinations per poll before
+    /// moving one finished group. Hidden and predicate-rejected candidates
+    /// also yield; no private group or input row is emitted during accumulation.
+    /// The synchronous iterator uses this same resumable accumulator. Groups,
+    /// DISTINCT support, collections and all meters survive Pending unchanged.
+    /// Individual source callbacks, probes and completed-group selection remain
+    /// synchronous governed operations, not a wall-clock duration guarantee.
+    pub fn poll_next<C>(
+        &mut self,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Option<Result<GraphAggregateRow, VertexAggregateError<S::Error, C>>>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        if self.state != VertexScanState::Open {
+            return core::task::Poll::Ready(None);
+        }
+        if self.pending.is_none() && self.completed.is_none() {
+            let mut remaining = 64;
+            match self.accumulate(&mut remaining) {
+                Ok(None) => {
+                    context.waker().wake_by_ref();
+                    return core::task::Poll::Pending;
+                }
+                Ok(Some(groups)) => {
+                    self.source = None;
+                    if self.plan.aggregate.has_streamed_output_stage() {
+                        match self.select_output(groups) {
+                            Ok(rows) => self.completed = Some(rows.into_iter()),
+                            Err(error) => {
+                                self.state = VertexScanState::Failed;
+                                self.close();
+                                return core::task::Poll::Ready(Some(Err(error)));
+                            }
+                        }
+                    } else {
+                        self.pending = Some(groups.into_iter());
+                    }
+                }
+                Err(error) => {
+                    self.state = VertexScanState::Failed;
+                    self.close();
+                    return core::task::Poll::Ready(Some(Err(error)));
+                }
+            }
+        }
+        core::task::Poll::Ready(self.next())
     }
 
     fn finalize<C>(
@@ -963,7 +1048,14 @@ where
             return None;
         }
         if self.pending.is_none() && self.completed.is_none() {
-            let result = self.accumulate();
+            let result = loop {
+                let mut remaining = usize::MAX;
+                match self.accumulate(&mut remaining) {
+                    Ok(Some(groups)) => break Ok(groups),
+                    Ok(None) => {}
+                    Err(error) => break Err(error),
+                }
+            };
             // Every retained key is owned. Release the snapshot before delivery.
             self.source = None;
             match result {
@@ -979,6 +1071,7 @@ where
                 Ok(groups) => self.pending = Some(groups.into_iter()),
                 Err(error) => {
                     self.state = VertexScanState::Failed;
+                    self.accumulating = None;
                     return Some(Err(error));
                 }
             }

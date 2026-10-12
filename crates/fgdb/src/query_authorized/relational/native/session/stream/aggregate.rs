@@ -13,6 +13,10 @@ use fgdb_gql::{
 #[path = "aggregate/edge.rs"]
 pub(super) mod edge;
 
+#[path = "aggregate/asynchronous.rs"]
+mod asynchronous;
+pub use asynchronous::AuthorizedAsyncAggregateCursor;
+
 struct Layout {
     slots: Vec<GraphAggregateTextSlot>,
     keys: Vec<String>,

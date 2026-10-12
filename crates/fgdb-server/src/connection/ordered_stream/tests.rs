@@ -169,7 +169,7 @@ fn ping_credit_and_cancel_preserve_one_pending_order_future() {
             let polls = Arc::new(AtomicUsize::new(0));
             let drops = Arc::new(AtomicUsize::new(0));
             let waiter = server.shutdown.waiter();
-            let mut progress = Box::pin(lane.ordered_progress(
+            let mut progress = Box::pin(lane.read_progress(
                 &root,
                 &waiter,
                 &mut window,
@@ -253,7 +253,7 @@ fn pending_admission_releases_on_disconnect_drain_shutdown_and_recovery_before_s
             // This is the admission phase: no column chunk has announced the
             // stream and no completed source/cursor exists. The exact future
             // owner still has to be dropped when control interrupts setup.
-            let mut admission = Box::pin(lane.ordered_progress(
+            let mut admission = Box::pin(lane.read_progress(
                 &root,
                 &waiter,
                 &mut window,
@@ -297,6 +297,93 @@ fn pending_admission_releases_on_disconnect_drain_shutdown_and_recovery_before_s
             assert_eq!(drops.load(Ordering::SeqCst), 1);
             server.join_database_workers(&root).await;
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_aggregate_announces_and_services_controls_during_input_without_scratch() {
+    let ((), report) = run_async_under_lab(0x79a0_0610, |root| async move {
+        let (server, token, _) = served(&root, "native-aggregate-controls").await;
+        let db = &server.databases["test"];
+        assert!(db.ordered_reads.is_none());
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut batch = crate::recovery::tests::vertex(1);
+        for id in 2..=4096 {
+            batch.create_vertex(fgdb_types::VId(id), vec![], vec![]);
+        }
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), batch)
+            .await
+            .unwrap();
+
+        for stop in ["cancel", "recovery"] {
+            let (mut lane, wire, stream) = lane(&root, db, &token);
+            let binding = lane.conn.binding();
+            let waiter = server.shutdown.waiter();
+            let mut execution = Box::pin(lane.source_read(
+                &root,
+                &waiter,
+                db,
+                &token,
+                1,
+                stream,
+                binding,
+                SourceStatement::Text("MATCH (n) RETURN count(*) AS n"),
+                &[],
+            ));
+            assert!(poll_once(execution.as_mut()).is_pending());
+            let announced = wire.lock().unwrap().outgoing.clone();
+            let mut decoder = fgdb_protocol::Decoder::new(FrameLimits::new(4096).unwrap());
+            let first = decoder.decode(&announced, |_| Ok(())).unwrap();
+            assert_eq!(first.consumed, announced.len());
+            let frame = first.frame.expect("schema precedes source accumulation");
+            assert_eq!(frame.header().kind, FrameKind::SnapshotResultChunk);
+            assert_eq!(frame.header().stream_id, stream);
+            let chunk = ResultChunk::decode(frame.payload()).unwrap();
+            assert_eq!(chunk.columns, Some(vec!["n".into()]));
+            assert!(chunk.rows.is_empty(), "no partial aggregate may escape");
+
+            inject(
+                &wire,
+                FrameKind::Ping,
+                StreamId::CONTROL,
+                binding,
+                &Ping { nonce: 611 },
+            );
+            assert!(poll_once(execution.as_mut()).is_pending());
+            let outgoing = wire.lock().unwrap().outgoing.clone();
+            let pong = decoder
+                .decode(&outgoing[announced.len()..], |_| Ok(()))
+                .unwrap();
+            assert_eq!(pong.consumed, outgoing.len() - announced.len());
+            let pong = pong.frame.expect("PING is serviced while count is pending");
+            assert_eq!(pong.header().kind, FrameKind::Pong);
+            assert_eq!(Ping::decode(pong.payload()).unwrap().nonce, 611);
+
+            match stop {
+                "cancel" => inject(&wire, FrameKind::QueryCancel, stream, binding, &Empty),
+                "recovery" => {
+                    crate::recovery::tests::fail_after_marker(&root, db, 4097).await;
+                    assert!(matches!(
+                        crate::recovery::tests::settled(db).await,
+                        crate::DatabaseStatus::Ready { .. }
+                    ));
+                }
+                _ => unreachable!(),
+            }
+            let result = execution.await;
+            match stop {
+                "cancel" => assert!(matches!(result, Err(Stop::Cancelled))),
+                "recovery" => assert!(matches!(result, Err(Stop::Recovery(_)))),
+                _ => unreachable!(),
+            }
+            assert_eq!(wire.lock().unwrap().outgoing, outgoing);
+        }
+        server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

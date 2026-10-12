@@ -289,6 +289,22 @@ pub trait EdgeScanSource {
     ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
         self.next_edge(control)
     }
+
+    /// One root directory examination for a cooperative consumer. Scoped
+    /// sources may return Skipped without charging a hidden candidate. The
+    /// default preserves sources which already return one history per call.
+    fn next_edge_step_for_relation<C>(
+        &mut self,
+        relation: crate::algebra::EdgeRelation,
+        _continuing: bool,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<crate::scan_stream::SourceStep<EId>, EdgeScanSourceError<Self::Error, C>> {
+        self.next_edge_for_relation(relation, control)
+            .map(|next| match next {
+                Some(eid) => crate::scan_stream::SourceStep::Item(eid),
+                None => crate::scan_stream::SourceStep::Exhausted,
+            })
+    }
     fn edge<'a, C>(
         &'a self,
         eid: EId,
@@ -405,6 +421,25 @@ pub trait EdgeScanSource {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
         self.next_incident_edge(endpoint, direction, after, control)
+    }
+
+    /// One indexed successor examination. A skipped identity advances only
+    /// this traversal's position and spends no candidate allowance; it cannot
+    /// enter a binding, projection, predicate or aggregate.
+    fn next_incident_edge_step_for_relation<C>(
+        &self,
+        endpoint: VId,
+        relation: crate::algebra::EdgeRelation,
+        direction: GlaDirection,
+        after: Option<EId>,
+        _continuing: bool,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<crate::scan_stream::SourceStep<EId>, EdgeExpansionSourceError<Self::Error, C>> {
+        self.next_incident_edge_for_relation(endpoint, relation, direction, after, control)
+            .map(|next| match next {
+                Some(eid) => crate::scan_stream::SourceStep::Item(eid),
+                None => crate::scan_stream::SourceStep::Exhausted,
+            })
     }
 }
 
@@ -535,6 +570,8 @@ pub struct EdgeScanCursor<S, F> {
     skip: u64,
     state: EdgeScanState,
     traversal: Option<join::Traversal>,
+    advancing: bool,
+    source_pending: bool,
 }
 impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
     /// No candidate scan or checkpoint occurs during construction.
@@ -557,6 +594,8 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             reverse_pending: None,
             state: EdgeScanState::Open,
             traversal: None,
+            advancing: false,
+            source_pending: false,
         }
     }
     #[must_use]
@@ -582,34 +621,83 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
         self.source = None;
         self.reverse_pending = None;
         self.traversal = None;
+        self.advancing = false;
+        self.source_pending = false;
     }
     fn advance<C>(&mut self) -> ScanResult<Option<GraphValueRow>, S::Error, C>
     where
         F: FnMut() -> Result<(), C>,
     {
+        loop {
+            let mut remaining = usize::MAX;
+            if let core::task::Poll::Ready(row) = self.advance_bounded(&mut remaining)? {
+                return Ok(row);
+            }
+        }
+    }
+
+    fn advance_bounded<C>(
+        &mut self,
+        remaining: &mut usize,
+    ) -> ScanResult<core::task::Poll<Option<GraphValueRow>>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        let result = self.advance_batch(remaining);
+        if !matches!(result, Ok(core::task::Poll::Pending)) {
+            self.advancing = false;
+        }
+        result
+    }
+
+    fn advance_batch<C>(
+        &mut self,
+        remaining: &mut usize,
+    ) -> ScanResult<core::task::Poll<Option<GraphValueRow>>, S::Error, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         if self.plan.joined.is_some() {
-            return join::advance(self);
+            return join::advance(self, remaining);
         }
         let meter = &mut self.meter;
-        meter.event(GlaExecutionEvent::Work)?;
+        if !self.advancing {
+            meter.event(GlaExecutionEvent::Work)?;
+            self.advancing = true;
+        }
         if self.plan.count == Some(0) {
-            return Ok(None);
+            return Ok(core::task::Poll::Ready(None));
         }
         let source = self
             .source
             .as_mut()
             .expect("open edge cursor owns its source");
         loop {
+            if *remaining == 0 {
+                return Ok(core::task::Poll::Pending);
+            }
+            *remaining -= 1;
             let (eid, second) = if let Some(eid) = self.reverse_pending.take() {
                 (eid, true)
             } else {
-                let Some(eid) = flatten(
-                    source.next_edge_for_relation(self.plan.relation, &mut |event| {
-                        meter.event(event)
-                    }),
-                )?
-                else {
-                    return Ok(None);
+                let next = flatten(source.next_edge_step_for_relation(
+                    self.plan.relation,
+                    self.source_pending,
+                    &mut |event| meter.event(event),
+                ))?;
+                let eid = match next {
+                    crate::scan_stream::SourceStep::Item(eid) => {
+                        self.source_pending = false;
+                        eid
+                    }
+                    crate::scan_stream::SourceStep::Skipped(_) => {
+                        self.source_pending = true;
+                        continue;
+                    }
+                    crate::scan_stream::SourceStep::Exhausted => {
+                        self.source_pending = false;
+                        return Ok(core::task::Poll::Ready(None));
+                    }
                 };
                 meter.event(GlaExecutionEvent::Work)?;
                 if self.last.is_some_and(|last| eid <= last) {
@@ -677,7 +765,7 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
                 .project(&image, &paths, &mut |event| meter.event(event))?;
             meter.event(GlaExecutionEvent::ResultRow)?;
             meter.rows.result_rows = next;
-            return Ok(Some(row));
+            return Ok(core::task::Poll::Ready(Some(row)));
         }
     }
 }

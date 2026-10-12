@@ -4,6 +4,7 @@
 #[cfg(test)]
 mod map_overlay_tests;
 mod membership;
+mod subscript;
 mod temporal;
 
 pub(crate) use membership::{
@@ -42,6 +43,9 @@ pub enum GraphSetValue {
     TypedNull(GraphSetColumnType),
     Integer(GraphIntegerExpression),
     List(Vec<GraphSetValue>),
+    /// A signed integer selects a list member; a text key selects a map entry.
+    /// NULL operands, missing keys and out-of-range indexes yield NULL. This
+    /// is value access only: graph identities never become property maps.
     Index {
         list: Box<GraphSetValue>,
         index: Box<GraphSetValue>,
@@ -1504,14 +1508,16 @@ fn evaluate_value_at<E>(
                 let GraphValue::Scalar(CanonicalScalar::Text(key)) = &index else {
                     return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
                 };
-                let key = key.as_str().as_bytes();
-                match keys.binary_search_by(|probe| probe.as_bytes().cmp(key)) {
-                    Ok(at) => {
-                        copy_value(&values[at], control).map_err(ProjectionFailure::Control)?
-                    }
-                    Err(_) => {
-                        control(GlaExecutionEvent::ScratchEntry)
-                            .map_err(ProjectionFailure::Control)?;
+                let at = GraphSetValue::map_subscript_index(
+                    keys, values.len(), key.as_str(), control,
+                ).map_err(|error| match error {
+                    GraphIntegerEvaluationError::Control(error) => ProjectionFailure::Control(error),
+                    GraphIntegerEvaluationError::Value(error) => failure(error.kind),
+                })?;
+                match at {
+                    Some(at) => copy_value(&values[at], control).map_err(ProjectionFailure::Control)?,
+                    None => {
+                        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                         GraphValue::Scalar(CanonicalScalar::Null)
                     }
                 }

@@ -74,6 +74,8 @@ impl EdgeWork<'_, '_> {
 impl WriteTxn {
     /// Fuse graph expansion, text and vectors against this transaction's
     /// pinned basis PLUS its canonical prepared writes, without committing.
+    /// `GraphHybridQuery::graph_only` uses this same source with no property
+    /// projection or index construction, including zero-hop seed retrieval.
     ///
     /// All lanes share one selected vertex corpus and allowance. Staged label
     /// changes constrain transit vertices as well as hits. Edges come from the
@@ -167,8 +169,14 @@ impl WriteTxn {
             options,
             observer,
             |work| {
-                let config = options.config_for_graph(query)?;
-                Search::Hybrid(query.source_query()).validate(&config, &mut Shared(work))?;
+                let config = if query.is_graph_only() {
+                    options.validate_graph_only(query)?;
+                    None
+                } else {
+                    let config = options.config_for_graph(query)?;
+                    Search::Hybrid(query.source_query()).validate(&config, &mut Shared(work))?;
+                    Some(config)
+                };
                 prepare_filter(work)?;
                 if query.graph_enabled() {
                     if expansion.seeds.len() > expansion.limits.max_seed_ids {
@@ -206,12 +214,20 @@ impl WriteTxn {
                     };
                     // Every modality counts eligible endpoints before its
                     // own truncation; rejected transit cannot consume k.
-                    index.hybrid_search_graph_filtered(
-                        query,
-                        &hits,
-                        |id| eligible(id, work),
-                        &mut Shared(work),
-                    )
+                    // No-index execution shares the same exact fusion owner.
+                    match index {
+                        Some(index) => index.hybrid_search_graph_filtered(
+                            query,
+                            &hits,
+                            |id| eligible(id, work),
+                            &mut Shared(work),
+                        ),
+                        None => query.fuse_graph_only(
+                            &hits,
+                            |id| eligible(id, work),
+                            &mut Shared(work),
+                        ),
+                    }
                 })();
                 finish_filter(result)
             },

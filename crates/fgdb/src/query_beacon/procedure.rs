@@ -10,10 +10,13 @@
 //! `vector_property` holding the whole embedding as packed little-endian f32
 //! bytes (`metric`
 //! l2/cosine/dot, exact unless `ann` gives the HNSW `ef_search`), restricted
-//! to `label` when given. `seeds` with an explicit `max_hops` add the graph
-//! lane (`relation`, `direction` out/in/both, `include_seeds`,
-//! `graph_candidates`, `graph_weight`). Schema names resolve at prepare time
-//! (`fgdb_gql` symbol arguments), so a prepared call never re-resolves.
+//! to `label` when given. `seeds` with an explicit nonnegative `max_hops`
+//! enable the graph lane (`relation`, `direction` out/in/both, `include_seeds`,
+//! `graph_candidates`, `graph_weight`). Seeds may be the ONLY retrieval input:
+//! that path reads topology without projecting properties or creating an index.
+//! Zero hops with include_seeds returns admitted seeds, including isolates,
+//! without scanning edges. Schema names resolve at prepare time (`fgdb_gql`
+//! symbol arguments), so a prepared call never re-resolves.
 //!
 //! Native calls also accept `eligible => [vertex, ...]` (vertices
 //! or nonnegative integer IDs). This restricts RESULT endpoints before every
@@ -29,8 +32,8 @@
 //! own rank and score are separate outputs, null where that lane did not
 //! return the vertex. Rows arrive best first, ties by ascending vertex.
 //!
-//! The index is built for this one execution from the read's snapshot. This
-//! is exact fusion of the selected candidates, not an exhaustive hybrid
+//! Requested indexes are built for this one execution from the read's snapshot.
+//! This is exact fusion of selected candidates, not an exhaustive hybrid
 //! top-k; `ann` remains approximate. It is not a durable index definition.
 
 use super::graph;
@@ -349,7 +352,12 @@ impl HybridSearch {
                         _ => return Err(domain("direction", "out, in or both")),
                     });
                 }
-                "max_hops" => max_hops = Some(positive::<u32>("max_hops", value)?),
+                "max_hops" => {
+                    max_hops = Some(
+                        u32::try_from(int_value("max_hops", value)?)
+                            .map_err(|_| domain("max_hops", "a nonnegative integer within u32"))?,
+                    );
+                }
                 "include_seeds" => {
                     include_seeds = Some(match value {
                         GraphValue::Scalar(CanonicalScalar::Bool(value)) => *value,
@@ -399,9 +407,9 @@ impl HybridSearch {
                 ));
             }
         };
-        if text.is_none() && vector.is_none() {
+        if text.is_none() && vector.is_none() && seeds.is_none() {
             return Err(HybridCallError::Combination(
-                "a search needs text with text_property, vector with vector_properties, or both",
+                "a search needs text, a vector, or seeds with an explicit max_hops",
             ));
         }
         if text.is_none()
@@ -462,20 +470,35 @@ impl HybridSearch {
             Some(candidates) => candidates,
             None => u32::try_from(k).map_err(|_| domain("k", "a count within u32"))?,
         };
-        let profile = ExactRrfProfile::new(
-            60,
-            if vector.is_some() {
-                vector_weight.unwrap_or(1)
-            } else {
-                0
-            },
-            if text.is_some() {
-                text_weight.unwrap_or(1)
-            } else {
-                0
-            },
-        )
-        .map_err(HybridCallError::Index)?;
+        let profile = if text.is_none() && vector.is_none() {
+            // Only the graph-query owner may create a neutral base profile.
+            // It validates graph weight/depth and final output admission; no
+            // arbitrary zero-weight profile or synthetic modality is admitted.
+            GraphHybridQuery::graph_only(
+                k,
+                graph_candidates.unwrap_or(candidates),
+                graph_weight.unwrap_or(1),
+                60,
+            )
+            .map_err(HybridCallError::Index)?
+            .retrieval
+            .profile
+        } else {
+            ExactRrfProfile::new(
+                60,
+                if vector.is_some() {
+                    vector_weight.unwrap_or(1)
+                } else {
+                    0
+                },
+                if text.is_some() {
+                    text_weight.unwrap_or(1)
+                } else {
+                    0
+                },
+            )
+            .map_err(HybridCallError::Index)?
+        };
         let mut outputs = Vec::with_capacity(call.outputs().len());
         for output in call.outputs() {
             let position = HYBRID_SEARCH_OUTPUTS

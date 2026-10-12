@@ -17,7 +17,9 @@ use std::sync::{Mutex, MutexGuard};
 
 #[path = "stream/aggregate.rs"]
 mod aggregate;
-pub use aggregate::{AuthorizedAggregateCursor, AuthorizedSendAggregateCursor};
+pub use aggregate::{
+    AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedSendAggregateCursor,
+};
 
 #[path = "stream/ordered.rs"]
 mod ordered;
@@ -378,6 +380,24 @@ impl<S: VertexScanSource<Error = ReadError>, Clock: FnMut() -> u64> VertexScanSo
             if self.visible(vid)? {
                 return Ok(Some(vid));
             }
+        }
+    }
+
+    fn next_vertex_step<C>(
+        &mut self,
+        _: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<fgdb_gql::scan_stream::SourceStep<VId>, VertexScanSourceError<QueryError, C>> {
+        use fgdb_gql::scan_stream::SourceStep;
+        let execution = self.execution.clone();
+        let mut poll = |_: VertexScanEvent| execution.borrow_mut().poll();
+        match self
+            .inner
+            .next_vertex_step(&mut poll)
+            .map_err(scoped_error)?
+        {
+            SourceStep::Item(vid) if self.visible(vid)? => Ok(SourceStep::Item(vid)),
+            SourceStep::Item(vid) | SourceStep::Skipped(vid) => Ok(SourceStep::Skipped(vid)),
+            SourceStep::Exhausted => Ok(SourceStep::Exhausted),
         }
     }
     fn vertex<'a, C>(
