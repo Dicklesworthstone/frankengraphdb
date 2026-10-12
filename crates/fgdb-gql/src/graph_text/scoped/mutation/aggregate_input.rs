@@ -101,7 +101,7 @@ impl<'a> Parser<'a> {
                     || !matches!(next.kind,
                         TokenKind::Word(next) if next.eq_ignore_ascii_case("IS")))
                 && (self.syntax.variables.iter().any(|name| name.text == word)
-                    || self.syntax.path.is_some_and(|path| path.text == word)
+                    || self.syntax.names_path(word)
                     || self.syntax.visible_edge(word).is_some()
                     || !(word.eq_ignore_ascii_case("TRUE")
                         || word.eq_ignore_ascii_case("FALSE")

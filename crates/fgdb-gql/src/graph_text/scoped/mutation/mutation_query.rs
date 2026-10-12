@@ -676,6 +676,7 @@ impl<'a> Parser<'a> {
                         .filter_map(|(edge, _)| edge.variable),
                 )
                 .chain(self.syntax.path)
+                .chain(self.syntax.scope_paths.iter().copied())
                 .filter(|name| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
                 .collect();
             for name in matched {

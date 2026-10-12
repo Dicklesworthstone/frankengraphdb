@@ -398,7 +398,7 @@ impl<'a> Parser<'a> {
                     self.mutation_projection(&mut inputs, self.syntax.variables[right], None)?;
                 keys.push((left, right));
             }
-            if self.syntax.path.is_some_and(|path| path.text == name.text) {
+            if self.syntax.names_path(name.text) {
                 return Err(expected(name.at, "new path bindings after WITH"));
             }
             // A carried relationship correlates by identity, as a carried

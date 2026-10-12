@@ -323,7 +323,7 @@ impl<'a> Parser<'a> {
                 .visible_edge(name)
                 .is_some_and(|(edge, scoped)| !scoped && edge.walk.is_none()),
             GraphPathFunction::Length | GraphPathFunction::Nodes | GraphPathFunction::Edges => {
-                self.syntax.path.is_some_and(|path| path.text == name)
+                self.syntax.names_path(name)
             }
             _ => false,
         };

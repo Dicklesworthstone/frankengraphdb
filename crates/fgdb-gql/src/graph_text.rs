@@ -1430,11 +1430,7 @@ impl<'a> Parser<'a> {
                     };
                     self.punct(b')', ")")?;
                     (variable, None, Some(function))
-                } else if self
-                    .syntax
-                    .path
-                    .is_some_and(|path| path.text == expression.text)
-                {
+                } else if self.syntax.names_path(expression.text) {
                     (
                         expression,
                         None,

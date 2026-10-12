@@ -291,6 +291,14 @@ fn a_later_or_optional_match_names_its_path() {
         expected.sort();
         assert_eq!(found, expected, "{text}");
     }
+    // The set and pipeline facades read a clause's path as a bare name too.
+    for text in [
+        "MATCH (a) OPTIONAL MATCH p = (a)-[:R]->(b) RETURN a, p",
+        "MATCH (a) OPTIONAL MATCH p = (a)-[:R]->(b) RETURN p, length(p) AS l",
+    ] {
+        fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+    }
     for text in [
         // An existential body's locals never escape, so it names no path.
         "MATCH (a) WHERE EXISTS { MATCH p = (a)-->() } RETURN a",

@@ -643,6 +643,7 @@ impl<'a> Parser<'a> {
             .syntax
             .path
             .into_iter()
+            .chain(self.syntax.scope_paths.iter().copied())
             .chain(
                 self.syntax
                     .visible_edges()
@@ -862,6 +863,7 @@ impl<'a> Parser<'a> {
             .copied()
             .filter(|name| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
             .chain(self.syntax.path)
+            .chain(self.syntax.scope_paths.iter().copied())
             .chain(
                 self.syntax
                     .visible_edges()
@@ -968,7 +970,7 @@ impl<'a> Parser<'a> {
                         return Ok(None);
                     }
                     let graph = parser.syntax.variables.iter().any(|v| v.text == word)
-                        || parser.syntax.path.is_some_and(|path| path.text == word)
+                        || parser.syntax.names_path(word)
                         || parser.syntax.visible_edge(word).is_some();
                     if graph {
                         let variable = parser.any_variable()?;
@@ -2104,11 +2106,13 @@ impl<'a> Parser<'a> {
             let bare = matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
                     && (self.syntax.variables.iter().any(|name| name.text == word)
-                    || self.syntax.path.is_some_and(|path| path.text == word)
+                    || self.syntax.names_path(word)
                     || self.syntax.visible_edge(word).is_some()))
+                // `v:L` is a label test, an expression over the element
+                // (fgdb-qo3jv), never the bare element.
                 && !matches!(
                     self.lexer.clone().next()?.kind,
-                    TokenKind::Punct(b'.' | b'(')
+                    TokenKind::Punct(b'.' | b'(' | b':')
                 )
                 && !matches!(self.lexer.clone().next()?.kind,
                     TokenKind::Word(next) if next.eq_ignore_ascii_case("IS"));
