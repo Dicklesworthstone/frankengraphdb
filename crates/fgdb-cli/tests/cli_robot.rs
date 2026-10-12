@@ -2137,9 +2137,14 @@ fn cli_named_time_zone_constructs_through_every_read_front_end() {
         ],
     );
     assert_eq!(written.code, 0, "{create}: {}", written.stdout);
+    // Decoding a stored named-zone value needs the same tzdb (fgdb-zshkh).
     let stored = db.command(
         "query",
-        &["MATCH (e:Person) WHERE e.born IS NOT NULL RETURN e.born AS v"],
+        &[
+            "--tzdb-file",
+            artifact_path.to_str().unwrap(),
+            "MATCH (e:Person) WHERE e.born IS NOT NULL RETURN e.born AS v",
+        ],
     );
     assert_eq!(stored.code, 0, "{}", stored.stdout);
     assert!(
