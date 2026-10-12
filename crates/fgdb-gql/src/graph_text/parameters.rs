@@ -101,20 +101,21 @@ pub(crate) struct UnresolvedGraphText<'a> {
 }
 impl UnresolvedGraphText<'_> {
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
-        use crate::GraphSetColumnType::{Scalar, Vertex};
+        use crate::GraphSetColumnType::{Scalar, Stored, Vertex};
         let column_type = |column: &Column<'_>| match column.path {
             Some(GraphPathFunction::Value) => crate::GraphSetColumnType::Path,
             Some(GraphPathFunction::Length) => Scalar,
             Some(GraphPathFunction::Nodes) => crate::GraphSetColumnType::Vertices,
             Some(GraphPathFunction::Edges) => crate::GraphSetColumnType::Edges,
             // Edge selects the property owner in BoundColumn::declaration;
-            // an edge property itself is a scalar, not an edge identity.
-            Some(GraphPathFunction::Edge) if column.property.is_some() => Scalar,
+            // an edge property itself is a stored value, not an edge identity.
+            Some(GraphPathFunction::Edge) if column.property.is_some() => Stored,
             Some(GraphPathFunction::Edge) => crate::GraphSetColumnType::Edge,
             Some(GraphPathFunction::Labels) => crate::GraphSetColumnType::List,
             Some(GraphPathFunction::Type) => Scalar,
             Some(GraphPathFunction::Properties) => crate::GraphSetColumnType::Any,
-            None if column.property.is_some() => Scalar,
+            // A property is a scalar or a stored List or Map (fgdb-kr8j1).
+            None if column.property.is_some() => Stored,
             None => Vertex,
         };
         let input_types: Vec<_> = self
