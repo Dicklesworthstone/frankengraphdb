@@ -4,6 +4,7 @@
 #[cfg(test)]
 mod map_overlay_tests;
 mod membership;
+mod subscript;
 
 pub(crate) use membership::evaluate as evaluate_membership;
 
@@ -33,6 +34,9 @@ pub enum GraphSetValue {
     TypedNull(GraphSetColumnType),
     Integer(GraphIntegerExpression),
     List(Vec<GraphSetValue>),
+    /// A signed integer selects a list member; a text key selects a map entry.
+    /// NULL operands, missing keys and out-of-range indexes yield NULL. This
+    /// is value access only: graph identities never become property maps.
     Index {
         list: Box<GraphSetValue>,
         index: Box<GraphSetValue>,
@@ -1017,6 +1021,23 @@ fn evaluate_value_at<E>(
             if list.is_null() || index.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
+            } else if let Some((keys, values)) = list.as_map() {
+                let GraphValue::Scalar(CanonicalScalar::Text(key)) = &index else {
+                    return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+                };
+                let at = GraphSetValue::map_subscript_index(
+                    keys, values.len(), key.as_str(), control,
+                ).map_err(|error| match error {
+                    GraphIntegerEvaluationError::Control(error) => ProjectionFailure::Control(error),
+                    GraphIntegerEvaluationError::Value(error) => failure(error.kind),
+                })?;
+                match at {
+                    Some(at) => copy_value(&values[at], control).map_err(ProjectionFailure::Control)?,
+                    None => {
+                        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                        GraphValue::Scalar(CanonicalScalar::Null)
+                    }
+                }
             } else {
                 let values = list
                     .as_list()
