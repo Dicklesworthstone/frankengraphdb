@@ -2,7 +2,7 @@
 //! The graph lane retains selected vertices and BFS state, never an edge copy.
 //! Text/vector construction and exact candidate fusion remain the native paths.
 
-use super::{Cancel, Meter, Options, Scan, SharedWork, build_selected};
+use super::{Cancel, Meter, Options, Scan, SharedWork, build_selected_optional};
 use crate::gql_exec::source::SourceEvent;
 use crate::{Database, EmbeddedReadView, ReadError, Snapshot, VertexRow};
 use asupersync::fs::Vfs;
@@ -190,6 +190,8 @@ pub(crate) fn evaluate(
 
 /// Restrict result endpoints while retaining the complete selected corpus and
 /// its seed-directed transit. The same predicate precedes every lane's top-k.
+/// A graph-only request prepares no text/vector index and reads no properties;
+/// its topology uses the same historical successor source as an indexed hybrid.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_filtered(
     snapshot: &Snapshot,
@@ -207,8 +209,14 @@ pub(crate) fn evaluate_filtered(
     eligible: impl Fn(VId) -> bool,
 ) -> Result<Vec<GraphHybridHit>, BeaconError> {
     work.borrow_mut().charge(1)?;
-    let config = options.config_for_graph(query)?;
-    Search::Hybrid(query.source_query()).validate(&config, &mut SharedWork(work))?;
+    let config = if query.is_graph_only() {
+        options.validate_graph_only(query)?;
+        None
+    } else {
+        let config = options.config_for_graph(query)?;
+        Search::Hybrid(query.source_query()).validate(&config, &mut SharedWork(work))?;
+        Some(config)
+    };
     let mut selected = if query.graph_enabled() {
         if expansion.seeds.len() > expansion.limits.max_seed_ids {
             return Err(BeaconError::ResourceLimit {
@@ -225,7 +233,7 @@ pub(crate) fn evaluate_filtered(
         Scan::Metered => Scan::Metered,
         Scan::Unmetered(poll) => Scan::Unmetered(&mut **poll),
     };
-    let index = build_selected(
+    let index = build_selected_optional(
         snapshot,
         at,
         options,
@@ -272,12 +280,17 @@ pub(crate) fn evaluate_filtered(
     } else {
         Vec::new()
     };
-    let rows = index.snapshot().hybrid_search_graph_filtered(
-        query,
-        &graph_hits,
-        eligible,
-        &mut SharedWork(work),
-    )?;
+    // Index-free and indexed execution share the exact fusion owner. None
+    // is selected before source access, never a fallback after index failure.
+    let rows = match index {
+        Some(index) => index.snapshot().hybrid_search_graph_filtered(
+            query,
+            &graph_hits,
+            eligible,
+            &mut SharedWork(work),
+        )?,
+        None => query.fuse_graph_only(&graph_hits, eligible, &mut SharedWork(work))?,
+    };
     work.borrow_mut().charge(1)?;
     Ok(rows)
 }
@@ -295,6 +308,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// No edge properties are read and no per-query adjacency copy is built.
     /// Text/vector corpus preparation still scans selected vertex history;
     /// decoded source/index and visited state remain resident, not spill-backed.
+    /// GraphHybridQuery::graph_only skips property projection and index creation,
+    /// but keeps the selected vertex directory and all source/vertex limits.
     ///
     /// In this explicit physical profile max_input_edges bounds ADMITTED
     /// INCIDENCE VISITS, not all graph edges: parallel EIds count separately,
@@ -385,6 +400,10 @@ impl EmbeddedReadView {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "indexed/graph_only_tests.rs"]
+mod graph_only_tests;
 
 #[cfg(test)]
 mod tests {
