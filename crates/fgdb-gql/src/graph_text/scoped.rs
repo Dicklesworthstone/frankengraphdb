@@ -471,7 +471,10 @@ fn predicate_captures<'a>(
         let names = match item {
             Pending::Variable(name) => [Some(name), None],
             Pending::Predicate(filter) => match filter {
-                Filter::PathCapture(_) | Filter::PathLength { .. } | Filter::PathNull { .. } => {
+                // A clause's named path captures its own pattern; it reads no
+                // containing value.
+                Filter::PathCapture(_) => continue,
+                Filter::PathLength { .. } | Filter::PathNull { .. } => {
                     return Err(error(
                         0,
                         GraphPatternTextErrorKind::Expected("root path predicate"),
@@ -1226,13 +1229,28 @@ impl<'a> Parser<'a> {
                 }
                 self.syntax.match_mode = self.match_mode()?;
             }
-            if self.starts_path_binding()? {
-                return Err(error(
-                    self.current.at,
-                    GraphPatternTextErrorKind::Expected("path binding in root MATCH only"),
-                ));
-            }
+            // A required or OPTIONAL clause may name its path, exported like
+            // its vertices (openCypher Match7, OPTIONAL MATCH p = ...). An
+            // existential body's locals never escape, so it names none.
+            let path = if clause && kind.exports_bindings() && self.starts_path_binding()? {
+                let path = self.name()?;
+                self.punct(b'=', "=")?;
+                Some(path)
+            } else {
+                if self.starts_path_binding()? {
+                    return Err(error(
+                        self.current.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "path binding in a required or OPTIONAL MATCH",
+                        ),
+                    ));
+                }
+                None
+            };
             self.positive_pattern()?;
+            if let Some(path) = path {
+                self.syntax.filters.push(Filter::PathCapture(path));
+            }
             if !clause {
                 // An openCypher pattern predicate tests the bindings it names
                 // and cannot introduce one (UndefinedVariable). Only the
@@ -1275,17 +1293,33 @@ impl<'a> Parser<'a> {
             let mut body = self.take_pattern();
             body.variables.truncate(matched_variables);
             body.captures = predicate_captures(&mut body.variables, &body.filters, &body.edges)?;
-            Ok::<_, GraphPatternTextError>(body)
+            Ok::<_, GraphPatternTextError>((body, path))
         })();
         self.read_row_bindings = row_bindings;
-        let body = match parsed {
-            Ok(body) => body,
+        let (body, path) = match parsed {
+            Ok(parsed) => parsed,
             Err(error) => {
                 self.restore_pattern(outer);
                 return Err(error);
             }
         };
         self.restore_pattern(outer);
+        if let Some(path) = path {
+            if self
+                .syntax
+                .variables
+                .iter()
+                .any(|seen| seen.text == path.text)
+                || self.syntax.names_path(path.text)
+                || self.syntax.visible_edge(path.text).is_some()
+            {
+                return Err(error(
+                    path.at,
+                    GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateVariable),
+                ));
+            }
+            self.syntax.scope_paths.push(path);
+        }
         // Captures already name visible values. Only actual new matched names
         // are exported; existential locals never enter the containing table.
         if kind.exports_bindings() {
