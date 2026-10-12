@@ -22,8 +22,10 @@ const RENDER_WORK: usize = 160;
 pub(super) fn supports(function: Function) -> bool {
     matches!(
         function,
-        Function::SumInt | Function::SumIntDistinct
-            | Function::AverageInt | Function::AverageIntDistinct
+        Function::SumInt
+            | Function::SumIntDistinct
+            | Function::AverageInt
+            | Function::AverageIntDistinct
     )
 }
 
@@ -42,7 +44,10 @@ pub(super) fn function<D: GroupDefinition, E>(
 }
 
 fn distinct(function: Function) -> bool {
-    matches!(function, Function::SumIntDistinct | Function::AverageIntDistinct)
+    matches!(
+        function,
+        Function::SumIntDistinct | Function::AverageIntDistinct
+    )
 }
 
 fn units<E>(
@@ -69,7 +74,8 @@ struct Summary {
 
 fn adjust<E>(old: u64, times: u64, remove: bool) -> Result<u64, GroupError<E>> {
     if remove {
-        old.checked_sub(times).ok_or(GroupError::NegativeMultiplicity)
+        old.checked_sub(times)
+            .ok_or(GroupError::NegativeMultiplicity)
     } else {
         old.checked_add(times).ok_or(GroupError::Arithmetic)
     }
@@ -144,7 +150,8 @@ impl State {
                 change.to_i128().ok_or(GroupError::Arithmetic)?
             };
             if difference != 0 {
-                let times = u64::try_from(difference.unsigned_abs()).map_err(|_| GroupError::Arithmetic)?;
+                let times =
+                    u64::try_from(difference.unsigned_abs()).map_err(|_| GroupError::Arithmetic)?;
                 charge(control, ZSetEvent::ScratchEntry)?;
                 steps.push((primary(&key.0, key.1), *value, times, difference < 0));
             }
@@ -162,9 +169,14 @@ impl State {
                 if !patch.contains_key(key) {
                     units(control, ZSetEvent::ScratchEntry, COPY_UNITS)?;
                     units(control, ZSetEvent::Work, COPY_UNITS)?;
-                    patch.insert(key.clone(), self.groups.get(key).cloned().unwrap_or_default());
+                    patch.insert(
+                        key.clone(),
+                        self.groups.get(key).cloned().unwrap_or_default(),
+                    );
                 }
-                patch.get_mut(key).ok_or(GroupError::InvalidResult)?
+                patch
+                    .get_mut(key)
+                    .ok_or(GroupError::InvalidResult)?
                     .apply(*value, *times, remove, control)?;
             }
         }
@@ -189,43 +201,60 @@ impl Update<'_> {
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<Option<Value>, GroupError<E>> {
         charge(control, ZSetEvent::Work)?;
-        let state = if pending { self.patch.get(key) } else { None }
-            .or_else(|| self.state.groups.get(key));
+        let state =
+            if pending { self.patch.get(key) } else { None }.or_else(|| self.state.groups.get(key));
         let Some(state) = state.filter(|state| state.count != 0) else {
             return Ok(None);
         };
-        let average = matches!(function, Function::AverageInt | Function::AverageIntDistinct);
+        let average = matches!(
+            function,
+            Function::AverageInt | Function::AverageIntDistinct
+        );
         let distinct = distinct(function);
         let sum = integers.and_then(|integers| {
-            if distinct { integers.sum_distinct() } else { integers.sum() }
+            if distinct {
+                integers.sum_distinct()
+            } else {
+                integers.sum()
+            }
         });
         let sum = sum.map_or(Ok(0), |sum| sum.to_i128().ok_or(GroupError::Arithmetic))?;
         let denominator = if average {
             let integer_count = integers.map_or(Ok(0), |integers| {
-                count(if distinct { integers.count_distinct() } else { integers.count_values() })
+                count(if distinct {
+                    integers.count_distinct()
+                } else {
+                    integers.count_values()
+                })
             })?;
-            state.count.checked_add(integer_count).ok_or(GroupError::Arithmetic)?
+            state
+                .count
+                .checked_add(integer_count)
+                .ok_or(GroupError::Arithmetic)?
         } else {
             1
         };
         units(control, ZSetEvent::Work, RENDER_WORK)?;
         units(control, ZSetEvent::ScratchEntry, COPY_UNITS)?;
-        let result = if state.nan != 0 || (state.positive_infinity != 0 && state.negative_infinity != 0) {
-            CanonicalF64::new(f64::NAN)
-        } else if state.positive_infinity != 0 {
-            CanonicalF64::new(f64::INFINITY)
-        } else if state.negative_infinity != 0 {
-            CanonicalF64::new(f64::NEG_INFINITY)
-        } else {
-            let mut exact = state.finite.clone();
-            exact.add_integer(sum);
-            if average {
-                exact.mean(denominator).ok_or(GroupError::InvalidResult)?
+        let result =
+            if state.nan != 0 || (state.positive_infinity != 0 && state.negative_infinity != 0) {
+                CanonicalF64::new(f64::NAN)
+            } else if state.positive_infinity != 0 {
+                CanonicalF64::new(f64::INFINITY)
+            } else if state.negative_infinity != 0 {
+                CanonicalF64::new(f64::NEG_INFINITY)
             } else {
-                exact.sum()
-            }
-        };
-        Ok(Some(Value::Value(GraphValue::Scalar(CanonicalScalar::Float(result)))))
+                let mut exact = state.finite.clone();
+                exact.add_integer(sum);
+                if average {
+                    exact.mean(denominator).ok_or(GroupError::InvalidResult)?
+                } else {
+                    exact.sum()
+                }
+            };
+        Ok(Some(Value::Value(GraphValue::Scalar(
+            CanonicalScalar::Float(result),
+        ))))
     }
 
     pub(super) fn commit(self) {

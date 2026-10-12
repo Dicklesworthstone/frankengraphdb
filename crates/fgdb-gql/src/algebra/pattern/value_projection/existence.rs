@@ -170,9 +170,11 @@ impl GraphPatternBuilder {
                 // ordinary binding slots, before any capture or path predicate.
                 // This uses the existing governed scan/expand family, not an
                 // endpoint-to-edge reconstruction or a second path evaluator.
-                let first = inner.edges.first().map(|edge| edge.source).or_else(|| {
-                    inner.variables.iter().position(|variable| !variable.outer)
-                });
+                let first = inner
+                    .edges
+                    .first()
+                    .map(|edge| edge.source)
+                    .or_else(|| inner.variables.iter().position(|variable| !variable.outer));
                 (first.and_then(correlation), None)
             } else if let Some((edge_at, outer_at)) = edge_anchor {
                 inner.edges.swap(0, edge_at);

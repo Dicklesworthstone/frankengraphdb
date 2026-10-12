@@ -386,11 +386,15 @@ impl PreparedGraphAggregate {
                 }
                 GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
                     matches!(argument, Some(Scalar | Any))
-                        && (matches!(value, GraphAggregateValue::Integer(_)) || floating || value.is_null())
+                        && (matches!(value, GraphAggregateValue::Integer(_))
+                            || floating
+                            || value.is_null())
                 }
                 GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
                     matches!(argument, Some(Scalar | Any))
-                        && (matches!(value, GraphAggregateValue::Average(_)) || floating || value.is_null())
+                        && (matches!(value, GraphAggregateValue::Average(_))
+                            || floating
+                            || value.is_null())
                 }
                 GraphAggregateFunction::Min | GraphAggregateFunction::Max => match value {
                     GraphAggregateValue::Value(value) => accepts(argument, value),
@@ -585,12 +589,21 @@ mod tests {
                     CanonicalScalar::Float(CanonicalF64::new(number)),
                 ));
             }
-            assert!(definition.materialize_incremental_row(key.clone(), floating).is_some());
+            assert!(
+                definition
+                    .materialize_incremental_row(key.clone(), floating)
+                    .is_some()
+            );
         }
         for index in [1, 2] {
             let mut narrowed = values.clone();
-            narrowed[index] = GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1)));
-            assert!(definition.materialize_incremental_row(key.clone(), narrowed).is_none());
+            narrowed[index] =
+                GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1)));
+            assert!(
+                definition
+                    .materialize_incremental_row(key.clone(), narrowed)
+                    .is_none()
+            );
         }
         assert!(
             definition

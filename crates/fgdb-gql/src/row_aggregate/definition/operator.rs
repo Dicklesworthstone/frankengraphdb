@@ -216,9 +216,10 @@ fn render<'a, D: GroupDefinition, E>(
         charge(control, ZSetEvent::ScratchEntry)?;
         let state = get(index);
         if float_support::supports(function)
-            && let Some(value) = floats.0.render(
-                &primary(group, index), function, state, floats.1, control,
-            )?
+            && let Some(value) =
+                floats
+                    .0
+                    .render(&primary(group, index), function, state, floats.1, control)?
         {
             values.push(value);
             continue;
@@ -510,7 +511,11 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
             // Float numeric support has a separate retractable summary. It
             // must not add synthetic nonnull zeroes to the integer reducer.
             if was != now
-                && !float_support::supports(float_support::function(&self.definition, key.1, control)?)
+                && !float_support::supports(float_support::function(
+                    &self.definition,
+                    key.1,
+                    control,
+                )?)
             {
                 charge(control, ZSetEvent::ScratchEntry)?;
                 crossings.push((
@@ -528,7 +533,9 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                 state.prepare(changes, self.definition.group_key_columns(), limbs, control)
             })
             .transpose()?;
-        let floats = self.floats.prepare(&self.definition, &self.aggregate, &delta, limbs, control)?;
+        let floats =
+            self.floats
+                .prepare(&self.definition, &self.aggregate, &delta, limbs, control)?;
         let mut groups = BTreeSet::new();
         // Argument replacements and sort-key changes can leave COUNT exactly
         // unchanged. The collection index, not count crossings, invalidates
