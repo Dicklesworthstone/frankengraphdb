@@ -1214,3 +1214,141 @@ fn an_authorized_read_hosts_call_over_the_masked_projection() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+
+/// fgdb-luq0b: a named selection uses the same capability-protected analytics
+/// source. Selecting a forbidden relation cannot reveal it, and an explicitly
+/// selected hidden weight is absent before its payload is inspected.
+#[test]
+fn named_projection_applies_authority_before_relation_and_weight_selection() {
+    let ((), report) = run_async_under_lab(0x5ec0_3071, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let issuer = authority(309, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |kind, name: &str| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Label, "Person") => {
+                Some(fgdb_gql::GraphSymbol::Label(LabelId(1)))
+            }
+            (fgdb_gql::GraphSymbolKind::Relation, "hidden") => {
+                Some(fgdb_gql::GraphSymbol::Relation(RelationId(2)))
+            }
+            (fgdb_gql::GraphSymbolKind::Property, "private") => {
+                Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(2)))
+            }
+            _ => None,
+        };
+        let db = simple_database(&c.commit(), true).await;
+        let oracle = simple_database(&c.commit(), false).await;
+        for text in [
+            "CALL fnx.single_source_shortest_path_length(\
+             args => [1], label => 'Person', direction => 'directed') \
+             YIELD vertex, distance RETURN vertex, distance ORDER BY vertex",
+            "CALL fnx.single_source_shortest_path_length(\
+             args => [1], relation => 'hidden') \
+             YIELD vertex, distance RETURN vertex, distance ORDER BY vertex",
+        ] {
+            let masked = db
+                .query_authorized(
+                    &cx, &issuer, &token, BRANCH, text, &params, symbols, policy, || 100,
+                )
+                .unwrap();
+            assert_eq!(
+                masked,
+                oracle.query(&cx, text, &params, symbols, policy).unwrap(),
+                "{text}",
+            );
+            assert_ne!(
+                masked,
+                db.query(&cx, text, &params, symbols, policy).unwrap(),
+                "the unmasked control must distinguish the hidden relation",
+            );
+        }
+        let db = database(&c.commit(), true).await;
+        let oracle = database(&c.commit(), false).await;
+        let text = "CALL fnx.single_source_dijkstra_path_length(\
+                    args => [1], weight => 'private', missing => 'zero', \
+                    parallel => 'min', self_loops => 'drop') \
+                    YIELD vertex, distance RETURN vertex, distance ORDER BY vertex";
+        let masked = db
+            .query_authorized(
+                &cx, &issuer, &token, BRANCH, text, &params, symbols, policy, || 100,
+            )
+            .unwrap();
+        assert_eq!(
+            masked,
+            oracle.query(&cx, text, &params, symbols, policy).unwrap(),
+        );
+        assert!(
+            db.query(&cx, text, &params, symbols, policy).is_err(),
+            "the unmasked Boolean weight must be refused",
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+
+#[test]
+fn inline_projection_is_applied_inside_the_capability_and_before_weight_inspection() {
+    let ((), report) = run_async_under_lab(0x5ec0_3072, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit(), true).await;
+        let oracle = database(&c.commit(), false).await;
+        let issuer = authority(310, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let tight = token.attenuate(Restriction::MaxNodes(2)).unwrap();
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |kind, name: &str| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Label, "Person") => {
+                Some(fgdb_gql::GraphSymbol::Label(LabelId(1)))
+            }
+            (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                Some(fgdb_gql::GraphSymbol::Relation(RelationId(1)))
+            }
+            (fgdb_gql::GraphSymbolKind::Property, "weight") => {
+                Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(1)))
+            }
+            (fgdb_gql::GraphSymbolKind::Property, "secret") => {
+                Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(2)))
+            }
+            _ => None,
+        };
+        let queries = [
+            "CALL fnx.single_source_dijkstra_path_length(\
+             {weight:'weight', missing:'reject', parallel:'min', self_loops:'drop'}, \
+             1,NULL,true) YIELD vertex,distance RETURN vertex,distance ORDER BY vertex",
+            "CALL fnx.single_source_dijkstra_path_length(\
+             {labels:['Person'], relations:['R'], weight:'weight', missing:'reject', \
+              parallel:'min', self_loops:'drop'}, \
+             1,NULL,true) YIELD vertex,distance RETURN vertex,distance ORDER BY vertex",
+            "CALL fnx.single_source_dijkstra_path_length(\
+             {weight:'secret', missing:'unit', parallel:'min', self_loops:'drop'}, \
+             1,NULL,true) YIELD vertex,distance RETURN vertex,distance ORDER BY vertex",
+            "CALL fnx.single_source_dijkstra_path_length(\
+             label=>'Person', relation=>'R', weight=>'weight', missing=>'reject', \
+             parallel=>'min', self_loops=>'drop', args=>[1,NULL,true]) \
+             YIELD vertex,distance RETURN vertex,distance ORDER BY vertex",
+        ];
+        for query in queries {
+            let expected = oracle.query(&cx, query, &params, symbols, policy).unwrap();
+            let actual = db.query_authorized(
+                &cx, &issuer, &token, BRANCH, query, &params, symbols, policy, || 100,
+            ).unwrap();
+            assert_eq!(actual, expected, "{query}");
+            assert!(matches!(
+                db.query_authorized(
+                    &cx, &issuer, &tight, BRANCH, query, &params, symbols, policy, || 100,
+                ),
+                Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Nodes)))
+            ));
+        }
+        // Without the capability's induced mask, malformed hidden weights are
+        // observable to this control and correctly fail numeric admission.
+        assert!(db.query(&cx, queries[0], &params, symbols, policy).is_err());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

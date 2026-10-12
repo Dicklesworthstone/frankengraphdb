@@ -104,12 +104,49 @@ impl WriteTxn {
         query: GraphHybridQuery<'_>,
         expansion: ExpansionSpec<'_, RelationId>,
     ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
-        self.beacon_search_graph_observed(database, cx, options, query, expansion, None)
+        self.beacon_search_graph_filtered(database, cx, options, query, expansion, |_| true)
     }
 
-    /// Same engine and witnesses, with an optional enclosing query meter.
+    /// Restrict endpoints before each lane's candidate limit and final fusion.
+    /// Rejected endpoints remain available for graph transit and ANN routing;
+    /// corpus selection alone constrains those inputs and BM25 statistics.
+    /// Derive data-dependent eligibility from this transaction's pinned basis
+    /// and staged writes. The predicate must be stable, bounded computation
+    /// over IDs, not I/O or a capability check. Reject-all retains source,
+    /// traversal and final-delivery limits, including all conflict witnesses.
+    ///
+    /// The predicate must be deterministic and side-effect-free; its own
+    /// application work is the caller's responsibility. Native eligible lists
+    /// use a governed predicate. Engine work and witnesses follow the same
+    /// contract as [`Self::beacon_search_graph`].
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn beacon_search_graph_observed<V: Vfs + Clone>(
+    pub fn beacon_search_graph_filtered<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        options: &Options,
+        query: GraphHybridQuery<'_>,
+        expansion: ExpansionSpec<'_, RelationId>,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
+        self.beacon_search_graph_filtered_observed(
+            database,
+            cx,
+            options,
+            query,
+            expansion,
+            None,
+            |_| Ok(()),
+            |id, _| eligible(id),
+            |result| result,
+        )
+    }
+
+    /// One source and meter for public predicates and native eligible lists.
+    /// Native filter preparation runs under the live control before sources;
+    /// its finalizer retains a lookup refusal across the bool predicate ABI.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn beacon_search_graph_filtered_observed<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         cx: &QueryCx,
@@ -117,6 +154,11 @@ impl WriteTxn {
         query: GraphHybridQuery<'_>,
         expansion: ExpansionSpec<'_, RelationId>,
         observer: Option<Observer<'_>>,
+        prepare_filter: impl FnOnce(&RefCell<Control<'_>>) -> Result<(), BeaconError>,
+        eligible: impl Fn(VId, &RefCell<Control<'_>>) -> bool,
+        finish_filter: impl FnOnce(
+            Result<Vec<GraphHybridHit>, BeaconError>,
+        ) -> Result<Vec<GraphHybridHit>, BeaconError>,
     ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
         let graph = RefCell::new(None);
         self.beacon_read(
@@ -127,6 +169,7 @@ impl WriteTxn {
             |work| {
                 let config = options.config_for_graph(query)?;
                 Search::Hybrid(query.source_query()).validate(&config, &mut Shared(work))?;
+                prepare_filter(work)?;
                 if query.graph_enabled() {
                     if expansion.seeds.len() > expansion.limits.max_seed_ids {
                         return Err(BeaconError::ResourceLimit {
@@ -145,22 +188,32 @@ impl WriteTxn {
                 Ok(())
             },
             |index, snapshot, work| {
-                let hits = if let Some(mut graph) = graph.borrow_mut().take() {
-                    if expansion.max_hops != 0 && !expansion.seeds.is_empty() {
-                        self.beacon_graph_edges(snapshot, &mut graph, expansion, work)?;
-                    }
-                    graph.expand(
-                        expansion.seeds,
-                        expansion.max_hops,
-                        expansion.include_seeds,
-                        query.graph_candidates,
+                let result = (|| {
+                    let hits = if let Some(mut graph) = graph.borrow_mut().take() {
+                        if expansion.max_hops != 0 && !expansion.seeds.is_empty() {
+                            self.beacon_graph_edges(snapshot, &mut graph, expansion, work)?;
+                        }
+                        graph.expand_filtered(
+                            expansion.seeds,
+                            expansion.max_hops,
+                            expansion.include_seeds,
+                            query.graph_candidates,
+                            |id, _| Ok(eligible(id, work)),
+                            &mut Shared(work),
+                        )?
+                    } else {
+                        Vec::new()
+                    };
+                    // Every modality counts eligible endpoints before its
+                    // own truncation; rejected transit cannot consume k.
+                    index.hybrid_search_graph_filtered(
+                        query,
+                        &hits,
+                        |id| eligible(id, work),
                         &mut Shared(work),
-                    )?
-                } else {
-                    Vec::new()
-                };
-                // Do not truncate the two-lane result before graph ranks exist.
-                index.hybrid_search_graph(query, &hits, &mut Shared(work))
+                    )
+                })();
+                finish_filter(result)
             },
         )
     }
@@ -425,6 +478,125 @@ mod tests {
                 txn.beacon_search_graph(&db, &query_cx, &options, query, expansion),
                 Err(ReadError::Read(WriteTxnError::Finished))
             ));
+            assert_eq!(contexts.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn endpoint_filter_precedes_every_lane_limit_without_removing_transit() {
+        let ((), report) = run_async_under_lab(0xbeac_3102, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut db = Database::open_memory(
+                &commit,
+                DatabaseKeys::new(
+                    [0xd4; 32],
+                    DatabaseSecurityNamespaceId([0xd5; 32]),
+                    [0xd6; 32],
+                ),
+            )
+            .await
+            .unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for id in 1..=3 {
+                seed.create_vertex(
+                    VId(id),
+                    vec![],
+                    vec![
+                        (
+                            PropertyKeyId(1),
+                            CanonicalScalar::ucs_basic_text("graph").unwrap(),
+                        ),
+                        (PropertyKeyId(2), CanonicalScalar::Int(id as i64)),
+                    ],
+                );
+            }
+            seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+            db.write(&commit, seed).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            txn.savepoint(&db, "before-link").unwrap();
+            let mut link = WriteBatch::new(RelationId(1));
+            link.add_edge(EId(2), VId(2), VId(3), vec![]);
+            txn.write(&mut db, link).unwrap();
+            let mut options = Options::text(PropertyKeyId(1));
+            options.projection.vector = vec![PropertyKeyId(2)];
+            options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
+            let query = GraphHybridQuery {
+                retrieval: ExactHybridQuery {
+                    vector: &[0.0],
+                    text: "graph",
+                    k: 1,
+                    vector_candidates: 1,
+                    text_candidates: 1,
+                    vector_mode: VectorSearch::Exact,
+                    text_mode: TextMatch::Any,
+                    profile: ExactRrfProfile::default(),
+                },
+                graph_candidates: 1,
+                graph_weight: 100,
+            };
+            let expansion = ExpansionSpec {
+                seeds: &[VId(1)],
+                relation: Some(RelationId(1)),
+                direction: ExpansionDirection::Outgoing,
+                max_hops: 2,
+                include_seeds: false,
+                limits: ExpansionLimits::default(),
+            };
+            let allowed = |id| id == VId(3);
+            let actual = txn
+                .beacon_search_graph_filtered(&db, &cx, &options, query, expansion, allowed)
+                .unwrap();
+            assert_eq!(actual.len(), 1);
+            let hit = &actual[0];
+            assert_eq!(hit.id, VId(3));
+            assert_eq!(hit.graph_hops, Some(2));
+            assert_eq!(hit.graph_rank.map(|rank| rank.get()), Some(1));
+            assert_eq!(hit.vector_rank.map(|rank| rank.get()), Some(1));
+            assert_eq!(hit.text_rank.map(|rank| rank.get()), Some(1));
+            assert!(txn.scanned_edges.get());
+            assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(2))));
+            assert!(
+                txn.beacon_search_graph_filtered(&db, &cx, &options, query, expansion, |_| false)
+                    .unwrap()
+                    .is_empty()
+            );
+            let without_graph = GraphHybridQuery {
+                graph_candidates: 0,
+                graph_weight: 0,
+                ..query
+            };
+            let two_lane = txn
+                .beacon_search_graph_filtered(&db, &cx, &options, without_graph, expansion, allowed)
+                .unwrap();
+            assert_eq!(two_lane.len(), 1);
+            assert_eq!(two_lane[0].id, VId(3));
+            assert_eq!(two_lane[0].graph_rank, None);
+            assert_eq!(two_lane[0].vector_rank.map(|rank| rank.get()), Some(1));
+            assert_eq!(two_lane[0].text_rank.map(|rank| rank.get()), Some(1));
+            assert_eq!(db.frontier().unwrap(), basis);
+            let committed_before = db
+                .beacon_search_graph_filtered(&cx, &options, query, expansion, allowed)
+                .unwrap();
+            assert_eq!(committed_before[0].graph_hops, None);
+            txn.rollback_to_savepoint(&db, "before-link").unwrap();
+            assert_eq!(
+                txn.beacon_search_graph_filtered(&db, &cx, &options, query, expansion, allowed)
+                    .unwrap(),
+                committed_before,
+            );
+            let mut link = WriteBatch::new(RelationId(1));
+            link.add_edge(EId(2), VId(2), VId(3), vec![]);
+            txn.write(&mut db, link).unwrap();
+            txn.commit(&mut db, &commit).await.unwrap();
+            assert_eq!(
+                db.beacon_search_graph_filtered(&cx, &options, query, expansion, allowed)
+                    .unwrap(),
+                actual,
+            );
             assert_eq!(contexts.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");

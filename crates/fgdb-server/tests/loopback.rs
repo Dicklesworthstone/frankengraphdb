@@ -8,7 +8,7 @@ use asupersync::{Budget, Cx};
 use fgdb::{Database, DatabaseKeys};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GraphSymbolKind;
-use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, WireValue};
+use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, PreparedReadMode, WireValue};
 use fgdb_protocol::client::{Client, ClientError};
 use fgdb_server::{
     DatabaseConfig, Server, ServerLimits, Symbols, attenuate_token, issue_token, issuer,
@@ -2980,6 +2980,7 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
         let cancelled = owner
             .execute_prepared_streaming(
                 cx,
+                PreparedReadMode::Buffered,
                 handle,
                 vec![("min".into(), WireValue::Int(1))],
                 |_| {},
@@ -3076,5 +3077,195 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
         owner.close(cx).await.unwrap();
         shutdown.trigger();
         server.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn historical_snapshot_metadata_agrees_across_eager_prepared_http_and_streamed_reads() {
+    run(async |cx| {
+        let server = Arc::new(served(cx, "historical-snapshot-metadata").await);
+        let native_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let native_addr = native_listener.local_addr().unwrap();
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_addr = http_listener.local_addr().unwrap();
+        let shutdown = server.shutdown();
+        let native_server = Arc::clone(&server);
+        let mut native_task = cx
+            .spawn(move |child| async move {
+                native_server.serve(&child, native_listener).await.unwrap();
+            })
+            .unwrap();
+        let mut http_task = cx
+            .spawn(move |child| async move {
+                server
+                    .serve_http(&child, http_listener, vec!["127.0.0.1".into()])
+                    .await
+                    .unwrap();
+            })
+            .unwrap();
+        let mut owner = Client::connect(cx, native_addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {age:10})",
+                vec![],
+            )
+            .await
+            .unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) SET n.age=20",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let reader_token = token(&grant(Rights::Read));
+        let mut reader = Client::connect(cx, native_addr, reader_token.clone())
+            .await
+            .unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let arguments = || vec![("route".to_owned(), text("main"))];
+        // Every preparation occurs at frontier 2, including historical cuts.
+        // Literal cuts use the current wire parameter profile; the engine
+        // session regression separately covers UInt64 temporal rebinding.
+        for (projection, copies, aggregate) in [
+            ("RETURN n.age AS age", 1, false),
+            ("RETURN sum(n.age) AS age", 1, true),
+            (
+                "RETURN n.age AS age UNION ALL MATCH (n:Person) RETURN n.age AS age",
+                2,
+                false,
+            ),
+        ] {
+            for (at, age) in [(1, 10), (2, 20), (1, 10)] {
+                let statement = format!(
+                    "AT BRANCH $route MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {at} {projection}"
+                );
+                let handle = reader
+                    .prepare_read(cx, &statement, arguments())
+                    .await
+                    .unwrap();
+                let expected_value = if aggregate {
+                    WireValue::WideInt(i128::from(age))
+                } else {
+                    WireValue::Int(age)
+                };
+                let expected_rows = vec![vec![expected_value]; copies];
+                let expected_outcome = Outcome::Rows { seq: at };
+                let eager = reader
+                    .execute(cx, ExecuteMode::Read, &statement, arguments())
+                    .await
+                    .unwrap();
+                assert_eq!(eager.columns, ["age"]);
+                assert_eq!(eager.rows, expected_rows);
+                assert_eq!(eager.outcome, expected_outcome);
+                let prepared = reader
+                    .execute_prepared(cx, handle, arguments())
+                    .await
+                    .unwrap();
+                assert_eq!(prepared, eager, "{statement}");
+                if aggregate {
+                    let streamed = reader
+                        .execute(cx, ExecuteMode::ReadStream, &statement, arguments())
+                        .await
+                        .unwrap();
+                    assert_eq!(streamed, eager, "{statement}");
+                }
+
+                let request = format!(
+                    r#"{{"statement":"{statement}","parameters":{{"route":"main"}}}}"#
+                );
+                let (status, body) = http(
+                    http_addr,
+                    "POST",
+                    "/v1/databases/social/query",
+                    "127.0.0.1",
+                    Some(&reader_token),
+                    &request,
+                )
+                .await;
+                let kind = if aggregate { "wideint" } else { "int" };
+                let rows = (0..copies)
+                    .map(|_| format!(r#"[{{"type":"{kind}","value":"{age}"}}]"#))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                assert_eq!(status, 200, "{body}");
+                assert_eq!(
+                    body,
+                    format!(r#"{{"v":1,"columns":["age"],"rows":[{rows}],"seq":{at}}}"#)
+                );
+
+                let wrong_branch = vec![("route".to_owned(), text("elsewhere"))];
+                assert_eq!(
+                    server_code(
+                        reader
+                            .execute_prepared(cx, handle, wrong_branch)
+                            .await
+                            .unwrap_err()
+                    ),
+                    ErrorCode::PermissionDenied
+                );
+                reader.release_prepared(cx, handle).await.unwrap();
+            }
+            let future = format!(
+                "AT BRANCH $route MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ 3 {projection}"
+            );
+            assert_eq!(
+                server_code(
+                    reader
+                        .execute(cx, ExecuteMode::Read, &future, arguments())
+                        .await
+                        .unwrap_err()
+                ),
+                ErrorCode::Execution
+            );
+            let handle = reader
+                .prepare_read(cx, &future, arguments())
+                .await
+                .unwrap();
+            assert_eq!(
+                server_code(
+                    reader
+                        .execute_prepared(cx, handle, arguments())
+                        .await
+                        .unwrap_err()
+                ),
+                ErrorCode::Execution
+            );
+            reader.release_prepared(cx, handle).await.unwrap();
+        }
+        let empty = reader
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ 1 WHERE n.age < 0 RETURN n.age AS age",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.outcome, Outcome::Rows { seq: 1 });
+        let current = reader
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN n.age AS age",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(current.rows, [vec![WireValue::Int(20)]]);
+        assert_eq!(current.outcome, Outcome::Rows { seq: 2 });
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        native_task.join(cx).await.unwrap();
+        http_task.join(cx).await.unwrap();
     });
 }

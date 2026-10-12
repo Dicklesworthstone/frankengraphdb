@@ -136,6 +136,86 @@ impl PreparedGraphPattern<GraphValueRow> {
         self
     }
 
+    /// Prove the native visitation order for a vertex or uncaptured one-edge
+    /// source. Vertex scans visit root identities; edge scans visit the ordered
+    /// endpoint pair, retaining parallel-edge multiplicity. Predicates and all
+    /// original values stay in the real source. Requested identities append
+    /// after existing column addresses, before the consumer restores the order.
+    pub(crate) fn incremental_collection_source(
+        &self,
+        identity_names: Option<&[&str]>,
+    ) -> Option<(Self, Vec<usize>)> {
+        if self.logical.visible_columns.is_some() {
+            return None;
+        }
+        let [
+            scan,
+            predicates @ ..,
+            GlaOperator::ProjectValues { columns },
+            GlaOperator::OrderByValues,
+            GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            },
+        ] = self.logical.operators.as_slice()
+        else {
+            return None;
+        };
+        let width = match scan {
+            GlaOperator::ScanVertices if self.variable_count == 1 && self.edge_count == 0 => 1,
+            GlaOperator::ScanEdges { .. } if self.variable_count == 2 && self.edge_count == 1 => 2,
+            _ => return None,
+        };
+        if columns.is_empty()
+            || columns.len() != self.columns.len()
+            || columns.iter().any(|column| {
+                !matches!(column, ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } if slot.ordinal() < width)
+            })
+            || predicates.iter().any(|operator| match operator {
+                GlaOperator::Select { slot, .. } => slot.ordinal() >= width,
+                GlaOperator::VertexIdentity { left, right, .. }
+                | GlaOperator::CompareProperties { left, right, .. } => {
+                    left.ordinal() >= width || right.ordinal() >= width
+                }
+                GlaOperator::SelectBoolean { expression } => {
+                    !expression.supports_vertex_bindings(width as usize)
+                }
+                _ => true,
+            })
+        {
+            return None;
+        }
+        let mut source = self.clone();
+        let mut identities = Vec::new();
+        if let Some(names) = identity_names {
+            let names = names.get(..width as usize)?;
+            for (ordinal, name) in names.iter().enumerate() {
+                let identity = if let Some(column) = columns.iter().position(|column| {
+                    matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() as usize == ordinal)
+                }) {
+                    column
+                } else {
+                    let column = source.columns.len();
+                    let projection = source.logical.operators.len() - 3;
+                    let GlaOperator::ProjectValues { columns } =
+                        &mut source.logical.operators[projection]
+                    else {
+                        unreachable!("the proved source has one terminal value projection")
+                    };
+                    columns.push(ValueProjection::Vertex {
+                        slot: BindingSlot(ordinal as u32),
+                    });
+                    source.columns.push((*name).to_owned());
+                    column
+                };
+                identities.push(identity);
+            }
+        }
+        // The counted-tuple producer reserves another private COUNT column.
+        // The projection may not evade that source's complete schema bound.
+        (source.columns.len() < MAX_PATTERN_VERTICES).then_some((source, identities))
+    }
+
     /// Rank by projected column positions before applying the existing page.
     /// Nulls default to last in both directions. Canonical complete-row order
     /// breaks remaining ties; DISTINCT still compares the entire output row.

@@ -815,7 +815,17 @@ impl<'a> Parser<'a> {
             // Leading columns, then the same visible graph bindings as a
             // MATCH-first `WITH *`; anonymous compiler slots stay private.
             for (index, name) in leading.iter().enumerate() {
-                outputs.push((*name, ReadValueTemplate::Column(index)));
+                // A correlated graph identity retains its source domain even
+                // through WITH *. Other procedure/UNWIND values stay ordinary
+                // row columns and never acquire graph lookup authority.
+                let column = match self
+                    .visible_graph_bindings()
+                    .find(|binding| binding.text == name.text)
+                {
+                    Some(variable) => width + self.mutation_projection(inputs, variable, None)?,
+                    None => index,
+                };
+                outputs.push((*name, ReadValueTemplate::Column(column)));
             }
             let visible: Vec<_> = self.visible_graph_bindings().collect();
             for variable in visible {
@@ -826,7 +836,14 @@ impl<'a> Parser<'a> {
                 let index = self.mutation_projection(inputs, variable, None)?;
                 outputs.push((variable, ReadValueTemplate::Column(width + index)));
             }
-            return Ok((outputs, distinct, at));
+            let mut head = GraphProjectionHead {
+                with: true,
+                inputs: core::mem::take(inputs),
+                outputs,
+            };
+            self.hoist_boundary_reads(&mut head, width)?;
+            *inputs = head.inputs;
+            return Ok((head.outputs, distinct, at));
         }
         loop {
             self.capacity(
@@ -852,6 +869,14 @@ impl<'a> Parser<'a> {
                         return parser
                             .property_map_function(inputs)
                             .map(|column| Some(width + column));
+                    }
+                    if pipeline::metadata_source(word, parser.current.at, &parser.lexer)?
+                        .is_some()
+                    {
+                        let Operand::Column(column) = parser.mutation_operand(inputs)? else {
+                            unreachable!("native metadata projects one source column");
+                        };
+                        return Ok(Some(width + column));
                     }
                     if matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'(')) {
                         return Ok(None);
@@ -903,7 +928,14 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok((outputs, distinct, at))
+        let mut head = GraphProjectionHead {
+            with: true,
+            inputs: core::mem::take(inputs),
+            outputs,
+        };
+        self.hoist_boundary_reads(&mut head, width)?;
+        *inputs = head.inputs;
+        Ok((head.outputs, distinct, at))
     }
 
     /// Shared graph-to-row boundary. Exact grouped RETURN uses this same first
@@ -2522,6 +2554,7 @@ pub(super) fn bind_stages(
                 names,
                 outputs,
                 vertices,
+                graph_projection,
                 ..
             } => {
                 let mut bound = Vec::with_capacity(arguments.len());
@@ -2529,13 +2562,14 @@ pub(super) fn bind_stages(
                     bound.push(bind_read_value(argument, values)?);
                 }
                 input
-                    .procedure_call(
+                    .procedure_call_with_projection(
                         namespace.clone(),
                         name.clone(),
                         bound,
                         names.clone(),
                         outputs.clone(),
                         vertices.clone(),
+                        *graph_projection,
                     )
                     .map_err(|kind| GraphSetTextError {
                         offset: *at,

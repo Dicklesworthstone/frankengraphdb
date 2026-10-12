@@ -514,6 +514,83 @@ fn maximum_depth_and_exponential_join_output_keep_only_one_prefix_and_obey_early
 }
 
 #[test]
+fn directed_join_identity_prefix_needs_no_synthetic_source_vertex_column() {
+    for mask in [0, 10, 31, 63] {
+        for shape in 0..3 {
+            for root in [GlaDirection::Forward, GlaDirection::Reverse] {
+                for next in [
+                    GlaDirection::Forward,
+                    GlaDirection::Reverse,
+                    GlaDirection::Undirected,
+                ] {
+                    for distinct in [false, true] {
+                        for (skip, limit) in [(0, 1000), (1, 3), (0, 0)] {
+                            let text = statement(shape, [root, next], false, skip, limit)
+                                .replace("r, a, s", "r, s");
+                            let text = if distinct {
+                                text.replace("RETURN ", "RETURN DISTINCT ")
+                            } else {
+                                text
+                            };
+                            let query = prepare(&text);
+                            let fixture = Fixture::small(mask);
+                            // The finite relation oracle enumerates orientations
+                            // independently, then removes only the unused root
+                            // vertex from complete rows before the native check.
+                            let expected: Vec<_> =
+                                oracle(&fixture, shape, [root, next], false, skip, limit)
+                                    .into_iter()
+                                    .map(|mut row| {
+                                        row.remove(1);
+                                        row
+                                    })
+                                    .collect();
+                            let eager = query
+                                .plan()
+                                .execute_governed_with_element_properties(
+                                    fixture.edges.len() as u64,
+                                    fixture.vertices.iter().copied(),
+                                    fixture.edges.iter().map(|(&id, (a, b, _))| (id, *a, R, *b)),
+                                    |_, _| Ok::<_, ()>(true),
+                                    |_, _| Ok(None),
+                                    |id, _| Ok(Some(&fixture.edges[&id].2[0].1)),
+                                    policy(),
+                                    || Ok::<_, ()>(()),
+                                )
+                                .unwrap();
+                            assert_eq!(plain(&eager.value), expected, "{text}, mask {mask}");
+                            let roots = Arc::clone(&fixture.roots);
+                            let mut cursor = EdgeScanCursor::new(
+                                fixture,
+                                EdgeScanPlan::compile(query.plan()).unwrap(),
+                                policy(),
+                                || Ok::<_, ()>(()),
+                            );
+                            assert_eq!(roots.load(Ordering::SeqCst), 0);
+                            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                            assert_eq!(plain(&rows), expected, "{text}, mask {mask}");
+                            assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                            assert_eq!(cursor.row_stats().result_rows, rows.len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for text in [
+        "MATCH (a)-[r:R]-(b)-[s:R]->(c) RETURN r, s LIMIT 0",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r, c, s LIMIT 0",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN s, r LIMIT 0",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r LIMIT 0",
+    ] {
+        assert!(
+            EdgeScanPlan::compile(prepare(text).plan()).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn unsupported_sources_bad_order_and_invalid_plan_prefixes_never_silently_change_semantics() {
     let text = statement(0, [GlaDirection::Forward; 2], false, 0, 5);
     for invalid in [

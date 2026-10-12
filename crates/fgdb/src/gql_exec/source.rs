@@ -353,6 +353,44 @@ mod persistent_index_tests {
 type History = IndexMap<(CommitSeq, usize, usize), ()>;
 type Incidence = IndexMap<EId, ()>;
 
+/// Only the ordered statement coordinates of an admitted generation. A writer
+/// resolving a version chain needs neither endpoint incidence nor property
+/// candidates. Cloning this root never clones the statements it names.
+#[derive(Clone, Debug)]
+pub(crate) struct StatementHistoryIndex<I>(IndexMap<I, History>);
+
+impl<I: Ord + Clone> StatementHistoryIndex<I> {
+    pub(crate) fn coordinates(
+        &self,
+        identity: I,
+    ) -> impl Iterator<Item = (CommitSeq, usize, usize)> + '_ {
+        self.0
+            .get(&identity)
+            .into_iter()
+            .flat_map(|history| history.iter().map(|(coordinate, ())| *coordinate))
+    }
+}
+
+impl StatementHistoryIndex<EId> {
+    pub(crate) fn edges(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
+        let mut histories = BTreeMap::<EId, Vec<(CommitSeq, usize, usize)>>::new();
+        for (block, entries) in blocks.iter().enumerate() {
+            for (row, entry) in entries.as_ref().iter().enumerate() {
+                histories
+                    .entry(entry.eid)
+                    .or_default()
+                    .push((entry.created_at, block, row));
+            }
+        }
+        let mut work = 0;
+        let histories = histories
+            .into_iter()
+            .map(|(eid, versions)| (eid, unit_set(versions, &mut work)))
+            .collect();
+        Self(IndexMap::from_sorted(histories, &mut work))
+    }
+}
+
 /// The `(block, row)` of the latest statement in `history` created at or
 /// before `as_of`. Keys order `(created_at, block, row)`, so among one
 /// statement's restatements the later block wins, as in the merge.
@@ -609,6 +647,10 @@ pub(crate) struct PropertyEqualityIndex {
 }
 
 impl PropertyEqualityIndex {
+    pub(crate) fn statement_histories(&self) -> StatementHistoryIndex<VId> {
+        StatementHistoryIndex(self.histories.clone())
+    }
+
     /// Build a generation from scratch bottom-up, with the same contents as
     /// folding every row through `apply_added`.
     pub(crate) fn build(patches: &[VertexPatchRows]) -> Self {

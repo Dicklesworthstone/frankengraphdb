@@ -36,8 +36,10 @@ mod overlay;
 #[path = "query_authorized/relational.rs"]
 mod relational;
 pub use relational::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendRowCursor,
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
 type Fault = GqlQueryError<ReadError, QueryError>;
@@ -94,9 +96,14 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
         QueryError::Authorization(*self.failure.get_or_insert(error))
     }
     fn checkpoint(&mut self) -> Result<(), QueryError> {
+        self.reserve_work(1)
+    }
+    // Reserve a bounded private physical phase on this same signed permit.
+    // Reservations are never refunded after failure, cancellation or drop.
+    fn reserve_work(&mut self, units: u64) -> Result<(), QueryError> {
         self.poll()?;
         let now = self.now();
-        let charged = self.permit.charge_work_at(now, 1);
+        let charged = self.permit.charge_work_at(now, units);
         charged.map_err(|error| self.refusal(error))
     }
     /// Cancellation and a retained refusal only; no signed or native charge.

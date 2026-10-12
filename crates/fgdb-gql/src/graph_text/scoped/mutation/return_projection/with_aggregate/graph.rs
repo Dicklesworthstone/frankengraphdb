@@ -229,6 +229,7 @@ impl<'a> Parser<'a> {
                 visible,
                 width: outputs.len(),
                 reads,
+                functions: Vec::new(),
                 grouped,
                 scoped: Vec::new(),
             });

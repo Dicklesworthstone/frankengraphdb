@@ -327,7 +327,9 @@ fn error(error: EdgeAggregateError<QueryError, QueryError>) -> QueryError {
     }
 }
 
-fn row_error(error: GqlQueryError<EdgeScanError<QueryError>, QueryError>) -> QueryError {
+pub(in super::super) fn row_error(
+    error: GqlQueryError<EdgeScanError<QueryError>, QueryError>,
+) -> QueryError {
     match error {
         GqlQueryError::Interrupted(error) => error,
         GqlQueryError::Source(error) => source_error(error),
@@ -338,6 +340,24 @@ fn row_error(error: GqlQueryError<EdgeScanError<QueryError>, QueryError>) -> Que
         }
         GqlQueryError::Data(error) => QueryError::EdgeStream(GqlQueryError::Data(error)),
     }
+}
+
+// External ordering uses this exact masked source, with private input rows
+// rather than the row driver's final delivery admission.
+pub(in super::super) fn ordered_source<'q, C: FnMut() -> u64 + Send>(
+    at: CommitSeq,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+) -> Result<impl EdgeScanSource<Error = QueryError> + Send + 'q + use<'q, C>, QueryError> {
+    Ok(Source {
+        edges: view.edge_scan_source(cx, at).map_err(QueryError::Read)?,
+        vertices: ScopedSource {
+            inner: view.vertex_scan_source(cx, at).map_err(QueryError::Read)?,
+            execution,
+        },
+        after: None,
+    })
 }
 
 // Both row constructors erase this SAME native driver; only Send capability
@@ -374,17 +394,17 @@ pub(in super::super) fn row_driver<'q, C: FnMut() -> u64>(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn build<'q, C: FnMut() -> u64>(
+pub(super) fn aggregate_driver<'q, C: FnMut() -> u64>(
     plan: EdgeAggregatePlan,
     at: CommitSeq,
-    columns: Vec<String>,
-    layout: Layout,
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
-) -> Opened<'q, GraphAggregateRow, Layout> {
+) -> Result<
+    impl FnMut() -> Result<(Option<GraphAggregateRow>, bool), QueryError> + use<'q, C>,
+    QueryError,
+> {
     // Both factories borrow the SAME view and cut; neither can refresh from a
     // writer. Constructing these cheap pin owners scans no graph candidates.
     let edges = view.edge_scan_source(cx, at).map_err(QueryError::Read)?;
@@ -402,12 +422,11 @@ pub(super) fn build<'q, C: FnMut() -> u64>(
         control.borrow_mut().checkpoint()
     });
     execution.borrow_mut().checkpoint()?;
-    let driver: Pull<'q, GraphAggregateRow> = Box::new(move || {
+    Ok(move || {
         let row = cursor.next().transpose().map_err(error)?;
         execution.borrow_mut().deliver(usize::from(row.is_some()))?;
         Ok((row, cursor.state() != EdgeScanState::Open))
-    });
-    Ok((AuthorizedRowCursor::new(driver, columns, at), layout))
+    })
 }
 
 #[cfg(test)]

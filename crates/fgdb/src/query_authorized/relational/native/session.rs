@@ -6,7 +6,11 @@
 
 #[path = "session/stream.rs"]
 mod stream;
-pub use stream::{AuthorizedAggregateCursor, AuthorizedRowCursor, AuthorizedSendRowCursor};
+pub use stream::{
+    AuthorizedAggregateCursor, AuthorizedOrderExecution, AuthorizedOrderedReadSession,
+    AuthorizedRowCursor, AuthorizedSendAggregateCursor, AuthorizedSendRowCursor,
+    AuthorizedSortLimits, AuthorizedSpoolCursor,
+};
 
 use super::*;
 use crate::EmbeddedReadView;
@@ -58,8 +62,8 @@ pub struct AuthorizedReadSession<'a, Resolver, Clock> {
 /// binds new argument values and checks current credentials on each execution.
 pub struct AuthorizedPreparedRead {
     owner: Arc<()>,
-    selector: PreparedGraphBranchText,
-    native: PreparedNativeRead,
+    selector: Arc<PreparedGraphBranchText>,
+    native: Arc<PreparedNativeRead>,
 }
 
 impl core::fmt::Debug for AuthorizedPreparedRead {
@@ -122,18 +126,24 @@ fn check_branch(
     Ok(())
 }
 fn terminal<T>(result: &Result<T, QueryError>) -> bool {
+    result.as_ref().err().is_some_and(terminal_error)
+}
+fn terminal_error(error: &QueryError) -> bool {
     matches!(
-        result,
-        Err(QueryError::Authorization(
+        error,
+        QueryError::Authorization(
             AuthorizationError::ExecutionStopped
                 | AuthorizationError::Expired
                 | AuthorizationError::NotYetValid
                 | AuthorizationError::AuthorityRetired
                 | AuthorizationError::ClockWentBackwards
-        ))
+        )
     )
 }
-fn result_rows(result: QueryResult) -> Result<(QueryResult, usize), QueryError> {
+fn result_rows(
+    result: QueryResult,
+    snapshot_seq: CommitSeq,
+) -> Result<((QueryResult, CommitSeq), usize), QueryError> {
     let count = match &result {
         QueryResult::Rows { rows, .. } => rows.len(),
         QueryResult::Write { .. } => {
@@ -142,7 +152,7 @@ fn result_rows(result: QueryResult) -> Result<(QueryResult, usize), QueryError> 
             });
         }
     };
-    Ok((result, count))
+    Ok(((result, snapshot_seq), count))
 }
 
 type Live<'cx, 'permit, 'clock> = RefCell<Execution<'cx, 'permit, &'clock mut dyn FnMut() -> u64>>;
@@ -240,6 +250,23 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         text: &str,
         params: &GqlParameters,
     ) -> Result<QueryResult, QueryError> {
+        self.query_with_snapshot(cx, text, params)
+            .map(|(result, _)| result)
+    }
+
+    /// Execute a read and return the exact sequence selected for its rows.
+    ///
+    /// The result and sequence share one preparation, pinned generation and
+    /// signed execution permit. A temporal selector may choose an older cut;
+    /// an ordinary read uses this session's frontier even if the writer has
+    /// advanced. EXPLAIN reports this frontier without reading graph rows.
+    /// Neither metadata nor rows escape a failed execution or final check.
+    pub fn query_with_snapshot(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+    ) -> Result<(QueryResult, CommitSeq), QueryError> {
         self.run(cx, |view, branch, scope, resolver, policy, execution| {
             text_at(
                 view, branch, scope, resolver, policy, execution, text, params,
@@ -272,8 +299,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             Ok((
                 AuthorizedPreparedRead {
                     owner,
-                    selector,
-                    native: native?,
+                    selector: Arc::new(selector),
+                    native: Arc::new(native?),
                 },
                 0,
             ))
@@ -289,6 +316,19 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         prepared: &AuthorizedPreparedRead,
         params: &GqlParameters,
     ) -> Result<QueryResult, QueryError> {
+        self.execute_with_snapshot(cx, prepared, params)
+            .map(|(result, _)| result)
+    }
+
+    /// Execute an exact-session template with its bound snapshot metadata.
+    /// Rebinding a temporal argument changes both rows and sequence together;
+    /// the template never captures the sequence from its preparation call.
+    pub fn execute_with_snapshot(
+        &mut self,
+        cx: &QueryCx,
+        prepared: &AuthorizedPreparedRead,
+        params: &GqlParameters,
+    ) -> Result<(QueryResult, CommitSeq), QueryError> {
         let owner = Arc::clone(&self.owner);
         self.run(cx, |view, branch, scope, _, policy, execution| {
             prepared_at(
@@ -310,19 +350,22 @@ fn text_at<R: GraphSymbolResolver>(
     execution: &Live<'_, '_, '_>,
     text: &str,
     params: &GqlParameters,
-) -> Result<(QueryResult, usize), QueryError> {
+) -> Result<((QueryResult, CommitSeq), usize), QueryError> {
     let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
     let selected = selector.bind_parameters(params).map_err(selector_error)?;
     check_branch(&selected, branch)?;
     refuse_element_identity(selected.statement())?;
     execution.borrow_mut().checkpoint()?;
     if let Some(explain) = crate::query::explain::explain_prefix(selected.statement()) {
-        return result_rows(explain_authorized(
-            explain,
-            selected.parameters(),
-            BorrowedResolver(resolver),
-            || execution.borrow_mut().checkpoint(),
-        )?);
+        return result_rows(
+            explain_authorized(
+                explain,
+                selected.parameters(),
+                BorrowedResolver(resolver),
+                || execution.borrow_mut().checkpoint(),
+            )?,
+            view.frontier(),
+        );
     }
     let prepared = PreparedNativeRead::prepare(
         selected.statement(),
@@ -330,15 +373,20 @@ fn text_at<R: GraphSymbolResolver>(
         BorrowedResolver(resolver),
     );
     execution.borrow_mut().checkpoint()?;
-    result_rows(native_at(
-        &prepared?,
-        selected.parameters(),
-        &view.snapshot,
-        view.frontier(),
-        scope,
-        execution,
-        policy,
-    )?)
+    let prepared = prepared?;
+    let at = prepared.bound_snapshot_seq(selected.parameters(), view.frontier())?;
+    result_rows(
+        native_at(
+            &prepared,
+            selected.parameters(),
+            &view.snapshot,
+            at,
+            scope,
+            execution,
+            policy,
+        )?,
+        at,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -351,7 +399,7 @@ fn prepared_at(
     owner: &Arc<()>,
     prepared: &AuthorizedPreparedRead,
     params: &GqlParameters,
-) -> Result<(QueryResult, usize), QueryError> {
+) -> Result<((QueryResult, CommitSeq), usize), QueryError> {
     if !Arc::ptr_eq(owner, &prepared.owner) {
         return Err(QueryError::Authorization(
             AuthorizationError::WrongAuthority,
@@ -362,15 +410,21 @@ fn prepared_at(
         .bind_parameters(params)
         .map_err(selector_error)?;
     check_branch(&selected, branch)?;
-    result_rows(native_at(
-        &prepared.native,
-        selected.parameters(),
-        &view.snapshot,
-        view.frontier(),
-        scope,
-        execution,
-        policy,
-    )?)
+    let at = prepared
+        .native
+        .bound_snapshot_seq(selected.parameters(), view.frontier())?;
+    result_rows(
+        native_at(
+            &prepared.native,
+            selected.parameters(),
+            &view.snapshot,
+            at,
+            scope,
+            execution,
+            policy,
+        )?,
+        at,
+    )
 }
 impl<R, C> AuthorizedReadSession<'_, R, C> {
     /// Release the generation and trusted state, with no source reads or clock
@@ -384,6 +438,61 @@ impl<R, C> AuthorizedReadSession<'_, R, C> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Bind a retained host-prepared template to a fresh authorized read pin.
+    /// The immutable selector and native template are shared without parsing
+    /// or catalog callbacks. This privileged Database constructor is the only
+    /// attachment seam; the narrowed session cannot accept an arbitrary plan.
+    /// Its returned handle remains bound to this exact session.
+    ///
+    /// The host must validate that the template's catalog belongs to this
+    /// database, branch and trusted resolver, just as for raw
+    /// PreparedNativeRead::execute_authorized. Matching source text proves
+    /// selector/template coherence, not catalog identity. Server hosts must
+    /// additionally preserve their connection, authentication-generation and
+    /// recovery fences before using this constructor.
+    ///
+    /// Signature, namespace and read-rights checks precede template inspection.
+    /// Mismatched source refuses as WrongAuthority; identity-reading templates
+    /// retain the native authorization refusal. Current scope and live permits
+    /// still govern every execution. The fresh pin sees the current frontier,
+    /// never a generation retained when the template was prepared. A failed
+    /// constructor releases its new pin; the shared templates pin no graph.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorized_prepared_read_session<'a, R: GraphSymbolResolver, C: FnMut() -> u64>(
+        &self,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        resolver: R,
+        policy: GqlQueryPolicy,
+        clock: C,
+        selector: Arc<PreparedGraphBranchText>,
+        native: Arc<PreparedNativeRead>,
+    ) -> Result<(AuthorizedReadSession<'a, R, C>, AuthorizedPreparedRead), QueryError> {
+        let mut session =
+            self.authorized_read_session(cx, authority, token, branch, resolver, policy, clock)?;
+        let owner = Arc::clone(&session.owner);
+        let prepared = session.run(cx, |_, _, _, _, _, _| {
+            if crate::query::explain::without_terminator(selector.statement()) != native.statement()
+            {
+                return Err(QueryError::Authorization(
+                    AuthorizationError::WrongAuthority,
+                ));
+            }
+            refuse_element_identity(selector.statement())?;
+            Ok((
+                AuthorizedPreparedRead {
+                    owner,
+                    selector,
+                    native,
+                },
+                0,
+            ))
+        })?;
+        Ok((session, prepared))
+    }
+
     /// Narrow a newly admitted immutable generation into an owned read-only
     /// session. The host, not a token holder, chooses all authority inputs.
     /// Signature/namespace/rights checks precede the read pin and any catalog

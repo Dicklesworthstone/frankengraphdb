@@ -1147,21 +1147,9 @@ fn hydration_snapshot(
     let prepared =
         PreparedNativeRead::prepare(selected.statement(), parameters, db.symbols.clone())
             .map_err(|error| Failure::from_refusal(query_refusal(error)))?;
-    match prepared {
-        PreparedNativeRead::TemporalPattern(prepared) => prepared
-            .bind_parameters(parameters)
-            .map(|bound| bound.as_of())
-            .map_err(|error| Failure::invalid(error.to_string())),
-        PreparedNativeRead::TemporalSet(prepared) => prepared
-            .bind_parameters(parameters)
-            .map(|bound| bound.as_of())
-            .map_err(|error| Failure::invalid(error.to_string())),
-        PreparedNativeRead::TemporalAggregate(prepared) => prepared
-            .bind_parameters(parameters)
-            .map(|bound| bound.as_of())
-            .map_err(|error| Failure::invalid(error.to_string())),
-        _ => Ok(default),
-    }
+    prepared
+        .bound_snapshot_seq(parameters, default)
+        .map_err(|error| Failure::from_refusal(query_refusal(error)))
 }
 
 /// Execute a metadata lookup through the original authorized session. Only a

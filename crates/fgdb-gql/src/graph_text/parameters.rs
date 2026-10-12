@@ -429,6 +429,9 @@ pub(crate) fn symbol_argument(
         }
         ("hybrid", "search", "label") => Some(GraphSymbolKind::Label),
         ("hybrid", "search", "relation") => Some(GraphSymbolKind::Relation),
+        ("fnx", _, "label") => Some(GraphSymbolKind::Label),
+        ("fnx", _, "relation") => Some(GraphSymbolKind::Relation),
+        ("fnx", _, "weight") => Some(GraphSymbolKind::Property),
         _ => None,
     }
 }
@@ -441,16 +444,28 @@ fn resolve_call_symbols(
     resolve: &mut impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
 ) -> Result<(), GraphPatternTextError> {
     let ReadStageTemplate::Call {
+        at,
         namespace,
         name,
         arguments,
         names,
         offsets,
+        graph_projection,
         ..
     } = stage
     else {
         return Ok(());
     };
+    if namespace == "fnx"
+        && names.is_empty()
+        && let Some(value @ ReadValueTemplate::MapLiteral { .. }) = arguments.first()
+    {
+        let at = offsets.first().copied().unwrap_or(*at);
+        let projection = resolve_fnx_projection(value, at, resolve)?;
+        arguments.remove(0);
+        offsets.remove(0);
+        *graph_projection = Some(projection);
+    }
     for ((argument, value), &at) in names.iter().zip(arguments.iter_mut()).zip(offsets.iter()) {
         let Some(kind) = symbol_argument(namespace, name, argument) else {
             continue;
@@ -508,6 +523,163 @@ fn resolve_call_symbols(
         }
     }
     Ok(())
+}
+
+/// A fnx call's first inline map is its graph argument, not an opaque runtime
+/// parameter. Check every option before consulting the catalog, then freeze
+/// exact schema identities. The host still applies authority and the pinned
+/// source sequence before reading this induced projection.
+fn resolve_fnx_projection(
+    value: &ReadValueTemplate,
+    at: usize,
+    resolve: &mut impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+) -> Result<crate::ProcedureGraphProjection, GraphPatternTextError> {
+    use crate::{
+        ProcedureGraphDirection as Direction, ProcedureGraphProjection, ProcedureGraphWeight,
+        ProcedureMissingWeight as Missing, ProcedureParallelEdges as Parallel,
+        ProcedureSelfLoops as Loops,
+    };
+    let expected = |item| error(at, GraphPatternTextErrorKind::Expected(item));
+    let ReadValueTemplate::MapLiteral {
+        keys,
+        values,
+        guard: None,
+    } = value
+    else {
+        return Err(expected("an inline literal procedure graph projection"));
+    };
+    let mut label = None;
+    let mut relation = None;
+    let mut weight = None;
+    let mut missing = None;
+    let mut projection = ProcedureGraphProjection {
+        vertex_label: None,
+        relation: None,
+        weight: ProcedureGraphWeight::Unit,
+        direction: None,
+        parallel_edges: Parallel::Reject,
+        self_loops: Loops::Keep,
+    };
+    for (key, value) in keys.iter().zip(values) {
+        match key.as_ref() {
+            "labels" => label = projection_selection_name(value, at)?,
+            "relations" => relation = projection_selection_name(value, at)?,
+            "weight" => weight = Some(projection_text(value, at)?),
+            "missing" => {
+                missing = Some(match projection_text(value, at)? {
+                    "reject" => Missing::Reject,
+                    "unit" => Missing::Unit,
+                    "zero" => Missing::Zero,
+                    _ => return Err(expected("missing: 'reject', 'unit', or 'zero'")),
+                });
+            }
+            "direction" => {
+                projection.direction = Some(match projection_text(value, at)? {
+                    "directed" => Direction::Directed,
+                    "reversed" => Direction::Reversed,
+                    "undirected" => Direction::Undirected,
+                    _ => {
+                        return Err(expected(
+                            "direction: 'directed', 'reversed', or 'undirected'",
+                        ));
+                    }
+                });
+            }
+            "parallel" => {
+                projection.parallel_edges = match projection_text(value, at)? {
+                    "reject" => Parallel::Reject,
+                    "collapse" => Parallel::CollapseUnit,
+                    "min" => Parallel::Minimum,
+                    "max" => Parallel::Maximum,
+                    "sum" => Parallel::Sum,
+                    _ => {
+                        return Err(expected(
+                            "parallel: 'reject', 'collapse', 'min', 'max', or 'sum'",
+                        ));
+                    }
+                };
+            }
+            "self_loops" => {
+                projection.self_loops = match projection_text(value, at)? {
+                    "keep" => Loops::Keep,
+                    "drop" => Loops::Drop,
+                    "reject" => Loops::Reject,
+                    _ => return Err(expected("self_loops: 'keep', 'drop', or 'reject'")),
+                };
+            }
+            _ => {
+                return Err(expected(
+                    "procedure graph option: labels, relations, weight, missing, direction, parallel, or self_loops",
+                ));
+            }
+        }
+    }
+    if missing.is_some() && weight.is_none() {
+        return Err(expected("a weight property when specifying its missing policy"));
+    }
+    let mut symbol = |kind, name| {
+        let found = resolve(kind, name)
+            .ok_or_else(|| error(at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
+        if found.kind() != kind {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::WrongSymbolKind {
+                    expected: kind,
+                    found: found.kind(),
+                },
+            ));
+        }
+        Ok(match found {
+            GraphSymbol::Label(id) => id.0,
+            GraphSymbol::Relation(id) => id.0,
+            GraphSymbol::Property(id) => id.0,
+        })
+    };
+    if let Some(name) = label {
+        projection.vertex_label = Some(LabelId(symbol(GraphSymbolKind::Label, name)?));
+    }
+    if let Some(name) = relation {
+        projection.relation = Some(RelationId(symbol(GraphSymbolKind::Relation, name)?));
+    }
+    if let Some(name) = weight {
+        projection.weight = ProcedureGraphWeight::Property {
+            key: PropertyKeyId(symbol(GraphSymbolKind::Property, name)?),
+            missing: missing.unwrap_or(Missing::Reject),
+        };
+    }
+    Ok(projection)
+}
+
+fn projection_text(value: &ReadValueTemplate, at: usize) -> Result<&str, GraphPatternTextError> {
+    if let ReadValueTemplate::Literal(literal) = value
+        && let CanonicalScalar::Text(text) = literal.value()
+    {
+        return Ok(text.as_str());
+    }
+    Err(error(
+        at,
+        GraphPatternTextErrorKind::Expected("a text literal in the procedure graph projection"),
+    ))
+}
+
+fn projection_selection_name(
+    value: &ReadValueTemplate,
+    at: usize,
+) -> Result<Option<&str>, GraphPatternTextError> {
+    let ReadValueTemplate::List(names) = value else {
+        return Err(error(
+            at,
+            GraphPatternTextErrorKind::Expected("an empty or singleton list of schema names"),
+        ));
+    };
+    match names.as_slice() {
+        [] => Ok(None),
+        [name] => projection_text(name, at).map(Some),
+        _ => Err(error(
+            at,
+            GraphPatternTextErrorKind::Expected("at most one schema name in the induced projection"),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -588,5 +760,91 @@ mod projection_schema_tests {
             crate::GraphSetTextErrorKind::SetBuild(crate::GraphSetBuildError::ColumnType { .. })
         ));
         assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn fnx_projection_names_resolve_once_and_determine_template_identity() {
+        let statement = "CALL fnx.pagerank(label => 'Person', relation => 'R', \
+                         weight => 'cost') YIELD node RETURN node";
+        let mut calls = Vec::new();
+        let resolve = |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Label, "Person" | "Human") => {
+                Some(GraphSymbol::Label(LabelId(7)))
+            }
+            _ => symbols(kind, name),
+        };
+        let prepared = PreparedGraphSetText::prepare(statement, |kind, name| {
+            calls.push((kind, name.to_owned()));
+            resolve(kind, name)
+        })
+        .unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                (GraphSymbolKind::Label, "Person".to_owned()),
+                (GraphSymbolKind::Relation, "R".to_owned()),
+                (GraphSymbolKind::Property, "cost".to_owned()),
+            ]
+        );
+        prepared.bind_parameters(&GqlParameters::new()).unwrap();
+        let alias = PreparedGraphSetText::prepare(
+            "CALL fnx.pagerank(label => 'Human', relation => 'R', \
+             weight => 'cost') YIELD node RETURN node",
+            resolve,
+        )
+        .unwrap();
+        assert_eq!(prepared.canonical_template_bytes(), alias.canonical_template_bytes());
+        let changed = PreparedGraphSetText::prepare(statement, |kind, name| {
+            if kind == GraphSymbolKind::Relation {
+                Some(GraphSymbol::Relation(RelationId(2)))
+            } else {
+                resolve(kind, name)
+            }
+        })
+        .unwrap();
+        assert_ne!(prepared.canonical_template_bytes(), changed.canonical_template_bytes());
+    }
+
+    #[test]
+    fn fnx_projection_schema_errors_refuse_even_for_an_empty_page() {
+        for (argument, kind) in [
+            ("label", GraphSymbolKind::Label),
+            ("relation", GraphSymbolKind::Relation),
+            ("weight", GraphSymbolKind::Property),
+        ] {
+            let statement = format!(
+                "CALL fnx.pagerank({argument} => 'Missing') YIELD node RETURN node LIMIT 0"
+            );
+            let error = PreparedGraphSetText::prepare(&statement, |_, _| None).unwrap_err();
+            assert_eq!(
+                error.kind,
+                crate::GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::UnknownSymbol(kind))
+            );
+            let found = if kind == GraphSymbolKind::Label {
+                GraphSymbol::Relation(RelationId(1))
+            } else {
+                GraphSymbol::Label(LabelId(1))
+            };
+            let error = PreparedGraphSetText::prepare(&statement, |_, _| Some(found)).unwrap_err();
+            assert_eq!(
+                error.kind,
+                crate::GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::WrongSymbolKind {
+                    expected: kind,
+                    found: found.kind(),
+                })
+            );
+            for value in ["1", "NULL", "$dynamic"] {
+                let statement = format!(
+                    "CALL fnx.pagerank({argument} => {value}) YIELD node RETURN node LIMIT 0"
+                );
+                let mut calls = 0;
+                assert!(PreparedGraphSetText::prepare(&statement, |_, _| {
+                    calls += 1;
+                    None
+                })
+                .is_err());
+                assert_eq!(calls, 0, "{statement}");
+            }
+        }
     }
 }

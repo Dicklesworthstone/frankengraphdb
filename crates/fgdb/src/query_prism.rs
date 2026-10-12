@@ -26,6 +26,10 @@ use std::num::NonZeroUsize;
 
 use fgdb_prism::FnxSealedExecutionError;
 
+#[path = "query_prism/projection.rs"]
+mod projection;
+pub(crate) use projection::{bind_procedure, procedure_options};
+
 type Error = FnxReadError<ReadError, Cancel>;
 type SealedReadError = FnxSealedReadError<ReadError, Cancel>;
 
@@ -66,10 +70,10 @@ impl core::error::Error for ProcedureError {
 }
 
 /// Prism as the procedure host of a native set read: bind the call through
-/// the same typed resolution as `call_fnx`, then run it over the canonical
-/// whole-graph projection at the read's own snapshot, so a later MATCH and
-/// the analytics see one generation. Admission is capped by what the read
-/// has left; the rows' cost is charged to that same policy. A completed
+/// the same typed resolution as `call_fnx`, then run its explicit projection
+/// or canonical whole-graph default at the read's own snapshot, so a later
+/// MATCH and the analytics see one generation. Admission is capped by what
+/// the read has left; the rows' cost is charged to that same policy. A completed
 /// call's Prism certificate is appended to `evidence`, in execution order,
 /// for a certified read to fold into its own certificate (fgdb-3b1v7).
 pub(crate) fn fnx_procedure(
@@ -106,20 +110,12 @@ fn refuse<C>(error: ProcedureError) -> GqlQueryError<GqlError, C> {
     GqlQueryError::Source(GqlError::Procedure(error))
 }
 
-/// Bind a CALL stage through the same typed resolution as `call_fnx`: exact
-/// argument domains, the registry's YIELD fields, and the vertex requirement
-/// a written or implied MATCH places on an output (fgdb-luq0b). Every host,
-/// authorized or not, binds here, so a call means the same thing in each.
-pub(crate) fn bind_procedure<C>(
+/// Bind the kernel portion after projection arguments have been separated.
+/// Every host retains the same registered argument and output-domain checks.
+fn bind_kernel<C>(
     call: &PreparedProcedureCall,
     arguments: &[GraphValue],
 ) -> Result<FnxCallSpec, GqlQueryError<GqlError, C>> {
-    if !call.argument_names().is_empty() {
-        return Err(refuse(ProcedureError::Bind(FnxCallError {
-            site: FnxCallSite::Argument(0),
-            kind: FnxBindErrorKind::InvalidArgument("Prism procedures take positional arguments"),
-        })));
-    }
     let mut supplied = Vec::with_capacity(arguments.len());
     for (index, value) in arguments.iter().enumerate() {
         let argument = match value {
@@ -165,8 +161,8 @@ pub(crate) fn bind_procedure<C>(
 }
 
 /// The canonical whole-graph projection at the read's sequence, admitted
-/// within what the read has left.
-pub(crate) fn procedure_options(
+/// within what the read has left. Explicit projections retain these ceilings.
+fn kernel_options(
     spec: &FnxCallSpec,
     as_of: CommitSeq,
     remaining: GqlQueryPolicy,

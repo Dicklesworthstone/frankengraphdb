@@ -24,7 +24,11 @@ pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
-pub use procedure::{GraphSetSource, PreparedProcedureCall, WithProcedures};
+pub use procedure::{
+    GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection,
+    ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
+    WithProcedures,
+};
 pub use projection::{
     GqlTimeZones, GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
     GraphTemporalFunction, GraphValueFunction,
@@ -467,6 +471,31 @@ impl PreparedGraphSet {
         outputs: Vec<(String, String)>,
         vertices: Vec<usize>,
     ) -> Result<Self, GraphSetProjectionError> {
+        self.procedure_call_with_projection(
+            namespace,
+            name,
+            arguments,
+            names,
+            outputs,
+            vertices,
+            None,
+        )
+    }
+
+    /// A procedure call with a catalog-bound graph projection. The projection
+    /// narrows the host's authorized snapshot; source, output and argument
+    /// checks are the same as [`Self::procedure_call`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn procedure_call_with_projection(
+        self,
+        namespace: String,
+        name: String,
+        arguments: Vec<GraphSetValue>,
+        names: Vec<String>,
+        outputs: Vec<(String, String)>,
+        vertices: Vec<usize>,
+        graph_projection: Option<ProcedureGraphProjection>,
+    ) -> Result<Self, GraphSetProjectionError> {
         use GraphSetProjectionError as Error;
         if !matches!(self.node, SetNode::Values)
             || !self.columns.is_empty()
@@ -530,6 +559,7 @@ impl PreparedGraphSet {
                 name,
                 arguments,
                 names,
+                graph_projection,
                 outputs: output_names,
                 vertices,
             })),

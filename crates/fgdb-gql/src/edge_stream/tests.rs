@@ -388,6 +388,119 @@ fn invalid_sources_are_errors_not_missing_rows_and_debug_is_redacted() {
 }
 
 #[test]
+fn directed_edge_identity_alone_orders_properties_parallel_edges_and_self_loops() {
+    for direction in [GlaDirection::Forward, GlaDirection::Reverse] {
+        for only_edge in [false, true] {
+            for quantifier in ["ALL", "DISTINCT"] {
+                for (skip, limit) in [(0, 100), (1, 2), (2, 0)] {
+                    let projection = if only_edge {
+                        "r"
+                    } else {
+                        "r, r.p AS weight, b AS target, a.p AS source_property"
+                    };
+                    let edge = if direction == GlaDirection::Forward {
+                        "(a)-[r:R]->(b)"
+                    } else {
+                        "(a)<-[r:R]-(b)"
+                    };
+                    let text = format!(
+                        "MATCH {edge} RETURN {quantifier} {projection} SKIP {skip} LIMIT {limit}"
+                    );
+                    let pattern = prepared(&text);
+                    let plan = EdgeScanPlan::compile(pattern.plan()).unwrap();
+                    let mut fixture = Fixture::new();
+                    // Parallel edges with equal properties remain independent
+                    // occurrences; their captured identities are not aliases.
+                    fixture.edges.get_mut(&EId(2)).unwrap().3 = fixture.edges[&EId(1)].3.clone();
+                    let mut expected = Vec::new();
+                    for (&id, (from, rel, to, properties)) in &fixture.edges {
+                        if *rel != R {
+                            continue;
+                        }
+                        let (a, b) = if direction == GlaDirection::Forward {
+                            (*from, *to)
+                        } else {
+                            (*to, *from)
+                        };
+                        let mut row = vec![GraphValue::Edge(id)];
+                        if !only_edge {
+                            row.extend([
+                                GraphValue::Scalar(
+                                    properties
+                                        .first()
+                                        .map_or(CanonicalScalar::Null, |(_, v)| v.clone()),
+                                ),
+                                GraphValue::Vertex(b),
+                                GraphValue::Scalar(
+                                    fixture.value(a).cloned().unwrap_or(CanonicalScalar::Null),
+                                ),
+                            ]);
+                        }
+                        expected.push(row);
+                    }
+                    expected.sort();
+                    let expected: Vec<_> = expected.into_iter().skip(skip).take(limit).collect();
+                    let eager = pattern
+                        .plan()
+                        .execute_governed_with_element_properties(
+                            fixture.edges.len() as u64,
+                            fixture.vertices.keys().copied(),
+                            fixture
+                                .edges
+                                .iter()
+                                .map(|(&id, (a, r, b, _))| (id, *a, *r, *b)),
+                            |_, _| Ok::<_, ()>(true),
+                            |id, _| Ok(fixture.value(id)),
+                            |id, _| Ok(fixture.edges[&id].3.first().map(|(_, v)| v)),
+                            policy(),
+                            || Ok::<_, ()>(()),
+                        )
+                        .unwrap();
+                    assert_eq!(plain(&eager.value), expected, "{text}");
+                    let visits = Arc::clone(&fixture.visits);
+                    let mut cursor =
+                        EdgeScanCursor::new(fixture, plan, policy(), || Ok::<_, ()>(()));
+                    assert_eq!(visits.load(Ordering::SeqCst), 0);
+                    let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(plain(&actual), expected, "{text}");
+                    assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
+                    assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn omitted_orientation_cannot_change_undirected_order_or_distinct_semantics() {
+    for quantifier in ["ALL", "DISTINCT"] {
+        for projection in ["r", "r, b", "r, r.p AS weight, a"] {
+            let text = format!("MATCH (a)-[r:R]-(b) RETURN {quantifier} {projection} LIMIT 0");
+            assert!(
+                EdgeScanPlan::compile(prepared(&text).plan()).is_err(),
+                "{text}"
+            );
+        }
+    }
+    let pattern = prepared("MATCH (a)-[r:R]->(b) RETURN r, b");
+    let fixture = Fixture::new();
+    let visits = Arc::clone(&fixture.visits);
+    let total = fixture.edges.len();
+    let mut cursor = EdgeScanCursor::new(
+        fixture,
+        EdgeScanPlan::compile(pattern.plan()).unwrap(),
+        policy(),
+        || Ok::<_, ()>(()),
+    );
+    assert!(cursor.next().unwrap().is_ok());
+    assert!(visits.load(Ordering::SeqCst) < total);
+    let paused = visits.load(Ordering::SeqCst);
+    cursor.close();
+    assert!(cursor.next().is_none());
+    assert_eq!(visits.load(Ordering::SeqCst), paused);
+}
+
+#[test]
 fn unsupported_shape_or_non_streamable_order_is_refused_instead_of_reordered() {
     for statement in [
         "MATCH (a)-[r:R]->(b) RETURN a, r, b",

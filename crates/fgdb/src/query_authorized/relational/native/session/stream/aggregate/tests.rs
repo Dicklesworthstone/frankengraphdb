@@ -94,7 +94,10 @@ fn scalar(value: i64) -> QueryValue {
 fn null() -> QueryValue {
     QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
 }
-fn native(cursor: &mut AuthorizedAggregateCursor<'_>) -> QueryResult {
+fn native<Driver>(cursor: &mut AuthorizedAggregateCursor<'_, Driver>) -> QueryResult
+where
+    Driver: FnMut() -> Result<(Option<GraphAggregateRow>, bool), QueryError>,
+{
     let slots = cursor.output_slots().to_vec();
     let columns = cursor.columns().to_vec();
     let rows = cursor
@@ -195,6 +198,19 @@ fn all_eleven_native_aggregates_mask_before_grouping_and_keep_lossless_return_la
         assert_eq!(got, eager);
         assert_eq!(cursor.state(), VertexScanState::Exhausted);
         assert!(cursor.next().is_none());
+        drop(cursor);
+        let mut cursor = session
+            .stream_aggregate_send(&cx, &prepared, &args)
+            .unwrap();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&cursor);
+        // Moving the same borrowed source to a worker changes neither exact
+        // arithmetic nor the masked RETURN layout, including repeated keys.
+        let sent =
+            std::thread::scope(|workers| workers.spawn(|| native(&mut cursor)).join().unwrap());
+        assert_eq!(sent, expected);
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(cursor.next().is_none());
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -242,6 +258,12 @@ fn grouped_pages_and_parameterized_anonymous_probes_keep_native_semantics() {
             let got = native(&mut session.stream_aggregate(&cx, &prepared, &args).unwrap());
             assert_eq!(got, expected, "{text}");
             assert_eq!(got, eager, "{text}");
+            let sent = native(
+                &mut session
+                    .stream_aggregate_send(&cx, &prepared, &args)
+                    .unwrap(),
+            );
+            assert_eq!(sent, expected, "{text}");
         }
         let low = GqlParameters::new().with_int64("wanted", 3).unwrap();
         let high = GqlParameters::new().with_int64("wanted", 999).unwrap();

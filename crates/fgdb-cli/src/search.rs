@@ -26,6 +26,9 @@
 //!   follows the reached neighbourhood, not the whole selected edge set;
 //! - `--k <n>` bounds the hits (default 10), `--vertex-label <label>`
 //!   restricts the corpus and `--as-of <seq>` pins a committed sequence.
+//! - `--eligible <vid,...>` restricts result endpoints before candidate limits.
+//!   Omission is unrestricted; an empty string selects no results. Corpus
+//!   statistics and graph/ANN transit still use the whole selected corpus.
 //!
 //! The index is built for this one call from the selected generation, so a
 //! result always describes exactly the reported `seq`.
@@ -57,6 +60,7 @@ pub(super) struct SearchFlags {
     k: Option<usize>,
     candidates: Option<u32>,
     vertex_label: Option<String>,
+    eligible: Option<Vec<VId>>,
     as_of: Option<CommitSeq>,
     expand_from: Option<Vec<VId>>,
     expand_relation: Option<String>,
@@ -71,8 +75,12 @@ pub(super) struct SearchFlags {
 /// `--max-expansions` says otherwise. Beacon refuses a query that exceeds it.
 const DEFAULT_MAX_EXPANSIONS: usize = 64;
 
+/// Bound ingress occurrences before allocating the sorted membership set.
+/// Duplicate IDs count toward this limit even though membership is a set.
+const MAX_ELIGIBLE_IDS: usize = 100_000;
+
 impl SearchFlags {
-    pub(super) const FLAGS: [&str; 19] = [
+    pub(super) const FLAGS: [&str; 20] = [
         "--text",
         "--text-property",
         "--text-match",
@@ -84,6 +92,7 @@ impl SearchFlags {
         "--k",
         "--candidates",
         "--vertex-label",
+        "--eligible",
         "--as-of",
         "--expand-from",
         "--expand-relation",
@@ -173,6 +182,31 @@ impl SearchFlags {
                 once(&mut self.candidates, n, flag)
             }
             "--vertex-label" => once(&mut self.vertex_label, value.to_owned(), flag),
+            "--eligible" => {
+                let mut ids = Vec::new();
+                if !value.trim().is_empty() {
+                    for raw in value.split(',') {
+                        if ids.len() == MAX_ELIGIBLE_IDS {
+                            return Err(Failure::usage(format!(
+                                "--eligible accepts at most {MAX_ELIGIBLE_IDS} vertex identities",
+                            )));
+                        }
+                        let raw = raw.trim();
+                        if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                            return Err(Failure::usage(
+                                "--eligible is comma-separated unsigned decimal vertex identities",
+                            ));
+                        }
+                        let id = raw.parse::<u128>().map_err(|_| {
+                            Failure::usage("--eligible vertex identities must fit in u128")
+                        })?;
+                        ids.push(VId(id));
+                    }
+                }
+                ids.sort_unstable();
+                ids.dedup();
+                once(&mut self.eligible, ids, flag)
+            }
             "--as-of" => {
                 let seq = value
                     .parse()
@@ -266,6 +300,7 @@ pub(super) struct Prepared {
     /// Per-lane candidate depth of a fused search (`--candidates`, default k).
     candidates: u32,
     graph: Option<GraphLane>,
+    eligible: Option<Vec<VId>>,
 }
 
 fn property(name: &str, bindings: &BTreeMap<String, u32>) -> Result<PropertyKeyId, Failure> {
@@ -456,6 +491,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         k,
         candidates,
         graph,
+        eligible: flags.eligible.clone(),
     })
 }
 
@@ -549,6 +585,12 @@ pub(super) fn run(
     let mut read = prepared.read.clone();
     let seq = read.as_of.unwrap_or(view.frontier());
     read.as_of = Some(seq);
+    let eligible = |id| {
+        prepared
+            .eligible
+            .as_ref()
+            .is_none_or(|ids| ids.binary_search(&id).is_ok())
+    };
     if let Some(graph) = &prepared.graph {
         let query = GraphHybridQuery {
             retrieval: prepared.retrieval()?,
@@ -567,7 +609,7 @@ pub(super) fn run(
         // reached vertices only; semantics are the whole-graph API's, which
         // tests/cli_robot.rs keeps as its oracle.
         let hits = view
-            .beacon_search_graph_indexed(cx, &read, query, expansion)
+            .beacon_search_graph_indexed_filtered(cx, &read, query, expansion, eligible)
             .map_err(Failure::query)?;
         let columns: Vec<String> = [
             "vertex",
@@ -600,7 +642,7 @@ pub(super) fn run(
         return render_rows(&columns, cells, seq.0, "searched", robot, out);
     }
     let rows = view
-        .beacon_search(cx, &read, prepared.search())
+        .beacon_search_filtered(cx, &read, prepared.search(), eligible)
         .map_err(Failure::query)?;
     let (columns, cells): (&[&str], Vec<Vec<String>>) = match &rows {
         Rows::Text(hits) => (
@@ -672,5 +714,53 @@ fn rank(value: Option<u32>, robot: bool) -> String {
         (Some(v), false) => v.to_string(),
         (None, true) => r#"{"type":"null"}"#.to_owned(),
         (None, false) => "NULL".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eligibility_distinguishes_omission_empty_and_full_width_membership() {
+        let mut flags = SearchFlags::default();
+        assert!(flags.eligible.is_none());
+        flags
+            .set("--eligible", &format!("{}, 0, 7, 7", u128::MAX))
+            .unwrap();
+        assert_eq!(flags.eligible, Some(vec![VId(0), VId(7), VId(u128::MAX)]));
+        assert!(flags.set("--eligible", "7").is_err());
+        for empty in ["", "   "] {
+            let mut flags = SearchFlags::default();
+            flags.set("--eligible", empty).unwrap();
+            assert_eq!(flags.eligible, Some(Vec::new()));
+        }
+        for invalid in [
+            "-1",
+            "+1",
+            "1.0",
+            "1,,2",
+            ",1",
+            "1,",
+            "null",
+            "340282366920938463463374607431768211456",
+        ] {
+            assert!(
+                SearchFlags::default().set("--eligible", invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn eligibility_bounds_occurrences_before_duplicate_reduction() {
+        let at_limit = std::iter::repeat_n("7", MAX_ELIGIBLE_IDS)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut flags = SearchFlags::default();
+        flags.set("--eligible", &at_limit).unwrap();
+        assert_eq!(flags.eligible, Some(vec![VId(7)]));
+        let too_many = format!("{at_limit},7");
+        assert!(SearchFlags::default().set("--eligible", &too_many).is_err());
     }
 }

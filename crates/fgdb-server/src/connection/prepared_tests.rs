@@ -202,3 +202,145 @@ fn prepared_handles_and_borrowed_templates_never_revive_after_recovery() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn prepared_sources_rebind_without_reparsing_and_pin_one_execution_frontier() {
+    let ((), report) = run_async_under_lab(0x79a0_0411, |root| async move {
+        let (server, token, _) = served(&root, "prepared-source-frontier").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut batch = vertex(1);
+        batch.create_vertex(fgdb_types::VId(2), vec![], vec![]);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), batch)
+            .await
+            .unwrap();
+        let definition = ok(prepare_read(
+            &root,
+            db,
+            &token,
+            &Prepare {
+                statement: "MATCH (n) RETURN n AS id, $value AS value".into(),
+                parameters: vec![("value".into(), WireValue::Int(7))],
+            },
+        )
+        .await);
+        let query = contexts.query();
+        let first_parameters = fgdb_gql::GqlParameters::new()
+            .with_int64("value", 11)
+            .unwrap();
+        let (mut session, prepared) =
+            ok(crate::execute::read_prepared_session(&root, db, &token, &definition).await);
+        let mut source = ok(session.stream_prepared(&query, &prepared, &first_parameters));
+        assert_eq!(source.snapshot_seq(), 1);
+        assert_eq!(
+            ok(source.next()),
+            Some(vec![WireValue::Vertex(1), WireValue::Int(11)])
+        );
+        // The cursor has no writer lock and remains on its first snapshot.
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), vertex(3))
+            .await
+            .unwrap();
+        assert_eq!(
+            ok(source.next()),
+            Some(vec![WireValue::Vertex(2), WireValue::Int(11)])
+        );
+        assert!(ok(source.next()).is_none());
+        drop(source);
+        drop(session);
+
+        let (mut session, prepared) =
+            ok(crate::execute::read_prepared_session(&root, db, &token, &definition).await);
+        let second_parameters = fgdb_gql::GqlParameters::new()
+            .with_int64("value", 23)
+            .unwrap();
+        let mut source = ok(session.stream_prepared(&query, &prepared, &second_parameters));
+        assert_eq!(source.snapshot_seq(), 2);
+        for id in 1..=3 {
+            assert_eq!(
+                ok(source.next()),
+                Some(vec![WireValue::Vertex(id), WireValue::Int(23)])
+            );
+        }
+        assert!(ok(source.next()).is_none());
+        drop(source);
+        drop(session);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_source_cursors_and_templates_keep_recovery_and_live_authority_fences() {
+    let ((), report) = run_async_under_lab(0x79a0_0412, |root| async move {
+        let (server, token, _) = served(&root, "prepared-source-fences").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut batch = vertex(1);
+        batch.create_vertex(fgdb_types::VId(2), vec![], vec![]);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), batch)
+            .await
+            .unwrap();
+        let request = Prepare {
+            statement: "MATCH (n) RETURN n AS key, count(*) AS n GROUP BY n".into(),
+            parameters: vec![],
+        };
+        let definition = ok(prepare_read(&root, db, &token, &request).await);
+        let query = contexts.query();
+        let parameters = fgdb_gql::GqlParameters::new();
+        let (mut session, prepared) =
+            ok(crate::execute::read_prepared_session(&root, db, &token, &definition).await);
+        let mut source = ok(session.stream_prepared(&query, &prepared, &parameters));
+        assert_eq!(
+            ok(source.next()),
+            Some(vec![WireValue::Vertex(1), WireValue::Count(1)])
+        );
+        fail_after_marker(&root, db, 99).await;
+        assert_eq!(
+            settled(db).await,
+            crate::DatabaseStatus::Ready { generation: 2 }
+        );
+        assert_eq!(
+            source.next().err().unwrap().code,
+            ErrorCode::DatabaseRecovering
+        );
+        drop(source);
+        drop(session);
+        assert_eq!(
+            crate::execute::read_prepared_session(&root, db, &token, &definition)
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::DatabaseRecovering
+        );
+
+        let definition = ok(prepare_read(&root, db, &token, &request).await);
+        let (mut session, prepared) =
+            ok(crate::execute::read_prepared_session(&root, db, &token, &definition).await);
+        let mut source = ok(session.stream_prepared(&query, &prepared, &parameters));
+        assert_eq!(source.snapshot_seq(), 2);
+        assert!(ok(source.next()).is_some());
+        assert!(db.authority.retire());
+        assert_eq!(
+            source.next().err().unwrap().code,
+            ErrorCode::PermissionDenied
+        );
+        assert!(ok(source.next()).is_none());
+        drop(source);
+        drop(session);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

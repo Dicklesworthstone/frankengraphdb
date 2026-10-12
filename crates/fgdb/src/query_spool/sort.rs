@@ -14,6 +14,7 @@ mod canonical;
 #[path = "sort/prepared.rs"]
 mod prepared;
 pub use prepared::PreparedBufferedOrder;
+pub(crate) use prepared::ordered_input;
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 

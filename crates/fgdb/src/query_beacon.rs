@@ -10,7 +10,7 @@ use asupersync::fs::Vfs;
 use fgdb_beacon::read::{ReadError as Error, ReadOptions, Rows, Search};
 use fgdb_beacon::{BeaconError, BeaconIndex, IndexConfig, WorkBudget, WorkControl};
 use fgdb_delta_types::{LabelId, PropertyKeyId};
-use fgdb_types::{CommitSeq, QueryCx};
+use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::cell::RefCell;
 
 #[path = "query_beacon/graph.rs"]
@@ -218,6 +218,36 @@ pub(crate) fn evaluate(
     label_allowed: impl FnMut(LabelId) -> bool,
     property_allowed: impl FnMut(PropertyKeyId) -> bool,
 ) -> Result<Rows, BeaconError> {
+    evaluate_filtered(
+        snapshot,
+        at,
+        options,
+        query,
+        work,
+        scan,
+        admit,
+        label_allowed,
+        property_allowed,
+        |_| true,
+    )
+}
+
+/// Result eligibility is independent of source authorization and projection.
+/// Keep the admitted corpus (and its BM25 statistics/ANN topology) unchanged;
+/// each lane applies the stable predicate before selecting its candidate depth.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_filtered(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    options: &Options,
+    query: Search<'_>,
+    work: &RefCell<impl WorkControl>,
+    scan: Scan<'_>,
+    admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
+    label_allowed: impl FnMut(LabelId) -> bool,
+    property_allowed: impl FnMut(PropertyKeyId) -> bool,
+    eligible: impl Fn(VId) -> bool,
+) -> Result<Rows, BeaconError> {
     work.borrow_mut().charge(1)?;
     let config = options.config_for(query)?;
     query.validate(&config, &mut SharedWork(work))?;
@@ -232,7 +262,7 @@ pub(crate) fn evaluate(
         label_allowed,
         property_allowed,
     )?;
-    let rows = query.execute(&index.snapshot(), &mut SharedWork(work))?;
+    let rows = query.execute_filtered(&index.snapshot(), eligible, &mut SharedWork(work))?;
     // Even empty and native zero-k paths cannot skip final live admission.
     work.borrow_mut().charge(1)?;
     Ok(rows)
@@ -250,11 +280,27 @@ impl<V: Vfs + Clone> Database<V> {
         options: &Options,
         query: Search<'_>,
     ) -> Result<Rows, Error<ReadError, Cancel>> {
+        self.beacon_search_filtered(cx, options, query, |_| true)
+    }
+
+    /// Search eligible results before native candidate limits and final top-k.
+    /// The predicate must be stable, bounded host-side computation over IDs,
+    /// not I/O or a capability check. It does not narrow the source corpus or
+    /// change BM25 statistics; rejected vertices can still route ANN search.
+    /// Use a pinned read view when deriving eligibility from database state.
+    /// This remains privileged, resident retrieval; ANN remains approximate.
+    pub fn beacon_search_filtered(
+        &self,
+        cx: &QueryCx,
+        options: &Options,
+        query: Search<'_>,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Rows, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
             self.read_session()
                 .map_err(Error::Read)?
-                .beacon_search(cx, options, query)
+                .beacon_search_filtered(cx, options, query, eligible)
         })
     }
 }
@@ -270,6 +316,22 @@ impl EmbeddedReadView {
         options: &Options,
         query: Search<'_>,
     ) -> Result<Rows, Error<ReadError, Cancel>> {
+        self.beacon_search_filtered(cx, options, query, |_| true)
+    }
+
+    /// Filter source candidates at this view's pinned historical cut, never
+    /// by filtering an already-truncated result. Derive any data-dependent
+    /// eligibility from this same view and `options.as_of`. The host predicate
+    /// is not an authorization boundary and must be stable and bounded.
+    /// One existing meter covers construction, search and final publication;
+    /// reject-all does not bypass validation, source limits or cancellation.
+    pub fn beacon_search_filtered(
+        &self,
+        cx: &QueryCx,
+        options: &Options,
+        query: Search<'_>,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Rows, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
             let at = options.as_of.unwrap_or(self.frontier());
@@ -277,7 +339,7 @@ impl EmbeddedReadView {
             let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
                 cx.checkpoint()
             }));
-            let result = evaluate(
+            let result = evaluate_filtered(
                 &self.snapshot,
                 at,
                 options,
@@ -287,8 +349,204 @@ impl EmbeddedReadView {
                 |_| Ok(true),
                 |_| true,
                 |_| true,
+                eligible,
             );
             work.into_inner().finish(result)
         })
+    }
+}
+
+#[cfg(test)]
+mod filtered_tests {
+    use super::*;
+    use crate::{DatabaseKeys, WriteBatch};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_beacon::{
+        DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch,
+    };
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+
+    const SECOND: VId = VId((1_u128 << 100) + 2);
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new(
+            [0x41; 32],
+            DatabaseSecurityNamespaceId([0x42; 32]),
+            [0x43; 32],
+        )
+    }
+
+    fn initial() -> WriteBatch {
+        let mut batch = WriteBatch::new(RelationId(1));
+        for (id, coordinate) in [(VId(1), 0), (SECOND, 1)] {
+            batch.create_vertex(
+                id,
+                vec![],
+                vec![
+                    (PropertyKeyId(1), CanonicalScalar::ucs_basic_text("red").unwrap()),
+                    (PropertyKeyId(2), CanonicalScalar::Int(coordinate)),
+                ],
+            );
+        }
+        batch
+    }
+
+    fn options() -> Options {
+        let mut options = Options::text(PropertyKeyId(1));
+        options.projection.vector = vec![PropertyKeyId(2)];
+        options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
+        options
+    }
+
+    fn queries() -> [Search<'static>; 3] {
+        [
+            Search::Text { query: "red", k: 1, mode: TextMatch::Any },
+            Search::Vector { query: &[0.0], k: 1, mode: VectorSearch::Exact },
+            Search::Hybrid(ExactHybridQuery {
+                vector: &[0.0],
+                text: "red",
+                k: 1,
+                vector_candidates: 1,
+                text_candidates: 1,
+                vector_mode: VectorSearch::Exact,
+                text_mode: TextMatch::Any,
+                profile: ExactRrfProfile::default(),
+            }),
+        ]
+    }
+
+    fn ids(rows: &Rows) -> Vec<VId> {
+        match rows {
+            Rows::Text(rows) => rows.iter().map(|row| row.id).collect(),
+            Rows::Vector(rows) => rows.iter().map(|row| row.id).collect(),
+            Rows::Hybrid(rows) => rows.iter().map(|row| row.id).collect(),
+        }
+    }
+
+    #[test]
+    fn filtering_refills_each_native_lane_before_candidate_depth_and_top_k() {
+        let ((), report) = run_async_under_lab(0xbeac_3101, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            db.write(&commit, initial()).await.unwrap();
+            for query in queries() {
+                let baseline = db.beacon_search(&cx, &options(), query).unwrap();
+                assert_eq!(ids(&baseline), [VId(1)]);
+                let rows = db
+                    .beacon_search_filtered(&cx, &options(), query, |id| id == SECOND)
+                    .unwrap();
+                assert_eq!(ids(&rows), [SECOND]);
+                if let Rows::Hybrid(hits) = rows {
+                    assert_eq!(hits[0].vector_rank.unwrap().get(), 1);
+                    assert_eq!(hits[0].text_rank.unwrap().get(), 1);
+                    assert_eq!(hits[0].score.numerator(), 2);
+                    assert_eq!(hits[0].score.denominator(), 61);
+                }
+                assert!(db
+                    .beacon_search_filtered(&cx, &options(), query, |_| false)
+                    .unwrap()
+                    .is_empty());
+                assert_eq!(
+                    db.beacon_search_filtered(&cx, &options(), query, |_| true).unwrap(),
+                    baseline
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn filtered_reads_keep_retained_history_through_delete_compaction_and_writer_drop() {
+        let ((), report) = run_async_under_lab(0xbeac_3102, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let at = db.write(&commit, initial()).await.unwrap();
+            let pinned = db.read_session().unwrap();
+            let query = queries()[2];
+            let before = pinned
+                .beacon_search_filtered(&cx, &options(), query, |id| id == SECOND)
+                .unwrap();
+            let mut changes = WriteBatch::new(RelationId(1));
+            changes.delete_vertex(SECOND);
+            db.write(&commit, changes).await.unwrap();
+            assert!(db
+                .beacon_search_filtered(&cx, &options(), query, |id| id == SECOND)
+                .unwrap()
+                .is_empty());
+            db.compact(&commit).await.unwrap();
+            let mut historical = options();
+            historical.as_of = Some(at);
+            assert_eq!(
+                db.beacon_search_filtered(&cx, &historical, query, |id| id == SECOND).unwrap(),
+                before
+            );
+            historical.as_of = Some(CommitSeq(at.0 + 1));
+            assert!(matches!(
+                pinned.beacon_search_filtered(&cx, &historical, query, |_| false),
+                Err(Error::Read(ReadError::BeyondFrontier { .. }))
+            ));
+            drop(db);
+            assert_eq!(
+                pinned.beacon_search_filtered(&cx, &options(), query, |id| id == SECOND).unwrap(),
+                before
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn reject_all_never_bypasses_source_limits_or_any_work_checkpoint() {
+        #[derive(Default)]
+        struct Cut { calls: usize, stop: Option<usize> }
+        impl WorkControl for Cut {
+            fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
+                self.calls += 1;
+                if self.stop == Some(self.calls) {
+                    Err(BeaconError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let ((), report) = run_async_under_lab(0xbeac_3103, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let at = db.write(&commit, initial()).await.unwrap();
+            let manifest = db.manifest().unwrap();
+            for query in queries() {
+                let run = |stop| {
+                    let work = RefCell::new(Cut { stop, ..Cut::default() });
+                    let result = evaluate_filtered(
+                        &db.snapshot, at, &options(), query, &work, Scan::Metered,
+                        |_| Ok(true), |_| true, |_| true, |_| false,
+                    );
+                    (result, work.into_inner().calls)
+                };
+                let (rows, calls) = run(None);
+                assert!(rows.unwrap().is_empty());
+                assert!(calls > 2);
+                for stop in 1..=calls {
+                    let (result, seen) = run(Some(stop));
+                    assert!(matches!(result, Err(BeaconError::Cancelled)), "cut {stop}");
+                    assert_eq!(seen, stop);
+                }
+                let mut limited = options();
+                limited.policy.max_staging_rows = 0;
+                assert!(matches!(
+                    db.beacon_search_filtered(&cx, &limited, query, |_| false),
+                    Err(Error::Index(BeaconError::ResourceLimit { resource: "staged vertices", .. }))
+                ));
+            }
+            assert_eq!(db.frontier().unwrap(), at);
+            assert_eq!(db.manifest().unwrap(), manifest);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }

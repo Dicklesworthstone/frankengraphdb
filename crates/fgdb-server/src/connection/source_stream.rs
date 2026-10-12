@@ -1,9 +1,17 @@
 //! Credit-driven native source reads, with one retained session and permit.
-//! A frame and at most one row awaiting byte credit are the only row buffers.
+//! A frame and at most one row awaiting byte credit are the adapter's only row
+//! buffers. Native aggregates retain their governed group/support state and
+//! consume the input on first demand, then move completed groups through this
+//! same delivery path without rescanning or collecting the source graph.
 
 use super::*;
-use crate::execute::read_session;
+use crate::execute::{read_prepared_session, read_session};
 use fgdb_types::PurposeContexts;
+
+pub(super) enum SourceStatement<'a> {
+    Text(&'a str),
+    Prepared(&'a PreparedRead),
+}
 
 struct Chunks {
     columns: Option<Vec<String>>,
@@ -108,9 +116,10 @@ impl Lane {
         request: u64,
         stream: StreamId,
         binding: Binding,
-        statement: &Execute,
+        statement: SourceStatement<'_>,
+        parameters: &[(String, WireValue)],
     ) -> Result<(), Stop> {
-        let parameters = match crate::convert::parameters(&statement.parameters, None) {
+        let parameters = match crate::convert::parameters(parameters, None) {
             Ok(parameters) => parameters,
             Err(error) => {
                 return self
@@ -125,7 +134,23 @@ impl Lane {
                     .await;
             }
         };
-        let (mut session, _) = match read_session(cx, db, token).await {
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        let query = contexts.query();
+        let opened = match statement {
+            SourceStatement::Text(text) => match read_session(cx, db, token).await {
+                Ok((mut session, _)) => {
+                    self.send_generation = Some(session.generation());
+                    session
+                        .prepare(&query, text, &parameters)
+                        .map(|prepared| (session, prepared))
+                }
+                Err(error) => Err(error),
+            },
+            SourceStatement::Prepared(prepared) => {
+                read_prepared_session(cx, db, token, prepared).await
+            }
+        };
+        let (mut session, prepared) = match opened {
             Ok(opened) => opened,
             Err(error) => {
                 return self
@@ -134,9 +159,7 @@ impl Lane {
             }
         };
         self.send_generation = Some(session.generation());
-        let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let query = contexts.query();
-        let mut source = match session.stream(&query, &statement.statement, &parameters) {
+        let mut source = match session.stream_prepared(&query, &prepared, &parameters) {
             Ok(source) => source,
             Err(error) => {
                 return self
@@ -230,8 +253,13 @@ impl Lane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recovery::tests::{fail_after_marker, served, settled, vertex};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbolKind};
+    use fgdb_types::{EId, VId};
+    use fgdb_warden::{Grant, QueryLimits};
 
-    fn accepted(result: Result<Option<ResultChunk>, Refusal>) -> Option<ResultChunk> {
+    fn accepted<T>(result: Result<T, Refusal>) -> T {
         result.unwrap_or_else(|error| panic!("unexpected refusal: {}", error.message))
     }
 
@@ -327,5 +355,268 @@ mod tests {
             .expect_err("oversized row refusal");
         assert_eq!(error.code, ErrorCode::Execution);
         assert!(!chunks.done());
+    }
+
+    #[test]
+    fn aggregate_open_and_zero_credit_do_not_consume_the_native_input() {
+        let ((), report) = run_async_under_lab(0x79a0_0511, |root| async move {
+            let (server, _, _) = served(&root, "aggregate-zero-credit").await;
+            let db = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), vertex(1))
+                .await
+                .unwrap();
+            let token = db
+                .authority
+                .issue_at(
+                    &Grant::read_only(
+                        crate::TRUNK,
+                        u64::MAX / 2,
+                        QueryLimits {
+                            max_nodes: 0,
+                            max_work: 100_000,
+                            max_rows: 1,
+                        },
+                    ),
+                    crate::unix_millis(),
+                )
+                .unwrap();
+            let (mut session, _) = accepted(read_session(&root, db, &token).await);
+            let query = contexts.query();
+            let mut source = accepted(session.stream(
+                &query,
+                "MATCH (n) RETURN count(*) AS n",
+                &GqlParameters::new(),
+            ));
+            let mut chunks = Chunks::new(source.columns().to_vec());
+            let mut pull = || source.next().map(|row| (row, source.exhausted()));
+            let metadata = accepted(chunks.next(128, 0, 128, &mut pull)).unwrap();
+            assert_eq!(metadata.columns, Some(vec!["n".into()]));
+            assert!(metadata.rows.is_empty());
+            assert!(accepted(chunks.next(128, 0, 128, &mut pull)).is_none());
+            assert!(accepted(chunks.next(0, 1, 128, &mut pull)).is_none());
+            let error = chunks.next(128, 1, 128, &mut pull).err().unwrap();
+            assert_eq!(error.code, ErrorCode::Budget);
+            assert!(
+                !chunks.done(),
+                "a denied input must not become aggregate EOF"
+            );
+            drop(source);
+            drop(session);
+            server.join_database_workers(&root).await;
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn prepared_source_open_waits_for_credit_and_refuses_unsupported_profiles_before_scan() {
+        let ((), report) = run_async_under_lab(0x79a0_0514, |root| async move {
+            let (server, _, _) = served(&root, "prepared-zero-credit").await;
+            let db = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), vertex(1))
+                .await
+                .unwrap();
+            let token = db
+                .authority
+                .issue_at(
+                    &Grant::read_only(
+                        crate::TRUNK,
+                        u64::MAX / 2,
+                        QueryLimits {
+                            max_nodes: 0,
+                            max_work: 100_000,
+                            max_rows: 4,
+                        },
+                    ),
+                    crate::unix_millis(),
+                )
+                .unwrap();
+            let query = contexts.query();
+            let parameters = GqlParameters::new();
+            for text in [
+                "MATCH (n) RETURN n",
+                "MATCH (n) RETURN count(*) AS n",
+            ] {
+                let definition = accepted(crate::execute::prepare_read(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        statement: text.into(),
+                        parameters: vec![],
+                    },
+                )
+                .await);
+                let (mut session, prepared) =
+                    accepted(read_prepared_session(&root, db, &token, &definition).await);
+                let mut source =
+                    accepted(session.stream_prepared(&query, &prepared, &parameters));
+                let mut chunks = Chunks::new(source.columns().to_vec());
+                let mut pull = || source.next().map(|row| (row, source.exhausted()));
+                let metadata = accepted(chunks.next(128, 0, 128, &mut pull)).unwrap();
+                assert!(metadata.rows.is_empty());
+                assert!(accepted(chunks.next(128, 0, 128, &mut pull)).is_none());
+                assert!(accepted(chunks.next(0, 1, 128, &mut pull)).is_none());
+                assert_eq!(
+                    chunks.next(128, 1, 128, &mut pull).err().unwrap().code,
+                    ErrorCode::Budget,
+                    "{text}"
+                );
+                assert!(!chunks.done());
+            }
+            let definition = accepted(crate::execute::prepare_read(
+                &root,
+                db,
+                &token,
+                &Prepare {
+                    statement: "MATCH (n) RETURN 1 AS value".into(),
+                    parameters: vec![],
+                },
+            )
+            .await);
+            let (mut session, prepared) =
+                accepted(read_prepared_session(&root, db, &token, &definition).await);
+            assert_eq!(
+                session
+                    .stream_prepared(&query, &prepared, &parameters)
+                    .err()
+                    .unwrap()
+                    .code,
+                ErrorCode::Statement,
+                "profile refusal must precede the zero-node execution limit"
+            );
+            drop(session);
+            for text in [
+                "MATCH (n) RETURN id(n)",
+                "MATCH (n) RETURN elementId(n)",
+            ] {
+                assert_eq!(
+                    crate::execute::prepare_read(
+                        &root,
+                        db,
+                        &token,
+                        &Prepare {
+                            statement: text.into(),
+                            parameters: vec![],
+                        },
+                    )
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                    ErrorCode::PermissionDenied
+                );
+            }
+            server.join_database_workers(&root).await;
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn native_aggregate_work_and_scratch_failures_keep_their_budget_class() {
+        let ((), report) = run_async_under_lab(0x79a0_0512, |root| async move {
+            let (mut server, token, _) = served(&root, "aggregate-native-limits").await;
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let mut batch = vertex(1);
+            batch.create_vertex(VId(2), vec![], vec![]);
+            batch.add_edge(EId(1), VId(1), VId(2), vec![]);
+            server.databases["test"]
+                .db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), batch)
+                .await
+                .unwrap();
+            Arc::get_mut(server.databases.get_mut("test").unwrap())
+                .unwrap()
+                .symbols
+                .bind(GraphSymbolKind::Relation, "R", 1)
+                .unwrap();
+            let query = contexts.query();
+            for policy in [
+                GqlQueryPolicy::new(1000, 1000, 0, 1_000_000),
+                GqlQueryPolicy::new(1000, 1000, 1_000_000, 0),
+            ] {
+                Arc::get_mut(server.databases.get_mut("test").unwrap())
+                    .unwrap()
+                    .query_policy = policy;
+                let db = &server.databases["test"];
+                for text in [
+                    "MATCH (n) RETURN count(*) AS n",
+                    "MATCH (a)-[:R]->(b) RETURN count(*) AS n",
+                ] {
+                    let (mut session, _) = accepted(read_session(&root, db, &token).await);
+                    let mut source = accepted(session.stream(&query, text, &GqlParameters::new()));
+                    let error = source.next().err().expect("native allowance must refuse");
+                    assert_eq!(error.code, ErrorCode::Budget, "{text}: {}", error.message);
+                }
+            }
+            server.join_database_workers(&root).await;
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn completed_aggregate_groups_remain_fenced_by_recovery_and_live_authority() {
+        let ((), report) = run_async_under_lab(0x79a0_0513, |root| async move {
+            let (server, token, _) = served(&root, "aggregate-generation-fence").await;
+            let db = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let mut batch = vertex(1);
+            batch.create_vertex(VId(2), vec![], vec![]);
+            db.db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), batch)
+                .await
+                .unwrap();
+            let query = contexts.query();
+            let text = "MATCH (n) RETURN n AS key, count(*) AS n GROUP BY n";
+            let parameters = GqlParameters::new();
+            let (mut session, _) = accepted(read_session(&root, db, &token).await);
+            let mut source = accepted(session.stream(&query, text, &parameters));
+            assert_eq!(source.snapshot_seq(), 1);
+            assert_eq!(
+                accepted(source.next()),
+                Some(vec![WireValue::Vertex(1), WireValue::Count(1)])
+            );
+            fail_after_marker(&root, db, 3).await;
+            assert_eq!(
+                settled(db).await,
+                crate::DatabaseStatus::Ready { generation: 2 }
+            );
+            assert_eq!(
+                source.next().err().unwrap().code,
+                ErrorCode::DatabaseRecovering
+            );
+            drop(source);
+            drop(session);
+
+            let (mut session, _) = accepted(read_session(&root, db, &token).await);
+            let mut source = accepted(session.stream(&query, text, &parameters));
+            assert_eq!(source.snapshot_seq(), 2);
+            assert!(accepted(source.next()).is_some());
+            assert!(db.authority.retire());
+            assert_eq!(
+                source.next().err().unwrap().code,
+                ErrorCode::PermissionDenied
+            );
+            assert!(accepted(source.next()).is_none());
+            drop(source);
+            drop(session);
+            server.join_database_workers(&root).await;
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }

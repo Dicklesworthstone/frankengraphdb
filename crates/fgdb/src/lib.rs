@@ -161,14 +161,16 @@ pub use gql_cert::{
 };
 pub use gql_exec::source::{SnapshotEdgeSource, SnapshotVertexSource};
 pub use query::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendRowCursor,
-    ExplainRow, HYBRID_SEARCH_OUTPUTS, HybridCallError, NativeAggregateCursor,
-    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
-    NativeAggregateSpoolRow, NativeExplainCertificate, NativeResultCertificate, NativeResultSpool,
-    NativeSpoolCursor, NativeSpoolError, PinnedIndex, PreparedBufferedAggregate,
-    PreparedBufferedOrder, PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue,
-    QueryWriteError, RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor, ExplainRow,
+    HYBRID_SEARCH_OUTPUTS, HybridCallError, NativeAggregateCursor, NativeAggregateSpool,
+    NativeAggregateSpoolCursor, NativeAggregateSpoolError, NativeAggregateSpoolRow,
+    NativeExplainCertificate, NativeResultCertificate, NativeResultSpool, NativeSpoolCursor,
+    NativeSpoolError, PinnedIndex, PreparedBufferedAggregate, PreparedBufferedOrder,
+    PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue, QueryWriteError,
+    RefreshReport, ReplayRefusal, ResidentIndex, ResidentIndexError,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,
@@ -854,6 +856,9 @@ pub enum ReadError {
     /// Property names or values cannot form one canonical bounded map (for
     /// example, two property IDs were given the same host name).
     InvalidPropertyMap,
+    /// The explicit version-head diagnostic could not encode an admitted
+    /// statement's canonical transcript.
+    VersionHead(CanonicalError),
 }
 
 macro_rules! from_error {
@@ -1137,6 +1142,7 @@ impl core::fmt::Display for ReadError {
             Self::InvalidPropertyMap => {
                 f.write_str("properties do not form a canonical bounded map")
             }
+            Self::VersionHead(error) => write!(f, "element version head: {error}"),
         }
     }
 }
@@ -1692,7 +1698,8 @@ struct Snapshot {
 /// writing handle, beside its [`BlockWriter`], not in the [`Snapshot`] a read
 /// view shares. A view can therefore be issued without deriving them, and a
 /// commit while a view is pinned no longer copies them with the snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 struct WriteHeads {
     /// The current element-version chain head of every LIVE element,
     /// derived by folding the stream (fgdb-p3ok). This is the state a
@@ -1701,12 +1708,211 @@ struct WriteHeads {
     /// oracle's, never shared code: the differential's replay path validates
     /// every emitted image against the oracle's own chains, so a drift in
     /// either implementation is a refusal, not a silent agreement.
-    versions: std::collections::BTreeMap<ElementId, ObjectId>,
+    versions: VersionHeads,
     /// The next unspent birth ordinal, derived by counting the creations the
     /// durable stream already contains. Derived rather than stored: identity
     /// allocation is `fgdb-w2`'s, and a counter persisted here would be a second
     /// authority beside the stream.
     next_birth_ordinal: u64,
+}
+
+/// Current heads are a sparse overlay over an admitted checkpoint. The first
+/// mutation of an existing identity derives that identity's chain; subsequent
+/// mutations use its overlay head. An explicit `None` shadows a checkpoint
+/// identity after deletion, so an older live statement can never reappear.
+#[derive(Clone, Debug, Default)]
+struct VersionHeads {
+    checkpoint: Option<Arc<CheckpointVersionBasis>>,
+    changed: std::collections::BTreeMap<ElementId, Option<ObjectId>>,
+    /// Only the diagnostic API requests the full map. Sharing an initialized
+    /// result keeps historical preparation from copying every diagnostic head.
+    complete: std::sync::OnceLock<
+        Result<Arc<std::collections::BTreeMap<ElementId, ObjectId>>, CanonicalError>,
+    >,
+}
+
+impl VersionHeads {
+    fn from_checkpoint(snapshot: &Snapshot) -> Self {
+        Self {
+            checkpoint: Some(Arc::new(CheckpointVersionBasis {
+                blocks: snapshot.blocks.clone(),
+                block_props: snapshot.block_props.clone(),
+                patches: snapshot.patches.clone(),
+                vertices: snapshot.property_index.statement_histories(),
+                edges: std::sync::OnceLock::new(),
+                frontier: snapshot.frontier,
+                #[cfg(test)]
+                head_derivations: std::sync::atomic::AtomicUsize::new(0),
+            })),
+            ..Self::default()
+        }
+    }
+
+    fn get(&self, elem: &ElementId) -> Result<Option<ObjectId>, CanonicalError> {
+        if let Some(version) = self.changed.get(elem) {
+            return Ok(*version);
+        }
+        if let Some(complete) = self.complete.get() {
+            return complete
+                .as_ref()
+                .map(|heads| heads.get(elem).copied())
+                .map_err(Clone::clone);
+        }
+        self.checkpoint
+            .as_ref()
+            .map_or(Ok(None), |checkpoint| checkpoint.head(*elem))
+    }
+
+    fn insert(&mut self, elem: ElementId, version: ObjectId) {
+        self.complete.take();
+        self.changed.insert(elem, Some(version));
+    }
+
+    fn remove(&mut self, elem: &ElementId) {
+        self.complete.take();
+        if self.checkpoint.is_some() {
+            self.changed.insert(*elem, None);
+        } else {
+            self.changed.remove(elem);
+        }
+    }
+
+    /// The writer has admitted a creation, proving there is no predecessor.
+    /// Recording that fact avoids building an edge-history index merely to
+    /// discover that a newly allocated identity is absent from the checkpoint.
+    fn admit_creation(&mut self, row: &DeltaRow) -> bool {
+        let elem = match row {
+            DeltaRow::CreateVertex { vid, .. } => ElementId::Vertex(*vid),
+            DeltaRow::CreateEdge { eid, .. } => ElementId::Edge(*eid),
+            _ => return false,
+        };
+        self.remove(&elem);
+        true
+    }
+
+    fn materialized(
+        &self,
+    ) -> Result<&std::collections::BTreeMap<ElementId, ObjectId>, CanonicalError> {
+        self.complete
+            .get_or_init(|| {
+                // Keep the independent all-history spelling as the diagnostic
+                // oracle for the demand-derived chain path below.
+                let mut heads = match &self.checkpoint {
+                    Some(checkpoint) => {
+                        derive_versions_and_ordinal(
+                            &checkpoint.blocks,
+                            &checkpoint.block_props,
+                            &checkpoint.patches,
+                            checkpoint.frontier,
+                        )?
+                        .0
+                    }
+                    None => std::collections::BTreeMap::new(),
+                };
+                for (elem, version) in &self.changed {
+                    match version {
+                        Some(version) => {
+                            heads.insert(*elem, *version);
+                        }
+                        None => {
+                            heads.remove(elem);
+                        }
+                    }
+                }
+                Ok(Arc::new(heads))
+            })
+            .as_deref()
+            .map_err(Clone::clone)
+    }
+}
+
+#[cfg(test)]
+impl PartialEq for VersionHeads {
+    fn eq(&self, other: &Self) -> bool {
+        self.materialized() == other.materialized()
+    }
+}
+
+#[cfg(test)]
+impl Eq for VersionHeads {}
+
+/// Immutable payloads and history coordinates only: retaining the whole
+/// Snapshot would force its copy-on-write path on every post-open commit.
+/// Vertex coordinates share the existing index; edge coordinates are built on
+/// the first existing-edge lookup, without indexing endpoint incidence.
+#[derive(Debug)]
+struct CheckpointVersionBasis {
+    blocks: Vec<Arc<[AdjacencyEntry]>>,
+    block_props: Vec<Option<Arc<BlockProps>>>,
+    patches: Vec<VertexPatchRows>,
+    vertices: gql_exec::source::StatementHistoryIndex<VId>,
+    edges: std::sync::OnceLock<gql_exec::source::StatementHistoryIndex<EId>>,
+    frontier: CommitSeq,
+    #[cfg(test)]
+    head_derivations: std::sync::atomic::AtomicUsize,
+}
+
+impl CheckpointVersionBasis {
+    fn head(&self, elem: ElementId) -> Result<Option<ObjectId>, CanonicalError> {
+        #[cfg(test)]
+        self.head_derivations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut transcript = Vec::new();
+        let mut version = None;
+        match elem {
+            ElementId::Vertex(vid) => {
+                let mut history = self.vertices.coordinates(vid).peekable();
+                let mut winner = None;
+                while let Some((created_at, patch, row)) = history.next() {
+                    if history.peek().is_some_and(|next| next.0 == created_at) {
+                        continue;
+                    }
+                    let row = &self.patches[patch][row];
+                    write_vertex_statement_transcript(
+                        &mut transcript,
+                        row.vid,
+                        row.birth_ordinal,
+                        &row.labels,
+                        &row.props,
+                    )?;
+                    version = Some(statement_successor(version, &transcript));
+                    winner = Some(row);
+                }
+                Ok(winner
+                    .filter(|row| row.visible_at(self.frontier))
+                    .and(version))
+            }
+            ElementId::Edge(eid) => {
+                let index = self.edges.get_or_init(|| {
+                    gql_exec::source::StatementHistoryIndex::edges(&self.blocks)
+                });
+                let mut history = index.coordinates(eid).peekable();
+                let mut winner = None;
+                while let Some((created_at, block, row)) = history.next() {
+                    if history.peek().is_some_and(|next| next.0 == created_at) {
+                        continue;
+                    }
+                    let entry = &self.blocks[block][row];
+                    let props = self.block_props[block]
+                        .as_ref()
+                        .map_or(&[][..], |props| props.props_ref(row));
+                    write_edge_statement_transcript(
+                        &mut transcript,
+                        entry.eid,
+                        entry.src,
+                        entry.relation,
+                        entry.dst,
+                        props,
+                    )?;
+                    version = Some(statement_successor(version, &transcript));
+                    winner = Some(entry);
+                }
+                Ok(winner
+                    .filter(|entry| entry.visible_at(self.frontier))
+                    .and(version))
+            }
+        }
+    }
 }
 
 fn read_error_from_index(error: IndexError) -> ReadError {
@@ -2639,12 +2845,14 @@ impl<V: Vfs + Clone> Database<V> {
     /// from its final row alone), so the law compares this map directly —
     /// without it, checkpoint-derived heads could drift from the fold's and
     /// every gate would stay green (GoldBarn's review, thread fgdb-l96k).
+    /// This diagnostic materializes all heads; ordinary writable open and
+    /// mutation preparation derive only the identities they need.
     #[doc(hidden)]
     pub fn element_versions(
         &self,
     ) -> Result<&std::collections::BTreeMap<ElementId, ObjectId>, ReadError> {
         self.ensure_readable()?;
-        Ok(&self.heads.versions)
+        self.heads.versions.materialized().map_err(ReadError::VersionHead)
     }
 
     // Type-erased because every constructor funnels through this bind: a
@@ -3392,8 +3600,8 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     let before_version = prefix_versions
                         .get(&ElementId::Edge(eid))
-                        .or_else(|| self.heads.versions.get(&ElementId::Edge(eid)))
                         .copied()
+                        .map_or_else(|| self.heads.versions.get(&ElementId::Edge(eid)), |head| Ok(Some(head)))?
                         .expect("a live edge always has a version chain head");
                     prefix_deleted_edges.insert(eid);
                     DeltaRow::DeleteEdge {
@@ -3413,8 +3621,8 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     let before_version = prefix_versions
                         .get(&ElementId::Vertex(vid))
-                        .or_else(|| self.heads.versions.get(&ElementId::Vertex(vid)))
                         .copied()
+                        .map_or_else(|| self.heads.versions.get(&ElementId::Vertex(vid)), |head| Ok(Some(head)))?
                         .expect("a live vertex always has a version chain head");
                     // The cascade image is the incident set the FOLD will
                     // see when it applies this DeleteVertex. NENF emits
@@ -3881,12 +4089,6 @@ impl<V: Vfs + Clone> Database<V> {
                 continue;
             }
             for row in &coordinate.rows {
-                if matches!(
-                    row,
-                    DeltaRow::CreateVertex { .. } | DeltaRow::CreateEdge { .. }
-                ) {
-                    next_birth_ordinal += 1;
-                }
                 folded
                     .apply(self.keys.block_keys(), frontier, row)
                     .map_err(|error| WriteError::CommittedNeedsRecovery {
@@ -3896,6 +4098,9 @@ impl<V: Vfs + Clone> Database<V> {
                             error,
                         }),
                     })?;
+                if new_versions.admit_creation(row) {
+                    next_birth_ordinal += 1;
+                }
                 touched_elements(row, &mut touched);
             }
         }
@@ -4714,9 +4919,9 @@ impl<V: Vfs + Clone> Database<V> {
             frontier,
         )?;
 
-        // The logical state is unchanged, so the handle's version heads and
-        // allocator stay as they are; the shared tail republishes and reopens
-        // from disk.
+        // The logical state and allocator are unchanged. The shared tail
+        // republishes and reopens from disk, providing an equivalent version
+        // basis that does not retain the superseded decoded payloads.
         let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)
             .expect("a healthy handle's frontier is on its own recovered chain");
         let (mut snapshot, writer, receipts) = publish_and_snapshot(
@@ -4729,6 +4934,7 @@ impl<V: Vfs + Clone> Database<V> {
         )
         .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
+        let versions = VersionHeads::from_checkpoint(&snapshot);
         // The slot advances so the compacted generation is what the next
         // checkpoint-selected open lands on.
         let manifest_records = [ManifestRecord {
@@ -4766,6 +4972,7 @@ impl<V: Vfs + Clone> Database<V> {
             .await
             .map_err(RebuildError::Slot)?;
         self.slot_generation = next_generation;
+        self.heads.versions = versions;
         self.snapshot = Arc::new(snapshot);
         self.writer = writer;
         // The old receipts describe the superseded generation. The ones the
@@ -4994,7 +5201,7 @@ fn touched_elements(row: &DeltaRow, touched: &mut std::collections::BTreeSet<Ele
 /// The map still holds pre-commit heads when this runs, and each element is
 /// visited once, so `prev` is exactly the durable chain's predecessor.
 fn fold_statement_versions(
-    versions: &mut std::collections::BTreeMap<ElementId, ObjectId>,
+    versions: &mut VersionHeads,
     touched: &std::collections::BTreeSet<ElementId>,
     writer: &BlockWriter,
 ) -> Result<(), CanonicalError> {
@@ -5008,7 +5215,7 @@ fn fold_statement_versions(
                         &row.labels,
                         &row.props,
                     )?;
-                    let previous = versions.get(elem).copied();
+                    let previous = versions.get(elem)?;
                     versions.insert(*elem, statement_successor(previous, &transcript));
                 }
                 None => {
@@ -5018,7 +5225,7 @@ fn fold_statement_versions(
             ElementId::Edge(eid) => match writer.live_edge_statement(*eid) {
                 Some((src, relation, dst, _created_at, props)) => {
                     let transcript = edge_statement_transcript(*eid, src, relation, dst, &props)?;
-                    let previous = versions.get(elem).copied();
+                    let previous = versions.get(elem)?;
                     versions.insert(*elem, statement_successor(previous, &transcript));
                 }
                 None => {
@@ -5202,8 +5409,8 @@ pub fn marker_for_capsule(
 /// counts ride along because every create spent exactly one identity, which
 /// is also what the birth-ordinal allocator counted.
 fn derive_versions_and_ordinal(
-    blocks: &[Vec<AdjacencyEntry>],
-    block_props: &[Option<BlockProps>],
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
     patches: &[VertexPatchRows],
     frontier: CommitSeq,
 ) -> Result<(std::collections::BTreeMap<ElementId, ObjectId>, u64), CanonicalError> {
@@ -5251,10 +5458,10 @@ fn derive_versions_and_ordinal(
     let mut edge_statements: Vec<(&AdjacencyEntry, &[(PropertyKeyId, CanonicalScalar)])> =
         Vec::new();
     for (block, props) in blocks.iter().zip(block_props) {
-        for (index, entry) in block.iter().enumerate() {
+        for (index, entry) in block.as_ref().iter().enumerate() {
             let row = props
                 .as_ref()
-                .map_or(&[][..], |props| props.props_ref(index));
+                .map_or(&[][..], |props| props.borrow().props_ref(index));
             edge_statements.push((entry, row));
         }
     }
@@ -5336,13 +5543,21 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         published_at,
     )
     .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
-    let (mut versions, mut next_birth_ordinal) =
-        derive_versions_and_ordinal(&blocks, &block_props, &patches, published_at).map_err(
-            |error| RebuildError::Decode {
-                commit_seq: published_at.0,
-                error,
-            },
-        )?;
+    // Admission already established permanent identity membership. Counting
+    // those identities preserves the allocator without hashing their complete
+    // statement histories or retaining an extra strong spent-set handle.
+    let mut next_birth_ordinal =
+        writer.spent_vertices().len() as u64 + writer.spent_edges().len() as u64;
+    let snapshot = current_generation(
+        keys,
+        coordinator.chain(),
+        root_id,
+        root,
+        blocks,
+        block_props,
+        patches,
+    );
+    let mut versions = VersionHeads::from_checkpoint(&snapshot);
 
     // The SUFFIX: everything the crash window or plain lag left past the
     // resolved publication.
@@ -5378,15 +5593,6 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
 
     // No suffix: the partition IS current, and the snapshot assembles from
     // what the reopen already decoded — no publish, no O(blocks) writes.
-    let snapshot = current_generation(
-        keys,
-        coordinator.chain(),
-        root_id,
-        root,
-        blocks,
-        block_props,
-        patches,
-    );
     // The adjacency index stays unbuilt until a read or a commit's extension
     // needs it: a write that never reads adjacency (a pure insert) does not
     // pay to index every published block. The first reader builds it from the
@@ -5606,7 +5812,7 @@ async fn rebuild<V: Vfs>(
 ) -> Result<OpenedGeneration, RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
     let mut next_birth_ordinal = 0u64;
-    let mut versions = std::collections::BTreeMap::new();
+    let mut versions = VersionHeads::default();
     let frontier = fold_stream(
         cx,
         coordinator,
@@ -5992,7 +6198,7 @@ fn consolidate_replay_if_needed(
 /// replay past `published_at` (fgdb-ge6a).
 struct FoldState<'a> {
     writer: &'a mut BlockWriter,
-    versions: &'a mut std::collections::BTreeMap<ElementId, ObjectId>,
+    versions: &'a mut VersionHeads,
     next_birth_ordinal: &'a mut u64,
     crypto_verification_events: &'a mut Vec<CryptoVerificationEvent>,
 }
@@ -6057,12 +6263,6 @@ async fn fold_stream<V: Vfs>(
                 continue;
             }
             for row in &coordinate.rows {
-                if matches!(
-                    row,
-                    DeltaRow::CreateVertex { .. } | DeltaRow::CreateEdge { .. }
-                ) {
-                    *state.next_birth_ordinal += 1;
-                }
                 state
                     .writer
                     .apply(keys.block_keys(), commit_seq, row)
@@ -6070,6 +6270,9 @@ async fn fold_stream<V: Vfs>(
                         commit_seq: commit_seq.0,
                         error,
                     })?;
+                if state.versions.admit_creation(row) {
+                    *state.next_birth_ordinal += 1;
+                }
                 touched_elements(row, &mut touched);
             }
         }
@@ -7466,7 +7669,10 @@ mod root_capacity_laws {
 
     fn assert_recovered_history_matches(actual: &Database<MemVfs>, expected: &Database<MemVfs>) {
         assert_eq!(actual.snapshot.frontier, expected.snapshot.frontier);
-        assert_eq!(actual.heads.versions, expected.heads.versions);
+        assert_eq!(
+            actual.element_versions().unwrap(),
+            expected.element_versions().unwrap()
+        );
         assert_eq!(
             actual.heads.next_birth_ordinal,
             expected.heads.next_birth_ordinal
@@ -7494,6 +7700,188 @@ mod root_capacity_laws {
                 "vertex history at {seq}",
             );
         }
+    }
+
+    #[test]
+    fn checkpoint_heads_derive_only_touched_chains_and_match_the_origin_fold() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x61; 32],
+            DatabaseSecurityNamespaceId([0x62; 32]),
+            [0x63; 32],
+        );
+        let mut db = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        let mut oracle = runtime
+            .block_on(Database::open_memory(&cx, keys.clone()))
+            .unwrap();
+        // The uninterrupted origin fold has no checkpoint derivation. Compare
+        // every prepared template too, including birth ordinals and deletes'
+        // before-version images, before either side commits it.
+        let write_both = |db: &mut Database<MemVfs>,
+                          oracle: &mut Database<MemVfs>,
+                          batch: WriteBatch| {
+            let prepared = db.prepare_write(batch.clone()).unwrap();
+            let expected = oracle.prepare_write(batch).unwrap();
+            assert_eq!(prepared.template, expected.template);
+            assert_eq!(
+                runtime.block_on(db.commit_prepared(&cx, prepared)).unwrap(),
+                runtime.block_on(oracle.commit_prepared(&cx, expected)).unwrap()
+            );
+        };
+        let mut initial = WriteBatch::new(RelationId(1));
+        for vid in 1..=12 {
+            initial.create_vertex(
+                VId(vid),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(vid as i64))],
+            );
+        }
+        for eid in 1..=11 {
+            initial.add_edge(
+                EId(eid),
+                VId(1),
+                VId(eid + 1),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(eid as i64))],
+            );
+        }
+        write_both(&mut db, &mut oracle, initial);
+        for turn in 1..=4 {
+            let mut batch = WriteBatch::new(RelationId(1));
+            let value = match turn % 3 {
+                0 => None,
+                1 => Some(CanonicalScalar::Null),
+                _ => Some(CanonicalScalar::Int(turn)),
+            };
+            batch.set_vertex_property(VId(1), PropertyKeyId(1), value.clone());
+            batch.set_vertex_label(VId(1), LabelId(2), turn % 2 == 0);
+            batch.set_edge_property(EId(1), PropertyKeyId(1), value);
+            write_both(&mut db, &mut oracle, batch);
+        }
+        let mut retired = WriteBatch::new(RelationId(1));
+        retired.delete_vertex(VId(12));
+        retired.delete_edge(EId(2));
+        write_both(&mut db, &mut oracle, retired);
+        let path = db.path().to_path_buf();
+        let vfs = db.vfs.clone();
+        drop(db);
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs.clone(), &path, keys.clone()))
+            .unwrap();
+        let basis = Arc::clone(db.heads.versions.checkpoint.as_ref().unwrap());
+        let derivations = || basis.head_derivations.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(derivations(), 0);
+        assert!(db.heads.versions.changed.is_empty());
+        assert!(db.heads.versions.complete.get().is_none());
+        assert!(basis.edges.get().is_none());
+        assert_eq!(Arc::strong_count(&db.snapshot), 1);
+        for (retained, published) in basis.blocks.iter().zip(&db.snapshot.blocks) {
+            assert!(Arc::ptr_eq(retained, published));
+        }
+
+        let mut append = WriteBatch::new(RelationId(1));
+        append.create_vertex(VId(100), vec![LabelId(3)], vec![]);
+        append.add_edge(EId(100), VId(1), VId(100), vec![]);
+        write_both(&mut db, &mut oracle, append);
+        assert_eq!(derivations(), 0, "new identities have no checkpoint predecessor");
+        assert_eq!(db.heads.versions.changed.len(), 2);
+        assert!(basis.edges.get().is_none());
+
+        for turn in 10..=11 {
+            let mut vertex = WriteBatch::new(RelationId(1));
+            vertex.set_vertex_property(
+                VId(1),
+                PropertyKeyId(1),
+                Some(CanonicalScalar::Int(turn)),
+            );
+            write_both(&mut db, &mut oracle, vertex);
+            assert_eq!(derivations(), 1, "later updates use the changed head");
+            assert!(basis.edges.get().is_none());
+        }
+        for turn in 20..=21 {
+            let mut edge = WriteBatch::new(RelationId(1));
+            edge.set_edge_property(
+                EId(1),
+                PropertyKeyId(1),
+                Some(CanonicalScalar::Int(turn)),
+            );
+            write_both(&mut db, &mut oracle, edge);
+            assert_eq!(derivations(), 2);
+            assert!(basis.edges.get().is_some());
+        }
+        let mut deletion = WriteBatch::new(RelationId(1));
+        deletion.delete_vertex(VId(4));
+        deletion.delete_edge(EId(10));
+        write_both(&mut db, &mut oracle, deletion);
+        assert_eq!(derivations(), 4, "a cascade masks its edges without hashing them");
+        for elem in [ElementId::Vertex(VId(4)), ElementId::Edge(EId(3)), ElementId::Edge(EId(10))] {
+            assert_eq!(db.heads.versions.changed.get(&elem), Some(&None));
+            assert_eq!(db.heads.versions.get(&elem).unwrap(), None);
+        }
+        assert!(db.heads.versions.complete.get().is_none());
+        // Both a checkpoint tombstone and a post-open tombstone permanently
+        // spend the identity, without consuming another birth ordinal.
+        let births = db.heads.next_birth_ordinal;
+        for vid in [4, 12] {
+            let mut reused = WriteBatch::new(RelationId(1));
+            reused.create_vertex(VId(vid), vec![], vec![]);
+            assert!(matches!(db.prepare_write(reused), Err(WriteError::IdentitySpent { .. })));
+        }
+        for eid in [2, 3] {
+            let mut reused = WriteBatch::new(RelationId(1));
+            reused.add_edge(EId(eid), VId(1), VId(2), vec![]);
+            assert!(matches!(db.prepare_write(reused), Err(WriteError::IdentitySpent { .. })));
+        }
+        assert_eq!(db.heads.next_birth_ordinal, births);
+        assert_recovered_history_matches(&db, &oracle);
+
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(db.heads.versions.changed.is_empty());
+        assert!(db.heads.versions.complete.get().is_none());
+        assert!(!Arc::ptr_eq(db.heads.versions.checkpoint.as_ref().unwrap(), &basis));
+        let mut next = WriteBatch::new(RelationId(1));
+        next.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(99)));
+        next.create_vertex(VId(101), vec![], vec![]);
+        write_both(&mut db, &mut oracle, next);
+        assert_recovered_history_matches(&db, &oracle);
+        drop(db);
+        for force_rebuild in [false, true] {
+            let reopened = runtime
+                .block_on(Database::bind_with_vfs(&cx, vfs.clone(), &path, keys.clone(), force_rebuild))
+                .unwrap();
+            assert_recovered_history_matches(&reopened, &oracle);
+        }
+    }
+
+    #[test]
+    fn compaction_replaces_the_lazy_basis_without_retaining_superseded_payloads() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let cx = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root).commit();
+        let keys = DatabaseKeys::new(
+            [0x64; 32],
+            DatabaseSecurityNamespaceId([0x65; 32]),
+            [0x66; 32],
+        );
+        let mut db = runtime.block_on(Database::open_memory(&cx, keys)).unwrap();
+        let mut initial = WriteBatch::new(RelationId(1));
+        initial.create_vertex(VId(1), vec![], vec![]);
+        initial.create_vertex(VId(2), vec![], vec![]);
+        initial.add_edge(EId(1), VId(1), VId(2), vec![(PropertyKeyId(1), CanonicalScalar::Int(1))]);
+        runtime.block_on(db.write(&cx, initial)).unwrap();
+        runtime.block_on(db.compact(&cx)).unwrap();
+        let old_basis = Arc::downgrade(db.heads.versions.checkpoint.as_ref().unwrap());
+        let old_block = Arc::downgrade(&db.snapshot.blocks[0]);
+        let expected = db.element_versions().unwrap().clone();
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(db.preparation_anchor.is_none(), "origin history needs no checkpoint anchor");
+        assert!(old_basis.upgrade().is_none());
+        assert!(old_block.upgrade().is_none());
+        assert_eq!(db.element_versions().unwrap(), &expected);
     }
 
     #[test]

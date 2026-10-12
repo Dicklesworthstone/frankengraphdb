@@ -457,7 +457,7 @@ impl PreparedBufferedOrder {
                         ))
                     });
                 Box::pin(async move {
-                    evaluate(
+                    ordered_input(
                         cx,
                         columns,
                         opened?,
@@ -484,7 +484,7 @@ impl PreparedBufferedOrder {
                         ))
                     });
                 Box::pin(async move {
-                    evaluate(
+                    ordered_input(
                         cx,
                         columns,
                         opened?,
@@ -511,7 +511,7 @@ impl PreparedBufferedOrder {
                         ))
                     });
                 Box::pin(async move {
-                    evaluate(
+                    ordered_input(
                         cx,
                         columns,
                         opened?,

@@ -17,7 +17,14 @@ use std::sync::{Mutex, MutexGuard};
 
 #[path = "stream/aggregate.rs"]
 mod aggregate;
-pub use aggregate::AuthorizedAggregateCursor;
+pub use aggregate::{AuthorizedAggregateCursor, AuthorizedSendAggregateCursor};
+
+#[path = "stream/ordered.rs"]
+mod ordered;
+pub use ordered::{
+    AuthorizedOrderExecution, AuthorizedOrderedReadSession, AuthorizedSortLimits,
+    AuthorizedSpoolCursor,
+};
 
 // Synchronization is local to ONE cursor's sequential callbacks. No guard is
 // held across a source call or suspension. Keeping the actual borrowed clock
@@ -746,7 +753,7 @@ fn probe_error(error: EdgeScanError<QueryError>) -> QueryError {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata, Driver>(
+fn open<'q, C: FnMut() -> u64, Plan, Output>(
     view: &EmbeddedReadView,
     capability: &'q VerifiedCapability<'_>,
     clock: &'q mut C,
@@ -764,8 +771,8 @@ fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata, Driver>(
         &'q QueryCx,
         Shared<'q, C>,
         GqlQueryPolicy,
-    ) -> Opened<'q, Row, Metadata, Driver>,
-) -> Opened<'q, Row, Metadata, Driver> {
+    ) -> Result<Output, QueryError>,
+) -> Result<Output, QueryError> {
     let now = clock();
     if now < *last_now_ms {
         return Err(QueryError::Authorization(
@@ -870,9 +877,10 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
     /// Open a prepared vertex or fixed-edge stream under this session's policy
-    /// and capability. Vertex projection must lead with its unique VId. Edge
-    /// projection must lead with the captured root EId and root-source VId;
-    /// connected fixed joins then name each appended EId in traversal order.
+    /// and capability. Vertex projection must lead with its unique VId. Directed
+    /// edge projection must lead with the captured root EId; undirected roots
+    /// also require the root-source VId to distinguish orientations. Connected
+    /// fixed joins then name each appended EId in traversal order.
     /// These prefixes prove native canonical ordering and ALL/DISTINCT semantics
     /// without a result bag or seen-set. Remaining edge columns may project
     /// endpoints, masked vertex/edge properties and admitted fixed-path values.

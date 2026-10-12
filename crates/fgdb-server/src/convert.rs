@@ -2,7 +2,7 @@
 //!
 //! Result cells convert totally: every engine value has exactly one wire
 //! spelling. Arguments convert partially: a wire value that has no statement
-//! parameter type (an element identity, an aggregate) is refused, never
+//! parameter type (an element identity, a wide/exact aggregate) is refused, never
 //! coerced, and a zoned timestamp is admitted only through the served
 //! database's pinned tz database, exactly as the CLI admits one.
 
@@ -108,6 +108,9 @@ pub(crate) fn parameters(
         };
         let parameter = match value {
             WireValue::Int(v) => GqlParameterValue::Int64(*v),
+            // Unsigned operands select historical cuts and row windows. They
+            // retain their exact domain instead of narrowing through i64.
+            WireValue::Count(v) => GqlParameterValue::UInt64(*v),
             WireValue::List(items) => {
                 let items = items
                     .iter()
@@ -350,6 +353,27 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn unsigned_operands_preserve_their_domain_and_do_not_become_nested_scalars() {
+        let bound = parameters(
+            &[
+                ("cut".into(), WireValue::Count(u64::MAX)),
+                ("signed".into(), WireValue::Int(-1)),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(bound.get("cut"), Some(&GqlParameterValue::UInt64(u64::MAX)));
+        assert_eq!(bound.get("signed"), Some(&GqlParameterValue::Int64(-1)));
+        for value in [
+            WireValue::List(vec![WireValue::Count(1)]),
+            WireValue::Map(vec![("cut".into(), WireValue::Count(1))]),
+        ] {
+            let error = parameters(&[("nested".into(), value)], None).unwrap_err();
+            assert_eq!(error.parameter, "nested");
+        }
     }
 
     #[test]

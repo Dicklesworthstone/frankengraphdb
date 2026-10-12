@@ -27,13 +27,16 @@ mod view;
 pub use crate::gql_cert::NativeResultCertificate;
 pub use aggregate_stream::NativeAggregateCursor;
 pub use authorized::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedPreparedFnxCall,
-    AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendRowCursor,
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
+};
+pub(crate) use beacon::procedure::{
+    EndpointFilter, HybridSearch, is_hybrid, privileged as hybrid_procedure,
+    refuse as hybrid_refusal,
 };
 pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
-pub(crate) use beacon::procedure::{
-    HybridSearch, is_hybrid, privileged as hybrid_procedure, refuse as hybrid_refusal,
-};
 pub use beacon::{PinnedIndex, RefreshReport, ResidentIndex, ResidentIndexError};
 pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 use explain::{explain_prefix, explain_result};

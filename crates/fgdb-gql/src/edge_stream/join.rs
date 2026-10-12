@@ -198,11 +198,17 @@ fn compile_output(
                     matches!(column, Some(ValueProjection::Path { capture, function: GraphPathFunction::Edge })
                         if captures.get(*capture as usize).is_some_and(|parts| parts.len() == 1 && parts[0] == step))
                 };
-                if output == Output::OrderedRows
-                    && (!edge_column(columns.first(), 0)
-                        || !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
-                        || !(1..width - 1).all(|step| edge_column(columns.get(step + 1), step)))
-                {
+                // A directed root EId fixes both endpoints, so its source
+                // vertex need not occupy a public result column. An undirected
+                // root needs that orientation discriminator before appended
+                // edge identities. Every appended EId then fixes one traversal
+                // step, even when that step itself is undirected or a self-loop.
+                let directed_prefix = *direction != GlaDirection::Undirected
+                    && (0..width - 1).all(|step| edge_column(columns.get(step), step));
+                let oriented_prefix = edge_column(columns.first(), 0)
+                    && matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
+                    && (1..width - 1).all(|step| edge_column(columns.get(step + 1), step));
+                if output == Output::OrderedRows && !directed_prefix && !oriented_prefix {
                     return Err(bad());
                 }
                 for column in columns {

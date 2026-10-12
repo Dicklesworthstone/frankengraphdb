@@ -41,6 +41,22 @@ fn aggregate_width(definition: &fgdb_gql::PreparedGraphAggregate) -> u64 {
         .unwrap_or(fgdb_gql::algebra::MAX_PATTERN_BINDINGS as u64)
 }
 
+fn aggregate_footprint(
+    cx: &QueryCx,
+    definition: &fgdb_gql::PreparedGraphAggregate,
+) -> Result<Footprint, StandingQueryError> {
+    if let Some(input) = definition.input_relation() {
+        return circuit(cx, input)?.append(1);
+    }
+    if let Some(definition) = definition.incremental_collection_relation() {
+        return circuit(cx, definition.input())?.append(1);
+    }
+    Ok(Footprint {
+        nodes: 1,
+        source_width: aggregate_width(definition),
+    })
+}
+
 fn pattern_width(
     pattern: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
 ) -> u64 {
@@ -154,13 +170,7 @@ impl PreparedNativeRead {
                 let bound = prepared
                     .bind_parameters(params)
                     .map_err(|error| prepare_error(QueryError::PatternText(error)))?;
-                match bound.input_relation() {
-                    Some(input) => circuit(cx, input)?.append(1)?,
-                    None => Footprint {
-                        nodes: 1,
-                        source_width: aggregate_width(&bound),
-                    },
-                }
+                aggregate_footprint(cx, &bound)?
             }
             Self::PipelineAggregate(prepared) => {
                 if prepared.requires_relational_input() {
@@ -175,13 +185,7 @@ impl PreparedNativeRead {
                     let bound = prepared
                         .bind_parameters(params)
                         .map_err(|error| prepare_error(QueryError::PipelineText(error)))?;
-                    match bound.input_relation() {
-                        Some(input) => circuit(cx, input)?.append(1)?,
-                        None => Footprint {
-                            nodes: 1,
-                            source_width: aggregate_width(&bound),
-                        },
-                    }
+                    aggregate_footprint(cx, &bound)?
                 }
             }
             _ => {

@@ -473,6 +473,7 @@ impl<'a> Parser<'a> {
             visible,
             width: output_schema.len(),
             reads,
+            functions: Vec::new(),
             grouped: Vec::new(),
             scoped: Vec::new(),
         });

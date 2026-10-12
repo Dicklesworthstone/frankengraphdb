@@ -1,7 +1,8 @@
 //! Ordered, pull-driven execution of identified fixed-edge GLA patterns.
 //!
-//! The leading edge identity and source vertex prove whole-row order and
-//! uniqueness, including both orientations of an undirected non-self edge.
+//! The leading edge identity proves whole-row order and uniqueness for a
+//! directed root. Undirected roots additionally require the source vertex to
+//! distinguish both orientations of a non-self edge.
 //! No adjacency/result bag, sorting, DISTINCT set or unread suffix is built.
 //! This is a physical specialization of compiler-owned GLA, not a text parser.
 
@@ -55,12 +56,14 @@ impl core::fmt::Display for EdgeScanBuildError {
 impl core::error::Error for EdgeScanBuildError {}
 
 /// Checked fixed-edge plan. For multiple connected edges, the output prefix
-/// is root edge, root source vertex, then every appended edge in GLA traversal
-/// order. This covers chains, branches and identity-constrained cycle closures;
-/// other output shapes and unsupported operators fail physical preparation.
+/// is root edge, optionally its source vertex, then every appended edge in GLA
+/// traversal order. The source vertex is required for an undirected root.
+/// This covers chains, branches and identity-constrained cycle closures; other
+/// output shapes and unsupported operators fail physical preparation.
 ///
-/// For one edge: The output must begin with the captured edge identity
-/// followed by slot zero's vertex identity. Remaining columns may contain either
+/// For one edge: The output must begin with the captured edge identity,
+/// followed by slot zero's vertex identity when the root is undirected.
+/// Remaining columns may contain either
 /// endpoint, their properties, edge properties or this one-edge path/functions.
 /// This prefix permits DISTINCT and ALL without storing a seen-set. Other order,
 /// hidden sort columns, optional/variable-length expansions, and catalog-name output
@@ -183,7 +186,8 @@ impl EdgeScanPlan {
                                 function: GraphPathFunction::Edge,
                                 ..
                             })
-                        ) || !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)))
+                        ) || (*direction == GlaDirection::Undirected
+                            && !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0))))
                         || !columns.iter().all(column_valid)
                     {
                         return Err(bad());

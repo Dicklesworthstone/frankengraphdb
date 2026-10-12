@@ -30,8 +30,11 @@ use std::io::Write;
 /// Is this `query` text a standalone Prism call? `CALL` is a keyword (any
 /// case); the procedure namespace `fnx.` is case-sensitive, like the
 /// registry. A call that continues past its YIELD list (WHERE, WITH, MATCH,
-/// RETURN, ...) is an ordinary native read over the whole graph instead.
+/// RETURN, ...) or supplies a native projection is an ordinary native read.
 pub(super) fn is_call(text: &str) -> bool {
+    if fgdb_gql::starts_fnx_graph_projection(text) {
+        return false;
+    }
     let text = text.trim_start();
     text.get(..4)
         .is_some_and(|word| word.eq_ignore_ascii_case("CALL"))
@@ -269,5 +272,27 @@ fn cell(value: FnxValue, robot: bool) -> String {
             format!(r#"{{"type":"float","value":"{}"}}"#, float_text(v))
         }
         (FnxValue::Score(v) | FnxValue::Float(v), false) => float_text(v),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_call;
+
+    #[test]
+    fn projection_envelopes_use_the_native_host_and_positional_calls_keep_their_route() {
+        assert!(is_call(
+            "CALL fnx.connected_components() YIELD vertex, component"
+        ));
+        for text in [
+            "CALL fnx.connected_components() YIELD vertex RETURN vertex",
+            "CALL fnx.connected_components({}) YIELD vertex RETURN vertex",
+            "CALL fnx.connected_components(args => []) YIELD vertex RETURN vertex",
+            "CALL fnx.degree(label => 'L') YIELD vertex RETURN vertex",
+            "/* leading */ CALL fnx.degree ( args /* split */ => [] ) YIELD vertex RETURN vertex",
+            "CALL fnx.degree({unknown: 'invalid'}) YIELD vertex RETURN vertex",
+        ] {
+            assert!(!is_call(text), "{text}");
+        }
     }
 }
