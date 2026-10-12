@@ -307,11 +307,17 @@ impl<'a> Parser<'a> {
                 self.mutation_action_capacity(actions.len())?;
                 // DETACH DELETE names a vertex. A plain DELETE, like SET and
                 // REMOVE, names a vertex or one fixed-length relationship.
+                // openCypher's property target is an atom, so `SET (n).name`
+                // parenthesizes the variable (Set1 [3], [4]).
+                let parenthesized = !deleting && self.parenthesized_property_target()?;
                 let variable = if detach {
                     self.variable()?
                 } else {
                     self.property_variable()?
                 };
+                if parenthesized {
+                    self.punct(b')', ")")?;
+                }
                 let target = self.mutation_projection(&mut columns, variable, None)?;
                 if setting && self.take(b'+')? {
                     self.mutation_literal_map(&mut columns, &mut actions, target)?;
@@ -372,6 +378,21 @@ impl<'a> Parser<'a> {
             }
         }
         Ok((columns, actions))
+    }
+
+    /// `( name ) .` opens a property target; consumes only the parenthesis.
+    fn parenthesized_property_target(&mut self) -> Result<bool, GraphPatternTextError> {
+        if !self.is_punct(b'(') {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        let shape = matches!(lexer.next()?.kind, TokenKind::Word(_))
+            && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
+            && matches!(lexer.next()?.kind, TokenKind::Punct(b'.'));
+        if shape {
+            self.advance()?;
+        }
+        Ok(shape)
     }
 
     fn mutation_action_capacity(&self, count: usize) -> Result<(), GraphMutationTextError> {
@@ -775,6 +796,37 @@ mod graph_function_tests {
             (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
             (GraphSymbolKind::Property, "cost") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             _ => None,
+        }
+    }
+
+    /// openCypher Set1 [3], [4]: a parenthesized variable is the same property
+    /// target as the bare one, for SET and REMOVE, vertex and relationship.
+    /// A label or map mutation still takes only the bare variable.
+    #[test]
+    fn a_parenthesized_property_target_is_the_bare_target() {
+        let bound = |text: &str| {
+            crate::PreparedGraphMutationText::prepare(text, RelationId(1), symbols)
+                .and_then(|prepared| prepared.bind_parameters(&crate::GqlParameters::new()))
+                .map_err(|error| format!("{text}: {error:?}"))
+        };
+        for (parenthesized, bare) in [
+            ("MATCH (n) SET (n).cost = 1", "MATCH (n) SET n.cost = 1"),
+            (
+                "MATCH (a)-[r:R]->() SET (r).cost = 2, (a).cost = 3",
+                "MATCH (a)-[r:R]->() SET r.cost = 2, a.cost = 3",
+            ),
+            ("MATCH (n) REMOVE (n).cost", "MATCH (n) REMOVE n.cost"),
+        ] {
+            assert_eq!(bound(parenthesized).unwrap(), bound(bare).unwrap());
+        }
+        for refused in [
+            "MATCH (n) SET (n):L",
+            "MATCH (n) SET (n) += {cost: 1}",
+            "MATCH (n) SET (m).cost = 1",
+            "MATCH (n) SET ((n)).cost = 1",
+            "MATCH (n) DELETE (n).cost",
+        ] {
+            assert!(bound(refused).is_err(), "{refused}");
         }
     }
 
