@@ -577,7 +577,7 @@ mod tests {
                 ] {
                     let (mut session, _) = accepted(read_session(&root, db, &token).await);
                     let mut source = accepted(session.stream(&query, text, &GqlParameters::new()));
-                    let error = source.next().err().expect("native allowance must refuse");
+                    let error = source.next().expect_err("native allowance must refuse");
                     assert_eq!(error.code, ErrorCode::Budget, "{text}: {}", error.message);
                 }
             }

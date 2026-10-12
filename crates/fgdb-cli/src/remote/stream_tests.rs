@@ -433,8 +433,7 @@ fn schema_and_row_flush_failures_cancel_drain_and_never_emit_success() {
                     &mut out,
                 )
                 .await
-                .err()
-                .expect("output failure is terminal");
+                .expect_err("output failure is terminal");
                 assert_eq!(error.code, 5);
                 assert!(error.message.contains("injected output flush failure"));
                 assert!(error.message.starts_with(&format!(
@@ -508,8 +507,7 @@ fn late_refusal_or_eof_preserves_the_flushed_prefix_without_success_or_retry() {
                     &mut out,
                 )
                 .await
-                .err()
-                .expect("missing successful terminal");
+                .expect_err("missing successful terminal");
                 assert_eq!(error.code, if terminal.is_some() { 3 } else { 5 });
                 assert!(
                     error

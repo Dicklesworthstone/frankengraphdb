@@ -1126,7 +1126,7 @@ fn transaction_eligible_precedes_lane_limits_and_preserves_transit_and_corpus() 
             )
             .unwrap(),
         );
-        assert_eq!(selected.1, std::slice::from_ref(&wanted));
+        assert_eq!(selected.1, std::slice::from_ref(wanted));
         txn.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
