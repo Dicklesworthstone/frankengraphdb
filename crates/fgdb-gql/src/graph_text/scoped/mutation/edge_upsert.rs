@@ -48,26 +48,31 @@ fn merge_error(error: GraphEdgeMergeTextError) -> GraphEdgeUpsertTextError {
 
 impl<'a> Parser<'a> {
     /// One `SET` assignment list of a relationship MERGE branch, appended to
-    /// `target` under the branch's action limit.
+    /// `target` under the branch's action limit. `r += {k: v, ...}` is the
+    /// same simultaneous assignments as `r.k = v, ...`, one action apiece.
     fn edge_upsert_assignments(
         &mut self,
         relationship: Name<'a>,
         target: &mut Vec<ParsedEdgeUpsertAction<'a>>,
         branch: GraphEdgeUpsertBranch,
     ) -> Result<(), GraphEdgeUpsertTextError> {
-        loop {
-            if target.len() >= crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS {
-                return Err(GraphEdgeUpsertTextError {
-                    offset: self.current.at,
-                    kind: GraphEdgeUpsertTextErrorKind::UpsertBuild(
-                        crate::GraphEdgeUpsertBuildError::TooManyActions {
-                            branch,
-                            limit: crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS,
-                            observed: target.len() + 1,
-                        },
-                    ),
-                });
+        let capacity = |parser: &Self, count: usize| {
+            if count < crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS {
+                return Ok(());
             }
+            Err(GraphEdgeUpsertTextError {
+                offset: parser.current.at,
+                kind: GraphEdgeUpsertTextErrorKind::UpsertBuild(
+                    crate::GraphEdgeUpsertBuildError::TooManyActions {
+                        branch,
+                        limit: crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS,
+                        observed: count + 1,
+                    },
+                ),
+            })
+        };
+        loop {
+            capacity(self, target.len())?;
             let actual = self.name()?;
             if actual.text != relationship.text {
                 return Err(error(
@@ -76,49 +81,97 @@ impl<'a> Parser<'a> {
                 )
                 .into());
             }
-            self.punct(b'.', "relationship property assignment")?;
-            let key = self.name()?;
-            self.punct(b'=', "=")?;
-            let at = self.current.at;
-            let mut properties: Vec<Name<'a>> = Vec::new();
-            let value = self.resolved_predicate(&mut |parser| {
-                if !matches!(parser.current.kind, TokenKind::Word(_))
-                    || !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
-                {
-                    return Ok(None);
-                }
-                let source = parser.name()?;
-                if source.text != relationship.text {
+            if self.take(b'+')? {
+                self.punct(b'=', "=")?;
+                let at = self.current.at;
+                self.punct(b'{', "literal property map after +=")?;
+                if self.is_punct(b'}') {
                     return Err(error(
-                        source.at,
-                        GraphPatternTextErrorKind::Expected("the MERGE relationship variable"),
-                    ));
+                        at,
+                        GraphPatternTextErrorKind::Expected("a property in SET += map"),
+                    )
+                    .into());
                 }
-                parser.punct(b'.', ".")?;
-                let property = parser.name()?;
-                if let Some(column) = properties.iter().position(|p| p.text == property.text) {
-                    return Ok(Some(column));
+                let first = target.len();
+                loop {
+                    capacity(self, target.len())?;
+                    let key = self.name()?;
+                    if target[first..]
+                        .iter()
+                        .any(|action| action.key.text == key.text)
+                    {
+                        return Err(error(
+                            key.at,
+                            GraphPatternTextErrorKind::Expected(
+                                "distinct property keys in SET += map",
+                            ),
+                        )
+                        .into());
+                    }
+                    self.punct(b':', ":")?;
+                    let action = self.edge_upsert_value(relationship, key)?;
+                    target.push(action);
+                    if self.take(b'}')? {
+                        break;
+                    }
+                    self.punct(b',', ", or }")?;
                 }
-                parser.capacity(
-                    properties.len(),
-                    MAX_PATTERN_VERTICES,
-                    crate::algebra::PatternLimitDimension::Columns,
-                )?;
-                let column = properties.len();
-                properties.push(property);
-                Ok(Some(column))
-            })?;
-            target.push(ParsedEdgeUpsertAction {
-                key,
-                value,
-                properties,
-                at,
-            });
+            } else {
+                self.punct(b'.', "relationship property assignment")?;
+                let key = self.name()?;
+                self.punct(b'=', "=")?;
+                let action = self.edge_upsert_value(relationship, key)?;
+                target.push(action);
+            }
             if !self.take(b',')? {
                 break;
             }
         }
         Ok(())
+    }
+
+    /// The right-hand side of one relationship property assignment. It reads
+    /// only the MERGE relationship's own fields, each through one input column.
+    fn edge_upsert_value(
+        &mut self,
+        relationship: Name<'a>,
+        key: Name<'a>,
+    ) -> Result<ParsedEdgeUpsertAction<'a>, GraphEdgeUpsertTextError> {
+        let at = self.current.at;
+        let mut properties: Vec<Name<'a>> = Vec::new();
+        let value = self.resolved_predicate(&mut |parser| {
+            if !matches!(parser.current.kind, TokenKind::Word(_))
+                || !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+            {
+                return Ok(None);
+            }
+            let source = parser.name()?;
+            if source.text != relationship.text {
+                return Err(error(
+                    source.at,
+                    GraphPatternTextErrorKind::Expected("the MERGE relationship variable"),
+                ));
+            }
+            parser.punct(b'.', ".")?;
+            let property = parser.name()?;
+            if let Some(column) = properties.iter().position(|p| p.text == property.text) {
+                return Ok(Some(column));
+            }
+            parser.capacity(
+                properties.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let column = properties.len();
+            properties.push(property);
+            Ok(Some(column))
+        })?;
+        Ok(ParsedEdgeUpsertAction {
+            key,
+            value,
+            properties,
+            at,
+        })
     }
 
     fn edge_upsert_pattern(
