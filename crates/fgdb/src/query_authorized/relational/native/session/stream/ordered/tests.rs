@@ -15,6 +15,9 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Waker};
 
+#[path = "tests/imported.rs"]
+mod imported;
+
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x86; 32]);
 type Resolver = fn(GraphSymbolKind, &str) -> Option<GraphSymbol>;
 type Session<'a, C> = AuthorizedOrderedReadSession<'a, Resolver, C, File, File>;
@@ -426,7 +429,10 @@ fn foreign_handles_unsupported_limit_zero_and_unpolled_work_touch_no_scratch() {
         let prepared = ordered
             .prepare(&cx, "MATCH (n:L) RETURN n.p AS p", &params)
             .unwrap();
-        drop(ordered.execute_ordered(&cx, &prepared, &params).unwrap());
+        let unopened = ordered.execute_ordered(&cx, &prepared, &params).unwrap();
+        assert_eq!(unopened.columns(), &["p"]);
+        assert_eq!(unopened.snapshot_seq(), CommitSeq(1));
+        drop(unopened);
         assert!(!ordered.is_closed());
         assert!(a.0.lock().unwrap().bytes.get_ref().is_empty());
         assert!(b.0.lock().unwrap().bytes.get_ref().is_empty());

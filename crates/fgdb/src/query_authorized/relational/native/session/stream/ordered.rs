@@ -11,7 +11,8 @@ use fgdb_gql::scan_stream::{ScanKind, ScanSortTail, ScanState};
 use fgdb_gql::{GlaExecutionStats, GqlExecutionBudget, GqlExecutionStats};
 use fgdb_strata::tiered::memory::{SpillError, SpillFile, TrackedBytes};
 use std::future::{Future, poll_fn};
-use std::task::Poll;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
 
@@ -101,6 +102,60 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64, A, B> AuthorizedOrderedReadSessi
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Bind a trusted host-prepared template to a fresh ordered read session.
+    ///
+    /// This preserves the catalog and source-coherence contract of
+    /// `authorized_prepared_read_session`: the host must validate the shared
+    /// selector/native template's database, branch and catalog, plus any
+    /// connection, authentication-generation and recovery fences. Importing
+    /// shares those immutable bindings without parsing or catalog callbacks.
+    /// The returned handle belongs only to this new session and pins no graph
+    /// independently; execution rebinds every argument under its live permit.
+    ///
+    /// Authority and template admission precede physical-limit inspection.
+    /// Both backends and their fixed ceilings move into the private wrapper;
+    /// neither a raw template nor a scratch attachment API is exposed to
+    /// narrowed request code. A failed constructor releases its new read pin.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorized_prepared_ordered_read_session<'a, R, C, A, B>(
+        &self,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        resolver: R,
+        policy: GqlQueryPolicy,
+        clock: C,
+        selector: Arc<PreparedGraphBranchText>,
+        native: Arc<PreparedNativeRead>,
+        scratch: SpillFile<A>,
+        destination: SpillFile<B>,
+        limits: AuthorizedSortLimits,
+    ) -> Result<(
+        AuthorizedOrderedReadSession<'a, R, C, A, B>,
+        AuthorizedPreparedRead,
+    )>
+    where
+        R: GraphSymbolResolver,
+        C: FnMut() -> u64,
+    {
+        let (session, prepared) = self
+            .authorized_prepared_read_session(
+                cx, authority, token, branch, resolver, policy, clock, selector, native,
+            )
+            .map_err(authorized)?;
+        limits.validate()?;
+        Ok((
+            AuthorizedOrderedReadSession {
+                session,
+                scratch,
+                destination,
+                limits,
+            },
+            prepared,
+        ))
+    }
+
     /// Create a pinned authorized session with host-owned external ordering.
     ///
     /// The backend types and files are trusted inputs, like the issuer clock:
@@ -432,9 +487,11 @@ where
     /// input demand, including under LIMIT 0; no eager fallback is attempted.
     ///
     /// Opening binds and admits the exact snapshot synchronously; a refusal
-    /// returns immediately without creating a future. An unpolled successful
-    /// future reserves no scratch. The complete private input, merge sort and
-    /// final window finish before the returned cursor can deliver a row. One
+    /// returns immediately without creating a future. The successful future
+    /// exposes its column schema and effective snapshot before input demand,
+    /// so a host can announce a cancellable stream before starting the sort.
+    /// An unpolled future reserves no scratch. The complete private input,
+    /// merge sort and final window finish before its cursor can deliver a row. One
     /// permit spans all phases. The fixed maximum sort/encoding allowance is
     /// reserved in full, source work continues on that permit, and the final
     /// encoded byte length is reserved before delivery reads. Neither reserve
@@ -450,9 +507,7 @@ where
         cx: &'q QueryCx,
         prepared: &AuthorizedPreparedRead,
         params: &GqlParameters,
-    ) -> Result<
-        impl Future<Output = Result<AuthorizedSpoolCursor<'q, B>>> + Send + 'q + use<'q, 'a, R, C, A, B>,
-    > {
+    ) -> Result<AuthorizedOrderExecution<'q, B>> {
         let Self {
             session,
             scratch,
@@ -461,7 +516,9 @@ where
         } = self;
         let limits = *limits;
         let opened = session.open_ordered(cx, prepared, params, limits)?;
-        Ok(async move {
+        let columns = opened.columns.clone();
+        let at = opened.at;
+        let future = Box::pin(async move {
             let OpenedOrder {
                 input,
                 tail,
@@ -520,7 +577,48 @@ where
                 at,
                 state: ScanState::Open,
             })
+        });
+        Ok(AuthorizedOrderExecution {
+            future,
+            columns,
+            at,
         })
+    }
+}
+
+/// One admitted external sort, retaining its private input and scratch owners.
+///
+/// The schema and selected snapshot are available before the first poll, so
+/// an async host can announce the stream and accept cancellation while sorting.
+/// They disclose no input rows, cardinality, scratch contents or progress.
+/// Public transports still need their ordinary live output guards before
+/// sending metadata. Awaiting runs the same live-checked sort and produces
+/// one final cursor; dropping never finishes the query or exposes a spool.
+/// A host must retain this exact future across control-frame pauses, because
+/// dropping an in-flight scratch operation preserves its poisoning rules.
+pub struct AuthorizedOrderExecution<'q, F> {
+    future: Pin<Box<dyn Future<Output = Result<AuthorizedSpoolCursor<'q, F>>> + Send + 'q>>,
+    columns: Vec<String>,
+    at: CommitSeq,
+}
+impl<F> core::fmt::Debug for AuthorizedOrderExecution<'_, F> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("AuthorizedOrderExecution([REDACTED])")
+    }
+}
+impl<F> AuthorizedOrderExecution<'_, F> {
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn snapshot_seq(&self) -> CommitSeq {
+        self.at
+    }
+}
+impl<'q, F> Future for AuthorizedOrderExecution<'q, F> {
+    type Output = Result<AuthorizedSpoolCursor<'q, F>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut().future.as_mut().poll(cx)
     }
 }
 

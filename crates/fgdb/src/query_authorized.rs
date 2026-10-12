@@ -36,10 +36,10 @@ mod overlay;
 #[path = "query_authorized/relational.rs"]
 mod relational;
 pub use relational::{
-    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedOrderedReadSession,
-    AuthorizedPreparedFnxCall, AuthorizedPreparedRead, AuthorizedReadSession, AuthorizedRowCursor,
-    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
-    AuthorizedSpoolCursor,
+    AuthorizedAggregateCursor, AuthorizedBeaconIndex, AuthorizedOrderExecution,
+    AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
+    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
 };
 
 type Fault = GqlQueryError<ReadError, QueryError>;

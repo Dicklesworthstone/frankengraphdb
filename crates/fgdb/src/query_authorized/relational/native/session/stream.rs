@@ -21,7 +21,10 @@ pub use aggregate::{AuthorizedAggregateCursor, AuthorizedSendAggregateCursor};
 
 #[path = "stream/ordered.rs"]
 mod ordered;
-pub use ordered::{AuthorizedOrderedReadSession, AuthorizedSortLimits, AuthorizedSpoolCursor};
+pub use ordered::{
+    AuthorizedOrderExecution, AuthorizedOrderedReadSession, AuthorizedSortLimits,
+    AuthorizedSpoolCursor,
+};
 
 // Synchronization is local to ONE cursor's sequential callbacks. No guard is
 // held across a source call or suspension. Keeping the actual borrowed clock
