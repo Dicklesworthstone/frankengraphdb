@@ -11,7 +11,7 @@ use fgdb_gql::spill_aggregate::{
 };
 use fgdb_gql::spill_set::{SpillSetAggregatePlan, SpillSetAggregateRowError};
 use fgdb_gql::stream::AsyncVertexScanSource;
-use fgdb_gql::{GlaExecutionEvent, GqlBudgetDimension};
+use fgdb_gql::{GlaExecutionEvent, GqlBudgetDimension, GqlExecutionBudget};
 
 struct BufferedInput<'q, T> {
     cursor: T,
@@ -215,7 +215,7 @@ fn conversion_error(error: SpillSetAggregateRowError<NativeSpoolError>) -> Nativ
 /// EVERY group into ordinary rows appended to destination. No live writer
 /// aliases a reader, and earlier sibling/child runs remain intact.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::query_spool) async fn spool_group_stage<V, A, B, C>(
+pub(in crate::query::view::spool) async fn spool_group_stage<V, A, B, C>(
     plan: SpillSetAggregatePlan,
     snapshot: CommitSeq,
     view: &mut BufferedReadView<V>,

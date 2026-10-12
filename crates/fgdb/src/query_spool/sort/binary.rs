@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::BufferedReadView;
-use crate::query_spool::sort::{Input as MergeInput, Run};
+use crate::query::view::spool::sort::{Input as MergeInput, Run};
 use fgdb_gql::spill_set::{AsyncSpillSetPlan, SpillSetBinaryPlan, SpillSetMergeStep};
 use fgdb_gql::{
     GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetExceeded, GraphSetQuantifier,

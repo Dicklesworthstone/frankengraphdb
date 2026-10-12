@@ -12,7 +12,8 @@ use fgdb::{
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateValue, GraphSymbol, GraphSymbolKind,
+    GqlBudgetDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateValue,
+    GraphSymbol, GraphSymbolKind,
 };
 use fgdb_strata::tiered::memory::{SpillFile, SpillLimits};
 use fgdb_types::{
@@ -316,6 +317,85 @@ fn cold_pipeline_aggregates_preserve_every_input_page_distinct_and_computed_sche
             assert_eq!(spool.row_stats().result_rows, expected.len() as u64);
             assert_eq!(contents(&spool, &mut destination, &cx).await, expected, "{text}");
             assert!(view.buffer_stats().bypasses > 0, "{text}");
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn cold_cartesian_groups_round_trip_through_ordering_into_a_final_aggregate() {
+    let ((), report) = run_async_under_lab(0xc01d_a105, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let prepared = prepare(concat!(
+            "UNWIND [1,1,2,13] AS wanted MATCH (n {p:wanted}) ",
+            "WITH n.p AS value,COUNT(*) AS copies ",
+            "ORDER BY value DESC SKIP 1 LIMIT 2 ",
+            "RETURN COUNT(*) AS rows,SUM(value*copies) AS total"
+        ));
+        for input_limit in [12, 11] {
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+            let mut view = view(&commit, &vfs, &source_pool).await;
+            let baseline = source_pool.used();
+            let (mut source, _) = file(&cx, &spill_pool).await;
+            let (mut partition, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let result = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(4, 1, WORK, WORK),
+                    &mut source,
+                    &mut partition,
+                    &mut destination,
+                    // Three intermediate groups exceed the resident group
+                    // capacity, and one-row runs require external merging.
+                    1,
+                    512,
+                    1,
+                    512,
+                    1024,
+                    16 * 1024,
+                    input_limit,
+                    WORK,
+                    None,
+                )
+                .await;
+            if input_limit == 12 {
+                let (spool, _) = result.unwrap();
+                // The fixture has p=[1,2,13]. Correlation keeps [1,1,2,13],
+                // grouped as (1,2),(2,1),(13,1). The ordered window removes
+                // (13,1), leaving two groups with weighted total 1*2+2*1=4.
+                assert_eq!(spool.columns(), &["rows", "total"]);
+                assert_eq!(spool.snapshot_seq(), CommitSeq(3));
+                // The one graph scan charges all four identities, including
+                // the retired vertex, across both reduction stages.
+                assert_eq!(spool.row_stats().snapshot_records, 4);
+                assert_eq!(spool.row_count(), 1);
+                assert_eq!(contents(&spool, &mut destination, &cx).await, summary(2, 4));
+            } else {
+                let error = result.expect_err("the complete Cartesian product needs twelve rows");
+                // The final one-row aggregate and intermediate window must
+                // not hide admission of four UNWIND rows times three vertices.
+                assert!(
+                    matches!(
+                        &error,
+                        NativeAggregateSpoolError::Spool(NativeSpoolError::BufferedExecute(inner))
+                            if matches!(**inner, GqlQueryError::Rows(ref exceeded)
+                                if exceeded.dimension == GqlBudgetDimension::ResultRows
+                                    && exceeded.limit == 11
+                                    && exceeded.observed == 12)
+                    ),
+                    "{error:?}"
+                );
+            }
             assert_eq!(source_pool.used(), baseline);
             assert_eq!(spill_pool.used(), 0);
             drop(view);
