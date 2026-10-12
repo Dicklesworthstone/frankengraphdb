@@ -209,11 +209,26 @@ fn text_and_typed_ordering_share_transcripts_and_immutable_rebinding() {
         1,
         "ORDER BY never re-resolves the catalog during rebinding"
     );
-    assert!(
+    // fgdb-3dnpu: a non-negative Int64 SKIP is that UInt64; a negative one
+    // still refuses.
+    assert_eq!(
         template
             .bind_parameters(
                 &GqlParameters::new()
                     .with_int64("off", 0)
+                    .unwrap()
+                    .with_uint64("take", 1)
+                    .unwrap()
+            )
+            .unwrap()
+            .canonical_bytes(),
+        changed.canonical_bytes()
+    );
+    assert!(
+        template
+            .bind_parameters(
+                &GqlParameters::new()
+                    .with_int64("off", -1)
                     .unwrap()
                     .with_uint64("take", 1)
                     .unwrap()

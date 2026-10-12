@@ -250,7 +250,6 @@ mod compound_order_expression_tests {
             "ORDER BY (value + 1]",
             "ORDER BY [value + 1)",
             "ORDER BY value + $p LIMIT $p",
-            "ORDER BY value + 1, value + 1",
         ] {
             let calls = Cell::new(0);
             let result = PreparedGraphSetText::prepare(&format!("{head} {tail}"), |kind, name| {
@@ -263,6 +262,9 @@ mod compound_order_expression_tests {
         let text = format!("{head} ORDER BY value + missing");
         let error = PreparedGraphSetText::prepare(&text, symbols).unwrap_err();
         assert_eq!(error.offset, text.find("missing").unwrap());
+        // A repeated sort key is legal and redundant, as in openCypher.
+        PreparedGraphSetText::prepare(&format!("{head} ORDER BY value + 1, value + 1"), symbols)
+            .unwrap();
     }
 
     #[test]
