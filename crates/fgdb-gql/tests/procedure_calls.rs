@@ -427,7 +427,9 @@ fn the_original_procedure_builder_signature_keeps_its_unprojected_behavior() {
             || Ok::<_, usize>(()),
         )
         .unwrap();
-    assert_eq!(column(&result.value, 0), [int(1), int(3), int(2), int(5)]);
+    // A procedure source is admitted in canonical bag order, as a pattern
+    // source is, whatever order the host yields (set_ops admit_source_rows).
+    assert_eq!(column(&result.value, 0), [int(1), int(2), int(3), int(5)]);
 }
 
 #[test]

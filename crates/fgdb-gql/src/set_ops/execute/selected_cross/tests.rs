@@ -711,13 +711,16 @@ fn leading_unwind_match_with_refuses_malformed_neighbours() {
             "UNWIND [1] AS x MATCH (n) WITH x, n.p AS x RETURN x",
             "two items cannot share an alias",
         ),
-        (
-            "UNWIND [1] AS x MATCH (n) WITH x, n RETURN n.p",
-            "past the boundary only the projected row exists",
-        ),
     ] {
         assert!(prepare_p(text).is_err(), "{why}: {text}");
     }
+    // A vertex carried past the boundary still reads its properties: `n` is a
+    // projected column, so `n.p` after `WITH x, n` is valid openCypher.
+    let carried = prepare_p("UNWIND [1] AS x MATCH (n) WITH x, n RETURN n.p").unwrap();
+    assert_eq!(
+        over_two_vertices(&carried),
+        vec![row(&[Some(1)]), row(&[Some(2)])]
+    );
 }
 
 #[test]
