@@ -620,8 +620,11 @@ impl<'a> Parser<'a> {
 
     /// Whether the WHERE at the current token needs the value language
     /// (fgdb-1c29d): a list quantifier, a list comprehension, a list or path
-    /// function, or IN over a computed list. Pattern predicates accept none
-    /// of these, so a WHERE without one keeps its exact pattern lowering.
+    /// function, `type(r)`, or IN over a computed list. Pattern predicates
+    /// accept none of these, so a WHERE without one keeps its exact pattern
+    /// lowering. The boolean filter cannot read a relationship's type
+    /// (fgdb-fj106); the row filter reads it through the hoisted metadata
+    /// column `RETURN type(r)` already uses.
     /// `nodes(p)` and `edges(p)` at depth zero are path predicates; inside
     /// parentheses (`size(nodes(p))`) they are list values.
     fn where_needs_values(&self) -> Result<bool, GraphPatternTextError> {
@@ -646,6 +649,7 @@ impl<'a> Parser<'a> {
                     let list_function = [
                         "relationships",
                         "labels",
+                        "type",
                         "keys",
                         "reduce",
                         "head",

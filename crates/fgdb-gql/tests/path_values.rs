@@ -755,6 +755,26 @@ fn match_where_over_list_values_filters_after_the_match() {
         assert_eq!(deferred, explicit, "{predicate}");
         assert_eq!(deferred.len(), count, "{predicate}");
     }
+    // fgdb-fj106: `type(r)` in WHERE reads the relationship's type through
+    // the same row filter (both chain edges are R; no S edge exists), and
+    // `type(r) = 'R'` keeps exactly the rows the typed pattern matches.
+    let untyped = "MATCH (a)-[r]->(c)";
+    for (predicate, count) in [
+        ("type(r) = 'R'", 2),
+        ("type(r) = 'S'", 0),
+        ("NOT type(r) = 'R'", 0),
+        ("type(r) = 'S' OR type(r) = 'R'", 2),
+        ("type(r) = 'R' AND c.name = 'b'", 1),
+    ] {
+        let deferred = rows(&format!("{untyped} WHERE {predicate} RETURN a, c"));
+        let explicit = rows(&format!("{untyped} WITH * WHERE {predicate} RETURN a, c"));
+        assert_eq!(deferred, explicit, "{predicate}");
+        assert_eq!(deferred.len(), count, "{predicate}");
+    }
+    assert_eq!(
+        rows(&format!("{untyped} WHERE type(r) = 'R' RETURN a, c")),
+        rows("MATCH (a)-[r:R]->(c) RETURN a, c")
+    );
     // The deferred predicate belongs to the root MATCH, so v1 refuses another
     // MATCH clause between it and the RETURN rather than moving it past one.
     assert!(
