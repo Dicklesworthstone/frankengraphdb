@@ -8,8 +8,8 @@ use fgdb_protocol::body::Prepare;
 use std::sync::Arc;
 
 pub(crate) struct PreparedRead {
-    selector: Arc<PreparedGraphBranchText>,
-    native: Arc<PreparedNativeRead>,
+    pub(super) selector: Arc<PreparedGraphBranchText>,
+    pub(super) native: Arc<PreparedNativeRead>,
     pub(crate) generation: Generation,
     pub(crate) source_bytes: usize,
 }

@@ -20,5 +20,6 @@ fgdb-crypto = { path = "../fgdb-crypto" }
 fgdb-delta-types = { path = "../fgdb-delta-types" }
 fgdb-gql = { path = "../fgdb-gql" }
 fgdb-protocol = { path = "../fgdb-protocol", features = ["transport"] }
+fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }
 fgdb-warden = { path = "../fgdb-warden" }

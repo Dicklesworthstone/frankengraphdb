@@ -161,7 +161,10 @@ fn insertion_returning_maps_mask_matched_sources_and_refuse_late_failures_atomic
                         ExecuteMode::Write,
                         &statement,
                         vec![],
-                        |_| columns += 1,
+                        |_| {
+                            columns += 1;
+                            Ok(())
+                        },
                         |_| {
                             rows += 1;
                             Ok(())

@@ -806,6 +806,7 @@ dependencies = [
  "fgdb-delta-types",
  "fgdb-gql",
  "fgdb-protocol",
+ "fgdb-strata",
  "fgdb-types",
  "fgdb-warden",
 ]

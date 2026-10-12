@@ -162,11 +162,11 @@ redacted from `Debug`.
 | AUTH_REFRESHED | unchanged `session_transcript [32]`, successor `auth_generation u64` |
 | SELECT_DATABASE | `name text` |
 | READY | `namespace [32]`, `incarnation [32]`, `service_epoch u64`, `posture u8`, `authority_commitment [32]`, `frontier u64` |
-| EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe, 3 native source read stream), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
+| EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe, 3 native source read stream, 4 external ordered read), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
 | PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending) |
 | PREPARED | nonzero connection-owned `handle [16]` |
-| EXECUTE_PREPARED | `handle [16]`, `mode u8` (0 buffered, 1 native source stream), execution `parameters [(name text, value)]` (names strictly ascending) |
+| EXECUTE_PREPARED | `handle [16]`, `mode u8` (0 buffered, 1 native source stream, 2 external ordered stream), execution `parameters [(name text, value)]` (names strictly ascending) |
 | RELEASE_PREPARED / PREPARED_RELEASED | `handle [16]` |
 | SNAPSHOT_RESULT_CHUNK | `columns: none \| [text]` (first chunk only), `rows [[value]]` |
 | SNAPSHOT_RESULT_END | `outcome` (`Rows{seq}`, `WriteCommitted{seq,statements}`, `ReadClosed{seq,statements}`), `rows u64` |
@@ -288,11 +288,16 @@ application output is admitted.
   Execution mode is explicit: `PreparedReadMode::Buffered` (wire 0) uses the
   broader eager native profile; `PreparedReadMode::SourceStream` (wire 1)
   opens the same credit-driven row or aggregate source as native read-stream
-  execution below. Unsupported source profiles refuse without an eager retry.
-  Each source execution imports shared immutable catalog bindings into a fresh
-  authorized session and rebinds its operands without reparsing or re-resolving
-  names. Its new snapshot and cumulative permit last through every credit pause.
-  The retained template owns neither that snapshot nor execution arguments.
+  execution below; `PreparedReadMode::OrderedStream` (wire 2) uses the host's
+  private external sorter and then streams its completed final rows. Unsupported
+  profiles or a missing ordered-read host configuration refuse without an eager
+  retry. Source and ordered execution import shared immutable catalog bindings
+  into a fresh authorized session and rebind operands without reparsing or
+  re-resolving names. The new snapshot and cumulative permit last through every
+  credit pause. Ordered execution uses
+  `Database::authorized_prepared_ordered_read_session` with fresh private files.
+  The retained template owns neither that snapshot, scratch nor execution
+  arguments.
 
   The execution body now requires this mode byte immediately after the handle.
   Clients and servers using the earlier handle-plus-parameters body must be
@@ -347,7 +352,7 @@ application output is admitted.
       PreparedReadMode::SourceStream,
       handle,
       vec![("min".into(), WireValue::Int(18))],
-      |columns| println!("{columns:?}"),
+      |columns| { println!("{columns:?}"); Ok(()) },
       |row| { println!("{row:?}"); Ok(()) },
   ).await?;
   client.release_prepared(cx, handle).await?;
@@ -410,7 +415,7 @@ application output is admitted.
       ExecuteMode::ReadStream,
       "MATCH (n:Person) RETURN n AS person, n.age AS age",
       vec![],
-      |columns| println!("{columns:?}"),
+      |columns| { println!("{columns:?}"); Ok(()) },
       |row| { println!("{row:?}"); Ok(()) },
   ).await?;
   ```
@@ -419,10 +424,75 @@ application output is admitted.
   durable result, background query task, spill, or per-page requery. Embedded
   callers use `AuthorizedReadSession::stream_send` for the same Send-capable
   cursor. The original `stream` API still accepts thread-local host clocks.
-  The separate embedded `authorized_ordered_read_session` API can externally
-  sort property-only projections into host-owned authenticated scratch before
-  exposing its final authorized cursor. It does not change these FGP modes or
-  make transport credit govern the blocking sort phase.
+- **External ordered streams.** `EXECUTE` mode 4 (`ExecuteMode::ReadOrdered`)
+  and prepared `OrderedStream` use the authorized native external sorter over
+  vertex scans, fixed-edge joins and admitted probes. Property-only projections,
+  compiler-admitted hidden sort keys, DISTINCT and final SKIP/LIMIT retain the
+  query's native semantics, including historical cuts. Scope masking precedes
+  input expressions, ordering and distinctness. Unsupported physical profiles,
+  including aggregate and compound plans, refuse even with LIMIT 0. Native
+  aggregate streaming remains available through `ReadStream`/`SourceStream`.
+
+  The operator enables this mode per database with
+  `fgdbd serve ... --database <name>=<path> ... --query-scratch-dir <directory>`.
+  The directory must already exist. Embedded hosts set
+  `DatabaseConfig.ordered_reads = Some(OrderedReadConfig::new(directory))` and
+  may adjust its physical limits. Defaults are one shared 64 MiB tracked spill
+  buffer pool, four concurrent ordered sessions, two files of at most 512 MiB
+  each per session, at most 100,000 input rows, 256 rows per initial sort run,
+  1,024 sort runs, 32 KiB pages, 1 MiB encoded rows and 10,000,000 sort-work
+  units. Each file additionally allows at most 8,192 runs and 128 MiB per run.
+  Every intermediate append spends its file quota. The complete sort-work
+  ceiling is reserved from the signed execution permit before source work;
+  source work and final delivery spend the same permit. Signed rows count only
+  final delivery. Requests supply neither scratch paths nor physical limits.
+  A database with no ordered-read configuration returns a statement refusal.
+
+  Setup processes controls and observes disconnect, shutdown and recovery even
+  while filesystem admission is pending. Once execution has been admitted, a
+  columns-only chunk announces its real child stream before the sort's first
+  poll, allowing QUERY_CANCEL to address that work. The server retains the same
+  pending admission, sort or row-read future across PING and WINDOW_UPDATE;
+  controls cannot restart a partial scratch operation. The complete sort and
+  final query window finish before the first result row. Byte and row credit
+  then govern final spool reads and output; they do not govern input sorting.
+  At most one result frame and one measured row awaiting byte credit are held
+  by the adapter. Live capability and served-generation checks surround each
+  asynchronous operation and protected physical output poll. Recovery holds no
+  operation lease across a pending filesystem call or a client credit wait.
+
+  On Unix, admission creates exclusive mode-0600 files and unlinks them before
+  writing query data. Closing their private descriptors retires scratch on
+  completion, refusal, cancellation or disconnect. Creation and unlink run in
+  one foundation blocking-I/O task, so cancellation cannot strand a named
+  partial result. An unlink failure can leave an empty file. This is ephemeral
+  scratch with no durable result, resume token or recovery manifest. The
+  decoded source graph remains resident; the shared pool accounts for tracked
+  spill buffers, not all source, wire or foundation-I/O memory. The session
+  concurrency ceiling and logical work reservations do not count cancelled
+  foundation syscalls that finish against already unlinked descriptors.
+  Synchronous bounded work observes controls at its next poll boundary.
+
+  ```rust
+  let outcome = client.execute_streaming(
+      cx,
+      ExecuteMode::ReadOrdered,
+      "MATCH (n:Person) RETURN n.name AS name ORDER BY n.age DESC LIMIT 20",
+      vec![],
+      |columns| { println!("{columns:?}"); Ok(()) },
+      |row| { println!("{row:?}"); Ok(()) },
+  ).await?;
+  ```
+
+  The remote CLI selects these paths with
+  `fgdb remote ... query --read-mode source|ordered <gql>`; `buffered` is the
+  default. Source and ordered modes flush columns and each row without collecting
+  the complete answer. Their robot columns record has `stream=true` and no
+  `seq`: the effective query cut arrives only in END and is included in the
+  successful final rows result. A late refusal, EOF or output failure leaves
+  the earlier prefix incomplete and emits no successful result. Use
+  `--param cut=uint:7` for an exact unsigned temporal or window operand;
+  `uint:` accepts the full `u64` range and retains its type separately from `int:`.
 - **Results.** Every result is the session-owned, ephemeral
   SNAPSHOT_RESULT class on a server-minted 128-bit child stream. The first
   chunk carries the columns. Each chunk is sized to the stream's available
@@ -435,10 +505,12 @@ application output is admitted.
   DRAIN get through, and a second EXECUTE is refused `busy`. A late
   WINDOW_UPDATE or QUERY_CANCEL for one of the last 64 finished streams is
   accepted and ignored instead of poisoning the connection. If a streaming
-  client callback refuses a row, the client sends QUERY_CANCEL, suppresses
-  further row callbacks, and drains the original terminal before returning
+  client callback refuses the columns or a row, the client sends QUERY_CANCEL,
+  suppresses further callbacks and credit replenishment, and drains the original
+  terminal before returning
   the callback error. Draining still validates every request, stream, binding
-  and terminal body; it never retries the query.
+  and terminal body; it never retries the query. Both column and row callbacks
+  return `Result<(), ClientError>`, including for prepared execution.
 - **Send guard.** Every write attempt rechecks that the frame carries the
   binding the connection holds at that moment. The only exceptions are
   HELLO_ACK and AUTH_OK on the transport header and READY on the session
@@ -631,6 +703,23 @@ read, masked results and unsigned historical/branch/window rebinding:
 `crates/fgdb/src/query_authorized/relational/native/session/failure_tests.rs`,
 `crates/fgdb-server/src/connection/{prepared_tests,source_stream}.rs` and
 `crates/fgdb-server/tests/loopback{,/source_stream}.rs`.
+
+External ordered regression sources additionally cover host scratch quotas and
+retirement, admission controls before schema announcement, retained futures
+across PING and credit grants, recovery and capability fencing, exact historical
+prepared rebinding, masked hidden-key sorting, property-only fixed joins,
+input/work/final-row allowances, callback cancellation and connection reuse:
+`crates/fgdb-server/src/{ordered,execute/ordered,connection/ordered_stream}/tests.rs`,
+`crates/fgdb-server/tests/loopback/ordered_stream.rs` and
+`crates/fgdb-cli/src/remote/stream_tests.rs`. These new server, transport and CLI
+tests received independent source review and scoped formatting/whitespace checks;
+their compilation and execution remain unverified under the pinned foundation's
+compiler-memory blocker. Existing unrelated formatting drift was preserved.
+On 2026-10-12, the dependency-free command
+`cargo test -p fgdb-protocol --lib --no-default-features --locked --offline -j1`
+passed all 10 library tests, including the new mode discriminators, unchanged
+existing encodings and canonical prepared operands. This command does not
+compile the transport, server or CLI.
 
 On 2026-10-11, `cargo test -p fgdb-protocol --locked -j1` passed all 27
 protocol-core tests and core Clippy passed with warnings denied in the earlier

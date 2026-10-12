@@ -8,7 +8,7 @@ use asupersync::io::AsyncWriteExt as _;
 use asupersync::net::TcpListener;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GraphSymbolKind;
-use fgdb_server::{DatabaseConfig, Server, ServerLimits, Symbols};
+use fgdb_server::{DatabaseConfig, OrderedReadConfig, Server, ServerLimits, Symbols};
 use fgdb_warden::{Grant, QueryLimits, Restriction, Rights, Scope};
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -23,7 +23,7 @@ USAGE:
   fgdbd serve --listen <addr:port> [--http-listen <addr:port> [--http-allow-host <host>]...]
       [--bolt-listen <addr:port>] [--tls-cert-file <path> --tls-key-file <path>] DATABASE...
       DATABASE := --database <name>=<path> --key-file <path> --issuer-key-file <path>
-                  [--policy-epoch <n>] [--write-relation <u32>]
+                  [--policy-epoch <n>] [--write-relation <u32>] [--query-scratch-dir <path>]
                   [--label <name>=<u32>]... [--relation <name>=<u32>]... [--property <name>=<u32>]...
       [--max-connections <n>]
   fgdbd token --key-file <path> --issuer-key-file <path> [--policy-epoch <n>]
@@ -47,6 +47,11 @@ the bindings given here (there is no durable catalog yet). serve prints one
 NDJSON line {\"v\":1,\"event\":\"listening\",\"protocol\":\"fgp\",\"addr\":...} per
 listener once bound, drains on SIGINT/SIGTERM (in-flight statements finish,
 idle connections say GOODBYE), and exits 0.
+
+--query-scratch-dir enables FGP ordered reads for that database using bounded
+query-private files in an existing directory. The operator chooses this path;
+clients request ReadOrdered or prepared OrderedStream without supplying paths
+or scratch limits. Databases without this option refuse those execution modes.
 
 --tls-cert-file and --tls-key-file must be supplied together. They enable
 TLS 1.3 on EVERY configured listener, with no plaintext fallback. Supply a
@@ -159,6 +164,7 @@ struct DatabaseOptions {
     path: PathBuf,
     key_file: Option<PathBuf>,
     issuer_key_file: Option<PathBuf>,
+    query_scratch_dir: Option<PathBuf>,
     policy_epoch: u64,
     write_relation: u32,
     symbols: Symbols,
@@ -243,6 +249,7 @@ impl ServeOptions {
                         path: PathBuf::from(path),
                         key_file: None,
                         issuer_key_file: None,
+                        query_scratch_dir: None,
                         policy_epoch: 1,
                         write_relation: 1,
                         symbols: Symbols::new(),
@@ -260,6 +267,9 @@ impl ServeOptions {
                         }
                         "--issuer-key-file" if db.issuer_key_file.is_none() => {
                             db.issuer_key_file = Some(PathBuf::from(value(args, &mut at, flag)?));
+                        }
+                        "--query-scratch-dir" if db.query_scratch_dir.is_none() => {
+                            db.query_scratch_dir = Some(PathBuf::from(value(args, &mut at, flag)?));
                         }
                         "--policy-epoch" => {
                             db.policy_epoch = number(value(args, &mut at, flag)?, flag)?
@@ -341,6 +351,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         config.policy_epoch = db.policy_epoch;
         config.write_relation = RelationId(u64::from(db.write_relation));
         config.symbols = db.symbols;
+        config.ordered_reads = db.query_scratch_dir.map(OrderedReadConfig::new);
         server
             .open_database(cx, &db.path, config)
             .await
@@ -766,6 +777,58 @@ async fn keygen(cx: &Cx, args: &[String]) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_scratch_is_an_explicit_per_database_option() {
+        let base = [
+            "--listen",
+            "127.0.0.1:0",
+            "--database",
+            "first=first-db",
+            "--key-file",
+            "first.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let parse = |extra: &[&str]| {
+            let args: Vec<String> = base.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+            ServeOptions::parse(&args)
+        };
+        let disabled = parse(&[]).unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(disabled.databases[0].query_scratch_dir.is_none());
+        let options = parse(&[
+            "--query-scratch-dir",
+            "private scratch/first",
+            "--database",
+            "second=second-db",
+            "--key-file",
+            "second.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ])
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            options.databases[0].query_scratch_dir.as_deref(),
+            Some(std::path::Path::new("private scratch/first"))
+        );
+        assert!(options.databases[1].query_scratch_dir.is_none());
+        assert!(parse(&["--query-scratch-dir"]).is_err());
+        assert!(
+            parse(&[
+                "--query-scratch-dir",
+                "first",
+                "--query-scratch-dir",
+                "second",
+            ])
+            .is_err()
+        );
+        let misplaced: Vec<String> = ["--query-scratch-dir", "scratch"]
+            .iter()
+            .chain(&base)
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert!(ServeOptions::parse(&misplaced).is_err());
+    }
 
     #[test]
     fn serve_tls_identity_must_be_complete_and_unique() {

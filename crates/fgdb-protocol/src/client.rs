@@ -11,8 +11,8 @@
 use crate::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, BodyError, Credential, Empty, ErrorBody,
     ErrorCode, Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping,
-    Prepare, Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared, ResultChunk, ResultEnd,
-    SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
+    Prepare, Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared, ResultChunk,
+    ResultEnd, SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
 };
 use crate::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, TransportError, split_duplex,
@@ -282,7 +282,10 @@ impl Client {
                 mode,
                 statement,
                 parameters,
-                |names| columns = names.to_vec(),
+                |names| {
+                    columns = names.to_vec();
+                    Ok(())
+                },
                 |row| {
                     rows.push(row);
                     Ok(())
@@ -330,7 +333,10 @@ impl Client {
             .receive_result(
                 cx,
                 request,
-                |columns| unexpected_columns |= !columns.is_empty(),
+                |columns| {
+                    unexpected_columns |= !columns.is_empty();
+                    Ok(())
+                },
                 |_| Err(ClientError::Protocol("a stats-only batch returned a row")),
             )
             .await?;
@@ -420,7 +426,10 @@ impl Client {
                 PreparedReadMode::Buffered,
                 handle,
                 parameters,
-                |names| columns = names.to_vec(),
+                |names| {
+                    columns = names.to_vec();
+                    Ok(())
+                },
                 |row| {
                     rows.push(row);
                     Ok(())
@@ -440,16 +449,22 @@ impl Client {
     /// aggregate profiles as `ExecuteMode::ReadStream`; unsupported profiles
     /// refuse without falling back to buffered execution. `Buffered` retains
     /// the broader native read profile and chunks its completed answer.
+    /// `OrderedStream` uses the server's bounded external ordering profile:
+    /// the complete private order, DISTINCT and window finish before the first
+    /// result row. Credit controls delivery of final rows. The server owns all
+    /// scratch limits; an unsupported profile or missing host scratch refuses.
     ///
-    /// A callback refusal sends QUERY_CANCEL and drains its terminal before
-    /// returning, so later execution cannot consume cancelled result frames.
+    /// A refusal from either callback sends QUERY_CANCEL and drains its
+    /// terminal before returning, so later execution cannot consume cancelled
+    /// result frames. Columns can arrive before any ordered source work; a
+    /// schema refusal cancels then, without waiting for a first row.
     pub async fn execute_prepared_streaming(
         &mut self,
         cx: &Cx,
         mode: PreparedReadMode,
         handle: PreparedHandle,
         mut parameters: Vec<(String, WireValue)>,
-        on_columns: impl FnMut(&[String]),
+        on_columns: impl FnMut(&[String]) -> Result<(), ClientError>,
         on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
     ) -> Result<Outcome, ClientError> {
         if self.selected.is_none() {
@@ -478,8 +493,10 @@ impl Client {
     }
 
     /// Run one statement, handing over its columns once and then each row as
-    /// it arrives. An error from `on_row` cancels and drains the stream before
-    /// returning that error, leaving the connection ready for another request.
+    /// it arrives. An error from either callback cancels and drains the stream
+    /// before returning that error, leaving the connection ready for another
+    /// request. A columns-only announcement can be refused immediately, even
+    /// if the server is still completing a private sort before its first row.
     /// `ReadStream` additionally makes flow credit drive the server's actual
     /// native source, retaining one pinned generation and execution allowance.
     /// It accepts the native cursor's identity-leading row profile or admitted
@@ -487,6 +504,11 @@ impl Client {
     /// and only complete groups are delivered. Unsupported plans refuse.
     /// `Read` retains its broader eager execution semantics; callbacks alone
     /// do not make that server source lazy.
+    /// `ReadOrdered` completes the native ORDER BY, DISTINCT and window in
+    /// host-owned bounded scratch before returning rows. It accepts admitted
+    /// property projections and hidden sort keys, and applies credit to final
+    /// delivery. Missing scratch or an unsupported physical profile refuses
+    /// without retrying another mode.
     /// The client replenishes an exactly exhausted row window before waiting
     /// for END, allowing a native source to discover natural EOF without an
     /// unauthorized pull at zero credit. No automatic query retry occurs.
@@ -496,7 +518,7 @@ impl Client {
         mode: ExecuteMode,
         statement: &str,
         mut parameters: Vec<(String, WireValue)>,
-        on_columns: impl FnMut(&[String]),
+        on_columns: impl FnMut(&[String]) -> Result<(), ClientError>,
         on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
     ) -> Result<Outcome, ClientError> {
         if self.selected.is_none() {
@@ -518,7 +540,7 @@ impl Client {
         &mut self,
         cx: &Cx,
         request: u64,
-        mut on_columns: impl FnMut(&[String]),
+        mut on_columns: impl FnMut(&[String]) -> Result<(), ClientError>,
         mut on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
     ) -> Result<Outcome, ClientError> {
         let mut stream: Option<StreamId> = None;
@@ -554,20 +576,24 @@ impl Client {
                         return Err(ClientError::Protocol("chunk on the control stream"));
                     }
                     let chunk = ResultChunk::decode(frame.payload())?;
-                    match (chunk.columns, seen_columns) {
-                        (Some(names), false) => {
-                            seen_columns = true;
-                            on_columns(&names);
-                        }
-                        (None, true) => {}
-                        _ => return Err(ClientError::Protocol("columns out of order")),
-                    }
                     let count = chunk.rows.len() as u64;
                     let cost = header.frame_len() as u64;
                     if cost > available.0 || count > available.1 {
                         return Err(ClientError::Protocol("server exceeded its flow credit"));
                     }
                     available = (available.0 - cost, available.1 - count);
+                    match (chunk.columns, seen_columns) {
+                        (Some(names), false) => {
+                            seen_columns = true;
+                            if let Err(error) = on_columns(&names) {
+                                let id = stream.expect("a chunk has a child stream");
+                                self.send(cx, FrameKind::QueryCancel, id, &Empty).await?;
+                                callback_error = Some(error);
+                            }
+                        }
+                        (None, true) => {}
+                        _ => return Err(ClientError::Protocol("columns out of order")),
+                    }
                     for row in chunk.rows {
                         if callback_error.is_none()
                             && let Err(error) = on_row(row)
@@ -1096,9 +1122,12 @@ mod tests {
     }
 
     #[test]
-    fn native_stream_replenishes_exact_row_windows_and_never_retries_a_late_refusal() {
+    fn native_read_modes_replenish_exact_row_windows_and_never_retry_a_late_refusal() {
         let ((), report) = run_async_under_lab(0x79a0_0313, |root| async move {
-            for fails in [false, true] {
+            for (mode, fails) in [ExecuteMode::ReadStream, ExecuteMode::ReadOrdered]
+                .into_iter()
+                .flat_map(|mode| [false, true].map(|fails| (mode, fails)))
+            {
                 let values: Vec<i64> = (0..32).collect();
                 let terminal = if fails {
                     rpc(
@@ -1121,10 +1150,10 @@ mod tests {
                 let result = client
                     .execute_streaming(
                         &root,
-                        ExecuteMode::ReadStream,
+                        mode,
                         "MATCH (n) RETURN n",
                         vec![],
-                        |_| {},
+                        |_| Ok(()),
                         |row| {
                             delivered.push(row);
                             Ok(())
@@ -1151,12 +1180,9 @@ mod tests {
                 assert_eq!(
                     executes.len(),
                     1,
-                    "a source stream is never retried as an eager query"
+                    "the requested physical mode must be sent only once"
                 );
-                assert_eq!(
-                    Execute::decode(executes[0].payload()).unwrap().mode,
-                    ExecuteMode::ReadStream
-                );
+                assert_eq!(Execute::decode(executes[0].payload()).unwrap().mode, mode);
                 let grants: Vec<_> = frames
                     .iter()
                     .filter(|frame| frame.header().kind() == FrameKind::WindowUpdate)
@@ -1170,6 +1196,254 @@ mod tests {
                 assert_eq!(grant.rows, 32);
                 assert_eq!(grant.sequence, 1);
                 assert_eq!(grants[0].header().stream_id(), StreamId([5; 16]));
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn ordered_refusals_keep_the_requested_mode_and_leave_the_connection_usable() {
+        let ((), report) = run_async_under_lab(0x79a0_0314, |root| async move {
+            for prepared in [false, true] {
+                let handle = PreparedHandle([0x32; 16]);
+                let request = if prepared { 5 } else { 4 };
+                let mut replies = Vec::new();
+                if prepared {
+                    replies.push(rpc(
+                        FrameKind::Prepared,
+                        4,
+                        StreamId::CONTROL,
+                        &Prepared { handle },
+                    ));
+                }
+                replies.extend([
+                    rpc(
+                        FrameKind::Error,
+                        request,
+                        StreamId([5; 16]),
+                        &ErrorBody {
+                            code: ErrorCode::Statement,
+                            message: "ordered execution profile is unsupported".into(),
+                        },
+                    ),
+                    result_chunk(request + 1, &[20]),
+                    result_end(request + 1, 1),
+                ]);
+                let io = script(replies);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let text = "MATCH (n) RETURN n.p AS value ORDER BY value LIMIT $limit";
+                let parameters = vec![("limit".into(), WireValue::Count(2))];
+                let callbacks = std::cell::Cell::new(0);
+                let result = if prepared {
+                    assert_eq!(
+                        client
+                            .prepare_read(&root, text, parameters.clone())
+                            .await
+                            .unwrap(),
+                        handle
+                    );
+                    client
+                        .execute_prepared_streaming(
+                            &root,
+                            PreparedReadMode::OrderedStream,
+                            handle,
+                            parameters.clone(),
+                            |_| {
+                                callbacks.set(callbacks.get() + 1);
+                                Ok(())
+                            },
+                            |_| {
+                                callbacks.set(callbacks.get() + 1);
+                                Ok(())
+                            },
+                        )
+                        .await
+                } else {
+                    client
+                        .execute_streaming(
+                            &root,
+                            ExecuteMode::ReadOrdered,
+                            text,
+                            parameters.clone(),
+                            |_| {
+                                callbacks.set(callbacks.get() + 1);
+                                Ok(())
+                            },
+                            |_| {
+                                callbacks.set(callbacks.get() + 1);
+                                Ok(())
+                            },
+                        )
+                        .await
+                };
+                assert!(matches!(
+                    result,
+                    Err(ClientError::Server {
+                        code: ErrorCode::Statement,
+                        ..
+                    })
+                ));
+                assert_eq!(callbacks.get(), 0);
+                let answer = client
+                    .execute(&root, ExecuteMode::Read, "MATCH (n) RETURN n", vec![])
+                    .await
+                    .unwrap();
+                assert_eq!(answer.rows, [vec![WireValue::Int(20)]]);
+                let frames = sent_frames(&written.lock().unwrap());
+                let executions: Vec<_> = frames
+                    .iter()
+                    .filter(|frame| {
+                        matches!(
+                            frame.header().kind(),
+                            FrameKind::Execute | FrameKind::ExecutePrepared
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    executions.len(),
+                    2,
+                    "a refusal must not trigger an automatic mode retry"
+                );
+                if prepared {
+                    let sent = ExecutePrepared::decode(executions[0].payload()).unwrap();
+                    assert_eq!(sent.mode, PreparedReadMode::OrderedStream);
+                    assert_eq!(sent.parameters, parameters);
+                } else {
+                    let sent = Execute::decode(executions[0].payload()).unwrap();
+                    assert_eq!(sent.mode, ExecuteMode::ReadOrdered);
+                    assert_eq!(sent.parameters, parameters);
+                }
+                assert_eq!(
+                    Execute::decode(executions[1].payload()).unwrap().mode,
+                    ExecuteMode::Read
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn schema_refusal_cancels_before_rows_and_drains_for_connection_reuse() {
+        let ((), report) = run_async_under_lab(0x79a0_0315, |root| async move {
+            for (mode, prepared_mode) in [
+                (ExecuteMode::ReadStream, PreparedReadMode::SourceStream),
+                (ExecuteMode::ReadOrdered, PreparedReadMode::OrderedStream),
+            ] {
+                for (prepared, cancelled) in [false, true]
+                    .into_iter()
+                    .flat_map(|prepared| [false, true].map(|cancelled| (prepared, cancelled)))
+                {
+                    let handle = PreparedHandle([0x33; 16]);
+                    let request = if prepared { 5 } else { 4 };
+                    let stream = StreamId([5; 16]);
+                    let mut replies = Vec::new();
+                    if prepared {
+                        replies.push(rpc(
+                            FrameKind::Prepared,
+                            4,
+                            StreamId::CONTROL,
+                            &Prepared { handle },
+                        ));
+                    }
+                    replies.push(rpc(
+                        FrameKind::SnapshotResultChunk,
+                        request,
+                        stream,
+                        &ResultChunk {
+                            columns: Some(vec!["value".into()]),
+                            rows: vec![],
+                        },
+                    ));
+                    if cancelled {
+                        // A pending sort can observe cancellation before it
+                        // produces any row; the client must not wait for one.
+                        replies.push(rpc(
+                            FrameKind::Error,
+                            request,
+                            stream,
+                            &ErrorBody {
+                                code: ErrorCode::Cancelled,
+                                message: "private sort cancelled".into(),
+                            },
+                        ));
+                    } else {
+                        // A send already queued when cancellation arrives is
+                        // still validated and drained, without row callbacks.
+                        replies.push(rpc(
+                            FrameKind::SnapshotResultChunk,
+                            request,
+                            stream,
+                            &ResultChunk {
+                                columns: None,
+                                rows: vec![vec![WireValue::Int(1)]],
+                            },
+                        ));
+                        replies.push(result_end(request, 1));
+                    }
+                    replies.extend([result_chunk(request + 2, &[20]), result_end(request + 2, 1)]);
+                    let io = script(replies);
+                    let written = std::sync::Arc::clone(&io.written);
+                    let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                    client.select(&root, "test").await.unwrap();
+                    let text = "MATCH (n) RETURN n.p AS value ORDER BY value";
+                    let columns = std::cell::Cell::new(0);
+                    let rows = std::cell::Cell::new(0);
+                    let on_columns = |names: &[String]| {
+                        assert_eq!(names, &["value"]);
+                        columns.set(columns.get() + 1);
+                        Err(ClientError::Io(std::io::ErrorKind::BrokenPipe))
+                    };
+                    let on_row = |_| {
+                        rows.set(rows.get() + 1);
+                        Ok(())
+                    };
+                    let result = if prepared {
+                        client.prepare_read(&root, text, vec![]).await.unwrap();
+                        client
+                            .execute_prepared_streaming(
+                                &root,
+                                prepared_mode,
+                                handle,
+                                vec![],
+                                on_columns,
+                                on_row,
+                            )
+                            .await
+                    } else {
+                        client
+                            .execute_streaming(&root, mode, text, vec![], on_columns, on_row)
+                            .await
+                    };
+                    assert!(matches!(
+                        result,
+                        Err(ClientError::Io(std::io::ErrorKind::BrokenPipe))
+                    ));
+                    assert_eq!((columns.get(), rows.get()), (1, 0));
+                    assert_eq!(
+                        client
+                            .execute(&root, ExecuteMode::Read, "MATCH (n) RETURN n", vec![])
+                            .await
+                            .unwrap()
+                            .rows,
+                        [vec![WireValue::Int(20)]]
+                    );
+                    let sent = sent_frames(&written.lock().unwrap());
+                    let controls: Vec<_> = sent
+                        .iter()
+                        .filter(|frame| {
+                            matches!(
+                                frame.header().kind(),
+                                FrameKind::QueryCancel | FrameKind::WindowUpdate
+                            )
+                        })
+                        .collect();
+                    assert_eq!(controls.len(), 1, "no credit follows a refused schema");
+                    assert_eq!(controls[0].header().kind(), FrameKind::QueryCancel);
+                    assert_eq!(controls[0].header().stream_id(), stream);
+                    assert_eq!(controls[0].header().request_id(), request + 1);
+                }
             }
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -1332,7 +1606,13 @@ mod tests {
     #[test]
     fn prepared_client_rebinds_and_reuses_the_connection_after_callback_cancellation() {
         let ((), report) = run_async_under_lab(0x79a0_0301, |root| async move {
-            for cancelled_terminal in [false, true] {
+            for (mode, cancelled_terminal) in [
+                PreparedReadMode::SourceStream,
+                PreparedReadMode::OrderedStream,
+            ]
+            .into_iter()
+            .flat_map(|mode| [false, true].map(|cancelled| (mode, cancelled)))
+            {
                 let handle = PreparedHandle([0x31; 16]);
                 let terminal = if cancelled_terminal {
                     rpc(
@@ -1387,10 +1667,10 @@ mod tests {
                 let stopped = client
                     .execute_prepared_streaming(
                         &root,
-                        PreparedReadMode::SourceStream,
+                        mode,
                         handle,
                         vec![("value".into(), WireValue::Int(1))],
-                        |_| {},
+                        |_| Ok(()),
                         |_| {
                             delivered += 1;
                             Err(ClientError::Protocol("caller stopped"))
@@ -1429,7 +1709,7 @@ mod tests {
                 );
                 let first = ExecutePrepared::decode(frames[4].payload()).unwrap();
                 let second = ExecutePrepared::decode(frames[6].payload()).unwrap();
-                assert_eq!(first.mode, PreparedReadMode::SourceStream);
+                assert_eq!(first.mode, mode);
                 assert_eq!(second.mode, PreparedReadMode::Buffered);
                 assert_eq!(first.parameters, [("value".into(), WireValue::Int(1))]);
                 assert_eq!(second.parameters, [("value".into(), WireValue::Int(20))]);
@@ -1502,7 +1782,7 @@ mod tests {
                         PreparedReadMode::SourceStream,
                         handle,
                         vec![],
-                        |_| {},
+                        |_| Ok(()),
                         |_| Err(ClientError::Protocol("caller stopped")),
                     )
                     .await

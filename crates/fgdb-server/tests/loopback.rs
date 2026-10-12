@@ -22,6 +22,9 @@ use std::sync::Arc;
 #[path = "loopback/source_stream.rs"]
 mod source_stream;
 
+#[path = "loopback/ordered_stream.rs"]
+mod ordered_stream;
+
 #[path = "loopback/insertion_property_maps.rs"]
 mod insertion_property_maps;
 
@@ -2983,7 +2986,7 @@ fn fgp_prepared_reads_rebind_current_state_scope_and_survive_cancelled_delivery(
                 PreparedReadMode::Buffered,
                 handle,
                 vec![("min".into(), WireValue::Int(1))],
-                |_| {},
+                |_| Ok(()),
                 |_| {
                     delivered += 1;
                     Err(ClientError::Protocol("the consumer stopped"))
