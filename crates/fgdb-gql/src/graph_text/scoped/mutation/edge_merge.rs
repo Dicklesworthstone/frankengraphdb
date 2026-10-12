@@ -80,7 +80,27 @@ impl PreparedGraphEdgeMergeText {
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphEdgeMergeTextError> {
-        let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
+        Self::prepare_with_parameter_types_and_resolver(
+            statement,
+            _relation,
+            declarations,
+            &mut resolve,
+        )
+    }
+
+    /// As [`Self::prepare_with_parameter_types`], with a host resolver whose
+    /// pinned tzdb the statement's temporal constructors use (fgdb-txbg9).
+    pub(crate) fn prepare_with_parameter_types_and_resolver<R>(
+        statement: &str,
+        _relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+    ) -> Result<Self, GraphEdgeMergeTextError>
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
         parser.parse_match_prefix()?;
         let parsed = parser.edge_merge_pattern()?;
         let mut projections = Vec::new();
@@ -95,7 +115,8 @@ impl PreparedGraphEdgeMergeText {
             if let Some(value) = cache.get(&key) {
                 return Ok(*value);
             }
-            let value = resolve(kind, name.text)
+            let value = resolve
+                .resolve_symbol(kind, name.text)
                 .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
             if value.kind() != kind {
                 return Err(error(

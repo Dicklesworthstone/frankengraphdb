@@ -1267,11 +1267,11 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 // before opening storage. Keep the bound record map through
                 // completion instead of discarding it into a bare program.
                 let native = if command == "write" && batch.is_none() && returning.is_none() {
-                    Some(BoundNativeGraphWrite::bind(
+                    Some(BoundNativeGraphWrite::bind_with_resolver(
                         &options.text,
                         &options.params,
                         options.coordinate,
-                        |kind, name| options.resolve(kind, name),
+                        &options,
                     ).map_err(Failure::query)?)
                 } else {
                     None

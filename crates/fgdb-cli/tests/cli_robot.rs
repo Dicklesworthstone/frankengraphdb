@@ -2108,6 +2108,37 @@ fn cli_named_time_zone_constructs_through_every_read_front_end() {
             refused.stdout
         );
     }
+    // fgdb-txbg9: a write statement's temporal constructors resolve a named
+    // zone through the same --tzdb-file. Without one the write refuses and
+    // stages nothing; with one it stores the constructor's instant and offset.
+    let create = format!("CREATE (:Event {{at: {after}}})");
+    let refused = db.command("write", &[create.as_str()]);
+    assert_ne!(
+        refused.code, 0,
+        "{create} without a tzdb: {}",
+        refused.stdout
+    );
+    let none = db.command("query", &["MATCH (e:Event) RETURN count(*) AS n"]);
+    assert_rows(&none, r#"[[{"type":"int","value":"0"}]]"#);
+    let written = db.command(
+        "write",
+        &[
+            "--tzdb-file",
+            artifact_path.to_str().unwrap(),
+            create.as_str(),
+        ],
+    );
+    assert_eq!(written.code, 0, "{create}: {}", written.stdout);
+    let stored = db.command("query", &["MATCH (e:Event) RETURN e.at AS v"]);
+    assert_eq!(stored.code, 0, "{}", stored.stdout);
+    assert!(
+        stored
+            .stdout
+            .contains(r#""instant_utc_nanos":"1735682400000000000""#)
+            && stored.stdout.contains(r#""utc_offset_seconds":7200"#),
+        "{}",
+        stored.stdout
+    );
 }
 
 #[test]

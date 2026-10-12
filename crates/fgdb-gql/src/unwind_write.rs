@@ -274,7 +274,19 @@ impl GraphUnwindWriteText {
         max_rows: usize,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<BoundGraphWriteScriptBatch, GraphUnwindWriteError> {
-        self.bind_with_limit_controlled(arguments, relation, max_rows, resolve, |_| {
+        self.bind_with_limit_resolver(arguments, relation, max_rows, resolve)
+    }
+
+    /// As [`Self::bind_with_limit`], with a host resolver whose pinned tzdb
+    /// the batch's statements use (fgdb-txbg9).
+    pub fn bind_with_limit_resolver(
+        &self,
+        arguments: &GqlParameters,
+        relation: RelationId,
+        max_rows: usize,
+        resolve: impl crate::GraphSymbolResolver,
+    ) -> Result<BoundGraphWriteScriptBatch, GraphUnwindWriteError> {
+        self.bind_with_limit_controlled_resolver(arguments, relation, max_rows, resolve, |_| {
             Ok::<(), core::convert::Infallible>(())
         })
         .map_err(|error| match error {

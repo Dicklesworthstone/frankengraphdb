@@ -451,7 +451,8 @@ impl PreparedGraphMutationText {
         mut resolve: impl GraphSymbolResolver,
         returning: bool,
     ) -> Result<(Self, Option<MutationReturnTemplate>), GraphMutationTextError> {
-        let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
         let optional_root = parser.parse_mutation_match_prefix()?;
         let (mut projections, parsed_actions) = parser.mutation_actions()?;
         let returning = if returning {

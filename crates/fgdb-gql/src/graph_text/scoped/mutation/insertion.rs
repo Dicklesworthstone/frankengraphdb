@@ -666,7 +666,8 @@ impl PreparedGraphInsertText {
         ),
         GraphInsertTextError,
     > {
-        let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
         let (leading, row_schema) = parser.insertion_unwind_prefix()?;
         let matched = parser.insertion_match_prefix(&row_schema)?;
         let at = parser.current.at;

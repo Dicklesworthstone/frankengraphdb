@@ -414,7 +414,7 @@ impl<V: Vfs + Clone> Database<V> {
         commit_cx: &CommitCx,
         text: &str,
         params: &GqlParameters,
-        mut resolver: impl GraphSymbolResolver,
+        resolver: impl GraphSymbolResolver,
         relation: RelationId,
         budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
@@ -485,10 +485,10 @@ impl<V: Vfs + Clone> Database<V> {
                 .map_err(QueryWriteError::VertexUpsert)?;
             return Ok(values(columns, rows.value));
         }
-        let bound = BoundNativeGraphWrite::bind(text, params, relation, |kind, name| {
-            resolver.resolve_symbol(kind, name)
-        })
-        .map_err(QueryWriteError::from)?;
+        // The resolver itself, not a closure over it: the write's temporal
+        // constructors need its pinned tzdb (fgdb-txbg9).
+        let bound = BoundNativeGraphWrite::bind_with_resolver(text, params, relation, resolver)
+            .map_err(QueryWriteError::from)?;
         let (receipt, completion) = self
             .execute_graph_write_program_returning_autocommit_governed(
                 txcx,
@@ -523,7 +523,7 @@ impl WriteTxn {
         cx: &QueryCx,
         text: &str,
         params: &GqlParameters,
-        mut resolver: impl GraphSymbolResolver,
+        resolver: impl GraphSymbolResolver,
         relation: RelationId,
         budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
@@ -583,10 +583,10 @@ impl WriteTxn {
                 .map_err(QueryWriteError::VertexUpsert)?;
             return Ok(values(columns, rows.value));
         }
-        let bound = BoundNativeGraphWrite::bind(text, params, relation, |kind, name| {
-            resolver.resolve_symbol(kind, name)
-        })
-        .map_err(QueryWriteError::from)?;
+        // The resolver itself, not a closure over it: the write's temporal
+        // constructors need its pinned tzdb (fgdb-txbg9).
+        let bound = BoundNativeGraphWrite::bind_with_resolver(text, params, relation, resolver)
+            .map_err(QueryWriteError::from)?;
         let receipt = self
             .execute_graph_write_program_returning_governed(
                 database,

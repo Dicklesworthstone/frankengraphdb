@@ -273,6 +273,37 @@ fn classify(
     ))
 }
 
+/// The one cached catalog every statement of a script resolves through. It
+/// forwards each defaulted resolver capability, so a statement compiler sees
+/// the host's tzdb and reverse catalog, not a closure that drops them.
+struct ScriptCatalog<'r, R: ?Sized> {
+    resolve: &'r mut R,
+    cache: BTreeMap<(GraphSymbolKind, String), GraphSymbol>,
+}
+impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for ScriptCatalog<'_, R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        let key = (kind, name.to_owned());
+        if let Some(value) = self.cache.get(&key) {
+            return Some(*value);
+        }
+        let value = self.resolve.resolve_symbol(kind, name)?;
+        self.cache.insert(key, value);
+        Some(value)
+    }
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.resolve.time_zones()
+    }
+    fn reverse_catalog(&self) -> Option<crate::ReverseSymbolCatalog> {
+        self.resolve.reverse_catalog()
+    }
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        self.resolve.reverse_label(id)
+    }
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.resolve.reverse_relation(id)
+    }
+}
+
 impl PreparedGraphWriteScript {
     pub fn prepare(
         script: &str,
@@ -293,6 +324,27 @@ impl PreparedGraphWriteScript {
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphWriteScriptError> {
+        Self::prepare_with_parameter_types_and_resolver(
+            script,
+            relation,
+            declarations,
+            &mut resolve,
+        )
+    }
+
+    /// As [`Self::prepare_with_parameter_types`], with a host resolver whose
+    /// pinned tzdb every statement compiler receives (fgdb-txbg9): a write's
+    /// temporal constructors resolve named zones exactly as a read's do, and
+    /// without a tzdb a named zone still refuses.
+    pub fn prepare_with_parameter_types_and_resolver<R>(
+        script: &str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+    ) -> Result<Self, GraphWriteScriptError>
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
         let scanned = scan(script)?;
         // Reuse the native declaration validator, without inventing a parser or
         // accepting duplicate/invalid names merely because different steps use them.
@@ -331,15 +383,9 @@ impl PreparedGraphWriteScript {
             kinds.push(kind);
             locals.push(local);
         }
-        let mut cache = BTreeMap::new();
-        let mut catalog = |kind, name: &str| {
-            let key = (kind, name.to_owned());
-            if let Some(value) = cache.get(&key) {
-                return Some(*value);
-            }
-            let value = resolve(kind, name)?;
-            cache.insert(key, value);
-            Some(value)
+        let mut catalog = ScriptCatalog {
+            resolve,
+            cache: BTreeMap::new(),
         };
         let mut statements = Vec::with_capacity(scanned.len());
         for (statement, definition) in scanned.iter().enumerate() {
@@ -351,7 +397,7 @@ impl PreparedGraphWriteScript {
                         text,
                         relation,
                         local,
-                        &mut catalog,
+                        crate::graph_text::LentResolver(&mut catalog),
                     )
                     .map(Into::into)
                     .map_err(|source| {
@@ -361,14 +407,14 @@ impl PreparedGraphWriteScript {
                         text,
                         relation,
                         local,
-                        &mut catalog,
+                        crate::graph_text::LentResolver(&mut catalog),
                     )
                     .map(Into::into)
                     .map_err(|source| {
                         GraphWriteProgramTemplateError::InsertBind { statement, source }
                     }),
                     Kind::VertexMerge => {
-                        PreparedGraphVertexMergeText::prepare_with_parameter_types(
+                        PreparedGraphVertexMergeText::prepare_with_parameter_types_and_resolver(
                             text,
                             relation,
                             local,
@@ -384,43 +430,49 @@ impl PreparedGraphWriteScript {
                             text,
                             relation,
                             local,
-                            &mut catalog,
+                            crate::graph_text::LentResolver(&mut catalog),
                         )
                         .map(Into::into)
                         .map_err(|source| {
                             GraphWriteProgramTemplateError::VertexUpsertBind { statement, source }
                         })
                     }
-                    Kind::EdgeMerge => PreparedGraphEdgeMergeText::prepare_with_parameter_types(
-                        text,
-                        relation,
-                        local,
-                        &mut catalog,
-                    )
-                    .map(Into::into)
-                    .map_err(|source| {
-                        GraphWriteProgramTemplateError::EdgeMergeBind { statement, source }
-                    }),
-                    Kind::EdgeUpsert => PreparedGraphEdgeUpsertText::prepare_with_parameter_types(
-                        text,
-                        relation,
-                        local,
-                        &mut catalog,
-                    )
-                    .map(Into::into)
-                    .map_err(|source| {
-                        GraphWriteProgramTemplateError::EdgeUpsertBind { statement, source }
-                    }),
-                    Kind::Delete => PreparedGraphDeleteText::prepare_with_parameter_types(
-                        text,
-                        relation,
-                        local,
-                        &mut catalog,
-                    )
-                    .map(Into::into)
-                    .map_err(|source| {
-                        GraphWriteProgramTemplateError::DeleteBind { statement, source }
-                    }),
+                    Kind::EdgeMerge => {
+                        PreparedGraphEdgeMergeText::prepare_with_parameter_types_and_resolver(
+                            text,
+                            relation,
+                            local,
+                            &mut catalog,
+                        )
+                        .map(Into::into)
+                        .map_err(|source| {
+                            GraphWriteProgramTemplateError::EdgeMergeBind { statement, source }
+                        })
+                    }
+                    Kind::EdgeUpsert => {
+                        PreparedGraphEdgeUpsertText::prepare_with_parameter_types_and_resolver(
+                            text,
+                            relation,
+                            local,
+                            &mut catalog,
+                        )
+                        .map(Into::into)
+                        .map_err(|source| {
+                            GraphWriteProgramTemplateError::EdgeUpsertBind { statement, source }
+                        })
+                    }
+                    Kind::Delete => {
+                        PreparedGraphDeleteText::prepare_with_parameter_types_and_resolver(
+                            text,
+                            relation,
+                            local,
+                            &mut catalog,
+                        )
+                        .map(Into::into)
+                        .map_err(|source| {
+                            GraphWriteProgramTemplateError::DeleteBind { statement, source }
+                        })
+                    }
                 };
             statements
                 .push(prepared.map_err(|source| GraphWriteScriptError::program(&spans, source))?);

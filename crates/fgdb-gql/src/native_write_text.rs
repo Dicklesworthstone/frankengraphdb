@@ -101,17 +101,29 @@ impl BoundNativeGraphWrite {
         text: &str,
         arguments: &GqlParameters,
         relation: RelationId,
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<Self, NativeGraphWriteBindError> {
+        Self::bind_with_resolver(text, arguments, relation, resolve)
+    }
+
+    /// As [`Self::bind`], with the host's own resolver rather than a closure
+    /// over it, so the statements see its pinned tzdb (fgdb-txbg9).
+    #[allow(clippy::result_large_err)]
+    pub fn bind_with_resolver(
+        text: &str,
+        arguments: &GqlParameters,
+        relation: RelationId,
+        mut resolve: impl crate::GraphSymbolResolver,
     ) -> Result<Self, NativeGraphWriteBindError> {
         if let Some(unwind) = GraphUnwindWriteText::parse_if_supported(text)
             .map_err(NativeGraphWriteBindError::Unwind)?
         {
             let batch = unwind
-                .bind_with_limit(
+                .bind_with_limit_resolver(
                     arguments,
                     relation,
                     PreparedGraphWriteScript::MAX_BATCH_STATEMENTS,
-                    &mut resolve,
+                    crate::graph_text::LentResolver(&mut resolve),
                 )
                 .map_err(NativeGraphWriteBindError::Unwind)?;
             return Ok(Self(BoundInput::Unwind(batch)));
@@ -129,7 +141,7 @@ impl BoundNativeGraphWrite {
         text: &str,
         arguments: &GqlParameters,
         relation: RelationId,
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        mut resolve: impl crate::GraphSymbolResolver,
     ) -> Result<PreparedGraphWriteScript, GraphWriteScriptError> {
         // Preserve numeric inference while declaring collection/scalar roles.
         // Collections may occur outside UNWIND, which otherwise infers List.
@@ -142,11 +154,11 @@ impl BoundNativeGraphWrite {
                 )
             })
             .collect();
-        PreparedGraphWriteScript::prepare_with_parameter_types(
+        PreparedGraphWriteScript::prepare_with_parameter_types_and_resolver(
             text,
             relation,
             &declarations,
-            resolve,
+            &mut resolve,
         )
     }
 

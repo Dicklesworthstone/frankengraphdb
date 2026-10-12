@@ -104,7 +104,20 @@ impl GraphUnwindWriteText {
         arguments: &GqlParameters,
         relation: RelationId,
         max_rows: usize,
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        control: impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
+    ) -> Result<BoundGraphWriteScriptBatch, GraphUnwindBindError<C>> {
+        self.bind_with_limit_controlled_resolver(arguments, relation, max_rows, resolve, control)
+    }
+
+    /// As [`Self::bind_with_limit_controlled`], with a host resolver whose
+    /// pinned tzdb the batch's statements use (fgdb-txbg9).
+    pub fn bind_with_limit_controlled_resolver<C>(
+        &self,
+        arguments: &GqlParameters,
+        relation: RelationId,
+        max_rows: usize,
+        mut resolve: impl crate::GraphSymbolResolver,
         mut control: impl FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
     ) -> Result<BoundGraphWriteScriptBatch, GraphUnwindBindError<C>> {
         work(&mut control, 1)?;
@@ -241,24 +254,14 @@ impl GraphUnwindWriteText {
 
         work(&mut control, self.lowered.len() as u64)?;
         let mut interrupted = None;
-        let prepared = PreparedGraphWriteScript::prepare_with_parameter_types(
+        let prepared = PreparedGraphWriteScript::prepare_with_parameter_types_and_resolver(
             &self.lowered,
             relation,
             &declarations,
-            |kind, name| {
-                if interrupted.is_some() {
-                    return None;
-                }
-                if let Err(error) = control(GraphUnwindBindEvent::Work(1)) {
-                    interrupted = Some(error);
-                    return None;
-                }
-                let symbol = resolve(kind, name);
-                if let Err(error) = control(GraphUnwindBindEvent::Work(1)) {
-                    interrupted = Some(error);
-                    return None;
-                }
-                symbol
+            &mut MeteredResolver {
+                resolve: &mut resolve,
+                control: &mut control,
+                interrupted: &mut interrupted,
             },
         );
         if let Some(error) = interrupted {
@@ -306,5 +309,48 @@ impl GraphUnwindWriteText {
                     GraphUnwindBindError::Interrupted(source)
                 }
             })
+    }
+}
+
+/// The batch's metered catalog. Each symbol lookup costs one unit of work
+/// before and one after the host's own lookup, and the first refusal is kept
+/// for the caller. The host's tzdb and reverse catalog stay visible to every
+/// statement (fgdb-txbg9), which a closure would drop.
+struct MeteredResolver<'r, R: ?Sized, F, C> {
+    resolve: &'r mut R,
+    control: &'r mut F,
+    interrupted: &'r mut Option<C>,
+}
+impl<R, F, C> crate::GraphSymbolResolver for MeteredResolver<'_, R, F, C>
+where
+    R: crate::GraphSymbolResolver + ?Sized,
+    F: FnMut(GraphUnwindBindEvent<'_>) -> Result<(), C>,
+{
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        if self.interrupted.is_some() {
+            return None;
+        }
+        if let Err(error) = (self.control)(GraphUnwindBindEvent::Work(1)) {
+            *self.interrupted = Some(error);
+            return None;
+        }
+        let symbol = self.resolve.resolve_symbol(kind, name);
+        if let Err(error) = (self.control)(GraphUnwindBindEvent::Work(1)) {
+            *self.interrupted = Some(error);
+            return None;
+        }
+        symbol
+    }
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.resolve.time_zones()
+    }
+    fn reverse_catalog(&self) -> Option<crate::ReverseSymbolCatalog> {
+        self.resolve.reverse_catalog()
+    }
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        self.resolve.reverse_label(id)
+    }
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.resolve.reverse_relation(id)
     }
 }

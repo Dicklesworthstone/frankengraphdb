@@ -203,11 +203,11 @@ fn prepare(
                         .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
                     return Ok(PreparedStep::Returning(query));
                 }
-                let bound = BoundNativeGraphWrite::bind(
+                let bound = BoundNativeGraphWrite::bind_with_resolver(
                     &step.text,
                     &params,
                     options.coordinate,
-                    |kind, name| options.resolve(kind, name),
+                    options,
                 )
                 .map_err(Failure::query)?;
                 // Count expanded UNWIND statements, not merely the one textual
