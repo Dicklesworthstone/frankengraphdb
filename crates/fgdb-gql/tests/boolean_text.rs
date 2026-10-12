@@ -521,6 +521,61 @@ fn a_where_label_conjunct_is_the_inline_label() {
     }
 }
 
+/// openCypher `v:L` as a value (TCK Graph5, Return2 [8], fgdb-qo3jv): a
+/// vertex test compiles to exactly `'L' IN labels(v)`, a conjunction of
+/// labels to the AND of those, and a relationship test to `type(r) = 'T'`.
+/// NULL elements and names no catalog knows therefore behave as those forms
+/// do. A vertex test needs a value context, so a SET right-hand side
+/// refuses, and a row-scope name is not a graph element.
+#[test]
+fn a_label_test_value_is_label_membership_or_type_equality() {
+    let template = |text: &str| {
+        fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .canonical_template_bytes()
+    };
+    for (test, spelled) in [
+        (
+            "MATCH (a) RETURN a, a:L AS result",
+            "MATCH (a) RETURN a, 'L' IN labels(a) AS result",
+        ),
+        (
+            "MATCH (a) RETURN (a:L) AS result",
+            "MATCH (a) RETURN ('L' IN labels(a)) AS result",
+        ),
+        (
+            "MATCH (a) RETURN a:L:M AS result",
+            "MATCH (a) RETURN 'L' IN labels(a) AND 'M' IN labels(a) AS result",
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN r, r:R AS result",
+            "MATCH (a)-[r:R]->(b) RETURN r, type(r) = 'R' AS result",
+        ),
+        (
+            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(m) RETURN m:L AS result",
+            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(m) RETURN 'L' IN labels(m) AS result",
+        ),
+        (
+            "MATCH (a) WITH a, a:L AS l RETURN a, l",
+            "MATCH (a) WITH a, 'L' IN labels(a) AS l RETURN a, l",
+        ),
+    ] {
+        assert_eq!(template(test), template(spelled), "{test}");
+    }
+    assert!(
+        fgdb_gql::PreparedGraphSetText::prepare("MATCH (a) WITH a.n AS n RETURN n:L AS x", symbols)
+            .is_err()
+    );
+    assert!(
+        fgdb_gql::PreparedGraphMutationText::prepare(
+            "MATCH (a) SET a.n = a:L",
+            RelationId(1),
+            symbols
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn malformed_boolean_programs_and_scope_mixtures_refuse_before_catalog_resolution() {
     for statement in [

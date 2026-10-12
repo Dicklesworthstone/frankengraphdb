@@ -1664,6 +1664,9 @@ impl<'a> Parser<'a> {
         if self.element_null_operand(columns, program, at)? {
             return Ok(());
         }
+        if self.label_test_operand(columns, program, at)? {
+            return Ok(());
+        }
         let operand = match columns {
             ExpressionColumns::Graph(columns) => self.mutation_operand(columns)?,
             ExpressionColumns::Row(schema) => self.row_operand(schema)?,
@@ -1731,6 +1734,99 @@ impl<'a> Parser<'a> {
             ParsedOp::Bound(GraphIntegerOp::IdentityColumn { column, text: true }),
             at,
         )?;
+        Ok(true)
+    }
+
+    /// openCypher `v:L1:L2` as a value (Graph5, Return2 [8], fgdb-qo3jv).
+    /// A vertex test is `'L1' IN labels(v) AND 'L2' IN labels(v)` over the
+    /// labels() column, each membership a let slot. A relationship test is
+    /// `type(r) = 'T'`. Either is NULL for a NULL element, and a label no
+    /// catalog name matches is simply absent. Graph scope only. False, with
+    /// nothing consumed, unless a MATCH vertex or relationship is followed by
+    /// `:`. Out of line: integer_unary repeats once per nested parenthesis.
+    #[inline(never)]
+    fn label_test_operand(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        if self.elements.contains(&word)
+            || !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b':'))
+        {
+            return Ok(false);
+        }
+        let ExpressionColumns::Graph(columns) = columns else {
+            return Ok(false);
+        };
+        let (variable, function) = match self.insertion_match_kind(word) {
+            Some(crate::GraphSetColumnType::Vertex) => {
+                (self.vertex_variable()?, GraphPathFunction::Labels)
+            }
+            Some(crate::GraphSetColumnType::Edge) => {
+                (self.edge_variable()?, GraphPathFunction::Type)
+            }
+            _ => return Ok(false),
+        };
+        if function == GraphPathFunction::Labels && self.lets.is_none() {
+            return Err(failure(
+                at,
+                GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                    "a label test where values are read (RETURN, WITH or ORDER BY)",
+                )),
+            ));
+        }
+        let column = self.projection_slot(
+            columns,
+            Projection {
+                variable,
+                property: None,
+                path: Some(function),
+            },
+        )?;
+        let mut first = true;
+        while self.take(b':')? {
+            let label = self.name()?;
+            let name = CanonicalScalar::ucs_basic_text(label.text)
+                .ok()
+                .and_then(|text| GqlScalarParameter::new(text).ok())
+                .ok_or_else(|| {
+                    failure(
+                        label.at,
+                        GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::ScalarLiteral),
+                    )
+                })?;
+            if function == GraphPathFunction::Labels {
+                let membership = ReadValueTemplate::In {
+                    value: Box::new(ReadValueTemplate::Literal(name)),
+                    list: Box::new(ReadValueTemplate::Column(column)),
+                };
+                self.let_slot(program, membership, label.at)?;
+            } else {
+                emit(
+                    program,
+                    ParsedOp::Atom(Operand::Column(column), at),
+                    label.at,
+                )?;
+                emit(
+                    program,
+                    ParsedOp::Atom(Operand::Literal(name), at),
+                    label.at,
+                )?;
+                emit(
+                    program,
+                    ParsedOp::Bound(GraphIntegerOp::Compare(IntegerComparison::Equal)),
+                    label.at,
+                )?;
+            }
+            if !first {
+                emit(program, ParsedOp::Bound(GraphIntegerOp::And), label.at)?;
+            }
+            first = false;
+        }
         Ok(true)
     }
 
