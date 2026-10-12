@@ -132,12 +132,39 @@ fn build_selected(
     options: &Options,
     config: IndexConfig,
     work: &RefCell<impl WorkControl>,
+    scan: Scan<'_>,
+    admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
+    label_allowed: impl FnMut(LabelId) -> bool,
+    property_allowed: impl FnMut(PropertyKeyId) -> bool,
+    selected: impl FnMut(&VertexRow) -> Result<(), BeaconError>,
+) -> Result<BeaconIndex, BeaconError> {
+    build_selected_optional(
+        snapshot, at, options, Some(config), work, scan, admit,
+        label_allowed, property_allowed, selected,
+    )?
+    .ok_or(BeaconError::Invariant("requested search index was not constructed"))
+}
+
+/// The same admitted vertex source with an explicitly optional index. None
+/// means topology-only preparation: every source/label/staging check and the
+/// selected callback still runs, but no property is projected and no text or
+/// vector index is constructed. It is never a fallback after a build failure.
+#[allow(clippy::too_many_arguments)]
+fn build_selected_optional(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    options: &Options,
+    config: Option<IndexConfig>,
+    work: &RefCell<impl WorkControl>,
     mut scan: Scan<'_>,
     mut admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
     mut label_allowed: impl FnMut(LabelId) -> bool,
     mut property_allowed: impl FnMut(PropertyKeyId) -> bool,
     mut selected: impl FnMut(&VertexRow) -> Result<(), BeaconError>,
-) -> Result<BeaconIndex, BeaconError> {
+) -> Result<Option<BeaconIndex>, BeaconError> {
+    let max_documents = config
+        .as_ref()
+        .map_or(options.index.max_documents, |config| config.max_documents);
     let mut scratch = 0usize;
     let mut source_work = |event| match &mut scan {
         Scan::Metered => {
@@ -175,7 +202,7 @@ fn build_selected(
         {
             return Ok(());
         }
-        let limit = options.policy.max_staging_rows.min(config.max_documents);
+        let limit = options.policy.max_staging_rows.min(max_documents);
         if rows.len() == limit {
             return Err(BeaconError::ResourceLimit {
                 resource: "staged vertices",
@@ -191,6 +218,9 @@ fn build_selected(
         rows.push(row);
         Ok(())
     })?;
+    let Some(config) = config else {
+        return Ok(None);
+    };
     let projected = rows.into_iter().map(|row| {
         options.projection.project(
             row.vid,
@@ -208,7 +238,7 @@ fn build_selected(
             &mut SharedWork(work),
         )
     });
-    BeaconIndex::try_build(config.clone(), projected, &mut SharedWork(work))
+    BeaconIndex::try_build(config.clone(), projected, &mut SharedWork(work)).map(Some)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -320,7 +350,7 @@ impl EmbeddedReadView {
         cx: &QueryCx,
         options: &Options,
         query: Search<'_>,
-    ) -> Result<Rows, Error<ReadError, Cancel>> {
+        ) -> Result<Rows, Error<ReadError, Cancel>> {
         self.beacon_search_filtered(cx, options, query, |_| true)
     }
 
