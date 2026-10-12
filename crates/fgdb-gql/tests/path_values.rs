@@ -515,17 +515,22 @@ fn element_values_read_their_properties_through_the_host_reader() {
         assert_eq!(run(&statement, true).unwrap(), expected, "{item}");
         assert_eq!(reads.get(), read_count, "{item}");
     }
-    // A carried path's elements read the same way after WITH and UNWIND.
+    // A carried path's elements read the same way after WITH and UNWIND: one
+    // row per node, each node read once.
     reads.set(0);
-    assert_eq!(
-        run(
-            "MATCH p = (a)-[:R]->(b)-[:R]->(c) WITH nodes(p) AS ns UNWIND ns AS n \
-             WITH n WHERE n.name = 'b' RETURN n.name AS v",
-            true,
-        )
-        .unwrap(),
-        text("b"),
-    );
+    let unwound = chain_rows(
+        "MATCH p = (a)-[:R]->(b)-[:R]->(c) WITH nodes(p) AS ns UNWIND ns AS n \
+         RETURN n.name AS v",
+        true,
+        &reads,
+    )
+    .unwrap();
+    let mut names: Vec<_> = unwound.iter().map(|row| row.values()[0].clone()).collect();
+    names.sort();
+    let mut expected = vec![text("a"), text("b"), null.clone()];
+    expected.sort();
+    assert_eq!(names, expected);
+    assert_eq!(reads.get(), 3);
     let typed_error =
         |result: Result<GraphValue, GqlQueryError<GraphSetExecutionError<()>, ()>>| {
             matches!(
