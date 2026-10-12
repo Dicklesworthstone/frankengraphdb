@@ -372,3 +372,69 @@ fn complete_maps_share_budgets_and_cancellation_precedes_identity_allocation() {
     assert!(empty.returning().value.is_empty());
     assert_eq!(empty.insertion().stats().created_vertices, 1);
 }
+
+/// openCypher Graph3: labels() of a vertex the CREATE makes is its CREATE
+/// labels, without a graph read, named through the catalog in label-identity
+/// order like every labels() read. A label the catalog cannot name refuses at
+/// preparation, and the label names are part of the definition's identity.
+#[test]
+fn created_vertex_labels_are_the_create_labels_in_identity_order() {
+    use fgdb_delta_types::LabelId;
+    #[derive(Clone, Copy)]
+    struct Labels(&'static str);
+    impl GraphSymbolResolver for Labels {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            match (kind, name) {
+                (GraphSymbolKind::Label, "Foo") => Some(GraphSymbol::Label(LabelId(1))),
+                (GraphSymbolKind::Label, "Bar") => Some(GraphSymbol::Label(LabelId(2))),
+                (GraphSymbolKind::Label, "Dog") => Some(GraphSymbol::Label(LabelId(3))),
+                _ => symbols(kind, name),
+            }
+        }
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut result = ReverseSymbolCatalog::new();
+            result.insert_label(LabelId(1), "Foo");
+            if !self.0.is_empty() {
+                result.insert_label(LabelId(2), self.0);
+            }
+            result.insert_label(LabelId(3), "Dog");
+            Some(result)
+        }
+    }
+    let names = |names: &[&str]| list(names.iter().map(|name| text(name)).collect());
+    for (statement, expected) in [
+        (
+            // Bar is written first; identity order still names Foo first.
+            "CREATE (node:Bar:Foo {p: 1}) RETURN labels(node) AS l, node.p AS p",
+            vec![vec![names(&["Foo", "Bar"]), int(1)]],
+        ),
+        ("CREATE (node) RETURN labels(node)", vec![vec![names(&[])]]),
+        (
+            "CREATE (n:Foo)-[:R]->(:Dog) RETURN labels(n) AS l",
+            vec![vec![names(&["Foo"])]],
+        ),
+        (
+            "UNWIND [1, 2] AS x CREATE (n:Dog {p: x}) RETURN labels(n) AS l, n.p AS p",
+            vec![vec![names(&["Dog"]), int(1)], vec![names(&["Dog"]), int(2)]],
+        ),
+    ] {
+        let batch = create(&prepare(statement, Labels("Bar")), policy())
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        assert_eq!(rows(&batch), expected, "{statement}");
+    }
+    let statement = "CREATE (node:Bar:Foo) RETURN labels(node) AS l";
+    let error = PreparedGraphInsertQueryText::prepare(statement, R, Labels("")).unwrap_err();
+    assert!(
+        matches!(
+            error.kind,
+            GraphInsertTextErrorKind::ReturnBuild(GraphInsertQueryBuildError::UnmappedLabel {
+                binding: 0
+            })
+        ),
+        "{error:?}"
+    );
+    assert_ne!(
+        prepare(statement, Labels("Bar")).canonical_bytes(),
+        prepare(statement, Labels("Baz")).canonical_bytes()
+    );
+}

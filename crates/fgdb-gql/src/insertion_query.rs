@@ -31,6 +31,9 @@ pub enum GraphInsertBinding {
     /// Complete checked CREATE fields, named by the query's property catalog.
     VertexProperties(usize),
     EdgeProperties(usize),
+    /// The created vertex's CREATE labels, named by the query's catalog in
+    /// label-identity order, as every labels() read names them (Graph3).
+    VertexLabels(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +54,10 @@ pub enum GraphInsertQueryBuildError {
     },
     /// Distinct property IDs cannot share one output name.
     PropertyMapCatalog,
+    /// A label of a returned created vertex has no trusted output name.
+    UnmappedLabel {
+        binding: usize,
+    },
 }
 impl core::fmt::Display for GraphInsertQueryBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -211,19 +218,41 @@ impl PreparedGraphInsertQuery {
                 GraphInsertBinding::EdgeProperties(edge) => {
                     (edge < insertion.edges_per_row()).then_some(GraphSetColumnType::Any)
                 }
+                GraphInsertBinding::VertexLabels(vertex) => {
+                    (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::List)
+                }
             };
             input_types.push(kind.ok_or(GraphInsertQueryBuildError::Binding { binding: at })?);
         }
-        let property_catalog = if bindings.iter().any(|binding| {
+        let maps = bindings.iter().any(|binding| {
             matches!(
                 binding,
                 GraphInsertBinding::VertexProperties(_) | GraphInsertBinding::EdgeProperties(_)
             )
-        }) {
-            if let Some(catalog) = &property_catalog {
+        });
+        let labels = bindings
+            .iter()
+            .any(|binding| matches!(binding, GraphInsertBinding::VertexLabels(_)));
+        let property_catalog = if maps || labels {
+            if maps && let Some(catalog) = &property_catalog {
                 let mut names = std::collections::BTreeSet::new();
                 if !catalog.properties.values().all(|name| names.insert(name)) {
                     return Err(GraphInsertQueryBuildError::PropertyMapCatalog);
+                }
+            }
+            // Every name a created vertex's labels() returns is admitted here,
+            // before source access or identity allocation.
+            for (at, binding) in bindings.iter().enumerate() {
+                if let Some(labels) = insertion.return_label_ids(*binding) {
+                    for label in labels {
+                        if !property_catalog.as_ref().is_some_and(|catalog| {
+                            catalog.labels.get(label).is_some_and(|name| {
+                                fgdb_types::CanonicalScalar::ucs_basic_text(name).is_ok()
+                            })
+                        }) {
+                            return Err(GraphInsertQueryBuildError::UnmappedLabel { binding: at });
+                        }
+                    }
                 }
             }
             for (at, binding) in bindings.iter().enumerate() {
@@ -420,6 +449,7 @@ impl PreparedGraphInsertQuery {
                 GraphInsertBinding::EdgeProperty { edge, key } => (4, edge, Some(key)),
                 GraphInsertBinding::VertexProperties(vertex) => (5, vertex, None),
                 GraphInsertBinding::EdgeProperties(edge) => (6, edge, None),
+                GraphInsertBinding::VertexLabels(vertex) => (7, vertex, None),
             };
             bytes.push(tag);
             bytes.extend_from_slice(&(index as u64).to_be_bytes());
@@ -452,6 +482,16 @@ impl PreparedGraphInsertQuery {
             )
         }) {
             crate::algebra::append_property_catalog_transcript(
+                self.property_catalog.as_deref(),
+                &mut bytes,
+            );
+        }
+        if self
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding, GraphInsertBinding::VertexLabels(_)))
+        {
+            crate::algebra::append_label_catalog_transcript(
                 self.property_catalog.as_deref(),
                 &mut bytes,
             );

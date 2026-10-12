@@ -281,9 +281,34 @@ fn properties_binding<E, A, C>(
     })
 }
 
+/// A created vertex has exactly its CREATE labels, sorted by identity at
+/// preparation, which also admitted every name. Name them as labels() does.
+fn labels_binding<E, A, C>(
+    labels: &[LabelId],
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+) -> ResultOf<GraphValue, E, A, C> {
+    control(GlaExecutionEvent::ScratchEntry)?;
+    let mut names = Vec::with_capacity(labels.len());
+    for label in labels {
+        control(GlaExecutionEvent::Work)?;
+        let name = catalog
+            .and_then(|catalog| catalog.labels.get(label))
+            .expect("created-vertex label names are admitted before execution");
+        for _ in 0..=name.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        let text = CanonicalScalar::ucs_basic_text(name)
+            .expect("created-vertex label names are admitted as UCS-basic text");
+        names.push(GraphValue::Scalar(text));
+    }
+    Ok(GraphValue::List(names.into_boxed_slice()))
+}
+
 fn freeze_bindings<E, A, C>(
     bindings: &[GraphInsertBinding],
     row: &[GraphValue],
+    templates: &[Vertex],
     vertices: &[Fields],
     edges: &[EdgeDraft],
     property_catalog: Option<&crate::ReverseSymbolCatalog>,
@@ -306,6 +331,9 @@ fn freeze_bindings<E, A, C>(
             }
             GraphInsertBinding::EdgeProperties(edge) => {
                 properties_binding(&edges[edge].properties, property_catalog, control)?
+            }
+            GraphInsertBinding::VertexLabels(vertex) => {
+                labels_binding(&templates[vertex].labels, property_catalog, control)?
             }
             GraphInsertBinding::CreatedVertex(_) | GraphInsertBinding::CreatedEdge(_) => {
                 control(GlaExecutionEvent::ScratchEntry)?;
@@ -512,6 +540,7 @@ pub(super) fn execute<E, A, C>(
             returned.push(freeze_bindings(
                 bindings,
                 row,
+                &insertion.vertices,
                 &vertices,
                 &edges,
                 property_catalog,
