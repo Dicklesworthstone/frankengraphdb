@@ -7,7 +7,7 @@ use super::{GlaOperator, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::GlaExecutionEvent;
 use crate::algebra_exec::ProjectedRows;
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 /// One nonempty, ordered projection of vertex bindings. Column positions match
 /// the immutable prepared pattern's `columns()`; Debug never prints identities.
@@ -260,34 +260,44 @@ mod sealed {
             self
         }
 
-        fn collect_properties<'a, E>(
+        fn collect_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E>;
-        fn collect_properties_with_paths<'a, E>(
+        fn collect_properties_with_paths<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             _paths: &[Option<super::super::GraphPath>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             Self::collect_properties(operator, bindings, projected, property, control)
         }
         #[allow(clippy::too_many_arguments)]
-        fn collect_element_properties<'a, E>(
+        fn collect_element_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             _edge_property: &mut impl FnMut(
                 fgdb_types::EId,
                 PropertyKeyId,
-            ) -> Result<Option<&'a CanonicalScalar>, E>,
+            )
+                -> Result<Option<&'a CanonicalPropertyValue>, E>,
             _vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
             _edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -303,11 +313,14 @@ mod sealed {
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             edge_property: &mut impl FnMut(
                 fgdb_types::EId,
                 PropertyKeyId,
-            ) -> Result<Option<&'a CanonicalScalar>, E>,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
             edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
             _vertex_properties: &mut impl FnMut(
@@ -393,11 +406,14 @@ mod sealed {
     }
 
     impl PropertyProjection for VId {
-        fn collect_properties<'a, E>(
+        fn collect_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
-            _property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            _property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             Self::collect(operator, bindings, projected, control)
@@ -405,11 +421,14 @@ mod sealed {
     }
 
     impl PropertyProjection for GraphBindingRow {
-        fn collect_properties<'a, E>(
+        fn collect_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
-            _property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            _property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             Self::collect(operator, bindings, projected, control)
@@ -429,11 +448,14 @@ mod sealed {
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             edge_property: &mut impl FnMut(
                 fgdb_types::EId,
                 PropertyKeyId,
-            ) -> Result<Option<&'a CanonicalScalar>, E>,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
             edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
             vertex_properties: &mut impl FnMut(VId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
@@ -466,16 +488,19 @@ mod sealed {
             )
         }
 
-        fn collect_element_properties<'a, E>(
+        fn collect_element_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             edge_property: &mut impl FnMut(
                 fgdb_types::EId,
                 PropertyKeyId,
-            ) -> Result<Option<&'a CanonicalScalar>, E>,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
             edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -495,12 +520,15 @@ mod sealed {
                 control,
             )
         }
-        fn collect_properties_with_paths<'a, E>(
+        fn collect_properties_with_paths<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             let GlaOperator::ProjectValues { columns } = operator else {
@@ -511,11 +539,14 @@ mod sealed {
             )
         }
 
-        fn collect_properties<'a, E>(
+        fn collect_properties<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
-            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            property: &mut impl FnMut(
+                VId,
+                PropertyKeyId,
+            ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             let GlaOperator::ProjectValues { columns } = operator else {

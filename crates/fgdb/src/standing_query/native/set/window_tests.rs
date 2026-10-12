@@ -9,7 +9,9 @@ use fgdb_gql::{
     GraphSetPredicateOp, GraphSetProjection, GraphSetValue, GraphSymbol, GraphSymbolKind,
     PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 
 const P: PropertyKeyId = PropertyKeyId(1);
 fn policy() -> GqlQueryPolicy {
@@ -73,7 +75,8 @@ fn scalar_result(values: impl IntoIterator<Item = i64>) -> QueryResult {
 fn oracle<V: Vfs + Clone>(db: &Database<V>) -> QueryResult {
     let mut values = Vec::new();
     for vertex in db.vertices_at(db.frontier().unwrap()).unwrap() {
-        let (_, CanonicalScalar::Int(value)) = &vertex.props[0] else {
+        let (_, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) = &vertex.props[0]
+        else {
             panic!("integer fixture");
         };
         values.extend([*value, *value]);

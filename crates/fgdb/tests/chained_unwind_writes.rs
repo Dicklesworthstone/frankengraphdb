@@ -209,9 +209,9 @@ fn nested_documents_upsert_vertices_and_correlated_edges_in_one_outer_commit() {
             ]
             .into_iter()
             .map(|(id, name, score)| vec![
-                (ID, CanonicalScalar::Int(id)),
-                (NAME, CanonicalScalar::ucs_basic_text(name).unwrap()),
-                (SCORE, CanonicalScalar::Int(score))
+                (ID, CanonicalScalar::Int(id).into()),
+                (NAME, CanonicalScalar::ucs_basic_text(name).unwrap().into()),
+                (SCORE, CanonicalScalar::Int(score).into())
             ])
             .collect::<Vec<_>>()
         );

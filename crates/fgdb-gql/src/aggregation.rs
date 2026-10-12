@@ -26,7 +26,7 @@ use crate::{
     GqlQueryExecution, GqlQueryPolicy,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1027,7 +1027,7 @@ impl PreparedGraphAggregate {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -1122,6 +1122,11 @@ impl PreparedGraphAggregate {
                                 Some(vid) => property(vid, *key)?,
                                 None => None,
                             };
+                            // Group keys borrow the source; a stored List or
+                            // Map refuses here rather than read as NULL
+                            // (fgdb-k3nub).
+                            let value = crate::integer_expression::stored_scalar(value)
+                                .map_err(GqlQueryError::from)?;
                             ValueRef::Scalar(value.unwrap_or(&NULL))
                         }
                         ValueProjection::Path { .. }

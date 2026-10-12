@@ -80,7 +80,7 @@ fn vertex(key: &str) -> BulkRow {
     BulkRow::Vertex(BulkVertex {
         key: key.into(),
         labels: vec![LabelId(1)],
-        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(7).into())],
     })
 }
 fn edge(key: &str, src: &str, dst: &str) -> BulkRow {
@@ -89,7 +89,7 @@ fn edge(key: &str, src: &str, dst: &str) -> BulkRow {
         source: src.into(),
         destination: dst.into(),
         relation: RelationId(1),
-        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(9))],
+        props: vec![(PropertyKeyId(1), CanonicalScalar::Int(9).into())],
     })
 }
 fn rows() -> Vec<BulkRow> {
@@ -118,7 +118,7 @@ fn changed_vertex_fields_and_row_order_never_allocate_or_publish() {
                     0 => v.key = "renamed".into(),
                     1 => v.labels = vec![LabelId(2)],
                     2 => v.props[0].0 = PropertyKeyId(2),
-                    3 => v.props[0].1 = CanonicalScalar::Int(8),
+                    3 => v.props[0].1 = CanonicalScalar::Int(8).into(),
                     _ => {}
                 },
                 _ => unreachable!(),
@@ -171,7 +171,7 @@ fn changed_edge_fields_never_publish_an_unchecked_chunk_or_panic_on_endpoints() 
                     2 => e.destination = "absent".into(),
                     3 => e.relation = RelationId(2),
                     4 => e.props[0].0 = PropertyKeyId(2),
-                    5 => e.props[0].1 = CanonicalScalar::Int(10),
+                    5 => e.props[0].1 = CanonicalScalar::Int(10).into(),
                     _ => {}
                 },
                 _ => unreachable!(),
@@ -358,7 +358,7 @@ fn canonical_scalars_and_length_delimited_keys_do_not_alias() {
             let expected = vec![vertex("a\0bc")];
             let mut actual = expected.clone();
             if let BulkRow::Vertex(v) = &mut actual[0] {
-                v.props[0].1 = replacement;
+                v.props[0].1 = replacement.into();
             }
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let error = db

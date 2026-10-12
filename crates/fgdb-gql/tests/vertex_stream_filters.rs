@@ -13,7 +13,7 @@ use fgdb_gql::{
     GqlQueryError, GqlQueryPolicy, GraphIntegerBinary, GraphIntegerError, GraphIntegerErrorKind,
     GraphIntegerExpression, GraphIntegerOp as I,
 };
-use fgdb_types::{CanonicalScalar, CommitSeq, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, VId};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -24,7 +24,7 @@ const Q: PropertyKeyId = PropertyKeyId(2);
 struct Record {
     vid: VId,
     visible: bool,
-    properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 
 struct Source {
@@ -112,11 +112,15 @@ fn identity(row: GraphValueRow) -> VId {
     row.get(0).unwrap().as_vertex().unwrap()
 }
 
-fn property(row: &Record, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+fn stored(row: &Record, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
     row.properties
         .iter()
         .find(|(actual, _)| *actual == key)
         .map(|(_, value)| value)
+}
+
+fn property(row: &Record, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+    stored(row, key).map(|value| value.as_scalar().expect("scalar fixture"))
 }
 
 fn eager(pattern: &PreparedGraphPattern<GraphValueRow>, rows: &[Record]) -> Vec<VId> {
@@ -131,12 +135,7 @@ fn eager(pattern: &PreparedGraphPattern<GraphValueRow>, rows: &[Record]) -> Vec<
                     predicates.iter().all(|p| p.matches(&[], &row.properties)),
                 )
             },
-            |vid, key| {
-                Ok(property(
-                    rows.iter().find(|row| row.vid == vid).unwrap(),
-                    key,
-                ))
-            },
+            |vid, key| Ok(stored(rows.iter().find(|row| row.vid == vid).unwrap(), key)),
             |_| Ok(()),
         )
         .unwrap()
@@ -222,7 +221,11 @@ fn rows() -> Vec<Record> {
                 visible: at % 8 != 0,
                 properties: [(P, left), (Q, right)]
                     .into_iter()
-                    .filter_map(|(key, value)| value.clone().map(|value| (key, value)))
+                    .filter_map(|(key, value)| {
+                        value
+                            .clone()
+                            .map(|value| (key, CanonicalPropertyValue::from(value)))
+                    })
                     .collect(),
             });
         }
@@ -431,12 +434,7 @@ fn boolean_identity_led_value_projection_preserves_the_property_payload() {
             rows.iter().filter(|row| row.visible).map(|row| row.vid),
             [],
             |_, _| Ok::<_, GqlQueryError<(), ()>>(true),
-            |vid, key| {
-                Ok(property(
-                    rows.iter().find(|row| row.vid == vid).unwrap(),
-                    key,
-                ))
-            },
+            |vid, key| Ok(stored(rows.iter().find(|row| row.vid == vid).unwrap(), key)),
             |_| Ok(()),
         )
         .unwrap();
@@ -553,11 +551,15 @@ fn property_pair_payload_work_is_charged_before_delivery_and_limit_drops_the_sou
         properties: vec![
             (
                 P,
-                CanonicalScalar::ucs_basic_text(&"a".repeat(4096)).unwrap(),
+                CanonicalScalar::ucs_basic_text(&"a".repeat(4096))
+                    .unwrap()
+                    .into(),
             ),
             (
                 Q,
-                CanonicalScalar::ucs_basic_text(&"b".repeat(8192)).unwrap(),
+                CanonicalScalar::ucs_basic_text(&"b".repeat(8192))
+                    .unwrap()
+                    .into(),
             ),
         ],
     };

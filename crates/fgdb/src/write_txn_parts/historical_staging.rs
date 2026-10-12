@@ -160,7 +160,7 @@ mod historical_staging_tests {
             assert_eq!(txn.prepared.as_ref().unwrap().basis(), basis);
             assert_eq!(
                 txn.vertex(&db, VId(5)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(2))]
+                vec![(P, CanonicalScalar::Int(2).into())]
             );
             assert!(db.vertex(VId(5)).unwrap().is_none());
             assert_eq!(db.frontier().unwrap(), live);
@@ -172,7 +172,7 @@ mod historical_staging_tests {
             assert!(pinned.vertex(VId(5)).unwrap().is_none());
             assert_eq!(
                 db.vertex(VId(3)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(90))]
+                vec![(P, CanonicalScalar::Int(90).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });

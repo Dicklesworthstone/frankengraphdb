@@ -9,8 +9,8 @@ use fgdb_gql::{
     GraphSymbol, GraphSymbolKind, PreparedGraphText, PreparedTemporalGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CanonicalScalarKind, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts,
-    QueryCx, VId,
+    CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, CommitSeq,
+    DatabaseSecurityNamespaceId, PurposeContexts, QueryCx, VId,
 };
 use std::collections::BTreeMap;
 
@@ -199,7 +199,7 @@ fn oracle(db: &Database<MemVfs>, at: CommitSeq, case: &Case) -> Vec<VId> {
         .filter(|row| {
             row.props.iter().any(|(key, value)| {
                 *key == NAME
-                    && matches!(value, CanonicalScalar::Text(value)
+                    && matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Text(value))
                 if case.prefix.is_some_and(|prefix| value.as_str().starts_with(prefix))
                     && (!case.residual || value.as_str() != "ab-reject"))
             })

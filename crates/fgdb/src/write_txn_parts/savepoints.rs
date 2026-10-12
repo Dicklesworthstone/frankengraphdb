@@ -152,7 +152,7 @@ mod savepoint_tests {
             txn.write(&mut db, edit).unwrap();
             assert_eq!(
                 txn.vertex(&db, VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(11)
+                CanonicalScalar::Int(11).into()
             );
             assert!(txn.vertex(&db, VId(2)).unwrap().is_some());
 
@@ -160,7 +160,7 @@ mod savepoint_tests {
             assert_eq!(txn.prepared.as_ref().unwrap().template, saved_template);
             assert_eq!(
                 txn.vertex(&db, VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10)
+                CanonicalScalar::Int(10).into()
             );
             assert!(txn.vertex(&db, VId(2)).unwrap().is_none());
             assert!(txn.vertex(&db, VId(777)).unwrap().is_some());
@@ -172,7 +172,7 @@ mod savepoint_tests {
             assert!(db.vertex(VId(2)).unwrap().is_none());
             assert_eq!(
                 db.vertex(VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(10)
+                CanonicalScalar::Int(10).into()
             );
             assert!(txn.savepoints.is_empty());
         });

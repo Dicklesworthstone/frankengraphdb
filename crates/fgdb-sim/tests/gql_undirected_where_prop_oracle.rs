@@ -21,7 +21,7 @@ use fgdb_reference::ReferenceGraph;
 use fgdb_sim::replay;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, EId, GraphId, VId};
 
 const R: RelationId = RelationId(1);
 const K: PropertyKeyId = PropertyKeyId(7);
@@ -34,7 +34,7 @@ const UN_NE: &str = "MATCH (a)-[:R]-(b) WHERE a.k <> 1 RETURN b";
 fn reference_other_endpoints(graph: &ReferenceGraph, keeps: impl Fn(i64) -> bool) -> Vec<VId> {
     let carrier = |vid: VId| {
         graph.vertex(vid).is_some_and(
-            |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if keeps(*v)),
+            |vertex| matches!(vertex.props.get(&K), Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v))) if keeps(*v)),
         )
     };
     let mut rows = Vec::new();

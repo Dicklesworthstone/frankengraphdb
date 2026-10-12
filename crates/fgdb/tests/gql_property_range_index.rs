@@ -9,8 +9,8 @@ use fgdb_gql::{
     PreparedGraphText, PreparedTemporalGraphText,
 };
 use fgdb_types::{
-    CanonicalDecimal, CanonicalF64, CanonicalScalar, CanonicalScalarKind, CommitSeq,
-    DatabaseSecurityNamespaceId, PurposeContexts, VId,
+    CanonicalDecimal, CanonicalF64, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind,
+    CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId,
 };
 use std::cmp::Ordering;
 
@@ -229,13 +229,18 @@ fn oracle(db: &Database<MemVfs>, at: CommitSeq, case: &Case) -> Vec<VId> {
         .filter(|row| {
             let actual = row.props.iter().find(|(key, _)| *key == P);
             actual.is_some_and(|(_, value)| {
+                let value = value.as_scalar().expect("scalar fixture");
                 case.bounds
                     .iter()
                     .all(|(op, bound)| op.accepts(value, bound))
             }) && (!case.residual
                 || (row.labels.contains(&L)
                     && row.props.iter().any(|(key, value)| {
-                        *key == Q && matches!(value, CanonicalScalar::Int(n) if *n > 0)
+                        *key == Q
+                            && matches!(
+                                value,
+                                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)) if *n > 0
+                            )
                     })))
         })
         .map(|row| row.vid)

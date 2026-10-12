@@ -102,14 +102,14 @@ fn assert_graph<V: Vfs + Clone>(db: &Database<V>, seq: CommitSeq, vertex_p: i64,
     assert_eq!(db.frontier().unwrap(), seq);
     assert_eq!(
         db.vertex(VId(1)).unwrap().unwrap().props,
-        vec![(P, CanonicalScalar::Int(vertex_p))]
+        vec![(P, CanonicalScalar::Int(vertex_p).into())]
     );
     for vid in [VId(1), VId(2), VId(3)] {
         assert_eq!(db.vertex(vid).unwrap().unwrap().labels, vec![L]);
     }
     assert_eq!(
         db.edge_at(EId(10), seq).unwrap().unwrap().props,
-        vec![(P, CanonicalScalar::Int(edge_p))]
+        vec![(P, CanonicalScalar::Int(edge_p).into())]
     );
     assert_eq!(db.neighbours(VId(1), R).unwrap(), vec![VId(2)]);
     assert_eq!(db.neighbours(VId(2), S).unwrap(), vec![VId(3)]);
@@ -181,7 +181,7 @@ fn forbidden_noop_in_another_relation_discards_all_prefix_effects() {
         assert_graph(&db, initial, 1, 10);
         assert_eq!(
             db.vertex(VId(9)).unwrap().unwrap().props,
-            vec![(SECRET, CanonicalScalar::Int(99))]
+            vec![(SECRET, CanonicalScalar::Int(99).into())]
         );
         // The failed workspace must not fence the handle.
         let seq = db
@@ -241,7 +241,7 @@ fn batch_coordinate_cannot_authorize_a_hidden_edge_relation() {
         assert!(db.vertex(VId(1)).unwrap().unwrap().props.is_empty());
         assert_eq!(
             db.edge_at(EId(10), initial).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1))]
+            vec![(P, CanonicalScalar::Int(1).into())]
         );
         assert_eq!(txn.outstanding_obligations(), baseline);
     });

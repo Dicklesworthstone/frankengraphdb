@@ -163,7 +163,7 @@ impl Parser<'_> {
 mod tests {
     use super::*;
     use crate::{GqlQueryPolicy, PreparedGraphWriteScript};
-    use fgdb_types::{CanonicalScalar, EId, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         match (kind, name) {
@@ -181,7 +181,12 @@ mod tests {
         // A diamond with a direct edge: three occurrences reach vertex 4,
         // but only the direct edge is shortest. Vertex 5 is an isolate.
         let numbers: BTreeMap<_, _> = (1..=5)
-            .map(|id| (VId(id), CanonicalScalar::Int(id as i64)))
+            .map(|id| {
+                (
+                    VId(id),
+                    CanonicalPropertyValue::from(CanonicalScalar::Int(id as i64)),
+                )
+            })
             .collect();
         let pattern = PreparedGraphText::prepare(text, symbols)
             .unwrap()

@@ -127,7 +127,7 @@ fn crash_disabled_commits_exactly_like_commit() {
             .expect("reopens");
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
-            vec![(PROP, int(1))],
+            vec![(PROP, int(1).into())],
             "the committed write is durable"
         );
     });
@@ -205,7 +205,7 @@ fn a_before_capsule_crash_is_residue_free_across_reopen() {
         );
         assert_eq!(
             db.vertex(VId(1)).expect("reads").expect("row").props,
-            vec![(PROP, int(0))],
+            vec![(PROP, int(0).into())],
             "the seed value is untouched; the crashed write's 99 is nowhere"
         );
     });

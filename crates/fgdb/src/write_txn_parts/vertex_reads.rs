@@ -256,7 +256,7 @@ mod vertex_overlay_tests {
                             assert_eq!(row.labels, vec![LabelId(1), LabelId(2)]);
                             assert_eq!(
                                 row.props,
-                                vec![(PropertyKeyId(1), CanonicalScalar::Int(20))]
+                                vec![(PropertyKeyId(1), CanonicalScalar::Int(20).into())]
                             );
                         }
                         2 => {
@@ -267,7 +267,7 @@ mod vertex_overlay_tests {
                             assert_eq!(row.labels, vec![LabelId(1)]);
                             assert_eq!(
                                 row.props,
-                                vec![(PropertyKeyId(1), CanonicalScalar::Int(10))]
+                                vec![(PropertyKeyId(1), CanonicalScalar::Int(10).into())]
                             );
                         }
                         _ => panic!("deleted vertex was materialized"),
@@ -461,7 +461,10 @@ mod bulk_vertex_overlay_tests {
                 vec![VId(1), VId(2), VId(4)]
             );
             assert_eq!(rows[0].labels, vec![LabelId(20)]);
-            assert_eq!(rows[0].props, vec![(PROPERTY, CanonicalScalar::Int(77))]);
+            assert_eq!(
+                rows[0].props,
+                vec![(PROPERTY, CanonicalScalar::Int(77).into())]
+            );
             assert_eq!(rows[1].labels, vec![LabelId(10), LabelId(20), LabelId(30)]);
             assert!(rows[1].props.is_empty());
             assert_eq!(rows[2].created_at, transaction.basis());
@@ -521,7 +524,10 @@ mod bulk_vertex_overlay_tests {
             let mut rows =
                 compare_with_points(&transaction, &database, &[VId(10), VId(20), VId(30)], None);
             assert_eq!(rows.len(), 3);
-            assert_eq!(rows[1].props, vec![(PROPERTY, CanonicalScalar::Int(42))]);
+            assert_eq!(
+                rows[1].props,
+                vec![(PROPERTY, CanonicalScalar::Int(42).into())]
+            );
             let committed_at = transaction
                 .commit(&mut database, &commit)
                 .await

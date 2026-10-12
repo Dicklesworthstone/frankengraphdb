@@ -140,7 +140,7 @@ fn public_autocommit_returns_parameterized_mutation_rows_with_collection_types()
         for (id, expected) in [(VId(1), 6), (VId(2), 9)] {
             assert_eq!(
                 db.vertex(id).unwrap().unwrap().props[0],
-                (P, CanonicalScalar::Int(expected))
+                (P, CanonicalScalar::Int(expected).into())
             );
         }
         let result = db
@@ -331,7 +331,7 @@ fn returning_write_classes_share_one_outer_workspace_and_refusals_preserve_its_p
         assert_eq!(db.vertices().unwrap().len(), 1);
         assert_eq!(
             db.vertex(vertex).unwrap().unwrap().props[0],
-            (P, CanonicalScalar::Int(11))
+            (P, CanonicalScalar::Int(11).into())
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -399,7 +399,7 @@ fn public_dispatch_preserves_creation_effect_and_final_result_limits() {
             assert_eq!(db.frontier().unwrap(), CommitSeq(1));
             assert_eq!(
                 db.vertex(VId(10)).unwrap().unwrap().props[0],
-                (P, CanonicalScalar::Int(4))
+                (P, CanonicalScalar::Int(4).into())
             );
         }
         let result = db
@@ -420,7 +420,7 @@ fn public_dispatch_preserves_creation_effect_and_final_result_limits() {
         assert_eq!(db.frontier().unwrap(), CommitSeq(2));
         assert_eq!(
             db.vertex(VId(10)).unwrap().unwrap().props[0],
-            (P, CanonicalScalar::Int(7))
+            (P, CanonicalScalar::Int(7).into())
         );
         let result = db
             .query_write(
@@ -518,11 +518,11 @@ fn public_return_cancellation_and_bad_tail_never_publish_a_successful_prefix() {
             assert_eq!(db.vertices().unwrap().len(), 2);
             assert_eq!(
                 db.vertex(VId(1)).unwrap().unwrap().props[0],
-                (P, CanonicalScalar::Int(4))
+                (P, CanonicalScalar::Int(4).into())
             );
             assert_eq!(
                 db.vertex(VId(2)).unwrap().unwrap().props[0],
-                (P, CanonicalScalar::Int(7))
+                (P, CanonicalScalar::Int(7).into())
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         }

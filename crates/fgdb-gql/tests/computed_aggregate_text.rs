@@ -8,14 +8,14 @@ use fgdb_gql::{
     MAX_GRAPH_INTEGER_INSTRUCTIONS, PreparedGraphAggregate, PreparedGraphAggregateText,
     PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(1);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 type ResultOf = Result<
     GqlQueryExecution<GraphAggregateRow>,
@@ -58,10 +58,10 @@ fn run(
 fn properties() -> Props {
     let mut props = Props::new();
     for (id, p, q) in [(1, -2, -2), (2, 2, 2), (3, 2, 3), (4, 5, 1)] {
-        props.insert((VId(id), P), CanonicalScalar::Int(p));
-        props.insert((VId(id), Q), CanonicalScalar::Int(q));
+        props.insert((VId(id), P), CanonicalScalar::Int(p).into());
+        props.insert((VId(id), Q), CanonicalScalar::Int(q).into());
     }
-    props.insert((VId(5), Q), CanonicalScalar::Null);
+    props.insert((VId(5), Q), CanonicalScalar::Null.into());
     props
 }
 
@@ -106,8 +106,8 @@ fn maintained_collection_normalization_preserves_native_and_computed_source_orde
     let vertices = [VId(1), VId(2), VId(3), VId(4)];
     let mut props = Props::new();
     for (id, p, q) in [(1, 7, 1), (2, 2, 1), (3, 7, 2), (4, -4, 2)] {
-        props.insert((VId(id), P), CanonicalScalar::Int(p));
-        props.insert((VId(id), Q), CanonicalScalar::Int(q));
+        props.insert((VId(id), P), CanonicalScalar::Int(p).into());
+        props.insert((VId(id), Q), CanonicalScalar::Int(q).into());
     }
     for (text, expected) in [
         ("MATCH (n) RETURN collect(n.p) AS values", vec![7, 2, 7, -4]),
@@ -149,8 +149,8 @@ fn maintained_collection_normalization_preserves_native_and_computed_source_orde
         );
         assert_eq!(plan.canonical_bytes(), original);
     }
-    props.insert((VId(u128::MAX), P), CanonicalScalar::Null);
-    props.insert((VId(u128::MAX), Q), CanonicalScalar::Int(3));
+    props.insert((VId(u128::MAX), P), CanonicalScalar::Null.into());
+    props.insert((VId(u128::MAX), Q), CanonicalScalar::Int(3).into());
     let vertices = [VId(1), VId(2), VId(3), VId(4), VId(u128::MAX)];
     for text in [
         "MATCH (n) RETURN collect(n) AS nodes,collect(n.p) AS values,COUNT(*) AS count,SUM(n.p) AS total,AVG(n.p) AS average",
@@ -277,8 +277,8 @@ fn maintained_edge_collections_preserve_endpoint_and_computed_row_order() {
     let vertices = [VId(1), VId(2), VId(3), VId(4)];
     let mut props = Props::new();
     for (id, p, q) in [(1, 7, 1), (2, -4, 1), (3, 2, 2), (4, 11, 2)] {
-        props.insert((VId(id), P), CanonicalScalar::Int(p));
-        props.insert((VId(id), Q), CanonicalScalar::Int(q));
+        props.insert((VId(id), P), CanonicalScalar::Int(p).into());
+        props.insert((VId(id), Q), CanonicalScalar::Int(q).into());
     }
     // Shuffled input and parallel edges must not become the collection order.
     let edges = [
@@ -561,11 +561,11 @@ fn aggregate_reduction_keeps_wide_sums_and_exact_average_accumulators() {
     use fgdb_gql::{GraphAggregateValue, GraphExactAverage};
 
     let vertices = [VId(1), VId(2)];
-    let props = BTreeMap::from([
-        ((VId(1), P), CanonicalScalar::Int(i64::MAX)),
-        ((VId(2), P), CanonicalScalar::Int(i64::MAX)),
-        ((VId(1), Q), CanonicalScalar::Int(1)),
-        ((VId(2), Q), CanonicalScalar::Int(2)),
+    let props: Props = BTreeMap::from([
+        ((VId(1), P), CanonicalScalar::Int(i64::MAX).into()),
+        ((VId(2), P), CanonicalScalar::Int(i64::MAX).into()),
+        ((VId(1), Q), CanonicalScalar::Int(1).into()),
+        ((VId(2), Q), CanonicalScalar::Int(2).into()),
     ]);
     for (text, expected) in [
         (
@@ -1251,9 +1251,9 @@ fn malformed_computation_and_grouping_refuse_before_catalog_resolution() {
 
 #[test]
 fn hidden_arithmetic_and_eager_source_failures_survive_limit_zero_and_lazy_branches() {
-    let props = BTreeMap::from([
-        ((VId(1), P), CanonicalScalar::Int(1)),
-        ((VId(2), P), CanonicalScalar::Int(0)),
+    let props: Props = BTreeMap::from([
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), P), CanonicalScalar::Int(0).into()),
     ]);
     for text in [
         "MATCH (n) RETURN SUM(10/n.p) AS x LIMIT 0",

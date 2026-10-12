@@ -642,11 +642,15 @@ mod shared_batch_tests {
                     props: vec![
                         (
                             PropertyKeyId(3),
-                            CanonicalScalar::bytes(vec![seq as u8; 1024]).unwrap(),
+                            CanonicalScalar::bytes(vec![seq as u8; 1024])
+                                .unwrap()
+                                .into(),
                         ),
                         (
                             PropertyKeyId(8),
-                            CanonicalScalar::ucs_basic_text("retained change").unwrap(),
+                            CanonicalScalar::ucs_basic_text("retained change")
+                                .unwrap()
+                                .into(),
                         ),
                     ],
                     valid_time: None,

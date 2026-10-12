@@ -2,7 +2,7 @@ use super::*;
 use crate::{DatabaseKeys, MemVfs};
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{DeltaRow, PropertyKeyId, SchemaEpoch};
-use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId, PurposeContexts};
+use fgdb_types::{CanonicalPropertyValue, DatabaseSecurityNamespaceId, ObjectId, PurposeContexts};
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -11,9 +11,9 @@ const Q: PropertyKeyId = PropertyKeyId(2);
 /// The whole-row oracle for single-property reads: the requested property's
 /// value in a full row, with a stored Null kept as Some(Null).
 fn take_point_property(
-    properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     requested: PropertyKeyId,
-) -> Option<CanonicalScalar> {
+) -> Option<CanonicalPropertyValue> {
     properties
         .into_iter()
         .find_map(|(key, value)| (key == requested).then_some(value))
@@ -57,7 +57,7 @@ fn read(
     db: &Database<MemVfs>,
     edge: bool,
     key: PropertyKeyId,
-) -> Option<CanonicalScalar> {
+) -> Option<CanonicalPropertyValue> {
     if edge {
         txn.edge_property(db, EId(1), key).unwrap()
     } else {
@@ -65,12 +65,18 @@ fn read(
     }
 }
 
-fn set(edge: bool, key: PropertyKeyId, value: Option<CanonicalScalar>) -> WriteBatch {
+/// A scalar fixture or a stored value read back, as in a restore.
+fn set(
+    edge: bool,
+    key: PropertyKeyId,
+    value: Option<impl Into<CanonicalPropertyValue>>,
+) -> WriteBatch {
+    let value = value.map(Into::into);
     let mut batch = WriteBatch::new(R);
     if edge {
-        batch.set_edge_property(EId(1), key, value);
+        batch.set_edge_property_value(EId(1), key, value);
     } else {
-        batch.set_vertex_property(VId(1), key, value);
+        batch.set_vertex_property_value(VId(1), key, value);
     }
     batch
 }
@@ -101,10 +107,14 @@ fn read_modify_write_on_disjoint_fields_matches_serial_execution_and_reopen() {
             let mut serial = database(&cx).await;
             let mut left = db.begin(&tcx).unwrap();
             let mut right = db.begin(&tcx).unwrap();
-            let Some(CanonicalScalar::Int(a)) = read(&left, &db, edge, P) else {
+            let Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(a))) =
+                read(&left, &db, edge, P)
+            else {
                 panic!("integer")
             };
-            let Some(CanonicalScalar::Int(b)) = read(&right, &db, edge, Q) else {
+            let Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(b))) =
+                read(&right, &db, edge, Q)
+            else {
                 panic!("integer")
             };
             assert!(left.read_set.borrow().is_empty());
@@ -310,16 +320,16 @@ fn point_values_use_canonical_overlay_and_kind_separation() {
         txn.write(&mut db, changes).unwrap();
         assert_eq!(
             txn.vertex_property(&db, VId(1), P).unwrap(),
-            Some(CanonicalScalar::Int(42))
+            Some(CanonicalScalar::Int(42).into())
         );
         assert_eq!(txn.edge_property(&db, EId(1), P).unwrap(), None);
         assert_eq!(
             txn.vertex_property(&db, VId(7), P).unwrap(),
-            Some(CanonicalScalar::Int(7))
+            Some(CanonicalScalar::Int(7).into())
         );
         assert_eq!(
             txn.edge_property(&db, EId(7), P).unwrap(),
-            Some(CanonicalScalar::Int(8))
+            Some(CanonicalScalar::Int(8).into())
         );
         assert!(txn.read_set.borrow().is_empty());
         // Whole-row getters are the independent public output oracle.
@@ -337,13 +347,13 @@ fn point_values_use_canonical_overlay_and_kind_separation() {
         assert_eq!(txn.edge_property(&db, EId(7), P).unwrap(), None);
         txn.abort();
         assert_eq!(
-            take_point_property(vec![(P, CanonicalScalar::Null)], P),
-            Some(CanonicalScalar::Null)
+            take_point_property(vec![(P, CanonicalScalar::Null.into())], P),
+            Some(CanonicalScalar::Null.into())
         );
         let mut narrow = db.begin(&tcx).unwrap();
         assert_eq!(
             narrow.vertex_property(&db, VId(1), P).unwrap(),
-            Some(CanonicalScalar::Int(10))
+            Some(CanonicalScalar::Int(10).into())
         );
         db.write(&cx, set(true, P, Some(CanonicalScalar::Int(999))))
             .await

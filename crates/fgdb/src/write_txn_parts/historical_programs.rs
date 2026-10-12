@@ -190,13 +190,16 @@ mod historical_program_tests {
                 assert_eq!(txn.basis(), basis);
                 assert_eq!(
                     txn.vertex(&db, VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(1))]
+                    vec![
+                        (P, CanonicalScalar::Int(1).into()),
+                        (Q, CanonicalScalar::Int(1).into())
+                    ]
                 );
                 assert_eq!(db.frontier().unwrap(), head);
                 assert_eq!(db.manifest().unwrap(), manifest);
                 assert_eq!(
                     db.vertex(VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(0))]
+                    vec![(P, CanonicalScalar::Int(0).into())]
                 );
                 assert!(db.vertex(VId(99)).unwrap().is_some());
                 let seq = txn.commit(&mut db, &cx).await.unwrap();
@@ -204,11 +207,14 @@ mod historical_program_tests {
                 assert_eq!(db.delta_since(head).unwrap().count(), 1);
                 assert_eq!(
                     db.vertex(VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(1))]
+                    vec![
+                        (P, CanonicalScalar::Int(1).into()),
+                        (Q, CanonicalScalar::Int(1).into())
+                    ]
                 );
                 assert_eq!(
                     read.vertex(VId(1)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(0))]
+                    vec![(P, CanonicalScalar::Int(0).into())]
                 );
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }
@@ -239,7 +245,7 @@ mod historical_program_tests {
             .unwrap();
             assert_eq!(
                 txn.vertex(&db, VId(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(1))]
+                vec![(P, CanonicalScalar::Int(1).into())]
             );
             assert!(matches!(
                 txn.commit(&mut db, &cx).await,
@@ -248,7 +254,7 @@ mod historical_program_tests {
             assert_eq!(db.frontier().unwrap(), head);
             assert_eq!(
                 db.vertex(VId(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(7))]
+                vec![(P, CanonicalScalar::Int(7).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });

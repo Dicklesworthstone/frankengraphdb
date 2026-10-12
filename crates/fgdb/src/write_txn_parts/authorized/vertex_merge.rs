@@ -306,7 +306,7 @@ pub(super) fn merge<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 unreachable!("validated vertex MERGE contains no edge creation")
             };
             let mut batch = WriteBatch::new(merge.relation());
-            batch.create_vertex(vertex, labels, properties);
+            batch.create_vertex_values(vertex, labels, properties);
             for row in batch.rows {
                 stage(transaction, database, batch.relation, row, execution)
                     .map_err(|error| GqlQueryError::Source(GraphVertexMergeError::Source(error)))?;

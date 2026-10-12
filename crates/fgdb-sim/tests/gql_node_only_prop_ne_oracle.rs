@@ -18,7 +18,7 @@ use fgdb_reference::ReferenceGraph;
 use fgdb_sim::replay;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, GraphId, VId};
 
 const R: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(7);
@@ -34,7 +34,7 @@ fn reference_people_with_k_not_one(graph: &ReferenceGraph) -> Vec<VId> {
             vertex.labels.contains(&PERSON)
                 && matches!(
                     vertex.props.get(&K),
-                    Some(CanonicalScalar::Int(value)) if *value != 1
+                    Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) if *value != 1
                 )
         })
         .map(|(vid, _)| vid)

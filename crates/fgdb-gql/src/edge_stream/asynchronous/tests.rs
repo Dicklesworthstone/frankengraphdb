@@ -89,14 +89,14 @@ struct Counts {
 struct Vertex {
     id: VId,
     labels: Vec<LabelId>,
-    properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 #[derive(Clone)]
 struct Image {
     source: VId,
     target: VId,
     relation: RelationId,
-    properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     vertices: Vec<Vertex>,
 }
 struct Record {
@@ -274,7 +274,7 @@ fn inputs() -> Inputs {
         .map(|(id, value)| Vertex {
             id,
             labels: vec![],
-            properties: vec![(P, CanonicalScalar::Int(value))],
+            properties: vec![(P, CanonicalScalar::Int(value).into())],
         })
         .collect();
     let mut input = vec![(EId(0), None)];
@@ -292,7 +292,7 @@ fn inputs() -> Inputs {
                 target: IDS[to],
                 relation,
                 properties: value
-                    .map(|value| vec![(P, CanonicalScalar::Int(value))])
+                    .map(|value| vec![(P, CanonicalScalar::Int(value).into())])
                     .unwrap_or_default(),
                 vertices: vertices.clone(),
             })),
@@ -327,22 +327,29 @@ fn oracle(
             }
             _ => vec![(image.source, image.target), (image.target, image.source)],
         };
-        let ep = image.properties.first().map(|(_, value)| value);
+        let ep = image
+            .properties
+            .first()
+            .map(|(_, value)| value.as_scalar().unwrap());
         for (a, b) in orientations {
-            let ap = &image
+            let ap = image
                 .vertices
                 .iter()
                 .find(|vertex| vertex.id == a)
                 .unwrap()
                 .properties[0]
-                .1;
-            let bp = &image
+                .1
+                .as_scalar()
+                .unwrap();
+            let bp = image
                 .vertices
                 .iter()
                 .find(|vertex| vertex.id == b)
                 .unwrap()
                 .properties[0]
-                .1;
+                .1
+                .as_scalar()
+                .unwrap();
             let accept = match filter {
                 0 => true,
                 1 => matches!(ep, Some(CanonicalScalar::Int(n)) if *n > 0),
@@ -968,11 +975,11 @@ fn endpoint_nulls_and_property_domains_do_not_resolve_through_captured_edge_slot
         if missing {
             vertex.properties.clear();
         } else {
-            vertex.properties[0].1 = CanonicalScalar::Null;
+            vertex.properties[0].1 = CanonicalScalar::Null.into();
         }
         // The captured edge value would PASS (< target.p == 1). A vertex
         // NULL/missing property must never be read from capture ordinal zero.
-        image.properties[0].1 = CanonicalScalar::Int(-10);
+        image.properties[0].1 = CanonicalScalar::Int(-10).into();
         let counts;
         {
             let source = Source::new(input.clone());

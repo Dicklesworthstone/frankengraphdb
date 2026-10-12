@@ -355,7 +355,7 @@ fn unavailable_bad_order_and_failed_reads_are_not_successful_absence() {
     f.source.vertices = BTreeSet::from([VId(0)]);
     f.source
         .props
-        .insert(VId(0), vec![(P, CanonicalScalar::Int(1))]);
+        .insert(VId(0), vec![(P, CanonicalScalar::Int(1).into())]);
     let c = VertexScanCursor::new(
         f,
         VertexScanPlan::compile(q.plan()).unwrap(),

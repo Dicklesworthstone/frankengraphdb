@@ -99,6 +99,9 @@ fn scalar(db: &Database<MemVfs>, key: PropertyKeyId) -> Scalar {
         .find(|(actual, _)| *actual == key)
         .unwrap()
         .1
+        .as_scalar()
+        .expect("scalar property")
+        .clone()
 }
 
 #[test]

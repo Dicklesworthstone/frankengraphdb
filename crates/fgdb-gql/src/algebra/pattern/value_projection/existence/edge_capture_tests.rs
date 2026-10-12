@@ -5,7 +5,7 @@ use crate::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
 };
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, EId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId};
 use std::collections::BTreeMap;
 
 const R: RelationId = RelationId(1);
@@ -39,20 +39,20 @@ fn edges() -> [(EId, VId, RelationId, VId); 6] {
     ]
 }
 
-fn properties() -> BTreeMap<EId, CanonicalScalar> {
+fn properties() -> BTreeMap<EId, CanonicalPropertyValue> {
     BTreeMap::from([
-        (EId(11), CanonicalScalar::Int(0)),
-        (EId(12), CanonicalScalar::Int(10)),
-        (EId(13), CanonicalScalar::Null),
-        (EId(u128::MAX), CanonicalScalar::Int(9)),
-        (EId(21), CanonicalScalar::Int(20)),
+        (EId(11), CanonicalScalar::Int(0).into()),
+        (EId(12), CanonicalScalar::Int(10).into()),
+        (EId(13), CanonicalScalar::Null.into()),
+        (EId(u128::MAX), CanonicalScalar::Int(9).into()),
+        (EId(21), CanonicalScalar::Int(20).into()),
     ])
 }
 
 fn run(text: &str) -> Vec<Vec<GraphValue>> {
     let pattern = prepare(text);
     let properties = properties();
-    let threshold = CanonicalScalar::Int(5);
+    let threshold = CanonicalPropertyValue::from(CanonicalScalar::Int(5));
     pattern
         .plan()
         .execute_governed_with_element_properties(

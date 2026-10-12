@@ -17,8 +17,8 @@ use fgdb_strata::{
     encode_block_with_properties,
 };
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, GraphId,
-    PurposeContexts, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq,
+    DatabaseSecurityNamespaceId, EId, GraphId, PurposeContexts, VId,
 };
 use std::future::Future;
 use std::path::PathBuf;
@@ -78,7 +78,7 @@ fn vertex(created: u64, retired: Option<u64>, value: i64) -> VertexRow {
         created_at: CommitSeq(created),
         retired_at: retired.map(CommitSeq),
         labels: vec![LabelId(9)],
-        props: vec![(PropertyKeyId(11), CanonicalScalar::Int(value))],
+        props: vec![(PropertyKeyId(11), CanonicalScalar::Int(value).into())],
     }
 }
 
@@ -169,7 +169,10 @@ async fn fixture(
         )
         .await
         .unwrap();
-    let rows = vec![vec![(PropertyKeyId(11), CanonicalScalar::Int(33))]];
+    let rows = vec![vec![(
+        PropertyKeyId(11),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(33)),
+    )]];
     let properties = store
         .put_edge_property_patch(&cx, &encode_property_patch(&rows).unwrap())
         .await
@@ -251,7 +254,10 @@ async fn propertied_block(
     let mut locators = Vec::new();
     for value in values {
         if let Some(value) = value {
-            rows.push(vec![(PropertyKeyId(11), CanonicalScalar::Int(*value))]);
+            rows.push(vec![(
+                PropertyKeyId(11),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(*value)),
+            )]);
             locators.push(u8::try_from(rows.len()).unwrap());
         } else {
             locators.push(0);
@@ -425,21 +431,30 @@ fn cold_points_select_all_matching_histories_and_only_the_winning_property_patch
                 90,
                 1,
                 Some(edge(90, 1, 2, 1, Some(3))),
-                vec![(PropertyKeyId(11), CanonicalScalar::Int(900))],
+                vec![(
+                    PropertyKeyId(11),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(900)),
+                )],
                 3,
             ),
             (
                 90,
                 3,
                 Some(edge(90, 1, 2, 3, None)),
-                vec![(PropertyKeyId(11), CanonicalScalar::Int(901))],
+                vec![(
+                    PropertyKeyId(11),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(901)),
+                )],
                 3,
             ),
             (
                 80,
                 3,
                 Some(edge(80, 1, 5, 1, None)),
-                vec![(PropertyKeyId(11), CanonicalScalar::Int(800))],
+                vec![(
+                    PropertyKeyId(11),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(800)),
+                )],
                 3,
             ),
             (20, 1, Some(edge(20, 1, 3, 1, Some(3))), vec![], 2),
@@ -482,7 +497,10 @@ fn cold_points_select_all_matching_histories_and_only_the_winning_property_patch
         assert!(pool.used() > 0);
         assert_eq!(
             held.props,
-            vec![(PropertyKeyId(11), CanonicalScalar::Int(901))]
+            vec![(
+                PropertyKeyId(11),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(901))
+            )]
         );
         drop(held);
         assert_eq!(pool.used(), 0);
@@ -612,7 +630,10 @@ fn pruned_payloads_remain_mandatory_at_open_and_authenticate_when_requested() {
                 .unwrap();
             assert_eq!(
                 found.props,
-                vec![(PropertyKeyId(11), CanonicalScalar::Int(901))]
+                vec![(
+                    PropertyKeyId(11),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(901))
+                )]
             );
             assert_eq!(extent_visits(view.stats()) - before, 3);
             drop(found);
@@ -726,7 +747,10 @@ fn cold_topology_and_propertyless_points_do_not_refault_an_unneeded_property_pat
             .unwrap();
         assert_eq!(
             found.props,
-            vec![(PropertyKeyId(11), CanonicalScalar::Int(800))]
+            vec![(
+                PropertyKeyId(11),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(800))
+            )]
         );
         drop(found);
         for cut in [1, 3] {
@@ -790,7 +814,10 @@ fn cold_selective_reads_refuse_unfunded_decode_and_result_storage_before_io() {
         assert_eq!(found.entry, edge(90, 1, 2, 3, None));
         assert_eq!(
             found.props,
-            vec![(PropertyKeyId(11), CanonicalScalar::Int(901))]
+            vec![(
+                PropertyKeyId(11),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(901))
+            )]
         );
         drop(found);
         drop(view);
@@ -850,7 +877,10 @@ fn cold_history_points_and_reverse_adjacency_survive_one_frame_refaults() {
                 if cut < 3 {
                     vec![]
                 } else {
-                    vec![(PropertyKeyId(11), CanonicalScalar::Int(33))]
+                    vec![(
+                        PropertyKeyId(11),
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(33)),
+                    )]
                 }
             );
         }
@@ -1287,7 +1317,7 @@ fn propertied_durable_source_can_exceed_the_shared_resident_ceiling() {
             payload[..16].copy_from_slice(&index.to_le_bytes());
             let rows = vec![vec![(
                 PropertyKeyId(11),
-                CanonicalScalar::bytes(payload).unwrap(),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::bytes(payload).unwrap()),
             )]];
             let property_bytes = encode_property_patch(&rows).unwrap();
             let property = store
@@ -1343,7 +1373,10 @@ fn propertied_durable_source_can_exceed_the_shared_resident_ceiling() {
             expected[..16].copy_from_slice(&(eid - 1).to_le_bytes());
             assert_eq!(
                 found.props,
-                vec![(PropertyKeyId(11), CanonicalScalar::bytes(expected).unwrap())]
+                vec![(
+                    PropertyKeyId(11),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::bytes(expected).unwrap())
+                )]
             );
             assert!(pool.used() <= cap);
         }
@@ -1456,7 +1489,10 @@ fn vertex_property_history_larger_than_the_resident_cap_opens_and_refaults() {
             let mut payload = vec![0x5a; PAYLOAD];
             payload[..8].copy_from_slice(&(index as u64).to_le_bytes());
             let row = VertexRow {
-                props: vec![(PropertyKeyId(11), CanonicalScalar::bytes(payload).unwrap())],
+                props: vec![(
+                    PropertyKeyId(11),
+                    CanonicalScalar::bytes(payload).unwrap().into(),
+                )],
                 ..scan_vertex(index as u128, 1, None, 0)
             };
             let bytes = encode_patch(&[row]).unwrap();
@@ -1508,7 +1544,10 @@ fn vertex_property_history_larger_than_the_resident_cap_opens_and_refaults() {
             payload[..8].copy_from_slice(&(index as u64).to_le_bytes());
             assert_eq!(
                 found.props,
-                vec![(PropertyKeyId(11), CanonicalScalar::bytes(payload).unwrap())]
+                vec![(
+                    PropertyKeyId(11),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::bytes(payload).unwrap())
+                )]
             );
             assert!(pool.used() <= cap);
         }
@@ -1521,7 +1560,10 @@ fn vertex_property_history_larger_than_the_resident_cap_opens_and_refaults() {
             payload[..8].copy_from_slice(&(index as u64).to_le_bytes());
             assert_eq!(
                 found.props,
-                vec![(PropertyKeyId(11), CanonicalScalar::bytes(payload).unwrap())]
+                vec![(
+                    PropertyKeyId(11),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::bytes(payload).unwrap())
+                )]
             );
         }
         assert!(scan.next(&query).await.unwrap().is_none());
@@ -1545,7 +1587,7 @@ fn vertex_restatements_bound_residency_and_meter_every_authenticated_birth_refau
             let birth = VertexRow {
                 props: vec![(
                     PropertyKeyId(11),
-                    CanonicalScalar::bytes(vec![0x6b; 14_000]).unwrap(),
+                    CanonicalScalar::bytes(vec![0x6b; 14_000]).unwrap().into(),
                 )],
                 ..vertex(1, None, 0)
             };
@@ -1602,7 +1644,7 @@ fn vertex_restatements_bound_residency_and_meter_every_authenticated_birth_refau
             found.props,
             vec![(
                 PropertyKeyId(11),
-                CanonicalScalar::bytes(vec![0x6b; 14_000]).unwrap()
+                CanonicalPropertyValue::Scalar(CanonicalScalar::bytes(vec![0x6b; 14_000]).unwrap())
             )]
         );
         drop(found);

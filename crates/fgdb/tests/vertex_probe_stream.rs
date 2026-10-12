@@ -95,7 +95,7 @@ fn field(db: &Database<MemVfs>, cut: CommitSeq, id: VId) -> CanonicalScalar {
         .props
         .iter()
         .find(|(p, _)| *p == P)
-        .map(|(_, v)| v.clone())
+        .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
         .unwrap_or(CanonicalScalar::Null)
 }
 fn orient(a: VId, b: VId, d: GlaDirection) -> Vec<(VId, VId)> {

@@ -326,7 +326,7 @@ fn overlapping_cascades_are_borrowed_once_without_losing_absorbed_edge_deletes()
             elem: ElementId::Edge(EId(1)),
             property: Q,
             before: None,
-            after: Some(CanonicalScalar::Int(1)),
+            after: Some(CanonicalScalar::Int(1).into()),
         };
         assert!(!footprint.conflicts(&edge, &mut || Ok(())).unwrap());
         db.write(&cx, unrelated()).await.unwrap();

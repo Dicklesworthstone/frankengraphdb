@@ -93,6 +93,9 @@ fn property(db: &Database<MemVfs>, vertex: VId, key: PropertyKeyId) -> Canonical
         .find(|(found, _)| *found == key)
         .unwrap()
         .1
+        .as_scalar()
+        .expect("scalar property")
+        .clone()
 }
 fn authorization(mut error: &(dyn core::error::Error + 'static)) -> Option<AuthorizationError> {
     loop {
@@ -253,7 +256,7 @@ fn inferred_float_row_fields_and_relationship_parameters_use_the_same_writer() {
         }
         let edges = db.edges().unwrap();
         assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].props, vec![(P, float(0.75))]);
+        assert_eq!(edges[0].props, vec![(P, float(0.75).into())]);
         assert_eq!(cx.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

@@ -6,7 +6,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
     GraphSymbol, GraphSymbolKind, PreparedGraphSet, PreparedGraphSetText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
@@ -43,7 +43,7 @@ fn run(
     GqlQueryExecution<GraphValueRow>,
     GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
 > {
-    let values = [1, 2, 2, 3].map(CanonicalScalar::Int);
+    let values = [1, 2, 2, 3].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
     let checkpoint = RefCell::new(checkpoint);
     query.execute_governed(
         policy,

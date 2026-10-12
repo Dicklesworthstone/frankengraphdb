@@ -193,7 +193,10 @@ fn vertex_content_restatement_reopens_to_the_same_root_and_chain() {
     );
     let reopened_now = reopened.vertex(VId(1)).expect("reads").expect("live");
     assert_eq!(reopened_now.labels, vec![label]);
-    assert_eq!(reopened_now.props, vec![(key, CanonicalScalar::Int(9))]);
+    assert_eq!(
+        reopened_now.props,
+        vec![(key, CanonicalScalar::Int(9).into())]
+    );
     assert_eq!(
         reopened_now, incremental_now,
         "frontier vertex row diverged after restatement"
@@ -215,7 +218,7 @@ fn vertex_content_restatement_reopens_to_the_same_root_and_chain() {
     assert_eq!(reopened_at_restatement.labels, vec![label]);
     assert_eq!(
         reopened_at_restatement.props,
-        vec![(key, CanonicalScalar::Int(1))]
+        vec![(key, CanonicalScalar::Int(1).into())]
     );
     assert_eq!(
         reopened_at_restatement, incremental_at_restatement,
@@ -292,7 +295,10 @@ fn edge_content_restatement_reopens_to_the_same_root_and_chain() {
         .edge_at(EId(10), CommitSeq(2))
         .expect("reads set seq")
         .expect("visible at set");
-    assert_eq!(reopened_at_set.props, vec![(key, CanonicalScalar::Int(4))]);
+    assert_eq!(
+        reopened_at_set.props,
+        vec![(key, CanonicalScalar::Int(4).into())]
+    );
     assert_eq!(
         reopened_at_set, incremental_at_set,
         "pre-clear snapshot diverged after restatement"

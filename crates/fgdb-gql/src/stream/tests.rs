@@ -11,7 +11,7 @@ struct Sample {
     vid: VId,
     visible: bool,
     labels: Vec<LabelId>,
-    properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 struct Source {
     rows: Vec<Sample>,
@@ -78,7 +78,7 @@ fn sample(vid: u128, value: i64, visible: bool) -> Sample {
         vid: VId(vid),
         visible,
         labels: vec![LABEL],
-        properties: vec![(KEY, CanonicalScalar::Int(value))],
+        properties: vec![(KEY, CanonicalScalar::Int(value).into())],
     }
 }
 fn pattern(
@@ -135,7 +135,10 @@ fn pull_results_equal_ordinary_gla_across_visibility_predicates_offsets_limits_a
                     } else {
                         vec![LABEL]
                     },
-                    properties: value.into_iter().map(|value| (KEY, value)).collect(),
+                    properties: value
+                        .into_iter()
+                        .map(|value| (KEY, CanonicalPropertyValue::Scalar(value)))
+                        .collect(),
                 }
             })
             .collect();
@@ -509,9 +512,9 @@ fn property_rows_use_ordinary_projection_with_exact_nulls_types_order_and_duplic
         sample(1_u128 << 100, 4, true),
         sample(u128::MAX, 0, true),
     ];
-    rows[0].properties = vec![(KEY, text)];
+    rows[0].properties = vec![(KEY, text.into())];
     rows[2].properties.clear();
-    rows[3].properties = vec![(KEY, CanonicalScalar::Null)];
+    rows[3].properties = vec![(KEY, CanonicalScalar::Null.into())];
     for offset in [0, 1, 4, u64::MAX] {
         for count in [None, Some(0), Some(1), Some(4)] {
             for all in [false, true] {
@@ -575,7 +578,9 @@ fn every_property_lookup_and_payload_copy_refusal_keeps_only_complete_delivered_
     let mut rows = vec![sample(1, 8, true), sample(2, 9, true)];
     rows[1].properties = vec![(
         KEY,
-        CanonicalScalar::ucs_basic_text(&"payload".repeat(512)).unwrap(),
+        CanonicalScalar::ucs_basic_text(&"payload".repeat(512))
+            .unwrap()
+            .into(),
     )];
     let scan = VertexScanPlan::compile(value_pattern(0, None).plan()).unwrap();
     let mut total = 0;
@@ -667,7 +672,9 @@ fn skipped_and_output_refused_property_rows_do_not_copy_payloads_or_reset_the_bu
     for row in &mut rows {
         row.properties = vec![(
             KEY,
-            CanonicalScalar::ucs_basic_text(&"large".repeat(1024)).unwrap(),
+            CanonicalScalar::ucs_basic_text(&"large".repeat(1024))
+                .unwrap()
+                .into(),
         )];
     }
     // Skipping all matching rows needs neither property projection nor scratch.

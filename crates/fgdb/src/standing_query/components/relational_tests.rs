@@ -116,8 +116,11 @@ fn check_circuit(
         .unwrap()
         .into_iter()
         .map(|row| {
-            let Some((_, CanonicalScalar::Int(score))) =
-                row.props.iter().find(|(key, _)| *key == SCORE)
+            let Some(CanonicalScalar::Int(score)) = row
+                .props
+                .iter()
+                .find(|(key, _)| *key == SCORE)
+                .and_then(|(_, value)| value.as_scalar())
             else {
                 panic!("fixture score is missing or not an integer")
             };

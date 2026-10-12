@@ -20,7 +20,7 @@ mod incremental;
 mod join;
 mod merge;
 mod procedure;
-mod projection;
+pub(crate) mod projection;
 pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
@@ -939,7 +939,7 @@ impl PreparedGraphSet {
         elements: impl FnMut(
             fgdb_delta_types::ElementId,
             fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalScalar>, E>,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
         let mut source = WithElementReads {

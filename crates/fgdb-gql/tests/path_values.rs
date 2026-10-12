@@ -579,7 +579,7 @@ fn chain_rows(
         GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, PreparedGraphSetText,
         PreparedProcedureCall,
     };
-    use fgdb_types::{CanonicalScalar, EId, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
     let keys = |kind: GraphSymbolKind, name: &str| match (kind, name) {
         (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(PropertyKeyId(7))),
         (GraphSymbolKind::Property, "w") => Some(GraphSymbol::Property(PropertyKeyId(8))),
@@ -591,16 +591,21 @@ fn chain_rows(
     ];
     let stored = |element: ElementId, key: PropertyKeyId| {
         reads.set(reads.get() + 1);
-        Ok::<_, ()>(match (element, key) {
-            (ElementId::Vertex(VId(1)), PropertyKeyId(7)) => {
-                Some(CanonicalScalar::ucs_basic_text("a").unwrap())
+        Ok::<_, ()>(
+            match (element, key) {
+                (ElementId::Vertex(VId(1)), PropertyKeyId(7)) => {
+                    Some(CanonicalScalar::ucs_basic_text("a").unwrap())
+                }
+                (ElementId::Vertex(VId(2)), PropertyKeyId(7)) => {
+                    Some(CanonicalScalar::ucs_basic_text("b").unwrap())
+                }
+                (ElementId::Edge(EId(id)), PropertyKeyId(8)) => {
+                    Some(CanonicalScalar::Int(id as i64))
+                }
+                _ => None,
             }
-            (ElementId::Vertex(VId(2)), PropertyKeyId(7)) => {
-                Some(CanonicalScalar::ucs_basic_text("b").unwrap())
-            }
-            (ElementId::Edge(EId(id)), PropertyKeyId(8)) => Some(CanonicalScalar::Int(id as i64)),
-            _ => None,
-        })
+            .map(CanonicalPropertyValue::from),
+        )
     };
     let query = PreparedGraphSetText::prepare(text, keys)
         .unwrap_or_else(|error| panic!("{text}: {error:?}"))
@@ -610,11 +615,13 @@ fn chain_rows(
     // A conjunction with `type(r)` filters inside the pattern, so its accessors
     // serve the same names and weights as the row reader above.
     let edge_type = CanonicalScalar::ucs_basic_text("R").unwrap();
-    let names = [
-        CanonicalScalar::ucs_basic_text("a").unwrap(),
-        CanonicalScalar::ucs_basic_text("b").unwrap(),
+    let names: [fgdb_types::CanonicalPropertyValue; 2] = [
+        CanonicalScalar::ucs_basic_text("a").unwrap().into(),
+        CanonicalScalar::ucs_basic_text("b").unwrap().into(),
     ];
-    let weights = edges.map(|(EId(id), ..)| CanonicalScalar::Int(id as i64));
+    let weights = edges.map(|(EId(id), ..)| {
+        fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(id as i64))
+    });
     let patterns = |pattern: &PreparedGraphPattern<GraphValueRow>, remaining: GqlQueryPolicy| {
         pattern.plan().execute_governed_with_element_accessors(
             edges.len() as u64 + 4,

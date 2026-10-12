@@ -248,7 +248,10 @@ where
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<QueryError, C>> {
+    ) -> Result<
+        Option<Option<&'a fgdb_types::CanonicalPropertyValue>>,
+        EdgeScanSourceError<QueryError, C>,
+    > {
         let Some(edge) = self.visible(eid, EdgeRelation::Any)? else {
             return Ok(None);
         };
@@ -309,7 +312,10 @@ where
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<QueryError, C>> {
+    ) -> Result<
+        Option<Option<&'a fgdb_types::CanonicalPropertyValue>>,
+        EdgeScanSourceError<QueryError, C>,
+    > {
         self.vertices
             .vertex_property(vid, key, &mut |event| control(edge_event(event)))
     }

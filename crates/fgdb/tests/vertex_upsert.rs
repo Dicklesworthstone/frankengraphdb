@@ -110,14 +110,20 @@ fn on_match_updates_existing_vertex_without_allocating() {
         assert_eq!(staged.labels, vec![MARKED]);
         assert_eq!(
             staged.props,
-            vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(100))]
+            vec![
+                (P, CanonicalScalar::Int(7).into()),
+                (Q, CanonicalScalar::Int(100).into())
+            ]
         );
         txn.commit(&mut db, &commit).await.unwrap();
         let row = db.vertex(VId(1)).unwrap().unwrap();
         assert_eq!(row.labels, vec![MARKED]);
         assert_eq!(
             row.props,
-            vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(100))]
+            vec![
+                (P, CanonicalScalar::Int(7).into()),
+                (Q, CanonicalScalar::Int(100).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -149,7 +155,10 @@ fn on_create_decorates_new_vertex_atomically_and_survives_reopen() {
         assert_eq!(staged.labels, vec![MARKED]);
         assert_eq!(
             staged.props,
-            vec![(P, CanonicalScalar::Int(9)), (Q, CanonicalScalar::Int(200))]
+            vec![
+                (P, CanonicalScalar::Int(9).into()),
+                (Q, CanonicalScalar::Int(200).into())
+            ]
         );
         assert!(db.vertex(VId(9)).unwrap().is_none());
         txn.commit(&mut db, &commit).await.unwrap();
@@ -162,7 +171,10 @@ fn on_create_decorates_new_vertex_atomically_and_survives_reopen() {
         assert_eq!(row.labels, vec![MARKED]);
         assert_eq!(
             row.props,
-            vec![(P, CanonicalScalar::Int(9)), (Q, CanonicalScalar::Int(200))]
+            vec![
+                (P, CanonicalScalar::Int(9).into()),
+                (Q, CanonicalScalar::Int(200).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

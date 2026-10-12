@@ -291,7 +291,7 @@ fn native_shortest_match_feeds_atomic_creation_with_tie_multiplicity_and_rollbac
             for vertex in [VId(100), VId(101), VId(102)] {
                 assert_eq!(
                     db.vertex(vertex).unwrap().unwrap().props,
-                    vec![(Q, CanonicalScalar::Int(7))]
+                    vec![(Q, CanonicalScalar::Int(7).into())]
                 );
             }
             assert!(db.vertex(VId(99)).unwrap().is_some());

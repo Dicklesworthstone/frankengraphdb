@@ -122,7 +122,7 @@ fn changed_match_destination_aborts_read_01_and_replays_only_the_writer() {
                 .expect("MATCH destination remains")
                 .props
                 .get(&PROPERTY),
-            Some(&CanonicalScalar::Int(22)),
+            Some(&CanonicalScalar::Int(22).into()),
             "independent replay contains only B's destination property"
         );
         assert!(

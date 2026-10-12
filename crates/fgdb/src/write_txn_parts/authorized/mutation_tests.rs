@@ -179,17 +179,17 @@ fn masked_simultaneous_vertex_and_edge_updates_deduplicate_and_reopen() {
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
             vec![
-                (P, CanonicalScalar::Int(11)),
-                (SECRET, CanonicalScalar::Int(71)),
-                (Q, CanonicalScalar::Int(20))
+                (P, CanonicalScalar::Int(11).into()),
+                (SECRET, CanonicalScalar::Int(71).into()),
+                (Q, CanonicalScalar::Int(20).into())
             ]
         );
         for (id, secret) in [(11, 81), (12, 82)] {
             assert_eq!(
                 db.edge(EId(id)).unwrap().unwrap().props,
                 vec![
-                    (P, CanonicalScalar::Int(7)),
-                    (SECRET, CanonicalScalar::Int(secret))
+                    (P, CanonicalScalar::Int(7).into()),
+                    (SECRET, CanonicalScalar::Int(secret).into())
                 ]
             );
         }

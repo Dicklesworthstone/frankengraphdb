@@ -12,7 +12,9 @@ use fgdb_gql::{
     PreparedGraphInsertText, PreparedGraphMutationText, PreparedGraphVertexMerge,
     PreparedGraphVertexMergeText, PreparedGraphVertexUpsert, PreparedGraphVertexUpsertText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -277,11 +279,11 @@ fn dependent_cross_relation_crud_has_ordered_receipts_one_commit_and_reopen() {
         assert!(db.vertex(a).unwrap().is_none());
         assert_eq!(
             db.vertex(b).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(31))]
+            vec![(P, CanonicalScalar::Int(31).into())]
         );
         assert_eq!(
             db.vertex(copy).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(30))]
+            vec![(P, CanonicalScalar::Int(30).into())]
         );
         assert!(db.edge(r).unwrap().is_none());
         let edge = db.edge(s).unwrap().unwrap();
@@ -289,7 +291,7 @@ fn dependent_cross_relation_crud_has_ordered_receipts_one_commit_and_reopen() {
             (edge.entry.src, edge.entry.relation, edge.entry.dst),
             (b, S, copy)
         );
-        assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(9))]);
+        assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(9).into())]);
         let vertices = db.vertices().unwrap();
         let edges = db.edges().unwrap();
         db.compact(&commit).await.unwrap();
@@ -932,7 +934,10 @@ fn vertex_merge_and_branch_actions_observe_prior_steps_publish_once_and_reopen()
         );
         assert_eq!(
             db.vertex(merged).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(20))]
+            vec![
+                (P, CanonicalScalar::Int(7).into()),
+                (Q, CanonicalScalar::Int(20).into())
+            ]
         );
         let rows = db.vertices().unwrap();
         db.compact(&commit).await.unwrap();
@@ -1020,11 +1025,11 @@ fn vertex_upsert_executes_only_the_selected_branch_and_preserves_hidden_fields()
                 .unwrap();
             assert_eq!(receipt.stats().mutation_effects, 1);
             assert_eq!(receipt.stats().created_vertices, u64::from(!existing));
-            let mut expected = vec![(P, CanonicalScalar::Int(7))];
+            let mut expected = vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7)))];
             if existing {
-                expected.push((SECRET, CanonicalScalar::Int(77)));
+                expected.push((SECRET, CanonicalScalar::Int(77).into()));
             }
-            expected.push((Q, CanonicalScalar::Int(8)));
+            expected.push((Q, CanonicalScalar::Int(8).into()));
             // The seed's VId(1) is an explicit client identity; a created vertex is
             // the first engine vertex (counter 1).
             let target = if existing { VId(1) } else { issued_vertex(1) };

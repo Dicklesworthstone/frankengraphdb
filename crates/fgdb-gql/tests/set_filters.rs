@@ -9,7 +9,7 @@ use fgdb_gql::{
     GraphSetFilterError, GraphSetOperand as Arg, GraphSetPredicateOp as Op, GraphSetProjection,
     GraphSetQuantifier, GraphSetValue, MAX_GRAPH_SET_DEPTH, PreparedGraphSet,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::{Cell, RefCell};
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -51,6 +51,10 @@ fn run(
     GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
 > {
     let checkpoint = RefCell::new(checkpoint);
+    let stored: Vec<CanonicalPropertyValue> = values
+        .iter()
+        .map(|value| CanonicalPropertyValue::from(value.clone()))
+        .collect();
     query.execute_governed(
         policy,
         |pattern, remaining| {
@@ -59,7 +63,7 @@ fn run(
                 (0..values.len()).map(|at| VId(at as u128)),
                 [],
                 |_, _| Ok::<_, &'static str>(true),
-                |vid, _| Ok(Some(&values[vid.0 as usize])),
+                |vid, _| Ok(Some(&stored[vid.0 as usize])),
                 remaining,
                 || (checkpoint.borrow_mut())(),
             )

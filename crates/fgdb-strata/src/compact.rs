@@ -452,8 +452,13 @@ mod tests {
     #[test]
     fn the_hosted_patch_row_ceiling_cuts_a_block_early() {
         use fgdb_delta_types::PropertyKeyId;
-        use fgdb_types::CanonicalScalar;
-        let row = |seed: u64| vec![(PropertyKeyId(seed), CanonicalScalar::Int(seed as i64))];
+        use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
+        let row = |seed: u64| {
+            vec![(
+                PropertyKeyId(seed),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(seed as i64)),
+            )]
+        };
 
         // Five entries, three propertied, entry capacity 5, row ceiling 2: the
         // third propertied entry cannot join the first block's patch.
@@ -507,7 +512,10 @@ mod tests {
             .map(|dst| {
                 (
                     entry(dst),
-                    vec![(PropertyKeyId(dst as u64), CanonicalScalar::Int(dst as i64))],
+                    vec![(
+                        PropertyKeyId(dst as u64),
+                        CanonicalScalar::Int(dst as i64).into(),
+                    )],
                 )
             })
             .collect();

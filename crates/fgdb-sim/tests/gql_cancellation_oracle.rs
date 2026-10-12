@@ -5,8 +5,8 @@ use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
 use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts,
-    QueryCx, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, QueryCx, VId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -15,8 +15,13 @@ const R: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
-type Vertex = (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>);
-type Edge = (VId, RelationId, VId, Vec<(PropertyKeyId, CanonicalScalar)>);
+type Vertex = (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>);
+type Edge = (
+    VId,
+    RelationId,
+    VId,
+    Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+);
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct State {
     vertices: BTreeMap<VId, Vertex>,

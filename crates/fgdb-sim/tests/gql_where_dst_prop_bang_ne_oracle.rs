@@ -19,7 +19,7 @@ use fgdb_reference::ReferenceGraph;
 use fgdb_sim::replay;
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, EId, GraphId, VId};
 
 const R: RelationId = RelationId(1);
 const K: PropertyKeyId = PropertyKeyId(7);
@@ -35,7 +35,7 @@ fn reference_sources(graph: &ReferenceGraph) -> Vec<VId> {
         .filter(|(_, edge)| edge.relation == R)
         .filter(|(_, edge)| {
             graph.vertex(edge.dst).is_some_and(
-                |vertex| matches!(vertex.props.get(&K), Some(CanonicalScalar::Int(v)) if *v != 1),
+                |vertex| matches!(vertex.props.get(&K), Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v))) if *v != 1),
             )
         })
         .map(|(_, edge)| edge.src)

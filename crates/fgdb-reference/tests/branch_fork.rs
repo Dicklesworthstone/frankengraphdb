@@ -20,7 +20,8 @@ use fgdb_delta_types::{
 };
 use fgdb_reference::{ApplyError, BranchError, BranchOrigin, ReferenceDatabase};
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq,
+    ObjectId, VId,
 };
 
 const GRAPH: GraphId = GraphId(1);
@@ -30,8 +31,9 @@ const REL: RelationId = RelationId(1);
 const LABEL: LabelId = LabelId(10);
 const PROP: PropertyKeyId = PropertyKeyId(100);
 
-fn text(value: &str) -> CanonicalScalar {
+fn text(value: &str) -> CanonicalPropertyValue {
     CanonicalScalar::Text(fgdb_types::CanonicalText::new_ucs_basic(value).expect("bounded text"))
+        .into()
 }
 
 fn vertex(vid: u128, name: &str) -> DeltaRow {
@@ -83,7 +85,7 @@ fn apply_at(db: &mut ReferenceDatabase, branch: BranchId, seq: u64, rows: Vec<De
         .expect("applies");
 }
 
-fn name_on(db: &ReferenceDatabase, branch: BranchId, vid: u128) -> Option<CanonicalScalar> {
+fn name_on(db: &ReferenceDatabase, branch: BranchId, vid: u128) -> Option<CanonicalPropertyValue> {
     db.graph(GRAPH, branch)?
         .vertex(VId(vid))?
         .props

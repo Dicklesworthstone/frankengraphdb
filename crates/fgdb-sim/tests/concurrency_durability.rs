@@ -46,7 +46,9 @@ use fgdb_reference::{ReferenceDatabase, ReferenceGraph};
 use fgdb_sim::{commit_capsule, prepare_capsule, replay};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, GraphId, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, GraphId, ObjectId, VId,
+};
 use std::path::PathBuf;
 
 const GRAPH: GraphId = GraphId(1);
@@ -96,8 +98,8 @@ where
     output
 }
 
-fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value)
+fn int(value: i64) -> CanonicalPropertyValue {
+    CanonicalScalar::Int(value).into()
 }
 
 fn create(vid: u128, value: i64) -> Statement {
@@ -560,7 +562,7 @@ fn dangerous_structures_are_monotone_under_restriction() {
 
 fn prop_of(graph: &ReferenceGraph, vid: u128) -> Option<i64> {
     match graph.vertex(VId(vid))?.props.get(&PROP)? {
-        CanonicalScalar::Int(value) => Some(*value),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => Some(*value),
         _ => None,
     }
 }

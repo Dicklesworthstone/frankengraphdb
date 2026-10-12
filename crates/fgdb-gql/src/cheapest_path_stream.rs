@@ -7,7 +7,7 @@ use crate::{
     GraphCheapestPathError, GraphCostPath, PreparedGraphCheapestPath,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CommitSeq, EId, VId};
 use std::convert::Infallible;
 
 type StreamResult<T, E, C> = Result<T, GqlQueryError<GraphCheapestPathError<E>, C>>;
@@ -59,7 +59,10 @@ impl PreparedGraphCheapestPath {
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> StreamResult<GraphCheapestPathStream, E, C> {
@@ -87,7 +90,10 @@ impl PreparedGraphCheapestPath {
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
-        mut property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
         admission: GlaExecutionStats,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,

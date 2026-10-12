@@ -4,7 +4,7 @@
 
 use super::{EdgeScanRow, GlaExecutionEvent};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, VId};
 
 pub enum EdgeScanRecord<'a> {
     Borrowed(EdgeScanRow<'a>),
@@ -12,7 +12,7 @@ pub enum EdgeScanRecord<'a> {
         source: VId,
         target: VId,
         relation: RelationId,
-        properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+        properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
 }
 impl EdgeScanRecord<'_> {
@@ -49,7 +49,7 @@ impl EdgeScanRecord<'_> {
             if allows_property(*key) {
                 control(GlaExecutionEvent::Work)?;
                 control(GlaExecutionEvent::ScratchEntry)?;
-                crate::algebra_exec::charge_payload(value, &mut |_| {
+                crate::algebra_exec::charge_stored_payload(value, &mut |_| {
                     control(GlaExecutionEvent::Work)?;
                     control(GlaExecutionEvent::ScratchEntry)
                 })?;

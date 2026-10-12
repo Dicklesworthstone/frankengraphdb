@@ -1,14 +1,16 @@
 use super::*;
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 
 type EdgeImage = (
     EId,
     VId,
     RelationId,
     VId,
-    Vec<(PropertyKeyId, CanonicalScalar)>,
+    Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 );
 fn read_source(
     view: EmbeddedReadView,
@@ -127,7 +129,7 @@ fn history_predecessors_equal_authoritative_rows_and_every_source_boundary_propa
         assert!(
             old_rows
                 .iter()
-                .all(|row| row.4 == vec![(key, CanonicalScalar::Int(3))])
+                .all(|row| row.4 == vec![(key, CanonicalScalar::Int(3).into())])
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

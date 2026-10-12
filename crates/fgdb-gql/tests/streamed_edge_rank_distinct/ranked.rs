@@ -258,7 +258,12 @@ fn hidden_order_terms_full_keys_and_projection_do_not_change_rank_or_bag_multipl
     ] {
         s.edges.insert(
             EId(id),
-            (VId(0), R, VId(end), vec![(P, CanonicalScalar::Int(weight))]),
+            (
+                VId(0),
+                R,
+                VId(end),
+                vec![(P, CanonicalScalar::Int(weight).into())],
+            ),
         );
     }
     let rows = run(&q, s, wide()).collect::<Result<Vec<_>, _>>().unwrap();
@@ -305,11 +310,16 @@ fn losing_and_zero_page_groups_still_evaluate_having_and_output_failures() {
         let mut s = source(0);
         s.edges.insert(
             EId(1),
-            (VId(0), R, VId(0), vec![(P, CanonicalScalar::Int(1))]),
+            (VId(0), R, VId(0), vec![(P, CanonicalScalar::Int(1).into())]),
         );
         s.edges.insert(
             EId(2),
-            (VId(0), R, VId(1), vec![(P, CanonicalScalar::Bool(true))]),
+            (
+                VId(0),
+                R,
+                VId(1),
+                vec![(P, CanonicalScalar::Bool(true).into())],
+            ),
         );
         let mut cursor = run(&q, s, wide());
         assert!(matches!(
@@ -415,7 +425,7 @@ fn ranked_tiny_page_does_not_charge_output_quota_for_offset_or_discarded_groups(
                 VId(0),
                 R,
                 VId(id),
-                vec![(P, CanonicalScalar::Int(id as i64))],
+                vec![(P, CanonicalScalar::Int(id as i64).into())],
             ),
         );
     }

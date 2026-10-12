@@ -9,7 +9,7 @@ use fgdb_gql::algebra::{
     PatternLimitDimension, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 const R: RelationId = RelationId(1);
@@ -76,9 +76,18 @@ fn captured_null_pattern(matched: bool, count: Option<u64>) -> PreparedGraphPatt
 fn predicate_only_correlations_match_independent_relational_bags_in_every_scope_kind() {
     let vertices = [VId(0), VId(1), VId(2), VId(9)];
     let values = BTreeMap::from([
-        (VId(0), CanonicalScalar::Int(0)),
-        (VId(1), CanonicalScalar::Int(0)),
-        (VId(2), CanonicalScalar::Null),
+        (
+            VId(0),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0)),
+        ),
+        (
+            VId(1),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0)),
+        ),
+        (
+            VId(2),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Null),
+        ),
     ]);
     let universe: [Edge; 5] = [
         (VId(0), R, VId(1)),
@@ -153,10 +162,19 @@ fn predicate_only_correlations_match_independent_relational_bags_in_every_scope_
                         outer_rows.push(None);
                     }
                     for b in outer_rows {
-                        let matches = vertices.iter().copied().filter(|c| b.is_none_or(|b| {
-                            matches!((values.get(c), values.get(&b)),
-                                (Some(CanonicalScalar::Int(x)), Some(CanonicalScalar::Int(y))) if x == y)
-                        })).collect::<Vec<_>>();
+                        let matches = vertices
+                            .iter()
+                            .copied()
+                            .filter(|c| {
+                                b.is_none_or(|b| {
+                                    matches!((values.get(c), values.get(&b)),
+                                (
+                                    Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(x))),
+                                    Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(y))),
+                                ) if x == y)
+                                })
+                            })
+                            .collect::<Vec<_>>();
                         match kind {
                             0 | 1 => {
                                 if matches.is_empty() && kind == 1 {
@@ -238,7 +256,11 @@ fn captured_null_property_is_null_without_source_access_but_matched_null_refuses
                 [VId(0), VId(1), VId(u128::MAX)],
                 [],
                 |_, _| Err::<bool, _>("null must not call the vertex source"),
-                |_, _| Err::<Option<&CanonicalScalar>, _>("null must not call the property source"),
+                |_, _| {
+                    Err::<Option<&CanonicalPropertyValue>, _>(
+                        "null must not call the property source",
+                    )
+                },
                 wide(),
                 || Ok::<_, ()>(()),
             )
@@ -390,8 +412,8 @@ fn reversed_positive_anchor_and_predicate_capture_keep_both_correlations_and_tie
         )
         .unwrap()
         .with_duplicates();
-    let ten = CanonicalScalar::Int(10);
-    let other = CanonicalScalar::Int(11);
+    let ten = CanonicalPropertyValue::from(CanonicalScalar::Int(10));
+    let other = CanonicalPropertyValue::from(CanonicalScalar::Int(11));
     let rows = pattern
         .plan()
         .execute_governed_with_properties(

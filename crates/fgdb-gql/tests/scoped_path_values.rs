@@ -9,7 +9,7 @@ use fgdb_gql::algebra::{
     PatternLimitDimension, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy, GraphWalkBounds};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 
 type Edge = (EId, VId, RelationId, VId);
@@ -70,7 +70,10 @@ fn run(pattern: &PreparedGraphPattern<GraphValueRow>, edges: &[Edge]) -> Vec<Gra
             (1..=5).map(VId),
             edges.iter().copied(),
             |id, predicates| {
-                let properties = [(P, CanonicalScalar::Int(id.0 as i64))];
+                let properties = [(
+                    P,
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(id.0 as i64)),
+                )];
                 Ok::<_, &'static str>(predicates.iter().all(|p| p.matches(&[], &properties)))
             },
             |_, _| Ok(None),

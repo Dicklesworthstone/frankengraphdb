@@ -19,7 +19,7 @@ fn reference_people_with_k_one(graph: &ReferenceGraph) -> Vec<VId> {
         .iter_vertices()
         .filter(|(_, vertex)| {
             vertex.labels.contains(&PERSON)
-                && vertex.props.get(&K) == Some(&CanonicalScalar::Int(1))
+                && vertex.props.get(&K) == Some(&CanonicalScalar::Int(1).into())
         })
         .map(|(vid, _)| vid)
         .collect();

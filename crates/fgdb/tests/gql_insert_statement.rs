@@ -360,8 +360,8 @@ fn readme_insert_example_runs_through_database_query_write() {
             assert_eq!(
                 vertex.props,
                 vec![
-                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap()),
-                    (BORN, CanonicalScalar::Int(born)),
+                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap().into()),
+                    (BORN, CanonicalScalar::Int(born).into()),
                 ]
             );
         }
@@ -372,7 +372,7 @@ fn readme_insert_example_runs_through_database_query_write() {
             (edge.entry.src, edge.entry.dst, edge.entry.relation),
             (vertices[0], vertices[1], R)
         );
-        assert_eq!(edge.props, vec![(SINCE, CanonicalScalar::Int(1833))]);
+        assert_eq!(edge.props, vec![(SINCE, CanonicalScalar::Int(1833).into())]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

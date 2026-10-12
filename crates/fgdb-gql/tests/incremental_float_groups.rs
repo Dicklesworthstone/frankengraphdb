@@ -8,7 +8,7 @@ use fgdb_gql::{
     GqlQueryPolicy, GraphAggregate, GraphAggregateValue as Value, GraphExactAverage,
     GraphSetColumnType, PreparedGraphSetAggregate,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 const LIMBS: LimbLimit = LimbLimit::new(16);
@@ -284,7 +284,7 @@ fn snapshot(input: &ZSet<GraphValueRow>) -> Vec<Value> {
             panic!("test scalar")
         };
         for _ in 0..weight.to_i128().unwrap() {
-            properties.insert(VId(id), value.clone());
+            properties.insert(VId(id), CanonicalPropertyValue::from(value.clone()));
             id += 1;
         }
     }

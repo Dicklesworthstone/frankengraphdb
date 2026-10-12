@@ -122,14 +122,14 @@ fn duplicates_null_and_input_order_create_distinct_occurrence_local_structures()
         expected.push(GraphInsertIntent::Vertex {
             vertex,
             labels: vec![LabelId(3)],
-            properties: vec![(P, value.clone())],
+            properties: vec![(P, value.clone().into())],
         });
         expected.push(GraphInsertIntent::Edge {
             edge: EId(200 + row as u128 * 256),
             relation: R,
             source: vertex,
             destination: vertex,
-            properties: vec![(P, value)],
+            properties: vec![(P, value.into())],
         });
         expected_requests.push(GraphInsertRequest::Vertex { row, vertex: 0 });
         expected_requests.push(GraphInsertRequest::Edge { row, edge: 0 });
@@ -155,7 +155,13 @@ fn relation_order_and_page_determine_identity_requests_after_unwind() {
         let GraphInsertIntent::Vertex { properties, .. } = intent else {
             panic!("expected one vertex before its edge")
         };
-        assert_eq!(properties, &[(P, CanonicalScalar::Int(expected))]);
+        assert_eq!(
+            properties,
+            &[(
+                P,
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(expected))
+            )]
+        );
     }
 }
 
@@ -183,9 +189,14 @@ fn empty_and_null_lists_create_nothing_and_request_no_identity() {
 }
 
 #[test]
-fn dynamic_non_scalar_properties_refuse_before_any_identity_is_requested() {
+fn dynamic_unwritable_properties_refuse_before_any_identity_is_requested() {
+    // A list is a stored List field since fgdb-k3nub (the law below). A map,
+    // a list holding a map, and a graph element are never written values.
+    let map = || GraphValue::map(vec![(Box::<str>::from("p"), scalar(9))]).unwrap();
     for bad in [
-        GraphValue::List(vec![scalar(9)].into()),
+        map(),
+        GraphValue::List(vec![scalar(9), map()].into()),
+        GraphValue::List(vec![GraphValue::Vertex(VId(999))].into()),
         GraphValue::Vertex(VId(999)),
         GraphValue::Edge(EId(999)),
     ] {
@@ -204,6 +215,43 @@ fn dynamic_non_scalar_properties_refuse_before_any_identity_is_requested() {
             }))
         ));
     }
+}
+
+/// fgdb-k3nub: a list row is written as a stored List, nested lists and NULL
+/// elements included, on both the vertex and the edge. Its value is the
+/// canonical list of the row's own elements, never a truncated scalar.
+#[test]
+fn dynamic_list_properties_are_written_as_stored_lists() {
+    use fgdb_types::CanonicalList;
+    let nested = GraphValue::List(
+        vec![
+            scalar(1),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::List(vec![scalar(2), scalar(3)].into()),
+        ]
+        .into(),
+    );
+    let batch = run(&plan(unwind(vec![nested])), policy()).unwrap();
+    let stored = |values: Vec<CanonicalPropertyValue>| {
+        CanonicalPropertyValue::List(CanonicalList::try_new(values).unwrap())
+    };
+    let int = |value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value));
+    let expected = stored(vec![
+        int(1),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Null),
+        stored(vec![int(2), int(3)]),
+    ]);
+    let [
+        GraphInsertIntent::Vertex { properties, .. },
+        GraphInsertIntent::Edge {
+            properties: edge, ..
+        },
+    ] = batch.intents()
+    else {
+        panic!("one vertex and one edge per row");
+    };
+    assert_eq!(properties, &[(P, expected.clone())]);
+    assert_eq!(edge, &[(P, expected)]);
 }
 
 #[test]
@@ -261,7 +309,7 @@ fn chained_unwind_can_retain_unused_list_columns_and_create_from_final_scalars()
             GraphInsertIntent::Vertex {
                 vertex: VId(100 + row as u128 * 256),
                 labels: vec![LabelId(3)],
-                properties: vec![(P, CanonicalScalar::Int(value))],
+                properties: vec![(P, CanonicalScalar::Int(value).into())],
             }
         );
     }
@@ -493,15 +541,28 @@ fn multiple_graph_leaves_share_source_admission_and_late_failure_precedes_alloca
 
 #[test]
 fn schema_and_cross_owner_depth_are_checked_during_preparation() {
-    let list = PreparedGraphSet::singleton()
-        .project(
-            vec![GraphSetProjection::new("list", GraphSetValue::List(vec![]))],
-            GraphSetQuantifier::All,
+    let column = |value| {
+        PreparedGraphSet::singleton()
+            .project(
+                vec![GraphSetProjection::new("value", value)],
+                GraphSetQuantifier::All,
+            )
+            .unwrap()
+    };
+    // A list column is a stored List property since fgdb-k3nub; a column
+    // of graph elements is still no property value.
+    assert!(
+        PreparedGraphInsert::prepare_relation(
+            column(GraphSetValue::List(vec![])),
+            R,
+            vec![vertex(GraphMutationValue::Column(0))],
+            vec![]
         )
-        .unwrap();
+        .is_ok()
+    );
     assert!(matches!(
         PreparedGraphInsert::prepare_relation(
-            list,
+            column(GraphSetValue::TypedNull(GraphSetColumnType::Vertex)),
             R,
             vec![vertex(GraphMutationValue::Column(0))],
             vec![]

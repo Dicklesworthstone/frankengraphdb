@@ -4,7 +4,7 @@
 
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId, VId};
 use fgdb_warden::{
     Authority, CapabilityToken, EdgeWriteImage, Error, ExecutionPermit, Grant, LimitDimension,
     QueryLimits, Restriction, Rights, Scope, Usage, VertexWriteFields, VertexWriteImage,
@@ -75,22 +75,24 @@ fn token(issuer: &Authority) -> CapabilityToken {
 #[derive(Clone)]
 struct Image {
     labels: Vec<LabelId>,
-    properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 
 impl Image {
     fn new(mask: usize, hidden_bytes: usize, value: i64) -> Self {
         let mut labels = vec![L];
-        let mut properties = vec![
-            (P, CanonicalScalar::Int(value)),
-            (Q, CanonicalScalar::bytes(vec![7; 70]).unwrap()),
+        let mut properties: Vec<(PropertyKeyId, CanonicalPropertyValue)> = vec![
+            (P, CanonicalScalar::Int(value).into()),
+            (Q, CanonicalScalar::bytes(vec![7; 70]).unwrap().into()),
         ];
         for (index, label) in HIDDEN_LABELS.into_iter().enumerate() {
             if mask & (1 << index) != 0 {
                 labels.push(label);
                 properties.push((
                     HIDDEN_KEYS[index],
-                    CanonicalScalar::bytes(vec![index as u8; hidden_bytes]).unwrap(),
+                    CanonicalScalar::bytes(vec![index as u8; hidden_bytes])
+                        .unwrap()
+                        .into(),
                 ));
             }
         }
@@ -383,7 +385,7 @@ fn hidden_fields_remain_exactly_validated_and_cannot_be_changed_or_deleted() {
         // ubs:ignore -- SECRET is a hidden property KEY in this fixture, not secret material.
         .find(|(key, _)| *key == SECRET)
         .unwrap()
-        .1 = CanonicalScalar::Int(9);
+        .1 = CanonicalScalar::Int(9).into();
     let mut removed = original.clone();
     // ubs:ignore -- SECRET is a hidden property KEY in this fixture, not secret material.
     removed.properties.retain(|(key, _)| *key != SECRET);

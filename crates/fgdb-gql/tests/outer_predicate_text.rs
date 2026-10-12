@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphSymbolKind, GraphWriteStatement, PreparedGraphAggregateText, PreparedGraphText,
     PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const R: RelationId = RelationId(1);
@@ -28,13 +28,16 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 fn wide() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 5_000_000, 5_000_000)
 }
-fn values() -> BTreeMap<VId, CanonicalScalar> {
-    BTreeMap::from([
-        (VId(1), CanonicalScalar::Int(7)),
-        (VId(2), CanonicalScalar::Int(7)),
-        (VId(3), CanonicalScalar::Int(9)),
-        (VId(4), CanonicalScalar::Null),
-    ])
+fn values() -> BTreeMap<VId, CanonicalPropertyValue> {
+    BTreeMap::from(
+        [
+            (VId(1), CanonicalScalar::Int(7)),
+            (VId(2), CanonicalScalar::Int(7)),
+            (VId(3), CanonicalScalar::Int(9)),
+            (VId(4), CanonicalScalar::Null),
+        ]
+        .map(|(vid, value)| (vid, CanonicalPropertyValue::from(value))),
+    )
 }
 fn prepare(text: &str) -> PreparedGraphPattern<GraphValueRow> {
     PreparedGraphText::prepare(text, symbols)

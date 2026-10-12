@@ -12,7 +12,8 @@ use fgdb_gql::{
     GraphAggregateTextSlot, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -109,7 +110,7 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord], floor: i64) -> Vec<Summa
             .find(|row| row.vid == vid)
             .and_then(|row| row.props.iter().find(|(key, _)| *key == P))
             .and_then(|(_, value)| {
-                if let CanonicalScalar::Int(value) = value {
+                if let CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) = value {
                     Some(*value)
                 } else {
                     None

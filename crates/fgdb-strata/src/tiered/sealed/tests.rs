@@ -1,6 +1,6 @@
 use super::*;
 use crate::edge_props::{BlockProps, EdgePropertyRow};
-use fgdb_types::{EId, ObjectId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, ObjectId};
 
 fn scope(floor: u64) -> SealedScope {
     SealedScope {
@@ -114,15 +114,26 @@ fn tombstone_precedence_and_content_version_properties_use_the_existing_compacto
     let initial_props = BlockProps {
         locators: (1..=9).collect(),
         rows: (1..=9)
-            .map(|eid| vec![(PropertyKeyId(1), CanonicalScalar::Int(eid))])
+            .map(|eid| {
+                vec![(
+                    PropertyKeyId(1),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(eid)),
+                )]
+            })
             .collect(),
     };
     let change = vec![entry(1, 7, 1, 1, Some(5)), entry(1, 7, 1, 5, None)];
     let changed_props = BlockProps {
         locators: vec![1, 2],
         rows: vec![
-            vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
-            vec![(PropertyKeyId(1), CanonicalScalar::Int(99))],
+            vec![(
+                PropertyKeyId(1),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1)),
+            )],
+            vec![(
+                PropertyKeyId(1),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(99)),
+            )],
         ],
     };
     let partition = seal(
@@ -133,11 +144,17 @@ fn tombstone_precedence_and_content_version_properties_use_the_existing_compacto
     assert_eq!(partition.stats().incidences, 10);
     assert_eq!(
         collect(&partition, 1, 4, None)[0].1,
-        vec![(PropertyKeyId(1), CanonicalScalar::Int(1))]
+        vec![(
+            PropertyKeyId(1),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1))
+        )]
     );
     assert_eq!(
         collect(&partition, 1, 5, None)[0].1,
-        vec![(PropertyKeyId(1), CanonicalScalar::Int(99))]
+        vec![(
+            PropertyKeyId(1),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(99))
+        )]
     );
     for cut in [4, 5, 10] {
         assert_eq!(collect(&partition, 1, cut, None).len(), 9);
@@ -294,7 +311,12 @@ fn property_chunks_cross_the_existing_255_row_boundary_without_locator_loss() {
         props.push(Some(BlockProps {
             locators: (1..=120).collect(),
             rows: (0..120)
-                .map(|i| vec![(PropertyKeyId(1), CanonicalScalar::Int(chunk * 120 + i))])
+                .map(|i| {
+                    vec![(
+                        PropertyKeyId(1),
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(chunk * 120 + i)),
+                    )]
+                })
                 .collect(),
         }));
     }
@@ -314,7 +336,10 @@ fn property_chunks_cross_the_existing_255_row_boundary_without_locator_loss() {
     for (index, (_, properties)) in rows.iter().enumerate() {
         assert_eq!(
             properties,
-            &vec![(PropertyKeyId(1), CanonicalScalar::Int(index as i64))]
+            &vec![(
+                PropertyKeyId(1),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(index as i64))
+            )]
         );
     }
 }

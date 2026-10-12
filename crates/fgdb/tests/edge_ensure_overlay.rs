@@ -71,7 +71,7 @@ fn ensure_noops_do_not_invent_edge_aliases_or_replace_existing_properties() {
                 .expect("edge after commit")
                 .expect("edge")
                 .props,
-            vec![(property, CanonicalScalar::Int(7))]
+            vec![(property, CanonicalScalar::Int(7).into())]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -114,7 +114,10 @@ fn deleting_the_old_triple_then_ensuring_materializes_only_the_real_successor() 
         assert!(txn.edge(&db, EId(999)).expect("unused alias").is_none());
         assert!(txn.edge(&db, EId(10)).expect("deleted edge").is_none());
         let point = txn.edge(&db, EId(20)).expect("successor").expect("edge");
-        assert_eq!(point.props, vec![(property, CanonicalScalar::Int(2))]);
+        assert_eq!(
+            point.props,
+            vec![(property, CanonicalScalar::Int(2).into())]
+        );
         assert_eq!(
             txn.edges(&db).expect("same canonical net table"),
             vec![point]
@@ -130,7 +133,7 @@ fn deleting_the_old_triple_then_ensuring_materializes_only_the_real_successor() 
                 .expect("committed successor")
                 .expect("edge")
                 .props,
-            vec![(property, CanonicalScalar::Int(2))]
+            vec![(property, CanonicalScalar::Int(2).into())]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

@@ -6,7 +6,7 @@ use crate::ReadError;
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::ReverseSymbolCatalog;
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -19,7 +19,7 @@ pub(crate) struct PropertyMaps {
 /// Each retained cell and variable payload is reserved before copying. The
 /// map constructor owns canonical key ordering and refuses duplicate names.
 pub(crate) fn collect<'a, E>(
-    properties: impl IntoIterator<Item = (PropertyKeyId, &'a CanonicalScalar)>,
+    properties: impl IntoIterator<Item = (PropertyKeyId, &'a CanonicalPropertyValue)>,
     catalog: Option<&ReverseSymbolCatalog>,
     mut visible: impl FnMut(PropertyKeyId) -> bool,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
@@ -49,32 +49,67 @@ pub(crate) fn collect<'a, E>(
             control(SourceEvent::ScratchEntry)?;
         }
         payload(name.len(), control)?;
-        let sizes = match value {
-            CanonicalScalar::Text(value) => [
-                value.len(),
-                value.canonical_sort_key().map_or(0, <[u8]>::len),
-            ],
-            CanonicalScalar::Bytes(value) => [value.as_slice().len(), 0],
-            CanonicalScalar::Timestamp(value) => {
-                [value.zone().map_or(0, |zone| zone.identifier().len()), 0]
-            }
-            CanonicalScalar::Null
-            | CanonicalScalar::Bool(_)
-            | CanonicalScalar::Int(_)
-            | CanonicalScalar::Decimal(_)
-            | CanonicalScalar::Float(_)
-            | CanonicalScalar::Date(_)
-            | CanonicalScalar::LocalTime(_)
-            | CanonicalScalar::Time(_)
-            | CanonicalScalar::LocalDateTime(_)
-            | CanonicalScalar::Duration(_) => [0, 0],
-        };
-        for bytes in sizes {
-            payload(bytes, control)?;
-        }
-        entries.push((name.as_str().into(), GraphValue::Scalar(value.clone())));
+        stored_payload(value, control)?;
+        // A stored List or Map is the query value it holds (fgdb-k3nub).
+        let value = GraphValue::from_property_value(value)
+            .ok_or_else(|| failure(ReadError::InvalidPropertyMap))?;
+        entries.push((name.as_str().into(), value));
     }
-    GraphValue::map(entries).ok_or_else(|| failure(ReadError::InvalidPropertyMap))
+    // Lists and Maps add nested nodes: the whole map must fit the bounds.
+    GraphValue::map(entries)
+        .filter(GraphValue::validate_bounds)
+        .ok_or_else(|| failure(ReadError::InvalidPropertyMap))
+}
+
+/// Reserve a stored value's payload before copying it: a scalar's variable
+/// bytes, and for a List or Map one scratch entry per element, each key's
+/// bytes, and every nested scalar (fgdb-k3nub).
+fn stored_payload<E>(
+    value: &CanonicalPropertyValue,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => scalar_payload(scalar, control),
+        CanonicalPropertyValue::List(list) => list.values().iter().try_for_each(|value| {
+            control(SourceEvent::ScratchEntry)?;
+            stored_payload(value, &mut *control)
+        }),
+        CanonicalPropertyValue::Map(map) => map.entries().iter().try_for_each(|entry| {
+            control(SourceEvent::ScratchEntry)?;
+            payload(entry.key().as_str().len(), control)?;
+            stored_payload(entry.value(), &mut *control)
+        }),
+    }
+}
+
+fn scalar_payload<E>(
+    value: &CanonicalScalar,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    let sizes = match value {
+        CanonicalScalar::Text(value) => [
+            value.len(),
+            value.canonical_sort_key().map_or(0, <[u8]>::len),
+        ],
+        CanonicalScalar::Bytes(value) => [value.as_slice().len(), 0],
+        CanonicalScalar::Timestamp(value) => {
+            [value.zone().map_or(0, |zone| zone.identifier().len()), 0]
+        }
+        CanonicalScalar::Null
+        | CanonicalScalar::Bool(_)
+        | CanonicalScalar::Int(_)
+        | CanonicalScalar::Decimal(_)
+        | CanonicalScalar::Float(_)
+        | CanonicalScalar::Date(_)
+        | CanonicalScalar::LocalTime(_)
+        | CanonicalScalar::Time(_)
+        | CanonicalScalar::LocalDateTime(_)
+        | CanonicalScalar::Duration(_) => [0, 0],
+    };
+    for bytes in sizes {
+        payload(bytes, control)?;
+    }
+    Ok(())
 }
 
 fn payload<E>(
@@ -94,19 +129,21 @@ mod tests {
 
     #[test]
     fn masked_unknown_properties_match_physical_removal_in_values_and_charges() {
-        let visible = [
-            (PropertyKeyId(1), CanonicalScalar::Int(7)),
-            (PropertyKeyId(2), CanonicalScalar::Null),
+        let visible: [(PropertyKeyId, CanonicalPropertyValue); 2] = [
+            (PropertyKeyId(1), CanonicalScalar::Int(7).into()),
+            (PropertyKeyId(2), CanonicalScalar::Null.into()),
         ];
         let mut with_hidden = visible.to_vec();
         with_hidden.push((
             PropertyKeyId(99),
-            CanonicalScalar::ucs_basic_text(&"hidden".repeat(1024)).unwrap(),
+            CanonicalScalar::ucs_basic_text(&"hidden".repeat(1024))
+                .unwrap()
+                .into(),
         ));
         let mut catalog = ReverseSymbolCatalog::new();
         catalog.insert_property(PropertyKeyId(1), "zeta");
         catalog.insert_property(PropertyKeyId(2), "alpha");
-        let run = |properties: &[(PropertyKeyId, CanonicalScalar)]| {
+        let run = |properties: &[(PropertyKeyId, CanonicalPropertyValue)]| {
             let mut events = Vec::new();
             let value = collect(
                 properties.iter().map(|(key, value)| (*key, value)),
@@ -154,7 +191,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty, GraphValue::map(Vec::new()).unwrap());
-        let value = CanonicalScalar::Int(1);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
         let mut catalog = ReverseSymbolCatalog::new();
         catalog.insert_property(PropertyKeyId(1), "same");
         catalog.insert_property(PropertyKeyId(2), "same");
@@ -172,7 +209,9 @@ mod tests {
 
     #[test]
     fn every_payload_reservation_refusal_returns_no_map_and_stops_callbacks() {
-        let value = CanonicalScalar::ucs_basic_text(&"payload".repeat(33)).unwrap();
+        let value = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"payload".repeat(33)).unwrap(),
+        );
         let mut catalog = ReverseSymbolCatalog::new();
         catalog.insert_property(PropertyKeyId(1), "name".repeat(33));
         let run = |stop| {

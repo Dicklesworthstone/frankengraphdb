@@ -9,7 +9,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
     GraphWalkBounds, MAX_GRAPH_WALK_HOPS, PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -401,7 +401,8 @@ fn parameterized_endpoint_values_preserve_occurrences_across_multiple_walk_lengt
         CanonicalScalar::Int(1),
         CanonicalScalar::Int(2),
         CanonicalScalar::Int(3),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let result = query
         .plan()
         .execute_governed_with_identified_properties(

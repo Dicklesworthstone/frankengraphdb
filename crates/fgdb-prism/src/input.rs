@@ -8,7 +8,7 @@ use crate::{
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -42,20 +42,21 @@ impl FnxWeightSpec {
             Self::Property { key, .. } => Some(key),
         }
     }
-    pub fn resolve(self, value: Option<&CanonicalScalar>) -> Result<f64, FnxWeightError> {
+    /// A stored List or Map (fgdb-k3nub) is not numeric: `NotNumeric`.
+    pub fn resolve(self, value: Option<&CanonicalPropertyValue>) -> Result<f64, FnxWeightError> {
         let Self::Property { missing, .. } = self else {
             return Ok(1.0);
         };
-        let value = match value {
-            None | Some(CanonicalScalar::Null) => {
+        let value = match value.map(CanonicalPropertyValue::as_scalar) {
+            None | Some(Some(CanonicalScalar::Null)) => {
                 return match missing {
                     MissingWeightPolicy::Reject => Err(FnxWeightError::Missing),
                     MissingWeightPolicy::Unit => Ok(1.0),
                     MissingWeightPolicy::Zero => Ok(0.0),
                 };
             }
-            Some(CanonicalScalar::Float(value)) => value.get(),
-            Some(CanonicalScalar::Int(value)) => {
+            Some(Some(CanonicalScalar::Float(value))) => value.get(),
+            Some(Some(CanonicalScalar::Int(value))) => {
                 let converted = *value as f64;
                 // Use i128 for the round trip: f64(i64::MAX) is 2^63, whose
                 // saturating cast back to i64 would otherwise falsely pass.

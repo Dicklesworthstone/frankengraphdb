@@ -462,9 +462,14 @@ fn compaction_carries_each_retained_entrys_property_row() {
     use fgdb_strata::compact::compact_with_props;
     use fgdb_strata::edge_props::{BlockProps, validate_block_patch_consistency};
     use fgdb_strata::root::merge_edge_with_props;
-    use fgdb_types::CanonicalScalar;
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
 
-    let row = |seed: u64| vec![(PropertyKeyId(seed), CanonicalScalar::Int(seed as i64))];
+    let row = |seed: u64| {
+        vec![(
+            PropertyKeyId(seed),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(seed as i64)),
+        )]
+    };
     // e10 propertied then retired by a tombstone RESTATING a changed row —
     // last-block-wins over props; e20 propertied and live; e30 propertyless
     // beside them; e40 propertied but retired BELOW the floor, so its row must

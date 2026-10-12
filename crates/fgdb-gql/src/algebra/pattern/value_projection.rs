@@ -251,7 +251,7 @@ mod tests {
     use super::*;
     use crate::{GqlQueryError, GqlQueryPolicy};
     use fgdb_delta_types::PropertyKeyId;
-    use fgdb_types::{CanonicalF64, CanonicalScalar};
+    use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar};
 
     fn builder() -> GraphPatternBuilder {
         let mut b = GraphPatternBuilder::new();
@@ -365,6 +365,7 @@ mod tests {
             CanonicalScalar::Bool(true),
             CanonicalScalar::Float(CanonicalF64::new(9.0)),
         ];
+        let stored = values.clone().map(CanonicalPropertyValue::Scalar);
         let edges: Vec<_> = (0..values.len())
             .map(|at| (VId(100), RelationId(1), VId(at as u128)))
             .collect();
@@ -374,7 +375,7 @@ mod tests {
                 [],
                 edges.iter().copied(),
                 |_, _| Ok::<_, &str>(true),
-                |vid, property| Ok((property == key).then(|| &values[vid.0 as usize])),
+                |vid, property| Ok((property == key).then(|| &stored[vid.0 as usize])),
                 policy,
                 || Ok::<_, usize>(()),
             )
@@ -425,7 +426,7 @@ mod tests {
                 if vid == VId(5) {
                     Err("late projected property")
                 } else {
-                    Ok(Some(&values[vid.0 as usize]))
+                    Ok(Some(&stored[vid.0 as usize]))
                 }
             },
             GqlQueryPolicy::new(6, 0, u64::MAX, u64::MAX),
@@ -450,7 +451,8 @@ mod tests {
             .unwrap();
         assert!(!pattern.plan().scans_edges());
         assert_eq!(pattern.required_vertex_label(), None);
-        let scalar = CanonicalScalar::ucs_basic_text("value").unwrap();
+        let scalar =
+            CanonicalPropertyValue::from(CanonicalScalar::ucs_basic_text("value").unwrap());
         let mut calls = 0;
         let policy = GqlQueryPolicy::new(3, 2, u64::MAX, u64::MAX);
         let expected = pattern
@@ -499,6 +501,7 @@ mod tests {
             CanonicalScalar::Int(9),
             CanonicalScalar::Float(CanonicalF64::new(9.0)),
         ];
+        let stored = values.clone().map(CanonicalPropertyValue::Scalar);
         let distinct = b
             .prepare_values(&[GraphColumn::property("value", "b", key)], 0, None)
             .unwrap();
@@ -521,7 +524,7 @@ mod tests {
                 [],
                 edges,
                 |_, _| Ok::<_, ()>(true),
-                |vid, _| Ok(Some(&values[vid.0 as usize])),
+                |vid, _| Ok(Some(&stored[vid.0 as usize])),
                 policy,
                 || Ok::<_, ()>(()),
             )

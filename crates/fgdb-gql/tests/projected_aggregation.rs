@@ -10,7 +10,7 @@ use fgdb_gql::{
     GraphIntegerUnary, GraphSetProjection, GraphSetProjectionError, GraphSetValue, GraphSymbol,
     GraphSymbolKind, PreparedGraphAggregate, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -19,7 +19,7 @@ const Q: PropertyKeyId = PropertyKeyId(2);
 const PRODUCT: PropertyKeyId = PropertyKeyId(3);
 const BUCKET: PropertyKeyId = PropertyKeyId(4);
 const R: RelationId = RelationId(1);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Edge = (VId, RelationId, VId);
 type ResultOf<C = ()> = Result<
     GqlQueryExecution<GraphAggregateRow>,
@@ -131,11 +131,11 @@ fn nullable_products_and_computed_groups_match_the_independent_stored_column_ora
             digits /= domain.len();
             properties.insert(
                 (vid, P),
-                p.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                p.map_or(CanonicalScalar::Null, CanonicalScalar::Int).into(),
             );
             properties.insert(
                 (vid, Q),
-                q.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                q.map_or(CanonicalScalar::Null, CanonicalScalar::Int).into(),
             );
             // The oracle is ordinary wide arithmetic, not the expression VM.
             let product = p
@@ -144,11 +144,15 @@ fn nullable_products_and_computed_groups_match_the_independent_stored_column_ora
             let bucket = p.map(i64::abs);
             properties.insert(
                 (vid, PRODUCT),
-                product.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                product
+                    .map_or(CanonicalScalar::Null, CanonicalScalar::Int)
+                    .into(),
             );
             properties.insert(
                 (vid, BUCKET),
-                bucket.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                bucket
+                    .map_or(CanonicalScalar::Null, CanonicalScalar::Int)
+                    .into(),
             );
         }
         let actual = run(&computed, &[VId(1), VId(2)], &[], &properties, policy()).unwrap();
@@ -174,8 +178,8 @@ fn argument_distinct_operates_on_computed_values_and_averages_remain_exact() {
     .unwrap();
     let mut properties = Props::new();
     for (id, p, q) in [(1, -2, -2), (2, 2, 2), (3, 2, 2), (4, 5, 1)] {
-        properties.insert((VId(id), P), CanonicalScalar::Int(p));
-        properties.insert((VId(id), Q), CanonicalScalar::Int(q));
+        properties.insert((VId(id), P), CanonicalScalar::Int(p).into());
+        properties.insert((VId(id), Q), CanonicalScalar::Int(q).into());
     }
     let result = run(
         &plan,
@@ -272,11 +276,11 @@ fn projected_groups_reuse_having_hidden_keys_distinct_ordering_and_pagination() 
     let base =
         PreparedGraphAggregate::prepare_projected(input(), projection, &[0], &functions, 0, None)
             .unwrap();
-    let properties = BTreeMap::from([
-        ((VId(1), P), CanonicalScalar::Int(1)),
-        ((VId(1), Q), CanonicalScalar::Int(5)),
-        ((VId(2), P), CanonicalScalar::Int(2)),
-        ((VId(2), Q), CanonicalScalar::Int(5)),
+    let properties: Props = BTreeMap::from([
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(1), Q), CanonicalScalar::Int(5).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
+        ((VId(2), Q), CanonicalScalar::Int(5).into()),
     ]);
     let plan = base
         .with_result_clauses(
@@ -443,9 +447,9 @@ fn hidden_or_zero_limit_arithmetic_and_late_source_errors_cannot_be_discarded() 
             limit,
         )
         .unwrap();
-        let properties = BTreeMap::from([
-            ((VId(1), P), CanonicalScalar::Int(1)),
-            ((VId(2), P), CanonicalScalar::Int(0)),
+        let properties: Props = BTreeMap::from([
+            ((VId(1), P), CanonicalScalar::Int(1).into()),
+            ((VId(2), P), CanonicalScalar::Int(0).into()),
         ]);
         assert!(
             matches!(run(&plan, &[VId(1), VId(2)], &[], &properties, policy()),
@@ -474,7 +478,7 @@ fn hidden_or_zero_limit_arithmetic_and_late_source_errors_cannot_be_discarded() 
             )))
         ));
     }
-    let wrong = BTreeMap::from([((VId(1), P), CanonicalScalar::Bool(true))]);
+    let wrong: Props = BTreeMap::from([((VId(1), P), CanonicalScalar::Bool(true).into())]);
     let plan = PreparedGraphAggregate::prepare_projected(
         input(),
         product_projection(),
@@ -499,11 +503,11 @@ fn every_projected_aggregate_checkpoint_and_exact_budget_boundary_is_enforced() 
         None,
     )
     .unwrap();
-    let properties = BTreeMap::from([
-        ((VId(1), P), CanonicalScalar::Int(2)),
-        ((VId(1), Q), CanonicalScalar::Int(3)),
-        ((VId(2), P), CanonicalScalar::Int(4)),
-        ((VId(2), Q), CanonicalScalar::Int(5)),
+    let properties: Props = BTreeMap::from([
+        ((VId(1), P), CanonicalScalar::Int(2).into()),
+        ((VId(1), Q), CanonicalScalar::Int(3).into()),
+        ((VId(2), P), CanonicalScalar::Int(4).into()),
+        ((VId(2), Q), CanonicalScalar::Int(5).into()),
     ]);
     let vertices = [VId(1), VId(2)];
     let measured = run(&plan, &vertices, &[], &properties, policy()).unwrap();

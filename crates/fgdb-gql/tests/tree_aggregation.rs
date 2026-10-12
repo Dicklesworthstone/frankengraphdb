@@ -7,7 +7,7 @@ use fgdb_gql::{
     GraphAggregateRow, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
     PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Edge = (VId, RelationId, VId);
@@ -226,7 +226,7 @@ fn a_billion_distinct_hidden_assignments_do_not_require_a_billion_visits() {
             [],
             edges.iter().copied(),
             |_, _| Err::<bool, _>("no predicates in this profile"),
-            |_, _| Err::<Option<&CanonicalScalar>, _>("no property reads in this profile"),
+            |_, _| Err::<Option<&CanonicalPropertyValue>, _>("no property reads in this profile"),
             GqlQueryPolicy::new(9, 1, 4096, 256),
             || Ok::<_, ()>(()),
         )
@@ -361,7 +361,7 @@ fn predicates_and_property_arguments_never_disappear_into_completion_weights() {
         (VId(1), RelationId(2), VId(2)),
         (VId(1), RelationId(2), VId(2)),
     ];
-    let scalar = CanonicalScalar::Int(1);
+    let scalar = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1));
     let mut calls = 0;
     let result = query.execute_governed(
         3,

@@ -9,16 +9,16 @@ use fgdb_gql::{
     PreparedGraphAggregateText, PreparedGraphPipelineAggregateText, PreparedGraphSetText,
     PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const VERTICES: [VId; 3] = [VId(1), VId(2), VId(3)];
-static VALUES: [CanonicalScalar; 3] = [
-    CanonicalScalar::Int(1),
-    CanonicalScalar::Int(2),
-    CanonicalScalar::Int(3),
+static VALUES: [CanonicalPropertyValue; 3] = [
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1)),
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2)),
+    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(3)),
 ];
 type Edge = (EId, VId, RelationId, VId);
 fn policy() -> GqlQueryPolicy {

@@ -213,12 +213,23 @@ pub struct BudgetedGqlExecution<T> {
     pub stats: GqlExecutionStats,
 }
 
-/// Execution refusal that preserves whether the source read/query failed or a
-/// deterministic budget was exhausted.
+/// Execution refusal that preserves whether the source read/query failed, a
+/// deterministic budget was exhausted, or a stored value raised a data
+/// exception.
 #[derive(Debug)]
 pub enum BudgetedGqlError<E> {
     Execution(E),
     Budget(GqlBudgetExceeded),
+    /// A stored value the plan read raised a data exception: a stored List or
+    /// Map beyond the value bounds, or used where only a scalar is defined.
+    /// It is never a filtered row or an absent property.
+    Data(crate::GraphIntegerError),
+}
+
+impl<E> From<crate::GraphIntegerError> for BudgetedGqlError<E> {
+    fn from(error: crate::GraphIntegerError) -> Self {
+        Self::Data(error)
+    }
 }
 
 impl<E: core::fmt::Display> core::fmt::Display for BudgetedGqlError<E> {
@@ -226,6 +237,7 @@ impl<E: core::fmt::Display> core::fmt::Display for BudgetedGqlError<E> {
         match self {
             Self::Execution(source) => core::fmt::Display::fmt(source, formatter),
             Self::Budget(source) => core::fmt::Display::fmt(source, formatter),
+            Self::Data(source) => core::fmt::Display::fmt(source, formatter),
         }
     }
 }
@@ -235,6 +247,7 @@ impl<E: core::error::Error + 'static> core::error::Error for BudgetedGqlError<E>
         match self {
             Self::Execution(source) => Some(source),
             Self::Budget(source) => Some(source),
+            Self::Data(source) => Some(source),
         }
     }
 }

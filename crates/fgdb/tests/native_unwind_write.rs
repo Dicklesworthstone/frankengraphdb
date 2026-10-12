@@ -116,11 +116,17 @@ fn native_engine_upserts_repeated_keys_once_and_reopens() {
         assert_eq!(db.vertices().unwrap().len(), 2);
         assert_eq!(
             db.vertex(first).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(5))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(5).into())
+            ]
         );
         assert_eq!(
             db.vertex(second).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(4))]
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(4).into())
+            ]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -166,7 +172,10 @@ fn transaction_native_updates_see_staged_rows_and_do_not_publish() {
         assert!(db.vertex(VId(90)).unwrap().is_none());
         assert_eq!(
             txn.vertex(&db, VId(90)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(90)), (Q, CanonicalScalar::Int(12))]
+            vec![
+                (P, CanonicalScalar::Int(90).into()),
+                (Q, CanonicalScalar::Int(12).into())
+            ]
         );
         txn.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
@@ -280,8 +289,8 @@ fn native_late_overflow_retains_row_location_and_outer_prefix() {
         assert_eq!(
             txn.vertex(&db, VId(90)).unwrap().unwrap().props,
             vec![
-                (P, CanonicalScalar::Int(90)),
-                (Q, CanonicalScalar::Int(i64::MAX))
+                (P, CanonicalScalar::Int(90).into()),
+                (Q, CanonicalScalar::Int(i64::MAX).into())
             ]
         );
         txn.finish(&mut db, &commit).await.unwrap();

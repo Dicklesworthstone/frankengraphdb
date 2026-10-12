@@ -5,7 +5,9 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{BoundPlan, Database, DatabaseKeys, EdgeRecord, RelationBind, VertexRow, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{EdgeDirection, ReturnProjection};
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use std::collections::BTreeMap;
 
 const R: RelationId = RelationId(1);
@@ -23,7 +25,7 @@ fn props_match(row: Option<&VertexRow>, tests: [Option<(PropertyKeyId, i64)>; 6]
             return false;
         };
         row.props.iter().any(|(found_key, value)| {
-            let CanonicalScalar::Int(actual) = value else {
+            let CanonicalPropertyValue::Scalar(CanonicalScalar::Int(actual)) = value else {
                 return false;
             };
             *found_key == key

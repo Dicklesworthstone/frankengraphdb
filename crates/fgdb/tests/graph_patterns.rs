@@ -13,7 +13,8 @@ use fgdb_gql::algebra::{
 };
 use fgdb_gql::{GlaLimitDimension, GqlBudgetDimension, GqlQueryError, GqlQueryPolicy};
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::BTreeSet;
 
@@ -176,7 +177,11 @@ impl Case {
                         if self.filtered
                             && (!a.labels.contains(&L) || !c.props.iter().any(|(key, scalar)| {
                                 *key == N
-                                    && matches!(scalar, CanonicalScalar::Int(value) if *value >= 3)
+                                    && matches!(
+                                        scalar,
+                                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))
+                                            if *value >= 3
+                                    )
                             }))
                         {
                             continue;

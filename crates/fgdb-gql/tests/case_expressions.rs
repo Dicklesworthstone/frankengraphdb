@@ -8,14 +8,14 @@ use fgdb_gql::{
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText, PreparedGraphMutationText,
     PreparedGraphSet, PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(1);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -139,11 +139,11 @@ fn nullable_numeric_conditions_and_parentheses_match_an_independent_oracle() {
         for q in [None, Some(-2), Some(0), Some(2)] {
             let mut props = Props::new();
             if let Some(p) = p {
-                props.insert((VId(1), P), CanonicalScalar::Int(p));
+                props.insert((VId(1), P), CanonicalScalar::Int(p).into());
             }
             props.insert(
                 (VId(1), Q),
-                q.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                q.map_or(CanonicalScalar::Null, CanonicalScalar::Int).into(),
             );
             let selected = p.zip(q).is_some_and(|(p, q)| p + 1 > q) || (p.is_none() && q.is_some());
             let expected = if selected {
@@ -164,9 +164,9 @@ fn nullable_numeric_conditions_and_parentheses_match_an_independent_oracle() {
 #[test]
 fn conditional_aggregation_groups_computed_values_and_retains_exact_averages() {
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(-2)),
-        ((VId(2), P), CanonicalScalar::Int(0)),
-        ((VId(3), P), CanonicalScalar::Int(3)),
+        ((VId(1), P), CanonicalScalar::Int(-2).into()),
+        ((VId(2), P), CanonicalScalar::Int(0).into()),
+        ((VId(3), P), CanonicalScalar::Int(3).into()),
     ]);
     let text = "MATCH (n) RETURN COUNT(*) AS rows, SUM(CASE WHEN n.p>=0 THEN n.p ELSE 0 END) AS total, \
         COUNT(CASE WHEN n.p>=0 THEN 1 END) AS selected, \
@@ -266,7 +266,7 @@ fn walk_occurrences_and_optional_nulls_survive_conditional_projection() {
 
 #[test]
 fn conditional_mutations_reuse_frozen_assignments_and_conflict_reduction() {
-    let props = Props::from([((VId(1), P), CanonicalScalar::Int(2))]);
+    let props = Props::from([((VId(1), P), CanonicalScalar::Int(2).into())]);
     let edges = [
         (VId(1), R, VId(1)),
         (VId(1), R, VId(1)),
@@ -451,7 +451,7 @@ fn lazy_values_never_suppress_source_failures_or_selected_errors_under_limit_zer
                 [VId(1)],
                 [],
                 |_, _| Ok::<_, &str>(true),
-                |_, _| Err::<Option<&CanonicalScalar>, _>("unreadable input"),
+                |_, _| Err::<Option<&CanonicalPropertyValue>, _>("unreadable input"),
                 allowance,
                 || Ok::<_, ()>(()),
             )
@@ -465,8 +465,8 @@ fn lazy_values_never_suppress_source_failures_or_selected_errors_under_limit_zer
         )))
     ));
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(0)),
-        ((VId(2), P), CanonicalScalar::Int(2)),
+        ((VId(1), P), CanonicalScalar::Int(0).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
     ]);
     let query =
         prepare("MATCH (n) RETURN CASE WHEN n.p=0 THEN 7 ELSE 1/(n.p-2) END AS value LIMIT 0");
@@ -483,8 +483,8 @@ fn exact_query_limits_and_each_conditional_checkpoint_refuse_without_output() {
         "MATCH (n) RETURN CASE n.p WHEN 1 THEN 7 WHEN 2 THEN 8 ELSE 9 END AS value ORDER BY value LIMIT 2",
     );
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(1)),
-        ((VId(2), P), CanonicalScalar::Int(2)),
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
     ]);
     let vertices = [VId(1), VId(2), VId(3)];
     let mut events = 0;
@@ -542,7 +542,7 @@ fn mixed_numeric_branches_keep_each_rows_type_and_integer_roots_stay_strict() {
     // gives Int 1 and odd p gives Float 1.0. 1 and 1.0 are different DISTINCT
     // members (aggregate_text pins that), and a SUM over them is a Float.
     let props: Props = (1..=4)
-        .map(|p| ((VId(p), P), CanonicalScalar::Int(p as i64)))
+        .map(|p| ((VId(p), P), CanonicalScalar::Int(p as i64).into()))
         .collect();
     let vertices: Vec<VId> = (1..=4).map(VId).collect();
     let int = CanonicalScalar::Int;

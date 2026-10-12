@@ -123,7 +123,7 @@ fn two_writes_commit_as_one_sequence() {
         assert_eq!(row.labels, vec![LabelId(5)]);
         assert_eq!(
             row.props,
-            vec![(PROP, int(7))],
+            vec![(PROP, int(7).into())],
             "the create AND the property ride one durable unit"
         );
     });
@@ -244,7 +244,7 @@ fn overlapping_two_write_txns_lose_whole_not_per_batch() {
         let row = db.vertex(VId(1)).expect("reads").expect("row");
         assert_eq!(
             row.props,
-            vec![(PROP, int(1)), (PROP_B, int(10))],
+            vec![(PROP, int(1).into()), (PROP_B, int(10).into())],
             "the winner's TWO writes survive; nothing of the loser's does — \
              not even its second batch"
         );
@@ -307,7 +307,7 @@ fn a_mixed_relation_second_write_refuses_typed_and_consumes_nothing() {
         let row = db.vertex(VId(1)).expect("reads").expect("row");
         assert_eq!(
             row.props,
-            vec![(PROP, int(1))],
+            vec![(PROP, int(1).into())],
             "the accepted batch is durable; the refused cross-relation \
              property is nowhere"
         );

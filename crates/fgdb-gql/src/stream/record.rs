@@ -4,7 +4,7 @@
 
 use super::{VertexScanEvent, VertexScanRow};
 use fgdb_delta_types::{LabelId, PropertyKeyId};
-use fgdb_types::CanonicalScalar;
+use fgdb_types::CanonicalPropertyValue;
 
 /// Root fields from one admitted vertex. Both forms obey VertexScanRow's sorted,
 /// unique metadata contract. Owning fields confers no source authentication;
@@ -13,7 +13,7 @@ pub enum VertexScanRecord<'a> {
     Borrowed(VertexScanRow<'a>),
     Owned {
         labels: Vec<LabelId>,
-        properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+        properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
 }
 impl VertexScanRecord<'_> {
@@ -50,7 +50,7 @@ impl VertexScanRecord<'_> {
             if allows_property(*key) {
                 control(VertexScanEvent::Work)?;
                 control(VertexScanEvent::ScratchEntry)?;
-                crate::algebra_exec::charge_payload(value, &mut |_| {
+                crate::algebra_exec::charge_stored_payload(value, &mut |_| {
                     control(VertexScanEvent::Work)?;
                     control(VertexScanEvent::ScratchEntry)
                 })?;
@@ -77,12 +77,12 @@ mod tests {
         GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
         PreparedGraphText,
     };
-    use fgdb_types::{CommitSeq, VId};
+    use fgdb_types::{CanonicalScalar, CommitSeq, VId};
 
     struct Source {
         sent: bool,
         labels: Vec<LabelId>,
-        properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+        properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     }
     impl VertexScanSource for Source {
         type Error = ();
@@ -151,10 +151,12 @@ mod tests {
             sent: false,
             labels: vec![LabelId(1), LabelId(99)],
             properties: vec![
-                (PropertyKeyId(1), CanonicalScalar::Int(8)),
+                (PropertyKeyId(1), CanonicalScalar::Int(8).into()),
                 (
                     PropertyKeyId(2),
-                    CanonicalScalar::ucs_basic_text(&"private".repeat(100)).unwrap(),
+                    CanonicalScalar::ucs_basic_text(&"private".repeat(100))
+                        .unwrap()
+                        .into(),
                 ),
             ],
         }
@@ -227,8 +229,8 @@ mod tests {
         let large = source();
         let tiny = Source {
             properties: vec![
-                (PropertyKeyId(1), CanonicalScalar::Int(8)),
-                (PropertyKeyId(2), CanonicalScalar::Int(0)),
+                (PropertyKeyId(1), CanonicalScalar::Int(8).into()),
+                (PropertyKeyId(2), CanonicalScalar::Int(0).into()),
             ],
             ..source()
         };
@@ -253,7 +255,10 @@ mod tests {
         assert_eq!(copied.as_row().labels, &[LabelId(1)]);
         assert_eq!(
             copied.as_row().properties,
-            &[(PropertyKeyId(1), CanonicalScalar::Int(8))]
+            &[(
+                PropertyKeyId(1),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(8))
+            )]
         );
         assert_eq!(copy(&tiny, usize::MAX).1, count);
         for cut in 1..=count {

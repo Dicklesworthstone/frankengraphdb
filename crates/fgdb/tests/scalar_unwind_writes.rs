@@ -136,11 +136,17 @@ fn scalar_upserts_matrix_updates_and_correlated_tags_publish_one_durable_commit(
         assert_eq!(input.canonical_bytes(), frozen);
         assert_eq!(
             txn.vertex(&db, VId(u128::MAX)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(2)), (P, CanonicalScalar::Int(2))]
+            vec![
+                (ID, CanonicalScalar::Int(2).into()),
+                (P, CanonicalScalar::Int(2).into())
+            ]
         );
         assert_eq!(
             txn.vertex(&db, VId(u128::MAX - 1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(1))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(1).into())
+            ]
         );
 
         let matrix = args(vec![
@@ -187,9 +193,9 @@ fn scalar_upserts_matrix_updates_and_correlated_tags_publish_one_durable_commit(
             assert_eq!(
                 txn.vertex(&db, VId(vertex)).unwrap().unwrap().props,
                 vec![
-                    (ID, CanonicalScalar::Int(id)),
-                    (P, CanonicalScalar::Int(3)),
-                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap())
+                    (ID, CanonicalScalar::Int(id).into()),
+                    (P, CanonicalScalar::Int(3).into()),
+                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap().into())
                 ]
             );
         }
@@ -212,9 +218,9 @@ fn scalar_upserts_matrix_updates_and_correlated_tags_publish_one_durable_commit(
             assert_eq!(
                 db.vertex(VId(vertex)).unwrap().unwrap().props,
                 vec![
-                    (ID, CanonicalScalar::Int(id)),
-                    (P, CanonicalScalar::Int(3)),
-                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap())
+                    (ID, CanonicalScalar::Int(id).into()),
+                    (P, CanonicalScalar::Int(3).into()),
+                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap().into())
                 ]
             );
         }
@@ -269,11 +275,17 @@ fn a_late_scalar_execution_failure_restores_the_outer_prefix_and_original_record
         assert_eq!(txn.staged_effect_digest().unwrap(), digest);
         assert_eq!(
             txn.vertex(&db, VId(1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(77))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(77).into())
+            ]
         );
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(10))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(10).into())
+            ]
         );
         assert_eq!(db.frontier().unwrap(), CommitSeq(1));
         txn.finish(&mut db, &commit).await.unwrap();
@@ -304,7 +316,10 @@ fn a_late_scalar_execution_failure_restores_the_outer_prefix_and_original_record
         assert_eq!(db.frontier().unwrap(), CommitSeq(2));
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(77))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(77).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
         let valid = args(vec![int(4), int(5)]).with_int64("target", 1).unwrap();
@@ -333,7 +348,10 @@ fn a_late_scalar_execution_failure_restores_the_outer_prefix_and_original_record
         ));
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(20))]
+            vec![
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(20).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -527,8 +545,14 @@ fn scalar_batches_share_creation_and_effect_budgets_and_keep_issued_identities_c
         assert_eq!(
             properties,
             vec![
-                vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(1))],
-                vec![(ID, CanonicalScalar::Int(2)), (P, CanonicalScalar::Int(1))],
+                vec![
+                    (ID, CanonicalScalar::Int(1).into()),
+                    (P, CanonicalScalar::Int(1).into())
+                ],
+                vec![
+                    (ID, CanonicalScalar::Int(2).into()),
+                    (P, CanonicalScalar::Int(1).into())
+                ],
             ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
