@@ -73,15 +73,20 @@ pub enum GraphSetColumnType {
     /// Every canonical native value, including maps, lists and graph elements.
     /// Combining this open domain with a concrete one never narrows it.
     Any,
+    /// A stored property value (fgdb-k3nub, fgdb-kr8j1): a scalar, or a
+    /// stored List or Map, never a graph element at any depth. A property
+    /// column has this domain; every consumer that admits a Scalar column
+    /// admits it too, and a scalar-only operator still refuses a collection
+    /// at run time with its own typed error. Scalar keeps its strict domain.
+    Stored,
 }
 impl From<&ValueProjection> for GraphSetColumnType {
     fn from(column: &ValueProjection) -> Self {
         use crate::algebra::GraphPathFunction;
         match column {
             ValueProjection::Vertex { .. } => Self::Vertex,
-            ValueProjection::Property { .. }
-            | ValueProjection::EdgeProperty { .. }
-            | ValueProjection::Type { .. } => Self::Scalar,
+            ValueProjection::Property { .. } | ValueProjection::EdgeProperty { .. } => Self::Stored,
+            ValueProjection::Type { .. } => Self::Scalar,
             ValueProjection::Labels { .. } => Self::List,
             ValueProjection::Properties { .. } | ValueProjection::EdgeProperties { .. } => {
                 Self::Any
@@ -118,18 +123,30 @@ impl GraphSetColumnType {
             Self::Edge => 5,
             Self::List => 6,
             Self::Any => 7,
+            Self::Stored => 8,
         }
+    }
+
+    /// Whether this column may be read as a scalar operand: a Scalar column,
+    /// or a stored property value, whose collections refuse at run time.
+    #[must_use]
+    pub(crate) const fn is_scalar_like(self) -> bool {
+        matches!(self, Self::Scalar | Self::Stored)
     }
 
     /// The common checked domain of two set-operand columns. Any already
     /// admits every native value, so it remains open when paired with a known
-    /// domain. Different concrete domains still refuse; this changes schema
-    /// admission only, never canonical equality, values or numeric coercion.
+    /// domain. A stored property value widens a Scalar column it is paired
+    /// with. Other different concrete domains still refuse; this changes
+    /// schema admission only, never canonical equality, values or numeric
+    /// coercion.
     pub(crate) fn common_set_domain(self, other: Self) -> Option<Self> {
         if self == Self::Any || other == Self::Any {
             Some(Self::Any)
         } else if self == other {
             Some(self)
+        } else if self.is_scalar_like() && other.is_scalar_like() {
+            Some(Self::Stored)
         } else {
             None
         }
@@ -139,16 +156,22 @@ impl GraphSetColumnType {
         use crate::algebra::GraphValue;
         self == Self::Any
             || value.is_null()
-            || matches!(
-                (self, value),
-                (Self::Vertex, GraphValue::Vertex(_))
-                    | (Self::Scalar, GraphValue::Scalar(_))
-                    | (Self::Path, GraphValue::Path(_))
-                    | (Self::Vertices, GraphValue::Vertices(_))
-                    | (Self::Edges, GraphValue::Edges(_))
-                    | (Self::Edge, GraphValue::Edge(_))
-                    | (Self::List, GraphValue::List(_))
-            )
+            || match (self, value) {
+                (Self::Stored, GraphValue::Scalar(_)) => true,
+                (Self::Stored, GraphValue::List(_) | GraphValue::Map { .. }) => {
+                    value.is_stored_value()
+                }
+                _ => matches!(
+                    (self, value),
+                    (Self::Vertex, GraphValue::Vertex(_))
+                        | (Self::Scalar, GraphValue::Scalar(_))
+                        | (Self::Path, GraphValue::Path(_))
+                        | (Self::Vertices, GraphValue::Vertices(_))
+                        | (Self::Edges, GraphValue::Edges(_))
+                        | (Self::Edge, GraphValue::Edge(_))
+                        | (Self::List, GraphValue::List(_))
+                ),
+            }
     }
 }
 

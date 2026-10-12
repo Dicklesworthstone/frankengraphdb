@@ -55,8 +55,7 @@ impl PreparedGraphSet {
         // widen RowJoinSpec's declared key domains or change NULL semantics.
         keys.retain(|&(a, b)| {
             let l = left.types[a];
-            l == right.types[b]
-                && matches!(l, GraphSetColumnType::Scalar | GraphSetColumnType::Vertex)
+            l == right.types[b] && (l.is_scalar_like() || l == GraphSetColumnType::Vertex)
         });
         for _ in 0..left.types.len() + right.types.len() + keys.len() {
             control(GlaExecutionEvent::ScratchEntry)?;

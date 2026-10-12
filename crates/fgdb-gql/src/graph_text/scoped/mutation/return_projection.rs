@@ -277,11 +277,11 @@ fn dynamic_column_at(
     }))
 }
 
-/// The column domain of one graph input: a property is a scalar, a bare
+/// The column domain of one graph input: a property is a stored value, a bare
 /// variable its element, a path function its own result.
 fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
     if input.property.is_some() {
-        return GraphSetColumnType::Scalar;
+        return GraphSetColumnType::Stored;
     }
     match input.path {
         None => GraphSetColumnType::Vertex,
@@ -322,7 +322,9 @@ fn map_capable(
                 .and_then(|schema| schema.get(*at))
                 .is_some_and(|(_, kind)| match kind {
                     GraphSetColumnType::Any => true,
-                    GraphSetColumnType::Scalar => crate::set_ops::temporal_field_name(key),
+                    GraphSetColumnType::Scalar | GraphSetColumnType::Stored => {
+                        crate::set_ops::temporal_field_name(key)
+                    }
                     _ => false,
                 })
         }
@@ -354,13 +356,14 @@ struct GraphProjectionHead<'a> {
 impl<'a> GraphProjectionHead<'a> {
     fn schema(&self, parameters: &[GqlParameterSpec]) -> pipeline::RowSchema<'a> {
         // Match the native source-column domains. A property on an edge is
-        // still a scalar; the Edge marker selects its owner, not its value type.
+        // still a stored value; the Edge marker selects its owner, not its
+        // value type.
         let types: Vec<_> = self
             .inputs
             .iter()
             .map(|input| {
                 if input.property.is_some() {
-                    return GraphSetColumnType::Scalar;
+                    return GraphSetColumnType::Stored;
                 }
                 match input.path {
                     Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
@@ -1274,7 +1277,7 @@ impl<'a> Parser<'a> {
             self.boundary_property_map(schema, source.text).or_else(|| {
                 schema.iter().position(|(name, kind)| {
                     name.text == source.text
-                        && matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::Scalar)
+                        && (kind.is_scalar_like() || *kind == GraphSetColumnType::Any)
                 })
             })
         } else {

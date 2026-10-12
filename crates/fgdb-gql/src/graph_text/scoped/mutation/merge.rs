@@ -915,7 +915,7 @@ impl<'a> mutation_query::ReturnLeaves<'a> for ParsedVertexReturn<'a> {
             ReturnMapInput::Property(key) => (
                 VertexBinding::Property(key),
                 key,
-                GraphSetColumnType::Scalar,
+                GraphSetColumnType::Stored,
             ),
             ReturnMapInput::Properties => {
                 (VertexBinding::Properties, source, GraphSetColumnType::Any)
