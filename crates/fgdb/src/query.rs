@@ -208,6 +208,10 @@ pub enum QueryWriteError<A> {
     /// post-clause result. Completion errors retain their original meaning.
     VertexUpsertText(GraphVertexUpsertTextError),
     VertexUpsert(GqlQueryError<GraphVertexUpsertError<WriteTxnError, A>, Cancel>),
+    /// Relationship MERGE RETURN: one row per selected row and resolved edge,
+    /// read from the staged graph (fgdb-at06q).
+    EdgeMergeText(GraphEdgeMergeTextError),
+    EdgeMerge(GqlQueryError<GraphEdgeMergeQueryError<WriteTxnError, A>, Cancel>),
 }
 impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -221,6 +225,8 @@ impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
             Self::Mutation(e) => e.fmt(f),
             Self::VertexUpsertText(e) => e.fmt(f),
             Self::VertexUpsert(e) => e.fmt(f),
+            Self::EdgeMergeText(e) => e.fmt(f),
+            Self::EdgeMerge(e) => e.fmt(f),
         }
     }
 }
@@ -236,6 +242,8 @@ impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> 
             Self::Mutation(error) => Some(error),
             Self::VertexUpsertText(error) => Some(error),
             Self::VertexUpsert(error) => Some(error),
+            Self::EdgeMergeText(error) => Some(error),
+            Self::EdgeMerge(error) => Some(error),
         }
     }
 }
@@ -307,6 +315,22 @@ fn prepare_vertex_upsert_return(
 ) -> Result<PreparedGraphVertexUpsertQuery, GraphVertexUpsertTextError> {
     let declarations = write_return_declarations(params);
     PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
+fn prepare_edge_merge_return(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    relation: RelationId,
+) -> Result<PreparedGraphEdgeMergeQuery, GraphEdgeMergeTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
         text,
         relation,
         &declarations,
@@ -394,8 +418,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// Autocommit counterpart. Purpose contexts, relation coordinate and identity
     /// allocator remain explicit, exactly as in the existing native script API.
     /// Ordinary scripts and expanded UNWIND batches share one work budget.
-    /// CREATE/INSERT, MATCH-selected mutation and vertex MERGE RETURN produce
-    /// Rows only after native transaction finish succeeds. Writes without RETURN
+    /// CREATE/INSERT, MATCH-selected mutation, vertex MERGE and relationship
+    /// MERGE RETURN produce Rows only after native transaction finish succeeds. Writes without RETURN
     /// retain their Write receipt. Statement-specific native classifiers own
     /// dispatch; comments, literals and names are never substring-scanned here.
     /// A RETURN failure is never retried as a script or as a read. Multi-statement RETURN
@@ -485,6 +509,30 @@ impl<V: Vfs + Clone> Database<V> {
                 .map_err(QueryWriteError::VertexUpsert)?;
             return Ok(values(columns, rows.value));
         }
+        if PreparedGraphEdgeMergeQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::EdgeMergeText)?
+        {
+            let query = prepare_edge_merge_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::EdgeMergeText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows, _) = self
+                .execute_graph_edge_merge_query_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &query,
+                    budget.edge_merge_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .await
+                .map_err(QueryWriteError::EdgeMerge)?;
+            return Ok(values(columns, rows.value));
+        }
         // The resolver itself, not a closure over it: the write's temporal
         // constructors need its pinned tzdb (fgdb-txbg9).
         let bound = BoundNativeGraphWrite::bind_with_resolver(text, params, relation, resolver)
@@ -510,8 +558,9 @@ impl<V: Vfs + Clone> Database<V> {
 impl WriteTxn {
     /// Stage a native statement/script atomically inside this transaction.
     /// The caller alone decides when to finish the outer transaction. Explicit
-    /// CREATE/INSERT, MATCH-selected mutation and vertex MERGE RETURN produce
-    /// transaction-local Rows, not a durability acknowledgment. Native query
+    /// CREATE/INSERT, MATCH-selected mutation, vertex MERGE and relationship
+    /// MERGE RETURN produce transaction-local Rows, not a durability
+    /// acknowledgment. Native query
     /// engines admit the complete result before accepting the statement;
     /// errors preserve earlier staged effects and their read dependencies.
     /// Result pagination never limits effects or hides a failing expression.
@@ -581,6 +630,28 @@ impl WriteTxn {
                     },
                 )
                 .map_err(QueryWriteError::VertexUpsert)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphEdgeMergeQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::EdgeMergeText)?
+        {
+            let query = prepare_edge_merge_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::EdgeMergeText)?;
+            let columns = query.columns().to_vec();
+            let (_, rows) = self
+                .execute_graph_edge_merge_query_governed(
+                    database,
+                    cx,
+                    &query,
+                    budget.edge_merge_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .map_err(QueryWriteError::EdgeMerge)?;
             return Ok(values(columns, rows.value));
         }
         // The resolver itself, not a closure over it: the write's temporal

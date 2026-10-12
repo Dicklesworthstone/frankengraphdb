@@ -1,17 +1,21 @@
 //! Directed relationship get-or-create on the same native MERGE collector.
 //! Selection is masked; existence candidates are confined to its admitted pair.
 
-use super::super::{EdgeMergeOutput, collect_edge_merge_output};
+use super::super::{
+    EdgeMergeOutput, EdgeMergeRows, collect_edge_merge_output, edge_merge_query_rows,
+};
 use super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxn,
     WriteTxnError, redacted, selection, stage,
 };
+use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{
-    GqlQueryError, GraphEdgeMergeError, GraphEdgeMergeOutcome, GraphEdgeMergePolicy,
-    GraphEdgeMergeStats, PreparedGraphEdgeMerge,
+    GqlQueryError, GqlQueryExecution, GraphEdgeMergeError, GraphEdgeMergeOutcome,
+    GraphEdgeMergePolicy, GraphEdgeMergeQueryError, GraphEdgeMergeStats, PreparedGraphEdgeMerge,
+    PreparedGraphEdgeMergeQuery,
 };
-use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
+use fgdb_types::{CanonicalScalar, CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
@@ -19,6 +23,13 @@ type Fault = GqlQueryError<GraphEdgeMergeError<WriteTxnError, WriteTxnError>, Wr
 type Receipt = (
     GraphEdgeMergeStats,
     GraphEdgeMergeOutcome,
+    EmbeddedTxnCompletion,
+);
+type QueryFault =
+    GqlQueryError<GraphEdgeMergeQueryError<WriteTxnError, WriteTxnError>, WriteTxnError>;
+type QueryReceipt = (
+    GraphEdgeMergeStats,
+    GqlQueryExecution<GraphValueRow>,
     EmbeddedTxnCompletion,
 );
 
@@ -40,9 +51,11 @@ impl<V: Vfs + Clone> Database<V> {
     ///
     /// Creation uses an engine-reserved EId and original before/after image
     /// authorization. An existing match preserves all fields, including hidden
-    /// properties. Initialization properties apply ONLY on creation, not as an
-    /// existing-edge predicate. The requested relation must be permitted even
-    /// when selection would be empty; this is a capability-only preflight.
+    /// properties. The MERGE map both filters existing edges and fills a
+    /// created one (fgdb-at06q), so every key it names must be visible; an
+    /// undirected MERGE admits either orientation of the pair. The requested
+    /// relation must be permitted even when selection would be empty; this is
+    /// a capability-only preflight.
     ///
     /// One live permit covers selection, reduction, creation and final native
     /// completion. Each Matched/Created receipt costs one signed row BEFORE
@@ -119,6 +132,124 @@ impl<V: Vfs + Clone> Database<V> {
             })
             .await
     }
+
+    /// Relationship MERGE RETURN under one ReadWrite permit and one native
+    /// completion (fgdb-at06q). Every selected pair resolves through the same
+    /// masked collector as a MERGE program, keeping each parallel match. RETURN
+    /// then reads those edges and their endpoints from the same private
+    /// overlay. A hidden property yields NULL before lookup or witness, and
+    /// MATCH bindings are the masked selection's own columns. Only final
+    /// projected rows consume the signed result allowance, so LIMIT 0 still
+    /// commits the effects. Any refusal discards every private effect; no
+    /// fallible check follows completion.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_edge_merge_query_authorized(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphEdgeMergeQuery,
+        policy: GraphEdgeMergePolicy,
+        mut clock: impl FnMut() -> u64,
+    ) -> Result<QueryReceipt, QueryFault> {
+        let merged = |error: Fault| error.map_source(GraphEdgeMergeQueryError::Merge);
+        let refusal = |error| merged(source(WriteTxnError::Authorization(error)));
+        if authority.namespace() != self.keys.namespace {
+            return Err(refusal(Error::WrongAuthority));
+        }
+        let now = clock();
+        let verified = authority.verify_at(token, branch, now).map_err(refusal)?;
+        let permit = verified.begin_write_at(branch, now).map_err(refusal)?;
+        if !verified.predicates().rights().can_read() {
+            return Err(refusal(Error::PermissionDenied));
+        }
+        if !verified
+            .predicates()
+            .allows_relation(query.merge().relation())
+        {
+            return Err(refusal(Error::ScopeDenied));
+        }
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
+                execution.checkpoint().map_err(source).map_err(merged)?;
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(|error| merged(source(WriteTxnError::Write(error))))?,
+                ));
+                let (stats, resolved, selected) = apply_with_output::<EdgeMergeRows, V, _>(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    query.merge(),
+                    policy,
+                    verified.predicates(),
+                    &mut execution,
+                    false,
+                )
+                .map_err(merged)?;
+                let result = query_cx.with_restriction(|| {
+                    let transaction = &*workspace.transaction();
+                    let controls = RefCell::new(&mut execution);
+                    let mut checkpoint = || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        controls.borrow_mut().checkpoint()
+                    };
+                    let rows = edge_merge_query_rows(
+                        query,
+                        &selected,
+                        &resolved,
+                        &mut checkpoint,
+                        |element, key| {
+                            // Mask BEFORE lookup: a hidden field is NULL with
+                            // no source read, admission or witness.
+                            if !verified.predicates().allows_property(key) {
+                                return Ok(GraphValue::Scalar(CanonicalScalar::Null));
+                            }
+                            transaction.merge_return_property(self, element, key)
+                        },
+                    )
+                    .map_err(|error| {
+                        error.map_source(|error| {
+                            GraphEdgeMergeQueryError::Merge(GraphEdgeMergeError::Source(error))
+                        })
+                    })?;
+                    query
+                        .finish_governed(
+                            rows,
+                            stats.match_selection,
+                            stats.evaluator,
+                            policy.query,
+                            checkpoint,
+                        )
+                        .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Returning))
+                })?;
+                let rows =
+                    u64::try_from(result.value.len()).map_err(|_| refusal(Error::TooLarge))?;
+                execution
+                    .permit
+                    .charge_rows_at((execution.clock)(), rows)
+                    .map_err(refusal)?;
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        execution.checkpoint()
+                    })
+                    .await
+                    .map_err(source)
+                    .map_err(merged)?;
+                Ok((stats, result, completion))
+            })
+            .await
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -142,6 +273,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
         execution,
         returning,
     )
+    .map(|(stats, outcome, _)| (stats, outcome))
 }
 
 /// Native write programs use every distinct selected pair; the public singular
@@ -167,6 +299,7 @@ pub(super) fn apply_many<V: Vfs + Clone, Clock: FnMut() -> u64>(
         execution,
         returning,
     )
+    .map(|(stats, receipt, _)| (stats, receipt))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -179,8 +312,18 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
     scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
-) -> Result<(GraphEdgeMergeStats, Output), Fault> {
+) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
     if !scope.allows_relation(merge.relation()) {
+        return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+    }
+    // The MERGE map is an existence predicate (fgdb-at06q): a key the
+    // capability cannot see would let its stored values decide a match.
+    // Refuse before selection, never compare a hidden field.
+    if merge
+        .properties()
+        .iter()
+        .any(|(key, _)| !scope.allows_property(*key))
+    {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
     let proposal: super::super::EdgeMergeProposal<Output> = cx.with_restriction(|| {
@@ -220,8 +363,9 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
                 }
                 // Retain the native scan witness even when no edge exists.
                 // Raw records stay private. Only exact pair/relation candidates
-                // reach the shared collector's counts and uniqueness reducer;
-                // every such edge has the two admitted endpoints above.
+                // (either orientation for an undirected MERGE) reach the shared
+                // collector's counts and uniqueness reducer; every such edge
+                // has the two admitted endpoints above.
                 let edges = transaction
                     .edges(&database.borrow())
                     .map_err(redacted)
@@ -235,9 +379,9 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
                         .borrow_mut()
                         .poll()
                         .map_err(GqlQueryError::Interrupted)?;
-                    if record.entry.src == src
-                        && record.entry.dst == dst
-                        && record.entry.relation == merge.relation()
+                    if record.entry.relation == merge.relation()
+                        && merge
+                            .accepts_orientation((src, dst), (record.entry.src, record.entry.dst))
                     {
                         admitted.push(record);
                     }
@@ -271,7 +415,7 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
             .charge_rows_at((execution.clock)(), result_rows)
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
     }
-    Ok((proposal.stats, proposal.outcome))
+    Ok((proposal.stats, proposal.outcome, proposal.selected))
 }
 
 #[cfg(test)]

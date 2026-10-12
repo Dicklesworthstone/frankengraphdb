@@ -1,5 +1,6 @@
-//! Shared preparation and staged execution for native CREATE, mutation and
-//! vertex MERGE RETURN writes, used by ordinary writes and ordered transactions.
+//! Shared preparation and staged execution for native CREATE, mutation,
+//! vertex MERGE and relationship MERGE RETURN writes, used by ordinary writes
+//! and ordered transactions.
 //! A RETURN-less write, including a bounded native UNWIND, uses the native
 //! write program path.
 
@@ -11,8 +12,9 @@ use fgdb::{Database, WriteTxn};
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GqlParameters, GqlQueryExecution, GqlQueryPolicy, GraphMutationPolicy, GraphVertexMergePolicy,
-    GraphVertexUpsertPolicy, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
+    GqlParameters, GqlQueryExecution, GqlQueryPolicy, GraphEdgeMergePolicy, GraphMutationPolicy,
+    GraphVertexMergePolicy, GraphVertexUpsertPolicy, PreparedGraphEdgeMergeQuery,
+    PreparedGraphEdgeMergeQueryText, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
     PreparedGraphMutationQuery, PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
     PreparedGraphVertexUpsertQueryText,
 };
@@ -29,6 +31,7 @@ pub(super) enum Returning {
     Insert(Box<PreparedGraphInsertQuery>),
     Mutation(Box<PreparedGraphMutationQuery>),
     Merge(Box<PreparedGraphVertexUpsertQuery>),
+    EdgeMerge(Box<PreparedGraphEdgeMergeQuery>),
 }
 impl Returning {
     pub(super) fn columns(&self) -> &[String] {
@@ -36,6 +39,7 @@ impl Returning {
             Self::Insert(query) => query.columns(),
             Self::Mutation(query) => query.columns(),
             Self::Merge(query) => query.columns(),
+            Self::EdgeMerge(query) => query.columns(),
         }
     }
 
@@ -81,6 +85,17 @@ impl Returning {
                     )
                     .map_err(execution_failure)?
                     .2
+            }
+            Self::EdgeMerge(query) => {
+                transaction
+                    .execute_graph_edge_merge_query_engine_governed(
+                        database,
+                        cx,
+                        query,
+                        GraphEdgeMergePolicy::new(allowance).with_creation_limit(100_000),
+                    )
+                    .map_err(execution_failure)?
+                    .1
             }
         })
     }
@@ -135,6 +150,19 @@ pub(super) fn prepare_statement(
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::Merge(Box::new(query))))
+            .map_err(Failure::query);
+    }
+    if PreparedGraphEdgeMergeQueryText::has_return_clause(statement).map_err(Failure::query)? {
+        let template = PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
+            statement,
+            options.coordinate,
+            &declarations,
+            options,
+        )
+        .map_err(Failure::query)?;
+        return template
+            .bind_parameters(params)
+            .map(|query| Some(Returning::EdgeMerge(Box::new(query))))
             .map_err(Failure::query);
     }
     Ok(None)

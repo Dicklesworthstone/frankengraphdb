@@ -188,3 +188,132 @@ fn self_loop_uses_one_projected_vertex_column_for_both_endpoints() {
     .unwrap();
     assert_eq!((merge.source_column(), merge.destination_column()), (0, 0));
 }
+
+/// fgdb-at06q: only a MATCH-led statement whose top level has `MERGE (` and a
+/// later RETURN routes to relationship MERGE RETURN. Quoted text, property
+/// keys and plain reads never do.
+#[test]
+fn only_a_match_merge_with_a_later_top_level_return_routes_to_merge_return() {
+    use fgdb_gql::PreparedGraphEdgeMergeQueryText;
+    for (text, routed) in [
+        (
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN count(r) AS n",
+            true,
+        ),
+        ("MATCH (a),(b) MERGE (a)-[:R]-(b) RETURN a", true),
+        ("MATCH (a),(b) MERGE (a)-[:R]->(b)", false),
+        ("MATCH (a),(b) MERGE (a)-[:R {p: 'RETURN'}]->(b)", false),
+        ("MATCH (a) RETURN a", false),
+        ("MATCH (a) WITH a RETURN a", false),
+        ("MERGE (n {p: 1}) RETURN n", false),
+        ("CREATE (a) RETURN a", false),
+    ] {
+        assert_eq!(
+            PreparedGraphEdgeMergeQueryText::has_return_clause(text).unwrap(),
+            routed,
+            "{text}"
+        );
+    }
+}
+
+/// fgdb-at06q: RETURN names the merged relationship, its final properties,
+/// its own endpoints (and their properties) and frozen MATCH bindings. The
+/// shared kernel then projects the host's rows, one per selected row and
+/// resolved relationship, including an aggregate over them.
+#[test]
+fn relationship_merge_return_binds_the_edge_its_endpoints_and_match_bindings() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{
+        GlaExecutionStats, GqlExecutionStats, GqlQueryPolicy, GraphEdgeMergeBinding,
+        PreparedGraphEdgeMergeQueryText,
+    };
+    use fgdb_types::{CanonicalScalar, EId, VId};
+    let prepare = |text: &str| {
+        PreparedGraphEdgeMergeQueryText::prepare(text, R, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    };
+    let query = prepare(
+        "MATCH (a),(b) MERGE (a)-[r:R {p: 2}]-(b) \
+         RETURN r AS r, r.p AS rp, startNode(r) AS s, endNode(r).p AS ep, a.p AS ap",
+    );
+    assert_eq!(query.columns(), &["r", "rp", "s", "ep", "ap"]);
+    assert!(query.merge().undirected());
+    let [
+        GraphEdgeMergeBinding::Edge,
+        GraphEdgeMergeBinding::Property(rp),
+        GraphEdgeMergeBinding::Endpoint { start: true },
+        GraphEdgeMergeBinding::EndpointProperty {
+            start: false,
+            key: ep,
+        },
+        GraphEdgeMergeBinding::Input(ap),
+    ] = query.bindings()
+    else {
+        panic!("unexpected bindings {:?}", query.bindings());
+    };
+    assert_eq!((*rp, *ep), (P, P));
+    // The endpoints lead the selection; a.p follows them.
+    assert_eq!(
+        (
+            query.merge().source_column(),
+            query.merge().destination_column()
+        ),
+        (0, 1)
+    );
+    assert_eq!(*ap, 2);
+
+    let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let count =
+        prepare("MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN count(r) AS n, count(*) AS rows");
+    let policy = GqlQueryPolicy::new(100, 100, 10_000, 10_000);
+    let finished = count
+        .finish_governed::<(), ()>(
+            vec![
+                vec![GraphValue::Edge(EId(1))],
+                vec![GraphValue::Edge(EId(2))],
+            ],
+            GqlExecutionStats::default(),
+            GlaExecutionStats::default(),
+            policy,
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(
+        finished
+            .value
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect::<Vec<_>>(),
+        vec![vec![int(2), int(2)]]
+    );
+    // A cell of the wrong kind is refused before any projection runs.
+    assert!(
+        count
+            .finish_governed::<(), ()>(
+                vec![vec![GraphValue::Vertex(VId(1))]],
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy,
+                || Ok(()),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn relationship_merge_return_refuses_star_unknown_variables_and_trailing_text() {
+    use fgdb_gql::PreparedGraphEdgeMergeQueryText;
+    for text in [
+        "MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN *",
+        "MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN missing",
+        "MATCH (a),(b) MERGE (a)-[:R]->(b) RETURN r",
+        "MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN r MERGE (a)",
+    ] {
+        assert!(
+            PreparedGraphEdgeMergeQueryText::prepare(text, R, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
