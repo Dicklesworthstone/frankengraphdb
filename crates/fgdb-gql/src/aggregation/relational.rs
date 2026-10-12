@@ -7,6 +7,7 @@
 //! sorting barriers and unsupported functions retain the materialized path.
 
 mod folded;
+mod incremental;
 
 use super::*;
 use crate::{
