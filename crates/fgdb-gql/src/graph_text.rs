@@ -703,6 +703,9 @@ struct Parser<'a> {
     defer_where: bool,
     /// The lexer and token at that WHERE keyword, once it was deferred.
     deferred_where: Option<(Lexer<'a>, Token<'a>)>,
+    /// A write clause after WITH is being read (fgdb-sl4ym): its scope is
+    /// the WITH row alone, so the MATCH bindings WITH dropped stay hidden.
+    write_row_scope: bool,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -782,6 +785,7 @@ impl<'a> Parser<'a> {
             zones: None,
             defer_where: false,
             deferred_where: None,
+            write_row_scope: false,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),

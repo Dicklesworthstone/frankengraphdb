@@ -52,7 +52,10 @@ impl<'a> Parser<'a> {
     /// The MATCH scope is shared by CREATE endpoints and RETURN. New names
     /// must not shadow a matched edge or path by silently declaring a vertex.
     pub(super) fn insertion_match_kind(&self, name: &str) -> Option<GraphSetColumnType> {
-        if self.syntax.names_path(name) {
+        // After WITH only the row is in scope (fgdb-sl4ym).
+        if self.write_row_scope {
+            None
+        } else if self.syntax.names_path(name) {
             Some(GraphSetColumnType::Path)
         } else if self.syntax.visible_edge(name).is_some() {
             Some(GraphSetColumnType::Edge)
@@ -345,19 +348,27 @@ impl<'a> Parser<'a> {
                     "CREATE vertex name distinct from edge and path bindings",
                 ));
             }
-            if row_schema
-                .is_some_and(|schema| schema.iter().any(|(alias, _)| alias.text == name.text))
-            {
-                return Err(expected(
-                    name.at,
-                    "new CREATE vertex name, not an imported row alias",
-                ));
-            }
-            if self
-                .syntax
-                .variables
-                .iter()
-                .any(|variable| variable.text == name.text)
+            let row = row_schema
+                .and_then(|schema| schema.iter().position(|(alias, _)| alias.text == name.text));
+            if let Some(row) = row {
+                // A vertex the WITH row carries is that row's endpoint; the
+                // relation is the row itself (fgdb-sl4ym).
+                if !self.write_row_scope {
+                    return Err(expected(
+                        name.at,
+                        "new CREATE vertex name, not an imported row alias",
+                    ));
+                }
+                if row_schema.is_some_and(|schema| schema[row].1 != GraphSetColumnType::Vertex) {
+                    return Err(expected(name.at, "a vertex-valued WITH binding"));
+                }
+                Some(GraphInsertEndpoint::Column(row))
+            } else if !self.write_row_scope
+                && self
+                    .syntax
+                    .variables
+                    .iter()
+                    .any(|variable| variable.text == name.text)
             {
                 let column = self.mutation_projection(&mut parsed.projections, name, None)?;
                 Some(GraphInsertEndpoint::Column(
@@ -500,7 +511,9 @@ impl<'a> Parser<'a> {
         if parsed.vertices.is_empty() && parsed.edges.is_empty() {
             return Err(insertion_build(create_at, GraphInsertBuildError::Empty));
         }
+        // After WITH the row carries the bag, and no MATCH field is read.
         if parsed.projections.is_empty()
+            && !self.write_row_scope
             && let Some(&root) = self.syntax.variables.first()
         {
             // A MATCH still carries its occurrence bag even for constants.
@@ -678,6 +691,9 @@ impl PreparedGraphInsertText {
             .with_zones(resolve.time_zones());
         let (leading, row_schema) = parser.insertion_unwind_prefix()?;
         let matched = parser.insertion_match_prefix(&row_schema)?;
+        if matched && leading.is_empty() && parser.is_word("WITH") {
+            return Self::prepare_after_with(parser, statement, relation, resolve, returning);
+        }
         let at = parser.current.at;
         let mut parsed =
             parser.insertion_clauses((!leading.is_empty()).then_some(row_schema.as_slice()))?;
@@ -956,6 +972,148 @@ impl PreparedGraphInsertText {
         if let Some(returning) = &returning {
             // Validate RETURN against the real source shape. Treating a MATCH
             // as a singleton here would lose its columns and occurrence bag.
+            returning.bind(prepared, &shape_arguments(template.parameter_schema()))?;
+        }
+        Ok((template, returning))
+    }
+
+    /// `MATCH ... WITH ... CREATE ... [RETURN ...]` (fgdb-sl4ym): CREATE
+    /// runs once per row of the read pipeline through its last WITH stage.
+    /// That row is the whole scope: a vertex it carries is a bound endpoint,
+    /// its values feed properties and RETURN, and a MATCH binding the WITH
+    /// dropped is unknown. The row pipeline is the ordinary read relation.
+    fn prepare_after_with<'a>(
+        mut parser: Parser<'a>,
+        statement: &'a str,
+        relation: RelationId,
+        mut resolve: impl GraphSymbolResolver,
+        returning: bool,
+    ) -> Result<
+        (
+            Self,
+            Option<crate::insertion_query_text::InsertReturnTemplate>,
+        ),
+        GraphInsertTextError,
+    > {
+        let (head, stages, schema) = parser.write_row_prefix()?;
+        let at = parser.current.at;
+        parser.write_row_scope = true;
+        let mut parsed = parser.insertion_clauses(Some(&schema))?;
+        let returning = if returning {
+            Some(parser.insertion_return(&mut parsed, &schema)?)
+        } else {
+            None
+        };
+        parser.end()?;
+        parser.write_row_scope = false;
+        if !parsed.projections.is_empty() {
+            return Err(expected(at, "a CREATE that reads only the WITH row"));
+        }
+        if let Some(returning) = &returning {
+            returning.admit(&parser.syntax.parameters)?;
+        }
+        let read = parser.finish_write_row_prefix(statement, head, stages)?;
+        let mut input = read.resolve(crate::graph_text::LentResolver(&mut resolve))?;
+        let mut cache = BTreeMap::new();
+        let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
+            let key = (kind, name.text.to_owned());
+            if let Some(value) = cache.get(&key) {
+                return Ok(*value);
+            }
+            let value = resolve
+                .resolve_symbol(kind, name.text)
+                .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
+            if value.kind() != kind {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::WrongSymbolKind {
+                        expected: kind,
+                        found: value.kind(),
+                    },
+                ));
+            }
+            cache.insert(key, value);
+            Ok(value)
+        };
+        let mut vertices = Vec::new();
+        for vertex in parsed.vertices {
+            let mut labels = Vec::new();
+            for label in vertex.labels {
+                let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)? else {
+                    unreachable!("shared catalog resolver checked the domain")
+                };
+                labels.push(label);
+            }
+            vertices.push(InsertVertexTemplate {
+                labels,
+                properties: resolve_properties(vertex.properties, &mut symbol)?,
+            });
+        }
+        let mut edges = Vec::new();
+        for edge in parsed.edges {
+            let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, edge.relation)?
+            else {
+                unreachable!("shared catalog resolver checked the domain")
+            };
+            edges.push(InsertEdgeTemplate {
+                source: edge.source,
+                destination: edge.destination,
+                relation,
+                properties: resolve_properties(edge.properties, &mut symbol)?,
+            });
+        }
+        let mut returning = returning
+            .map(|returning| returning.resolve(&mut symbol))
+            .transpose()?;
+        let created_maps = returning.as_ref().is_some_and(|returning| {
+            returning.bindings.iter().any(|binding| {
+                matches!(
+                    binding,
+                    crate::GraphInsertBinding::VertexProperties(_)
+                        | crate::GraphInsertBinding::EdgeProperties(_)
+                        | crate::GraphInsertBinding::VertexLabels(_)
+                )
+            })
+        });
+        let source_metadata = input.selection.as_ref().is_some_and(|selection| {
+            selection.columns.iter().any(|column| {
+                matches!(
+                    column.path,
+                    Some(
+                        GraphPathFunction::Labels
+                            | GraphPathFunction::Type
+                            | GraphPathFunction::Properties
+                    )
+                )
+            })
+        });
+        if created_maps || source_metadata {
+            let catalog =
+                std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(&mut resolve, statement));
+            if let Some(selection) = input.selection.as_mut() {
+                selection.reverse_catalog = Some(std::sync::Arc::clone(&catalog));
+            }
+            if created_maps {
+                returning
+                    .as_mut()
+                    .expect("created maps belong to RETURN")
+                    .property_catalog = Some(catalog);
+            }
+        }
+        let template = Self {
+            input: InsertTextInput::Relation {
+                statement: statement.to_owned(),
+                input,
+            },
+            relation,
+            vertices,
+            edges,
+            create_at: at,
+        };
+        // Endpoint domains, written keys and value columns check here, over
+        // the bound shape of the read relation.
+        let prepared = template.instantiate(None, None)?;
+        if let Some(returning) = &returning {
             returning.bind(prepared, &shape_arguments(template.parameter_schema()))?;
         }
         Ok((template, returning))
