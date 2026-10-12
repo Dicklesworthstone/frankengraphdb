@@ -52,7 +52,7 @@ impl<'a> Parser<'a> {
     /// The MATCH scope is shared by CREATE endpoints and RETURN. New names
     /// must not shadow a matched edge or path by silently declaring a vertex.
     pub(super) fn insertion_match_kind(&self, name: &str) -> Option<GraphSetColumnType> {
-        if self.syntax.path.is_some_and(|path| path.text == name) {
+        if self.syntax.names_path(name) {
             Some(GraphSetColumnType::Path)
         } else if self.syntax.visible_edge(name).is_some() {
             Some(GraphSetColumnType::Edge)
