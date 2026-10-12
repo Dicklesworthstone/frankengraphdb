@@ -36,8 +36,10 @@ impl PreparedGraphAggregate {
         if !self.aggregates.iter().any(|aggregate| {
             matches!(
                 aggregate.function,
-                GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct
-                    | GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct
+                GraphAggregateFunction::SumInt
+                    | GraphAggregateFunction::SumIntDistinct
+                    | GraphAggregateFunction::AverageInt
+                    | GraphAggregateFunction::AverageIntDistinct
             )
         }) {
             return None;
@@ -47,21 +49,28 @@ impl PreparedGraphAggregate {
             ..,
             GlaOperator::ProjectValues { columns },
             GlaOperator::OrderByValues,
-            GlaOperator::Limit { offset: 0, count: None },
+            GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            },
         ] = source.plan().operators()
         else {
             return None;
         };
         // The row producer requires a private COUNT cell. Hidden source cells
         // are not recoverable from the declared schema, even for numeric input.
-        if columns.is_empty() || columns.len() != source.columns().len()
-            || columns.len() >= MAX_PATTERN_VERTICES || !source.preserves_duplicates()
+        if columns.is_empty()
+            || columns.len() != source.columns().len()
+            || columns.len() >= MAX_PATTERN_VERTICES
+            || !source.preserves_duplicates()
         {
             return None;
         }
         let mut relation = PreparedGraphSet::from(source.clone());
         if let Some(projection) = &self.computed_input {
-            relation = relation.project(projection.clone(), GraphSetQuantifier::All).ok()?;
+            relation = relation
+                .project(projection.clone(), GraphSetQuantifier::All)
+                .ok()?;
         }
         relation.check_parent_depth().ok()?;
         let mut summary = self.clone();
