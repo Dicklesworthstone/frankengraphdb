@@ -25,14 +25,16 @@ fn policy(results: u64) -> GqlQueryPolicy {
 }
 
 fn prepare(text: &str) -> PreparedNativeRead {
-    PreparedNativeRead::prepare(text, &GqlParameters::new(), |kind, name| {
-        match (kind, name) {
+    PreparedNativeRead::prepare(
+        text,
+        &GqlParameters::new(),
+        |kind: GraphSymbolKind, name: &str| match (kind, name) {
             (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
             (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
             _ => None,
-        }
-    })
+        },
+    )
     .unwrap()
 }
 

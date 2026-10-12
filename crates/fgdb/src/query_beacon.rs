@@ -206,32 +206,6 @@ fn build_selected(
     BeaconIndex::try_build(config.clone(), projected, &mut SharedWork(work))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate(
-    snapshot: &Snapshot,
-    at: CommitSeq,
-    options: &Options,
-    query: Search<'_>,
-    work: &RefCell<impl WorkControl>,
-    scan: Scan<'_>,
-    admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
-    label_allowed: impl FnMut(LabelId) -> bool,
-    property_allowed: impl FnMut(PropertyKeyId) -> bool,
-) -> Result<Rows, BeaconError> {
-    evaluate_filtered(
-        snapshot,
-        at,
-        options,
-        query,
-        work,
-        scan,
-        admit,
-        label_allowed,
-        property_allowed,
-        |_| true,
-    )
-}
-
 /// Result eligibility is independent of source authorization and projection.
 /// Keep the admitted corpus (and its BM25 statistics/ANN topology) unchanged;
 /// each lane applies the stable predicate before selecting its candidate depth.

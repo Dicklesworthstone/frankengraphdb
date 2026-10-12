@@ -284,6 +284,10 @@ fn build_send<'q, C: FnMut() -> u64 + Send>(
     Ok((AuthorizedRowCursor::new(driver, columns, at), layout))
 }
 
+/// One step of a native aggregate driver: the group it delivered, if any, and
+/// whether its cursor has finished.
+type AggregateStep = Result<(Option<GraphAggregateRow>, bool), QueryError>;
+
 fn vertex_driver<'q, C: FnMut() -> u64>(
     plan: VertexAggregatePlan,
     at: CommitSeq,
@@ -291,10 +295,7 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
     cx: &'q QueryCx,
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
-) -> Result<
-    impl FnMut() -> Result<(Option<GraphAggregateRow>, bool), QueryError> + use<'q, C>,
-    QueryError,
-> {
+) -> Result<impl FnMut() -> AggregateStep + use<'q, C>, QueryError> {
     // Includes exact historical-cut admission even when LIMIT/HAVING returns
     // no rows. The source owns the existing immutable generation, not a copy.
     let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;

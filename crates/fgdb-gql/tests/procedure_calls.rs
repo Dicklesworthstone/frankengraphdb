@@ -880,8 +880,10 @@ impl MetadataGraph {
         Self {
             properties,
             maps,
-            labels: vec![GraphValue::Scalar(CanonicalScalar::Text("Person".into()))],
-            edge_type: CanonicalScalar::Text("R".into()),
+            labels: vec![GraphValue::Scalar(
+                CanonicalScalar::ucs_basic_text("Person").unwrap(),
+            )],
+            edge_type: CanonicalScalar::ucs_basic_text("R").unwrap(),
             visible,
         }
     }
@@ -925,16 +927,20 @@ impl MetadataGraph {
         text: &str,
         policy: GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, Fault> {
-        PreparedGraphSetText::prepare(text, MetadataCatalog)
-            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
-            .bind_parameters(&GqlParameters::new())
-            .unwrap()
-            .execute_governed_with_procedures(
-                policy,
-                |pattern, remaining| self.source(pattern, remaining),
-                |call, arguments, _| host(call, arguments),
-                || Ok(()),
-            )
+        PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            text,
+            &[],
+            &mut MetadataCatalog,
+        )
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .execute_governed_with_procedures(
+            policy,
+            |pattern, remaining| self.source(pattern, remaining),
+            |call, arguments, _| host(call, arguments),
+            || Ok(()),
+        )
     }
 }
 
@@ -947,9 +953,13 @@ fn yielded_labels_and_complete_maps_use_the_native_graph_boundary() {
     let implied = format!("{prefix}{suffix}");
     let written = format!("{prefix}MATCH (n) {suffix}");
     let template = |text: &str| {
-        PreparedGraphSetText::prepare(text, MetadataCatalog)
-            .unwrap()
-            .canonical_template_bytes()
+        PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            text,
+            &[],
+            &mut MetadataCatalog,
+        )
+        .unwrap()
+        .canonical_template_bytes()
     };
     assert_eq!(template(&implied), template(&written));
     let result = graph.query(&implied, wide()).unwrap().value;
@@ -960,7 +970,9 @@ fn yielded_labels_and_complete_maps_use_the_native_graph_boundary() {
         assert_eq!(row.values()[1], graph.maps[vertex]);
         assert_eq!(
             row.values()[2].as_list().unwrap(),
-            [GraphValue::Scalar(CanonicalScalar::Text("p".into()))],
+            [GraphValue::Scalar(
+                CanonicalScalar::ucs_basic_text("p").unwrap()
+            )],
         );
         assert_eq!(
             row.values()[3],
@@ -983,9 +995,10 @@ fn yielded_labels_and_complete_maps_use_the_native_graph_boundary() {
         column(&result, 1),
         column(&graph.query(&projected, wide()).unwrap().value, 1),
     );
-    let renamed = PreparedGraphSetText::prepare(
+    let renamed = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
         "CALL t.scores() YIELD vertex AS n WHERE size(labels(n)) > 0 RETURN LABELS(n)",
-        MetadataCatalog,
+        &[],
+        &mut MetadataCatalog,
     )
     .unwrap();
     assert_eq!(renamed.columns(), ["LABELS(n)"]);
@@ -1074,7 +1087,12 @@ fn generic_map_outputs_remain_values_and_metadata_scope_does_not_escape() {
         "CALL t.scores() YIELD vertex AS n UNWIND [1] AS x RETURN labels(x)",
     ] {
         assert!(
-            PreparedGraphSetText::prepare(statement, MetadataCatalog).is_err(),
+            PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+                statement,
+                &[],
+                &mut MetadataCatalog
+            )
+            .is_err(),
             "{statement}",
         );
     }
@@ -1165,7 +1183,7 @@ fn fnx_projection_schema_names_bind_once_before_procedure_execution() {
     assert_eq!(
         result[0].values(),
         ["Scoped", "LINK", "weight"]
-            .map(|value| GraphValue::Scalar(CanonicalScalar::Text(value.into()))),
+            .map(|value| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap())),
     );
 }
 

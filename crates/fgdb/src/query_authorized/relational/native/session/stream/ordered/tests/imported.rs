@@ -98,7 +98,7 @@ fn imported_ordered_templates_rebind_at_a_fresh_pin_without_catalog_callbacks() 
         assert_eq!(Arc::strong_count(&db.snapshot), refs);
         assert_eq!(prepared.parameter_schema().len(), 2);
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn ordered_import_admits_authority_before_templates_limits_and_scratch() {
             assert_eq!(pool.used(), 0);
         }
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -228,5 +228,5 @@ fn imported_handles_keep_exact_session_ownership_and_branch_rebinding() {
             .unwrap();
         assert_eq!(values(&mut cursor).await, vec![vec![scalar(3)]]);
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }

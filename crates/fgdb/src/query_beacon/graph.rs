@@ -18,6 +18,7 @@ use std::cell::{Cell, RefCell};
 /// `Scan` also covers the edge history walk: hidden history must not influence
 /// a capability holder's resource allowance. Visible graph admission, BFS and
 /// fusion all use the SAME meter as projection and both retrieval lanes.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate(
     snapshot: &Snapshot,

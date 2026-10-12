@@ -401,10 +401,7 @@ pub(super) fn aggregate_driver<'q, C: FnMut() -> u64>(
     cx: &'q QueryCx,
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
-) -> Result<
-    impl FnMut() -> Result<(Option<GraphAggregateRow>, bool), QueryError> + use<'q, C>,
-    QueryError,
-> {
+) -> Result<impl FnMut() -> AggregateStep + use<'q, C>, QueryError> {
     // Both factories borrow the SAME view and cut; neither can refresh from a
     // writer. Constructing these cheap pin owners scans no graph candidates.
     let edges = view.edge_scan_source(cx, at).map_err(QueryError::Read)?;

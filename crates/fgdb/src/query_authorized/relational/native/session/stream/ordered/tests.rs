@@ -275,7 +275,7 @@ fn masked_vertex_and_edge_ordering_keep_bags_hidden_keys_and_final_windows() {
             assert_eq!(pool.used(), 0);
         }
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -324,7 +324,7 @@ fn sorted_cursor_pins_the_selected_history_while_the_writer_advances() {
         assert_eq!(historic.snapshot_seq(), CommitSeq(1));
         assert_eq!(values(&mut historic).await, vec![vec![scalar(3)]]);
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -397,7 +397,7 @@ fn signed_rows_charge_only_final_pulls_and_work_reserves_before_scratch() {
         assert!(b.0.lock().unwrap().bytes.get_ref().is_empty());
         assert_eq!(pool.used(), 0);
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -444,7 +444,7 @@ fn foreign_handles_unsupported_limit_zero_and_unpolled_work_touch_no_scratch() {
             .unwrap();
         assert_eq!(values(&mut cursor).await.len(), 5);
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -517,7 +517,7 @@ fn expiry_during_pending_sort_or_completed_read_closes_the_pin_without_rows() {
         assert_eq!(Arc::strong_count(&db.snapshot), pins);
         assert_eq!(pool.used(), 0);
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -573,7 +573,7 @@ fn pending_read_drop_fuses_only_the_cursor_and_retirement_closes_the_session() {
         assert!(fresh.is_closed());
         assert_eq!(pool.used(), 0);
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -630,7 +630,7 @@ fn an_unwound_clock_cannot_leave_a_reusable_ordered_cursor_or_session_pin() {
         assert_eq!(Arc::strong_count(&db.snapshot), pins);
         assert_eq!(pool.used(), 0);
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -668,7 +668,7 @@ fn the_first_future_poll_rechecks_expiry_and_needs_no_retained_template_or_param
         assert!(b.0.lock().unwrap().bytes.get_ref().is_empty());
         assert_eq!(pool.used(), 0);
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
@@ -756,5 +756,5 @@ fn limit_zero_keeps_input_budget_and_pending_query_cancellation_is_nonterminal()
             );
         }
     });
-    assert_eq!(report.panicked, 0);
+    assert!(report.lab_test_passed(), "{report:?}");
 }
