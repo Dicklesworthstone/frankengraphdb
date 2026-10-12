@@ -20,6 +20,20 @@ impl EndpointFilter {
         scratch_limit: u64,
         work: &mut dyn WorkControl,
     ) -> Result<Self, BeaconError> {
+        Self::prepare_with_admission(values, result_capacity, scratch_limit, work, || Ok(()))
+    }
+
+    /// Admit each retained ID to the enclosing scratch meter BEFORE insertion.
+    /// Input/work limits still count duplicate occurrences; retained scratch
+    /// counts each identity once. A refusal returns no partially built filter.
+    /// Immutable hosts retain their existing accounting through `prepare`.
+    pub(crate) fn prepare_with_admission(
+        values: Option<&[GraphValue]>,
+        result_capacity: usize,
+        scratch_limit: u64,
+        work: &mut dyn WorkControl,
+        mut admit_entry: impl FnMut() -> Result<(), BeaconError>,
+    ) -> Result<Self, BeaconError> {
         let Some(values) = values else {
             // An omitted/null restriction preserves the existing no-filter
             // charge trace. In particular, it is not an empty allowed set.
@@ -50,7 +64,10 @@ impl EndpointFilter {
                     ));
                 }
             };
-            ids.insert(id);
+            if !ids.contains(&id) {
+                admit_entry()?;
+                ids.insert(id);
+            }
         }
         Ok(Self {
             ids: Some(ids),
@@ -201,6 +218,87 @@ mod tests {
             assert!(matches!(result, Err(BeaconError::Cancelled)), "cut {stop}");
             assert_eq!(seen, stop);
         }
+    }
+
+    #[test]
+    fn retained_admissions_are_unique_and_fail_before_later_input_work() {
+        use std::cell::Cell;
+        struct Work<'a> {
+            admitted: &'a Cell<usize>,
+            trace: Vec<usize>,
+        }
+        impl WorkControl for Work<'_> {
+            fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
+                self.trace.push(self.admitted.get());
+                Ok(())
+            }
+        }
+        let values = [1, 1, 2, 3].map(|id| GraphValue::Vertex(VId(id)));
+        let admitted = Cell::new(0);
+        let mut work = Work {
+            admitted: &admitted,
+            trace: Vec::new(),
+        };
+        let result = EndpointFilter::prepare_with_admission(
+            Some(&values),
+            1,
+            5,
+            &mut work,
+            || {
+                admitted.set(admitted.get() + 1);
+                if admitted.get() == 2 {
+                    Err(BeaconError::ResourceLimit {
+                        resource: "test retained IDs",
+                        limit: 1,
+                    })
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(BeaconError::ResourceLimit {
+                resource: "test retained IDs",
+                limit: 1
+            })
+        ));
+        assert_eq!(admitted.get(), 2);
+        assert_eq!(work.trace, [0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn absent_empty_and_duplicate_filters_share_the_retained_admission_law() {
+        let mut admissions = 0;
+        for values in [None, Some(&[][..])] {
+            let filter = EndpointFilter::prepare_with_admission(
+                values,
+                0,
+                0,
+                &mut WorkBudget::new(100),
+                || {
+                    admissions += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(filter.scratch_entries(), 0);
+        }
+        assert_eq!(admissions, 0);
+        let values = [1, 1, 2, 1].map(|id| GraphValue::Vertex(VId(id)));
+        let filter = EndpointFilter::prepare_with_admission(
+            Some(&values),
+            1,
+            5,
+            &mut WorkBudget::new(100),
+            || {
+                admissions += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(admissions, 2);
+        assert_eq!(filter.scratch_entries(), 2);
     }
 }
 

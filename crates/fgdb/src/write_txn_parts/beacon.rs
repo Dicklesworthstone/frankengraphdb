@@ -40,6 +40,7 @@ struct Control<'a> {
     limit: usize,
     interrupted: Option<Cancel>,
     observer: Option<Observer<'a>>,
+    refusal: Option<BeaconError>,
 }
 
 impl WorkControl for Control<'_> {
@@ -49,28 +50,35 @@ impl WorkControl for Control<'_> {
 }
 
 impl Control<'_> {
+    /// Stop before any later observer/clock/work callback. A bool-only search
+    /// predicate may carry a failure outside its return value; later smaller
+    /// charges must not revive the operation or replace its first cause.
+    fn refuse(&mut self, error: BeaconError) -> BeaconError {
+        self.refusal.get_or_insert(error).clone()
+    }
+
     fn admit(&mut self, units: usize, event: AdmissionEvent) -> Result<(), BeaconError> {
-        if self.interrupted.is_some() {
-            return Err(BeaconError::Cancelled);
+        if let Some(error) = &self.refusal {
+            return Err(error.clone());
         }
         if let Err(error) = self.cx.checkpoint() {
             self.interrupted = Some(error);
-            return Err(BeaconError::Cancelled);
+            return Err(self.refuse(BeaconError::Cancelled));
         }
         if let Some(observer) = self.observer {
-            observer(event)?;
+            observer(event).map_err(|error| self.refuse(error))?;
         }
-        self.budget.charge(units)
+        self.budget.charge(units).map_err(|error| self.refuse(error))
     }
 
     fn source(&mut self, event: SourceEvent) -> Result<(), BeaconError> {
         self.admit(1, AdmissionEvent::Source(event))?;
         if matches!(event, SourceEvent::ScratchEntry) {
             if self.scratch == self.limit {
-                return Err(BeaconError::ResourceLimit {
+                return Err(self.refuse(BeaconError::ResourceLimit {
                     resource: "transaction search source scratch entries",
                     limit: self.limit,
-                });
+                }));
             }
             self.scratch += 1;
         }
@@ -274,19 +282,16 @@ impl WriteTxn {
                         u64::try_from(control.limit.saturating_sub(control.scratch))
                             .unwrap_or(u64::MAX)
                     };
-                    let prepared = EndpointFilter::prepare(
+                    let prepared = EndpointFilter::prepare_with_admission(
                         eligible,
                         search.query().retrieval.k,
                         policy.evaluator.max_scratch_entries.min(source_scratch),
                         &mut Shared(work),
+                        || work.borrow_mut().source(SourceEvent::ScratchEntry),
                     )?;
-                    // Reserve the actual set in the SAME source and enclosing
-                    // query scratch allowances before any corpus is observed.
-                    // The preparation gate separately bounds all input
-                    // occurrences, including duplicates, before allocation.
-                    for _ in 0..prepared.scratch_entries() {
-                        work.borrow_mut().source(SourceEvent::ScratchEntry)?;
-                    }
+                    // Bound input occurrences and result capacity up front.
+                    // Each unique ID spends the same source/enclosing scratch
+                    // allowance BEFORE retention, not after allocation.
                     *filter.borrow_mut() = Some(prepared);
                     Ok(())
                 },
@@ -377,6 +382,7 @@ impl WriteTxn {
                 limit: options.policy.max_source_scratch,
                 interrupted: None,
                 observer,
+                refusal: None,
             });
             let result = (|| {
                 work.borrow_mut().charge(1)?;
@@ -499,6 +505,107 @@ impl WriteTxn {
                 None => result.map_err(ReadError::Index),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::PurposeContexts;
+    use std::cell::Cell;
+
+    #[test]
+    fn work_scratch_and_observer_refusals_stop_before_later_callbacks() {
+        let ((), report) = run_async_under_lab(0xbeac_3505, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            for case in 0..3 {
+                let calls = Cell::new(0);
+                let observe = |_: AdmissionEvent| {
+                    calls.set(calls.get() + 1);
+                    if case == 2 {
+                        Err(BeaconError::InvalidQuery("observer refused"))
+                    } else {
+                        Ok(())
+                    }
+                };
+                let mut control = Control {
+                    cx: &cx,
+                    budget: WorkBudget::new(if case == 0 { 1 } else { 100 }),
+                    scratch: 0,
+                    limit: 0,
+                    interrupted: None,
+                    observer: Some(&observe),
+                    refusal: None,
+                };
+                let first = if case == 1 {
+                    control.source(SourceEvent::ScratchEntry).unwrap_err()
+                } else {
+                    control.charge(2).unwrap_err()
+                };
+                assert_eq!(calls.get(), 1);
+                assert_eq!(control.charge(0).unwrap_err(), first);
+                assert_eq!(control.charge(1).unwrap_err(), first);
+                assert_eq!(control.source(SourceEvent::SnapshotRecord).unwrap_err(), first);
+                assert_eq!(calls.get(), 1, "a refusal cannot be retried as a smaller charge");
+                assert_eq!(control.scratch, 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn filtered_lookup_refusal_prevents_later_observer_failure_replacement() {
+        let ((), report) = run_async_under_lab(0xbeac_3506, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let values = [
+                fgdb_gql::algebra::GraphValue::Vertex(VId(1)),
+                fgdb_gql::algebra::GraphValue::Vertex(VId(2)),
+            ];
+            let filter = crate::query::EndpointFilter::prepare(
+                Some(&values),
+                1,
+                3,
+                &mut WorkBudget::new(100),
+            )
+            .unwrap();
+            let calls = Cell::new(0);
+            let observe = |_: AdmissionEvent| {
+                calls.set(calls.get() + 1);
+                if calls.get() > 1 {
+                    Err(BeaconError::InvalidQuery("later observer refusal"))
+                } else {
+                    Ok(())
+                }
+            };
+            let work = RefCell::new(Control {
+                cx: &cx,
+                budget: WorkBudget::new(1),
+                scratch: 0,
+                limit: 100,
+                interrupted: None,
+                observer: Some(&observe),
+                refusal: None,
+            });
+            // The bool return cannot carry the error; retain it before another
+            // charge reaches the enclosing query's observer.
+            assert!(!filter.admits(VId(1), &work));
+            assert_eq!(calls.get(), 1);
+            for units in [0, 1] {
+                assert_eq!(
+                    work.borrow_mut().charge(units).unwrap_err(),
+                    BeaconError::WorkBudgetExceeded
+                );
+            }
+            assert_eq!(calls.get(), 1);
+            assert!(matches!(
+                filter.finish(Ok(vec![VId(1)])),
+                Err(BeaconError::WorkBudgetExceeded)
+            ));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
 
