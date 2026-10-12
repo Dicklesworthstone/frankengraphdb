@@ -1282,6 +1282,7 @@ pub(super) fn copy_value<E>(
 pub(super) struct UnwindRows {
     prefix: GraphValueRow,
     values: std::vec::IntoIter<GraphValue>,
+    values_capacity: usize,
 }
 
 impl UnwindRows {
@@ -1315,10 +1316,21 @@ impl UnwindRows {
                 });
             }
         };
+        let values_capacity = values.capacity();
         Ok(Self {
             prefix: row,
             values: values.into_iter(),
+            values_capacity,
         })
+    }
+
+    pub(super) fn visit_retained_values<E>(
+        &self,
+        visitor: &mut impl FnMut(&[GraphValue], usize) -> Result<(), E>,
+    ) -> Result<(), E> {
+        visitor(self.prefix.values(), self.prefix.len())?;
+        // IntoIter keeps its original allocation after moving elements out.
+        visitor(self.values.as_slice(), self.values_capacity)
     }
 
     /// State allocations remain owned by the caller through the last emitted

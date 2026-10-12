@@ -414,6 +414,8 @@ where
         }
         .map_err(NativeSpoolError::Decode)?;
         drop(bytes);
+        let retained = codec::row_memory(&row, work)?;
+        codec::retain_reservation(&mut charge, retained, work.cx)?;
         let cursor = stage
             .start(row, row_index, &mut |event| {
                 native_event(work.cx, policy, evaluator, event)?;
@@ -427,9 +429,14 @@ where
                 SpillSetRowError::Control(error) => error,
                 SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
             })?;
-        // UNWIND retains one input and its evaluated list. Their reservation
-        // outlives every yielded element, including asynchronous appends; the
-        // cursor's payloads are dropped before its affine charge.
+        // Evaluation has finished, so its temporary workspace can be released.
+        // Preserve the initial cursor footprint through the entire expansion:
+        // it covers the original iterator allocation AND payloads moved into
+        // outputs, including asynchronous appends. Native work/scratch counts
+        // stay cumulative; only no-longer-resident byte admission is refunded.
+        let retained = codec::cursor_memory(&cursor, work)?;
+        codec::retain_reservation(&mut charge, retained, work.cx)?;
+        // The cursor's payloads are dropped before its affine charge.
         let mut state = (cursor, charge);
         row_index = row_index.checked_add(1).ok_or(SpillError::SizeOverflow)?;
         loop {

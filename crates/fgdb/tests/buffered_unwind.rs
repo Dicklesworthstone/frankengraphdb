@@ -30,6 +30,39 @@ use std::task::{Context, Poll};
 const WORK: u64 = 1_000_000_000;
 const SCRATCH_BYTES: usize = 512 * 1024;
 const PAYLOAD_BYTES: usize = 8400;
+const UNWIND_MARKER: &str = "unwind-output-witness-";
+const BINARY_LEFT_MARKER: &str = "set-left-merge-witness";
+const BINARY_RIGHT_MARKER: &str = "set-right-merge-witness";
+
+// Canonical text inserts a memcomparable marker after each eight text bytes.
+// The first complete group stays contiguous; a longer raw string does not.
+fn text_witness(marker: &'static str) -> &'static [u8] {
+    &marker.as_bytes()[..8]
+}
+
+#[test]
+fn cancellation_witnesses_survive_text_encoding_and_every_short_page_alignment() {
+    for marker in [UNWIND_MARKER, BINARY_LEFT_MARKER, BINARY_RIGHT_MARKER] {
+        let encoded = CanonicalScalar::ucs_basic_text(&marker.repeat(16))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let witness = text_witness(marker);
+        // An unknown preceding row/frame length can put the first text group
+        // at any page offset. Repetition must leave a whole witness in at
+        // least one actual 63-byte append, even when earlier copies straddle.
+        for prefix in 0..63 {
+            let mut framed = vec![0; prefix];
+            framed.extend_from_slice(&encoded);
+            assert!(
+                framed
+                    .chunks(63)
+                    .any(|page| page.windows(witness.len()).any(|bytes| bytes == witness)),
+                "{marker}: no complete witness at page offset {prefix}"
+            );
+        }
+    }
+}
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -1451,7 +1484,6 @@ fn one_large_expansion_exceeds_scratch_capacity_without_retaining_emitted_rows()
 
 #[test]
 fn dropping_suspended_expansion_output_releases_all_row_and_cursor_reservations() {
-    const MARKER: &str = "unwind-output-witness-";
     let ((), report) = run_async_under_lab(0xc01d_4106, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
@@ -1459,11 +1491,11 @@ fn dropping_suspended_expansion_output_releases_all_row_and_cursor_reservations(
         let vfs = fixture(&commit).await;
         // The marker exists only in the UNWIND instruction, never in source
         // or WITH rows. Repeating it across several short pages guarantees
-        // one complete occurrence reaches an append. A second list element
+        // one complete eight-byte witness reaches an append. A second element
         // remains owned by the cursor during the first output's suspension.
         let text = format!(
             "MATCH (n) WHERE n.p=1 WITH n.q AS payload UNWIND ['{}','remaining-element'] AS item RETURN payload,item",
-            MARKER.repeat(16),
+            UNWIND_MARKER.repeat(16),
         );
         let prepared = prepare(&text, &GqlParameters::new());
         let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
@@ -1473,8 +1505,8 @@ fn dropping_suspended_expansion_output_releases_all_row_and_cursor_reservations(
         let (mut scratch, a) = file(&cx, &spill_pool).await;
         let (mut destination, b) = file(&cx, &spill_pool).await;
         let (mut auxiliary, _) = file(&cx, &spill_pool).await;
-        a.0.lock().unwrap().suspend_on = Some(MARKER.as_bytes());
-        b.0.lock().unwrap().suspend_on = Some(MARKER.as_bytes());
+        a.0.lock().unwrap().suspend_on = Some(text_witness(UNWIND_MARKER));
+        b.0.lock().unwrap().suspend_on = Some(text_witness(UNWIND_MARKER));
         let mut future = prepared.spool_in_view(
             &mut view,
             &cx,
@@ -1499,7 +1531,10 @@ fn dropping_suspended_expansion_output_releases_all_row_and_cursor_reservations(
                 assert_eq!(suspended.iter().filter(|&&seen| seen).count(), 1);
                 Poll::Ready(index)
             } else {
-                assert!(result.is_pending(), "UNWIND output append must be reached");
+                assert!(
+                    result.is_pending(),
+                    "UNWIND output append must be reached: {result:?}"
+                );
                 Poll::Pending
             }
         })
@@ -1517,8 +1552,8 @@ fn dropping_suspended_expansion_output_releases_all_row_and_cursor_reservations(
 
 #[test]
 fn dropping_binary_execution_during_right_child_or_merge_releases_both_sides() {
-    const LEFT: &str = "set-left-merge-witness";
-    const RIGHT: &str = "set-right-merge-witness";
+    const LEFT: &str = BINARY_LEFT_MARKER;
+    const RIGHT: &str = BINARY_RIGHT_MARKER;
     let ((), report) = run_async_under_lab(0xc01d_4305, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
@@ -1543,11 +1578,11 @@ fn dropping_binary_execution_during_right_child_or_merge_releases_both_sides() {
             let (mut auxiliary, _) = file(&cx, &spill_pool).await;
             for backing in [&a, &b] {
                 let mut state = backing.0.lock().unwrap();
-                state.suspend_on = Some(RIGHT.as_bytes());
-                // No child contains BOTH markers. The first physical page
+                state.suspend_on = Some(text_witness(RIGHT));
+                // No child contains BOTH witnesses. The first physical page
                 // containing both can only be the binary merge output; no
                 // fragile sorter pass or write-occurrence count is assumed.
-                state.suspend_also_on = during_merge.then_some(LEFT.as_bytes());
+                state.suspend_also_on = during_merge.then_some(text_witness(LEFT));
             }
             let mut future = prepared.spool_in_view(
                 &mut view,
@@ -1579,7 +1614,7 @@ fn dropping_binary_execution_during_right_child_or_merge_releases_both_sides() {
                 } else {
                     assert!(
                         result.is_pending(),
-                        "binary suspension must be reached: {text}"
+                        "binary suspension must be reached: {text}: {result:?}"
                     );
                     Poll::Pending
                 }

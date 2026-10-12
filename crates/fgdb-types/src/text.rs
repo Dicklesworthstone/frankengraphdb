@@ -250,6 +250,13 @@ impl CanonicalText {
         self.sort_key.as_deref()
     }
 
+    /// Owned text and comparison-key storage, including unused capacity.
+    pub(crate) fn owned_heap_bytes(&self) -> Option<usize> {
+        self.text
+            .capacity()
+            .checked_add(self.sort_key.as_ref().map_or(0, Vec::capacity))
+    }
+
     /// Bytes defining collation equivalence under this value's pinned
     /// binding. Scalar `Eq` remains exact value identity (and therefore keeps
     /// original UTF-8 spelling); collation-aware predicates and constraints
@@ -848,6 +855,28 @@ mod tests {
     fn non_binary(text: &str, resolver: &impl CollationResolver) -> CanonicalText {
         CanonicalText::new_non_binary(text, binding(), resolver)
             .expect("test artifacts and resolver output are valid")
+    }
+
+    #[test]
+    fn owned_heap_bytes_counts_both_non_binary_allocations() {
+        let mut text = String::with_capacity(64);
+        text.push_str("abc");
+        let mut key = Vec::with_capacity(128);
+        key.extend_from_slice(&[u8::MAX - b'c', u8::MAX - b'b', u8::MAX - b'a']);
+        let expected = text.capacity() + key.capacity();
+        assert!(expected > text.len() + key.len());
+        let value = CanonicalText::from_ordered_scalar_parts(
+            text,
+            binding(),
+            key,
+            &TestResolver::available(),
+        )
+        .unwrap();
+        assert_eq!(value.owned_heap_bytes(), Some(expected));
+        assert_eq!(
+            crate::CanonicalScalar::Text(value).owned_heap_bytes(),
+            Some(expected)
+        );
     }
 
     #[test]

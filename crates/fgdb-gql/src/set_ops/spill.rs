@@ -10,7 +10,8 @@ use super::{
     projection,
 };
 use crate::algebra::{
-    GlaOperator, GraphValueOrder, GraphValueRow, MAX_PATTERN_VERTICES, PreparedGraphPattern,
+    GlaOperator, GraphValue, GraphValueOrder, GraphValueRow, MAX_PATTERN_VERTICES,
+    PreparedGraphPattern,
 };
 use crate::edge_stream::{AsyncEdgeJoinPlan, AsyncEdgeScanPlan, EdgeScanBuildError};
 use crate::scan_stream::{ScanKind, ScanSortTail};
@@ -688,6 +689,30 @@ pub struct SpillSetRows {
 }
 
 impl SpillSetRows {
+    /// Inspect retained values and their backing capacities without allocating
+    /// or charging native evaluator events. Capacity is in [`GraphValue`] cells.
+    /// Each callback names one owned allocation: a boxed row has capacity equal
+    /// to its length; UNWIND also reports its evaluated list's original `Vec`
+    /// capacity even after elements have moved out of the iterator.
+    ///
+    /// For memory admission, take this snapshot immediately after
+    /// [`SpillSetStage::start`] and before the first [`Self::next_with_control`].
+    /// Keep that initial bound through every emitted row's use, including
+    /// awaited encoding or scratch append: moved elements still own payload
+    /// admitted during start. A later visit sees only the remaining values and
+    /// cannot account for those outputs.
+    /// Visitor errors propagate unchanged and do not advance the cursor.
+    pub fn visit_retained_values<E>(
+        &self,
+        visitor: &mut impl FnMut(&[GraphValue], usize) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match &self.state {
+            StageRows::One(Some(row)) => visitor(row.values(), row.len()),
+            StageRows::One(None) => Ok(()),
+            StageRows::Unwind(rows) => rows.visit_retained_values(visitor),
+        }
+    }
+
     /// Produce the next occurrence and its remaining cursor, or finish.
     ///
     /// The host supplies a fresh output reservation on each call and charges
@@ -888,4 +913,119 @@ enum CompiledSource<'a> {
     Binary(SpillSetBinaryPlan),
     Cross(SpillSetCrossPlan),
     Aggregate(SpillSetAggregatePlan),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fgdb_types::{CanonicalScalar, VId};
+
+    fn retained_shape(cursor: &SpillSetRows) -> Vec<(usize, usize)> {
+        let mut shape = Vec::new();
+        cursor
+            .visit_retained_values(&mut |values, capacity| {
+                shape.push((values.len(), capacity));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        shape
+    }
+
+    #[test]
+    fn retained_values_inspect_owned_payload_without_copying_or_advancing() {
+        let mut bytes = Vec::with_capacity(4096);
+        bytes.extend_from_slice(b"abc");
+        let capacity = bytes.capacity();
+        let cursor = SpillSetRows {
+            state: StageRows::One(Some(GraphValueRow::from_owned_values(vec![
+                GraphValue::Scalar(CanonicalScalar::bytes(bytes).unwrap()),
+            ]))),
+        };
+        cursor
+            .visit_retained_values(&mut |values, backing_capacity| {
+                assert_eq!(backing_capacity, 1);
+                let [GraphValue::Scalar(value)] = values else {
+                    panic!("the complete original scalar must remain visible");
+                };
+                assert_eq!(value.owned_heap_bytes(), Some(capacity));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        let (row, cursor) = cursor
+            .next_with_control(&mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.values(),
+            &[GraphValue::Scalar(
+                CanonicalScalar::bytes(b"abc".to_vec()).unwrap()
+            )]
+        );
+        assert!(retained_shape(&cursor).is_empty());
+        assert!(
+            cursor
+                .next_with_control(&mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn retained_values_keep_original_unwind_backing_capacity_after_moves() {
+        let stage = SpillSetStage {
+            input: vec![GraphSetColumnType::Vertex],
+            columns: vec!["owner".into(), "item".into()],
+            types: vec![GraphSetColumnType::Vertex; 2],
+            operation: Operation::Unwind(GraphSetValue::Value(GraphValue::Vertices(
+                vec![VId(1), VId(2), VId(3)].into_boxed_slice(),
+            ))),
+            order: None,
+            distinct: false,
+            offset: 0,
+            count: None,
+        };
+        let mut cursor = stage
+            .start(
+                GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(99))]),
+                0,
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap();
+        let initial = retained_shape(&cursor);
+        assert_eq!(initial.len(), 2);
+        assert_eq!(initial[0], (1, 1));
+        assert_eq!(initial[1].0, 3);
+        let capacity = initial[1].1;
+        assert!(capacity >= 3);
+
+        let mut visits = 0;
+        assert_eq!(
+            cursor.visit_retained_values(&mut |_, _| {
+                visits += 1;
+                Err(17)
+            }),
+            Err(17)
+        );
+        assert_eq!(visits, 1);
+        assert_eq!(retained_shape(&cursor), initial);
+
+        for (remaining, value) in [(2, 1), (1, 2), (0, 3)] {
+            let (row, next) = cursor
+                .next_with_control(&mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.values(),
+                &[GraphValue::Vertex(VId(99)), GraphValue::Vertex(VId(value))]
+            );
+            cursor = next;
+            assert_eq!(retained_shape(&cursor), vec![(1, 1), (remaining, capacity)]);
+        }
+        assert!(
+            cursor
+                .next_with_control(&mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
+    }
 }

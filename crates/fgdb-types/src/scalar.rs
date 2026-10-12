@@ -388,6 +388,30 @@ impl CanonicalScalar {
         CanonicalBytes::new(value).map(Self::Bytes)
     }
 
+    /// Bytes of owned heap storage retained by this scalar, without allocating.
+    ///
+    /// Text counts both its `String` capacity and its optional sort-key capacity;
+    /// bytes count their `Vec` capacity, including unused space. A timestamp's
+    /// boxed zone identifier counts its exact byte length. Inline scalar data
+    /// and allocator bookkeeping are excluded. Returns `None` on size overflow.
+    pub fn owned_heap_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Text(value) => value.owned_heap_bytes(),
+            Self::Bytes(value) => Some(value.owned_heap_bytes()),
+            Self::Timestamp(value) => Some(value.zone().map_or(0, |zone| zone.identifier().len())),
+            Self::Null
+            | Self::Bool(_)
+            | Self::Int(_)
+            | Self::Decimal(_)
+            | Self::Float(_)
+            | Self::Date(_)
+            | Self::LocalTime(_)
+            | Self::Time(_)
+            | Self::LocalDateTime(_)
+            | Self::Duration(_) => Some(0),
+        }
+    }
+
     /// Fixed cross-type rank of the `STRICT_PORTABLE` profile, which is also
     /// the leading byte of the canonical encoding.
     pub(crate) fn type_rank(&self) -> u8 {
@@ -1586,6 +1610,55 @@ mod tests {
         let mut h = DefaultHasher::new();
         v.hash(&mut h);
         h.finish()
+    }
+
+    #[test]
+    fn owned_heap_bytes_counts_spare_byte_and_text_capacity() {
+        for payload in [b"".as_slice(), b"abc".as_slice()] {
+            let mut bytes = Vec::with_capacity(4096);
+            bytes.extend_from_slice(payload);
+            let capacity = bytes.capacity();
+            assert!(capacity > payload.len());
+            let scalar = CanonicalScalar::bytes(bytes).unwrap();
+            assert_eq!(scalar.owned_heap_bytes(), Some(capacity));
+            assert_eq!(
+                scalar.encode().unwrap(),
+                CanonicalScalar::bytes(payload.to_vec())
+                    .unwrap()
+                    .encode()
+                    .unwrap()
+            );
+        }
+
+        let mut text = String::with_capacity(1024);
+        text.push_str("abc");
+        let capacity = text.capacity();
+        let scalar = CanonicalScalar::Text(CanonicalText::from_owned_ucs_basic(text).unwrap());
+        assert_eq!(scalar.owned_heap_bytes(), Some(capacity));
+        assert_eq!(scalar, CanonicalScalar::ucs_basic_text("abc").unwrap());
+    }
+
+    #[test]
+    fn owned_heap_bytes_counts_only_boxed_timestamp_metadata() {
+        for scalar in [
+            CanonicalScalar::Null,
+            CanonicalScalar::Bool(true),
+            CanonicalScalar::Int(42),
+            CanonicalScalar::Timestamp(CanonicalTimestamp::offset_only(0, 0).unwrap()),
+        ] {
+            assert_eq!(scalar.owned_heap_bytes(), Some(0));
+        }
+        let scalar = CanonicalScalar::Timestamp(
+            CanonicalTimestamp::zoned(
+                1_735_689_600_123_456_789,
+                -5 * 60 * 60,
+                "America/New_York",
+                ObjectId([9; 32]),
+                &AVAILABLE_RESOLVER,
+            )
+            .unwrap(),
+        );
+        assert_eq!(scalar.owned_heap_bytes(), Some("America/New_York".len()));
     }
 
     #[test]
