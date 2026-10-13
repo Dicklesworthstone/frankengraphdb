@@ -1484,7 +1484,10 @@ impl<'a> Parser<'a> {
         if let Some(function) = function {
             self.advance()?;
             self.punct(b'(', "(")?;
-            self.scalar_concat(columns, depth + 1, program)?;
+            // An argument is a whole expression, comparisons and Boolean
+            // operators included (`toString(1 < 0)`, TCK TypeConversion4 [3]),
+            // exactly as inside parentheses.
+            self.scalar_boolean(columns, depth + 1, program)?;
             let spelled =
                 |names: [&str; 2]| names.iter().any(|name| function.eq_ignore_ascii_case(name));
             let text_op = if spelled(["UPPER", "TOUPPER"]) {
@@ -1530,13 +1533,13 @@ impl<'a> Parser<'a> {
                 if !sql {
                     self.punct(b',', ", or FROM")?;
                 }
-                self.scalar_concat(columns, depth + 1, program)?;
+                self.scalar_boolean(columns, depth + 1, program)?;
                 if sql {
                     self.word("FOR")?;
                 } else {
                     self.punct(b',', ",")?;
                 }
-                self.scalar_concat(columns, depth + 1, program)?;
+                self.scalar_boolean(columns, depth + 1, program)?;
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Bound(GraphIntegerOp::Substring), at);
             }
@@ -1545,14 +1548,14 @@ impl<'a> Parser<'a> {
                 return emit(program, ParsedOp::Unary(GraphIntegerUnary::Abs), at);
             }
             self.punct(b',', ",")?;
-            self.scalar_concat(columns, depth + 1, program)?;
+            self.scalar_boolean(columns, depth + 1, program)?;
             if function.eq_ignore_ascii_case("NULLIF") {
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Binary(GraphIntegerBinary::NullIf), at);
             }
             emit(program, ParsedOp::Coalesce, at)?;
             while self.take(b',')? {
-                self.scalar_concat(columns, depth + 1, program)?;
+                self.scalar_boolean(columns, depth + 1, program)?;
                 emit(program, ParsedOp::Coalesce, at)?;
             }
             self.punct(b')', ")")?;
