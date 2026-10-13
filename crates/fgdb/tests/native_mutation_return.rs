@@ -33,6 +33,7 @@ fn keys() -> DatabaseKeys {
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(L)),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(ID)),
         _ => None,
@@ -182,6 +183,74 @@ fn writes_after_with_target_the_row_and_return_its_captured_values() {
                 .unwrap()
                 .iter()
                 .all(|row| row.retired_at.is_some())
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// TCK Delete3: `DELETE p` deletes a matched path's relationships and nodes
+/// (refused while a node keeps another relationship); `DETACH DELETE p`
+/// deletes its nodes with every edge; a NULL OPTIONAL path deletes nothing.
+#[test]
+fn deleting_a_path_deletes_its_elements() {
+    let ((), report) = run_async_under_lab(0xa071_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = seed();
+        for id in [3, 4] {
+            batch.create_vertex(
+                VId(id),
+                vec![L],
+                vec![(ID, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        batch.add_edge(fgdb_types::EId(10), VId(1), VId(2), vec![]);
+        batch.add_edge(fgdb_types::EId(11), VId(2), VId(3), vec![]);
+        batch.add_edge(fgdb_types::EId(12), VId(2), VId(4), vec![]);
+        db.write(&commit, batch).await.unwrap();
+        let mut write = async |db: &mut Database<_>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+        };
+        let path = "p = (a:L {id: 1})-[:R]->()-[:R]->(c:L {id: 3})";
+        let frontier = db.frontier().unwrap();
+        // Node 2 keeps edge 12, so a plain DELETE of the path is refused.
+        assert!(
+            write(&mut db, &format!("MATCH {path} DELETE p"))
+                .await
+                .is_err()
+        );
+        assert_eq!(db.frontier().unwrap(), frontier);
+        write(
+            &mut db,
+            "OPTIONAL MATCH p = (:L {id: 9})-[:R]->() DETACH DELETE p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.frontier().unwrap(), frontier);
+        write(&mut db, &format!("MATCH {path} DETACH DELETE p"))
+            .await
+            .unwrap();
+        for (vid, live) in [(1, false), (2, false), (3, false), (4, true)] {
+            assert_eq!(db.vertex(VId(vid)).unwrap().is_some(), live, "vertex {vid}");
+        }
+        assert!(
+            db.edges().unwrap().is_empty(),
+            "every edge left with node 2"
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

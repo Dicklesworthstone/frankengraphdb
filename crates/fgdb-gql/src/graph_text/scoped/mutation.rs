@@ -430,7 +430,14 @@ impl<'a> Parser<'a> {
                         (variable, target, kind == crate::GraphSetColumnType::Vertex)
                     }
                     None => {
-                        let variable = if detach {
+                        // DELETE p and DETACH DELETE p name a matched path:
+                        // its elements are the targets (TCK Delete3).
+                        let path = deleting
+                            && matches!(self.current.kind,
+                                TokenKind::Word(word) if self.syntax.names_path(word));
+                        let variable = if path {
+                            self.name()?
+                        } else if detach {
                             self.variable()?
                         } else {
                             self.property_variable()?
