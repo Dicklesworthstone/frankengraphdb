@@ -191,6 +191,9 @@ impl AsyncSpillAggregatePlan {
 #[derive(Clone)]
 pub struct SpillAggregateDefinition {
     pub(crate) aggregate: Arc<PreparedGraphAggregate>,
+    // Address the stored projected row through the existing exact comparator.
+    // Lower once at preparation, never allocate sort metadata per comparison.
+    projected_ordering: Arc<[GraphAggregateOrder]>,
 }
 impl core::fmt::Debug for SpillAggregateDefinition {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -237,13 +240,6 @@ impl SpillAggregateDefinition {
     }
 
     fn from_physical(aggregate: PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
-        // External sort keys currently encode complete evaluation columns,
-        // not stored post-group expression cells. Physical pull support does
-        // not authorize that different host to ignore a projected sort order.
-        // This single admission covers graph and relational spill definitions.
-        if !aggregate.projected_ordering().is_empty() {
-            return Err(SpillAggregateBuildError::Unsupported);
-        }
         // Relational owners derive their schema from the real completed input,
         // including zero-column Values. Graph admission metadata is irrelevant
         // to this branch and must never manufacture a source or input width.
@@ -277,8 +273,22 @@ impl SpillAggregateDefinition {
         {
             return Err(SpillAggregateBuildError::Unsupported);
         }
+        let projected_ordering = aggregate
+            .projected_ordering()
+            .iter()
+            .map(|order| GraphAggregateOrder {
+                column: crate::GraphAggregateColumn::Aggregate(order.column),
+                descending: order.descending,
+                nulls: if order.nulls_first {
+                    crate::GraphNullPlacement::First
+                } else {
+                    crate::GraphNullPlacement::Last
+                },
+            })
+            .collect();
         Ok(Self {
             aggregate: Arc::new(aggregate),
+            projected_ordering,
         })
     }
 
@@ -323,8 +333,19 @@ impl SpillAggregateDefinition {
     pub fn has_precomputed_output(&self) -> bool {
         self.has_computed_output() || self.has_distinct_output()
     }
+    /// Evaluation-column ordering only. Use has_ordering() to decide whether
+    /// an external rank pass is required, including projected-result ordering.
     pub fn ordering(&self) -> &[GraphAggregateOrder] {
         self.aggregate.ordering()
+    }
+    pub fn has_ordering(&self) -> bool {
+        !self.ordering().is_empty() || self.has_projected_ordering()
+    }
+    /// Requires the already-evaluated visible row alongside its complete group.
+    /// compare_output() deliberately refuses this profile; use
+    /// compare_precomputed_output() without re-evaluating output expressions.
+    pub fn has_projected_ordering(&self) -> bool {
+        !self.projected_ordering.is_empty()
     }
     pub fn result_window(&self) -> (u64, Option<u64>) {
         self.aggregate.incremental_result_window()
@@ -344,6 +365,20 @@ impl SpillAggregateDefinition {
     ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
         if row.keys().len() != self.evaluation_key_columns().len()
             || row.values().len() != self.evaluation_aggregate_columns().len()
+        {
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_projected<E, C>(
+        &self,
+        row: &GraphAggregateRow,
+    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
+        if row.keys().len() != self.key_columns().len()
+            || row.values().len() != self.aggregate_columns().len()
         {
             return Err(GqlQueryError::Source(
                 GraphAggregateError::InvalidReductionInput,
@@ -390,6 +425,8 @@ impl SpillAggregateDefinition {
     /// The SAME exact comparator used by completed in-memory groups. Unsigned
     /// counts, wide signed sums and rational averages are never narrowed or
     /// compared by their serialization tags. Full ascending keys break ties.
+    /// A projected-order definition requires compare_precomputed_output();
+    /// complete cells alone cannot determine its rank and are refused.
     pub fn compare_output<E, C>(
         &self,
         left: &GraphAggregateRow,
@@ -398,6 +435,11 @@ impl SpillAggregateDefinition {
             VertexScanEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<core::cmp::Ordering, GqlQueryError<GraphAggregateError<E>, C>> {
+        if self.has_projected_ordering() {
+            return Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput,
+            ));
+        }
         self.check_complete(left)?;
         self.check_complete(right)?;
         left.compare_incremental_order(right, self.ordering(), &mut |event| {
@@ -408,9 +450,54 @@ impl SpillAggregateDefinition {
         ))
     }
 
+    /// Rank retained output cells, then the complete ascending grouping key.
+    /// The host must pair each complete group with the output it evaluated
+    /// once after HAVING. This checks all four schemas before any decisive
+    /// comparison; it does not certify provenance or re-evaluate expressions.
+    /// Both domains use the existing exact comparator, with no temporary row,
+    /// scalar cast, floating approximation or allocation during comparison.
+    /// Ordinary evaluation ordering remains unchanged when no projected order
+    /// was selected. DISTINCT equality is still compare_projected_output().
+    pub fn compare_precomputed_output<E, C>(
+        &self,
+        left: &GraphAggregateRow,
+        left_projected: &GraphAggregateRow,
+        right: &GraphAggregateRow,
+        right_projected: &GraphAggregateRow,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<core::cmp::Ordering, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.check_complete(left)?;
+        self.check_complete(right)?;
+        self.check_projected(left_projected)?;
+        self.check_projected(right_projected)?;
+        if self.has_projected_ordering() {
+            // A computed output has no grouping-key prefix. Thus an equal
+            // projected comparison reaches the ORIGINAL complete keys below,
+            // never a hidden or noninjective projected key as a tiebreak.
+            let order = left_projected
+                .compare_incremental_order(right_projected, &self.projected_ordering, &mut |event| {
+                    control(result_event(event))
+                })?
+                .ok_or(GqlQueryError::Source(
+                    GraphAggregateError::InvalidReductionInput,
+                ))?;
+            if order != core::cmp::Ordering::Equal {
+                return Ok(order);
+            }
+        }
+        left.compare_incremental_order(right, self.ordering(), &mut |event| {
+            control(result_event(event))
+        })?
+        .ok_or(GqlQueryError::Source(
+            GraphAggregateError::InvalidReductionInput,
+        ))
+    }
+
     /// Compare only projected visible cells for output DISTINCT. Equal values
-    /// retain their original representation; compare_output() separately picks
-    /// the first fully ranked group as each equivalence class's representative.
+    /// retain their original representation; the rank comparator separately
+    /// picks the first fully ranked group as each class's representative.
     pub fn compare_projected_output<E, C>(
         &self,
         left: &GraphAggregateRow,
@@ -419,15 +506,8 @@ impl SpillAggregateDefinition {
             VertexScanEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<core::cmp::Ordering, GqlQueryError<GraphAggregateError<E>, C>> {
-        if left.keys().len() != self.key_columns().len()
-            || left.values().len() != self.aggregate_columns().len()
-            || right.keys().len() != self.key_columns().len()
-            || right.values().len() != self.aggregate_columns().len()
-        {
-            return Err(GqlQueryError::Source(
-                GraphAggregateError::InvalidReductionInput,
-            ));
-        }
+        self.check_projected(left)?;
+        self.check_projected(right)?;
         left.compare_incremental_distinct(right, &mut |event| control(result_event(event)))?
             .ok_or(GqlQueryError::Source(
                 GraphAggregateError::InvalidReductionInput,

@@ -9,6 +9,9 @@ use super::super::sort::FrameOrder;
 use super::*;
 use std::cmp::Ordering;
 
+#[path = "aggregate_projected_order.rs"]
+mod projected_order;
+
 // Query-private scratch framing, not a durable result/scalar format. Keeping
 // two independently encoded rows avoids narrowing row-width or value-depth
 // admission by stuffing their cells into a larger canonical GraphValue.
@@ -219,6 +222,9 @@ impl FrameOrder for AggregateOrder<'_> {
                 return Ok(order);
             }
         }
+        if self.definition.has_projected_ordering() {
+            return self.compare_ranked_projected(left, right, work);
+        }
         let (left, right) = if self.definition.has_precomputed_output() {
             (
                 split_projected_frame(left)?.0,
@@ -357,7 +363,7 @@ where
     }
     // Equality grouping rearranges rows even without ORDER BY. Restore the
     // native complete-key order after deduplication before applying a window.
-    if (opened.definition.has_distinct_output() || !opened.definition.ordering().is_empty())
+    if (opened.definition.has_distinct_output() || opened.definition.has_ordering())
         && filtered.row_count() > 1
     {
         let mut comparator = AggregateOrder {

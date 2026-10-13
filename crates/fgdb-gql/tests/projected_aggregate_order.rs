@@ -3,9 +3,7 @@ use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::algebra::{
     GraphColumn, GraphPatternBuilder, GraphValue, GraphValueOrder, IntegerComparison,
 };
-use fgdb_gql::spill_aggregate::{
-    AsyncSpillAggregatePlan, SpillAggregateBuildError, SpillAggregatePlan,
-};
+use fgdb_gql::spill_aggregate::{AsyncSpillAggregatePlan, SpillAggregatePlan};
 use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError,
@@ -391,24 +389,41 @@ fn every_checkpoint_failure_is_retryable_and_zero_work_remains_a_refusal() {
 }
 
 #[test]
-fn consumers_that_cannot_preserve_projected_ranking_refuse_before_input() {
+fn spill_compilers_admit_projected_rank_while_incomplete_consumers_still_refuse() {
     let query = projection(native(0, None))
         .with_projected_order_by(&[order(0, true, false)])
         .unwrap();
     assert!(query.has_incremental_ranking());
     assert!(query.incremental_source_definition().is_none());
-    assert!(matches!(
-        SpillAggregatePlan::compile(&query),
-        Err(SpillAggregateBuildError::Unsupported)
-    ));
-    assert!(matches!(
-        AsyncSpillAggregatePlan::compile(&query),
-        Err(SpillAggregateBuildError::Unsupported)
-    ));
-    let values = data(&[(1, Some(5))]);
+    let synchronous = SpillAggregatePlan::compile(&query).unwrap();
+    let asynchronous = AsyncSpillAggregatePlan::compile(&query).unwrap();
+    let values = data(&[(1, Some(5)), (2, Some(9))]);
     let raw = execute(&native(0, None), &values, policy(), || Ok::<_, ()>(()))
         .unwrap()
         .value;
+    for definition in [synchronous.definition(), asynchronous.definition()] {
+        assert!(definition.has_projected_ordering());
+        assert!(definition.has_ordering());
+        assert!(definition.ordering().is_empty());
+        assert!(definition.has_precomputed_output());
+        let mut control = |_| Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(());
+        let a = definition.project_output(raw[0].clone(), &mut control).unwrap();
+        let b = definition.project_output(raw[1].clone(), &mut control).unwrap();
+        assert_eq!(
+            definition.compare_precomputed_output(&raw[0], &a, &raw[1], &b, &mut control).unwrap(),
+            std::cmp::Ordering::Greater
+        );
+        // A legacy raw-only consumer must fail, not silently use group order.
+        assert!(matches!(
+            definition.compare_output(&raw[0], &raw[1], &mut control),
+            Err(GqlQueryError::Source(GraphAggregateError::InvalidReductionInput))
+        ));
+        // The decisive first score cannot hide a malformed companion schema.
+        assert!(matches!(
+            definition.compare_precomputed_output(&raw[0], &a, &raw[1], &raw[1], &mut control),
+            Err(GqlQueryError::Source(GraphAggregateError::InvalidReductionInput))
+        ));
+    }
     assert!(
         query
             .project_incremental_output(&raw[0], &mut |_| Ok::<_, ()>(()))
