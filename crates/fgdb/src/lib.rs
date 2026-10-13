@@ -4985,6 +4985,13 @@ impl<V: Vfs + Clone> Database<V> {
         // basis that does not retain the superseded decoded payloads.
         let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)
             .expect("a healthy handle's frontier is on its own recovered chain");
+        // Trust publication (fgdb-ibbuq ruling, fgdb-l89gt): every object the
+        // handle's receipts hold was made durable before a root naming it was
+        // published, and objects are never removed, so the compacted
+        // publication skips re-reading and re-syncing them. A byte-identical
+        // compaction then costs only its root and manifest. The handle gives up
+        // its receipts here; if compaction fails, its next commit re-earns them
+        // from disk, the pre-ibbuq behaviour.
         let (mut snapshot, writer, receipts) = publish_and_snapshot(
             cx,
             &self.store,
@@ -4992,6 +4999,7 @@ impl<V: Vfs + Clone> Database<V> {
             writer,
             frontier,
             published_chain_hash,
+            std::mem::take(&mut self.receipts),
         )
         .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
@@ -5036,8 +5044,8 @@ impl<V: Vfs + Clone> Database<V> {
         self.heads.versions = versions;
         self.snapshot = Arc::new(snapshot);
         self.writer = writer;
-        // The old receipts describe the superseded generation. The ones the
-        // compacted publication earned describe the replacement exactly.
+        // The receipts now hold every durable object of both generations, and
+        // their root memo is the replacement root's.
         self.receipts = receipts;
         self.state = DatabaseState::Healthy {
             published_frontier: frontier,
@@ -5647,8 +5655,16 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         // publication syncs every object again and earns its own receipts.
         let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
             .expect("the fold's frontier is on the recovered chain it folded");
-        let (snapshot, writer, receipts) =
-            publish_and_snapshot(cx, store, keys, writer, frontier, published_chain_hash).await?;
+        let (snapshot, writer, receipts) = publish_and_snapshot(
+            cx,
+            store,
+            keys,
+            writer,
+            frontier,
+            published_chain_hash,
+            PublishReceipts::default(),
+        )
+        .await?;
         return Ok((snapshot, writer, heads, receipts));
     }
 
@@ -5938,8 +5954,16 @@ async fn rebuild<V: Vfs>(
     .await?;
     let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
         .expect("the fold's frontier is on the recovered chain it folded");
-    let (snapshot, writer, receipts) =
-        publish_and_snapshot(cx, store, keys, writer, frontier, published_chain_hash).await?;
+    let (snapshot, writer, receipts) = publish_and_snapshot(
+        cx,
+        store,
+        keys,
+        writer,
+        frontier,
+        published_chain_hash,
+        PublishReceipts::default(),
+    )
+    .await?;
     Ok((
         snapshot,
         writer,
@@ -6424,6 +6448,10 @@ async fn fold_stream<V: Vfs>(
 /// The receipts this publication earned come back with it, so the handle's
 /// first commit does not re-sync what this call just synced (fgdb-ibbuq).
 ///
+/// `receipts` seeds the publication: objects it already holds are durable
+/// under a published generation, so they are neither re-read nor re-synced.
+/// Open and recovery pass empty receipts and earn every object.
+///
 /// Type-erased because open, recovery and compaction all end here: a caller's
 /// `Send` proof stops at `dyn Future + Send` instead of descending through
 /// Strata publication (fgdb-a5y6m).
@@ -6434,6 +6462,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
     writer: BlockWriter,
     frontier: CommitSeq,
     published_chain_hash: Digest,
+    receipts: PublishReceipts,
 ) -> SendFuture<'a, Result<PublishedGeneration, RebuildError>> {
     Box::pin(publish_and_snapshot_inner(
         cx,
@@ -6442,6 +6471,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
         writer,
         frontier,
         published_chain_hash,
+        receipts,
     ))
 }
 
@@ -6452,6 +6482,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     writer: BlockWriter,
     frontier: CommitSeq,
     published_chain_hash: Digest,
+    receipts: PublishReceipts,
 ) -> Result<PublishedGeneration, RebuildError> {
     // Publish from a clone and hand the fold state back: the caller retains it
     // so later commits fold only their own template (fgdb-fujt). The strata
@@ -6471,7 +6502,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     // series, and put_root then re-read every block: a 900k-edge compaction
     // was 798 s of wall for 108 s of CPU. Nothing is reachable until the
     // root slot names the manifest, which the caller publishes after this.
-    let mut receipts = fgdb_strata::store::PublishReceipts::default();
+    let mut receipts = receipts;
     let mut batch = store.publication_batch(cx, &mut receipts, None)?;
     for block in &blocks {
         batch
