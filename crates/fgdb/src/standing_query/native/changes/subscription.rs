@@ -9,6 +9,8 @@
 
 use super::*;
 
+mod coalesced;
+
 /// An opaque, subscription-specific receipt. It acknowledges a complete frame,
 /// not an arbitrary caller-selected commit frontier. Cloning a receipt permits
 /// retrying an ACK; it does not create another delivery position.
@@ -22,6 +24,8 @@ pub struct SubscriptionReceipt {
 /// a delta is integrated exactly once into the acknowledged preceding bag.
 /// Rows use the same columns and exact signed weights as standing_native_bag.
 /// ORDER BY rank moves are deliberately not represented as bag differences.
+/// poll_coalesced may combine several consecutive commits into one delta;
+/// its from/frontier pair identifies the entire net transition being ACKed.
 pub struct SubscriptionBatch {
     receipt: SubscriptionReceipt,
     from: Option<CommitSeq>,
@@ -233,6 +237,8 @@ impl NativeSubscription {
     /// Return a complete replacement baseline, the FIRST unacknowledged
     /// successor, or None when caught up. With replay, later commits may be
     /// buffered behind this frame. Empty ticks still require acknowledgement.
+    /// A frame already selected by poll_coalesced is redelivered unchanged,
+    /// including its multi-commit range; changing poll modes cannot split it.
     ///
     /// Redelivery checks source ownership/health/cancellation, then shares the
     /// previously admitted frame, even if that frame has since left retention.
