@@ -245,6 +245,7 @@ pub use trail::GraphTrailCursor;
 pub use vertex_merge::{
     GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
     GraphVertexMergePolicy, GraphVertexMergeStats, PreparedGraphVertexMerge,
+    PreparedGraphVertexMergeRows,
 };
 pub use vertex_upsert::{
     GraphVertexReturnBinding, GraphVertexUpsertAction, GraphVertexUpsertBranch,

@@ -341,6 +341,30 @@ pub(crate) enum VertexMergeValueTemplate {
     Parameter { index: usize, at: usize },
 }
 
+/// A map value of a vertex MERGE step (fgdb-cpny9): a literal or parameter,
+/// or a column of the row the step runs over.
+#[derive(Clone)]
+pub(crate) enum VertexMergeRowValueTemplate {
+    Value(VertexMergeValueTemplate),
+    Column(usize),
+}
+
+/// A vertex MERGE step of a chained write (fgdb-cpny9), resolved: each map
+/// value is a literal, a parameter or a column of the row it runs over.
+#[derive(Clone)]
+pub(crate) struct PreparedGraphVertexMergeRowsText {
+    pub(crate) relation: RelationId,
+    pub(crate) labels: Vec<LabelId>,
+    pub(crate) properties: Vec<(PropertyKeyId, VertexMergeRowValueTemplate)>,
+    /// The carried row's column types; `None` for a statement's first write.
+    pub(crate) input: Option<Vec<crate::GraphSetColumnType>>,
+    /// Leading row columns the output keeps (the visible ones).
+    pub(crate) keep: usize,
+    pub(crate) parameters: Vec<crate::GqlParameterSpec>,
+    pub(crate) parameter_offsets: Vec<usize>,
+    pub(crate) end: usize,
+}
+
 /// Native bounded `MERGE (n[:Label...] {key:value,...})`. The same property
 /// values drive exact-equality MATCH predicates and the single-vertex creation
 /// template. This profile intentionally excludes relationship patterns and

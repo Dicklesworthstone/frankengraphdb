@@ -162,8 +162,9 @@ impl WriteTxn {
         use fgdb_gql::{
             GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
             GraphEdgeMergePolicy, GraphEdgeMergeQueryError, GraphEdgeMergeStats,
-            GraphInsertQueryError, GraphWriteChainError, GraphWriteChainStep,
-            GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStepReceipt,
+            GraphInsertQueryError, GraphVertexMergePolicy, GraphWriteChainError,
+            GraphWriteChainStep, GraphWriteProgramReceipt, GraphWriteProgramStats,
+            GraphWriteStepReceipt,
         };
         let source = |error| {
             GqlQueryError::Source(GraphWriteChainError::Insert(
@@ -345,6 +346,37 @@ impl WriteTxn {
                         receipts.push(receipt);
                         let stats = merged(&stats);
                         (stats, unreturned(&stats))
+                    }
+                    GraphWriteChainStep::VertexMerge(merge) => {
+                        let (stats, receipt, output) = workspace
+                            .txn
+                            .execute_graph_vertex_merges_over(
+                                database,
+                                cx,
+                                merge,
+                                GraphVertexMergePolicy::new(allowance.query)
+                                    .with_creation_limit(allowance.max_vertices),
+                                rows.take(),
+                                &mut allocate,
+                            )
+                            .map_err(|error| error.map_source(GraphWriteChainError::VertexMerge))?;
+                        receipts.push(receipt);
+                        let stats = GraphInsertStats {
+                            selection: stats.match_selection,
+                            evaluator: stats.evaluator,
+                            created_vertices: stats.created_vertices,
+                            created_edges: 0,
+                        };
+                        // Its rows are the next write's input, never results.
+                        let returning = GqlQueryExecution {
+                            value: output,
+                            rows: GqlExecutionStats {
+                                snapshot_records: stats.selection.snapshot_records,
+                                result_rows: 0,
+                            },
+                            evaluator: stats.evaluator,
+                        };
+                        (stats, returning)
                     }
                     GraphWriteChainStep::EdgeMergeQuery(query) => {
                         let (stats, returning) = workspace

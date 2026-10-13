@@ -104,10 +104,26 @@ impl core::fmt::Debug for GraphVertexMergeOutcome {
 pub enum GraphVertexMergeError<E, A> {
     Source(E),
     InvalidSourceStatistics,
-    InputSchema { row: usize, column: usize },
-    AmbiguousMatches { observed: u64 },
+    InputSchema {
+        row: usize,
+        column: usize,
+    },
+    AmbiguousMatches {
+        observed: u64,
+    },
     Creation(GraphInsertError<E, A>),
     AccountingOverflow,
+    /// A MERGE over input rows read NULL or a non-scalar from its row for a
+    /// property value (openCypher refuses a null MERGE property).
+    RowValue {
+        row: usize,
+        column: usize,
+    },
+    /// A MERGE over input rows could not build one row's MERGE.
+    RowMerge {
+        row: usize,
+        source: Box<crate::GraphVertexMergeTextError>,
+    },
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphVertexMergeError<E, A>
@@ -129,6 +145,11 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             Self::AccountingOverflow => {
                 f.write_str("MERGE cumulative resource accounting overflow")
             }
+            Self::RowValue { row, column } => write!(
+                f,
+                "MERGE row {row} column {column} is not a non-null scalar property value"
+            ),
+            Self::RowMerge { row, source } => write!(f, "MERGE row {row}: {source}"),
         }
     }
 }
@@ -139,6 +160,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
         match self {
             Self::Source(error) => Some(error),
             Self::Creation(error) => Some(error),
+            Self::RowMerge { source, .. } => Some(&**source),
             _ => None,
         }
     }
@@ -229,5 +251,115 @@ impl PreparedGraphVertexMerge {
             bytes.extend_from_slice(&definition);
         }
         bytes
+    }
+}
+
+/// One property value of a vertex MERGE over input rows (fgdb-cpny9).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum GraphVertexMergeRowValue {
+    /// A literal or bound parameter, the same for every row.
+    Bound(crate::GqlScalarParameter),
+    /// One column of the input row.
+    Column(usize),
+}
+
+/// A vertex MERGE over input rows: a step of a chained write (`MERGE (a:A)
+/// MERGE (b:B)`, `CREATE (x) MERGE (:X {k: v})`, fgdb-cpny9). Each row's
+/// property values form a tuple, and rows with equal tuples share one MERGE.
+/// A tuple no vertex matches creates exactly one. A tuple several distinct
+/// vertices match binds each of them, one output row apiece, as openCypher
+/// does. The output row is the input row's visible columns followed by the
+/// merged vertex.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PreparedGraphVertexMergeRows {
+    pub(crate) relation: RelationId,
+    pub(crate) labels: Vec<fgdb_delta_types::LabelId>,
+    /// In property-key order.
+    pub(crate) properties: Vec<(fgdb_delta_types::PropertyKeyId, GraphVertexMergeRowValue)>,
+    /// The input row's column types. `None` is the one empty row of a
+    /// statement's first write.
+    pub(crate) input: Option<Vec<crate::GraphSetColumnType>>,
+    /// Leading input columns the output keeps. Hidden reads after them are
+    /// the MERGE's own inputs, read by no later write.
+    pub(crate) keep: usize,
+}
+impl core::fmt::Debug for PreparedGraphVertexMergeRows {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphVertexMergeRows")
+            .field("properties", &self.properties.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PreparedGraphVertexMergeRows {
+    #[must_use]
+    pub const fn relation(&self) -> RelationId {
+        self.relation
+    }
+
+    /// The input row's column types; `None` for a statement's first write.
+    #[must_use]
+    pub fn input_column_types(&self) -> Option<&[crate::GraphSetColumnType]> {
+        self.input.as_deref()
+    }
+
+    /// The rows this MERGE runs over: `owned`, the previous write's rows, or
+    /// the one empty row of a first write. Owned rows must have the input
+    /// width, and a first write takes none.
+    pub fn input_rows<E, A>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+    ) -> Result<Vec<GraphValueRow>, GraphVertexMergeError<E, A>> {
+        match (&self.input, owned) {
+            (None, None) => Ok(vec![GraphValueRow::from_owned_values(Vec::new())]),
+            (Some(types), Some(rows)) => {
+                if let Some(row) = rows.iter().position(|row| row.len() != types.len()) {
+                    return Err(GraphVertexMergeError::InputSchema {
+                        row,
+                        column: types.len(),
+                    });
+                }
+                Ok(rows)
+            }
+            (Some(types), None) => Err(GraphVertexMergeError::InputSchema {
+                row: 0,
+                column: types.len(),
+            }),
+            (None, Some(_)) => Err(GraphVertexMergeError::InputSchema { row: 0, column: 0 }),
+        }
+    }
+
+    /// The property tuple of input row `at`, in property-key order. A NULL
+    /// or non-scalar row value refuses: openCypher cannot MERGE on null.
+    pub fn tuple<E, A>(
+        &self,
+        at: usize,
+        row: &GraphValueRow,
+    ) -> Result<Vec<fgdb_types::CanonicalScalar>, GraphVertexMergeError<E, A>> {
+        self.properties
+            .iter()
+            .map(|(_, value)| match value {
+                GraphVertexMergeRowValue::Bound(value) => Ok(value.value().clone()),
+                GraphVertexMergeRowValue::Column(column) => row
+                    .values()
+                    .get(*column)
+                    .and_then(crate::algebra::GraphValue::as_scalar)
+                    .filter(|value| !matches!(value, fgdb_types::CanonicalScalar::Null))
+                    .cloned()
+                    .ok_or(GraphVertexMergeError::RowValue {
+                        row: at,
+                        column: *column,
+                    }),
+            })
+            .collect()
+    }
+
+    /// One output row: the input row's kept columns, then the vertex.
+    #[must_use]
+    pub fn output_row(&self, row: &GraphValueRow, vertex: VId) -> GraphValueRow {
+        let mut values = row.values()[..self.keep.min(row.len())].to_vec();
+        values.push(crate::algebra::GraphValue::Vertex(vertex));
+        GraphValueRow::from_owned_values(values)
     }
 }

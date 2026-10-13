@@ -1746,6 +1746,41 @@ impl core::fmt::Debug for PreparedGraphText {
     }
 }
 
+/// Each declared parameter's admitted argument, in declaration order. A
+/// missing or mistyped argument refuses at its first use, and an argument no
+/// parameter names refuses at `end`.
+fn checked_parameter_values(
+    parameters: &[GqlParameterSpec],
+    offsets: &[usize],
+    end: usize,
+    arguments: &GqlParameters,
+) -> Result<Vec<GqlParameterValue>, GraphPatternTextError> {
+    // Signed client integers for SKIP/LIMIT parameters (fgdb-3dnpu).
+    let admitted = arguments.admit_unsigned(parameters);
+    let arguments: &GqlParameters = &admitted;
+    let mut values = Vec::new();
+    for (index, spec) in parameters.iter().enumerate() {
+        let at = offsets[index];
+        let value = arguments
+            .get(&spec.name)
+            .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
+        if !spec.parameter_type.accepts(value.parameter_type()) {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::ParameterTypeMismatch {
+                    expected: spec.parameter_type,
+                    found: value.parameter_type(),
+                },
+            ));
+        }
+        values.push(value);
+    }
+    if arguments.len() != values.len() {
+        return Err(error(end, GraphPatternTextErrorKind::UnexpectedArguments));
+    }
+    Ok(values)
+}
+
 impl PreparedGraphText {
     /// Prepare the bounded graph-pattern text profile. Keywords are ASCII
     /// case-insensitive; names are case-sensitive. RETURN defaults to ALL.
@@ -2108,33 +2143,12 @@ impl PreparedGraphText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<Vec<GqlParameterValue>, GraphPatternTextError> {
-        // Signed client integers for SKIP/LIMIT parameters (fgdb-3dnpu).
-        let admitted = arguments.admit_unsigned(&self.parameters);
-        let arguments: &GqlParameters = &admitted;
-        let mut values = Vec::new();
-        for (index, spec) in self.parameters.iter().enumerate() {
-            let at = self.parameter_offsets[index];
-            let value = arguments
-                .get(&spec.name)
-                .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
-            if !spec.parameter_type.accepts(value.parameter_type()) {
-                return Err(error(
-                    at,
-                    GraphPatternTextErrorKind::ParameterTypeMismatch {
-                        expected: spec.parameter_type,
-                        found: value.parameter_type(),
-                    },
-                ));
-            }
-            values.push(value);
-        }
-        if arguments.len() != values.len() {
-            return Err(error(
-                self.statement.len(),
-                GraphPatternTextErrorKind::UnexpectedArguments,
-            ));
-        }
-        Ok(values)
+        checked_parameter_values(
+            &self.parameters,
+            &self.parameter_offsets,
+            self.statement.len(),
+            arguments,
+        )
     }
 
     fn bind_values(

@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::insertion::{GraphInsertBuildError, GraphInsertVertex, PreparedGraphInsert};
-use crate::mutation_text::{VertexMergeValueTemplate, WriteReturnGroupTemplate};
+use crate::mutation_text::{
+    PreparedGraphVertexMergeRowsText, VertexMergeRowValueTemplate as RowValueTemplate,
+    VertexMergeValueTemplate, WriteReturnGroupTemplate,
+};
 use crate::set_text::{
     ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
 };
@@ -161,54 +164,7 @@ impl<'a> Parser<'a> {
                     return Err(MergeMapError::DuplicateProperty { at: key.at });
                 }
                 self.punct(b':', ":")?;
-                let at = self.current.at;
-                let operand = self.mutation_operand(&mut Vec::new())?;
-                let (filter, value) = match operand {
-                    Operand::Literal(value) => {
-                        if matches!(value.value(), CanonicalScalar::Null) {
-                            return Err(error(
-                                at,
-                                GraphPatternTextErrorKind::Expected(
-                                    "non-null MERGE property value",
-                                ),
-                            )
-                            .into());
-                        }
-                        (
-                            Number::Literal(GqlParameterValue::Scalar(value.clone())),
-                            VertexMergeValueTemplate::Bound(value),
-                        )
-                    }
-                    Operand::Number(Number::Literal(value)) => {
-                        let scalar = scalar(value.clone(), at)?;
-                        if matches!(scalar.value(), CanonicalScalar::Null) {
-                            return Err(error(
-                                at,
-                                GraphPatternTextErrorKind::Expected(
-                                    "non-null MERGE property value",
-                                ),
-                            )
-                            .into());
-                        }
-                        (
-                            Number::Literal(value),
-                            VertexMergeValueTemplate::Bound(scalar),
-                        )
-                    }
-                    Operand::Number(Number::Parameter(index)) => (
-                        Number::Parameter(index),
-                        VertexMergeValueTemplate::Parameter { index, at },
-                    ),
-                    Operand::Column(_) | Operand::Integer { .. } => {
-                        return Err(error(
-                            at,
-                            GraphPatternTextErrorKind::Expected(
-                                "scalar literal or parameter MERGE property value",
-                            ),
-                        )
-                        .into());
-                    }
-                };
+                let (filter, value) = self.merge_property_value()?;
                 properties.push(MergeProperty { key, filter, value });
                 if !self.take(b',')? {
                     break;
@@ -217,6 +173,57 @@ impl<'a> Parser<'a> {
             self.punct(b'}', "}")?;
         }
         Ok(properties)
+    }
+
+    /// One MERGE map value: a non-null literal or a parameter, as both the
+    /// exact-equality filter and the creation field.
+    fn merge_property_value(
+        &mut self,
+    ) -> Result<(Number, VertexMergeValueTemplate), MergeMapError> {
+        let at = self.current.at;
+        let operand = self.mutation_operand(&mut Vec::new())?;
+        Ok(match operand {
+            Operand::Literal(value) => {
+                if matches!(value.value(), CanonicalScalar::Null) {
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::Expected("non-null MERGE property value"),
+                    )
+                    .into());
+                }
+                (
+                    Number::Literal(GqlParameterValue::Scalar(value.clone())),
+                    VertexMergeValueTemplate::Bound(value),
+                )
+            }
+            Operand::Number(Number::Literal(value)) => {
+                let scalar = scalar(value.clone(), at)?;
+                if matches!(scalar.value(), CanonicalScalar::Null) {
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::Expected("non-null MERGE property value"),
+                    )
+                    .into());
+                }
+                (
+                    Number::Literal(value),
+                    VertexMergeValueTemplate::Bound(scalar),
+                )
+            }
+            Operand::Number(Number::Parameter(index)) => (
+                Number::Parameter(index),
+                VertexMergeValueTemplate::Parameter { index, at },
+            ),
+            Operand::Column(_) | Operand::Integer { .. } => {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected(
+                        "scalar literal or parameter MERGE property value",
+                    ),
+                )
+                .into());
+            }
+        })
     }
 
     fn upsert_branch_actions(
@@ -454,33 +461,62 @@ fn resolve_merge_template<'a>(
     parsed_properties: Vec<MergeProperty<'a>>,
     symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
 ) -> Result<PreparedGraphVertexMergeText, GraphVertexMergeTextError> {
-    let at = statement.len();
-    let mut builder = GraphPatternBuilder::new();
-    built(variable.at, builder.vertex(variable.text))?;
     let mut labels = Vec::new();
     for label in parsed_labels {
         let GraphSymbol::Label(label_id) = symbol(GraphSymbolKind::Label, label)? else {
             unreachable!("symbol domain checked by shared resolver")
         };
-        built(
-            label.at,
-            builder.filter(variable.text, VertexPredicate::HasLabel(label_id)),
-        )?;
-        labels.push(label_id);
+        labels.push((label_id, label.at));
     }
-    let mut filters = Vec::new();
     let mut properties = Vec::new();
     for property in parsed_properties {
         let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, property.key)? else {
             unreachable!("symbol domain checked by shared resolver")
         };
+        properties.push((key, property.filter, property.value));
+    }
+    merge_template(
+        statement,
+        relation,
+        (syntax.parameters, syntax.parameter_offsets),
+        variable,
+        &labels,
+        properties,
+    )
+}
+
+/// The MERGE template for resolved labels (with their source offsets) and
+/// properties: each property is an exact-equality predicate and the same
+/// creation field.
+fn merge_template(
+    statement: &str,
+    relation: RelationId,
+    (parameters, parameter_offsets): (Vec<GqlParameterSpec>, Vec<usize>),
+    variable: Name<'_>,
+    resolved_labels: &[(LabelId, usize)],
+    resolved: Vec<(PropertyKeyId, Number, VertexMergeValueTemplate)>,
+) -> Result<PreparedGraphVertexMergeText, GraphVertexMergeTextError> {
+    let at = statement.len();
+    let mut builder = GraphPatternBuilder::new();
+    built(variable.at, builder.vertex(variable.text))?;
+    let mut labels = Vec::with_capacity(resolved_labels.len());
+    for &(label, label_at) in resolved_labels {
+        built(
+            label_at,
+            builder.filter(variable.text, VertexPredicate::HasLabel(label)),
+        )?;
+        labels.push(label);
+    }
+    let mut filters = Vec::new();
+    let mut properties = Vec::new();
+    for (key, filter, value) in resolved {
         filters.push(BoundFilter::Property {
             variable: variable.text.to_owned(),
             key,
             comparison: IntegerComparison::Equal,
-            value: property.filter,
+            value: filter,
         });
-        properties.push((key, property.value));
+        properties.push((key, value));
     }
     labels.sort_unstable();
     properties.sort_by_key(|(key, _)| *key);
@@ -502,8 +538,8 @@ fn resolve_merge_template<'a>(
         scopes: Vec::new(),
         columns,
         ordering: Vec::new(),
-        parameters: syntax.parameters,
-        parameter_offsets: syntax.parameter_offsets,
+        parameters,
+        parameter_offsets,
         offset: Number::Literal(GqlParameterValue::UInt64(0)),
         count: None,
         distinct: false,
@@ -1310,6 +1346,355 @@ impl PreparedGraphVertexUpsertQueryText {
         let upsert = self.upsert.bind_parameters(arguments)?;
         let values = self.upsert.merge.selection.checked_arguments(arguments)?;
         self.returning.bind(upsert, &values)
+    }
+}
+
+impl<'a> Parser<'a> {
+    /// `MERGE ([v][:L ...] [{k: value, ...}])` as a chained write over `row`.
+    /// The variable is optional and must be new to the row. A value may read
+    /// the row: a scalar column by name, or a carried element's hidden read.
+    #[allow(clippy::type_complexity)]
+    fn vertex_merge_row_pattern(
+        &mut self,
+        row: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<
+        (
+            Option<Name<'a>>,
+            Vec<Name<'a>>,
+            Vec<(Name<'a>, RowValueTemplate)>,
+        ),
+        GraphVertexMergeTextError,
+    > {
+        self.word("MERGE")?;
+        self.punct(b'(', "(")?;
+        let variable = if matches!(self.current.kind, TokenKind::Word(_)) {
+            let name = self.name()?;
+            if row.iter().any(|(carried, _)| carried.text == name.text) {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::Expected("a MERGE variable the row does not carry"),
+                )
+                .into());
+            }
+            Some(name)
+        } else {
+            None
+        };
+        let mut labels: Vec<Name<'a>> = Vec::new();
+        while self.take(b':')? {
+            let label = self.name()?;
+            if labels.iter().any(|previous| previous.text == label.text) {
+                return Err(insert_error(
+                    label.at,
+                    GraphInsertBuildError::DuplicateLabel { vertex: 0 },
+                ));
+            }
+            labels.push(label);
+        }
+        let mut properties: Vec<(Name<'a>, RowValueTemplate)> = Vec::new();
+        if self.take(b'{')? {
+            loop {
+                if properties.len() >= crate::insertion::MAX_GRAPH_INSERT_FIELDS {
+                    return Err(insert_error(
+                        self.current.at,
+                        GraphInsertBuildError::TooManyFields {
+                            limit: crate::insertion::MAX_GRAPH_INSERT_FIELDS,
+                            observed: properties.len() + 1,
+                        },
+                    ));
+                }
+                let key = self.name()?;
+                if properties
+                    .iter()
+                    .any(|(previous, _)| previous.text == key.text)
+                {
+                    return Err(insert_error(
+                        key.at,
+                        GraphInsertBuildError::DuplicateProperty { declaration: 0 },
+                    ));
+                }
+                self.punct(b':', ":")?;
+                let value = match self.merge_row_column(row)? {
+                    Some(column) => RowValueTemplate::Column(column),
+                    None => {
+                        let (_, value) =
+                            self.merge_property_value()
+                                .map_err(|refusal| match refusal {
+                                    MergeMapError::Pattern(error) => {
+                                        GraphVertexMergeTextError::from(error)
+                                    }
+                                    MergeMapError::TooManyFields { at, observed } => insert_error(
+                                        at,
+                                        GraphInsertBuildError::TooManyFields {
+                                            limit: crate::insertion::MAX_GRAPH_INSERT_FIELDS,
+                                            observed,
+                                        },
+                                    ),
+                                    MergeMapError::DuplicateProperty { at } => insert_error(
+                                        at,
+                                        GraphInsertBuildError::DuplicateProperty { declaration: 0 },
+                                    ),
+                                })?;
+                        RowValueTemplate::Value(value)
+                    }
+                };
+                properties.push((key, value));
+                if !self.take(b',')? {
+                    break;
+                }
+            }
+            self.punct(b'}', "}")?;
+        }
+        self.punct(b')', ")")?;
+        if self.is_punct(b'-') || self.is_punct(b'<') {
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "a vertex MERGE, or a relationship MERGE between named row vertices",
+                ),
+            )
+            .into());
+        }
+        Ok((variable, labels, properties))
+    }
+
+    /// A MERGE map value that reads the carried row: a column by name, or
+    /// `a.key` of a carried element through its hidden read. A graph
+    /// element column is no property value.
+    fn merge_row_column(
+        &mut self,
+        row: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(None);
+        };
+        match self.lexer.clone().next()?.kind {
+            TokenKind::Punct(b'.') => return self.boundary_read(row.len()),
+            TokenKind::Punct(b'(') => return Ok(None),
+            _ => {}
+        }
+        let visible = self.visible_width(row);
+        let Some(column) = row[..visible]
+            .iter()
+            .position(|(name, _)| name.text == word)
+        else {
+            return Ok(None);
+        };
+        if !matches!(
+            row[column].1,
+            GraphSetColumnType::Scalar | GraphSetColumnType::Stored | GraphSetColumnType::Any
+        ) {
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::Expected("a scalar row value in a MERGE map"),
+            ));
+        }
+        self.advance()?;
+        Ok(Some(column))
+    }
+}
+
+impl PreparedGraphVertexMergeRowsText {
+    /// A vertex MERGE step of a chain. `from` is the row the previous write
+    /// left, or `None` when this MERGE is the statement's first write. The
+    /// continuation is returned when another write follows: its row is this
+    /// row's visible columns and the merged vertex, as `WITH *` would carry.
+    pub(crate) fn prepare_step<'a, R>(
+        statement: &'a str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+        from: Option<ChainContinuation<'a>>,
+    ) -> Result<(Self, Option<ChainContinuation<'a>>), GraphVertexMergeTextError>
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
+        let parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
+        let (mut parser, row, input) = match from {
+            Some(from) => {
+                let (_, types) = from.owned_columns();
+                let parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
+                (parser, from.row, Some(types))
+            }
+            None => (parser, Vec::new(), None),
+        };
+        parser.chain_write = true;
+        let keep = parser.visible_width(&row);
+        let (variable, parsed_labels, parsed_properties) = parser.vertex_merge_row_pattern(&row)?;
+        if parser.is_word("ON") || parser.is_word("SET") {
+            return Err(error(
+                parser.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "a chained vertex MERGE without ON or SET clauses",
+                ),
+            )
+            .into());
+        }
+        let continuation = if parser.at_chained_write()? {
+            let mut carried = row[..keep].to_vec();
+            if carried.len() >= MAX_PATTERN_VERTICES {
+                return Err(error(
+                    parser.current.at,
+                    GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                        dimension: crate::algebra::PatternLimitDimension::Columns,
+                        limit: MAX_PATTERN_VERTICES,
+                        observed: carried.len() + 1,
+                    }),
+                )
+                .into());
+            }
+            let name = variable.unwrap_or(Name {
+                text: Parser::anonymous_name(carried.len()),
+                at: parser.current.at,
+            });
+            carried.push((name, GraphSetColumnType::Vertex));
+            Some(ChainContinuation {
+                at: parser.current.at,
+                row: carried,
+                boundary: None,
+                parameters: parser.syntax.parameters.clone(),
+            })
+        } else {
+            parser.end()?;
+            None
+        };
+        let mut cache = BTreeMap::new();
+        let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
+            let key = (kind, name.text.to_owned());
+            if let Some(value) = cache.get(&key) {
+                return Ok(*value);
+            }
+            let value = resolve
+                .resolve_symbol(kind, name.text)
+                .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
+            if value.kind() != kind {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::WrongSymbolKind {
+                        expected: kind,
+                        found: value.kind(),
+                    },
+                ));
+            }
+            cache.insert(key, value);
+            Ok(value)
+        };
+        let mut labels = Vec::with_capacity(parsed_labels.len());
+        for label in parsed_labels {
+            let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)? else {
+                unreachable!("symbol domain checked by shared resolver")
+            };
+            labels.push(label);
+        }
+        let mut properties = Vec::with_capacity(parsed_properties.len());
+        for (key, value) in parsed_properties {
+            let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
+                unreachable!("symbol domain checked by shared resolver")
+            };
+            properties.push((key, value));
+        }
+        labels.sort_unstable();
+        properties.sort_by_key(|(key, _)| *key);
+        Ok((
+            Self {
+                relation,
+                labels,
+                properties,
+                input,
+                keep,
+                parameters: parser.syntax.parameters,
+                parameter_offsets: parser.syntax.parameter_offsets,
+                end: statement.len(),
+            },
+            continuation,
+        ))
+    }
+
+    pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        &self.parameters
+    }
+
+    /// The column types of the row this step reads; `None` for a first write.
+    pub(crate) fn input_column_types(&self) -> Option<&[GraphSetColumnType]> {
+        self.input.as_deref()
+    }
+
+    /// Bind with exactly the arguments this step names.
+    pub(crate) fn bind_parameters(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<crate::PreparedGraphVertexMergeRows, GraphVertexMergeTextError> {
+        use crate::vertex_merge::GraphVertexMergeRowValue;
+        let values = crate::graph_text::checked_parameter_values(
+            &self.parameters,
+            &self.parameter_offsets,
+            self.end,
+            arguments,
+        )?;
+        let mut properties = Vec::with_capacity(self.properties.len());
+        for (key, value) in &self.properties {
+            properties.push((
+                *key,
+                match value {
+                    RowValueTemplate::Column(column) => GraphVertexMergeRowValue::Column(*column),
+                    RowValueTemplate::Value(VertexMergeValueTemplate::Bound(value)) => {
+                        GraphVertexMergeRowValue::Bound(value.clone())
+                    }
+                    RowValueTemplate::Value(VertexMergeValueTemplate::Parameter { index, at }) => {
+                        let value = scalar(values[*index].clone(), *at)?;
+                        if matches!(value.value(), CanonicalScalar::Null) {
+                            return Err(error(
+                                *at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "non-null MERGE property value",
+                                ),
+                            )
+                            .into());
+                        }
+                        GraphVertexMergeRowValue::Bound(value)
+                    }
+                },
+            ));
+        }
+        Ok(crate::PreparedGraphVertexMergeRows {
+            relation: self.relation,
+            labels: self.labels.clone(),
+            properties,
+            input: self.input.clone(),
+            keep: self.keep,
+        })
+    }
+}
+
+impl crate::PreparedGraphVertexMergeRows {
+    /// The single MERGE of one property tuple (values in property-key order,
+    /// as [`Self::tuple`] reads them).
+    pub fn merge_for(
+        &self,
+        tuple: &[CanonicalScalar],
+    ) -> Result<PreparedGraphVertexMerge, GraphVertexMergeTextError> {
+        let variable = Name { text: "n", at: 0 };
+        let mut resolved = Vec::with_capacity(self.properties.len());
+        for ((key, _), value) in self.properties.iter().zip(tuple) {
+            let value = crate::GqlScalarParameter::new(value.clone())
+                .map_err(|_| error(0, GraphPatternTextErrorKind::ScalarLiteral))?;
+            resolved.push((
+                *key,
+                Number::Literal(GqlParameterValue::Scalar(value.clone())),
+                VertexMergeValueTemplate::Bound(value),
+            ));
+        }
+        let labels: Vec<_> = self.labels.iter().map(|label| (*label, 0)).collect();
+        let template = merge_template(
+            "",
+            self.relation,
+            (Vec::new(), Vec::new()),
+            variable,
+            &labels,
+            resolved,
+        )?;
+        bind_merge_values(&template, &[])
     }
 }
 

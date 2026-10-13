@@ -1276,10 +1276,12 @@ impl<'a> Parser<'a> {
             && matches!(lexer.next()?.kind, TokenKind::Punct(b'-' | b'<')))
     }
 
-    /// The next write of a chain this slice compiles: a CREATE, or a
-    /// relationship MERGE over the carried row.
+    /// The next write of a chain this slice compiles: a CREATE, or a vertex
+    /// or relationship MERGE over the carried row.
     pub(super) fn at_chained_write(&self) -> Result<bool, GraphPatternTextError> {
-        Ok(self.is_word("CREATE") || self.at_relationship_merge()?)
+        Ok(self.is_word("CREATE")
+            || (self.is_word("MERGE")
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))))
     }
 
     /// The continuation a chained WITH tail left, at the next write.

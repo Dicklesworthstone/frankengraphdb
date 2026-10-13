@@ -341,6 +341,207 @@ impl WriteTxn {
             Ok((proposal.stats, proposal.outcome))
         })
     }
+
+    /// A vertex MERGE over input rows: a chained write's step (fgdb-cpny9).
+    /// Rows with equal property tuples share one MERGE. Each distinct tuple
+    /// binds every vertex it selects, in identity order, or creates one.
+    /// Tuples run in first-row order and each creation stages before the
+    /// next tuple selects, so a later row sees an earlier row's vertex, as
+    /// openCypher's row-by-row MERGE does. That holds even when two
+    /// different tuples compare equal, such as `1` and `1.0`. The receipt
+    /// lists each tuple's outcomes. The rows are each input row's kept
+    /// columns followed by each of its vertices; each one, like each tuple,
+    /// takes one scratch entry.
+    pub(crate) fn execute_graph_vertex_merges_over<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        merge: &fgdb_gql::PreparedGraphVertexMergeRows,
+        policy: fgdb_gql::GraphVertexMergePolicy,
+        owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
+        mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> VertexMergeRowsResult<A> {
+        use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
+        use fgdb_gql::{
+            GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats,
+            GqlQueryError, GqlQueryPolicy, GraphVertexMergeError, GraphVertexMergeOutcome,
+            GraphVertexMergePolicy, GraphVertexMergeStats, GraphWriteStepReceipt,
+        };
+        let infrastructure = |error| GqlQueryError::Source(GraphVertexMergeError::Source(error));
+        self.ensure_database(database).map_err(infrastructure)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(infrastructure)?;
+        if live != self.basis {
+            return Err(infrastructure(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            }));
+        }
+        let rows = merge.input_rows(owned).map_err(GqlQueryError::Source)?;
+        cx.with_restriction(|| {
+            let mut used = GraphVertexMergeStats {
+                match_selection: GqlExecutionStats {
+                    snapshot_records: 0,
+                    result_rows: 0,
+                },
+                evaluator: GlaExecutionStats::default(),
+                created_vertices: 0,
+            };
+            // One scratch entry, within the statement's cumulative allowance.
+            let scratch = |used: &mut GraphVertexMergeStats| -> Result<
+                (),
+                TxnGqlError<GraphVertexMergeError<WriteTxnError, A>>,
+            > {
+                let observed = u128::from(used.evaluator.scratch_entries) + 1;
+                let limit = policy.query.evaluator.max_scratch_entries;
+                if observed > u128::from(limit) {
+                    return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                        dimension: GlaLimitDimension::ScratchEntries,
+                        limit,
+                        observed,
+                    }));
+                }
+                used.evaluator.scratch_entries = observed as u64;
+                Ok(())
+            };
+            let mut resolved: std::collections::BTreeMap<Vec<CanonicalScalar>, Vec<VId>> =
+                std::collections::BTreeMap::new();
+            let mut outcomes = Vec::new();
+            let mut created = Vec::new();
+            let mut output = Vec::new();
+            for (at, row) in rows.iter().enumerate() {
+                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                let tuple = merge.tuple(at, row).map_err(GqlQueryError::Source)?;
+                if !resolved.contains_key(&tuple) {
+                    scratch(&mut used)?;
+                    let single = merge.merge_for(&tuple).map_err(|source| {
+                        GqlQueryError::Source(GraphVertexMergeError::RowMerge {
+                            row: at,
+                            source: Box::new(source),
+                        })
+                    })?;
+                    // What the statement has left after the tuples so far.
+                    let rows_left = |limit: Option<u64>, spent: u64| {
+                        limit.map_or(u64::MAX, |limit| limit.saturating_sub(spent))
+                    };
+                    let allowance = GraphVertexMergePolicy::new(GqlQueryPolicy::new(
+                        rows_left(
+                            policy.query.rows.max_snapshot_records(),
+                            used.match_selection.snapshot_records,
+                        ),
+                        rows_left(
+                            policy.query.rows.max_result_rows(),
+                            used.match_selection.result_rows,
+                        ),
+                        policy
+                            .query
+                            .evaluator
+                            .max_work_units
+                            .saturating_sub(used.evaluator.work_units),
+                        policy
+                            .query
+                            .evaluator
+                            .max_scratch_entries
+                            .saturating_sub(used.evaluator.scratch_entries),
+                    ))
+                    .with_creation_limit(
+                        policy
+                            .max_created_vertices
+                            .saturating_sub(used.created_vertices),
+                    );
+                    // Every distinct match is bound (openCypher MERGE), never
+                    // refused as ambiguous.
+                    let proposal = collect_vertex_merge_output::<VertexMergeTargets, _, A, _>(
+                        &single,
+                        allowance,
+                        |pattern, allowance| {
+                            self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                        },
+                        &mut allocate,
+                        || cx.checkpoint(),
+                    )?;
+                    let stats = proposal.stats;
+                    used.match_selection.snapshot_records = used
+                        .match_selection
+                        .snapshot_records
+                        .saturating_add(stats.match_selection.snapshot_records);
+                    used.match_selection.result_rows = used
+                        .match_selection
+                        .result_rows
+                        .saturating_add(stats.match_selection.result_rows);
+                    used.evaluator.work_units = used
+                        .evaluator
+                        .work_units
+                        .saturating_add(stats.evaluator.work_units);
+                    used.evaluator.scratch_entries = used
+                        .evaluator
+                        .scratch_entries
+                        .saturating_add(stats.evaluator.scratch_entries);
+                    used.created_vertices =
+                        used.created_vertices.saturating_add(stats.created_vertices);
+                    let vertices = match proposal.creation {
+                        Some(creation) => {
+                            let mut vertices = Vec::new();
+                            let mut batch = WriteBatch::new(merge.relation());
+                            for intent in creation.into_intents() {
+                                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                                let GraphInsertIntent::Vertex {
+                                    vertex,
+                                    labels,
+                                    properties,
+                                } = intent
+                                else {
+                                    unreachable!("validated vertex MERGE contains no edge creation")
+                                };
+                                batch.create_vertex_values(vertex, labels, properties);
+                                created.push(vertex);
+                                outcomes.push(GraphVertexMergeOutcome::Created(vertex));
+                                vertices.push(vertex);
+                            }
+                            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                            // Preserve the insertion adapter's composition choice.
+                            let staged = if self
+                                .staged
+                                .iter()
+                                .all(|staged| staged.relation == merge.relation())
+                            {
+                                self.write(database, batch)
+                            } else {
+                                self.write_atomic(database, vec![batch])
+                            };
+                            staged.map_err(|error| {
+                                GqlQueryError::Source(GraphVertexMergeError::Creation(
+                                    GraphInsertError::Source(error),
+                                ))
+                            })?;
+                            vertices
+                        }
+                        None => {
+                            let matched = proposal.outcome.matched;
+                            outcomes.extend(
+                                matched
+                                    .iter()
+                                    .map(|vertex| GraphVertexMergeOutcome::Matched(*vertex)),
+                            );
+                            matched.into_iter().collect()
+                        }
+                    };
+                    resolved.insert(tuple.clone(), vertices);
+                }
+                for vertex in &resolved[&tuple] {
+                    scratch(&mut used)?;
+                    output.push(merge.output_row(row, *vertex));
+                }
+            }
+            Ok((
+                used,
+                GraphWriteStepReceipt::VertexMergeRows { outcomes, created },
+                output,
+            ))
+        })
+    }
 }
 
 // Both cardinality owners stage the collector's ordinary insertion proposal

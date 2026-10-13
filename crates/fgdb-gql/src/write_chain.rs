@@ -15,11 +15,12 @@
 
 use crate::insertion::PreparedGraphInsert;
 use crate::insertion_query_text::InsertReturnTemplate;
-use crate::mutation_text::EdgeMergeReturnTemplate;
+use crate::mutation_text::{EdgeMergeReturnTemplate, PreparedGraphVertexMergeRowsText};
 use crate::{
     GraphEdgeMergeQueryError, GraphEdgeMergeTextError, GraphInsertQueryError, GraphInsertTextError,
-    PreparedGraphEdgeMerge, PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeText,
-    PreparedGraphInsertQuery, PreparedGraphInsertText,
+    GraphVertexMergeError, GraphVertexMergeTextError, PreparedGraphEdgeMerge,
+    PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeText, PreparedGraphInsertQuery,
+    PreparedGraphInsertText, PreparedGraphVertexMergeRows,
 };
 
 /// One parsed write of a chain.
@@ -29,6 +30,9 @@ pub(crate) enum ChainTextStep {
     Insert(Box<(PreparedGraphInsertText, Option<InsertReturnTemplate>)>),
     /// A relationship MERGE over the previous write's rows (the last step).
     EdgeMerge(Box<(PreparedGraphEdgeMergeText, Option<EdgeMergeReturnTemplate>)>),
+    /// A vertex MERGE over the previous write's rows, or over one empty row
+    /// as the first write; any step but one with RETURN.
+    VertexMerge(Box<PreparedGraphVertexMergeRowsText>),
 }
 
 /// A parsed chain: two or more writes, each but the last with a (written or
@@ -54,10 +58,16 @@ impl core::fmt::Debug for PreparedGraphWriteChainText {
 pub enum GraphWriteChainTextError {
     Insert(GraphInsertTextError),
     EdgeMerge(GraphEdgeMergeTextError),
+    VertexMerge(GraphVertexMergeTextError),
 }
 impl From<GraphInsertTextError> for GraphWriteChainTextError {
     fn from(error: GraphInsertTextError) -> Self {
         Self::Insert(error)
+    }
+}
+impl From<GraphVertexMergeTextError> for GraphWriteChainTextError {
+    fn from(error: GraphVertexMergeTextError) -> Self {
+        Self::VertexMerge(error)
     }
 }
 impl From<GraphEdgeMergeTextError> for GraphWriteChainTextError {
@@ -75,6 +85,7 @@ impl core::fmt::Display for GraphWriteChainTextError {
         match self {
             Self::Insert(error) => error.fmt(f),
             Self::EdgeMerge(error) => error.fmt(f),
+            Self::VertexMerge(error) => error.fmt(f),
         }
     }
 }
@@ -83,6 +94,7 @@ impl core::error::Error for GraphWriteChainTextError {
         match self {
             Self::Insert(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
+            Self::VertexMerge(error) => Some(error),
         }
     }
 }
@@ -93,6 +105,7 @@ impl core::error::Error for GraphWriteChainTextError {
 pub enum GraphWriteChainError<E, A> {
     Insert(GraphInsertQueryError<E, A>),
     EdgeMerge(GraphEdgeMergeQueryError<E, A>),
+    VertexMerge(GraphVertexMergeError<E, A>),
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphWriteChainError<E, A>
@@ -101,6 +114,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
         match self {
             Self::Insert(error) => error.fmt(f),
             Self::EdgeMerge(error) => error.fmt(f),
+            Self::VertexMerge(error) => error.fmt(f),
         }
     }
 }
@@ -111,6 +125,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
         match self {
             Self::Insert(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
+            Self::VertexMerge(error) => Some(error),
         }
     }
 }
@@ -128,6 +143,9 @@ pub enum GraphWriteChainStep {
     EdgeMerge(Box<PreparedGraphEdgeMerge>),
     /// The last write, a relationship MERGE with RETURN.
     EdgeMergeQuery(Box<PreparedGraphEdgeMergeQuery>),
+    /// A vertex MERGE over the previous write's rows (or one empty row as
+    /// the first write). Its rows are the input row and the merged vertex.
+    VertexMerge(Box<PreparedGraphVertexMergeRows>),
 }
 
 impl core::fmt::Debug for GraphWriteChainStep {
@@ -137,6 +155,7 @@ impl core::fmt::Debug for GraphWriteChainStep {
             Self::Insert(_) => "Insert([REDACTED])",
             Self::EdgeMerge(_) => "EdgeMerge([REDACTED])",
             Self::EdgeMergeQuery(_) => "EdgeMergeQuery([REDACTED])",
+            Self::VertexMerge(_) => "VertexMerge([REDACTED])",
         })
     }
 }
