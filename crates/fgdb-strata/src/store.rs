@@ -2816,10 +2816,11 @@ impl RootAdmission {
     /// The canonical edge history this walk admitted: one row per content
     /// statement, keyed `(eid, created_at)`, exactly the collapse of the
     /// root's blocks in order. A writable open builds its writer from it
-    /// instead of validating every block a second time (fgdb-e8gr4).
+    /// instead of validating every block a second time (fgdb-e8gr4). Built
+    /// on each call from the walk's per-EId chains (fgdb-2n2a2).
     pub fn edge_statements(
         &self,
-    ) -> &std::collections::BTreeMap<(fgdb_types::EId, CommitSeq), crate::AdjacencyEntry> {
+    ) -> std::collections::BTreeMap<(fgdb_types::EId, CommitSeq), crate::AdjacencyEntry> {
         self.walk.history.statements()
     }
 }

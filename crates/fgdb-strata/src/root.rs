@@ -1838,11 +1838,51 @@ pub(crate) type CollapsedEdgeHistory = (
 
 #[derive(Debug, Default)]
 pub(crate) struct EdgeHistoryValidator {
-    /// One row per content STATEMENT, keyed `(eid, created_at)` — the FGSV V2
-    /// chain model applied to edges (fgdb-ls5b). Birth fields are immutable
-    /// across an EId's whole chain; `created_at` advances only at contiguity.
-    statements: std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry>,
+    /// One chain of content STATEMENTS per EId — the FGSV V2 chain model
+    /// applied to edges (fgdb-ls5b). Birth fields are immutable across an
+    /// EId's whole chain; `created_at` advances only at contiguity. Keyed by
+    /// EId alone because every question admission asks is about one EId's
+    /// chain: an entry costs one descent, not one to find its chain and
+    /// another to insert (fgdb-2n2a2, half of an open's main-task time).
+    chains: std::collections::BTreeMap<EId, EdgeChain>,
+    statements: usize,
     seen: usize,
+}
+
+/// One EId's content statements, ascending by `created_at`. Almost every EId
+/// carries exactly one, which holds no separate allocation.
+#[derive(Debug)]
+enum EdgeChain {
+    One(crate::AdjacencyEntry),
+    Many(Vec<crate::AdjacencyEntry>),
+}
+
+impl EdgeChain {
+    fn statements(&self) -> &[crate::AdjacencyEntry] {
+        match self {
+            Self::One(statement) => std::slice::from_ref(statement),
+            Self::Many(statements) => statements,
+        }
+    }
+
+    fn statements_mut(&mut self) -> &mut [crate::AdjacencyEntry] {
+        match self {
+            Self::One(statement) => std::slice::from_mut(statement),
+            Self::Many(statements) => statements,
+        }
+    }
+
+    fn insert(&mut self, at: usize, statement: crate::AdjacencyEntry) {
+        match self {
+            Self::One(first) => {
+                let mut statements = Vec::with_capacity(2);
+                statements.push(*first);
+                statements.insert(at, statement);
+                *self = Self::Many(statements);
+            }
+            Self::Many(statements) => statements.insert(at, statement),
+        }
+    }
 }
 
 impl EdgeHistoryValidator {
@@ -1886,98 +1926,102 @@ impl EdgeHistoryValidator {
                 dst: entry.dst,
                 created_at: entry.created_at,
             };
-            let key = (entry.eid, entry.created_at);
-            // Most EIds carry one statement, so first ask whether this one has
-            // any: a single narrow search. With none there is no restatement,
-            // predecessor or successor to check, and the entry costs that
-            // search plus the insert instead of four tree searches.
-            let chain_known = self
-                .statements
-                .range((entry.eid, CommitSeq(0))..=(entry.eid, CommitSeq(u64::MAX)))
-                .next()
-                .is_some();
-            if chain_known && let Some(existing) = self.statements.get(&key) {
-                // A restatement of one exact statement: birth fields must
-                // byte-match, and the only lawful change is live-to-retired.
-                if birth(existing) != birth(entry) {
-                    return Err(RootError::EdgeIdentityMismatch {
-                        eid: entry.eid,
-                        conflict: Box::new(EdgeIdentityConflict {
-                            expected: birth(existing),
-                            found: birth(entry),
-                        }),
-                    });
+            // Most EIds carry one statement: an unknown EId has no
+            // restatement, predecessor or successor to check, and costs only
+            // its insert.
+            let chain = match self.chains.entry(entry.eid) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(EdgeChain::One(*entry));
+                    self.statements += 1;
+                    continue;
                 }
-                if existing.retired_at.is_some() && entry.retired_at != existing.retired_at {
-                    return Err(RootError::EdgeRetirementMismatch {
-                        eid: entry.eid,
-                        expected: existing.retired_at,
-                        found: entry.retired_at,
-                    });
+                std::collections::btree_map::Entry::Occupied(slot) => slot.into_mut(),
+            };
+            let statements = chain.statements();
+            match statements.binary_search_by_key(&entry.created_at, |known| known.created_at) {
+                Ok(at) => {
+                    // A restatement of one exact statement: birth fields must
+                    // byte-match, and the only lawful change is
+                    // live-to-retired.
+                    let existing = statements[at];
+                    if birth(&existing) != birth(entry) {
+                        return Err(RootError::EdgeIdentityMismatch {
+                            eid: entry.eid,
+                            conflict: Box::new(EdgeIdentityConflict {
+                                expected: birth(&existing),
+                                found: birth(entry),
+                            }),
+                        });
+                    }
+                    if existing.retired_at.is_some() && entry.retired_at != existing.retired_at {
+                        return Err(RootError::EdgeRetirementMismatch {
+                            eid: entry.eid,
+                            expected: existing.retired_at,
+                            found: entry.retired_at,
+                        });
+                    }
+                    chain.statements_mut()[at] = *entry;
                 }
-            } else if chain_known {
-                // A NEW statement must extend its EId's chain contiguously —
-                // begin exactly where the predecessor retired (a gap is a
-                // resurrection, an overlap is aliasing) and carry the SAME
-                // topology, since (src, relation, dst) is immutable for the
-                // chain's whole life; only content versions advance
-                // (fgdb-ls5b, the FGSV V2 law on edges).
-                let predecessor = self
-                    .statements
-                    .range(..key)
-                    .next_back()
-                    .filter(|((eid, _), _)| *eid == entry.eid)
-                    .map(|(_, existing)| existing);
-                if let Some(predecessor) = predecessor
-                    && (predecessor.retired_at != Some(entry.created_at)
-                        || (predecessor.src, predecessor.relation, predecessor.dst)
-                            != (entry.src, entry.relation, entry.dst))
-                {
-                    return Err(RootError::EdgeIdentityMismatch {
-                        eid: entry.eid,
-                        conflict: Box::new(EdgeIdentityConflict {
-                            expected: birth(predecessor),
-                            found: birth(entry),
-                        }),
-                    });
-                }
-                let successor = self
-                    .statements
-                    .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
-                    .next()
-                    .filter(|((eid, _), _)| *eid == entry.eid)
-                    .map(|(_, existing)| existing);
-                if let Some(successor) = successor
-                    && (entry.retired_at != Some(successor.created_at)
-                        || (successor.src, successor.relation, successor.dst)
-                            != (entry.src, entry.relation, entry.dst))
-                {
-                    return Err(RootError::EdgeIdentityMismatch {
-                        eid: entry.eid,
-                        conflict: Box::new(EdgeIdentityConflict {
-                            expected: birth(entry),
-                            found: birth(successor),
-                        }),
-                    });
+                Err(at) => {
+                    // A NEW statement must extend its EId's chain contiguously
+                    // — begin exactly where the predecessor retired (a gap is
+                    // a resurrection, an overlap is aliasing) and carry the
+                    // SAME topology, since (src, relation, dst) is immutable
+                    // for the chain's whole life; only content versions
+                    // advance (fgdb-ls5b, the FGSV V2 law on edges).
+                    if let Some(predecessor) = at.checked_sub(1).map(|before| &statements[before])
+                        && (predecessor.retired_at != Some(entry.created_at)
+                            || (predecessor.src, predecessor.relation, predecessor.dst)
+                                != (entry.src, entry.relation, entry.dst))
+                    {
+                        return Err(RootError::EdgeIdentityMismatch {
+                            eid: entry.eid,
+                            conflict: Box::new(EdgeIdentityConflict {
+                                expected: birth(predecessor),
+                                found: birth(entry),
+                            }),
+                        });
+                    }
+                    if let Some(successor) = statements.get(at)
+                        && (entry.retired_at != Some(successor.created_at)
+                            || (successor.src, successor.relation, successor.dst)
+                                != (entry.src, entry.relation, entry.dst))
+                    {
+                        return Err(RootError::EdgeIdentityMismatch {
+                            eid: entry.eid,
+                            conflict: Box::new(EdgeIdentityConflict {
+                                expected: birth(entry),
+                                found: birth(successor),
+                            }),
+                        });
+                    }
+                    chain.insert(at, *entry);
+                    self.statements += 1;
                 }
             }
-            self.statements.insert(key, *entry);
         }
         Ok(())
     }
 
     /// The canonical collapsed history admitted so far, one row per content
-    /// statement: exactly what [`collapse_edge_history`] would rebuild from
-    /// the same blocks in the same order.
+    /// statement keyed `(eid, created_at)`: exactly what
+    /// [`collapse_edge_history`] would rebuild from the same blocks in the
+    /// same order. Built on request; admission itself never needs it.
     pub(crate) fn statements(
         &self,
-    ) -> &std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry> {
-        &self.statements
+    ) -> std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry> {
+        // Chains iterate in EId order and each is ascending by created_at,
+        // so the pairs arrive sorted and the map is bulk-built.
+        self.chains
+            .values()
+            .flat_map(EdgeChain::statements)
+            .map(|statement| ((statement.eid, statement.created_at), *statement))
+            .collect()
     }
 
     fn into_canonical(self) -> CollapsedEdgeHistory {
-        let superseded = self.seen - self.statements.len();
-        (self.statements, superseded)
+        let superseded = self.seen - self.statements;
+        (self.statements(), superseded)
     }
 }
 
@@ -2147,3 +2191,6 @@ pub fn patches_visible_at(root: &PartitionRoot, as_of: CommitSeq) -> Vec<usize> 
         .map(|(index, _)| index)
         .collect()
 }
+
+#[cfg(test)]
+mod edge_history_tests;

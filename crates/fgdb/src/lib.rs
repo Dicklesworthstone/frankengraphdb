@@ -5605,7 +5605,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         PARTITION,
         sealed_blocks,
         sealed_patches,
-        admission.edge_statements(),
+        &admission.edge_statements(),
         &blocks,
         &block_props,
         &patches,
