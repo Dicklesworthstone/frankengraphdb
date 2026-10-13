@@ -679,13 +679,30 @@ enum EdgeBinding<'a> {
     Input(usize),
     Edge,
     Property(Name<'a>),
-    Endpoint { start: bool },
-    EndpointProperty { start: bool, key: Name<'a> },
+    Endpoint {
+        start: bool,
+    },
+    EndpointProperty {
+        start: bool,
+        key: Name<'a>,
+    },
+    /// A property of the element in a row column, after the statement.
+    InputProperty {
+        column: usize,
+        key: Name<'a>,
+    },
 }
 impl EdgeBinding<'_> {
     fn same(self, other: Self) -> bool {
         match (self, other) {
             (Self::Input(old), Self::Input(new)) => old == new,
+            (
+                Self::InputProperty { column, key },
+                Self::InputProperty {
+                    column: other,
+                    key: other_key,
+                },
+            ) => column == other && key.text == other_key.text,
             (Self::Edge, Self::Edge) => true,
             (Self::Property(old), Self::Property(new)) => old.text == new.text,
             (Self::Endpoint { start: old }, Self::Endpoint { start: new }) => old == new,
@@ -778,6 +795,12 @@ impl<'a> ParsedEdgeReturn<'a> {
                         key: property(key)?,
                     }
                 }
+                EdgeBinding::InputProperty { column, key } => {
+                    GraphEdgeMergeBinding::InputProperty {
+                        column,
+                        key: property(key)?,
+                    }
+                }
             });
         }
         Ok(EdgeMergeReturnTemplate {
@@ -858,14 +881,30 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
         }
         if let Some(row) = self.row {
             // After WITH the row is the whole scope (fgdb-cpny9): a carried
-            // name is its column, and `a.key` of a carried element is its
-            // hidden read. MERGE changes no element the row carries, so that
-            // read is also the value after the statement.
+            // name is its column. `a.key` of a vertex or relationship the row
+            // carries reads its value after the statement; otherwise it is a
+            // carried element's hidden read.
             if call {
                 return Ok(None);
             }
             let mut lookahead = parser.lexer.clone();
             if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
+                if let Some(column) = row.iter().position(|(name, kind)| {
+                    name.text == word
+                        && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                }) {
+                    parser.name()?;
+                    parser.punct(b'.', ".")?;
+                    let key = parser.name()?;
+                    return self
+                        .returning
+                        .column(
+                            EdgeBinding::InputProperty { column, key },
+                            key,
+                            GraphSetColumnType::Stored,
+                        )
+                        .map(Some);
+                }
                 let key = lookahead.next()?;
                 if let TokenKind::Word(text) = key.kind
                     && let Some(column) = parser.boundary_read(row.len())?

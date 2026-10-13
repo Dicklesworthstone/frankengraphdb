@@ -1328,13 +1328,20 @@ fn vertex_merge_steps_apply_on_and_set_clauses_per_row() {
             assert_eq!(merged(&db, 21).1, vec![(P, stored(21)), (Q, stored(2))]);
             assert_eq!(db.edges().unwrap().len(), 1);
         }
-        // RETURN of a key the clauses write through a carried element, or of
-        // its metadata, an anonymous MERGE with clauses, and a SET of a row
-        // element refuse and publish nothing.
+        // The MERGE merges the very vertex the row carries: RETURN reads the
+        // carried element's property after the SET.
+        let same = write(
+            &mut db,
+            "MATCH (person:Person {born: 1}) MERGE (same:Person {born: 1}) SET same.q = 3 \
+             RETURN person.q AS q",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(same), [vec![int(3)]]);
+        // A carried element's metadata after the clauses, an anonymous MERGE
+        // with clauses, and a SET of a row element refuse and publish nothing.
         let frontier = db.frontier().unwrap();
         for refused in [
-            "MATCH (person:Person {born: 5}) MERGE (c:Copy {p: 4}) SET c.born = 9 \
-             RETURN person.born AS b",
             "MATCH (person:Person {born: 5}) MERGE (c:Copy {p: 4}) SET c.q = 9 \
              RETURN labels(person) AS l",
             "MATCH (person:Person) MERGE (:Copy {p: 4}) ON CREATE SET person.q = 1",
@@ -1436,6 +1443,21 @@ fn merge_steps_take_a_with_head() {
         .unwrap();
         assert_eq!(with_p(&db, COPY, 52), 1);
         assert_eq!(db.edges().unwrap().len(), 5);
+        // RETURN after a relationship MERGE step reads the carried endpoints'
+        // properties after the statement.
+        let carried = write(
+            &mut db,
+            "CREATE (a:Person {p: 70}), (b:Person {p: 71}) MERGE (a)-[:R]->(b) \
+             RETURN a.p AS x, b.p AS y",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = carried else {
+            unreachable!("a MERGE with RETURN answers rows")
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        assert_eq!(rows, [vec![int(70), int(71)]]);
+        assert_eq!(db.edges().unwrap().len(), 6);
         // A head no write follows, a WHERE after it and WITH * refuse and
         // publish nothing.
         let frontier = db.frontier().unwrap();

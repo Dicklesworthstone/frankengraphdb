@@ -481,7 +481,32 @@ impl WriteTxn {
                             })?;
                         receipts.push(receipt);
                         // RETURN's input: each bound column of each pair,
-                        // properties read after the statement.
+                        // properties read after the statement: the merged
+                        // vertex's, and a carried element's (ON/SET effects
+                        // included). A NULL column reads NULL.
+                        let read = |element: Option<ElementId>,
+                                    key|
+                         -> Result<
+                            GraphValue,
+                            TxnGqlError<GraphWriteChainError<WriteTxnError, A>>,
+                        > {
+                            let value = match element {
+                                None => None,
+                                Some(element) => workspace
+                                    .txn
+                                    .merge_return_property(database, element, key)
+                                    .map_err(chain)?,
+                            };
+                            match value {
+                                None => Ok(GraphValue::Scalar(CanonicalScalar::Null)),
+                                Some(value) => GraphValue::from_property_value(&value).ok_or(
+                                    GqlQueryError::Data(fgdb_gql::GraphIntegerError {
+                                        instruction: 0,
+                                        kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+                                    }),
+                                ),
+                            }
+                        };
                         let mut returned = Vec::with_capacity(pairs.len());
                         for (at, vertex) in pairs {
                             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
@@ -493,22 +518,23 @@ impl WriteTxn {
                                         .get(column)
                                         .cloned()
                                         .unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
-                                    GraphVertexMergeRowsBinding::Vertex => GraphValue::Vertex(vertex),
+                                    GraphVertexMergeRowsBinding::Vertex => {
+                                        GraphValue::Vertex(vertex)
+                                    }
                                     GraphVertexMergeRowsBinding::Property(key) => {
-                                        match workspace
-                                            .txn
-                                            .merged_vertex_property(database, vertex, key)
-                                            .map_err(chain)?
-                                        {
-                                            None => GraphValue::Scalar(CanonicalScalar::Null),
-                                            Some(value) => GraphValue::from_property_value(&value)
-                                                .ok_or(GqlQueryError::Data(
-                                                    fgdb_gql::GraphIntegerError {
-                                                        instruction: 0,
-                                                        kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
-                                                    },
-                                                ))?,
-                                        }
+                                        read(Some(ElementId::Vertex(vertex)), key)?
+                                    }
+                                    GraphVertexMergeRowsBinding::InputProperty { column, key } => {
+                                        let element = match input[at].values().get(column) {
+                                            Some(GraphValue::Vertex(carried)) => {
+                                                Some(ElementId::Vertex(*carried))
+                                            }
+                                            Some(GraphValue::Edge(carried)) => {
+                                                Some(ElementId::Edge(*carried))
+                                            }
+                                            _ => None,
+                                        };
+                                        read(element, key)?
                                     }
                                 });
                             }

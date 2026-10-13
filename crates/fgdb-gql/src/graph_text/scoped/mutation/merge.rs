@@ -1607,6 +1607,8 @@ enum RowsBinding<'a> {
     Input(usize),
     Vertex,
     Property(Name<'a>),
+    /// A property of the element in a row column, after the statement.
+    InputProperty(usize, Name<'a>),
 }
 
 /// RETURN after a vertex MERGE step (fgdb-cpny9): the row it read (names
@@ -1615,8 +1617,10 @@ enum RowsBinding<'a> {
 struct ParsedVertexRowsReturn<'r, 'a> {
     variable: Option<Name<'a>>,
     row: &'r [(Name<'a>, GraphSetColumnType)],
-    /// With ON/SET clauses, the property names they write: RETURN reads none
-    /// of them, nor any metadata, through a carried element.
+    /// With ON/SET clauses, the property names they write. A carried
+    /// element's properties read their final values (InputProperty), but its
+    /// labels(), keys() and properties() would read a hidden read from
+    /// before the clauses, so RETURN refuses them.
     written: Option<Vec<&'a str>>,
     bindings: Vec<(RowsBinding<'a>, GraphSetColumnType)>,
     projection: Vec<ReadProjectionTemplate>,
@@ -1644,6 +1648,10 @@ impl<'a> ParsedVertexRowsReturn<'_, 'a> {
                 (RowsBinding::Input(old), RowsBinding::Input(new)) => *old == new,
                 (RowsBinding::Vertex, RowsBinding::Vertex) => true,
                 (RowsBinding::Property(old), RowsBinding::Property(new)) => old.text == new.text,
+                (
+                    RowsBinding::InputProperty(old_column, old),
+                    RowsBinding::InputProperty(new_column, new),
+                ) => *old_column == new_column && old.text == new.text,
                 _ => false,
             })
         {
@@ -1677,6 +1685,12 @@ impl<'a> ParsedVertexRowsReturn<'_, 'a> {
                         unreachable!("symbol domain checked by shared resolver")
                     };
                     crate::GraphVertexMergeRowsBinding::Property(key)
+                }
+                RowsBinding::InputProperty(column, key) => {
+                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
+                        unreachable!("symbol domain checked by shared resolver")
+                    };
+                    crate::GraphVertexMergeRowsBinding::InputProperty { column, key }
                 }
             });
         }
@@ -1737,32 +1751,33 @@ impl<'a> ReturnLeaves<'a> for ParsedVertexRowsReturn<'_, 'a> {
                 .column(RowsBinding::Vertex, GraphSetColumnType::Vertex, at)
                 .map(Some);
         }
-        // `a.key` of a carried element is its hidden read; MERGE changes no
-        // element the row carries, so that read is the final value too,
-        // unless an ON/SET clause may write that key on a carried element
-        // the MERGE also merged.
+        let visible = parser.visible_width(self.row);
         if matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'.')) {
-            if let Some(written) = &self.written {
-                let mut lexer = parser.lexer.clone();
-                lexer.next()?;
-                if let TokenKind::Word(key) = lexer.next()?.kind
-                    && written.contains(&key)
-                {
-                    return Err(error(
+            // `a.key` of a vertex or relationship the row carries reads its
+            // value after the statement, ON/SET effects included: the MERGE
+            // may have merged that same element.
+            if let Some(column) = self.row[..visible].iter().position(|(name, kind)| {
+                name.text == word
+                    && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+            }) {
+                parser.advance()?;
+                parser.punct(b'.', ".")?;
+                let key = parser.name()?;
+                return self
+                    .column(
+                        RowsBinding::InputProperty(column, key),
+                        GraphSetColumnType::Stored,
                         at,
-                        GraphPatternTextErrorKind::Expected(
-                            "no RETURN read of a carried element's key that MERGE ON/SET writes",
-                        ),
-                    ));
-                }
+                    )
+                    .map(Some);
             }
+            // Otherwise a carried element's hidden read, if the row has one.
             let Some(column) = parser.boundary_read(self.row.len())? else {
                 return Ok(None);
             };
             let kind = self.row[column].1;
             return self.column(RowsBinding::Input(column), kind, at).map(Some);
         }
-        let visible = parser.visible_width(self.row);
         let Some(column) = self.row[..visible]
             .iter()
             .position(|(name, _)| name.text == word)
@@ -2004,9 +2019,10 @@ impl PreparedGraphVertexMergeRowsText {
             })
         } else {
             // A carried element the MERGE also merged would read stale
-            // through its hidden read, so RETURN (or a WITH head) may not
-            // read a property an ON/SET clause writes, nor labels(), keys()
-            // or properties() of a carried element.
+            // metadata through its hidden read, so after ON/SET clauses
+            // RETURN (or a WITH head) refuses labels(), keys() and
+            // properties() of a carried element. Its properties read final
+            // values.
             let written = parsed_actions.as_ref().map(|(on_match, on_create, after)| {
                 on_match
                     .iter()
