@@ -523,23 +523,24 @@ impl<'a> ParsedMutationReturn<'a> {
         let kind = row[index].1;
         if matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) {
             let mut lookahead = parser.lexer.clone();
-            if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.'))
-                && let key = lookahead.next()?
-                && let TokenKind::Word(text) = key.kind
-                && let Some(current) = parser.boundary_read(row.len())?
-            {
-                let key = Name { text, at: key.at };
-                return self
-                    .column(
-                        Binding::Property {
-                            target: index,
+            if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
+                let token = lookahead.next()?;
+                if let TokenKind::Word(text) = token.kind
+                    && let Some(current) = parser.boundary_read(row.len())?
+                {
+                    let key = Name { text, at: token.at };
+                    return self
+                        .column(
+                            Binding::Property {
+                                target: index,
+                                key,
+                                current,
+                            },
                             key,
-                            current,
-                        },
-                        key,
-                        GraphSetColumnType::Stored,
-                    )
-                    .map(Some);
+                            GraphSetColumnType::Stored,
+                        )
+                        .map(Some);
+                }
             }
         }
         let name = parser.name()?;
