@@ -43,6 +43,9 @@ pub enum GraphEdgeUpsertValue {
         properties: Vec<PropertyKeyId>,
         value: crate::GraphSetValue,
     },
+    /// A constant List value (fgdb-k3nub), evaluated when the statement
+    /// binds and written as it is.
+    Stored(fgdb_types::CanonicalPropertyValue),
 }
 impl core::fmt::Debug for GraphEdgeUpsertValue {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -54,7 +57,7 @@ impl GraphEdgeUpsertValue {
     pub fn literal(&self) -> Option<&GqlScalarParameter> {
         match self {
             Self::Literal(value) => Some(value),
-            Self::Expression { .. } | Self::Composite { .. } => None,
+            Self::Expression { .. } | Self::Composite { .. } | Self::Stored(_) => None,
         }
     }
 
@@ -75,6 +78,16 @@ impl GraphEdgeUpsertValue {
                 .evaluate_scalar_with_control(&inputs, control)
                 .map(GraphValue::Scalar);
         }
+        // A constant stored value (fgdb-k3nub) needs no evaluation. Binding
+        // admitted it through the stored bounds, so the error is impossible.
+        if let Self::Stored(value) = self {
+            return GraphValue::from_property_value(value).ok_or(
+                GraphIntegerEvaluationError::Value(crate::GraphIntegerError {
+                    instruction: 0,
+                    kind: crate::GraphIntegerErrorKind::StoredValueBounds,
+                }),
+            );
+        }
         control(crate::GlaExecutionEvent::ScratchEntry)
             .map_err(GraphIntegerEvaluationError::Control)?;
         let row = GraphValueRow::from_owned_values(inputs);
@@ -87,7 +100,7 @@ impl GraphEdgeUpsertValue {
                 &literal
             }
             Self::Composite { value, .. } => value,
-            Self::Expression { .. } => unreachable!("bytecode returned above"),
+            Self::Expression { .. } | Self::Stored(_) => unreachable!("returned above"),
         };
         crate::set_ops::evaluate_value(value, &row, 0, control).map_err(|error| match error {
             crate::set_ops::ProjectionFailure::Control(error) => {
@@ -445,6 +458,17 @@ impl PreparedGraphEdgeUpsert {
                         bytes.extend_from_slice(&(expression.len() as u64).to_be_bytes());
                         bytes.extend_from_slice(&expression);
                     }
+                    // Binding admitted the value through the stored format's
+                    // bounds, so it encodes; tag 5 marks the impossible
+                    // failure instead of a panic. Tag 2 is Composite's.
+                    GraphEdgeUpsertValue::Stored(value) => match value.encode() {
+                        Ok(encoded) => {
+                            bytes.push(4);
+                            bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                            bytes.extend_from_slice(&encoded);
+                        }
+                        Err(_) => bytes.push(5),
+                    },
                 }
             }
         }

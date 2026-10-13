@@ -418,14 +418,9 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Work a constant list value may spend when the statement binds. Binding is
-/// not a budgeted query, so a literal like range(1, 100000000) refuses here
-/// instead of allocating.
-const CONSTANT_LIST_EVENTS: u32 = 1 << 20;
-
-/// A MERGE branch's constant list value (fgdb-k3nub), evaluated once at
-/// binding. A scalar result is an ordinary assignment and a List the stored
-/// List. A map at any depth refuses, as CREATE's does (to_written_property).
+/// A vertex MERGE branch's constant list value (fgdb-k3nub): a scalar result
+/// is an ordinary assignment and a List the stored List; anything else
+/// refuses (Parser::constant_written_value).
 fn constant_list_action(
     key: fgdb_delta_types::PropertyKeyId,
     template: &ReadValueTemplate,
@@ -438,15 +433,7 @@ fn constant_list_action(
             crate::GraphMutationTextErrorKind::IntegerOperand,
         ),
     };
-    let value = return_projection::bind_read_value(template, values)?;
-    let row = crate::algebra::GraphValueRow::from_owned_values(Vec::new());
-    let mut remaining = CONSTANT_LIST_EVENTS;
-    let value = crate::set_ops::evaluate_value(&value, &row, 0, &mut |_| {
-        remaining = remaining.checked_sub(1).ok_or(())?;
-        Ok::<_, ()>(())
-    })
-    .map_err(|_| refused())?;
-    match value.to_written_property() {
+    match Parser::constant_written_value(template, values)? {
         Some(fgdb_types::CanonicalPropertyValue::Scalar(scalar)) => {
             Ok(GraphVertexUpsertAction::SetProperty {
                 key,

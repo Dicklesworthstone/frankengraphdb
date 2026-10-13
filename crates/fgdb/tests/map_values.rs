@@ -846,6 +846,24 @@ fn set_writes_list_values_as_stored_lists() {
         let people = first(&db);
         assert_eq!(people.len(), 4, "the refused MERGE created nothing");
         assert_eq!(people[3], vec![text("d"), list([text("p"), text("q")])]);
+        // A relationship MERGE branch takes a constant List too.
+        write(
+            &mut db,
+            cxs,
+            "MATCH (a:Person {name: 'a'}), (b:Person {name: 'b'}) \
+             MERGE (a)-[r:R]->(b) ON CREATE SET r.first = [1, 2]",
+            &empty,
+        )
+        .await
+        .expect("relationship MERGE ON CREATE list");
+        let text_query = "MATCH (a:Person)-[r:R]->(b:Person) RETURN r.first AS first";
+        assert_eq!(
+            cells(
+                db.query(&cx, text_query, &empty, symbols, policy())
+                    .expect(text_query)
+            ),
+            vec![vec![list([int(1), int(2)])]]
+        );
     });
 }
 
