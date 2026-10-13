@@ -398,39 +398,35 @@ impl<'a> Parser<'a> {
         // seventh token.
         let mut ahead = lexer.clone();
         let tail = [ahead.next()?.kind, ahead.next()?.kind, ahead.next()?.kind];
+        // Both spellings share one shape; the side that names a row binding
+        // decides which is the field.
         let field = match (tokens, tail) {
             (
                 [
-                    TokenKind::Word(element),
+                    TokenKind::Word(left),
                     TokenKind::Punct(b'.'),
                     TokenKind::Word(_),
                     TokenKind::Punct(b'='),
-                    TokenKind::Word(name),
+                    TokenKind::Word(right),
                 ],
-                [TokenKind::Punct(b'.'), TokenKind::Word(_), last],
-            ) => Some((name, element, true, last)),
-            (
                 [
-                    TokenKind::Word(name),
                     TokenKind::Punct(b'.'),
                     TokenKind::Word(_),
-                    TokenKind::Punct(b'='),
-                    TokenKind::Word(element),
+                    TokenKind::End | TokenKind::Word(_) | TokenKind::Punct(b')'),
                 ],
-                [TokenKind::Punct(b'.'), TokenKind::Word(_), last],
-            ) => Some((name, element, false, last)),
+            ) => {
+                let bound = |word: &str| {
+                    (self.read_row_bindings.iter()).position(|binding| binding.text == word)
+                };
+                match (bound(left), bound(right)) {
+                    (None, Some(row)) => Some((row, true)),
+                    (Some(row), None) => Some((row, false)),
+                    _ => None,
+                }
+            }
             _ => None,
         };
-        let bound =
-            |word: &str| (self.read_row_bindings.iter()).position(|binding| binding.text == word);
-        if let Some((name, element, property_first, last)) = field
-            && matches!(
-                last,
-                TokenKind::End | TokenKind::Word(_) | TokenKind::Punct(b')')
-            )
-            && bound(element).is_none()
-            && let Some(row) = bound(name)
-        {
+        if let Some((row, property_first)) = field {
             self.capacity(
                 self.predicates,
                 MAX_PATTERN_PREDICATES,
