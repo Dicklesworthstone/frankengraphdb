@@ -284,7 +284,8 @@ fn locate(statement: &str) -> Result<(usize, usize, SequenceSelector), GraphTemp
 #[derive(Clone)]
 enum AggregateTemplate {
     Direct(PreparedGraphAggregateText),
-    Pipeline(PreparedGraphPipelineAggregateText),
+    // Boxed: the pipeline's relational input outgrew the direct variant.
+    Pipeline(Box<PreparedGraphPipelineAggregateText>),
 }
 
 impl AggregateTemplate {
@@ -411,13 +412,13 @@ impl PreparedTemporalGraphAggregateText {
             .take_while(|token| !token.word("RETURN"))
             .any(|token| token.word("WITH"));
         let inner = if pipeline {
-            AggregateTemplate::Pipeline(
+            AggregateTemplate::Pipeline(Box::new(
                 PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
                     &blanked,
                     &inner_declarations,
                     resolve,
                 )?,
-            )
+            ))
         } else {
             AggregateTemplate::Direct(
                 PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
