@@ -24,6 +24,12 @@ pub enum GraphVertexUpsertAction {
         key: PropertyKeyId,
         value: GqlScalarParameter,
     },
+    /// A constant List value (fgdb-k3nub): a literal or a List parameter,
+    /// evaluated once when the statement binds and written as it is.
+    SetStored {
+        key: PropertyKeyId,
+        value: fgdb_types::CanonicalPropertyValue,
+    },
     /// Columns address `properties` in order, on the chosen vertex before
     /// this clause. Missing/masked fields are NULL. No ambient row or local
     /// comprehension binding is admitted. The entire input is frozen before
@@ -42,6 +48,7 @@ impl core::fmt::Debug for GraphVertexUpsertAction {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::SetProperty { .. } => f.write_str("SetProperty([REDACTED])"),
+            Self::SetStored { .. } => f.write_str("SetStored([REDACTED])"),
             Self::SetExpression { .. } => f.write_str("SetExpression([REDACTED])"),
             Self::SetLabel { present, .. } => f
                 .debug_struct("SetLabel")
@@ -196,6 +203,7 @@ fn validate_branch(
     for (at, action) in actions.iter().enumerate() {
         match action {
             GraphVertexUpsertAction::SetProperty { key, .. }
+            | GraphVertexUpsertAction::SetStored { key, .. }
             | GraphVertexUpsertAction::SetExpression { key, .. } => {
                 if !properties.insert(*key) {
                     return Err(GraphVertexUpsertBuildError::DuplicateProperty { branch });
@@ -304,6 +312,20 @@ impl PreparedGraphVertexUpsert {
                         bytes.push(1);
                         bytes.extend_from_slice(&label.0.to_be_bytes());
                         bytes.push(u8::from(*present));
+                    }
+                    GraphVertexUpsertAction::SetStored { key, value } => {
+                        bytes.push(3);
+                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                        // Binding admitted the value through the stored
+                        // format's bounds, so it encodes; tag 4 marks the
+                        // impossible failure instead of a panic.
+                        match value.encode() {
+                            Ok(encoded) => {
+                                bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                                bytes.extend_from_slice(&encoded);
+                            }
+                            Err(_) => bytes.push(4),
+                        }
                     }
                     GraphVertexUpsertAction::SetExpression {
                         key,

@@ -806,6 +806,46 @@ fn set_writes_list_values_as_stored_lists() {
         .await
         .unwrap();
         assert_eq!(first(&db)[1], vec![text("b"), list([text("p"), text("q")])]);
+        // MERGE branches take a constant List: a literal ON CREATE, a
+        // declared List parameter ON MATCH. A map inside refuses when the
+        // statement binds and commits nothing.
+        write(
+            &mut db,
+            cxs,
+            "MERGE (n:Person {name: 'd'}) ON CREATE SET n.first = ['m', 'n']",
+            &empty,
+        )
+        .await
+        .expect("MERGE ON CREATE list");
+        let program = PreparedGraphWriteScript::prepare_with_parameter_types(
+            "MERGE (n:Person {name: 'd'}) ON MATCH SET n.first = $tags",
+            R,
+            &[("tags", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&tags)
+        .unwrap();
+        db.execute_graph_write_program_returning_autocommit_engine_governed(
+            &txn,
+            &cx,
+            &commit,
+            &program,
+            GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000),
+        )
+        .await
+        .unwrap();
+        let refused = write(
+            &mut db,
+            cxs,
+            "MERGE (n:Person {name: 'e'}) ON CREATE SET n.first = [{k: 1}]",
+            &empty,
+        )
+        .await;
+        assert!(refused.is_err(), "{refused:?}");
+        let people = first(&db);
+        assert_eq!(people.len(), 4, "the refused MERGE created nothing");
+        assert_eq!(people[3], vec![text("d"), list([text("p"), text("q")])]);
     });
 }
 
