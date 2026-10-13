@@ -263,6 +263,8 @@ so a reader who greps anyway gets a true answer. `$?` is still the verdict.
 
 `cargo test` is a **hard gate**: it MUST exit `0` before any change is handed off or a bead is closed. The convenience wrapper `scripts/check.sh` runs `cargo fmt --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in order and stops on the first failure. **This project does not use GitHub Actions** (owner ruling, 2026-09-03; releases go through the `dsr` self-releaser instead). `.github/workflows/check.yml` still holds the hosted recipe and can be dispatched by hand, but nothing runs automatically, so "CI-enforced" means **locally proved**: `bash scripts/local_proof.sh` runs `scripts/check.sh` against the exact committed tree, refuses a dirty worktree, and writes a manifest binding the verdict to that commit and tree hash. That manifest is the verdict a landing cites. A green `scripts/check.sh` in a dirty tree is not one.
 
+**macOS:** Apple `ld` cannot link the `fgdb` lib test binary (its `__eh_frame` exceeds the 16 MB compact-unwind range), and the `fgdb-gql` one sits at that limit. Link through the toolchain's `ld64.lld` per invocation: `cargo --config .cargo/macos-lld.toml test -p fgdb --lib` (fgdb-jon4t).
+
 Beyond the bare gate, **every verification domain in §15 is a permanent CI gate** — semantics conformance, transaction-anomaly oracles, the crash-point matrix, format fuzzers, representation-equivalence, incremental correctness, and complexity-witness regression locks (an operator whose observed op-count exceeds its declared bound *fails CI*). A release may bypass a gate only with a public, expiring waiver recorded in the ledger.
 
 ### No toolchain? Push to `staging`, never `main` (owner ruling 2026-09-22)
