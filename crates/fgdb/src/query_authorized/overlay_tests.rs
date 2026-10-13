@@ -158,6 +158,7 @@ fn incumbent(
                     &mut control,
                 )?;
             }
+            tables.seal();
             tables.metadata(pattern.plan(), scope, &mut control)?;
         }
         execute_tables(tables, pattern, scope, policy, usage, &mut || {

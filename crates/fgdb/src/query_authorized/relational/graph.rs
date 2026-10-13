@@ -82,11 +82,11 @@ fn visit_at<Clock: FnMut() -> u64>(
     .map_err(|error| aggregate_error(error.map_source(GraphAggregateError::Source)))?;
     let result = query.execute_governed(
         tables.records,
-        tables.vertices.keys().copied(),
+        tables.vertices.iter().map(|&(vid, _)| vid),
         tables
             .edges
-            .values()
-            .map(|((_, from, relation, to), _)| (*from, *relation, *to)),
+            .iter()
+            .map(|&((_, from, relation, to), _)| (from, relation, to)),
         |vid, required| Ok(tables.matches(vid, required, scope)),
         |vid, key| Ok(tables.property(vid, key, scope)),
         usage.remaining(policy),

@@ -66,6 +66,7 @@ impl<V: Vfs + Clone> Database<V> {
                         })
                         .ok_or(GqlQueryError::IdentifiedEdgesRequired)??;
                 }
+                tables.seal();
                 tables.metadata(pattern.plan(), scope, &mut control)?;
             }
             execute_tables(tables, pattern, scope, policy, usage, &mut checkpoint)

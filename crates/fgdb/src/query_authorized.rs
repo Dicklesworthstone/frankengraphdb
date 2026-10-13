@@ -284,9 +284,14 @@ fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
     })
 }
 
+// Admitted records in visitor order, sorted by identity once sealed. Full-scan
+// visitors already yield ascending VIds and EIds, so sealing is one pass; a
+// sorted vector replaces per-record ordered-map inserts and lookups (fgdb-61p1n).
 struct Tables<'a> {
-    vertices: BTreeMap<VId, &'a VertexRow>,
-    edges: BTreeMap<EId, Edge<'a>>,
+    vertices: Vec<(VId, &'a VertexRow)>,
+    /// Whether `vertices` is strictly ascending, so endpoint checks can search it.
+    vertices_sealed: bool,
+    edges: Vec<Edge<'a>>,
     labels: BTreeMap<VId, Vec<GraphValue>>,
     types: BTreeMap<EId, CanonicalScalar>,
     property_maps: PropertyMaps,
@@ -329,6 +334,7 @@ impl<'a> Tables<'a> {
                 )
             })?;
         }
+        tables.seal();
         tables.metadata(plan, predicates, control)?;
         Ok(tables)
     }
@@ -385,13 +391,18 @@ impl<'a> Tables<'a> {
             };
             // The owner source hydrates only the endpoint rows a plan reads;
             // an authorized edge also needs both endpoints admitted.
+            let mut admitted = std::collections::BTreeSet::new();
             for &((_, src, _, dst), _) in &edges {
                 for vid in [src, dst] {
-                    if tables.vertices.contains_key(&vid) {
+                    if admitted.contains(&vid) {
                         continue;
                     }
                     if let Some(row) = source::find_vertex(snapshot, vid, at, scan)? {
+                        let before = tables.vertices.len();
                         tables.admit_vertex(row, predicates, node, control)?;
+                        if tables.vertices.len() > before {
+                            admitted.insert(vid);
+                        }
                     }
                 }
             }
@@ -399,19 +410,44 @@ impl<'a> Tables<'a> {
                 tables.admit_edge(edge, predicates, control)?;
             }
         }
+        tables.seal();
         tables.metadata(plan, predicates, control)?;
         Ok(Some(tables))
     }
 
     fn new() -> Self {
         Self {
-            vertices: BTreeMap::new(),
-            edges: BTreeMap::new(),
+            vertices: Vec::new(),
+            vertices_sealed: true,
+            edges: Vec::new(),
             labels: BTreeMap::new(),
             types: BTreeMap::new(),
             property_maps: PropertyMaps::default(),
             records: 0,
         }
+    }
+
+    /// Sort both tables by identity. A repeated identity keeps its last
+    /// admission, as the ordered-map insert this replaces did. Charges nothing:
+    /// every record was charged when it was admitted.
+    fn seal(&mut self) {
+        seal_by_key(&mut self.vertices, |&(vid, _)| vid);
+        self.vertices_sealed = true;
+        seal_by_key(&mut self.edges, |&((eid, ..), _)| eid);
+    }
+
+    fn vertex(&self, vid: VId) -> Option<&'a VertexRow> {
+        self.vertices
+            .binary_search_by_key(&vid, |&(vid, _)| vid)
+            .ok()
+            .map(|at| self.vertices[at].1)
+    }
+
+    fn edge(&self, eid: EId) -> Option<&Edge<'a>> {
+        self.edges
+            .binary_search_by_key(&eid, |&((eid, ..), _)| eid)
+            .ok()
+            .map(|at| &self.edges[at])
     }
 
     // Snapshot visitors and canonical transaction rows use identical masking
@@ -434,27 +470,34 @@ impl<'a> Tables<'a> {
             control(SourceEvent::SnapshotRecord)?;
             control(SourceEvent::ScratchEntry)?;
             self.records += 1;
-            self.vertices.insert(row.vid, row);
+            self.vertices_sealed &= self.vertices.last().is_none_or(|&(last, _)| last < row.vid);
+            self.vertices.push((row.vid, row));
         }
         Ok(())
     }
 
+    /// Endpoint admission is checked against the sealed vertex table; an edge
+    /// phase seals it first (a no-op pass when the visitor already sorted it).
     fn admit_edge(
         &mut self,
         edge: Edge<'a>,
         predicates: &PlannerPredicates,
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
     ) -> Result<(), Fault> {
-        let ((eid, src, relation, dst), _) = edge;
+        let ((_, src, relation, dst), _) = edge;
+        if !self.vertices_sealed {
+            seal_by_key(&mut self.vertices, |&(vid, _)| vid);
+            self.vertices_sealed = true;
+        }
         if predicates.allows_relation(relation)
-            && self.vertices.contains_key(&src)
-            && self.vertices.contains_key(&dst)
+            && self.vertex(src).is_some()
+            && self.vertex(dst).is_some()
         {
             control(SourceEvent::Work)?;
             control(SourceEvent::SnapshotRecord)?;
             control(SourceEvent::ScratchEntry)?;
             self.records += 1;
-            self.edges.insert(eid, edge);
+            self.edges.push(edge);
         }
         Ok(())
     }
@@ -468,7 +511,7 @@ impl<'a> Tables<'a> {
         // Resolve names only after both topology and metadata scopes apply.
         // A forbidden unmapped label/type cannot cause a data-dependent error.
         if plan.projects_labels() {
-            for row in self.vertices.values() {
+            for &(_, row) in &self.vertices {
                 control(SourceEvent::Work)?;
                 let mut labels = Vec::new();
                 for &label in &row.labels {
@@ -494,23 +537,23 @@ impl<'a> Tables<'a> {
             }
         }
         if plan.projects_types() {
-            for (&eid, ((_, _, relation, _), _)) in &self.edges {
+            for &((eid, _, relation, _), _) in &self.edges {
                 control(SourceEvent::Work)?;
                 let name = plan
                     .reverse_catalog
                     .as_deref()
-                    .and_then(|catalog| catalog.relations.get(relation))
-                    .ok_or_else(|| GqlQueryError::Source(ReadError::UnmappedRelation(*relation)))?;
+                    .and_then(|catalog| catalog.relations.get(&relation))
+                    .ok_or_else(|| GqlQueryError::Source(ReadError::UnmappedRelation(relation)))?;
                 let name = text(name, control).map_err(|error| match error {
                     Some(error) => error,
-                    None => GqlQueryError::Source(ReadError::UnmappedRelation(*relation)),
+                    None => GqlQueryError::Source(ReadError::UnmappedRelation(relation)),
                 })?;
                 control(SourceEvent::ScratchEntry)?;
                 self.types.insert(eid, name);
             }
         }
         if plan.projects_vertex_property_maps() {
-            for row in self.vertices.values() {
+            for &(_, row) in &self.vertices {
                 let map = property_maps::collect(
                     row.props.iter().map(|(key, value)| (*key, value)),
                     plan.reverse_catalog.as_deref(),
@@ -523,7 +566,7 @@ impl<'a> Tables<'a> {
             }
         }
         if plan.projects_edge_property_maps() {
-            for (&eid, (_, properties)) in &self.edges {
+            for &((eid, ..), properties) in &self.edges {
                 let map = property_maps::collect(
                     properties.iter().map(|(key, value)| (*key, value)),
                     plan.reverse_catalog.as_deref(),
@@ -539,7 +582,7 @@ impl<'a> Tables<'a> {
     }
 
     fn matches(&self, vid: VId, required: &[VertexPredicate], scope: &PlannerPredicates) -> bool {
-        self.vertices.get(&vid).is_some_and(|row| {
+        self.vertex(vid).is_some_and(|row| {
             required.iter().all(|predicate| {
                 predicate.matches_borrowed(
                     row.labels
@@ -563,7 +606,7 @@ impl<'a> Tables<'a> {
         if !scope.allows_property(key) {
             return None;
         }
-        let row = self.vertices.get(&vid)?;
+        let row = self.vertex(vid)?;
         row.props
             .binary_search_by_key(&key, |(key, _)| *key)
             .ok()
@@ -578,11 +621,30 @@ impl<'a> Tables<'a> {
         if !scope.allows_property(key) {
             return None;
         }
-        let (_, row) = self.edges.get(&eid)?;
+        let (_, row) = self.edge(eid)?;
         row.binary_search_by_key(&key, |(key, _)| *key)
             .ok()
             .map(|at| &row[at].1)
     }
+}
+
+/// Sort `items` by `key`, keeping the LAST of any repeated key (a map insert
+/// overwrites). Already strictly ascending input, a full scan's, is one pass.
+fn seal_by_key<T, K: Ord>(items: &mut Vec<T>, key: impl Fn(&T) -> K) {
+    if items.windows(2).all(|pair| key(&pair[0]) < key(&pair[1])) {
+        return;
+    }
+    // Stable, so a repeated key's admissions keep their order.
+    items.sort_by_key(|item| key(item));
+    let mut kept = 0;
+    for at in 0..items.len() {
+        if at + 1 < items.len() && key(&items[at]) == key(&items[at + 1]) {
+            continue;
+        }
+        items.swap(kept, at);
+        kept += 1;
+    }
+    items.truncate(kept);
 }
 
 // Reserve each copied catalog scalar and payload before constructing it.
@@ -659,8 +721,8 @@ fn execute_tables<Row: GlaOutput>(
 ) -> Governed<Row> {
     let result = pattern.plan().execute_governed_with_element_maps(
         tables.records,
-        tables.vertices.keys().copied(),
-        tables.edges.values().map(|(edge, _)| *edge),
+        tables.vertices.iter().map(|&(vid, _)| vid),
+        tables.edges.iter().map(|(edge, _)| *edge),
         |vid, required| Ok(tables.matches(vid, required, scope)),
         |vid, key| Ok(tables.property(vid, key, scope)),
         |eid, key| Ok(tables.edge_property(eid, key, scope)),
@@ -792,3 +854,7 @@ impl<V: Vfs + Clone> Database<V> {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "query_authorized/tables_tests.rs"]
+mod tables_tests;
