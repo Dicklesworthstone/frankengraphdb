@@ -119,7 +119,7 @@ impl WriteTxn {
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> VertexMergeBatchResult<A> {
         use fgdb_gql::{GqlQueryError, GraphVertexMergeError};
-        let infrastructure = |error| GqlQueryError::Source(GraphVertexMergeError::Staging(error));
+        let infrastructure = |error| GqlQueryError::Source(GraphVertexMergeError::Source(error));
         self.ensure_database(database).map_err(infrastructure)?;
         let live = database.frontier().map_err(WriteTxnError::from).map_err(infrastructure)?;
         if live != self.basis {

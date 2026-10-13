@@ -36,7 +36,11 @@ fn grant(rows: u64) -> Grant {
         relations: Scope::only([R, S]),
         properties: Scope::only([P]),
         rights: Rights::ReadWrite,
-        limits: QueryLimits { max_nodes: 100_000, max_work: 10_000_000, max_rows: rows },
+        limits: QueryLimits {
+            max_nodes: 100_000,
+            max_work: 10_000_000,
+            max_rows: rows,
+        },
         expires_at_ms: 10_000,
     }
 }
@@ -57,7 +61,9 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 fn prepared(text: &str) -> PreparedGraphEdgeUpsertQuery {
     PreparedGraphEdgeUpsertQueryText::prepare(text, S, symbols)
-        .unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
 }
 fn lab<F>(seed: u64, body: impl FnOnce(PurposeContexts) -> F + Send + 'static)
 where
@@ -81,7 +87,12 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx, secret: Option<Canonical
     db.write(cx, batch).await.unwrap();
     if let Some(secret) = secret {
         let mut batch = WriteBatch::new(R);
-        batch.add_edge(EId(13), VId(1), VId(2), vec![(P, CanonicalScalar::Int(7)), (SECRET, secret)]);
+        batch.add_edge(
+            EId(13),
+            VId(1),
+            VId(2),
+            vec![(P, CanonicalScalar::Int(7)), (SECRET, secret)],
+        );
         db.write(cx, batch).await.unwrap();
     }
 }
@@ -91,11 +102,9 @@ fn authorization(error: QueryFault) -> Error {
         | GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
             GraphEdgeUpsertError::Staging(WriteTxnError::Authorization(error)),
         ))
-        | GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
-            GraphEdgeUpsertError::Merge(fgdb_gql::GraphEdgeMergeError::Source(
-                WriteTxnError::Authorization(error),
-            )),
-        )) => error,
+        | GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(GraphEdgeUpsertError::Merge(
+            fgdb_gql::GraphEdgeMergeError::Source(WriteTxnError::Authorization(error)),
+        ))) => error,
         other => panic!("expected authorization refusal: {other:?}"),
     }
 }
@@ -105,38 +114,70 @@ fn projected_branches_read_final_state_and_hidden_payloads_never_enter_return() 
     lab(0xa9c1, |contexts| async move {
         let authority = authority();
         let token = authority.issue_at(&grant(1), NOW).unwrap();
-        let query = prepared(&format!("{HEAD} ON CREATE SET r.p=4 ON MATCH SET r.p=r.p+3 \
-            SET r.p=r.p*2 RETURN r.p AS value,r.secret AS hidden"));
+        let query = prepared(&format!(
+            "{HEAD} ON CREATE SET r.p=4 ON MATCH SET r.p=r.p+3 \
+            SET r.p=r.p*2 RETURN r.p AS value,r.secret AS hidden"
+        ));
         let mut matched_cost = None;
-        for secret in [None, Some(CanonicalScalar::Int(99)),
-            Some(CanonicalScalar::ucs_basic_text(&"x".repeat(32_000)).unwrap())] {
-            let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+        for secret in [
+            None,
+            Some(CanonicalScalar::Int(99)),
+            Some(CanonicalScalar::ucs_basic_text(&"x".repeat(32_000)).unwrap()),
+        ] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
             seed(&mut db, &contexts.commit(), secret.clone()).await;
             let vertices = db.vertices().unwrap();
             let before = db.frontier().unwrap();
             let expected = if secret.is_some() { 20 } else { 8 };
-            let (stats, outcome, result, completion) = db.execute_graph_edge_upsert_query_authorized(
-                &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-                "main", &query, policy(1), || NOW,
-            ).await.unwrap();
+            let (stats, outcome, result, completion) = db
+                .execute_graph_edge_upsert_query_authorized(
+                    &contexts.txn(),
+                    &contexts.query(),
+                    &contexts.commit(),
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    policy(1),
+                    || NOW,
+                )
+                .await
+                .unwrap();
             assert_eq!(outcome.created(), secret.is_none());
             assert_eq!(result.value.len(), 1);
-            assert_eq!(result.value[0].values(), &[
-                GraphValue::Scalar(CanonicalScalar::Int(expected)),
-                GraphValue::Scalar(CanonicalScalar::Null),
-            ]);
+            assert_eq!(
+                result.value[0].values(),
+                &[
+                    GraphValue::Scalar(CanonicalScalar::Int(expected)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ]
+            );
             assert!(result.evaluator.work_units > stats.evaluator.work_units);
             if secret.is_some() {
                 let costs = (result.rows, result.evaluator);
-                if let Some(prior) = matched_cost { assert_eq!(costs, prior); }
+                if let Some(prior) = matched_cost {
+                    assert_eq!(costs, prior);
+                }
                 matched_cost = Some(costs);
             }
             let mut expected_props = vec![(P, CanonicalScalar::Int(expected))];
-            if let Some(secret) = secret { expected_props.push((SECRET, secret)); }
-            assert_eq!(db.edge(outcome.edge().unwrap()).unwrap().unwrap().props, expected_props);
+            if let Some(secret) = secret {
+                expected_props.push((SECRET, secret));
+            }
+            assert_eq!(
+                db.edge(outcome.edge().unwrap()).unwrap().unwrap().props,
+                expected_props
+            );
             assert_eq!(db.vertices().unwrap(), vertices);
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
-            assert_eq!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq: db.frontier().unwrap() });
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: db.frontier().unwrap()
+                }
+            );
             assert_eq!(contexts.txn().outstanding_obligations(), 0);
         }
     });
@@ -147,34 +188,93 @@ fn final_row_budgets_do_not_charge_private_matches_and_late_projection_is_atomic
     lab(0xa9c2, |contexts| async move {
         let authority = authority();
         let token = authority.issue_at(&grant(0), NOW).unwrap();
-        let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
         seed(&mut db, &contexts.commit(), None).await;
         // Zero native and signed output rows do not suppress the actual write.
         let query = prepared(&format!("{HEAD} ON CREATE SET r.p=5 RETURN r.p LIMIT 0"));
-        let (_, _, rows, _) = db.execute_graph_edge_upsert_query_authorized(
-            &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-            "main", &query, policy(0), || NOW,
-        ).await.unwrap();
+        let (_, _, rows, _) = db
+            .execute_graph_edge_upsert_query_authorized(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &authority,
+                &token,
+                "main",
+                &query,
+                policy(0),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert!(rows.value.is_empty());
-        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
         for (signed, native) in [(0, 1), (1, 0)] {
             let token = authority.issue_at(&grant(signed), NOW).unwrap();
             let query = prepared(&format!("{HEAD} ON MATCH SET r.p=6 RETURN r.p"));
-            let error = db.execute_graph_edge_upsert_query_authorized(
-                &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-                "main", &query, policy(native), || NOW,
-            ).await.unwrap_err();
-            if signed == 0 { assert!(matches!(authorization(error), Error::LimitExceeded(_))); }
-            else { assert!(matches!(error, GqlQueryError::Rows(_)), "{error:?}"); }
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            let error = db
+                .execute_graph_edge_upsert_query_authorized(
+                    &contexts.txn(),
+                    &contexts.query(),
+                    &contexts.commit(),
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    policy(native),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            if signed == 0 {
+                assert!(matches!(authorization(error), Error::LimitExceeded(_)));
+            } else {
+                assert!(matches!(error, GqlQueryError::Rows(_)), "{error:?}");
+            }
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
         }
         let query = prepared(&format!("{HEAD} ON MATCH SET r.p=0 RETURN 10/r.p LIMIT 0"));
-        let error = db.execute_graph_edge_upsert_query_authorized(
-            &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-            "main", &query, policy(0), || NOW,
-        ).await.unwrap_err();
-        assert!(matches!(error, GqlQueryError::Source(GraphEdgeUpsertQueryError::Returning(_))), "{error:?}");
-        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+        let error = db
+            .execute_graph_edge_upsert_query_authorized(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &authority,
+                &token,
+                "main",
+                &query,
+                policy(0),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                GqlQueryError::Source(GraphEdgeUpsertQueryError::Returning(_))
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
     });
 }
 
@@ -182,25 +282,58 @@ fn final_row_budgets_do_not_charge_private_matches_and_late_projection_is_atomic
 fn preflight_and_attempted_fields_stay_authorized_even_with_empty_output() {
     lab(0xa9c3, |contexts| async move {
         let authority = authority();
-        let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
         seed(&mut db, &contexts.commit(), None).await;
-        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
-        let empty = prepared("MATCH (a)-[:S]->(b) WHERE a.p=999 MERGE (a)-[r:R]->(b) \
-            ON CREATE SET r.p=1 RETURN r.p LIMIT 0");
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let empty = prepared(
+            "MATCH (a)-[:S]->(b) WHERE a.p=999 MERGE (a)-[r:R]->(b) \
+            ON CREATE SET r.p=1 RETURN r.p LIMIT 0",
+        );
         for rights in [Rights::Read, Rights::Write] {
-            let token = authority.issue_at(&Grant { rights, ..grant(0) }, NOW).unwrap();
-            let error = db.execute_graph_edge_upsert_query_authorized(
-                &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-                "main", &empty, policy(0), || NOW,
-            ).await.unwrap_err();
+            let token = authority
+                .issue_at(&Grant { rights, ..grant(0) }, NOW)
+                .unwrap();
+            let error = db
+                .execute_graph_edge_upsert_query_authorized(
+                    &contexts.txn(),
+                    &contexts.query(),
+                    &contexts.commit(),
+                    &authority,
+                    &token,
+                    "main",
+                    &empty,
+                    policy(0),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
             assert_eq!(authorization(error), Error::PermissionDenied);
         }
-        let denied = Grant { relations: Scope::only([S]), ..grant(0) };
+        let denied = Grant {
+            relations: Scope::only([S]),
+            ..grant(0)
+        };
         let token = authority.issue_at(&denied, NOW).unwrap();
-        let error = db.execute_graph_edge_upsert_query_authorized(
-            &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-            "main", &empty, policy(0), || NOW,
-        ).await.unwrap_err();
+        let error = db
+            .execute_graph_edge_upsert_query_authorized(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &authority,
+                &token,
+                "main",
+                &empty,
+                policy(0),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
         assert_eq!(authorization(error), Error::ScopeDenied);
         let token = authority.issue_at(&grant(0), NOW).unwrap();
         for text in [
@@ -214,13 +347,30 @@ fn preflight_and_attempted_fields_stay_authorized_even_with_empty_output() {
             assert_eq!(authorization(error), Error::ScopeDenied);
             assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
         }
-        let (_, outcome, result, _) = db.execute_graph_edge_upsert_query_authorized(
-            &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-            "main", &empty, policy(0), || NOW,
-        ).await.unwrap();
+        let (_, outcome, result, _) = db
+            .execute_graph_edge_upsert_query_authorized(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &authority,
+                &token,
+                "main",
+                &empty,
+                policy(0),
+                || NOW,
+            )
+            .await
+            .unwrap();
         assert_eq!(outcome, GraphEdgeMergeOutcome::NoInput);
         assert!(result.value.is_empty());
-        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
     });
 }
 
@@ -229,22 +379,58 @@ fn ambiguous_pairs_and_parallel_matches_are_not_arbitrarily_selected() {
     lab(0xa9c4, |contexts| async move {
         let authority = authority();
         let token = authority.issue_at(&grant(10), NOW).unwrap();
-        let query = prepared(&format!("{HEAD} ON CREATE SET r.p=1 ON MATCH SET r.p=2 RETURN r.p"));
+        let query = prepared(&format!(
+            "{HEAD} ON CREATE SET r.p=1 ON MATCH SET r.p=2 RETURN r.p"
+        ));
         for parallel in [false, true] {
-            let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
             seed(&mut db, &contexts.commit(), Some(CanonicalScalar::Int(99))).await;
             let mut batch = WriteBatch::new(if parallel { R } else { S });
-            batch.add_edge(EId(14), VId(1), if parallel { VId(2) } else { VId(1) }, vec![]);
+            batch.add_edge(
+                EId(14),
+                VId(1),
+                if parallel { VId(2) } else { VId(1) },
+                vec![],
+            );
             db.write(&contexts.commit(), batch).await.unwrap();
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
-            let error = db.execute_graph_edge_upsert_query_authorized(
-                &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-                "main", &query, policy(10), || NOW,
-            ).await.unwrap_err();
-            assert!(matches!(error, GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
-                GraphEdgeUpsertError::Merge(_)
-            ))), "{error:?}");
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let error = db
+                .execute_graph_edge_upsert_query_authorized(
+                    &contexts.txn(),
+                    &contexts.query(),
+                    &contexts.commit(),
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    policy(10),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
+                        GraphEdgeUpsertError::Merge(_)
+                    ))
+                ),
+                "{error:?}"
+            );
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
         }
     });
 }
@@ -256,32 +442,80 @@ fn late_expiry_and_each_native_allowance_refuse_before_publication() {
         let token = authority.issue_at(&grant(1), NOW).unwrap();
         let query = prepared(&format!("{HEAD} ON CREATE SET r.p=9 RETURN r.p"));
         let calls = AtomicU64::new(0);
-        let mut control = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+        let mut control = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
         seed(&mut control, &contexts.commit(), None).await;
-        control.execute_graph_edge_upsert_query_authorized(
-            &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-            "main", &query, policy(1), || { calls.fetch_add(1, Ordering::Relaxed); NOW },
-        ).await.unwrap();
+        control
+            .execute_graph_edge_upsert_query_authorized(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &authority,
+                &token,
+                "main",
+                &query,
+                policy(1),
+                || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    NOW
+                },
+            )
+            .await
+            .unwrap();
         let total = calls.load(Ordering::Relaxed);
         assert!(total > 2);
         for stop in [0, total / 2, total - 1] {
-            let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
             seed(&mut db, &contexts.commit(), None).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
             let calls = AtomicU64::new(0);
-            let error = db.execute_graph_edge_upsert_query_authorized(
-                &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-                "main", &query, policy(1), || {
-                    if calls.fetch_add(1, Ordering::Relaxed) >= stop { 10_001 } else { NOW }
-                },
-            ).await.unwrap_err();
+            let error = db
+                .execute_graph_edge_upsert_query_authorized(
+                    &contexts.txn(),
+                    &contexts.query(),
+                    &contexts.commit(),
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    policy(1),
+                    || {
+                        if calls.fetch_add(1, Ordering::Relaxed) >= stop {
+                            10_001
+                        } else {
+                            NOW
+                        }
+                    },
+                )
+                .await
+                .unwrap_err();
             let _ = authorization(error);
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
         }
         for dimension in 0..5 {
-            let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
             seed(&mut db, &contexts.commit(), None).await;
-            let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
             let mut bounded = policy(1);
             match dimension {
                 0 => bounded.merge.query = GqlQueryPolicy::new(0, 1, 1_000_000, 100_000),
@@ -290,11 +524,30 @@ fn late_expiry_and_each_native_allowance_refuse_before_publication() {
                 3 => bounded.merge.max_created_edges = 0,
                 _ => bounded.max_actions = 0,
             }
-            assert!(db.execute_graph_edge_upsert_query_authorized(
-                &contexts.txn(), &contexts.query(), &contexts.commit(), &authority, &token,
-                "main", &query, bounded, || NOW,
-            ).await.is_err(), "dimension {dimension}");
-            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()), before);
+            assert!(
+                db.execute_graph_edge_upsert_query_authorized(
+                    &contexts.txn(),
+                    &contexts.query(),
+                    &contexts.commit(),
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    bounded,
+                    || NOW,
+                )
+                .await
+                .is_err(),
+                "dimension {dimension}"
+            );
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
         }
     });
 }

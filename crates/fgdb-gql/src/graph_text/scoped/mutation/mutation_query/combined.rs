@@ -52,7 +52,11 @@ impl<'a, L: ReturnLeaves<'a>> AggregateLeaves<'_, 'a, L> {
         Ok(self.leaves.len() - 1)
     }
 
-    fn binding(&mut self, parser: &mut Parser<'a>, binding: usize) -> Result<usize, GraphPatternTextError> {
+    fn binding(
+        &mut self,
+        parser: &mut Parser<'a>,
+        binding: usize,
+    ) -> Result<usize, GraphPatternTextError> {
         let kind = self.raw.types()[binding];
         self.slot(parser, Leaf::Binding(binding), kind)
     }
@@ -65,16 +69,23 @@ impl<'a, L: ReturnLeaves<'a>> ReturnLeaves<'a> for AggregateLeaves<'_, 'a, L> {
             && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
             let at = parser.current.at;
-            let result = parser.compound_write_summary(self.raw, function, self.inputs, self.summaries);
+            let result =
+                parser.compound_write_summary(self.raw, function, self.inputs, self.summaries);
             return match result {
                 Ok((summary, kind)) => self.slot(parser, Leaf::Summary(summary), kind).map(Some),
                 Err(failure) => {
                     self.failure = Some(failure);
-                    Err(error(at, GraphPatternTextErrorKind::Expected("a write aggregate operand")))
+                    Err(error(
+                        at,
+                        GraphPatternTextErrorKind::Expected("a write aggregate operand"),
+                    ))
                 }
             };
         }
-        self.raw.leaf(parser)?.map(|binding| self.binding(parser, binding)).transpose()
+        self.raw
+            .leaf(parser)?
+            .map(|binding| self.binding(parser, binding))
+            .transpose()
     }
 
     fn map_input(
@@ -98,7 +109,8 @@ fn combined(kinds: &[TokenKind<'_>]) -> bool {
             if return_projection::with_aggregate::function(word).is_some())
     };
     let has_call = kinds.windows(2).enumerate().any(|(at, pair)| {
-        call(pair[0]) && matches!(pair[1], TokenKind::Punct(b'('))
+        call(pair[0])
+            && matches!(pair[1], TokenKind::Punct(b'('))
             && (at == 0 || !matches!(kinds[at - 1], TokenKind::Punct(b'.')))
     });
     if !has_call {
@@ -126,7 +138,9 @@ fn combined(kinds: &[TokenKind<'_>]) -> bool {
 impl<'a> Parser<'a> {
     /// Only new compound forms choose this lowering. Existing plain items and
     /// top-level aggregates keep their original compiler and template identity.
-    pub(super) fn write_items_have_combined_aggregate(&self) -> Result<bool, GraphPatternTextError> {
+    pub(super) fn write_items_have_combined_aggregate(
+        &self,
+    ) -> Result<bool, GraphPatternTextError> {
         let mut lexer = self.lexer.clone();
         let mut token = self.current;
         let mut kinds = Vec::new();
@@ -142,23 +156,47 @@ impl<'a> Parser<'a> {
             let named = matches!(previous, Some(TokenKind::Punct(b'.')));
             match token.kind {
                 TokenKind::End | TokenKind::Punct(b';') => return Ok(combined(&kinds)),
-                TokenKind::Word(word) if depth == 0 && !named && word.eq_ignore_ascii_case("AS") => {
-                    if combined(&kinds) { return Ok(true); }
+                TokenKind::Word(word)
+                    if depth == 0 && !named && word.eq_ignore_ascii_case("AS") =>
+                {
+                    if combined(&kinds) {
+                        return Ok(true);
+                    }
                     kinds.clear();
                     skip_alias = true;
                 }
                 TokenKind::Punct(b',') if depth == 0 => {
-                    if combined(&kinds) { return Ok(true); }
+                    if combined(&kinds) {
+                        return Ok(true);
+                    }
                     kinds.clear();
                 }
-                TokenKind::Word(word) if depth == 0 && !named && (
-                    ["WHERE", "ORDER", "SKIP", "LIMIT", "RETURN", "MATCH", "OPTIONAL",
-                     "UNWIND", "UNION", "EXCEPT", "INTERSECT", "CALL"]
-                        .iter().any(|end| word.eq_ignore_ascii_case(end))
-                    || word.eq_ignore_ascii_case("WITH") && !matches!(previous,
+                TokenKind::Word(word)
+                    if depth == 0
+                        && !named
+                        && ([
+                            "WHERE",
+                            "ORDER",
+                            "SKIP",
+                            "LIMIT",
+                            "RETURN",
+                            "MATCH",
+                            "OPTIONAL",
+                            "UNWIND",
+                            "UNION",
+                            "EXCEPT",
+                            "INTERSECT",
+                            "CALL",
+                        ]
+                        .iter()
+                        .any(|end| word.eq_ignore_ascii_case(end))
+                            || word.eq_ignore_ascii_case("WITH")
+                                && !matches!(previous,
                         Some(TokenKind::Word(prior)) if prior.eq_ignore_ascii_case("STARTS")
-                            || prior.eq_ignore_ascii_case("ENDS"))
-                ) => return Ok(combined(&kinds)),
+                            || prior.eq_ignore_ascii_case("ENDS"))) =>
+                {
+                    return Ok(combined(&kinds));
+                }
                 kind => {
                     match kind {
                         TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
@@ -183,10 +221,16 @@ impl<'a> Parser<'a> {
         self.advance()?;
         self.punct(b'(', "(")?;
         let distinct = self.take_word("DISTINCT")?;
-        if !distinct { self.take_word("ALL")?; }
+        if !distinct {
+            self.take_word("ALL")?;
+        }
         let (column, input_kind) = if self.take(b'*')? {
             if function != Function::Count || distinct {
-                return Err(error(at, GraphPatternTextErrorKind::Expected("COUNT(*) without DISTINCT")).into());
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("COUNT(*) without DISTINCT"),
+                )
+                .into());
             }
             function = Function::CountRows;
             (None, GraphSetColumnType::Scalar)
@@ -198,16 +242,30 @@ impl<'a> Parser<'a> {
             self.aggregate_argument = outer;
             let value = value?;
             let kind = value.column_type(&raw.types(), &self.syntax.parameters);
-            self.capacity(inputs.len(), MAX_PATTERN_VERTICES, crate::algebra::PatternLimitDimension::Columns)?;
+            self.capacity(
+                inputs.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
             let column = inputs.len();
-            inputs.push(ReadProjectionTemplate { name: format!("__write_arg_{column}"), value });
+            inputs.push(ReadProjectionTemplate {
+                name: format!("__write_arg_{column}"),
+                value,
+            });
             (Some(column), kind)
         };
         self.punct(b')', "one aggregate argument")?;
         if matches!(function, Function::SumInt | Function::AverageInt)
-            && !matches!(input_kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any)
+            && !matches!(
+                input_kind,
+                GraphSetColumnType::Scalar | GraphSetColumnType::Any
+            )
         {
-            return Err(error(at, GraphPatternTextErrorKind::Expected("scalar input for a numeric aggregate")).into());
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Expected("scalar input for a numeric aggregate"),
+            )
+            .into());
         }
         if distinct {
             function = match function {
@@ -218,9 +276,17 @@ impl<'a> Parser<'a> {
                 other => other,
             };
         }
-        self.capacity(summaries.len(), MAX_PATTERN_VERTICES, crate::algebra::PatternLimitDimension::Columns)?;
+        self.capacity(
+            summaries.len(),
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
         let summary = summaries.len();
-        summaries.push(ReadAggregateSpec { name: format!("__write_summary_{summary}"), function, column });
+        summaries.push(ReadAggregateSpec {
+            name: format!("__write_summary_{summary}"),
+            function,
+            column,
+        });
         let kind = match function {
             Function::Min | Function::Max => input_kind,
             Function::Collect | Function::CollectDistinct => GraphSetColumnType::List,
@@ -238,38 +304,78 @@ impl<'a> Parser<'a> {
         let mut items: Vec<Item<'a>> = Vec::new();
         let mut spellings = Vec::new();
         loop {
-            self.capacity(items.len(), MAX_PATTERN_VERTICES, crate::algebra::PatternLimitDimension::Columns)?;
+            self.capacity(
+                items.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
             let at = self.current.at;
             let mut leaves = AggregateLeaves {
-                raw: &mut *raw, inputs: &mut inputs, summaries: &mut summaries,
-                leaves: Vec::new(), kinds: Vec::new(), failure: None,
+                raw: &mut *raw,
+                inputs: &mut inputs,
+                summaries: &mut summaries,
+                leaves: Vec::new(),
+                kinds: Vec::new(),
+                failure: None,
                 lifetime: core::marker::PhantomData,
             };
             let value = self.read_write_value(&mut leaves, 0);
-            if let Some(failure) = leaves.failure { return Err(failure); }
+            if let Some(failure) = leaves.failure {
+                return Err(failure);
+            }
             let value = value?;
             let kind = value.column_type(&leaves.kinds, &self.syntax.parameters);
             let operands = leaves.leaves;
             let end = self.current.at;
             let spelling = self.source_name(at, end);
-            let name = if self.take_word("AS")? { self.name()? } else { spelling };
+            let name = if self.take_word("AS")? {
+                self.name()?
+            } else {
+                spelling
+            };
             if items.iter().any(|item| item.name.text == name.text) {
-                return Err(error(name.at, GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection)).into());
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection),
+                )
+                .into());
             }
             spellings.push(spelling);
-            items.push(Item { at, name, value, leaves: operands, kind });
-            if !self.take(b',')? { break; }
+            items.push(Item {
+                at,
+                name,
+                value,
+                leaves: operands,
+                kind,
+            });
+            if !self.take(b',')? {
+                break;
+            }
         }
         let mut keys = Vec::new();
         let mut key_slots = Vec::new();
         for item in &mut items {
-            if item.leaves.iter().any(|leaf| matches!(leaf, Leaf::Summary(_))) { continue; }
-            let columns: Vec<_> = item.leaves.iter().map(|leaf| match *leaf {
-                Leaf::Binding(binding) => binding,
-                Leaf::Summary(_) => unreachable!("nonaggregate item"),
-            }).collect();
+            if item
+                .leaves
+                .iter()
+                .any(|leaf| matches!(leaf, Leaf::Summary(_)))
+            {
+                continue;
+            }
+            let columns: Vec<_> = item
+                .leaves
+                .iter()
+                .map(|leaf| match *leaf {
+                    Leaf::Binding(binding) => binding,
+                    Leaf::Summary(_) => unreachable!("nonaggregate item"),
+                })
+                .collect();
             remap_output_columns(&mut item.value, &columns);
-            self.capacity(inputs.len(), MAX_PATTERN_VERTICES, crate::algebra::PatternLimitDimension::Columns)?;
+            self.capacity(
+                inputs.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
             if let ReadValueTemplate::Column(binding) = item.value {
                 key_slots.push((binding, keys.len()));
             }
@@ -283,16 +389,29 @@ impl<'a> Parser<'a> {
         // Only explicitly projected nonaggregate keys may occur outside a
         // summary. In particular, no arbitrary representative row is chosen.
         for item in &mut items {
-            if !item.leaves.iter().any(|leaf| matches!(leaf, Leaf::Summary(_))) { continue; }
+            if !item
+                .leaves
+                .iter()
+                .any(|leaf| matches!(leaf, Leaf::Summary(_)))
+            {
+                continue;
+            }
             let mut columns = Vec::new();
             for leaf in &item.leaves {
                 columns.push(match *leaf {
                     Leaf::Summary(summary) => keys.len() + summary,
-                    Leaf::Binding(binding) => key_slots.iter()
-                        .find(|&&(known, _)| known == binding).map(|&(_, key)| key)
-                        .ok_or_else(|| error(item.at, GraphPatternTextErrorKind::Expected(
-                            "an explicit grouping key for every nonaggregate write operand",
-                        )))?,
+                    Leaf::Binding(binding) => key_slots
+                        .iter()
+                        .find(|&&(known, _)| known == binding)
+                        .map(|&(_, key)| key)
+                        .ok_or_else(|| {
+                            error(
+                                item.at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "an explicit grouping key for every nonaggregate write operand",
+                                ),
+                            )
+                        })?,
                 });
             }
             remap_output_columns(&mut item.value, &columns);
@@ -300,16 +419,28 @@ impl<'a> Parser<'a> {
         if inputs.is_empty() {
             inputs.push(ReadProjectionTemplate {
                 name: "__write_input_0".into(),
-                value: ReadValueTemplate::Literal(GqlScalarParameter::new(CanonicalScalar::Null).expect("canonical null")),
+                value: ReadValueTemplate::Literal(
+                    GqlScalarParameter::new(CanonicalScalar::Null).expect("canonical null"),
+                ),
             });
         }
         let output = items.iter().map(|item| (item.name, item.kind)).collect();
-        let projection = items.into_iter().map(|item| ReadProjectionTemplate {
-            name: item.name.text.to_owned(), value: item.value,
-        }).collect();
+        let projection = items
+            .into_iter()
+            .map(|item| ReadProjectionTemplate {
+                name: item.name.text.to_owned(),
+                value: item.value,
+            })
+            .collect();
         Ok(ReturnItems {
-            projection, output, spellings,
-            grouping: Some(WriteReturnGroupTemplate { inputs, keys, aggregates: summaries }),
+            projection,
+            output,
+            spellings,
+            grouping: Some(WriteReturnGroupTemplate {
+                inputs,
+                keys,
+                aggregates: summaries,
+            }),
         })
     }
 }
@@ -332,50 +463,87 @@ mod tests {
             _ => None,
         }
     }
-    fn int(value: i64) -> GraphValue { GraphValue::Scalar(CanonicalScalar::Int(value)) }
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
     fn text(tail: &str) -> String {
         format!("MATCH (a),(b) MERGE (a)-[r:R]->(b) ON MATCH SET r.p=r.p {tail}")
     }
     fn prepare(tail: &str) -> PreparedGraphEdgeUpsertQuery {
         PreparedGraphEdgeUpsertQueryText::prepare(&text(tail), RelationId(1), symbols)
-            .unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
     }
     fn policy(rows: u64) -> GqlQueryPolicy {
         GqlQueryPolicy::new(1_000, rows, 1_000_000, 1_000_000)
     }
-    fn inputs(query: &PreparedGraphEdgeUpsertQuery, values: &[Option<i64>]) -> Vec<Vec<GraphValue>> {
-        values.iter().map(|value| query.bindings().iter().map(|binding| match binding {
-            GraphEdgeReturnBinding::Edge => GraphValue::Edge(EId(1)),
-            GraphEdgeReturnBinding::Property(key) => {
-                assert_eq!(*key, PropertyKeyId(1));
-                value.map_or(GraphValue::Scalar(CanonicalScalar::Null), int)
-            }
-        }).collect()).collect()
+    fn inputs(
+        query: &PreparedGraphEdgeUpsertQuery,
+        values: &[Option<i64>],
+    ) -> Vec<Vec<GraphValue>> {
+        values
+            .iter()
+            .map(|value| {
+                query
+                    .bindings()
+                    .iter()
+                    .map(|binding| match binding {
+                        GraphEdgeReturnBinding::Edge => GraphValue::Edge(EId(1)),
+                        GraphEdgeReturnBinding::Property(key) => {
+                            assert_eq!(*key, PropertyKeyId(1));
+                            value.map_or(GraphValue::Scalar(CanonicalScalar::Null), int)
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
     }
-    fn execute(query: &PreparedGraphEdgeUpsertQuery, values: &[Option<i64>]) -> GqlQueryExecution<GraphValueRow> {
-        query.project_rows_governed::<(), ()>(
-            inputs(query, values), GqlExecutionStats::default(), GlaExecutionStats::default(),
-            policy(100), || Ok(()),
-        ).unwrap()
+    fn execute(
+        query: &PreparedGraphEdgeUpsertQuery,
+        values: &[Option<i64>],
+    ) -> GqlQueryExecution<GraphValueRow> {
+        query
+            .project_rows_governed::<(), ()>(
+                inputs(query, values),
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(100),
+                || Ok(()),
+            )
+            .unwrap()
     }
     fn values(output: GqlQueryExecution<GraphValueRow>) -> Vec<Vec<GraphValue>> {
-        output.value.into_iter().map(|row| row.values().to_vec()).collect()
+        output
+            .value
+            .into_iter()
+            .map(|row| row.values().to_vec())
+            .collect()
     }
 
     #[test]
     fn compound_write_results_use_final_rows_for_predicates_arithmetic_and_collections() {
-        let query = prepare("RETURN count(*) > 0 AS any, sum(r.p)+count(*) AS total, size(collect(r.p)) AS n");
+        let query = prepare(
+            "RETURN count(*) > 0 AS any, sum(r.p)+count(*) AS total, size(collect(r.p)) AS n",
+        );
         assert_eq!(query.columns(), &["any", "total", "n"]);
-        assert_eq!(values(execute(&query, &[Some(4), Some(6)])), vec![vec![
-            GraphValue::Scalar(CanonicalScalar::Bool(true)), int(12), int(2),
-        ]]);
+        assert_eq!(
+            values(execute(&query, &[Some(4), Some(6)])),
+            vec![vec![
+                GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                int(12),
+                int(2),
+            ]]
+        );
     }
 
     #[test]
     fn compound_grouped_write_items_use_only_explicit_keys() {
         let query = prepare("RETURN r.p AS key, r.p+count(*) AS mixed ORDER BY key");
-        assert_eq!(values(execute(&query, &[Some(4), Some(4), Some(9)])),
-            vec![vec![int(4), int(6)], vec![int(9), int(10)]]);
+        assert_eq!(
+            values(execute(&query, &[Some(4), Some(4), Some(9)])),
+            vec![vec![int(4), int(6)], vec![int(9), int(10)]]
+        );
     }
 
     #[test]
@@ -388,23 +556,35 @@ mod tests {
 
     #[test]
     fn compound_distinct_aggregate_arguments_do_not_count_nulls_or_duplicates() {
-        let query = prepare("RETURN sum(DISTINCT r.p)+count(DISTINCT r.p) AS n, size(collect(DISTINCT r.p)) AS size");
-        assert_eq!(values(execute(&query, &[Some(4), Some(4), None])), vec![vec![int(5), int(1)]]);
+        let query = prepare(
+            "RETURN sum(DISTINCT r.p)+count(DISTINCT r.p) AS n, size(collect(DISTINCT r.p)) AS size",
+        );
+        assert_eq!(
+            values(execute(&query, &[Some(4), Some(4), None])),
+            vec![vec![int(5), int(1)]]
+        );
     }
 
     #[test]
     fn compound_aggregate_case_keeps_lazy_post_group_evaluation() {
-        let query = prepare("RETURN CASE WHEN count(*) > 0 THEN sum(r.p)/count(*) ELSE 0 END AS mean");
+        let query =
+            prepare("RETURN CASE WHEN count(*) > 0 THEN sum(r.p)/count(*) ELSE 0 END AS mean");
         assert_eq!(values(execute(&query, &[])), vec![vec![int(0)]]);
-        assert_eq!(values(execute(&query, &[Some(4), Some(6)])), vec![vec![int(5)]]);
+        assert_eq!(
+            values(execute(&query, &[Some(4), Some(6)])),
+            vec![vec![int(5)]]
+        );
     }
 
     #[test]
     fn compound_write_output_failures_are_not_hidden_by_limit_zero() {
         let query = prepare("RETURN 12/(sum(r.p)-8) AS bad LIMIT 0");
         let result = query.project_rows_governed::<(), ()>(
-            inputs(&query, &[Some(4), Some(4)]), GqlExecutionStats::default(),
-            GlaExecutionStats::default(), policy(0), || Ok(()),
+            inputs(&query, &[Some(4), Some(4)]),
+            GqlExecutionStats::default(),
+            GlaExecutionStats::default(),
+            policy(0),
+            || Ok(()),
         );
         assert!(matches!(result, Err(GqlQueryError::Source(_))));
     }
@@ -418,10 +598,14 @@ mod tests {
             "RETURN count(DISTINCT *)+1 AS invalid",
         ] {
             let mut calls = 0;
-            let result = PreparedGraphEdgeUpsertQueryText::prepare(&text(tail), RelationId(1), |kind, name: &str| {
-                calls += 1;
-                symbols(kind, name)
-            });
+            let result = PreparedGraphEdgeUpsertQueryText::prepare(
+                &text(tail),
+                RelationId(1),
+                |kind, name: &str| {
+                    calls += 1;
+                    symbols(kind, name)
+                },
+            );
             assert!(result.is_err(), "{tail}");
             assert_eq!(calls, 0, "{tail}");
         }
@@ -430,6 +614,9 @@ mod tests {
     #[test]
     fn compound_write_with_feeds_the_existing_native_tail() {
         let query = prepare("WITH sum(r.p)+count(*) AS total RETURN total*2 AS doubled");
-        assert_eq!(values(execute(&query, &[Some(4), Some(6)])), vec![vec![int(24)]]);
+        assert_eq!(
+            values(execute(&query, &[Some(4), Some(6)])),
+            vec![vec![int(24)]]
+        );
     }
 }

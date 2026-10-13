@@ -53,9 +53,8 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<
         Option<(
             CommitSeq,
-            impl core::iter::FusedIterator<
-                Item = Result<Arc<StandingReplayBatch>, StandingQueryError>,
-            > + 'cx
+            impl core::iter::FusedIterator<Item = Result<Arc<StandingReplayBatch>, StandingQueryError>>
+            + 'cx
             + use<'cx, V>,
         )>,
         StandingQueryError,
@@ -84,7 +83,8 @@ impl<V: Vfs + Clone> Database<V> {
                 max_ticks,
                 max_pinned_payload_units,
                 &mut meter,
-            )? else {
+            )?
+            else {
                 return Ok(None);
             };
             let cursor = std::iter::from_fn(move || {
@@ -137,9 +137,9 @@ impl PinnedReplay {
             meter
                 .charge(ZSetEvent::ScratchEntry)
                 .map_err(StandingQueryError::Delivery)?;
-            frames.try_reserve(1).map_err(|_| {
-                StandingQueryError::Delivery(StandingQueryFailure::ScratchBudget)
-            })?;
+            frames
+                .try_reserve(1)
+                .map_err(|_| StandingQueryError::Delivery(StandingQueryFailure::ScratchBudget))?;
             frames.push_back(Arc::clone(frame));
             end = frame.frontier;
             if frames.len() == max_ticks.get() {
@@ -179,8 +179,8 @@ impl PinnedReplay {
                 (meter.checkpoint)()?;
                 return Ok(None);
             };
-            let support = u64::try_from(frame.rows.len())
-                .map_err(|_| StandingQueryFailure::ResultBudget)?;
+            let support =
+                u64::try_from(frame.rows.len()).map_err(|_| StandingQueryFailure::ResultBudget)?;
             let delivered = self
                 .delivered
                 .checked_add(support)

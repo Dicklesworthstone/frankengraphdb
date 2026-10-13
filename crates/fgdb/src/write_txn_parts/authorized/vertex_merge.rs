@@ -446,8 +446,16 @@ mod all_targets {
         let scratch = u128::from(stats.scratch_entries)
             + u128::from(event == GlaExecutionEvent::ScratchEntry);
         for (observed, limit, dimension) in [
-            (work, policy.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-            (scratch, policy.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+            (
+                work,
+                policy.evaluator.max_work_units,
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                scratch,
+                policy.evaluator.max_scratch_entries,
+                GlaLimitDimension::ScratchEntries,
+            ),
         ] {
             if observed > u128::from(limit) {
                 return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
@@ -491,7 +499,15 @@ mod all_targets {
             clock: impl FnMut() -> u64,
         ) -> Result<Receipt, UpsertFault> {
             self.execute_graph_vertex_upserts_query_authorized_checked(
-                txn_cx, query_cx, commit_cx, authority, token, branch, query, policy, clock,
+                txn_cx,
+                query_cx,
+                commit_cx,
+                authority,
+                token,
+                branch,
+                query,
+                policy,
+                clock,
                 |_, _| Ok(()),
             )
             .await
@@ -529,35 +545,55 @@ mod all_targets {
             if !verified.predicates().rights().can_read() {
                 return Err(refusal(Error::PermissionDenied));
             }
-            commit_cx.with_restriction_async(async {
-                let mut execution = Execution { cx: commit_cx, permit, clock };
-                execution.checkpoint().map_err(staging)?;
-                let mut workspace = Workspace(Some(
-                    self.begin(txn_cx).map_err(WriteTxnError::Write).map_err(staging)?,
-                ));
-                let (stats, result) = query_cx.with_restriction(|| {
-                    apply_all(
-                        workspace.transaction(), self, query_cx, query, policy,
-                        verified.predicates(), &mut execution,
-                    )
-                })?;
-                let rows = u64::try_from(result.value.len())
-                    .map_err(|_| refusal(Error::TooLarge))?;
-                execution.permit.charge_rows_at((execution.clock)(), rows).map_err(refusal)?;
-                query_cx.with_restriction(|| {
-                    admit(&result.value, &mut |work| {
-                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                        execution.work(work)
-                    })
-                }).map_err(staging)?;
-                let completion = workspace.transaction().complete_controlled(
-                    self, commit_cx, None, false, || {
-                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                        execution.checkpoint()
-                    },
-                ).await.map_err(staging)?;
-                Ok((stats, result, completion))
-            }).await
+            commit_cx
+                .with_restriction_async(async {
+                    let mut execution = Execution {
+                        cx: commit_cx,
+                        permit,
+                        clock,
+                    };
+                    execution.checkpoint().map_err(staging)?;
+                    let mut workspace = Workspace(Some(
+                        self.begin(txn_cx)
+                            .map_err(WriteTxnError::Write)
+                            .map_err(staging)?,
+                    ));
+                    let (stats, result) = query_cx.with_restriction(|| {
+                        apply_all(
+                            workspace.transaction(),
+                            self,
+                            query_cx,
+                            query,
+                            policy,
+                            verified.predicates(),
+                            &mut execution,
+                        )
+                    })?;
+                    let rows =
+                        u64::try_from(result.value.len()).map_err(|_| refusal(Error::TooLarge))?;
+                    execution
+                        .permit
+                        .charge_rows_at((execution.clock)(), rows)
+                        .map_err(refusal)?;
+                    query_cx
+                        .with_restriction(|| {
+                            admit(&result.value, &mut |work| {
+                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                                execution.work(work)
+                            })
+                        })
+                        .map_err(staging)?;
+                    let completion = workspace
+                        .transaction()
+                        .complete_controlled(self, commit_cx, None, false, || {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.checkpoint()
+                        })
+                        .await
+                        .map_err(staging)?;
+                    Ok((stats, result, completion))
+                })
+                .await
         }
     }
 
@@ -580,7 +616,13 @@ mod all_targets {
                 vertex_upsert_query_selection_policy(policy).merge,
                 |pattern, allowance| {
                     selection::select_overlay(
-                        transaction, &database.borrow(), cx, pattern, scope, allowance, &controls,
+                        transaction,
+                        &database.borrow(),
+                        cx,
+                        pattern,
+                        scope,
+                        allowance,
+                        &controls,
                     )
                 },
                 |request| database.borrow_mut().allocate_identity(cx, request),
@@ -588,7 +630,8 @@ mod all_targets {
                     cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                     controls.borrow_mut().checkpoint()
                 },
-            ).map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?
+            )
+            .map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?
         };
         let targets = proposal.outcome;
         let (branch, actions) = if targets.created.is_some() {
@@ -598,37 +641,59 @@ mod all_targets {
         };
         let observed = (targets.len() as u128)
             .checked_mul(actions.len() as u128 + upsert.after().len() as u128)
-            .ok_or_else(|| GqlQueryError::Source(GraphVertexUpsertError::Merge(
-                GraphVertexMergeError::AccountingOverflow,
-            )))?;
+            .ok_or_else(|| {
+                GqlQueryError::Source(GraphVertexUpsertError::Merge(
+                    GraphVertexMergeError::AccountingOverflow,
+                ))
+            })?;
         if observed > u128::from(policy.max_actions) {
             return Err(GqlQueryError::Source(GraphVertexUpsertError::ActionLimit {
-                limit: policy.max_actions, observed,
+                limit: policy.max_actions,
+                observed,
             }));
         }
         if let Some(creation) = proposal.creation {
             for intent in creation.into_intents() {
-                cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(staging)?;
+                cx.checkpoint()
+                    .map_err(WriteTxnError::Interrupted)
+                    .map_err(staging)?;
                 execution.checkpoint().map_err(staging)?;
-                let GraphInsertIntent::Vertex { vertex, labels, properties } = intent else {
+                let GraphInsertIntent::Vertex {
+                    vertex,
+                    labels,
+                    properties,
+                } = intent
+                else {
                     unreachable!("validated vertex MERGE contains no edge creation")
                 };
                 let mut batch = WriteBatch::new(upsert.merge().relation());
                 batch.create_vertex(vertex, labels, properties);
                 for row in batch.rows {
-                    stage(transaction, database, batch.relation, row, execution).map_err(staging)?;
+                    stage(transaction, database, batch.relation, row, execution)
+                        .map_err(staging)?;
                 }
             }
         }
         let mut stats = GraphVertexUpsertStats {
-            merge: proposal.stats, branch, action_effects: observed as u64,
+            merge: proposal.stats,
+            branch,
+            action_effects: observed as u64,
         };
         for outcome in targets.outcomes() {
-            event(cx, execution, policy.merge.query, &mut stats.merge.evaluator, GlaExecutionEvent::Work)?;
+            event(
+                cx,
+                execution,
+                policy.merge.query,
+                &mut stats.merge.evaluator,
+                GlaExecutionEvent::Work,
+            )?;
             let state = RefCell::new((&mut *transaction, &mut *database));
             let controls = RefCell::new(&mut *execution);
             let completed = vertex_upsert_actions(
-                upsert, policy, stats.merge, outcome,
+                upsert,
+                policy,
+                stats.merge,
+                outcome,
                 || {
                     cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                     controls.borrow_mut().checkpoint()
@@ -646,7 +711,9 @@ mod all_targets {
                     let (transaction, database) = &mut *state;
                     let mut execution = controls.borrow_mut();
                     for row in batch.rows {
-                        cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(staging)?;
+                        cx.checkpoint()
+                            .map_err(WriteTxnError::Interrupted)
+                            .map_err(staging)?;
                         execution.checkpoint().map_err(staging)?;
                         // Check every original attempted field, even a no-op.
                         stage(transaction, database, batch.relation, row, &mut execution)
@@ -661,11 +728,22 @@ mod all_targets {
         let rows = {
             let controls = RefCell::new(&mut *execution);
             let mut control = |kind| {
-                event(cx, &mut **controls.borrow_mut(), policy.merge.query, &mut evaluator, kind)
+                event(
+                    cx,
+                    &mut **controls.borrow_mut(),
+                    policy.merge.query,
+                    &mut evaluator,
+                    kind,
+                )
             };
             let mut poll = || {
-                cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(GqlQueryError::Interrupted)?;
-                controls.borrow_mut().poll().map_err(GqlQueryError::Interrupted)
+                cx.checkpoint()
+                    .map_err(WriteTxnError::Interrupted)
+                    .map_err(GqlQueryError::Interrupted)?;
+                controls
+                    .borrow_mut()
+                    .poll()
+                    .map_err(GqlQueryError::Interrupted)
             };
             control(GlaExecutionEvent::Work)?;
             let mut rows = Vec::new();
@@ -678,7 +756,13 @@ mod all_targets {
                         GraphVertexReturnBinding::Vertex => GraphValue::Vertex(outcome.vertex()),
                         GraphVertexReturnBinding::Property(key) => {
                             let value = if scope.allows_property(key) {
-                                vertex_upsert_property(transaction, database, outcome.vertex(), key, &mut control)?
+                                vertex_upsert_property(
+                                    transaction,
+                                    database,
+                                    outcome.vertex(),
+                                    key,
+                                    &mut control,
+                                )?
                             } else {
                                 // Match the singular masked reader's logical charge.
                                 control(GlaExecutionEvent::ScratchEntry)?;
@@ -687,12 +771,22 @@ mod all_targets {
                             GraphValue::Scalar(value)
                         }
                         GraphVertexReturnBinding::Properties => vertex_upsert_properties(
-                            transaction, database, outcome.vertex(), query.property_catalog(),
-                            |key| scope.allows_property(key), &mut poll, &mut control,
+                            transaction,
+                            database,
+                            outcome.vertex(),
+                            query.property_catalog(),
+                            |key| scope.allows_property(key),
+                            &mut poll,
+                            &mut control,
                         )?,
                         GraphVertexReturnBinding::Labels => vertex_upsert_labels(
-                            transaction, database, outcome.vertex(), query.property_catalog(),
-                            |label| scope.allows_label(label), &mut poll, &mut control,
+                            transaction,
+                            database,
+                            outcome.vertex(),
+                            query.property_catalog(),
+                            |label| scope.allows_label(label),
+                            &mut poll,
+                            &mut control,
                         )?,
                     });
                 }
@@ -700,13 +794,18 @@ mod all_targets {
             }
             rows
         };
-        let result = query.project_rows_governed(
-            rows, stats.merge.match_selection, evaluator, policy.merge.query,
-            || {
-                cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                execution.checkpoint()
-            },
-        ).map_err(|error| error.map_source(GraphVertexUpsertError::Returning))?;
+        let result = query
+            .project_rows_governed(
+                rows,
+                stats.merge.match_selection,
+                evaluator,
+                policy.merge.query,
+                || {
+                    cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                    execution.checkpoint()
+                },
+            )
+            .map_err(|error| error.map_source(GraphVertexUpsertError::Returning))?;
         Ok((stats, result))
     }
 }
