@@ -728,9 +728,10 @@ impl<'a> Parser<'a> {
     }
 
     /// The stages after a write's WITH head. A carried element's property
-    /// read in the WITH's own WHERE, its pages or the terminal RETURN becomes
-    /// a hidden head column holding the post-write value, exactly as a read
-    /// pipeline hoists boundary reads; later stages see only the WITH items.
+    /// read in the WITH's own WHERE, its pages, the terminal RETURN or the
+    /// first UNWIND expression becomes a hidden head column holding the
+    /// post-write value. The native row pipeline drops those hidden cells
+    /// immediately after UNWIND, retaining only visible items and its output.
     fn write_tail(
         &mut self,
         returning: &mut ParsedMutationReturn<'a>,
@@ -801,9 +802,10 @@ impl<'a> Parser<'a> {
         self.write_row_pipeline(schema)
     }
 
-    /// `alias.key` reads of a carried vertex or edge from the current token
-    /// to the next WITH, UNWIND, MATCH or CALL: the WITH's WHERE, its pages
-    /// and the terminal RETURN. Chained keys and other names are not reads.
+    /// `alias.key` reads of a carried vertex or edge in the WITH's WHERE,
+    /// pages and terminal RETURN, or through the first UNWIND expression up
+    /// to its top-level AS. A later WITH/MATCH/CALL/set operation ends the
+    /// scope. Chained keys and other names are not carried property reads.
     pub(super) fn write_tail_reads(
         &self,
         outputs: &[(Name<'a>, GraphSetColumnType)],
@@ -814,25 +816,38 @@ impl<'a> Parser<'a> {
         // The three tokens before `token`, oldest first.
         let mut back: [Option<Token<'a>>; 3] = [None; 3];
         let mut depth = 0_usize;
+        let mut unwind = false;
         loop {
-            let after_dot = matches!(
-                back[2],
-                Some(Token {
-                    kind: TokenKind::Punct(b'.'),
-                    ..
-                })
-            );
+            let previous = back[2].map(|token| token.kind);
+            let after_dot = matches!(previous, Some(TokenKind::Punct(b'.')));
+            let after_alias = matches!(previous, Some(TokenKind::Word(word))
+                if word.eq_ignore_ascii_case("AS"));
             match token.kind {
                 TokenKind::End => break,
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
                 TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
                 TokenKind::Word(word)
-                    if depth == 0
+                    if unwind && depth == 0 && !after_dot && word.eq_ignore_ascii_case("AS") =>
+                {
+                    break;
+                }
+                TokenKind::Word(word)
+                    if !unwind
+                        && depth == 0
                         && !after_dot
-                        && return_projection::pipeline::ends_boundary_scope(
-                            word,
-                            back[2].map(|token| token.kind),
-                        ) =>
+                        && !after_alias
+                        && word.eq_ignore_ascii_case("UNWIND") =>
+                {
+                    // The expression still reads the head's final-state
+                    // cells. Nothing after its AS may request another one.
+                    unwind = true;
+                }
+                TokenKind::Word(word)
+                    if !unwind
+                        && depth == 0
+                        && !after_dot
+                        && !after_alias
+                        && return_projection::pipeline::ends_boundary_scope(word, previous) =>
                 {
                     break;
                 }
