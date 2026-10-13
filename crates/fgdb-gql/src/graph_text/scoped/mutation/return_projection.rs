@@ -1222,6 +1222,23 @@ impl<'a> Parser<'a> {
         self.write_row_after_head(head)
     }
 
+    /// Source-free WITH stages (and any WHERE, page or UNWIND among them) a
+    /// statement's first write follows: `WITH 42 AS v MERGE ...`, `UNWIND
+    /// [1] AS x WITH x WHERE x > 0 MERGE ...` (fgdb-cpny9). `schema` is the
+    /// leading UNWINDs' row, or empty.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn leading_row_stages(
+        &mut self,
+        schema: Vec<(Name<'a>, GraphSetColumnType)>,
+    ) -> Result<(Vec<ReadStageTemplate>, Vec<(Name<'a>, GraphSetColumnType)>), GraphSetTextError>
+    {
+        self.write_prefix = true;
+        let prefix = self.row_pipeline_prefix(schema);
+        self.write_prefix = false;
+        let (stages, schema, _) = prefix?;
+        Ok((stages, schema))
+    }
+
     #[allow(clippy::type_complexity)]
     fn write_row_after_head(
         &mut self,

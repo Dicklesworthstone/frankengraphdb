@@ -37,7 +37,7 @@ impl PreparedGraphWriteChainText {
         };
         // Peek the first clause without consuming it: it may be the write.
         let first = script::next_script_token(&mut lexer.clone())?;
-        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "MATCH", "MERGE"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
+        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "MATCH", "MERGE", "WITH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
         {
             return Ok(false);
         }
@@ -84,6 +84,10 @@ impl PreparedGraphWriteChainText {
                             script::next_script_token(&mut lexer.clone())?.kind,
                             TokenKind::Parameter(_)
                         );
+                    } else if previous.is_none() && word.eq_ignore_ascii_case("WITH") {
+                        // A leading source-free WITH (`WITH 42 AS v MERGE ...`)
+                        // is a row prefix, as a leading UNWIND is.
+                        unwound = true;
                     } else if previous.is_none() && word.eq_ignore_ascii_case("MATCH") {
                         matched = true;
                     } else if clause && word.eq_ignore_ascii_case("MERGE") && pattern()? {
@@ -173,15 +177,19 @@ impl PreparedGraphWriteChainText {
                         }
                         if word.eq_ignore_ascii_case("UNWIND") {
                             unwound |= first;
+                        } else if first && word.eq_ignore_ascii_case("WITH") {
+                            // A leading source-free WITH is a row prefix.
+                            unwound = true;
                         } else if first && word.eq_ignore_ascii_case("MATCH") {
                             matched = true;
                         } else if ["CREATE", "INSERT"]
                             .iter()
                             .any(|clause| word.eq_ignore_ascii_case(clause))
                             || (!matched
-                                && ["MATCH", "OPTIONAL", "WITH"]
+                                && (["MATCH", "OPTIONAL"]
                                     .iter()
-                                    .any(|clause| word.eq_ignore_ascii_case(clause)))
+                                    .any(|clause| word.eq_ignore_ascii_case(clause))
+                                    || (!unwound && word.eq_ignore_ascii_case("WITH"))))
                         {
                             break None;
                         }
@@ -563,6 +571,11 @@ mod tests {
             "MATCH (a), (b) MERGE (a)-[:X]->(b) MERGE (c)",
             "MATCH (n) MATCH (m) WITH n AS a, m AS b MERGE (a)-[:T]->(b) WITH a AS x, b AS y \
              MERGE (a) MERGE (b) MERGE (a)-[:T]->(b) RETURN x.id AS x, y.id AS y",
+            // A vertex MERGE after source-free WITH stages (TCK Merge1 [8],
+            // Merge9 [4]).
+            "WITH 42 AS var MERGE (c:N {var: var})",
+            "UNWIND [42] AS props WITH props WHERE props > 32 WITH DISTINCT props AS p \
+             MERGE (a:A {num: p}) RETURN a.num AS prop",
         ] {
             assert!(
                 PreparedGraphWriteChainText::is_chain(text).unwrap(),

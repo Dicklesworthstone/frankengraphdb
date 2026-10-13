@@ -1010,6 +1010,21 @@ fn vertex_merge_steps_run_over_a_leading_unwind_and_return_rows() {
         assert_eq!(count(&db, SOURCE), 1);
         assert_eq!(count(&db, PERSON), 7);
         assert_eq!(db.edges().unwrap().len(), 3);
+        // Source-free WITH stages before the MERGE (Merge1 [8], Merge9 [4]):
+        // a WITH alone, and after an UNWIND with WHERE and DISTINCT.
+        write(&mut db, "WITH 42 AS var MERGE (c:Copy {p: var})")
+            .await
+            .unwrap();
+        assert_eq!(count(&db, COPY), 3);
+        let filtered = write(
+            &mut db,
+            "UNWIND [42, 42, 7] AS props WITH props WHERE props > 32 \
+             WITH DISTINCT props AS q MERGE (a:Copy {p: q}) RETURN a.p AS prop",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(filtered), [vec![int(42)]]);
+        assert_eq!(count(&db, COPY), 3);
         // RETURN after chained MERGEs and over a carried row column.
         let pair = write(
             &mut db,

@@ -1946,9 +1946,10 @@ impl PreparedGraphVertexMergeRowsText {
     {
         let parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
-        // `leading` is a first write's UNWIND prefix, if any; `matched` its
-        // MATCH prefix (a WITH head, or every MATCH binding as `WITH *`
-        // carries them) and the row stages after it.
+        // `leading` is a first write's source-free prefix, if any: its UNWIND
+        // stages and the WITH stages after them (`WITH 42 AS v MERGE ...`);
+        // `matched` its MATCH prefix (a WITH head, or every MATCH binding as
+        // `WITH *` carries them) and the row stages after it.
         let mut matched = None;
         let (mut parser, row, owned, leading) = match from {
             Some(from) => {
@@ -1958,9 +1959,18 @@ impl PreparedGraphVertexMergeRowsText {
             }
             None => {
                 let mut parser = parser;
-                if parser.is_word("UNWIND") {
-                    let (stages, schema) = parser.insertion_unwind_prefix()?;
-                    (parser, schema, None, Some(stages))
+                if parser.is_word("UNWIND") || parser.is_word("WITH") {
+                    let (unwound, schema) = if parser.is_word("UNWIND") {
+                        parser.insertion_unwind_prefix()?
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    let (stages, schema) = if parser.is_word("WITH") {
+                        parser.leading_row_stages(schema)?
+                    } else {
+                        (Vec::new(), schema)
+                    };
+                    (parser, schema, None, Some((unwound, stages)))
                 } else if parser.is_word("MATCH") {
                     parser.parse_match_prefix()?;
                     let (head, stages, schema) = if parser.is_word("WITH") {
@@ -2132,7 +2142,7 @@ impl PreparedGraphVertexMergeRowsText {
         let parameter_offsets = parser.syntax.parameter_offsets.clone();
         let input = match (owned, leading, matched) {
             (Some(types), _, _) => VertexMergeRowsTextInput::Owned(types),
-            (None, Some(leading), _) => {
+            (None, Some((leading, pipeline)), _) => {
                 VertexMergeRowsTextInput::Relation(Box::new(crate::set_text::BoundSetTextInput {
                     selection: None,
                     parameters: parameters.clone(),
@@ -2140,7 +2150,7 @@ impl PreparedGraphVertexMergeRowsText {
                     return_at: statement.len(),
                     projection: None,
                     quantifier: GraphSetQuantifier::All,
-                    pipeline: Vec::new(),
+                    pipeline,
                     singleton: true,
                     leading,
                     correlations: Vec::new(),
