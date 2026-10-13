@@ -222,6 +222,115 @@ impl EdgeReturnTemplate {
     }
 }
 impl PreparedGraphEdgeUpsertQueryText {
+    /// Classify a MATCH-fed relationship MERGE with ON/SET and RETURN using
+    /// native token framing, without binding symbols or inspecting storage.
+    /// Plain MERGE RETURN retains its multi-row owner; vertex MERGE and other
+    /// writes retain theirs. Preparation, not this probe, validates grammar.
+    pub fn has_return_clause(statement: &str) -> Result<bool, GraphEdgeUpsertTextError> {
+        if statement.len() > crate::MAX_GRAPH_WRITE_SCRIPT_BYTES {
+            return Err(error(
+                0,
+                GraphPatternTextErrorKind::Expected("bounded native write text"),
+            )
+            .into());
+        }
+        let mut lexer = Lexer {
+            text: statement,
+            at: 0,
+            tokens: 0,
+        };
+        let first = script::next_script_token(&mut lexer)?;
+        if !matches!(first.kind, TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("MATCH") || word.eq_ignore_ascii_case("OPTIONAL"))
+        {
+            return Ok(false);
+        }
+        const PREFIX_ENDS: [&str; 10] = [
+            "WITH", "UNWIND", "CREATE", "INSERT", "DELETE", "DETACH", "SET", "REMOVE", "CALL",
+            "RETURN",
+        ];
+        let mut depth = 0_usize;
+        let mut previous = first.kind;
+        loop {
+            let token = script::next_script_token(&mut lexer)?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word) if depth == 0 => {
+                    let alias = matches!(previous, TokenKind::Punct(b'.'))
+                        || matches!(previous, TokenKind::Word(word) if word.eq_ignore_ascii_case("AS"));
+                    if !alias {
+                        if PREFIX_ENDS.iter().any(|name| word.eq_ignore_ascii_case(name)) {
+                            return Ok(false);
+                        }
+                        if word.eq_ignore_ascii_case("MERGE")
+                            && matches!(
+                                script::next_script_token(&mut lexer.clone())?.kind,
+                                TokenKind::Punct(b'(')
+                            )
+                        {
+                            return Self::actions_then_return(&mut lexer);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            previous = token.kind;
+        }
+    }
+
+    fn actions_then_return(lexer: &mut Lexer<'_>) -> Result<bool, GraphEdgeUpsertTextError> {
+        let mut depth = 0_usize;
+        let mut nodes = 0_u8;
+        loop {
+            let token = script::next_script_token(lexer)?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(close @ (b')' | b']' | b'}')) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && close == b')' {
+                        nodes += 1;
+                        let next = script::next_script_token(&mut lexer.clone())?.kind;
+                        if nodes > 1 {
+                            if matches!(next, TokenKind::Word(word)
+                                if word.eq_ignore_ascii_case("ON") || word.eq_ignore_ascii_case("SET"))
+                            {
+                                break;
+                            }
+                            return Ok(false);
+                        }
+                        if !matches!(next, TokenKind::Punct(b'-' | b'<')) {
+                            return Ok(false);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut previous = TokenKind::End;
+        loop {
+            let token = script::next_script_token(lexer)?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word)
+                    if depth == 0 && word.eq_ignore_ascii_case("RETURN") =>
+                {
+                    let alias = matches!(previous, TokenKind::Punct(b'.'))
+                        || matches!(previous, TokenKind::Word(word) if word.eq_ignore_ascii_case("AS"));
+                    if !alias {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+            previous = token.kind;
+        }
+    }
+
     pub fn prepare(
         statement: &str,
         relation: RelationId,
@@ -264,5 +373,36 @@ impl PreparedGraphEdgeUpsertQueryText {
         let upsert = self.upsert.bind_parameters(arguments)?;
         let values = self.upsert.merge.selection.checked_arguments(arguments)?;
         self.returning.bind(upsert, &values)
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    #[test]
+    fn branch_return_classifier_preserves_native_statement_ownership() {
+        for text in [
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) ON MATCH SET r.p=1 RETURN r",
+            "MATCH (a),(b) MERGE (a)-[r:R]-(b) SET r.p=1 RETURN r.p",
+            "/* MERGE RETURN */ MATCH (a),(b) MERGE (a)-[r:R {p:'RETURN'}]-(b) \
+             ON CREATE SET r.p='SET' ON MATCH SET r.p='ON' RETURN r",
+            "MATCH (a),(b) WHERE a.RETURN=1 MERGE (a)<-[r:R]-(b) \
+             ON CREATE SET r.RETURN=2 RETURN r.RETURN AS value;",
+        ] {
+            assert!(PreparedGraphEdgeUpsertQueryText::has_return_clause(text).unwrap(), "{text}");
+            assert!(!crate::PreparedGraphEdgeMergeQueryText::has_return_clause(text).unwrap(), "{text}");
+        }
+        for text in [
+            "MERGE (a) ON CREATE SET a.p=1 RETURN a",
+            "MATCH (a) CREATE (b) RETURN b",
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN r",
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) SET r.p='RETURN'",
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) SET r.RETURN=1",
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) SET r.p='; RETURN r'",
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) SET r.p=1; MATCH (n) RETURN n",
+        ] {
+            assert!(!PreparedGraphEdgeUpsertQueryText::has_return_clause(text).unwrap(), "{text}");
+        }
     }
 }

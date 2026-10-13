@@ -52,8 +52,8 @@ pub(crate) use prism::{
     push_staged as push_prism_staged,
 };
 pub use view::{
-    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
-    NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeSpoolError,
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeSpoolError,
+    NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeAggregateSpoolError,
     PreparedBufferedAggregate, PreparedBufferedOrder,
 };
 
@@ -212,6 +212,10 @@ pub enum QueryWriteError<A> {
     /// read from the staged graph (fgdb-at06q).
     EdgeMergeText(GraphEdgeMergeTextError),
     EdgeMerge(GqlQueryError<GraphEdgeMergeQueryError<WriteTxnError, A>, Cancel>),
+    /// Relationship ON/SET RETURN uses the singular upsert owner, with its
+    /// original text, action, final-state projection and completion errors.
+    EdgeUpsertText(GraphEdgeUpsertTextError),
+    EdgeUpsert(GqlQueryError<GraphEdgeUpsertQueryError<WriteTxnError, A>, Cancel>),
 }
 impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -227,6 +231,8 @@ impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
             Self::VertexUpsert(e) => e.fmt(f),
             Self::EdgeMergeText(e) => e.fmt(f),
             Self::EdgeMerge(e) => e.fmt(f),
+            Self::EdgeUpsertText(e) => e.fmt(f),
+            Self::EdgeUpsert(e) => e.fmt(f),
         }
     }
 }
@@ -244,6 +250,8 @@ impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> 
             Self::VertexUpsert(error) => Some(error),
             Self::EdgeMergeText(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
+            Self::EdgeUpsertText(error) => Some(error),
+            Self::EdgeUpsert(error) => Some(error),
         }
     }
 }
@@ -331,6 +339,22 @@ fn prepare_edge_merge_return(
 ) -> Result<PreparedGraphEdgeMergeQuery, GraphEdgeMergeTextError> {
     let declarations = write_return_declarations(params);
     PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
+fn prepare_edge_upsert_return(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    relation: RelationId,
+) -> Result<PreparedGraphEdgeUpsertQuery, GraphEdgeUpsertTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphEdgeUpsertQueryText::prepare_with_parameter_types(
         text,
         relation,
         &declarations,
@@ -509,6 +533,30 @@ impl<V: Vfs + Clone> Database<V> {
                 .map_err(QueryWriteError::VertexUpsert)?;
             return Ok(values(columns, rows.value));
         }
+        if PreparedGraphEdgeUpsertQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::EdgeUpsertText)?
+        {
+            let query = prepare_edge_upsert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::EdgeUpsertText)?;
+            let columns = query.columns().to_vec();
+            let (_, _, rows, _) = self
+                .execute_graph_edge_upsert_query_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &query,
+                    budget.edge_upsert_policy(),
+                    |_| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request: fgdb_gql::insertion::GraphInsertRequest::Edge { row: 0, edge: 0 },
+                        })
+                    },
+                )
+                .await
+                .map_err(QueryWriteError::EdgeUpsert)?;
+            return Ok(values(columns, rows.value));
+        }
         if PreparedGraphEdgeMergeQueryText::has_return_clause(text)
             .map_err(QueryWriteError::EdgeMergeText)?
         {
@@ -630,6 +678,28 @@ impl WriteTxn {
                     },
                 )
                 .map_err(QueryWriteError::VertexUpsert)?;
+            return Ok(values(columns, rows.value));
+        }
+        if PreparedGraphEdgeUpsertQueryText::has_return_clause(text)
+            .map_err(QueryWriteError::EdgeUpsertText)?
+        {
+            let query = prepare_edge_upsert_return(text, params, resolver, relation)
+                .map_err(QueryWriteError::EdgeUpsertText)?;
+            let columns = query.columns().to_vec();
+            let (_, _, rows) = self
+                .execute_graph_edge_upsert_query_governed(
+                    database,
+                    cx,
+                    &query,
+                    budget.edge_upsert_policy(),
+                    |_| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request: fgdb_gql::insertion::GraphInsertRequest::Edge { row: 0, edge: 0 },
+                        })
+                    },
+                )
+                .map_err(QueryWriteError::EdgeUpsert)?;
             return Ok(values(columns, rows.value));
         }
         if PreparedGraphEdgeMergeQueryText::has_return_clause(text)
@@ -1007,6 +1077,94 @@ mod write_return_tests {
             ));
             assert!(db.vertices().unwrap().is_empty());
             assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn public_relationship_upsert_return_keeps_parameters_branches_and_rollback() {
+        let ((), report) = run_async_under_lab(0xe6e0_0004, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let q = PropertyKeyId(2);
+            let symbols = |kind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+                (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(q)),
+                _ => None,
+            };
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
+            seed.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(2))]);
+            db.write(&commit, seed).await.unwrap();
+            let text = "MATCH (a),(b) WHERE a.p=1 AND b.p=2 \
+                        MERGE (a)-[r:R {q:$key}]-(b) \
+                        ON CREATE SET r.p=$initial ON MATCH SET r.p=r.p+1 \
+                        SET r.p=r.p+1 RETURN r,r.q AS key,r.p AS counter";
+            let arguments = GqlParameters::new()
+                .with_int64("key", 42)
+                .unwrap()
+                .with_int64("initial", 4)
+                .unwrap();
+            let next = AtomicU64::new(100);
+            let mut allocate = |request: GraphWriteIdentityRequest| -> Result<ElementId, ()> {
+                assert_eq!(request.statement, 0);
+                assert!(matches!(request.request, GraphInsertRequest::Edge { row: 0, edge: 0 }));
+                Ok(ElementId::Edge(EId(u128::from(next.fetch_add(1, Ordering::Relaxed)))))
+            };
+            let result = db
+                .query_write(
+                    &txcx, &cx, &commit, text, &arguments, &symbols, R,
+                    policy(1, 0, 1), &mut allocate,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                rows(result, &["r", "key", "counter"]),
+                vec![vec![GraphValue::Edge(EId(100)), int(42), int(5)]]
+            );
+            let before = db.frontier().unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let result = transaction
+                .query_write(
+                    &mut db, &cx, text, &arguments, &symbols, R,
+                    policy(1, 0, 0), &mut allocate,
+                )
+                .unwrap();
+            assert_eq!(
+                rows(result, &["r", "key", "counter"]),
+                vec![vec![GraphValue::Edge(EId(100)), int(42), int(7)]]
+            );
+            assert_eq!(next.load(Ordering::Relaxed), 101);
+            let digest = transaction.staged_effect_digest().unwrap();
+            let result = transaction.query_write(
+                &mut db, &cx,
+                "MATCH (a),(b) WHERE a.p=1 AND b.p=2 \
+                 MERGE (a)-[r:R {q:99}]->(b) ON CREATE SET r.p=0 \
+                 RETURN 10/r.p AS bad LIMIT 0",
+                &GqlParameters::new(), &symbols, R, policy(1, 0, 1), &mut allocate,
+            );
+            assert!(matches!(
+                result,
+                Err(QueryWriteError::EdgeUpsert(GqlQueryError::Source(
+                    GraphEdgeUpsertQueryError::Returning(_)
+                )))
+            ));
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.edges(&db).unwrap().len(), 1);
+            assert_eq!(next.load(Ordering::Relaxed), 102);
+            assert_eq!(db.frontier().unwrap(), before);
+            transaction.finish(&mut db, &commit).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert_eq!(
+                db.edge(EId(100)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(7)), (q, CanonicalScalar::Int(42))]
+            );
+            assert!(db.edge(EId(101)).unwrap().is_none());
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
