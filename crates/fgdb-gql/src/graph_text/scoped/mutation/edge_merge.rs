@@ -414,18 +414,79 @@ impl PreparedGraphEdgeMergeText {
         let schema = from.row;
         let keep = parser.visible_width(&schema);
         let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
-        let continuation = if let (true, Some(head)) = (continues, &merged.3) {
-            // A WITH head: the next write reads its output row.
-            Some((
-                keep,
-                ChainContinuation {
-                    at: parser.current.at,
-                    row: head.output.clone(),
-                    boundary: None,
-                    parameters: parser.syntax.parameters.clone(),
-                },
-            ))
-        } else if continues {
+        let continuation = Self::chain_continuation(&parser, &schema, keep, &merged, continues)?;
+        let input = BoundSetTextInput {
+            selection: None,
+            parameters: parser.syntax.parameters.clone(),
+            parameter_offsets: parser.syntax.parameter_offsets.clone(),
+            return_at: statement.len(),
+            projection: None,
+            quantifier: GraphSetQuantifier::All,
+            pipeline: Vec::new(),
+            singleton: false,
+            leading: Vec::new(),
+            correlations: Vec::new(),
+            owned: Some((columns, types)),
+        };
+        let (merge, returning) = Self::resolve_row_merge(statement, resolve, merged, input)?;
+        Ok((merge, returning, continuation))
+    }
+
+    /// A chain whose first write is a relationship MERGE over a leading MATCH
+    /// (`MATCH (a), (b) MERGE (a)-[:R]->(b) CREATE ...`, fgdb-cpny9). The
+    /// MATCH rows, through its WITH head or as `WITH *` carries them, are the
+    /// ordinary read relation, as after `MATCH ... WITH ... MERGE`.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn prepare_first_step<'a, R>(
+        statement: &'a str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+    ) -> Result<
+        (
+            Self,
+            Option<EdgeMergeReturnTemplate>,
+            Option<(usize, ChainContinuation<'a>)>,
+        ),
+        GraphEdgeMergeTextError,
+    >
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
+        parser.parse_match_prefix()?;
+        let (head, stages, schema) = if parser.is_word("WITH") {
+            parser.write_row_prefix()?
+        } else {
+            parser.implicit_write_row_prefix()?
+        };
+        parser.chain_write = true;
+        let keep = parser.visible_width(&schema);
+        let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
+        let continuation = Self::chain_continuation(&parser, &schema, keep, &merged, continues)?;
+        let read = parser.finish_write_row_prefix(statement, head, stages)?;
+        let input = read.resolve(crate::graph_text::LentResolver(&mut *resolve))?;
+        let (merge, returning) = Self::resolve_row_merge(statement, resolve, merged, input)?;
+        Ok((merge, returning, continuation))
+    }
+
+    /// The row the next write of a chain reads after a relationship MERGE
+    /// step: a WITH head's output row, or (`continues` without a head) the
+    /// row's first `keep` columns and the relationship, as `WITH *` carries
+    /// them.
+    fn chain_continuation<'a>(
+        parser: &Parser<'a>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        keep: usize,
+        merged: &RowMerge<'a>,
+        continues: bool,
+    ) -> Result<Option<(usize, ChainContinuation<'a>)>, GraphEdgeMergeTextError> {
+        if !continues {
+            return Ok(None);
+        }
+        let row = if let Some(head) = &merged.3 {
+            head.output.clone()
+        } else {
             let mut carried = schema[..keep].to_vec();
             if carried.len() >= MAX_PATTERN_VERTICES {
                 return Err(error(
@@ -443,33 +504,17 @@ impl PreparedGraphEdgeMergeText {
                 at: parser.current.at,
             });
             carried.push((name, GraphSetColumnType::Edge));
-            Some((
-                keep,
-                ChainContinuation {
-                    at: parser.current.at,
-                    row: carried,
-                    boundary: None,
-                    parameters: parser.syntax.parameters.clone(),
-                },
-            ))
-        } else {
-            None
+            carried
         };
-        let input = BoundSetTextInput {
-            selection: None,
-            parameters: parser.syntax.parameters.clone(),
-            parameter_offsets: parser.syntax.parameter_offsets.clone(),
-            return_at: statement.len(),
-            projection: None,
-            quantifier: GraphSetQuantifier::All,
-            pipeline: Vec::new(),
-            singleton: false,
-            leading: Vec::new(),
-            correlations: Vec::new(),
-            owned: Some((columns, types)),
-        };
-        let (merge, returning) = Self::resolve_row_merge(statement, resolve, merged, input)?;
-        Ok((merge, returning, continuation))
+        Ok(Some((
+            keep,
+            ChainContinuation {
+                at: parser.current.at,
+                row,
+                boundary: None,
+                parameters: parser.syntax.parameters.clone(),
+            },
+        )))
     }
 
     /// A relationship MERGE pattern over a WITH row, its endpoint columns and
