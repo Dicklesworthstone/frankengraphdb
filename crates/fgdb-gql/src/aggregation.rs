@@ -1030,7 +1030,9 @@ impl PreparedGraphAggregate {
             }
             .into());
         }
-        if self.input.plan().requires_identified_edges() && !weighted::counts_distinct_edges(self) {
+        if self.input.plan().requires_identified_edges()
+            && !weighted::answers_identified_exactly(self)
+        {
             return Err(GqlQueryError::IdentifiedEdgesRequired);
         }
         if self.relational_input.is_some() {
