@@ -3,9 +3,10 @@ use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder, GraphValue, GraphValueOrder, IntegerComparison};
 use fgdb_gql::spill_aggregate::{AsyncSpillAggregatePlan, SpillAggregateBuildError, SpillAggregatePlan};
 use fgdb_gql::{
-    GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphAggregate, GraphAggregateBuildError,
-    GraphAggregateColumn, GraphAggregateError, GraphAggregateFilter, GraphAggregateOrder,
-    GraphAggregateRow, GraphAggregateTest, GraphSetProjection, GraphSetValue, PreparedGraphAggregate,
+    GqlParameterType, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphAggregate,
+    GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError, GraphAggregateFilter,
+    GraphAggregateOrder, GraphAggregateRow, GraphAggregateTest, GraphSetProjection, GraphSetValue,
+    GraphSymbol, GraphSymbolKind, PreparedGraphAggregate, PreparedGraphAggregateText,
 };
 use fgdb_types::{CanonicalScalar, VId};
 
@@ -251,4 +252,101 @@ fn consumers_that_cannot_preserve_projected_ranking_refuse_before_input() {
     let values = data(&[(1, Some(5))]);
     let raw = execute(&native(0, None), &values, policy(), || Ok::<_, ()>(())).unwrap().value;
     assert!(query.project_incremental_output(&raw[0], &mut |_| Ok::<_, ()>(())).unwrap().is_none());
+}
+
+fn catalog(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+    match (kind, name) {
+        (GraphSymbolKind::Property, "g") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+        _ => None,
+    }
+}
+
+fn text(statement: &str) -> PreparedGraphAggregate {
+    PreparedGraphAggregateText::prepare(statement, catalog).unwrap()
+        .bind_parameters(&GqlParameters::new()).unwrap()
+}
+
+#[test]
+fn computed_alias_and_returned_group_key_sort_through_text() {
+    let query = text("MATCH (n) RETURN n.g AS bucket, -sum(n.p) AS score ORDER BY score DESCENDING, bucket ASCENDING");
+    let values = data(&[
+        (1, Some(10)), (1, Some(10)), (1, Some(10)), (3, Some(20)), (2, Some(20)),
+    ]);
+    let rows = execute(&query, &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+    assert_eq!(rows.iter().map(|row| bucket(row, 0)).collect::<Vec<_>>(), [2, 3, 1]);
+    assert_eq!(rows[0].values()[1].as_integer(), Some(-20));
+    assert!(query.ordering().is_empty());
+    assert_eq!(query.projected_ordering(), &[order(1, true, false), order(0, false, false)]);
+}
+
+#[test]
+fn mixed_returned_summary_and_computed_alias_keep_original_column_mapping() {
+    let query = text("MATCH (n) RETURN n.g AS bucket, sum(n.p) AS total, -count(*) AS score ORDER BY score, total DESC");
+    let values = data(&[
+        (3, Some(3)), (3, Some(3)), (2, Some(5)), (2, Some(5)), (1, Some(99)),
+    ]);
+    let rows = execute(&query, &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+    assert_eq!(rows.iter().map(|row| bucket(row, 0)).collect::<Vec<_>>(), [2, 3, 1]);
+    assert_eq!(query.projected_ordering(), &[order(2, false, false), order(1, true, false)]);
+    let ordinary = text("MATCH (n) RETURN sum(n.p) AS total, -sum(n.p) AS score ORDER BY total");
+    assert!(ordinary.projected_ordering().is_empty());
+    assert_eq!(ordinary.ordering().len(), 1);
+}
+
+#[test]
+fn prepared_alias_order_rebinds_once_and_retains_plan_identity() {
+    let statement = "MATCH (n) RETURN n.g AS bucket, sum(n.p) * $scale AS score ORDER BY score DESC";
+    let template = PreparedGraphAggregateText::prepare_with_parameter_types(
+        statement, &[("scale", GqlParameterType::Int64)], catalog,
+    ).unwrap();
+    assert_eq!(template.parameter_schema().len(), 1);
+    assert_eq!(template.parameter_schema()[0].occurrences, 1);
+    let original = template.canonical_template_bytes();
+    let a = template.bind_parameters(&GqlParameters::new().with_int64("scale", 1).unwrap()).unwrap();
+    let b = template.bind_parameters(&GqlParameters::new().with_int64("scale", -1).unwrap()).unwrap();
+    assert_ne!(a.canonical_bytes(), b.canonical_bytes());
+    assert_eq!(template.canonical_template_bytes(), original);
+    assert!(template.template_operators().contains(&"OrderByAggregate"));
+    let values = data(&[(1, Some(30)), (2, Some(20))]);
+    let forward = execute(&a, &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+    let reverse = execute(&b, &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+    assert_eq!(forward.iter().map(|row| bucket(row, 0)).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(reverse.iter().map(|row| bucket(row, 0)).collect::<Vec<_>>(), [2, 1]);
+    let ascending = PreparedGraphAggregateText::prepare_with_parameter_types(
+        "MATCH (n) RETURN n.g AS bucket, sum(n.p) * $scale AS score ORDER BY score ASC",
+        &[("scale", GqlParameterType::Int64)], catalog,
+    ).unwrap();
+    assert_ne!(template.canonical_template_bytes(), ascending.canonical_template_bytes());
+}
+
+#[test]
+fn computed_alias_sort_keeps_distinct_page_and_limit_zero_failures() {
+    let query = text("MATCH (n) RETURN DISTINCT -sum(n.p) AS score GROUP BY n.g ORDER BY score DESC SKIP 1 LIMIT 1");
+    let values = data(&[(1, Some(4)), (2, Some(4)), (3, Some(2)), (4, Some(1))]);
+    let rows = execute(&query, &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values()[0].as_integer(), Some(-2));
+    let broken = text("MATCH (n) RETURN sum(n.p) / 0 AS score GROUP BY n.g ORDER BY score LIMIT 0");
+    assert!(matches!(execute(&broken, &values, policy(), || Ok::<_, ()>(())),
+        Err(GqlQueryError::Source(GraphAggregateError::OutputExpression { .. }))));
+}
+
+#[test]
+fn ambiguous_or_hidden_mixed_order_refuses_before_catalog_access() {
+    for statement in [
+        "MATCH (n) RETURN -sum(n.p) AS score GROUP BY n.g ORDER BY score, n.g",
+        "MATCH (n) RETURN -sum(n.p) AS score GROUP BY n.g ORDER BY score, sum(n.p)",
+        "MATCH (n) RETURN -sum(n.p) AS score ORDER BY score, score",
+        "MATCH (n) RETURN -sum(n.p) AS score ORDER BY missing",
+        "MATCH (n) RETURN -sum(n.p) AS score ORDER BY score + 1",
+    ] {
+        let calls = std::cell::Cell::new(0);
+        let result = PreparedGraphAggregateText::prepare(statement, |kind, name| {
+            calls.set(calls.get() + 1);
+            catalog(kind, name)
+        });
+        assert!(result.is_err(), "{statement}");
+        assert_eq!(calls.get(), 0, "{statement}");
+    }
 }
