@@ -363,22 +363,28 @@ fn no_input_skips_actions_but_limit_zero_does_not_skip_effects_or_failures() {
 }
 
 #[test]
-fn ambiguous_upserts_refuse_without_narrowing_plain_multi_row_merge() {
-    let db = Fixture::new("ambiguity");
+fn multi_row_upserts_preserve_every_occurrence_and_plain_merge_reuses_them() {
+    let db = Fixture::new("multi-row");
     db.run("write", &["CREATE (:Person {p:1})"])
         .success("written");
-    let before = db.state();
-    db.run("write", &[UPSERT, "--param", "delta=int:2"])
-        .refusal();
-    assert_eq!(db.state(), before);
+
+    let upsert = db.run("write", &[UPSERT, "--param", "delta=int:2"]);
+    upsert.success("written");
+    let rows = upsert.rows(None);
+    assert_eq!(rows.len(), 2);
+    assert_ne!(rows[0][0], rows[1][0]);
+    assert!(rows.iter().all(|row| row[1] == scalar_int(3)));
+    let after_upsert = db.state();
+    assert_eq!(after_upsert.2.len(), 2);
+
     let plain = db.run(
         "write",
         &["MATCH (a:Person),(b:Person) WHERE a.p=1 AND b.p=2 \
          MERGE (a)-[r:R]->(b) RETURN r"],
     );
     plain.success("written");
-    let rows = plain.rows(None);
-    assert_eq!(rows.len(), 2);
-    assert_ne!(rows[0], rows[1]);
+    let plain_rows = plain.rows(None);
+    assert_eq!(plain_rows.len(), 2);
+    assert_ne!(plain_rows[0], plain_rows[1]);
     assert_eq!(db.edges().rows(None).len(), 2);
 }
