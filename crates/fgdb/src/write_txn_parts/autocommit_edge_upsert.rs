@@ -40,52 +40,6 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(infrastructure)?;
         Ok((stats, outcome, completion))
     }
-
-    /// MERGE with ON/SET and RETURN, published only after the complete result
-    /// has been admitted. A failed result aborts the private transaction; a
-    /// failed finish releases no rows. This is the same native transaction
-    /// executor, not an independent autocommit matcher or projection engine.
-    pub async fn execute_graph_edge_upsert_query_autocommit_governed<A>(
-        &mut self,
-        txcx: &TxnCx,
-        query_cx: &fgdb_types::QueryCx,
-        commit_cx: &CommitCx,
-        query: &fgdb_gql::PreparedGraphEdgeUpsertQuery,
-        policy: fgdb_gql::GraphEdgeUpsertPolicy,
-        allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
-    ) -> Result<
-        (
-            fgdb_gql::GraphEdgeUpsertStats,
-            fgdb_gql::GraphEdgeMergeOutcome,
-            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-            EmbeddedTxnCompletion,
-        ),
-        TxnGqlError<fgdb_gql::GraphEdgeUpsertQueryError<WriteTxnError, A>>,
-    > {
-        use fgdb_gql::{GqlQueryError, GraphEdgeUpsertError, GraphEdgeUpsertQueryError};
-        let infrastructure = |error| {
-            GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
-                GraphEdgeUpsertError::Staging(error),
-            ))
-        };
-        let mut transaction = self
-            .begin(txcx)
-            .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let (stats, outcome, rows) = match transaction.execute_graph_edge_upsert_query_governed(
-            self, query_cx, query, policy, allocate,
-        ) {
-            Ok(result) => result,
-            Err(error) => {
-                transaction.abort();
-                return Err(error);
-            }
-        };
-        let completion = transaction
-            .finish(self, commit_cx)
-            .await
-            .map_err(infrastructure)?;
-        Ok((stats, outcome, rows, completion))
-    }
 }
 
 #[cfg(test)]
