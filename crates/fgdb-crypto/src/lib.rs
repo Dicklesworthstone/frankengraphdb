@@ -21,6 +21,7 @@ pub mod blake2b;
 pub mod blake3;
 pub mod chacha20;
 pub mod cx;
+pub mod ed25519;
 pub mod poly1305;
 pub mod sha512;
 pub mod zeroize;
@@ -48,6 +49,10 @@ pub use audit::{
 pub use blake2b::{Blake2b, Blake2bError, blake2b, blake2b_keyed};
 pub use blake3::{Digest, Hasher, derive_key, hash, keyed_hash};
 pub use sha512::{Sha512, sha512};
+pub use ed25519::{
+    ED25519_PUBLIC_KEY_BYTES, ED25519_SEED_BYTES, ED25519_SIGNATURE_BYTES,
+    Ed25519Error, Ed25519SigningKey, Ed25519VerifyingKey,
+};
 pub use cx::{
     CryptoCx, DeterministicEntropy, EntropyError, EntropySource, FreshObjectProtectionMaterial,
     ObjectProtectionMaterialRef, SystemEntropy,
