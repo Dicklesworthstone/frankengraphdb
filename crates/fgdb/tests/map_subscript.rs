@@ -169,6 +169,14 @@ fn parenthesized_values_take_postfix_reads_and_arguments_take_predicates() {
                 vec![null(), null(), int(42)],
             ),
             ("RETURN ([1, 2])[0] AS x", vec!["x"], vec![int(1)]),
+            // NULL is dynamically typed: its map read is NULL (Map1 [2],
+            // Null1 [5], Null2 [5]).
+            (
+                "WITH null AS m RETURN m.missing AS a, m.name IS NULL AS b, \
+                 m.name IS NOT NULL AS c",
+                vec!["a", "b", "c"],
+                vec![null(), boolean(true), boolean(false)],
+            ),
             // A graph function of NULL is NULL (TCK Graph4 [3]).
             (
                 "RETURN type(null) AS a, nodes(null) AS b",

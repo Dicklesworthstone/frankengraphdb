@@ -233,6 +233,10 @@ impl ReadValueTemplate {
     ) -> GraphSetColumnType {
         match self {
             Self::Column(index) => input[*index],
+            // NULL is dynamically typed (bound as TypedNull(Any)).
+            Self::Literal(value) if matches!(value.value(), fgdb_types::CanonicalScalar::Null) => {
+                GraphSetColumnType::Any
+            }
             Self::List(_)
             | Self::Comprehension { .. }
             | Self::Slice { .. }

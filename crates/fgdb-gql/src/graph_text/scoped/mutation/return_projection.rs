@@ -2923,6 +2923,11 @@ pub(in crate::graph_text) fn bind_read_value(
 ) -> Result<GraphSetValue, GraphSetTextError> {
     Ok(match value {
         ReadValueTemplate::Column(input) => GraphSetValue::Column(*input),
+        // NULL belongs to every type: a NULL value is dynamically typed, so a
+        // later `.key` or subscript of it reads NULL (TCK Map1 [2], Null1 [5]).
+        ReadValueTemplate::Literal(value) if matches!(value.value(), CanonicalScalar::Null) => {
+            GraphSetValue::TypedNull(GraphSetColumnType::Any)
+        }
         ReadValueTemplate::Literal(value) => GraphSetValue::Literal(value.clone()),
         ReadValueTemplate::Parameter {
             index,
