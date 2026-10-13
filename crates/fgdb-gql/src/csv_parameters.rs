@@ -373,11 +373,12 @@ fn bind_field(
             }
             GqlParameterType::Scalar(
                 kind @ (CanonicalScalarKind::Float
-                    | CanonicalScalarKind::Decimal
-                    | CanonicalScalarKind::Bytes),
-            ) => {
-                arguments.with_scalar(spec.name.as_str(), scalars::decode(kind, text).map_err(fail)?)
-            }
+                | CanonicalScalarKind::Decimal
+                | CanonicalScalarKind::Bytes),
+            ) => arguments.with_scalar(
+                spec.name.as_str(),
+                scalars::decode(kind, text).map_err(fail)?,
+            ),
             GqlParameterType::Scalar(CanonicalScalarKind::Null) => return Err(invalid()),
             _ => return Err(fail(CsvParameterErrorKind::UnsupportedType)),
         }

@@ -3,8 +3,8 @@ use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder, GraphValue, GraphValueOrder};
 use fgdb_gql::spill_set::SpillSetAggregateRowError;
 use fgdb_gql::{
-    GraphAggregate, GraphAggregateError, GraphAggregateRow, GraphAggregateValue,
-    GraphExactAverage, GraphIntegerErrorKind, PreparedGraphSet,
+    GraphAggregate, GraphAggregateError, GraphAggregateRow, GraphAggregateValue, GraphExactAverage,
+    GraphIntegerErrorKind, PreparedGraphSet,
 };
 use fgdb_types::CanonicalScalar;
 
@@ -12,7 +12,11 @@ fn input() -> PreparedGraphSet {
     let mut graph = GraphPatternBuilder::new();
     graph.vertex("n").unwrap();
     graph
-        .prepare_values(&[GraphColumn::property("key", "n", PropertyKeyId(1))], 0, None)
+        .prepare_values(
+            &[GraphColumn::property("key", "n", PropertyKeyId(1))],
+            0,
+            None,
+        )
         .unwrap()
         .with_duplicates()
         .into()
@@ -72,7 +76,10 @@ fn shared_row_conversion_preserves_domains_and_every_interruption() {
         vec![GraphValue::Scalar(
             CanonicalScalar::ucs_basic_text(&"x".repeat(257)).unwrap(),
         )],
-        vec![GraphAggregateValue::Count(2), GraphAggregateValue::Integer(-3)],
+        vec![
+            GraphAggregateValue::Count(2),
+            GraphAggregateValue::Integer(-3),
+        ],
     );
     let mut calls = 0;
     let expected = row
@@ -81,8 +88,14 @@ fn shared_row_conversion_preserves_domains_and_every_interruption() {
             Ok::<(), usize>(())
         })
         .unwrap();
-    assert_eq!(expected.values()[1], GraphValue::Scalar(CanonicalScalar::Int(2)));
-    assert_eq!(expected.values()[2], GraphValue::Scalar(CanonicalScalar::Int(-3)));
+    assert_eq!(
+        expected.values()[1],
+        GraphValue::Scalar(CanonicalScalar::Int(2))
+    );
+    assert_eq!(
+        expected.values()[2],
+        GraphValue::Scalar(CanonicalScalar::Int(-3))
+    );
     for stop in 1..=calls {
         let mut seen = 0;
         assert!(matches!(
@@ -95,8 +108,14 @@ fn shared_row_conversion_preserves_domains_and_every_interruption() {
         assert_eq!(seen, stop);
     }
     for (value, kind) in [
-        (GraphAggregateValue::Count(u64::MAX), GraphIntegerErrorKind::Overflow),
-        (GraphAggregateValue::Integer(i128::MIN), GraphIntegerErrorKind::Overflow),
+        (
+            GraphAggregateValue::Count(u64::MAX),
+            GraphIntegerErrorKind::Overflow,
+        ),
+        (
+            GraphAggregateValue::Integer(i128::MIN),
+            GraphIntegerErrorKind::Overflow,
+        ),
         (
             GraphAggregateValue::Average(GraphExactAverage::new(2, 1).unwrap()),
             GraphIntegerErrorKind::IncompatibleOperands,

@@ -393,8 +393,13 @@ fn computed_collections_keep_original_child_order_and_unproved_shapes_refuse() {
         let expected = batch(&q, &s);
         let plan = EdgeAggregatePlan::compile(&q).unwrap();
         assert!(plan.ordered_collections.is_some(), "{text}");
-        assert_eq!(EdgeAggregateCursor::new(s, plan, wide(), || Ok::<_, ()>(()))
-            .collect::<Result<Vec<_>, _>>().unwrap(), expected, "{text}");
+        assert_eq!(
+            EdgeAggregateCursor::new(s, plan, wide(), || Ok::<_, ()>(()))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected,
+            "{text}"
+        );
     }
     // A transformed collection argument has no order proof of its own.
     assert!(matches!(
@@ -710,15 +715,27 @@ fn shared_collection_order_preserves_correlated_arrays_and_unreturned_prefixes()
     for (text, expected) in [
         (
             "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS amounts,COLLECT(r) AS edges,COUNT(*) AS rows",
-            vec![integer_list(&[-4, 7, 9, 9]), edges(&[4, 2, 5, 1, 3]), GraphAggregateValue::Count(5)],
+            vec![
+                integer_list(&[-4, 7, 9, 9]),
+                edges(&[4, 2, 5, 1, 3]),
+                GraphAggregateValue::Count(5),
+            ],
         ),
         (
             "MATCH (a)-[r:R]->(b) RETURN COUNT(b) AS count,COLLECT(r.p) AS amounts,COLLECT(r) AS edges",
-            vec![GraphAggregateValue::Count(5), integer_list(&[9, 9, -4, 7]), edges(&[1, 3, 4, 2, 5])],
+            vec![
+                GraphAggregateValue::Count(5),
+                integer_list(&[9, 9, -4, 7]),
+                edges(&[1, 3, 4, 2, 5]),
+            ],
         ),
         (
             "MATCH (a)-[r:R]->(b) RETURN COUNT(b) AS count,COLLECT(DISTINCT r.p) AS amounts,COLLECT(r) AS edges",
-            vec![GraphAggregateValue::Count(5), integer_list(&[9, -4, 7]), edges(&[1, 3, 4, 2, 5])],
+            vec![
+                GraphAggregateValue::Count(5),
+                integer_list(&[9, -4, 7]),
+                edges(&[1, 3, 4, 2, 5]),
+            ],
         ),
     ] {
         let q = prepare(text);
@@ -731,7 +748,8 @@ fn shared_collection_order_preserves_correlated_arrays_and_unreturned_prefixes()
         assert!(!plan.canonical_collections);
         let drops = s.drops.clone();
         let actual = EdgeAggregateCursor::new(s, plan, wide(), || Ok::<_, ()>(()))
-            .collect::<Result<Vec<_>, _>>().unwrap();
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert_eq!(actual, expected, "stream: {text}");
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(q.canonical_bytes(), before);
@@ -754,15 +772,22 @@ fn shared_collection_order_covers_joins_orientations_groups_and_result_windows()
                 }
                 for group in ["", "b AS destination,"] {
                     for page in ["", " LIMIT 0", " SKIP 1 LIMIT 1"] {
-                        let tail = if hops == 2 { ",COLLECT(s) AS suffixes" } else { "" };
-                        let text = format!("MATCH {pattern} RETURN {group}COLLECT(r.p) AS amounts,\
-                            COLLECT(r) AS roots,COLLECT(a) AS starts,COLLECT(DISTINCT r.p) AS support{tail}{page}");
+                        let tail = if hops == 2 {
+                            ",COLLECT(s) AS suffixes"
+                        } else {
+                            ""
+                        };
+                        let text = format!(
+                            "MATCH {pattern} RETURN {group}COLLECT(r.p) AS amounts,\
+                            COLLECT(r) AS roots,COLLECT(a) AS starts,COLLECT(DISTINCT r.p) AS support{tail}{page}"
+                        );
                         let q = prepare(&text);
                         let s = source(mask);
                         let expected = batch(&q, &s);
                         let plan = EdgeAggregatePlan::compile(&q).unwrap();
                         assert!(plan.ordered_collections.is_some(), "{text}");
-                        let mut cursor = EdgeAggregateCursor::new(s, plan, wide(), || Ok::<_, ()>(()));
+                        let mut cursor =
+                            EdgeAggregateCursor::new(s, plan, wide(), || Ok::<_, ()>(()));
                         let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
                         assert_eq!(actual, expected, "mask {mask}: {text}");
                         assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
@@ -788,9 +813,19 @@ fn shared_collection_order_limits_and_all_checkpoints_refuse_before_a_partial_li
     let rows = full.row_stats();
     let stats = full.evaluator_stats();
     drop(full);
-    let exact = GqlQueryPolicy::new(rows.snapshot_records, 1, stats.work_units, stats.scratch_entries);
-    assert_eq!(EdgeAggregateCursor::new(source(31), plan.clone(), exact, || Ok::<_, ()>(()))
-        .next().unwrap().unwrap(), expected);
+    let exact = GqlQueryPolicy::new(
+        rows.snapshot_records,
+        1,
+        stats.work_units,
+        stats.scratch_entries,
+    );
+    assert_eq!(
+        EdgeAggregateCursor::new(source(31), plan.clone(), exact, || Ok::<_, ()>(()))
+            .next()
+            .unwrap()
+            .unwrap(),
+        expected
+    );
     for stop in 1..=calls {
         let s = source(31);
         let drops = s.drops.clone();
@@ -813,21 +848,30 @@ fn shared_collection_order_limits_and_all_checkpoints_refuse_before_a_partial_li
         GqlQueryPolicy::new(rows.snapshot_records - 1, 1, u64::MAX, u64::MAX),
         GqlQueryPolicy::new(u64::MAX, 0, u64::MAX, u64::MAX),
     ] {
-        let mut cursor = EdgeAggregateCursor::new(source(31), plan.clone(), policy, || Ok::<_, ()>(()));
+        let mut cursor =
+            EdgeAggregateCursor::new(source(31), plan.clone(), policy, || Ok::<_, ()>(()));
         assert!(cursor.next().unwrap().is_err());
         assert_eq!(cursor.row_stats().result_rows, 0);
         assert_eq!(cursor.state(), EdgeScanState::Failed);
         assert!(cursor.next().is_none());
     }
     for page in [" LIMIT 0", " LIMIT 1", " SKIP 100 LIMIT 1"] {
-        let q = prepare(&format!("MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS amounts,COLLECT(r) AS edges{page}"));
+        let q = prepare(&format!(
+            "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS amounts,COLLECT(r) AS edges{page}"
+        ));
         let mut s = source(31);
         s.fail = Some(EId(5));
         let drops = s.drops.clone();
-        let mut cursor = EdgeAggregateCursor::new(s, EdgeAggregatePlan::compile(&q).unwrap(), wide(), || Ok::<_, ()>(()));
-        assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Source(GraphAggregateError::Source(
-            EdgeScanError::Source("late edge failure")
-        ))))));
+        let mut cursor =
+            EdgeAggregateCursor::new(s, EdgeAggregatePlan::compile(&q).unwrap(), wide(), || {
+                Ok::<_, ()>(())
+            });
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(GraphAggregateError::Source(
+                EdgeScanError::Source("late edge failure")
+            ))))
+        ));
         assert_eq!(cursor.row_stats().result_rows, 0);
         assert!(cursor.next().is_none());
         assert_eq!(drops.load(Ordering::SeqCst), 1);

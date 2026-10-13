@@ -52,11 +52,17 @@ fn decimal(text: &str) -> Option<CanonicalScalar> {
     let scale = CanonicalDecimal::scale();
     let digits = u32::try_from(fraction.len()).ok()?;
     let shift = scale.checked_sub(digits)?;
-    let integral = whole.parse::<i128>().ok()?.checked_mul(10_i128.pow(scale))?;
+    let integral = whole
+        .parse::<i128>()
+        .ok()?
+        .checked_mul(10_i128.pow(scale))?;
     let fractional = if fraction.is_empty() {
         0
     } else {
-        fraction.parse::<i128>().ok()?.checked_mul(10_i128.pow(shift))?
+        fraction
+            .parse::<i128>()
+            .ok()?
+            .checked_mul(10_i128.pow(shift))?
     };
     let coefficient = integral.checked_add(fractional)?;
     let coefficient = if negative {
@@ -140,8 +146,7 @@ mod tests {
             );
         }
         for text in [
-            "NaN", "nan", "inf", "-inf", "Infinity", "1e309", "+1.5", " 1", "1 ",
-            "1_0", "0x10", "",
+            "NaN", "nan", "inf", "-inf", "Infinity", "1e309", "+1.5", " 1", "1 ", "1_0", "0x10", "",
         ] {
             assert_eq!(
                 decode(CanonicalScalarKind::Float, text),
@@ -168,18 +173,27 @@ mod tests {
                 fgdb_types::MIN_DECIMAL_COEFFICIENT,
             ),
         ] {
-            let expected = CanonicalScalar::Decimal(
-                CanonicalDecimal::from_coefficient(coefficient).unwrap(),
-            );
+            let expected =
+                CanonicalScalar::Decimal(CanonicalDecimal::from_coefficient(coefficient).unwrap());
             assert_eq!(
                 decoded(CanonicalScalarKind::Decimal, text),
                 GqlParameters::new().with_scalar("v", expected).unwrap(),
             );
         }
         for text in [
-            "0.0000000000000000001", "1.0000000000000000005",
-            "10000000000000000", "-10000000000000000", "1e2", "+1", ".5", "1.",
-            "1.2.3", "NaN", " 1", "", "9999999999999999999999999999999999999999999",
+            "0.0000000000000000001",
+            "1.0000000000000000005",
+            "10000000000000000",
+            "-10000000000000000",
+            "1e2",
+            "+1",
+            ".5",
+            "1.",
+            "1.2.3",
+            "NaN",
+            " 1",
+            "",
+            "9999999999999999999999999999999999999999999",
         ] {
             assert_eq!(
                 decode(CanonicalScalarKind::Decimal, text),
@@ -195,7 +209,10 @@ mod tests {
             .into_iter()
             .flat_map(f32::to_le_bytes)
             .collect();
-        let hex = packed.iter().map(|byte| format!("{byte:02X}")).collect::<String>();
+        let hex = packed
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<String>();
         assert_eq!(
             decoded(CanonicalScalarKind::Bytes, &hex),
             GqlParameters::new()
@@ -231,14 +248,16 @@ mod tests {
                 decoded(kind, "\\N"),
                 GqlParameters::new().with_null("v").unwrap(),
             );
-            assert!(decode_csv_parameters(
-                "v\n\"\\N\"", &schema(kind), CsvParameterLimits::default(),
-            ).is_err());
+            assert!(
+                decode_csv_parameters("v\n\"\\N\"", &schema(kind), CsvParameterLimits::default(),)
+                    .is_err()
+            );
             let error = decode_csv_parameters(
                 &format!("v\n{value}\nsecret_payload"),
                 &schema(kind),
                 CsvParameterLimits::default(),
-            ).unwrap_err();
+            )
+            .unwrap_err();
             assert_eq!(error.record, 2);
             assert_eq!(error.column, Some(0));
             assert_eq!(error.offset, 3 + value.len());
@@ -256,29 +275,51 @@ mod tests {
         ] {
             let input = format!("v\n{value}\n{value}");
             let schema = schema(kind);
-            let rows = decode_csv_parameters(&input, &schema, CsvParameterLimits::default()).unwrap();
+            let rows =
+                decode_csv_parameters(&input, &schema, CsvParameterLimits::default()).unwrap();
             let total = rows.iter().map(GqlParameters::canonical_byte_len).sum();
             let limits = CsvParameterLimits {
                 max_field_bytes: value.len(),
                 max_parameter_bytes: total,
                 ..CsvParameterLimits::default()
             };
-            assert_eq!(decode_csv_parameters(&input, &schema, limits).unwrap(), rows);
+            assert_eq!(
+                decode_csv_parameters(&input, &schema, limits).unwrap(),
+                rows
+            );
             let error = decode_csv_parameters(
-                &input, &schema,
-                CsvParameterLimits { max_parameter_bytes: total - 1, ..limits },
-            ).unwrap_err();
+                &input,
+                &schema,
+                CsvParameterLimits {
+                    max_parameter_bytes: total - 1,
+                    ..limits
+                },
+            )
+            .unwrap_err();
             assert_eq!(error.record, 2);
-            assert!(matches!(error.kind, CsvParameterErrorKind::Limit {
-                dimension: CsvParameterLimit::ParameterBytes, ..
-            }));
+            assert!(matches!(
+                error.kind,
+                CsvParameterErrorKind::Limit {
+                    dimension: CsvParameterLimit::ParameterBytes,
+                    ..
+                }
+            ));
             let error = decode_csv_parameters(
-                &input, &schema,
-                CsvParameterLimits { max_field_bytes: value.len() - 1, ..limits },
-            ).unwrap_err();
-            assert!(matches!(error.kind, CsvParameterErrorKind::Limit {
-                dimension: CsvParameterLimit::FieldBytes, ..
-            }));
+                &input,
+                &schema,
+                CsvParameterLimits {
+                    max_field_bytes: value.len() - 1,
+                    ..limits
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error.kind,
+                CsvParameterErrorKind::Limit {
+                    dimension: CsvParameterLimit::FieldBytes,
+                    ..
+                }
+            ));
         }
     }
 
@@ -290,14 +331,17 @@ mod tests {
             ("b", GqlParameterType::Scalar(CanonicalScalarKind::Bytes)),
         ];
         PreparedGraphWriteScript::prepare_with_parameter_types(
-            "CREATE (n {f:$f,d:$d,b:$b})", RelationId(1), &types,
+            "CREATE (n {f:$f,d:$d,b:$b})",
+            RelationId(1),
+            &types,
             |kind, name| match (kind, name) {
                 (GraphSymbolKind::Property, "f") => Some(GraphSymbol::Property(PropertyKeyId(1))),
                 (GraphSymbolKind::Property, "d") => Some(GraphSymbol::Property(PropertyKeyId(2))),
                 (GraphSymbolKind::Property, "b") => Some(GraphSymbol::Property(PropertyKeyId(3))),
                 _ => None,
             },
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
@@ -306,32 +350,60 @@ mod tests {
         let input = "\u{feff}b,f,d\r\n\"0000803f\",1.25,-2.500\r\n\\N,\\N,0.000000000000000001\r\n";
         let arguments = [
             GqlParameters::new()
-                .with_scalar("f", CanonicalScalar::Float(CanonicalF64::new(1.25))).unwrap()
-                .with_scalar("d", CanonicalScalar::Decimal(
-                    CanonicalDecimal::from_coefficient(-2_500_000_000_000_000_000).unwrap(),
-                )).unwrap()
-                .with_scalar("b", CanonicalScalar::bytes(1_f32.to_le_bytes().to_vec()).unwrap()).unwrap(),
-            GqlParameters::new().with_null("f").unwrap().with_null("b").unwrap()
-                .with_scalar("d", CanonicalScalar::Decimal(
-                    CanonicalDecimal::from_coefficient(1).unwrap(),
-                )).unwrap(),
+                .with_scalar("f", CanonicalScalar::Float(CanonicalF64::new(1.25)))
+                .unwrap()
+                .with_scalar(
+                    "d",
+                    CanonicalScalar::Decimal(
+                        CanonicalDecimal::from_coefficient(-2_500_000_000_000_000_000).unwrap(),
+                    ),
+                )
+                .unwrap()
+                .with_scalar(
+                    "b",
+                    CanonicalScalar::bytes(1_f32.to_le_bytes().to_vec()).unwrap(),
+                )
+                .unwrap(),
+            GqlParameters::new()
+                .with_null("f")
+                .unwrap()
+                .with_null("b")
+                .unwrap()
+                .with_scalar(
+                    "d",
+                    CanonicalScalar::Decimal(CanonicalDecimal::from_coefficient(1).unwrap()),
+                )
+                .unwrap(),
         ];
-        let expected = script.bind_parameter_sets_with_limit(&arguments, 64)
-            .unwrap().program().canonical_bytes();
-        assert_eq!(script.bind_csv(input, CsvParameterLimits::default())
-            .unwrap().program().canonical_bytes(), expected);
+        let expected = script
+            .bind_parameter_sets_with_limit(&arguments, 64)
+            .unwrap()
+            .program()
+            .canonical_bytes();
+        assert_eq!(
+            script
+                .bind_csv(input, CsvParameterLimits::default())
+                .unwrap()
+                .program()
+                .canonical_bytes(),
+            expected
+        );
         for split in 1..input.len() {
             let mut at = 0;
-            let (actual, records) = script.bind_csv_stream_controlled(
-                CsvParameterLimits::default(), 64,
-                |buffer| -> Result<usize, ()> {
-                    let boundary = if at < split { split } else { input.len() };
-                    let n = buffer.len().min(boundary - at);
-                    buffer[..n].copy_from_slice(&input.as_bytes()[at..at + n]);
-                    at += n;
-                    Ok(n)
-                }, || Ok(()),
-            ).unwrap();
+            let (actual, records) = script
+                .bind_csv_stream_controlled(
+                    CsvParameterLimits::default(),
+                    64,
+                    |buffer| -> Result<usize, ()> {
+                        let boundary = if at < split { split } else { input.len() };
+                        let n = buffer.len().min(boundary - at);
+                        buffer[..n].copy_from_slice(&input.as_bytes()[at..at + n]);
+                        at += n;
+                        Ok(n)
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
             assert_eq!(records, 2);
             assert_eq!(actual.canonical_bytes(), expected, "split {split}");
         }
@@ -345,28 +417,44 @@ mod tests {
         let input = b"f,d,b\n1.25,0.1,00\n2.5,0.2,ff\n";
         let mut calls = 0;
         let mut source = input.as_slice();
-        let (_, records) = script.bind_csv_stream_controlled(
-            CsvParameterLimits::default(), 64,
-            |buffer| source.read(buffer).map_err(|_| ()),
-            || { calls += 1; Ok(()) },
-        ).unwrap();
+        let (_, records) = script
+            .bind_csv_stream_controlled(
+                CsvParameterLimits::default(),
+                64,
+                |buffer| source.read(buffer).map_err(|_| ()),
+                || {
+                    calls += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
         assert_eq!(records, 2);
         for stop in 0..calls {
             let mut at = 0;
             let mut source = input.as_slice();
             let result = script.bind_csv_stream_controlled(
-                CsvParameterLimits::default(), 64,
+                CsvParameterLimits::default(),
+                64,
                 |buffer| source.read(buffer).map_err(|_| ()),
-                || { let current = at; at += 1; if current == stop { Err(()) } else { Ok(()) } },
+                || {
+                    let current = at;
+                    at += 1;
+                    if current == stop { Err(()) } else { Ok(()) }
+                },
             );
-            assert!(matches!(result, Err(GraphWriteScriptCsvStreamError::Interrupted(()))));
+            assert!(matches!(
+                result,
+                Err(GraphWriteScriptCsvStreamError::Interrupted(()))
+            ));
         }
         for last in ["NaN,0.2,ff", "2.5,0.0000000000000000001,ff", "2.5,0.2,fg"] {
             let input = format!("f,d,b\n1.25,0.1,00\n{last}\n");
             let mut source = input.as_bytes();
             let result = script.bind_csv_stream_controlled(
-                CsvParameterLimits::default(), 64,
-                |buffer| source.read(buffer).map_err(|_| ()), || Ok(()),
+                CsvParameterLimits::default(),
+                64,
+                |buffer| source.read(buffer).map_err(|_| ()),
+                || Ok(()),
             );
             let error = match result.err().expect("invalid CSV must not bind") {
                 GraphWriteScriptCsvStreamError::Csv(error) => Some(error),

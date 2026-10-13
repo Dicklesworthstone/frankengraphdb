@@ -28,7 +28,11 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 
 fn policy() -> GraphInsertPolicy {
-    GraphInsertPolicy::new(GqlQueryPolicy::new(1_000, 100, 1_000_000, 100_000), 100, 100)
+    GraphInsertPolicy::new(
+        GqlQueryPolicy::new(1_000, 100, 1_000_000, 100_000),
+        100,
+        100,
+    )
 }
 
 fn prepare(text: &str) -> PreparedGraphInsertQuery {
@@ -107,9 +111,16 @@ fn computed_with_bindings_rebind_once_and_feed_the_creation_and_return() {
         let output = execute(&bound, policy(), &mut requests, || Ok(())).unwrap();
         assert_eq!(output.returning().value, ints(&[&[expected, expected]]));
         assert_eq!(output.insertion().stats().created_vertices, 1);
-        assert_eq!(requests, vec![GraphInsertRequest::Vertex { row: 0, vertex: 0 }]);
+        assert_eq!(
+            requests,
+            vec![GraphInsertRequest::Vertex { row: 0, vertex: 0 }]
+        );
     }
-    assert_eq!(calls.get(), resolved, "binding and execution do not resolve again");
+    assert_eq!(
+        calls.get(),
+        resolved,
+        "binding and execution do not resolve again"
+    );
     assert!(prepared.bind_parameters(&GqlParameters::new()).is_err());
 }
 
@@ -138,7 +149,11 @@ fn input_filters_distinct_and_windows_select_exact_creation_occurrences() {
     ] {
         let mut requests = Vec::new();
         let output = execute(&prepare(text), policy(), &mut requests, || Ok(())).unwrap();
-        assert_eq!(output.insertion().stats().created_vertices, expected.len() as u64, "{text}");
+        assert_eq!(
+            output.insertion().stats().created_vertices,
+            expected.len() as u64,
+            "{text}"
+        );
         assert_eq!(requests.len(), expected.len(), "{text}");
         assert_eq!(output.returning().value, expected, "{text}");
     }
@@ -174,18 +189,21 @@ fn equal_input_rows_create_distinct_full_width_identities_and_edges() {
     let output = execute(&query, policy(), &mut requests, || Ok(())).unwrap();
     assert_eq!(output.insertion().stats().created_vertices, 4);
     assert_eq!(output.insertion().stats().created_edges, 2);
-    assert_eq!(output.returning().value, vec![
-        GraphValueRow::from_owned_values(vec![
-            GraphValue::Vertex(VId(ID_BASE + 1)),
-            GraphValue::Vertex(VId(ID_BASE + 2)),
-            GraphValue::Edge(EId(ID_BASE + 3)),
-        ]),
-        GraphValueRow::from_owned_values(vec![
-            GraphValue::Vertex(VId(ID_BASE + 4)),
-            GraphValue::Vertex(VId(ID_BASE + 5)),
-            GraphValue::Edge(EId(ID_BASE + 6)),
-        ]),
-    ]);
+    assert_eq!(
+        output.returning().value,
+        vec![
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(ID_BASE + 1)),
+                GraphValue::Vertex(VId(ID_BASE + 2)),
+                GraphValue::Edge(EId(ID_BASE + 3)),
+            ]),
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(ID_BASE + 4)),
+                GraphValue::Vertex(VId(ID_BASE + 5)),
+                GraphValue::Edge(EId(ID_BASE + 6)),
+            ]),
+        ]
+    );
     assert_eq!(requests.len(), 6);
 }
 
@@ -199,7 +217,8 @@ fn only_the_final_result_consumes_the_result_row_allowance() {
         budget,
         &mut Vec::new(),
         || Ok(()),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(output.insertion().stats().created_vertices, 3);
     assert_eq!(output.returning().value, ints(&[&[3]]));
     budget.query = GqlQueryPolicy::new(1_000, 0, 1_000_000, 100_000);
@@ -208,7 +227,8 @@ fn only_the_final_result_consumes_the_result_row_allowance() {
         budget,
         &mut Vec::new(),
         || Ok(()),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(output.insertion().stats().created_vertices, 3);
     assert!(output.returning().value.is_empty());
 }
@@ -235,17 +255,24 @@ fn prefix_scope_and_depth_refuse_before_any_catalog_callback() {
         "WITH 1 AS x CREATE (n:Item {p: CASE WHEN true THEN x ELSE missing END}) RETURN n",
         "WHERE true CREATE (n:Item) RETURN n",
     ] {
-        assert!(PreparedGraphInsertQueryText::prepare(text, R, |_, _| {
-            panic!("invalid scope reached catalog: {text}")
-        }).is_err(), "{text}");
+        assert!(
+            PreparedGraphInsertQueryText::prepare(text, R, |_, _| {
+                panic!("invalid scope reached catalog: {text}")
+            })
+            .is_err(),
+            "{text}"
+        );
     }
     let text = format!(
         "WITH 1 AS x {} CREATE (n:Item {{p:x}}) RETURN n",
         "WITH x AS x ".repeat(fgdb_gql::MAX_GRAPH_SET_DEPTH + 1),
     );
-    assert!(PreparedGraphInsertQueryText::prepare(&text, R, |_, _| {
-        panic!("excessive prefix depth reached catalog")
-    }).is_err());
+    assert!(
+        PreparedGraphInsertQueryText::prepare(&text, R, |_, _| {
+            panic!("excessive prefix depth reached catalog")
+        })
+        .is_err()
+    );
 }
 
 #[test]
@@ -258,7 +285,8 @@ fn cancellation_and_work_scratch_limits_cover_the_whole_prefix_and_write() {
     let baseline = execute(&query, policy(), &mut Vec::new(), || {
         checkpoints += 1;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(baseline.returning().value, ints(&[&[2], &[3]]));
     let work = baseline.returning().evaluator.work_units;
     let scratch = baseline.returning().evaluator.scratch_entries;
@@ -266,7 +294,8 @@ fn cancellation_and_work_scratch_limits_cover_the_whole_prefix_and_write() {
     let exact = GraphInsertPolicy::new(GqlQueryPolicy::new(1_000, 100, work, scratch), 100, 100);
     assert!(execute(&query, exact, &mut Vec::new(), || Ok(())).is_ok());
     for (work, scratch) in [(work - 1, scratch), (work, scratch - 1)] {
-        let budget = GraphInsertPolicy::new(GqlQueryPolicy::new(1_000, 100, work, scratch), 100, 100);
+        let budget =
+            GraphInsertPolicy::new(GqlQueryPolicy::new(1_000, 100, work, scratch), 100, 100);
         assert!(execute(&query, budget, &mut Vec::new(), || Ok(())).is_err());
     }
     for stop in 1..=checkpoints {
@@ -274,8 +303,12 @@ fn cancellation_and_work_scratch_limits_cover_the_whole_prefix_and_write() {
         let error = execute(&query, policy(), &mut Vec::new(), || {
             reached += 1;
             if reached == stop { Err(()) } else { Ok(()) }
-        }).unwrap_err();
-        assert!(matches!(error, GqlQueryError::Interrupted(())), "checkpoint {stop}: {error:?}");
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, GqlQueryError::Interrupted(())),
+            "checkpoint {stop}: {error:?}"
+        );
     }
 }
 
@@ -285,15 +318,18 @@ fn no_return_script_preflight_uses_the_same_imported_scope() {
                   WITH $value + 1 AS y INSERT (m:Item {p:y})";
     assert!(!PreparedGraphInsertQueryText::has_return_clause(script).unwrap());
     let prepared = PreparedGraphWriteScript::prepare(script, R, symbols).unwrap();
-    let bound = prepared.bind_parameters(
-        &GqlParameters::new().with_int64("value", 7).unwrap(),
-    ).unwrap();
+    let bound = prepared
+        .bind_parameters(&GqlParameters::new().with_int64("value", 7).unwrap())
+        .unwrap();
     assert_eq!(bound.statements().len(), 2);
     assert!(PreparedGraphInsertText::prepare("WITH 42 AS x CREATE (n {p:x})", R, symbols).is_ok());
-    assert!(PreparedGraphWriteScript::prepare(
-        "CREATE (n:Item); WITH missing AS x CREATE (m {p:x})",
-        R,
-        |_, _| panic!("whole-script preflight reached the first statement's catalog"),
-    ).is_err());
+    assert!(
+        PreparedGraphWriteScript::prepare(
+            "CREATE (n:Item); WITH missing AS x CREATE (m {p:x})",
+            R,
+            |_, _| panic!("whole-script preflight reached the first statement's catalog"),
+        )
+        .is_err()
+    );
     assert!(PreparedGraphWriteScript::prepare("WITH 1 AS x MERGE (n {p:x})", R, symbols).is_err());
 }

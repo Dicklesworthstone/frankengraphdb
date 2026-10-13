@@ -62,16 +62,20 @@ impl PreparedNativeRead {
         E: From<SubscriptionError>,
     {
         let first = database.standing_queries.len();
-        let mut registration = Registration { database, first, accepted: false };
-        let (mut consumer, output) = self.subscribe_replaying(
-            &mut *registration.database, cx, params, setup, admit,
-        )?;
+        let mut registration = Registration {
+            database,
+            first,
+            accepted: false,
+        };
+        let (mut consumer, output) =
+            self.subscribe_replaying(&mut *registration.database, cx, params, setup, admit)?;
         let end = registration.database.standing_queries.len();
         if consumer.handle.index < first
             || consumer.handle.index.checked_add(2) != Some(end)
-            || consumer.replay.as_ref().is_none_or(|replay| {
-                replay.index.checked_add(1) != Some(end)
-            })
+            || consumer
+                .replay
+                .as_ref()
+                .is_none_or(|replay| replay.index.checked_add(1) != Some(end))
         {
             return Err(SubscriptionError::from(StandingQueryError::Unsupported).into());
         }
@@ -133,7 +137,10 @@ impl NativeSubscription {
         if !Arc::ptr_eq(&database.handle_owner, &self.handle.owner) {
             return Err(StandingQueryError::ForeignHandle.into());
         }
-        let ownership = self.ownership.as_ref().ok_or(SubscriptionError::NotPrivate)?;
+        let ownership = self
+            .ownership
+            .as_ref()
+            .ok_or(SubscriptionError::NotPrivate)?;
         if ownership.released {
             return Ok(0);
         }
@@ -152,10 +159,13 @@ impl NativeSubscription {
         }
         cx.with_restriction(|| {
             let mut checkpoint = || {
-                cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted)
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
             };
             let mut meter = Meter {
-                policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint,
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
             };
             let count = range.end - range.start;
             let prepared = Release::prepare(&mut database.standing_queries, range, &mut meter)
@@ -205,7 +215,9 @@ impl<'a> Release<'a> {
         let count = range.end - range.start;
         meter.units(ZSetEvent::ScratchEntry, count)?;
         let mut retired = Vec::new();
-        retired.try_reserve_exact(count).map_err(|_| StandingQueryFailure::ScratchBudget)?;
+        retired
+            .try_reserve_exact(count)
+            .map_err(|_| StandingQueryFailure::ScratchBudget)?;
         let mut keep = queries.len();
         while keep > 0 {
             meter.charge(ZSetEvent::Work)?;
@@ -216,12 +228,20 @@ impl<'a> Release<'a> {
             }
         }
         (meter.checkpoint)()?;
-        Ok(Self { queries, range, keep, retired })
+        Ok(Self {
+            queries,
+            range,
+            keep,
+            retired,
+        })
     }
 
     fn commit(mut self) {
         for index in self.range {
-            self.retired.push(std::mem::replace(&mut self.queries[index], StandingQuery::Released));
+            self.retired.push(std::mem::replace(
+                &mut self.queries[index],
+                StandingQuery::Released,
+            ));
         }
         self.queries.truncate(self.keep);
         drop(self.retired);

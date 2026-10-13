@@ -123,7 +123,10 @@ fn terminal_aggregate_tail_distinguishes_empty_grouped_and_global_input() {
     assert_eq!(values(&output), vec![vec![int(0)]]);
     assert_eq!(output.rows.result_rows, 1);
     assert!(finish(&global, Some(4), 0).is_err());
-    assert_eq!(values(&finish(&global, None, 1).unwrap()), vec![vec![int(0)]]);
+    assert_eq!(
+        values(&finish(&global, None, 1).unwrap()),
+        vec![vec![int(0)]]
+    );
 
     let grouped = prepare("WITH r.p AS p WHERE p < 0 RETURN p, count(*) AS n");
     let output = finish(&grouped, Some(4), 0).unwrap();
@@ -389,9 +392,7 @@ fn unwind_property_reads_stop_at_its_as_and_do_not_revive_dropped_bindings() {
         assert!(result.is_err(), "{tail}");
     }
     // A caller that needs a later scalar read can explicitly retain it.
-    let query = prepare(
-        "WITH r.p AS p UNWIND [p] AS x UNWIND [p+x] AS y RETURN p, y",
-    );
+    let query = prepare("WITH r.p AS p UNWIND [p] AS x UNWIND [p+x] AS y RETURN p, y");
     assert_eq!(
         values(&finish(&query, Some(4), 1).unwrap()),
         vec![vec![int(4), int(8)]]

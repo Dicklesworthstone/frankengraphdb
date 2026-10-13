@@ -99,12 +99,19 @@ const VECTORS: &[(&str, &str, &str, &str)] = &[
 ];
 fn unhex(text: &str) -> Vec<u8> {
     assert_eq!(text.len() % 2, 0);
-    text.as_bytes().chunks_exact(2).map(|pair| {
-        let digits = core::str::from_utf8(pair).unwrap();
-        u8::from_str_radix(digits, 16).unwrap()
-    }).collect()
+    text.as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let digits = core::str::from_utf8(pair).unwrap();
+            u8::from_str_radix(digits, 16).unwrap()
+        })
+        .collect()
 }
-fn fixed<const N: usize>(text: &str) -> [u8; N] { unhex(text).try_into().unwrap() }
+fn fixed<const N: usize>(text: &str) -> [u8; N] {
+    unhex(text).try_into().unwrap()
+}
 
 #[test]
 fn all_rfc8032_pure_ed25519_vectors_derive_sign_and_verify() {
@@ -130,8 +137,12 @@ fn message_signature_and_wrong_key_tampering_refuse() {
     let wrong = Ed25519SigningKey::from_seed(Secret::new([7; 32])).verifying_key();
     assert!(wrong.verify(b"signed transcript", &signature).is_err());
     for at in 0..64 {
-        let mut modified = signature; modified[at] ^= 1;
-        assert!(public.verify(b"signed transcript", &modified).is_err(), "byte={at}");
+        let mut modified = signature;
+        modified[at] ^= 1;
+        assert!(
+            public.verify(b"signed transcript", &modified).is_err(),
+            "byte={at}"
+        );
     }
     assert_eq!(format!("{key:?}"), "Ed25519SigningKey([REDACTED])");
 }
@@ -145,34 +156,61 @@ fn noncanonical_scalars_and_points_are_not_reduced_during_verification() {
     let mut carry = 0u16;
     for (byte, order) in plus_order[32..].iter_mut().zip(scalar::ORDER) {
         let sum = u16::from(*byte) + u16::from(order) + carry;
-        *byte = sum as u8; carry = sum >> 8;
+        *byte = sum as u8;
+        carry = sum >> 8;
     }
     assert!(public.verify(b"", &plus_order).is_err());
     for scalar in [scalar::ORDER, [0xff; 32]] {
-        let mut signature = original; signature[32..].copy_from_slice(&scalar);
+        let mut signature = original;
+        signature[32..].copy_from_slice(&scalar);
         assert!(public.verify(b"", &signature).is_err());
     }
-    let mut p = [0xff; 32]; p[0] = 0xed; p[31] = 0x7f;
-    let mut bad_sign = [0; 32]; bad_sign[0] = 1; bad_sign[31] = 0x80;
+    let mut p = [0xff; 32];
+    p[0] = 0xed;
+    p[31] = 0x7f;
+    let mut bad_sign = [0; 32];
+    bad_sign[0] = 1;
+    bad_sign[31] = 0x80;
     for point in [p, [0xff; 32], bad_sign] {
         assert!(Ed25519VerifyingKey::from_bytes(point).is_err());
-        let mut signature = original; signature[..32].copy_from_slice(&point);
+        let mut signature = original;
+        signature[..32].copy_from_slice(&point);
         assert!(public.verify(b"", &signature).is_err());
     }
 }
 
 #[test]
 fn weak_and_mixed_order_public_keys_and_torsion_modified_r_refuse() {
-    let order_two = Point { x: Field::ZERO, y: Field::ONE.negate(), z: Field::ONE, t: Field::ZERO };
-    for encoded in [Point::identity().encode(), order_two.encode(), [0; 32], Point::base().add(&order_two).encode()] {
-        assert!(Point::decode(&encoded).is_some(), "valid curve point, wrong subgroup");
-        assert_eq!(Ed25519VerifyingKey::from_bytes(encoded), Err(Ed25519Error::InvalidPublicKey));
+    let order_two = Point {
+        x: Field::ZERO,
+        y: Field::ONE.negate(),
+        z: Field::ONE,
+        t: Field::ZERO,
+    };
+    for encoded in [
+        Point::identity().encode(),
+        order_two.encode(),
+        [0; 32],
+        Point::base().add(&order_two).encode(),
+    ] {
+        assert!(
+            Point::decode(&encoded).is_some(),
+            "valid curve point, wrong subgroup"
+        );
+        assert_eq!(
+            Ed25519VerifyingKey::from_bytes(encoded),
+            Err(Ed25519Error::InvalidPublicKey)
+        );
     }
     let key = Ed25519SigningKey::from_seed(Secret::new([11; 32]));
     let mut signature = key.sign(b"cofactorless");
     let r = Point::decode(signature[..32].try_into().unwrap()).unwrap();
     signature[..32].copy_from_slice(&r.add(&order_two).encode());
-    assert!(key.verifying_key().verify(b"cofactorless", &signature).is_err());
+    assert!(
+        key.verifying_key()
+            .verify(b"cofactorless", &signature)
+            .is_err()
+    );
 }
 
 #[test]
@@ -194,7 +232,12 @@ fn equation_allows_identity_r_only_with_a_valid_response_and_strong_key() {
 #[test]
 fn fixed_seed_roundtrips_across_hash_block_boundaries() {
     let message: Vec<_> = (0..1025).map(|i| (i % 251) as u8).collect();
-    for (index, length) in [0, 1, 31, 32, 63, 64, 79, 80, 111, 112, 127, 128, 129, 255, 256, 1025].into_iter().enumerate() {
+    for (index, length) in [
+        0, 1, 31, 32, 63, 64, 79, 80, 111, 112, 127, 128, 129, 255, 256, 1025,
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let key = Ed25519SigningKey::from_seed(Secret::new([index as u8; 32]));
         let public = Ed25519VerifyingKey::from_bytes(key.verifying_key().to_bytes()).unwrap();
         let signature = key.sign(&message[..length]);

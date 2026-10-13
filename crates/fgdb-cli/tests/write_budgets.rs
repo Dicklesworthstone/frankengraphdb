@@ -29,7 +29,12 @@ impl Fixture {
         let keys = directory.join("keys");
         std::fs::write(
             &keys,
-            format!("{}\n{}\n{}\n", "51".repeat(32), "52".repeat(32), "53".repeat(32)),
+            format!(
+                "{}\n{}\n{}\n",
+                "51".repeat(32),
+                "52".repeat(32),
+                "53".repeat(32)
+            ),
         )
         .unwrap();
         #[cfg(unix)]
@@ -79,11 +84,12 @@ impl Fixture {
     }
 
     fn edge_snapshot(&self) -> Vec<u8> {
-        let output = self.run("query", &[
-            "MATCH (a:Person)-[r:R]->(b:Person) \
+        let output = self.run(
+            "query",
+            &["MATCH (a:Person)-[r:R]->(b:Person) \
              RETURN a.p AS source,b.p AS destination,r.p AS edge_value \
-             ORDER BY source,destination,edge_value",
-        ]);
+             ORDER BY source,destination,edge_value"],
+        );
         success(&output);
         output.stdout
     }
@@ -157,12 +163,19 @@ fn plain_and_returning_write_families_use_the_requested_allowance() {
         "MATCH (a:Person {p:1}), (b:Person {p:2}) MERGE (a)-[r:R]->(b) RETURN r",
         "MATCH (a:Person {p:1}), (b:Person {p:2}) MERGE (a)-[r:R]->(b) \
          ON CREATE SET r.p=7 RETURN r,r.p AS p",
-    ].iter().enumerate() {
+    ]
+    .iter()
+    .enumerate()
+    {
         let fixture = Fixture::new(&format!("family-{at}"));
         let before = fixture.snapshot();
         let zero = fixture.run("write", &[statement, "--max-work-units", "0"]);
         refused(&zero, "WorkUnits");
-        assert_eq!(fixture.snapshot(), before, "failed family {at} changed durable state");
+        assert_eq!(
+            fixture.snapshot(),
+            before,
+            "failed family {at} changed durable state"
+        );
         // The positive control rules out a syntax refusal being mistaken for
         // enforcement. No query is retried automatically by production code.
         success(&fixture.run("write", &[statement, "--max-work-units", "1000000"]));
@@ -301,9 +314,27 @@ fn one_record_bound(csv: bool) -> u64 {
         let bound = records.to_string();
         let output = if csv {
             let input = fixture.csv("single.csv", "value\n4\n");
-            fixture.run("import-csv", &[statement, "--input", &input, "--max-snapshot-records", &bound])
+            fixture.run(
+                "import-csv",
+                &[
+                    statement,
+                    "--input",
+                    &input,
+                    "--max-snapshot-records",
+                    &bound,
+                ],
+            )
         } else {
-            fixture.run("write", &[statement, "--rows", "json:[{\"value\":4}]", "--max-snapshot-records", &bound])
+            fixture.run(
+                "write",
+                &[
+                    statement,
+                    "--rows",
+                    "json:[{\"value\":4}]",
+                    "--max-snapshot-records",
+                    &bound,
+                ],
+            )
         };
         if output.status.success() {
             success(&output);
@@ -319,7 +350,10 @@ fn one_record_bound(csv: bool) -> u64 {
     let mut low = 0;
     let mut high = 1024;
     assert!(!run(low), "zero must refuse this nonempty source");
-    assert!(run(high), "the positive control must be an executable write");
+    assert!(
+        run(high),
+        "the positive control must be an executable write"
+    );
     while low + 1 < high {
         let middle = low + (high - low) / 2;
         if run(middle) {
@@ -346,20 +380,49 @@ fn parameter_and_csv_records_share_one_execution_budget_not_one_each() {
         let execute = |records: u64| {
             let records = records.to_string();
             if csv {
-                fixture.run("import-csv", &[statement, "--input", &batch, "--max-snapshot-records", &records])
+                fixture.run(
+                    "import-csv",
+                    &[
+                        statement,
+                        "--input",
+                        &batch,
+                        "--max-snapshot-records",
+                        &records,
+                    ],
+                )
             } else {
-                fixture.run("write", &[statement, "--rows", "json:[{\"value\":10},{\"value\":20}]", "--max-snapshot-records", &records])
+                fixture.run(
+                    "write",
+                    &[
+                        statement,
+                        "--rows",
+                        "json:[{\"value\":10},{\"value\":20}]",
+                        "--max-snapshot-records",
+                        &records,
+                    ],
+                )
             }
         };
         let output = execute(bound);
         refused(&output, "SnapshotRecords");
         // Native program positions are zero-based. Prove that record two, not
         // record one or preparation, reaches the shared-budget refusal.
-        assert!(text(&output).contains("statement 1 SnapshotRecords"), "{}", text(&output));
-        assert_eq!(fixture.snapshot(), before, "first record escaped atomic batch refusal");
+        assert!(
+            text(&output).contains("statement 1 SnapshotRecords"),
+            "{}",
+            text(&output)
+        );
+        assert_eq!(
+            fixture.snapshot(),
+            before,
+            "first record escaped atomic batch refusal"
+        );
         success(&execute(1024));
         let after = String::from_utf8(fixture.snapshot()).unwrap();
-        assert_eq!(after.matches("\"type\":\"int\",\"value\":\"20\"").count(), 3);
+        assert_eq!(
+            after.matches("\"type\":\"int\",\"value\":\"20\"").count(),
+            3
+        );
     }
 }
 
@@ -373,9 +436,18 @@ fn transaction_limits_apply_to_reads_plain_writes_and_returning_writes() {
             "MATCH (n:Person) SET n.p=n.p+1"
         };
         let before = fixture.snapshot();
-        refused(&fixture.run("transaction", &[kind, statement, "--max-snapshot-records", "0"]), "SnapshotRecords");
+        refused(
+            &fixture.run(
+                "transaction",
+                &[kind, statement, "--max-snapshot-records", "0"],
+            ),
+            "SnapshotRecords",
+        );
         assert_eq!(fixture.snapshot(), before);
-        success(&fixture.run("transaction", &[kind, statement, "--max-snapshot-records", "1000000"]));
+        success(&fixture.run(
+            "transaction",
+            &[kind, statement, "--max-snapshot-records", "1000000"],
+        ));
     }
     // Use a pristine graph: the preceding positive write changed p values.
     let fixture = Fixture::new("transaction-late-refusal");
@@ -384,30 +456,55 @@ fn transaction_limits_apply_to_reads_plain_writes_and_returning_writes() {
     // A one-row first step is legal under the explicit one-row per-operation
     // limit. Its positive control prevents an early first-step refusal from
     // masquerading as rollback of a later failed step.
-    let control = fixture.run("transaction", &[
-        "--write", first, "--max-result-rows", "1", "--rollback",
-    ]);
+    let control = fixture.run(
+        "transaction",
+        &["--write", first, "--max-result-rows", "1", "--rollback"],
+    );
     success(&control);
     assert!(text(&control).contains("\"kind\":\"rolled_back\""));
     assert_eq!(fixture.snapshot(), before);
-    let late = fixture.run("transaction", &[
-        "--write", first,
-        "--query", "MATCH (n:Person) RETURN n.p AS p",
-        "--max-result-rows", "1",
-    ]);
+    let late = fixture.run(
+        "transaction",
+        &[
+            "--write",
+            first,
+            "--query",
+            "MATCH (n:Person) RETURN n.p AS p",
+            "--max-result-rows",
+            "1",
+        ],
+    );
     refused(&late, "ResultRows");
-    assert!(text(&late).contains("transaction step 2:"), "{}", text(&late));
+    assert!(
+        text(&late).contains("transaction step 2:"),
+        "{}",
+        text(&late)
+    );
     assert_eq!(fixture.snapshot(), before);
-    refused(&fixture.run("transaction", &[
-        "--write", "MATCH (n:Person) SET n.p=n.p+10 RETURN n.p AS p",
-        "--max-result-rows", "1",
-    ]), "ResultRows");
+    refused(
+        &fixture.run(
+            "transaction",
+            &[
+                "--write",
+                "MATCH (n:Person) SET n.p=n.p+10 RETURN n.p AS p",
+                "--max-result-rows",
+                "1",
+            ],
+        ),
+        "ResultRows",
+    );
     assert_eq!(fixture.snapshot(), before);
-    let output = fixture.run("transaction", &[
-        "--query", "MATCH (n:Person) RETURN n.p AS p LIMIT 1",
-        "--query", "MATCH (n:Person) RETURN n.p AS p LIMIT 1",
-        "--max-result-rows", "1",
-    ]);
+    let output = fixture.run(
+        "transaction",
+        &[
+            "--query",
+            "MATCH (n:Person) RETURN n.p AS p LIMIT 1",
+            "--query",
+            "MATCH (n:Person) RETURN n.p AS p LIMIT 1",
+            "--max-result-rows",
+            "1",
+        ],
+    );
     success(&output);
     assert_eq!(text(&output).matches("\"event\":\"row\"").count(), 2);
     assert!(text(&output).contains("\"kind\":\"read_closed\""));
@@ -419,44 +516,77 @@ fn higher_execution_limits_do_not_bypass_csv_effect_limits() {
     let fixture = Fixture::new("effect-cap");
     let input = fixture.csv("creates.csv", "value\n30\n40\n");
     let before = fixture.snapshot();
-    let output = fixture.run("import-csv", &[
-        "CREATE (n:Person {p:$value})", "--input", &input,
-        "--max-snapshot-records", "1000000", "--max-work-units", "1000000",
-        "--max-changes", "1",
-    ]);
+    let output = fixture.run(
+        "import-csv",
+        &[
+            "CREATE (n:Person {p:$value})",
+            "--input",
+            &input,
+            "--max-snapshot-records",
+            "1000000",
+            "--max-work-units",
+            "1000000",
+            "--max-changes",
+            "1",
+        ],
+    );
     refused(&output, "");
     assert_eq!(fixture.snapshot(), before);
-    success(&fixture.run("import-csv", &[
-        "CREATE (n:Person {p:$value})", "--input", &input,
-        "--max-snapshot-records", "1000000", "--max-work-units", "1000000",
-        "--max-changes", "2",
-    ]));
+    success(&fixture.run(
+        "import-csv",
+        &[
+            "CREATE (n:Person {p:$value})",
+            "--input",
+            &input,
+            "--max-snapshot-records",
+            "1000000",
+            "--max-work-units",
+            "1000000",
+            "--max-changes",
+            "2",
+        ],
+    ));
 }
 
 #[test]
 fn row_limits_also_bound_selection_in_programs_that_return_no_rows() {
     for csv in [false, true] {
-        let fixture = Fixture::new(if csv { "csv-selections" } else { "row-selections" });
+        let fixture = Fixture::new(if csv {
+            "csv-selections"
+        } else {
+            "row-selections"
+        });
         let input = fixture.csv("selection.csv", "value\n10\n20\n");
         let before = fixture.snapshot();
         let statement = "MATCH (n:Person) SET n.p=$value";
         let execute = |rows: &str| {
             if csv {
-                fixture.run("import-csv", &[
-                    statement, "--input", &input, "--max-result-rows", rows,
-                ])
+                fixture.run(
+                    "import-csv",
+                    &[statement, "--input", &input, "--max-result-rows", rows],
+                )
             } else {
-                fixture.run("write", &[
-                    statement, "--rows", "json:[{\"value\":10},{\"value\":20}]",
-                    "--max-result-rows", rows,
-                ])
+                fixture.run(
+                    "write",
+                    &[
+                        statement,
+                        "--rows",
+                        "json:[{\"value\":10},{\"value\":20}]",
+                        "--max-result-rows",
+                        rows,
+                    ],
+                )
             }
         };
         // Each statement selects three vertices. Three is enough for the first
         // statement but not both; a per-record reset would incorrectly succeed.
         let failed = execute("3");
         refused(&failed, "SelectedRows");
-        assert!(text(&failed).contains("statement 1 SelectedRows"), "{}", text(&failed));
+        assert!(
+            text(&failed).contains("statement 1 SelectedRows"),
+            "{}",
+            text(&failed)
+        );
         assert_eq!(fixture.snapshot(), before);
         // The exact whole-program boundary is six selections, with no returned
         // rows. The effect counter remains separate from this admission cap.
@@ -464,7 +594,10 @@ fn row_limits_also_bound_selection_in_programs_that_return_no_rows() {
         success(&complete);
         assert!(!text(&complete).contains("\"event\":\"row\""));
         let after = String::from_utf8(fixture.snapshot()).unwrap();
-        assert_eq!(after.matches("\"type\":\"int\",\"value\":\"20\"").count(), 3);
+        assert_eq!(
+            after.matches("\"type\":\"int\",\"value\":\"20\"").count(),
+            3
+        );
     }
 }
 
@@ -472,18 +605,28 @@ fn row_limits_also_bound_selection_in_programs_that_return_no_rows() {
 fn zero_result_allowance_accepts_an_empty_transaction_read_but_not_a_nonempty_one() {
     let fixture = Fixture::new("zero-delivery");
     let before = fixture.snapshot();
-    let empty = fixture.run("transaction", &[
-        "--query", "MATCH (n:Person) WHERE n.p>100 RETURN n.p AS p",
-        "--max-result-rows", "0",
-    ]);
+    let empty = fixture.run(
+        "transaction",
+        &[
+            "--query",
+            "MATCH (n:Person) WHERE n.p>100 RETURN n.p AS p",
+            "--max-result-rows",
+            "0",
+        ],
+    );
     success(&empty);
     assert!(text(&empty).contains("\"kind\":\"read_closed\""));
     assert!(!text(&empty).contains("\"event\":\"row\""));
     assert_eq!(fixture.snapshot(), before);
-    let nonempty = fixture.run("transaction", &[
-        "--query", "MATCH (n:Person) RETURN n.p AS p",
-        "--max-result-rows", "0",
-    ]);
+    let nonempty = fixture.run(
+        "transaction",
+        &[
+            "--query",
+            "MATCH (n:Person) RETURN n.p AS p",
+            "--max-result-rows",
+            "0",
+        ],
+    );
     refused(&nonempty, "ResultRows");
     assert_eq!(fixture.snapshot(), before);
 }

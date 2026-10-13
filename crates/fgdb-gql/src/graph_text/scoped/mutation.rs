@@ -634,7 +634,7 @@ impl<'a> Parser<'a> {
                     .into());
                 }
                 self.punct(b':', ":")?;
-                let value = self.mutation_expression(columns)?;
+                let value = self.mutation_assignment(columns)?;
                 actions.push(Action {
                     target,
                     kind: ActionKind::Property {
@@ -883,7 +883,7 @@ impl PreparedGraphMutationText {
                 cache.insert(key, value);
                 Ok(value)
             };
-            let actions = action_templates(parsed_actions, statement.len(), &mut symbol)?;
+            let actions = action_templates(parsed_actions, &mut symbol)?;
             let returning = returning
                 .map(|returning| returning.resolve(&mut symbol))
                 .transpose()?;
@@ -1365,10 +1365,7 @@ mod graph_function_tests {
     }
 
     fn assignment_policy() -> crate::GraphMutationPolicy {
-        crate::GraphMutationPolicy::new(
-            crate::GqlQueryPolicy::new(100, 100, 100_000, 100_000),
-            100,
-        )
+        crate::GraphMutationPolicy::new(crate::GqlQueryPolicy::new(100, 100, 100_000, 100_000), 100)
     }
 
     fn execute_assignment(
@@ -1376,10 +1373,11 @@ mod graph_function_tests {
         values: &[CanonicalScalar],
         policy: crate::GraphMutationPolicy,
         checkpoint: impl FnMut() -> Result<(), ()>,
-    ) -> Result<
-        crate::GraphMutationBatch,
-        crate::GqlQueryError<crate::GraphMutationError<()>, ()>,
-    > {
+    ) -> Result<crate::GraphMutationBatch, crate::GqlQueryError<crate::GraphMutationError<()>, ()>>
+    {
+        // Property sources hand stored values (fgdb-k3nub).
+        let values: Vec<fgdb_types::CanonicalPropertyValue> =
+            values.iter().cloned().map(Into::into).collect();
         mutation.execute_governed(
             policy,
             |plan, policy| {
@@ -1428,8 +1426,8 @@ mod graph_function_tests {
                 format!("SET a += {{cost: {expression}}}"),
             ] {
                 let text = format!("MATCH (a)-[:R]->(b) {assignment}");
-                let prepared = PreparedGraphMutationText::prepare(&text, RelationId(1), symbols)
-                    .unwrap();
+                let prepared =
+                    PreparedGraphMutationText::prepare(&text, RelationId(1), symbols).unwrap();
                 let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
                 let batch = execute_assignment(
                     &bound,
@@ -1443,7 +1441,7 @@ mod graph_function_tests {
                     &[crate::GraphMutationIntent::Property {
                         vertex: fgdb_types::VId(1),
                         key: PropertyKeyId(1),
-                        value: Some(expected.clone()),
+                        value: Some(expected.clone().into()),
                     }],
                     "{text}"
                 );
@@ -1469,10 +1467,12 @@ mod graph_function_tests {
             || Ok(()),
         )
         .unwrap();
-        let [crate::GraphMutationIntent::Property {
-            value: Some(CanonicalScalar::Date(date)),
-            ..
-        }] = batch.intents()
+        let [
+            crate::GraphMutationIntent::Property {
+                value: Some(fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Date(date))),
+                ..
+            },
+        ] = batch.intents()
         else {
             panic!("SET must retain a Date, not its text rendering");
         };
@@ -1511,7 +1511,7 @@ mod graph_function_tests {
                 &[crate::GraphMutationIntent::Property {
                     vertex: fgdb_types::VId(1),
                     key: PropertyKeyId(1),
-                    value: Some(CanonicalScalar::Int(7 + extra)),
+                    value: Some(CanonicalScalar::Int(7 + extra).into()),
                 }]
             );
         }
@@ -1553,7 +1553,12 @@ mod graph_function_tests {
         ));
         let bound = bind("[[1]][0]").unwrap();
         assert!(matches!(
-            execute_assignment(&bound, &[CanonicalScalar::Int(7)], assignment_policy(), || Ok(())),
+            execute_assignment(
+                &bound,
+                &[CanonicalScalar::Int(7)],
+                assignment_policy(),
+                || Ok(())
+            ),
             Err(crate::GqlQueryError::Source(
                 crate::GraphMutationError::NonScalarValue { .. }
             ))
@@ -1571,8 +1576,7 @@ mod graph_function_tests {
         .bind_parameters(&GqlParameters::new())
         .unwrap();
         let values = [CanonicalScalar::Int(7)];
-        let measured =
-            execute_assignment(&bound, &values, assignment_policy(), || Ok(())).unwrap();
+        let measured = execute_assignment(&bound, &values, assignment_policy(), || Ok(())).unwrap();
         let stats = measured.stats();
         let exact = crate::GraphMutationPolicy::new(
             crate::GqlQueryPolicy::new(
@@ -1584,7 +1588,9 @@ mod graph_function_tests {
             1,
         );
         assert_eq!(
-            execute_assignment(&bound, &values, exact, || Ok(())).unwrap().stats(),
+            execute_assignment(&bound, &values, exact, || Ok(()))
+                .unwrap()
+                .stats(),
             stats
         );
         let mut short = exact;
@@ -1597,11 +1603,7 @@ mod graph_function_tests {
         assert!(matches!(
             execute_assignment(&bound, &values, assignment_policy(), || {
                 checkpoints += 1;
-                if checkpoints == 10 {
-                    Err(())
-                } else {
-                    Ok(())
-                }
+                if checkpoints == 10 { Err(()) } else { Ok(()) }
             }),
             Err(crate::GqlQueryError::Interrupted(()))
         ));

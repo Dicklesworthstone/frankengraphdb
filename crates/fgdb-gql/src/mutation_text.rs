@@ -177,7 +177,10 @@ impl WriteReturnGroupTemplate {
     /// The raw write binding a WITH item carries unchanged. A grouped item
     /// must be a direct identity key, never a MIN/MAX/COLLECT representative.
     /// The caller still checks the binding's actual vertex/edge domain.
-    pub(crate) fn carried_binding(group: Option<&Self>, value: &ReadValueTemplate) -> Option<usize> {
+    pub(crate) fn carried_binding(
+        group: Option<&Self>,
+        value: &ReadValueTemplate,
+    ) -> Option<usize> {
         let ReadValueTemplate::Column(column) = value else {
             return None;
         };
@@ -202,9 +205,9 @@ impl WriteReturnGroupTemplate {
         binding: usize,
         at: usize,
     ) -> Result<usize, GraphPatternTextError> {
-        let existing = self.inputs.iter().position(|input| {
-            matches!(input.value, ReadValueTemplate::Column(column) if column == binding)
-        });
+        let existing = self.inputs.iter().position(
+            |input| matches!(input.value, ReadValueTemplate::Column(column) if column == binding),
+        );
         let input = existing.unwrap_or(self.inputs.len());
         if let Some(key) = self.keys.iter().position(|&column| column == input) {
             return Ok(key);
@@ -216,19 +219,21 @@ impl WriteReturnGroupTemplate {
         if observed > limit {
             return Err(GraphPatternTextError {
                 offset: at,
-                kind: GraphPatternTextErrorKind::Build(crate::algebra::PatternBuildError::LimitExceeded {
-                    dimension: crate::algebra::PatternLimitDimension::Columns,
-                    limit,
-                    observed,
-                }),
+                kind: GraphPatternTextErrorKind::Build(
+                    crate::algebra::PatternBuildError::LimitExceeded {
+                        dimension: crate::algebra::PatternLimitDimension::Columns,
+                        limit,
+                        observed,
+                    },
+                ),
             });
         }
         // write_return_items emits a column permutation of keys/summaries.
         // Refuse an unexpected projection shape rather than partially remap
         // it, even if a future compiler broadens that internal contract.
-        if projection.iter().any(|output| {
-            !matches!(output.value, ReadValueTemplate::Column(column) if column < width)
-        }) {
+        if projection.iter().any(
+            |output| !matches!(output.value, ReadValueTemplate::Column(column) if column < width),
+        ) {
             return Err(GraphPatternTextError {
                 offset: at,
                 kind: GraphPatternTextErrorKind::Expected("native grouped write output columns"),

@@ -346,10 +346,8 @@ mod difference_tests {
                     .register_standing_native(&cx, text, &params, resolve, policy())
                     .unwrap();
                 logs.push(
-                    db.register_standing_replay(
-                        &cx, &source, 16, 1000, 100_000, delivery(100_000),
-                    )
-                    .unwrap(),
+                    db.register_standing_replay(&cx, &source, 16, 1000, 100_000, delivery(100_000))
+                        .unwrap(),
                 );
                 sources.push(source);
             }
@@ -369,12 +367,16 @@ mod difference_tests {
                     batch.delete_vertex(VId(1));
                 } else if tick == 1 {
                     batch.set_vertex_property(
-                        VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(2)),
+                        VId(3),
+                        PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(2)),
                     );
                 } else {
                     // A real commit with no change to any selected output.
                     batch.set_vertex_property(
-                        VId(2), PropertyKeyId(99), Some(CanonicalScalar::Int(1)),
+                        VId(2),
+                        PropertyKeyId(99),
+                        Some(CanonicalScalar::Int(1)),
                     );
                 }
                 cuts.push(db.write(&commit, batch).await.unwrap());
@@ -385,27 +387,34 @@ mod difference_tests {
                 for before in 0..cuts.len() {
                     for after in 0..cuts.len() {
                         let expected = endpoint_difference(
-                            &snapshots[before][index], &snapshots[after][index],
+                            &snapshots[before][index],
+                            &snapshots[after][index],
                         );
                         let allowance = delivery(expected.len() as u64);
                         let materialized = db
                             .standing_replay_difference(
-                                &cx, log, cuts[before], cuts[after], allowance,
+                                &cx,
+                                log,
+                                cuts[before],
+                                cuts[after],
+                                allowance,
                             )
                             .unwrap();
                         assert_eq!(materialized, expected, "{index}: {before}->{after}");
                         let mut streamed = ZSet::new();
                         let mut cursor = db
                             .standing_replay_difference_cursor(
-                                &cx, log, cuts[before], cuts[after], allowance,
+                                &cx,
+                                log,
+                                cuts[before],
+                                cuts[after],
+                                allowance,
                             )
                             .unwrap();
                         for change in cursor.by_ref() {
                             let (row, weight) = change.unwrap();
                             streamed
-                                .accumulate(
-                                    row.to_vec(), weight, LIMBS, &mut |_| Ok::<_, ()>(()),
-                                )
+                                .accumulate(row.to_vec(), weight, LIMBS, &mut |_| Ok::<_, ()>(()))
                                 .unwrap();
                         }
                         assert!(cursor.next().is_none());
@@ -416,7 +425,11 @@ mod difference_tests {
                 // Dropping a partial cursor does not consume the interval.
                 let mut partial = db
                     .standing_replay_difference_cursor(
-                        &cx, log, cuts[3], cuts[0], delivery(100_000),
+                        &cx,
+                        log,
+                        cuts[3],
+                        cuts[0],
+                        delivery(100_000),
                     )
                     .unwrap();
                 assert!(partial.next().unwrap().is_ok());
@@ -425,21 +438,27 @@ mod difference_tests {
             }
             let future = cuts[3].checked_successor().unwrap();
             assert!(matches!(
-                db.standing_replay_difference_cursor(
-                    &cx, &logs[0], future, future, delivery(0),
-                ),
+                db.standing_replay_difference_cursor(&cx, &logs[0], future, future, delivery(0),),
                 Err(StandingQueryError::ReplayGap { .. })
             ));
             assert!(matches!(
                 db.standing_replay_difference_cursor(
-                    &cx, &sources[0], cuts[0], cuts[3], delivery(100_000),
+                    &cx,
+                    &sources[0],
+                    cuts[0],
+                    cuts[3],
+                    delivery(100_000),
                 ),
                 Err(StandingQueryError::Unsupported)
             ));
             let foreign = Database::open_memory(&commit, keys()).await.unwrap();
             assert!(matches!(
                 foreign.standing_replay_difference_cursor(
-                    &cx, &logs[0], cuts[0], cuts[3], delivery(100_000),
+                    &cx,
+                    &logs[0],
+                    cuts[0],
+                    cuts[3],
+                    delivery(100_000),
                 ),
                 Err(StandingQueryError::ForeignHandle)
             ));
@@ -459,7 +478,11 @@ mod difference_tests {
             let start = db.write(&commit, seed).await.unwrap();
             let source = db
                 .register_standing_native(
-                    &cx, "MATCH (n) RETURN n", &GqlParameters::new(), resolve, policy(),
+                    &cx,
+                    "MATCH (n) RETURN n",
+                    &GqlParameters::new(),
+                    resolve,
+                    policy(),
                 )
                 .unwrap();
             let log = db
@@ -475,9 +498,7 @@ mod difference_tests {
             db.rebuild_standing_query(&cx, &log, policy()).unwrap();
             for (before, after) in [(start, at), (at, start), (start, start)] {
                 assert!(matches!(
-                    db.standing_replay_difference_cursor(
-                        &cx, &log, before, after, delivery(0),
-                    ),
+                    db.standing_replay_difference_cursor(&cx, &log, before, after, delivery(0),),
                     Err(StandingQueryError::ReplayGap { .. })
                 ));
             }
@@ -532,10 +553,13 @@ mod difference_tests {
             let (row, weight) = change.unwrap();
             expected.push((row.to_vec(), weight.to_i128().unwrap()));
         }
-        assert_eq!(expected, vec![
-            (vec![QueryValue::Integer(1)], -5),
-            (vec![QueryValue::Integer(2)], -4),
-        ]);
+        assert_eq!(
+            expected,
+            vec![
+                (vec![QueryValue::Integer(1)], -5),
+                (vec![QueryValue::Integer(2)], -4),
+            ]
+        );
         for stop in 1..=calls {
             let mut pull = open(&sources, delivery(2));
             let mut seen = 0;
@@ -552,9 +576,9 @@ mod difference_tests {
                     Some(Ok((row, weight))) => {
                         prefix.push((row.to_vec(), weight.to_i128().unwrap()));
                     }
-                    Some(Err(StandingQueryError::Delivery(
-                        StandingQueryFailure::Interrupted,
-                    ))) => break,
+                    Some(Err(StandingQueryError::Delivery(StandingQueryFailure::Interrupted))) => {
+                        break;
+                    }
                     _ => panic!("missed reverse interruption"),
                 }
             }
@@ -562,25 +586,47 @@ mod difference_tests {
             assert_eq!(prefix, expected[..prefix.len()]);
             assert_eq!(pull.delivered, prefix.len() as u64);
             assert!(pull.merge.is_none());
-            assert!(pull.advance_oriented(true, &mut || panic!("fused")).is_none());
+            assert!(
+                pull.advance_oriented(true, &mut || panic!("fused"))
+                    .is_none()
+            );
         }
         for stop in [1, calls / 2, calls] {
             let mut pull = open(&sources, delivery(2));
             let mut seen = 0;
-            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                while pull.advance_oriented(true, &mut || {
-                    seen += 1;
-                    assert_ne!(seen, stop, "injected reverse unwind");
-                    Ok(())
-                }).is_some() {}
-            })).is_err());
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    while pull
+                        .advance_oriented(true, &mut || {
+                            seen += 1;
+                            assert_ne!(seen, stop, "injected reverse unwind");
+                            Ok(())
+                        })
+                        .is_some()
+                    {}
+                }))
+                .is_err()
+            );
             assert!(pull.merge.is_none());
-            assert!(pull.advance_oriented(true, &mut || panic!("fused")).is_none());
+            assert!(
+                pull.advance_oriented(true, &mut || panic!("fused"))
+                    .is_none()
+            );
         }
         for (work, scratch, rows, passes) in [
             (good.stats.work_units, good.stats.scratch_entries, 2, true),
-            (good.stats.work_units - 1, good.stats.scratch_entries, 2, false),
-            (good.stats.work_units, good.stats.scratch_entries - 1, 2, false),
+            (
+                good.stats.work_units - 1,
+                good.stats.scratch_entries,
+                2,
+                false,
+            ),
+            (
+                good.stats.work_units,
+                good.stats.scratch_entries - 1,
+                2,
+                false,
+            ),
             (good.stats.work_units, good.stats.scratch_entries, 1, false),
         ] {
             let mut pull = open(&sources, GqlQueryPolicy::new(0, rows, work, scratch));
@@ -600,8 +646,14 @@ mod difference_tests {
     fn reverse_promoted_weight_keeps_borrowed_payload_and_cancellation_costs_no_row() {
         let sources = [small(&[(1, i128::MIN)])];
         let mut pull = open(&sources, delivery(1));
-        let (row, weight) = pull.advance_oriented(true, &mut || Ok(())).unwrap().unwrap();
-        assert!(std::ptr::eq(row, sources[0].iter().next().unwrap().0.as_slice()));
+        let (row, weight) = pull
+            .advance_oriented(true, &mut || Ok(()))
+            .unwrap()
+            .unwrap();
+        assert!(std::ptr::eq(
+            row,
+            sources[0].iter().next().unwrap().0.as_slice()
+        ));
         let expected = ZWeight::from_i128(i128::MAX)
             .checked_add(&ZWeight::ONE, LIMBS)
             .unwrap();

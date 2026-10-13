@@ -154,7 +154,7 @@ fn sort<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GraphAggregateValue, GraphAggregateFunction};
+    use crate::{GraphAggregateFunction, GraphAggregateValue};
 
     fn row(key: i64, value: i64) -> GraphValueRow {
         GraphValueRow::from_owned_values(vec![
@@ -183,20 +183,34 @@ mod tests {
 
     #[test]
     fn every_key_sort_checkpoint_is_propagated_without_accepting_a_partial_sort() {
-        let payload = GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"x".repeat(257)).unwrap());
-        let rows: Vec<_> = [9, 3, 8, 1, 7, 2, 6].into_iter().map(|value| {
-            GraphValueRow::from_owned_values(vec![payload.clone(), row(value, 0).values()[0].clone()])
-        }).collect();
+        let payload =
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"x".repeat(257)).unwrap());
+        let rows: Vec<_> = [9, 3, 8, 1, 7, 2, 6]
+            .into_iter()
+            .map(|value| {
+                GraphValueRow::from_owned_values(vec![
+                    payload.clone(),
+                    row(value, 0).values()[0].clone(),
+                ])
+            })
+            .collect();
         let mut calls = 0;
         let mut sorted = rows.clone();
-        sort(&mut sorted, &mut |_| { calls += 1; Ok::<_, usize>(()) }).unwrap();
+        sort(&mut sorted, &mut |_| {
+            calls += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap();
         for stop in 1..=calls {
             let mut seen = 0;
             let mut candidate = rows.clone();
-            assert_eq!(sort(&mut candidate, &mut |_| {
-                seen += 1;
-                if seen == stop { Err(stop) } else { Ok(()) }
-            }), Err(stop));
+            assert_eq!(
+                sort(&mut candidate, &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }),
+                Err(stop)
+            );
             assert_eq!(seen, stop);
             // The caller discards failed state; a fresh attempt is unchanged.
             let mut retry = rows.clone();
@@ -207,25 +221,51 @@ mod tests {
 
     #[test]
     fn collection_cells_share_the_key_order_and_keep_distinct_first_occurrences() {
-        let layout = Layout { targets: vec![(0, 0), (1, 1), (2, 1)] };
+        let layout = Layout {
+            targets: vec![(0, 0), (1, 1), (2, 1)],
+        };
         let mut support = State::default();
         for row in [row(2, 1), row(0, 9), row(1, 3), row(3, 9)] {
-            support.push(&layout, row, &mut |_| Ok::<_, ()>(())).unwrap();
+            support
+                .push(&layout, row, &mut |_| Ok::<_, ()>(()))
+                .unwrap();
         }
-        let mut states: Vec<_> = [GraphAggregateFunction::Collect,
-            GraphAggregateFunction::Collect, GraphAggregateFunction::CollectDistinct]
-            .into_iter().map(|function| NumericState::new_governed(
-                function, &mut |_| Ok::<_, EdgeAggregateError<(), ()>>(()),
-            ).unwrap()).collect();
-        support.finish(&layout, &mut states, &mut |_| Ok::<_, EdgeAggregateError<(), ()>>(()))
+        let mut states: Vec<_> = [
+            GraphAggregateFunction::Collect,
+            GraphAggregateFunction::Collect,
+            GraphAggregateFunction::CollectDistinct,
+        ]
+        .into_iter()
+        .map(|function| {
+            NumericState::new_governed(function, &mut |_| Ok::<_, EdgeAggregateError<(), ()>>(()))
+                .unwrap()
+        })
+        .collect();
+        support
+            .finish(&layout, &mut states, &mut |_| {
+                Ok::<_, EdgeAggregateError<(), ()>>(())
+            })
             .unwrap();
-        let actual: Vec<_> = states.into_iter().map(|state| state.finish_governed(
-            &mut |_| Ok::<_, EdgeAggregateError<(), ()>>(()),
-        ).unwrap()).collect();
-        let list = |values: &[i64]| GraphAggregateValue::Value(GraphValue::List(
-            values.iter().map(|&x| GraphValue::Scalar(CanonicalScalar::Int(x)))
-                .collect::<Vec<_>>().into_boxed_slice(),
-        ));
-        assert_eq!(actual, [list(&[0, 1, 2, 3]), list(&[9, 3, 1, 9]), list(&[9, 3, 1])]);
+        let actual: Vec<_> = states
+            .into_iter()
+            .map(|state| {
+                state
+                    .finish_governed(&mut |_| Ok::<_, EdgeAggregateError<(), ()>>(()))
+                    .unwrap()
+            })
+            .collect();
+        let list = |values: &[i64]| {
+            GraphAggregateValue::Value(GraphValue::List(
+                values
+                    .iter()
+                    .map(|&x| GraphValue::Scalar(CanonicalScalar::Int(x)))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ))
+        };
+        assert_eq!(
+            actual,
+            [list(&[0, 1, 2, 3]), list(&[9, 3, 1, 9]), list(&[9, 3, 1])]
+        );
     }
 }

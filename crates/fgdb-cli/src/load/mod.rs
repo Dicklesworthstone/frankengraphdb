@@ -782,7 +782,10 @@ fn parse_row(
                 .properties
                 .get(name)
                 .ok_or_else(|| format!("UnknownBinding: property {name}"))?;
-            props.push((PropertyKeyId(u64::from(*id)), storable(value, resolver)?.into()));
+            props.push((
+                PropertyKeyId(u64::from(*id)),
+                storable(value, resolver)?.into(),
+            ));
         }
     }
     props.sort_by_key(|(id, _)| *id);

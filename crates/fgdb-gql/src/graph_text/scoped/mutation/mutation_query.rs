@@ -835,11 +835,8 @@ impl<'a> Parser<'a> {
             ) else {
                 continue;
             };
-            let (
-                Binding::Input(input),
-                _,
-                GraphSetColumnType::Vertex | GraphSetColumnType::Edge,
-            ) = returning.bindings[binding]
+            let (Binding::Input(input), _, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) =
+                returning.bindings[binding]
             else {
                 continue;
             };

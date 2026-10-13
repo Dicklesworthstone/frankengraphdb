@@ -185,8 +185,8 @@ impl History {
                     StandingQueryFailure::ResultBudget,
                 ));
             }
-            let weight = orient_weight(weight, reverse, meter)
-                .map_err(StandingQueryError::Delivery)?;
+            let weight =
+                orient_weight(weight, reverse, meter).map_err(StandingQueryError::Delivery)?;
             let cells = own_row(row, meter).map_err(StandingQueryError::Delivery)?;
             rows.accumulate(cells, weight, LIMBS, &mut |event| meter.charge(event))
                 .map_err(zset_error)
@@ -488,13 +488,16 @@ mod difference_tests {
         GqlQueryPolicy::new(0, rows, 1_000_000, 1_000_000)
     }
     fn key(value: i64) -> Vec<QueryValue> {
-        vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))]
+        vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+            value,
+        )))]
     }
     fn bag(counts: [i128; 2]) -> ZSet<Vec<QueryValue>> {
         ZSet::from_updates(
-            counts.into_iter().enumerate().map(|(i, count)| {
-                (key(i as i64), ZWeight::from_i128(count))
-            }),
+            counts
+                .into_iter()
+                .enumerate()
+                .map(|(i, count)| (key(i as i64), ZWeight::from_i128(count))),
             LIMBS,
             &mut |_| Ok::<_, ()>(()),
         )
@@ -523,7 +526,10 @@ mod difference_tests {
         after: CommitSeq,
         policy: GqlQueryPolicy,
         checkpoint: &mut dyn FnMut() -> Result<(), StandingQueryFailure>,
-    ) -> (Result<ZSet<Vec<QueryValue>>, StandingQueryError>, StandingQueryStats) {
+    ) -> (
+        Result<ZSet<Vec<QueryValue>>, StandingQueryError>,
+        StandingQueryStats,
+    ) {
         let mut meter = Meter {
             policy,
             stats: StandingQueryStats::default(),
@@ -545,7 +551,10 @@ mod difference_tests {
             }
             let mut history = History::new(CommitSeq(17));
             for pair in counts.windows(2) {
-                append(&mut history, [pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]]);
+                append(
+                    &mut history,
+                    [pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]],
+                );
             }
             let window = history.window();
             for before in 0..3 {
@@ -559,10 +568,13 @@ mod difference_tests {
                     )
                     .0
                     .unwrap();
-                    assert_eq!(actual, bag([
-                        counts[after][0] - counts[before][0],
-                        counts[after][1] - counts[before][1],
-                    ]));
+                    assert_eq!(
+                        actual,
+                        bag([
+                            counts[after][0] - counts[before][0],
+                            counts[after][1] - counts[before][1],
+                        ])
+                    );
                     assert_eq!(history.window(), window);
                 }
             }
@@ -577,11 +589,17 @@ mod difference_tests {
         append(&mut history, [0, 99]);
         let low = CommitSeq(u64::MAX - 2);
         let high = CommitSeq(u64::MAX - 1);
-        let forward = run(&history, low, high, budget(1), &mut || Ok(())).0.unwrap();
+        let forward = run(&history, low, high, budget(1), &mut || Ok(()))
+            .0
+            .unwrap();
         assert_eq!(forward, bag([i128::MIN, 0]));
-        let reverse = run(&history, high, low, budget(1), &mut || Ok(())).0.unwrap();
+        let reverse = run(&history, high, low, budget(1), &mut || Ok(()))
+            .0
+            .unwrap();
         let (row, weight) = reverse.iter().next().unwrap();
-        let positive = ZWeight::from_i128(i128::MAX).checked_add(&ZWeight::ONE, LIMBS).unwrap();
+        let positive = ZWeight::from_i128(i128::MAX)
+            .checked_add(&ZWeight::ONE, LIMBS)
+            .unwrap();
         assert_eq!(reverse.len(), 1);
         assert_eq!(row, &key(0));
         assert_eq!(weight, &positive);
@@ -595,12 +613,27 @@ mod difference_tests {
         append(&mut history, [0, 0]);
         append(&mut history, [-7, 0]);
         for (before, after) in [(4, 4), (5, 5), (7, 7), (4, 7), (7, 4), (5, 6)] {
-            assert!(run(&history, CommitSeq(before), CommitSeq(after), budget(0), &mut || Ok(()))
-                .0.unwrap().is_empty());
+            assert!(
+                run(
+                    &history,
+                    CommitSeq(before),
+                    CommitSeq(after),
+                    budget(0),
+                    &mut || Ok(())
+                )
+                .0
+                .unwrap()
+                .is_empty()
+            );
         }
         assert!(matches!(
-            run(&history, CommitSeq(4), CommitSeq(5), budget(0), &mut || Ok(())).0,
-            Err(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget))
+            run(&history, CommitSeq(4), CommitSeq(5), budget(0), &mut || Ok(
+                ()
+            ))
+            .0,
+            Err(StandingQueryError::Delivery(
+                StandingQueryFailure::ResultBudget
+            ))
         ));
     }
 
@@ -613,21 +646,53 @@ mod difference_tests {
         let retired = history.frames.pop_front().unwrap();
         history.rows -= retired.rows.len();
         history.units -= retired.units;
-        for (before, after, rejected) in [(5, 8, 5), (8, 5, 5), (5, 5, 5), (6, 9, 9), (9, 6, 9), (9, 9, 9)] {
+        for (before, after, rejected) in [
+            (5, 8, 5),
+            (8, 5, 5),
+            (5, 5, 5),
+            (6, 9, 9),
+            (9, 6, 9),
+            (9, 9, 9),
+        ] {
             assert!(matches!(
                 run(&history, CommitSeq(before), CommitSeq(after), budget(2), &mut || Ok(())).0,
                 Err(StandingQueryError::ReplayGap { after, retained_after: CommitSeq(6), frontier: CommitSeq(8) })
                     if after == CommitSeq(rejected)
             ));
         }
-        assert_eq!(run(&history, CommitSeq(6), CommitSeq(7), budget(2), &mut || Ok(())).0.unwrap(), bag([0, 1]));
-        Arc::get_mut(history.frames.back_mut().unwrap()).unwrap().from = CommitSeq(6);
+        assert_eq!(
+            run(&history, CommitSeq(6), CommitSeq(7), budget(2), &mut || Ok(
+                ()
+            ))
+            .0
+            .unwrap(),
+            bag([0, 1])
+        );
+        Arc::get_mut(history.frames.back_mut().unwrap())
+            .unwrap()
+            .from = CommitSeq(6);
         // Corruption outside a selected interval is not accidentally consumed.
-        assert_eq!(run(&history, CommitSeq(6), CommitSeq(7), budget(2), &mut || Ok(())).0.unwrap(), bag([0, 1]));
+        assert_eq!(
+            run(&history, CommitSeq(6), CommitSeq(7), budget(2), &mut || Ok(
+                ()
+            ))
+            .0
+            .unwrap(),
+            bag([0, 1])
+        );
         for (before, after) in [(6, 8), (8, 6)] {
             assert!(matches!(
-                run(&history, CommitSeq(before), CommitSeq(after), budget(2), &mut || Ok(())).0,
-                Err(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))
+                run(
+                    &history,
+                    CommitSeq(before),
+                    CommitSeq(after),
+                    budget(2),
+                    &mut || Ok(())
+                )
+                .0,
+                Err(StandingQueryError::Delivery(
+                    StandingQueryFailure::InvalidDelta
+                ))
             ));
         }
     }
@@ -642,26 +707,56 @@ mod difference_tests {
         let frames = history.frames.iter().cloned().collect::<Vec<_>>();
         for (before, after, expected) in [(2, 5, [1, 3]), (5, 2, [-1, -3])] {
             let mut calls = 0;
-            let (result, stats) = run(&history, CommitSeq(before), CommitSeq(after), budget(2), &mut || {
-                calls += 1;
-                Ok(())
-            });
+            let (result, stats) = run(
+                &history,
+                CommitSeq(before),
+                CommitSeq(after),
+                budget(2),
+                &mut || {
+                    calls += 1;
+                    Ok(())
+                },
+            );
             assert_eq!(result.unwrap(), bag(expected));
             for stop in 1..=calls {
                 let mut seen = 0;
                 assert!(matches!(
-                    run(&history, CommitSeq(before), CommitSeq(after), budget(2), &mut || {
-                        seen += 1;
-                        if seen == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
-                    }).0,
-                    Err(StandingQueryError::Delivery(StandingQueryFailure::Interrupted))
+                    run(
+                        &history,
+                        CommitSeq(before),
+                        CommitSeq(after),
+                        budget(2),
+                        &mut || {
+                            seen += 1;
+                            if seen == stop {
+                                Err(StandingQueryFailure::Interrupted)
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    )
+                    .0,
+                    Err(StandingQueryError::Delivery(
+                        StandingQueryFailure::Interrupted
+                    ))
                 ));
                 assert_eq!(seen, stop);
                 assert_eq!(history.window(), window);
                 for (actual, original) in history.frames.iter().zip(&frames) {
                     assert!(Arc::ptr_eq(actual, original));
                 }
-                assert_eq!(run(&history, CommitSeq(before), CommitSeq(after), budget(2), &mut || Ok(())).0.unwrap(), bag(expected));
+                assert_eq!(
+                    run(
+                        &history,
+                        CommitSeq(before),
+                        CommitSeq(after),
+                        budget(2),
+                        &mut || Ok(())
+                    )
+                    .0
+                    .unwrap(),
+                    bag(expected)
+                );
             }
             for (work, scratch, rows, passes) in [
                 (stats.work_units, stats.scratch_entries, 2, true),
@@ -669,7 +764,14 @@ mod difference_tests {
                 (stats.work_units, stats.scratch_entries - 1, 2, false),
                 (stats.work_units, stats.scratch_entries, 1, false),
             ] {
-                let result = run(&history, CommitSeq(before), CommitSeq(after), GqlQueryPolicy::new(0, rows, work, scratch), &mut || Ok(())).0;
+                let result = run(
+                    &history,
+                    CommitSeq(before),
+                    CommitSeq(after),
+                    GqlQueryPolicy::new(0, rows, work, scratch),
+                    &mut || Ok(()),
+                )
+                .0;
                 assert_eq!(result.is_ok(), passes);
                 assert_eq!(history.window(), window);
             }

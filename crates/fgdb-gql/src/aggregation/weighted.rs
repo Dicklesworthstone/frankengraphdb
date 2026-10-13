@@ -841,7 +841,10 @@ fn visit_chain_bindings<'a, E, C, F, R, M, P>(
 ) -> Result<(), VisitError<E, C>>
 where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(
+        VId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(
         &[ValueProjection],
@@ -1796,7 +1799,7 @@ mod tests {
         admitted: &[VId],
         edges: &[(EId, VId, RelationId, VId)],
         labelled: &BTreeSet<VId>,
-        properties: &BTreeMap<VId, CanonicalScalar>,
+        properties: &BTreeMap<VId, CanonicalPropertyValue>,
     ) -> crate::GqlQueryExecution<GraphAggregateRow> {
         aggregate
             .execute_governed_with_element_maps(
@@ -1946,11 +1949,11 @@ mod tests {
         }
         edges.push((EId(300), VId(4), RelationId(1), VId(5)));
         let properties = BTreeMap::from([
-            (VId(0), CanonicalScalar::Int(7)),
-            (VId(1), CanonicalScalar::Null),
-            (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Int(-2)),
-            (VId(5), CanonicalScalar::Int(9)),
+            (VId(0), CanonicalScalar::Int(7).into()),
+            (VId(1), CanonicalScalar::Null.into()),
+            (VId(2), CanonicalScalar::Int(7).into()),
+            (VId(3), CanonicalScalar::Int(-2).into()),
+            (VId(5), CanonicalScalar::Int(9).into()),
         ]);
         let mut checked = 0;
         // Trail and walk answers per (shape, filter, grouping): the trail
@@ -2074,10 +2077,10 @@ mod tests {
         // Vertices 4 and 5 lack the label; 1 and 5 lack n = 7.
         let labelled: BTreeSet<VId> = [0, 1, 2, 3].map(VId).into();
         let properties = BTreeMap::from([
-            (VId(0), CanonicalScalar::Int(7)),
-            (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Int(7)),
-            (VId(4), CanonicalScalar::Int(7)),
+            (VId(0), CanonicalScalar::Int(7).into()),
+            (VId(2), CanonicalScalar::Int(7).into()),
+            (VId(3), CanonicalScalar::Int(7).into()),
+            (VId(4), CanonicalScalar::Int(7).into()),
         ]);
         let accesses = |aggregate: &PreparedGraphAggregate| {
             let mut accesses = Vec::new();
