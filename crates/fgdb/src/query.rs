@@ -212,8 +212,8 @@ pub enum QueryWriteError<A> {
     /// read from the staged graph (fgdb-at06q).
     EdgeMergeText(GraphEdgeMergeTextError),
     EdgeMerge(GqlQueryError<GraphEdgeMergeQueryError<WriteTxnError, A>, Cancel>),
-    /// Relationship ON/SET RETURN uses the singular upsert owner, with its
-    /// original text, action, final-state projection and completion errors.
+    /// Relationship ON/SET RETURN preserves every input occurrence and parallel
+    /// match, retaining native action, result and completion errors.
     EdgeUpsertText(GraphEdgeUpsertTextError),
     EdgeUpsert(GqlQueryError<GraphEdgeUpsertQueryError<WriteTxnError, A>, Cancel>),
 }
@@ -451,6 +451,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// One bounded UNWIND MERGE/MATCH mutation binds every map row before the
     /// ordinary atomic executor starts. Its rows share the whole program budget
     /// and its errors retain input-record coordinates; no per-row commit occurs.
+    /// Relationship ON/SET RETURN preserves every MATCH occurrence and parallel
+    /// match, using one atomic bulk executor and the original allocator row IDs.
     #[allow(clippy::too_many_arguments)]
     // Returns once per statement/script and wraps the script execution error,
     // whose record location plus program error is deliberate (write_scripts).
@@ -539,17 +541,17 @@ impl<V: Vfs + Clone> Database<V> {
             let query = prepare_edge_upsert_return(text, params, resolver, relation)
                 .map_err(QueryWriteError::EdgeUpsertText)?;
             let columns = query.columns().to_vec();
-            let (_, _, rows, _) = self
-                .execute_graph_edge_upsert_query_autocommit_governed(
+            let (_, rows, _) = self
+                .execute_graph_edge_upserts_query_autocommit_governed(
                     txcx,
                     cx,
                     commit_cx,
                     &query,
                     budget.edge_upsert_policy(),
-                    |_| {
+                    |request| {
                         allocate(GraphWriteIdentityRequest {
                             statement: 0,
-                            request: fgdb_gql::insertion::GraphInsertRequest::Edge { row: 0, edge: 0 },
+                            request,
                         })
                     },
                 )
@@ -612,6 +614,8 @@ impl WriteTxn {
     /// engines admit the complete result before accepting the statement;
     /// errors preserve earlier staged effects and their read dependencies.
     /// Result pagination never limits effects or hides a failing expression.
+    /// Relationship ON/SET RETURN processes the complete occurrence bag before
+    /// projection or WITH; a late failure restores the prior staged prefix.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)] // once-per-statement report, as above
     pub fn query_write<V: Vfs + Clone, A>(
@@ -686,16 +690,16 @@ impl WriteTxn {
             let query = prepare_edge_upsert_return(text, params, resolver, relation)
                 .map_err(QueryWriteError::EdgeUpsertText)?;
             let columns = query.columns().to_vec();
-            let (_, _, rows) = self
-                .execute_graph_edge_upsert_query_governed(
+            let (_, rows) = self
+                .execute_graph_edge_upserts_query_governed(
                     database,
                     cx,
                     &query,
                     budget.edge_upsert_policy(),
-                    |_| {
+                    |request| {
                         allocate(GraphWriteIdentityRequest {
                             statement: 0,
-                            request: fgdb_gql::insertion::GraphInsertRequest::Edge { row: 0, edge: 0 },
+                            request,
                         })
                     },
                 )
@@ -1165,6 +1169,76 @@ mod write_return_tests {
                 vec![(P, CanonicalScalar::Int(7)), (q, CanonicalScalar::Int(42))]
             );
             assert!(db.edge(EId(101)).unwrap().is_none());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn public_bulk_upsert_preserves_allocator_rows_with_tail_and_statement_rollback() {
+        let ((), report) = run_async_under_lab(0xe6e1_0010, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for id in 1..=3 {
+                seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
+            }
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let calls = AtomicU64::new(0);
+            let args = GqlParameters::new().with_int64("initial", 7).unwrap();
+            let result = db.query_write(
+                &txcx, &cx, &commit,
+                "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
+                 ON CREATE SET r.p=$initial RETURN r,r.p AS p ORDER BY r",
+                &args, symbols, R, policy(2, 0, 2),
+                |request| -> Result<ElementId, ()> {
+                    assert_eq!(request.statement, 0);
+                    let GraphInsertRequest::Edge { row, edge: 0 } = request.request else {
+                        panic!("bulk upsert allocates only its missing relationships")
+                    };
+                    assert_eq!(row as u64, calls.fetch_add(1, Ordering::Relaxed));
+                    Ok(ElementId::Edge(EId(500 + row as u128)))
+                },
+            ).await.unwrap();
+            assert_eq!(calls.load(Ordering::Relaxed), 2);
+            assert_eq!(rows(result, &["r", "p"]), vec![
+                vec![GraphValue::Edge(EId(500)), int(7)],
+                vec![GraphValue::Edge(EId(501)), int(7)],
+            ]);
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            let before = db.frontier().unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let result = transaction.query_write(
+                &mut db, &cx,
+                "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
+                 ON MATCH SET r.p=r.p+1 WITH r.p AS p RETURN count(*) AS n,sum(p) AS total",
+                &GqlParameters::new(), symbols, R, policy(1, 0, 0),
+                |_| -> Result<ElementId, ()> { panic!("matched relationships do not allocate") },
+            ).unwrap();
+            assert_eq!(rows(result, &["n", "total"]), vec![vec![int(2), int(16)]]);
+            let digest = transaction.staged_effect_digest().unwrap();
+            let result = transaction.query_write(
+                &mut db, &cx,
+                "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
+                 ON MATCH SET r.p=0 RETURN 10/r.p AS bad LIMIT 0",
+                &GqlParameters::new(), symbols, R, policy(0, 0, 0),
+                |_| -> Result<ElementId, ()> { panic!("matched relationships do not allocate") },
+            );
+            assert!(matches!(result, Err(QueryWriteError::EdgeUpsert(GqlQueryError::Source(
+                GraphEdgeUpsertQueryError::Returning(_)
+            )))));
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(db.edge(EId(500)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(7))]);
+            assert_eq!(db.frontier().unwrap(), before);
+            transaction.finish(&mut db, &commit).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            for edge in [EId(500), EId(501)] {
+                assert_eq!(db.edge(edge).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(8))]);
+            }
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
