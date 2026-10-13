@@ -282,11 +282,7 @@ impl PreparedGraphWriteChainText {
                     let own = own(merge.parameter_schema())?;
                     let input = merge.input_column_types().map(<[_]>::to_vec);
                     if input.is_some() && previous != input {
-                        return Err(GraphInsertTextError::from(expected(
-                            merge.end,
-                            "the previous write's WITH row",
-                        ))
-                        .into());
+                        return Err(expected(merge.end, "the previous write's WITH row").into());
                     }
                     let bound = merge.bind_parameters(&own)?;
                     // Its rows: the row's visible columns, then the vertex.
