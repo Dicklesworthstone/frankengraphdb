@@ -61,8 +61,9 @@ pub enum GqlQueryError<E, C> {
     IdentifiedEdgesRequired,
     /// A predicate's scalar expression raised an arithmetic data exception
     /// (GQL class 22: division by zero, numeric overflow; see
-    /// `GraphIntegerErrorKind::is_arithmetic_exception`). It never reads as
-    /// UNKNOWN or a filtered row.
+    /// `GraphIntegerErrorKind::is_arithmetic_exception`), or met a stored List
+    /// or Map operand its scalar program cannot read (NonScalar). It never
+    /// reads as UNKNOWN or a filtered row.
     Data(crate::GraphIntegerError),
 }
 

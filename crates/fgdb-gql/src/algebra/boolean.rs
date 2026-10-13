@@ -751,6 +751,7 @@ impl BoundBooleanExpression {
                         control(GlaExecutionEvent::ScratchEntry)?;
                     }
                     let mut values = Vec::with_capacity(columns.len());
+                    let mut collection = false;
                     for column in columns {
                         let value = match resolve(
                             column,
@@ -776,6 +777,7 @@ impl BoundBooleanExpression {
                             // The scalar VM reads a stored collection as the
                             // List or Map it is (size(), IN, indexing).
                             Value::Stored(value) => {
+                                collection = true;
                                 GraphValue::admit_property_value(value, control)?
                             }
                             Value::Vertex(None) | Value::Edge(None) | Value::Scalar(None) => {
@@ -792,6 +794,17 @@ impl BoundBooleanExpression {
                         Ok(CanonicalScalar::Bool(value)) => Truth::from(Some(value)),
                         Err(GraphIntegerEvaluationError::Value(error))
                             if error.kind.is_arithmetic_exception() =>
+                        {
+                            return Err(E::from(error));
+                        }
+                        // The scalar program cannot read a stored List or
+                        // Map operand (size(n.list), n.list[0] here): it
+                        // raises, as the same expression in RETURN does. As
+                        // UNKNOWN it silently dropped every row whose
+                        // property holds a collection (fgdb-bqri3).
+                        Err(GraphIntegerEvaluationError::Value(error))
+                            if collection
+                                && error.kind == crate::GraphIntegerErrorKind::NonScalar =>
                         {
                             return Err(E::from(error));
                         }

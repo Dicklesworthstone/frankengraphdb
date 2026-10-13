@@ -689,6 +689,27 @@ fn map_rows_drive_create_properties() {
         wanted_widened.push(vec![list([text("z")])]);
         wanted_widened.sort();
         assert_eq!(widened, wanted_widened);
+        // fgdb-bqri3: a pattern WHERE whose scalar program meets a stored List
+        // raises, as the same expression in RETURN does. It never reads the
+        // row as UNKNOWN, which silently dropped every listed vertex (count 0
+        // for size(n.name) > 1). After WITH the value language reads the list.
+        for statement in [
+            "MATCH (n:Listed) WHERE size(n.name) > 1 RETURN count(*) AS c",
+            "MATCH (n:Listed) WHERE size(n.name) > 1 RETURN n.name AS name",
+            "MATCH (n:Listed) RETURN size(n.name) > 1 AS longer",
+        ] {
+            assert!(
+                db.query(&cx, statement, &empty, symbols, policy()).is_err(),
+                "{statement}"
+            );
+        }
+        assert_eq!(
+            query(
+                &db,
+                "MATCH (n:Listed) WITH n WHERE size(n.name) > 1 RETURN n.name AS name"
+            ),
+            vec![vec![list([text("a"), text("b")])]]
+        );
     });
 }
 
