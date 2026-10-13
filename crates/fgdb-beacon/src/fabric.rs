@@ -124,8 +124,15 @@ impl StoredDocument {
                     .vector
                     .as_ref()
                     .ok_or(BeaconError::Disabled("vector"))?;
-                vector_config.validate_vector(&vector, work)?;
-                Some(Arc::from(vector))
+                match vector_config.validate_vector(&vector, work) {
+                    Ok(_) => Some(Arc::from(vector)),
+                    // A document vector its metric cannot score (a zero vector
+                    // under cosine) is ineligible for that lane: never a
+                    // candidate, and no refusal of every other document
+                    // (fgdb-x83z1). A zero QUERY vector still refuses.
+                    Err(BeaconError::ZeroVector) => None,
+                    Err(error) => return Err(error),
+                }
             }
             None => None,
         };
