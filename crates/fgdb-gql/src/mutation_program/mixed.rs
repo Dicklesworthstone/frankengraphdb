@@ -481,7 +481,7 @@ impl PreparedGraphWriteProgram {
                 (GraphWriteStatement::Mutation(input), GraphWriteStepStats::Mutation(stats)) => {
                     meter
                         .common
-                        .absorb(statement, input.actions().len(), stats)?;
+                        .absorb(statement, input.row_effect_bound(), stats)?;
                 }
                 (GraphWriteStatement::Insert(input), GraphWriteStepStats::Insert(stats)) => {
                     meter.absorb_insert(statement, input, stats)?;
@@ -685,7 +685,7 @@ impl MixedMeter {
             .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?;
         self.common.absorb(
             statement,
-            input.target_columns().len(),
+            input.target_columns().len() as u128,
             GraphMutationStats {
                 selection: stats.selection,
                 evaluator: stats.evaluator,
