@@ -1,7 +1,9 @@
 //! Successful eager reads report the cut used by their native bound plan.
 //! No mock history or second evaluator supplies the expected row identities.
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryResult, QueryValue, WriteBatch};
+use fgdb::{
+    Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryResult, QueryValue, WriteBatch,
+};
 use fgdb_delta_types::RelationId;
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
@@ -24,7 +26,9 @@ fn policy() -> GqlQueryPolicy {
 }
 
 async fn history(contexts: &PurposeContexts) -> Database<MemVfs> {
-    let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+    let mut db = Database::open_memory(&contexts.commit(), keys())
+        .await
+        .unwrap();
     for id in 1..=2 {
         let mut batch = WriteBatch::new(RelationId(1));
         batch.create_vertex(VId(id), vec![], vec![]);
@@ -55,17 +59,14 @@ fn historical_pattern_and_aggregate_results_carry_their_actual_cut_including_zer
         let view = db.read_session().unwrap();
         let params = GqlParameters::new();
         for cut in 0..=2 {
-            let pattern = format!(
-                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n ORDER BY n"
-            );
+            let pattern = format!("MATCH (n) FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n ORDER BY n");
             let (result, seq) = view
                 .query_with_snapshot(&contexts.query(), &pattern, &params, symbols, policy())
                 .unwrap();
             assert_eq!(seq, CommitSeq(cut));
             assert_eq!(rows(result), identities(cut));
-            let aggregate = format!(
-                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ {cut} RETURN COUNT(*) AS total"
-            );
+            let aggregate =
+                format!("MATCH (n) FOR SYSTEM_TIME AS OF SEQ {cut} RETURN COUNT(*) AS total");
             let (result, seq) = view
                 .query_with_snapshot(&contexts.query(), &aggregate, &params, symbols, policy())
                 .unwrap();
@@ -140,7 +141,9 @@ fn prepared_temporal_rebinding_changes_rows_and_metadata_together() {
             assert_eq!(rows(result.clone()), identities(cut));
             assert_eq!(
                 result,
-                prepared.execute_in_view(&view, &contexts.query(), &params, policy()).unwrap()
+                prepared
+                    .execute_in_view(&view, &contexts.query(), &params, policy())
+                    .unwrap()
             );
         }
         assert_eq!(prepared.statement(), text);
@@ -179,16 +182,26 @@ fn plain_reads_and_explain_keep_the_retained_view_frontier_after_writer_advances
         let (result, seq) = retained
             .query_with_snapshot(&contexts.query(), text, &params, symbols, policy())
             .unwrap();
-        assert_eq!(seq, CommitSeq(2), "EXPLAIN lists the retained view's template");
+        assert_eq!(
+            seq,
+            CommitSeq(2),
+            "EXPLAIN lists the retained view's template"
+        );
         assert_eq!(
             result,
-            retained.query(&contexts.query(), text, &params, symbols, policy()).unwrap()
+            retained
+                .query(&contexts.query(), text, &params, symbols, policy())
+                .unwrap()
         );
         assert!(!rows(result).is_empty());
         let current = db.read_session().unwrap();
         let (result, seq) = current
             .query_with_snapshot(
-                &contexts.query(), "MATCH (n) RETURN n ORDER BY n", &params, symbols, policy(),
+                &contexts.query(),
+                "MATCH (n) RETURN n ORDER BY n",
+                &params,
+                symbols,
+                policy(),
             )
             .unwrap();
         assert_eq!(seq, CommitSeq(3));
@@ -212,17 +225,22 @@ fn refusals_never_return_successful_snapshot_metadata_or_hide_behind_empty_pages
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $missing RETURN n",
             "CREATE (n)",
         ] {
-            assert!(view.query_with_snapshot(
-                &contexts.query(), text, &params, symbols, policy(),
-            ).is_err(), "{text}");
+            assert!(
+                view.query_with_snapshot(&contexts.query(), text, &params, symbols, policy(),)
+                    .is_err(),
+                "{text}"
+            );
         }
-        assert!(view.query_with_snapshot(
-            &contexts.query(),
-            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n",
-            &params,
-            symbols,
-            GqlQueryPolicy::new(100, 100, 0, 1_000_000),
-        ).is_err());
+        assert!(
+            view.query_with_snapshot(
+                &contexts.query(),
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n",
+                &params,
+                symbols,
+                GqlQueryPolicy::new(100, 100, 0, 1_000_000),
+            )
+            .is_err()
+        );
         assert_eq!(view.frontier(), CommitSeq(2));
         assert_eq!(db.frontier().unwrap(), CommitSeq(2));
     });
