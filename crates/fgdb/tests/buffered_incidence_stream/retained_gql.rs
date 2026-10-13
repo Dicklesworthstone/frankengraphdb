@@ -1,7 +1,9 @@
 //! Cold GQL continuations against literal relation products and native reads.
 use super::*;
 use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
-use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+use fgdb_gql::{
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
+};
 use fgdb_types::QueryCx;
 
 fn policy() -> GqlQueryPolicy {
@@ -13,7 +15,10 @@ fn prepare(text: &str) -> PreparedGraphPattern<GraphValueRow> {
         (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         _ => None,
-    }).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
 }
 fn orient(row: &Row, direction: usize) -> Vec<(VId, VId)> {
     match direction {
@@ -44,22 +49,46 @@ fn text(shape: usize, dirs: [usize; 2], any: bool, filtered: bool) -> String {
     let predicate = if filtered { "WHERE s.p >= 9" } else { "" };
     format!("{root}{tail} {predicate} RETURN r,a,s,b,{end},s.p AS sp,a.p AS ap")
 }
-fn expected_pair(cut: u64, shape: usize, dirs: [usize; 2], any: bool, filtered: bool) -> Vec<Vec<GraphValue>> {
+fn expected_pair(
+    cut: u64,
+    shape: usize,
+    dirs: [usize; 2],
+    any: bool,
+    filtered: bool,
+) -> Vec<Vec<GraphValue>> {
     let edges = expected(cut);
     let mut rows = Vec::new();
     for r in &edges {
-        if !any && r.3 != R { continue; }
+        if !any && r.3 != R {
+            continue;
+        }
         for (a, b) in orient(r, dirs[0]) {
             for s in &edges {
-                if r.0 == s.0 || (!any && s.3 != R) { continue; }
-                if filtered && !matches!(payload(s), CanonicalScalar::Int(n) if n >= 9) { continue; }
+                if r.0 == s.0 || (!any && s.3 != R) {
+                    continue;
+                }
+                if filtered && !matches!(payload(s), CanonicalScalar::Int(n) if n >= 9) {
+                    continue;
+                }
                 for (from, c) in orient(s, dirs[1]) {
-                    if from != (if shape == 1 { a } else { b }) || (shape == 2 && c != a) { continue; }
+                    if from != (if shape == 1 { a } else { b }) || (shape == 2 && c != a) {
+                        continue;
+                    }
                     let index = IDS.iter().position(|vid| *vid == a).unwrap();
-                    let ap = if cut >= 2 && index == 0 { 21 } else { index as i64 + 1 };
-                    rows.push(vec![GraphValue::Edge(r.0), GraphValue::Vertex(a), GraphValue::Edge(s.0),
-                        GraphValue::Vertex(b), GraphValue::Vertex(c), GraphValue::Scalar(payload(s)),
-                        GraphValue::Scalar(CanonicalScalar::Int(ap))]);
+                    let ap = if cut >= 2 && index == 0 {
+                        21
+                    } else {
+                        index as i64 + 1
+                    };
+                    rows.push(vec![
+                        GraphValue::Edge(r.0),
+                        GraphValue::Vertex(a),
+                        GraphValue::Edge(s.0),
+                        GraphValue::Vertex(b),
+                        GraphValue::Vertex(c),
+                        GraphValue::Scalar(payload(s)),
+                        GraphValue::Scalar(CanonicalScalar::Int(ap)),
+                    ]);
                 }
             }
         }
@@ -68,10 +97,14 @@ fn expected_pair(cut: u64, shape: usize, dirs: [usize; 2], any: bool, filtered: 
     rows
 }
 async fn collect(
-    view: &mut BufferedReadView<MemVfs>, cx: &QueryCx,
-    plan: &PreparedGraphPattern<GraphValueRow>, cut: CommitSeq,
+    view: &mut BufferedReadView<MemVfs>,
+    cx: &QueryCx,
+    plan: &PreparedGraphPattern<GraphValueRow>,
+    cut: CommitSeq,
 ) -> Vec<Vec<GraphValue>> {
-    let mut cursor = view.stream_graph_edge_joins_governed_at(cx, plan, cut, policy()).unwrap();
+    let mut cursor = view
+        .stream_graph_edge_joins_governed_at(cx, plan, cut, policy())
+        .unwrap();
     assert_eq!(cursor.snapshot_seq(), cut);
     let mut rows = Vec::new();
     while let Some(result) = cursor.next().await {
@@ -114,10 +147,30 @@ fn retained_gql_joins_match_literal_histories_and_pinned_compaction_views() {
                             for filtered in [false, true] {
                                 let text = text(shape, [left, right], any, filtered);
                                 let plan = prepare(&text);
-                                let wanted = expected_pair(cut, shape, [left, right], any, filtered);
-                                let native = db.execute_graph_pattern_governed_at(&cx, &plan, CommitSeq(cut), policy()).unwrap();
-                                assert_eq!(native.value.iter().map(|row| row.values().to_vec()).collect::<Vec<_>>(), wanted, "resident {text} cut={cut}");
-                                assert_eq!(collect(&mut view, &cx, &plan, CommitSeq(cut)).await, wanted, "cold {text} cut={cut}");
+                                let wanted =
+                                    expected_pair(cut, shape, [left, right], any, filtered);
+                                let native = db
+                                    .execute_graph_pattern_governed_at(
+                                        &cx,
+                                        &plan,
+                                        CommitSeq(cut),
+                                        policy(),
+                                    )
+                                    .unwrap();
+                                assert_eq!(
+                                    native
+                                        .value
+                                        .iter()
+                                        .map(|row| row.values().to_vec())
+                                        .collect::<Vec<_>>(),
+                                    wanted,
+                                    "resident {text} cut={cut}"
+                                );
+                                assert_eq!(
+                                    collect(&mut view, &cx, &plan, CommitSeq(cut)).await,
+                                    wanted,
+                                    "cold {text} cut={cut}"
+                                );
                                 cases += 1;
                             }
                         }
@@ -132,9 +185,15 @@ fn retained_gql_joins_match_literal_histories_and_pinned_compaction_views() {
         assert_eq!(collect(&mut pinned, &cx, &plan, CommitSeq(1)).await, old);
         db.compact(&contexts.commit()).await.unwrap();
         drop(db);
-        let reopened = Database::open_with_vfs(&contexts.commit(), vfs.clone(), vfs.database_dir(), keys()).await.unwrap();
+        let reopened =
+            Database::open_with_vfs(&contexts.commit(), vfs.clone(), vfs.database_dir(), keys())
+                .await
+                .unwrap();
         let mut compacted = cold(&contexts, &vfs, pool()).await;
-        assert_eq!(collect(&mut compacted, &cx, &plan, CommitSeq(3)).await, latest);
+        assert_eq!(
+            collect(&mut compacted, &cx, &plan, CommitSeq(3)).await,
+            latest
+        );
         assert_eq!(collect(&mut view, &cx, &plan, CommitSeq(3)).await, latest);
         assert_eq!(collect(&mut pinned, &cx, &plan, CommitSeq(1)).await, old);
         assert_eq!(reopened.frontier().unwrap(), CommitSeq(3));
@@ -161,24 +220,41 @@ fn three_hop_backtracking_and_repeated_incidence_requests_preserve_occurrences()
                 let first = atom("r", "b", direction, false);
                 let second = atom("s", "c", direction, false);
                 let third = atom("t", "d", direction, false);
-                let head = if star { format!("MATCH (a){first}, (a){second}, (a){third}") }
-                    else { format!("MATCH (a){first}{second}{third}") };
+                let head = if star {
+                    format!("MATCH (a){first}, (a){second}, (a){third}")
+                } else {
+                    format!("MATCH (a){first}{second}{third}")
+                };
                 let text = format!("{head} RETURN r,a,s,t,b,c,d");
                 let plan = prepare(&text);
                 let mut wanted = Vec::new();
                 for r in &edges {
                     for (a, b) in orient(r, direction) {
                         for s in &edges {
-                            if s.0 == r.0 { continue; }
+                            if s.0 == r.0 {
+                                continue;
+                            }
                             for (from, c) in orient(s, direction) {
-                                if from != (if star { a } else { b }) { continue; }
+                                if from != (if star { a } else { b }) {
+                                    continue;
+                                }
                                 for t in &edges {
-                                    if t.0 == r.0 || t.0 == s.0 { continue; }
+                                    if t.0 == r.0 || t.0 == s.0 {
+                                        continue;
+                                    }
                                     for (from, d) in orient(t, direction) {
-                                        if from != (if star { a } else { c }) { continue; }
-                                        wanted.push(vec![GraphValue::Edge(r.0), GraphValue::Vertex(a),
-                                            GraphValue::Edge(s.0), GraphValue::Edge(t.0), GraphValue::Vertex(b),
-                                            GraphValue::Vertex(c), GraphValue::Vertex(d)]);
+                                        if from != (if star { a } else { c }) {
+                                            continue;
+                                        }
+                                        wanted.push(vec![
+                                            GraphValue::Edge(r.0),
+                                            GraphValue::Vertex(a),
+                                            GraphValue::Edge(s.0),
+                                            GraphValue::Edge(t.0),
+                                            GraphValue::Vertex(b),
+                                            GraphValue::Vertex(c),
+                                            GraphValue::Vertex(d),
+                                        ]);
                                     }
                                 }
                             }
@@ -186,12 +262,28 @@ fn three_hop_backtracking_and_repeated_incidence_requests_preserve_occurrences()
                     }
                 }
                 wanted.sort();
-                let native = db.execute_graph_pattern_governed(&cx, &plan, policy()).unwrap();
-                assert_eq!(native.value.iter().map(|row| row.values().to_vec()).collect::<Vec<_>>(), wanted, "{text}");
-                assert_eq!(collect(&mut view, &cx, &plan, CommitSeq(1)).await, wanted, "{text}");
+                let native = db
+                    .execute_graph_pattern_governed(&cx, &plan, policy())
+                    .unwrap();
+                assert_eq!(
+                    native
+                        .value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    wanted,
+                    "{text}"
+                );
+                assert_eq!(
+                    collect(&mut view, &cx, &plan, CommitSeq(1)).await,
+                    wanted,
+                    "{text}"
+                );
                 let paged = prepare(&format!("{text} SKIP 1 LIMIT 3"));
-                assert_eq!(collect(&mut view, &cx, &paged, CommitSeq(1)).await,
-                    wanted.into_iter().skip(1).take(3).collect::<Vec<_>>());
+                assert_eq!(
+                    collect(&mut view, &cx, &paged, CommitSeq(1)).await,
+                    wanted.into_iter().skip(1).take(3).collect::<Vec<_>>()
+                );
             }
         }
         drop(view);
@@ -210,15 +302,31 @@ fn retained_gql_late_result_refusal_fuses_without_revoking_a_delivered_row() {
         let memory = pool();
         let mut view = cold(&contexts, &vfs, memory.clone()).await;
         let plan = prepare(&text(0, [0, 0], false, false));
-        let mut refused = view.stream_graph_edge_joins_governed(&cx, &plan,
-            GqlQueryPolicy::new(100_000, 100_000, 0, 10_000_000)).unwrap();
-        assert!(matches!(refused.next().await, Some(Err(GqlQueryError::Evaluator(_)))));
+        let mut refused = view
+            .stream_graph_edge_joins_governed(
+                &cx,
+                &plan,
+                GqlQueryPolicy::new(100_000, 100_000, 0, 10_000_000),
+            )
+            .unwrap();
+        assert!(matches!(
+            refused.next().await,
+            Some(Err(GqlQueryError::Evaluator(_)))
+        ));
         assert!(refused.next().await.is_none());
         drop(refused);
-        let mut cursor = view.stream_graph_edge_joins_governed(&cx, &plan,
-            GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000)).unwrap();
+        let mut cursor = view
+            .stream_graph_edge_joins_governed(
+                &cx,
+                &plan,
+                GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000),
+            )
+            .unwrap();
         let held = cursor.next().await.unwrap().unwrap();
-        assert!(matches!(cursor.next().await, Some(Err(GqlQueryError::Rows(_)))));
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Rows(_)))
+        ));
         assert!(cursor.next().await.is_none());
         cursor.close();
         drop(cursor);

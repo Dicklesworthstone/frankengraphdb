@@ -258,7 +258,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         let mut scan = self.stream_adjacency_at(cx, vertex, relation, direction, as_of, None)?;
         let mut count = 0_u64;
         while scan.next(cx).await?.is_some() {
-            count = count.checked_add(1).ok_or(BufferedReadError::SizeOverflow)?;
+            count = count
+                .checked_add(1)
+                .ok_or(BufferedReadError::SizeOverflow)?;
         }
         Ok(count)
     }

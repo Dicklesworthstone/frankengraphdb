@@ -196,7 +196,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         terminal: impl FnOnce(&Result<T, E>) -> bool,
     ) -> Result<T, E> {
         let mut state = self.state.take().ok_or_else(|| {
-            map_error(QueryError::Authorization(AuthorizationError::ExecutionStopped))
+            map_error(QueryError::Authorization(
+                AuthorizationError::ExecutionStopped,
+            ))
         })?;
         if state.view.is_none() {
             return Err(map_error(QueryError::Authorization(
@@ -236,7 +238,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             ));
             execution.borrow_mut().checkpoint().map_err(&map_error)?;
             let view = view.as_ref().ok_or_else(|| {
-                map_error(QueryError::Authorization(AuthorizationError::ExecutionStopped))
+                map_error(QueryError::Authorization(
+                    AuthorizationError::ExecutionStopped,
+                ))
             })?;
             let result = cx.with_restriction(|| {
                 action(

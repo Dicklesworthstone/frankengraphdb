@@ -202,13 +202,11 @@ impl<'a> BoundDiff<'a> {
             },
             PreparedNativeRead::Set(prepared) => Self {
                 columns: prepared.columns().to_vec(),
-                input: Input::Set(
-                    Box::new(
-                        prepared
-                            .bind_parameters(params)
-                            .map_err(|error| definition(QueryError::SetText(error)))?,
-                    ),
-                ),
+                input: Input::Set(Box::new(
+                    prepared
+                        .bind_parameters(params)
+                        .map_err(|error| definition(QueryError::SetText(error)))?,
+                )),
             },
             PreparedNativeRead::TemporalPattern(_)
             | PreparedNativeRead::TemporalAggregate(_)
@@ -241,48 +239,56 @@ impl<'a> BoundDiff<'a> {
                             .map(GraphDiffInput::values)
                             .map_err(|error| {
                                 error.map_source(|source| {
-                                    QueryError::Pattern(GqlQueryError::Source(GqlError::Read(source)))
+                                    QueryError::Pattern(GqlQueryError::Source(GqlError::Read(
+                                        source,
+                                    )))
                                 })
                             })
                     }
-                    Input::Aggregate(query, slots) => {
-                        graph::graph_execution_at(
-                            &view.snapshot, at, query, scope, execution, remaining,
+                    Input::Aggregate(query, slots) => graph::graph_execution_at(
+                        &view.snapshot,
+                        at,
+                        query,
+                        scope,
+                        execution,
+                        remaining,
+                    )
+                    .map(|result| {
+                        GraphDiffInput::aggregates(
+                            result,
+                            slots,
+                            query.key_columns().len(),
+                            query.aggregate_columns().len(),
                         )
-                        .map(|result| {
-                            GraphDiffInput::aggregates(
-                                result,
-                                *slots,
-                                query.key_columns().len(),
-                                query.aggregate_columns().len(),
-                            )
+                    })
+                    .map_err(|error| {
+                        error.map_source(|source| {
+                            QueryError::Aggregate(GqlQueryError::Source(
+                                source.map_source(GqlError::Read),
+                            ))
                         })
-                        .map_err(|error| {
-                            error.map_source(|source| {
-                                QueryError::Aggregate(GqlQueryError::Source(
-                                    source.map_source(GqlError::Read),
-                                ))
-                            })
-                        })
-                    }
-                    Input::Relational(query, slots) => {
-                        aggregate_execution_at(
-                            &view.snapshot, at, query, scope, execution, remaining,
+                    }),
+                    Input::Relational(query, slots) => aggregate_execution_at(
+                        &view.snapshot,
+                        at,
+                        query,
+                        scope,
+                        execution,
+                        remaining,
+                    )
+                    .map(|result| {
+                        GraphDiffInput::aggregates(
+                            result,
+                            slots,
+                            query.key_columns().len(),
+                            query.aggregate_columns().len(),
                         )
-                        .map(|result| {
-                            GraphDiffInput::aggregates(
-                                result,
-                                *slots,
-                                query.key_columns().len(),
-                                query.aggregate_columns().len(),
-                            )
+                    })
+                    .map_err(|error| {
+                        error.map_source(|source| {
+                            QueryError::Aggregate(GqlQueryError::Source(source))
                         })
-                        .map_err(|error| {
-                            error.map_source(|source| {
-                                QueryError::Aggregate(GqlQueryError::Source(source))
-                            })
-                        })
-                    }
+                    }),
                     Input::Set(query) => {
                         set_execution_at(&view.snapshot, at, query, scope, execution, remaining)
                             .map(GraphDiffInput::values)
@@ -303,5 +309,8 @@ impl<'a> BoundDiff<'a> {
     }
 }
 
+// This file is itself loaded through `#[path]`, so an undecorated child would
+// resolve beside it (session/tests.rs), not under diff/.
 #[cfg(test)]
+#[path = "diff/tests.rs"]
 mod tests;

@@ -162,24 +162,44 @@ fn every_native_input_compares_both_masked_cuts_against_physically_removed_state
             let expected: Vec<_> = cuts
                 .iter()
                 .map(|at| {
-                    bag(native.execute_in_view_at_seq(&view, &cx, &params, policy(), *at).unwrap())
+                    bag(native
+                        .execute_in_view_at_seq(&view, &cx, &params, policy(), *at)
+                        .unwrap())
                 })
                 .collect();
             let prepared = scoped.prepare(&cx, text, &params).unwrap();
             for (i, before) in cuts.iter().enumerate() {
                 for (j, after) in cuts.iter().enumerate() {
-                    let result = scoped.execute_diff(&cx, &prepared, &params, *before, *after).unwrap();
+                    let result = scoped
+                        .execute_diff(&cx, &prepared, &params, *before, *after)
+                        .unwrap();
                     assert_eq!(result.before(), *before);
                     assert_eq!(result.after(), *after);
-                    assert_eq!(delivered(&result), difference(&expected[i], &expected[j]), "{text}");
-                    assert_eq!(result, scoped.query_diff(&cx, text, &params, *before, *after).unwrap());
-                    assert_eq!(result, removed.query_diff(&cx, text, &params, *before, *after).unwrap());
+                    assert_eq!(
+                        delivered(&result),
+                        difference(&expected[i], &expected[j]),
+                        "{text}"
+                    );
+                    assert_eq!(
+                        result,
+                        scoped
+                            .query_diff(&cx, text, &params, *before, *after)
+                            .unwrap()
+                    );
+                    assert_eq!(
+                        result,
+                        removed
+                            .query_diff(&cx, text, &params, *before, *after)
+                            .unwrap()
+                    );
                 }
             }
         }
         // Independent arithmetic, not merely a differential with the same
         // query engine: 3x3 rows with column sum 3*(3+3+7), then 2x2 and 2*(3+7).
-        let delta = scoped.query_diff(&cx, MULTI, &params, cuts[0], cuts[1]).unwrap();
+        let delta = scoped
+            .query_diff(&cx, MULTI, &params, cuts[0], cuts[1])
+            .unwrap();
         assert_eq!(delta.changes().len(), 2);
         for (row, weight) in delta.changes().iter() {
             match weight.to_i128().unwrap() {
@@ -206,9 +226,11 @@ fn prepared_diffs_rebind_without_catalog_calls_and_keep_the_original_pin() {
         let (mut db, cuts) = history(&contexts.commit(), true).await;
         let authority = issuer();
         let token = authority.issue_at(&grant(), 100).unwrap();
-        let resolver_calls = Cell::new(0);
+        // Atomic, not a Cell: the session holds this resolver across an await
+        // and the lab requires a Send future.
+        let resolver_calls = std::sync::atomic::AtomicUsize::new(0);
         let resolver = |kind, name: &str| {
-            resolver_calls.set(resolver_calls.get() + 1);
+            resolver_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             symbols(kind, name)
         };
         let mut session = db
@@ -217,27 +239,51 @@ fn prepared_diffs_rebind_without_catalog_calls_and_keep_the_original_pin() {
         let initial = GqlParameters::new().with_int64("floor", 3).unwrap();
         let text = "MATCH (n) WHERE n.p >= $floor RETURN n.p AS p";
         let prepared = session.prepare(&cx, text, &initial).unwrap();
-        let calls = resolver_calls.get();
+        let calls = resolver_calls.load(std::sync::atomic::Ordering::Relaxed);
         assert!(calls > 0);
         let rebound = GqlParameters::new().with_int64("floor", 6).unwrap();
-        let result = session.execute_diff(&cx, &prepared, &rebound, cuts[0], cuts[2]).unwrap();
-        assert_eq!(resolver_calls.get(), calls);
-        assert_eq!(delivered(&result), Bag::from([(
-            vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(7)))], -1,
-        )]));
+        let result = session
+            .execute_diff(&cx, &prepared, &rebound, cuts[0], cuts[2])
+            .unwrap();
+        assert_eq!(
+            resolver_calls.load(std::sync::atomic::Ordering::Relaxed),
+            calls
+        );
+        assert_eq!(
+            delivered(&result),
+            Bag::from([(
+                vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+                    7
+                )))],
+                -1,
+            )])
+        );
         let mut edit = WriteBatch::new(R);
         edit.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(700)));
         let future = db.write(&contexts.commit(), edit).await.unwrap();
         assert!(matches!(
             session.execute_diff(&cx, &prepared, &rebound, cuts[0], future),
-            Err(GqlQueryError::Source(GraphDiffError::Endpoint { endpoint: DiffEndpoint::After, .. }))
+            Err(GqlQueryError::Source(GraphDiffError::Endpoint {
+                endpoint: DiffEndpoint::After,
+                ..
+            }))
         ));
         drop(db);
-        assert_eq!(session.execute_diff(&cx, &prepared, &rebound, cuts[0], cuts[2]).unwrap(), result);
-        assert_eq!(resolver_calls.get(), calls);
+        assert_eq!(
+            session
+                .execute_diff(&cx, &prepared, &rebound, cuts[0], cuts[2])
+                .unwrap(),
+            result
+        );
+        assert_eq!(
+            resolver_calls.load(std::sync::atomic::Ordering::Relaxed),
+            calls
+        );
         assert!(matches!(
             session.execute_diff(&cx, &prepared, &GqlParameters::new(), cuts[0], cuts[2]),
-            Err(GqlQueryError::Source(GraphDiffError::Definition(QueryError::PatternText(_))))
+            Err(GqlQueryError::Source(GraphDiffError::Definition(
+                QueryError::PatternText(_)
+            )))
         ));
         assert!(!session.is_closed());
     });
@@ -261,7 +307,13 @@ fn authority_owner_branch_identity_and_temporal_fences_precede_source_work() {
             .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
             .unwrap();
         authorization(
-            second.execute_diff(&cx, &prepared, &params, CommitSeq(u64::MAX), CommitSeq(u64::MAX)),
+            second.execute_diff(
+                &cx,
+                &prepared,
+                &params,
+                CommitSeq(u64::MAX),
+                CommitSeq(u64::MAX),
+            ),
             AuthorizationError::WrongAuthority,
         );
         let calls = Cell::new(0);
@@ -269,14 +321,25 @@ fn authority_owner_branch_identity_and_temporal_fences_precede_source_work() {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         };
-        let mut zero = db.authorized_read_session(
-            &cx, &authority, &token, BRANCH, resolver, GqlQueryPolicy::new(0, 0, 0, 0), || 100,
-        ).unwrap();
+        let mut zero = db
+            .authorized_read_session(
+                &cx,
+                &authority,
+                &token,
+                BRANCH,
+                resolver,
+                GqlQueryPolicy::new(0, 0, 0, 0),
+                || 100,
+            )
+            .unwrap();
         for text in [
             "MATCH (n) RETURN id(n) AS identity LIMIT 0",
             "MATCH (n) RETURN elementId(n) AS identity LIMIT 0",
         ] {
-            authorization(zero.query_diff(&cx, text, &params, cuts[0], cuts[0]), AuthorizationError::ScopeDenied);
+            authorization(
+                zero.query_diff(&cx, text, &params, cuts[0], cuts[0]),
+                AuthorizationError::ScopeDenied,
+            );
         }
         assert_eq!(calls.get(), 0);
         for text in [
@@ -290,7 +353,13 @@ fn authority_owner_branch_identity_and_temporal_fences_precede_source_work() {
         }
         assert!(!first.is_closed());
         authorization(
-            first.query_diff(&cx, "MATCH (n) AT BRANCH other RETURN n.p AS p", &params, cuts[0], cuts[2]),
+            first.query_diff(
+                &cx,
+                "MATCH (n) AT BRANCH other RETURN n.p AS p",
+                &params,
+                cuts[0],
+                cuts[2],
+            ),
             AuthorizationError::ScopeDenied,
         );
     });
@@ -311,7 +380,12 @@ fn signed_nodes_and_native_usage_accumulate_but_only_changed_tuples_spend_rows()
         let mut session = db
             .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
             .unwrap();
-        assert_eq!(bag(session.query(&cx, ROWS, &params).unwrap()).values().sum::<i128>(), 3);
+        assert_eq!(
+            bag(session.query(&cx, ROWS, &params).unwrap())
+                .values()
+                .sum::<i128>(),
+            3
+        );
         authorization(
             session.query_diff(&cx, ROWS, &params, cuts[0], cuts[0]),
             AuthorizationError::LimitExceeded(LimitDimension::Nodes),
@@ -321,14 +395,42 @@ fn signed_nodes_and_native_usage_accumulate_but_only_changed_tuples_spend_rows()
         bounded.limits.max_nodes = 100_000;
         bounded.limits.max_rows = 0;
         let token = authority.issue_at(&bounded, 100).unwrap();
-        let mut zero_rows = db.authorized_read_session(
-            &cx, &authority, &token, BRANCH, symbols,
-            GqlQueryPolicy::new(100_000, 0, 10_000_000, 10_000_000), || 100,
-        ).unwrap();
-        assert!(zero_rows.query_diff(&cx, ROWS, &params, cuts[0], cuts[0]).unwrap().changes().is_empty());
-        assert!(zero_rows.query_diff(&cx, "UNWIND [1,2,3] AS x RETURN COUNT(*) AS n", &params, cuts[0], cuts[2])
-            .unwrap().changes().is_empty());
-        assert!(zero_rows.query_diff(&cx, ROWS, &params, cuts[0], cuts[2]).is_err());
+        let mut zero_rows = db
+            .authorized_read_session(
+                &cx,
+                &authority,
+                &token,
+                BRANCH,
+                symbols,
+                GqlQueryPolicy::new(100_000, 0, 10_000_000, 10_000_000),
+                || 100,
+            )
+            .unwrap();
+        assert!(
+            zero_rows
+                .query_diff(&cx, ROWS, &params, cuts[0], cuts[0])
+                .unwrap()
+                .changes()
+                .is_empty()
+        );
+        assert!(
+            zero_rows
+                .query_diff(
+                    &cx,
+                    "UNWIND [1,2,3] AS x RETURN COUNT(*) AS n",
+                    &params,
+                    cuts[0],
+                    cuts[2]
+                )
+                .unwrap()
+                .changes()
+                .is_empty()
+        );
+        assert!(
+            zero_rows
+                .query_diff(&cx, ROWS, &params, cuts[0], cuts[2])
+                .is_err()
+        );
         assert!(!zero_rows.is_closed());
         // Discover the exact native snapshot-record requirement of one endpoint
         // through its real source, then show that two identical endpoints do
@@ -338,18 +440,29 @@ fn signed_nodes_and_native_usage_accumulate_but_only_changed_tuples_spend_rows()
             .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || 100)
             .unwrap();
         let bound = PreparedNativeRead::prepare(ROWS, &params, symbols).unwrap();
-        let records = measured.run(&cx, |view, _, scope, _, policy, execution| {
-            let PreparedNativeRead::Pattern(query) = &bound else { panic!("pattern required"); };
-            let query = query.bind_parameters(&params).unwrap();
-            let output = pattern_at(&view.snapshot, cuts[0], &query, scope, execution, policy)
-                .map_err(query_error)?;
-            Ok((output.rows.snapshot_records, 0))
-        }).unwrap();
+        let records = measured
+            .run(&cx, |view, _, scope, _, policy, execution| {
+                let PreparedNativeRead::Pattern(query) = &bound else {
+                    panic!("pattern required");
+                };
+                let query = query.bind_parameters(&params).unwrap();
+                let output = pattern_at(&view.snapshot, cuts[0], &query, scope, execution, policy)
+                    .map_err(query_error)?;
+                Ok((output.rows.snapshot_records, 0))
+            })
+            .unwrap();
         assert!(records > 0);
-        let mut limited = db.authorized_read_session(
-            &cx, &authority, &token, BRANCH, symbols,
-            GqlQueryPolicy::new(records, 1000, 10_000_000, 10_000_000), || 100,
-        ).unwrap();
+        let mut limited = db
+            .authorized_read_session(
+                &cx,
+                &authority,
+                &token,
+                BRANCH,
+                symbols,
+                GqlQueryPolicy::new(records, 1000, 10_000_000, 10_000_000),
+                || 100,
+            )
+            .unwrap();
         assert!(matches!(
             limited.query_diff(&cx, ROWS, &params, cuts[0], cuts[0]),
             Err(GqlQueryError::Rows(_))
@@ -384,9 +497,13 @@ fn every_live_clock_boundary_including_final_delivery_fences_and_releases_the_pi
             let prepared = session.prepare(&cx, ROWS, &params).unwrap();
             calls.set(0);
             if prepared_mode {
-                session.execute_diff(&cx, &prepared, &params, cuts[0], cuts[2]).unwrap();
+                session
+                    .execute_diff(&cx, &prepared, &params, cuts[0], cuts[2])
+                    .unwrap();
             } else {
-                session.query_diff(&cx, ROWS, &params, cuts[0], cuts[2]).unwrap();
+                session
+                    .query_diff(&cx, ROWS, &params, cuts[0], cuts[2])
+                    .unwrap();
             }
             let total = calls.get();
             session.close();
@@ -395,7 +512,15 @@ fn every_live_clock_boundary_including_final_delivery_fences_and_releases_the_pi
                 cutoff.set(usize::MAX);
                 calls.set(0);
                 let mut session = db
-                    .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), clock)
+                    .authorized_read_session(
+                        &cx,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        symbols,
+                        policy(),
+                        clock,
+                    )
                     .unwrap();
                 let prepared = session.prepare(&cx, ROWS, &params).unwrap();
                 calls.set(0);
@@ -439,12 +564,23 @@ fn callback_retirement_unwind_and_backwards_time_cannot_be_hidden_by_definition_
                 None
             };
             let mut session = db
-                .authorized_read_session(&cx, &authority, &token, BRANCH, resolver, policy(), || 100)
+                .authorized_read_session(
+                    &cx,
+                    &authority,
+                    &token,
+                    BRANCH,
+                    resolver,
+                    policy(),
+                    || 100,
+                )
                 .unwrap();
             if panic {
-                assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = session.query_diff(&cx, ROWS, &params, cuts[0], cuts[2]);
-                })).is_err());
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = session.query_diff(&cx, ROWS, &params, cuts[0], cuts[2]);
+                    }))
+                    .is_err()
+                );
             } else {
                 authorization(
                     session.query_diff(&cx, ROWS, &params, cuts[0], cuts[2]),
@@ -458,7 +594,9 @@ fn callback_retirement_unwind_and_backwards_time_cannot_be_hidden_by_definition_
         let token = authority.issue_at(&grant(), 100).unwrap();
         let now = Cell::new(100_u64);
         let mut session = db
-            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || now.get())
+            .authorized_read_session(&cx, &authority, &token, BRANCH, symbols, policy(), || {
+                now.get()
+            })
             .unwrap();
         now.set(99);
         authorization(
@@ -487,13 +625,15 @@ fn late_endpoint_errors_and_signed_delivery_refusal_never_release_partial_differ
             assert!(matches!(
                 session.query_diff(&cx, &text, &params, cuts[0], cuts[2]),
                 Err(GqlQueryError::Source(GraphDiffError::Endpoint {
-                    endpoint: DiffEndpoint::After, ..
+                    endpoint: DiffEndpoint::After,
+                    ..
                 }))
             ));
             assert!(matches!(
                 session.query_diff(&cx, &text, &params, cuts[2], cuts[2]),
                 Err(GqlQueryError::Source(GraphDiffError::Endpoint {
-                    endpoint: DiffEndpoint::Before, ..
+                    endpoint: DiffEndpoint::Before,
+                    ..
                 }))
             ));
             assert!(!session.is_closed());
@@ -510,8 +650,13 @@ fn late_endpoint_errors_and_signed_delivery_refusal_never_release_partial_differ
             AuthorizationError::LimitExceeded(LimitDimension::Rows),
         );
         assert!(!limited.is_closed());
-        assert!(limited.query_diff(&cx, ROWS, &params, cuts[0], cuts[0])
-            .unwrap().changes().is_empty());
+        assert!(
+            limited
+                .query_diff(&cx, ROWS, &params, cuts[0], cuts[0])
+                .unwrap()
+                .changes()
+                .is_empty()
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

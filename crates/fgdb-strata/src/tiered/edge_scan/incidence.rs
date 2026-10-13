@@ -304,15 +304,22 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         };
         // Both ownership roots leave self before the first possible suspension.
         let mut continuation = self.continuation.take();
-        let request = Incidence { endpoint, relation, direction, after };
+        let request = Incidence {
+            endpoint,
+            relation,
+            direction,
+            after,
+        };
         let used = &mut self.work;
-        let result = driver.continue_incident(cx, request, &mut continuation, &mut |event| {
-            observe(event)?;
-            if event == BufferedEdgeScanEvent::Work {
-                *used = used.saturating_add(1);
-            }
-            Ok(())
-        }).await;
+        let result = driver
+            .continue_incident(cx, request, &mut continuation, &mut |event| {
+                observe(event)?;
+                if event == BufferedEdgeScanEvent::Work {
+                    *used = used.saturating_add(1);
+                }
+                Ok(())
+            })
+            .await;
         self.work = driver.root.work.used;
         if result.is_ok() {
             self.continuation = continuation;
@@ -331,12 +338,18 @@ impl<V: Vfs> Driver<'_, V> {
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
         self.root.work.step(cx, observe)?;
-        if continuation.as_ref().is_none_or(|saved| saved.next != request) {
+        if continuation
+            .as_ref()
+            .is_none_or(|saved| saved.next != request)
+        {
             // Do not retain an obsolete decoded block while allocating its
             // replacement, and never attach partial heads to a continuation.
             *continuation = None;
             let state = self.prepare_incident(cx, request, true, observe).await?;
-            *continuation = Some(Continuation { next: request, state: Some(state) });
+            *continuation = Some(Continuation {
+                next: request,
+                state: Some(state),
+            });
         }
         let saved = continuation.as_mut().expect("complete continuation");
         let Some(state) = saved.state.as_mut() else {
@@ -345,8 +358,11 @@ impl<V: Vfs> Driver<'_, V> {
         let candidate = self.root.advance(state, cx, observe).await?;
         let exhausted = state.heads.is_empty();
         let result = match candidate {
-            Some(candidate) => Some(self.root
-                .resolve_endpoints(cx, candidate, request.relation, observe).await?),
+            Some(candidate) => Some(
+                self.root
+                    .resolve_endpoints(cx, candidate, request.relation, observe)
+                    .await?,
+            ),
             None => None,
         };
         if let Some(candidate) = &result {

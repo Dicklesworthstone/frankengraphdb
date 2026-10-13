@@ -314,7 +314,15 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
     returning: bool,
 ) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
     apply_with_input(
-        transaction, database, cx, merge, policy, scope, execution, returning, None,
+        transaction,
+        database,
+        cx,
+        merge,
+        policy,
+        scope,
+        execution,
+        returning,
+        None,
     )
 }
 
@@ -335,7 +343,14 @@ pub(super) fn apply_occurrence<V: Vfs + Clone, Clock: FnMut() -> u64>(
     occurrence: usize,
 ) -> Result<(GraphEdgeMergeStats, crate::write_txn::EdgeUpsertOccurrences), Fault> {
     apply_with_input(
-        transaction, database, cx, merge, policy, scope, execution, false,
+        transaction,
+        database,
+        cx,
+        merge,
+        policy,
+        scope,
+        execution,
+        false,
         Some((selected, occurrence)),
     )
     .map(|(stats, outcomes, _)| (stats, outcomes))

@@ -48,12 +48,11 @@ pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
     {
         return visit_at(snapshot, at, query, scope, execution, policy);
     }
-    query
-        .execute_with_source_governed(
-            policy,
-            |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
-            || execution.borrow_mut().checkpoint(),
-        )
+    query.execute_with_source_governed(
+        policy,
+        |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
+        || execution.borrow_mut().checkpoint(),
+    )
 }
 
 // Reuse the SAME source admission and masking as pattern_at, then the ordinary

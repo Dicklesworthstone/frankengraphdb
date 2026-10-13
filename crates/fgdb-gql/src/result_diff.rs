@@ -523,12 +523,22 @@ mod release_tests {
             after: CommitSeq(2),
             columns: vec!["private-name".to_owned()].into_boxed_slice(),
             changes: ZSet::from_updates(
-                [(vec![GraphAggregateValue::Integer(37)].into_boxed_slice(), ZWeight::ONE)],
+                [(
+                    vec![GraphAggregateValue::Integer(37)].into_boxed_slice(),
+                    ZWeight::ONE,
+                )],
                 LimbLimit::new(4),
                 &mut |_| Ok::<_, ()>(()),
-            ).unwrap(),
-            rows: GqlExecutionStats { snapshot_records: work, result_rows: 1 },
-            evaluator: GlaExecutionStats { work_units: work, scratch_entries: work },
+            )
+            .unwrap(),
+            rows: GqlExecutionStats {
+                snapshot_records: work,
+                result_rows: 1,
+            },
+            evaluator: GlaExecutionStats {
+                work_units: work,
+                scratch_entries: work,
+            },
         }
     }
 
@@ -547,7 +557,13 @@ mod release_tests {
         assert_eq!(released, other);
         let debug = format!("{released:?}");
         assert_eq!(debug, format!("{other:?}"));
-        for private in ["private-name", "37", "snapshot_records", "work_units", "scratch_entries"] {
+        for private in [
+            "private-name",
+            "37",
+            "snapshot_records",
+            "work_units",
+            "scratch_entries",
+        ] {
             assert!(!debug.contains(private));
         }
     }

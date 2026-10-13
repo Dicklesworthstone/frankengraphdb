@@ -17,10 +17,10 @@ use std::cell::RefCell;
 #[cfg(test)]
 use fgdb_gql::{GqlQueryError, GraphMutationError};
 
-#[path = "edge_upsert.rs"]
-mod edge_upsert;
 #[path = "edge_upsert_program.rs"]
 mod edge_program;
+#[path = "edge_upsert.rs"]
+mod edge_upsert;
 #[path = "write_query.rs"]
 mod query;
 #[path = "write_script.rs"]

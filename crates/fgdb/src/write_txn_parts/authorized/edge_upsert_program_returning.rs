@@ -6,15 +6,19 @@ use crate::write_txn::authorized::Workspace;
 use crate::write_txn::{edge_upsert_property, edge_upsert_query_selection_policy};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
-    GlaExecutionEvent, GqlExecutionStats, GqlQueryError, GqlQueryExecution,
-    GraphEdgeReturnBinding, GraphEdgeUpsertBatchStats, GraphEdgeUpsertPolicy,
-    GraphEdgeUpsertQueryError, PreparedGraphEdgeUpsertQuery,
+    GlaExecutionEvent, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GraphEdgeReturnBinding,
+    GraphEdgeUpsertBatchStats, GraphEdgeUpsertPolicy, GraphEdgeUpsertQueryError,
+    PreparedGraphEdgeUpsertQuery,
 };
 use fgdb_types::{CanonicalScalar, CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::{Authority, CapabilityToken, Error};
 
 type Fault = GqlQueryError<GraphEdgeUpsertQueryError<WriteTxnError, WriteTxnError>, WriteTxnError>;
-type Receipt = (GraphEdgeUpsertBatchStats, GqlQueryExecution<GraphValueRow>, EmbeddedTxnCompletion);
+type Receipt = (
+    GraphEdgeUpsertBatchStats,
+    GqlQueryExecution<GraphValueRow>,
+    EmbeddedTxnCompletion,
+);
 
 fn source(error: WriteTxnError) -> Fault {
     staging(error).map_source(GraphEdgeUpsertQueryError::Upsert)
@@ -61,9 +65,18 @@ impl<V: Vfs + Clone> Database<V> {
         clock: impl FnMut() -> u64,
     ) -> Result<Receipt, Fault> {
         self.execute_graph_edge_upserts_query_authorized_checked(
-            txn_cx, query_cx, commit_cx, authority, token, branch, query, policy, clock,
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            query,
+            policy,
+            clock,
             |_, _| Ok(()),
-        ).await
+        )
+        .await
     }
 
     /// Admit the complete native result under the same live permit BEFORE
@@ -104,81 +117,132 @@ impl<V: Vfs + Clone> Database<V> {
         if !verified.predicates().rights().can_read() {
             return Err(refusal(Error::PermissionDenied));
         }
-        if !verified.predicates().allows_relation(query.upsert().merge().relation()) {
+        if !verified
+            .predicates()
+            .allows_relation(query.upsert().merge().relation())
+        {
             return Err(refusal(Error::ScopeDenied));
         }
-        commit_cx.with_restriction_async(async {
-            let mut execution = Execution { cx: commit_cx, permit, clock };
-            execution.checkpoint().map_err(source)?;
-            let mut workspace = Workspace(Some(
-                self.begin(txn_cx).map_err(WriteTxnError::Write).map_err(source)?,
-            ));
-            let Batch { stats, outcomes, .. } = apply_all(
-                workspace.transaction(), self, query_cx, query.upsert(),
-                edge_upsert_query_selection_policy(policy), verified.predicates(),
-                &mut execution, true,
-            ).map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
-            let mut evaluator = stats.evaluator;
-            let rows = query_cx.with_restriction(|| {
-                let mut control = |kind| {
-                    event(query_cx, &mut execution, policy.merge.query, &mut evaluator, kind)
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
                 };
-                control(GlaExecutionEvent::Work)?;
-                let mut rows = Vec::new();
-                for outcome in outcomes {
-                    let edge = outcome.edge().ok_or_else(invalid)?;
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    let mut cells = Vec::new();
-                    for binding in query.bindings() {
-                        control(GlaExecutionEvent::ScratchEntry)?;
-                        cells.push(match *binding {
-                            GraphEdgeReturnBinding::Edge => GraphValue::Edge(edge),
-                            GraphEdgeReturnBinding::Property(key) => {
-                                let value = if verified.predicates().allows_property(key) {
-                                    edge_upsert_property(
-                                        workspace.transaction(), self, edge, key, &mut control,
-                                    )?
-                                } else {
-                                    control(GlaExecutionEvent::Work)?;
-                                    control(GlaExecutionEvent::ScratchEntry)?;
-                                    CanonicalScalar::Null
-                                };
-                                GraphValue::Scalar(value)
+                execution.checkpoint().map_err(source)?;
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(WriteTxnError::Write)
+                        .map_err(source)?,
+                ));
+                let Batch {
+                    stats, outcomes, ..
+                } = apply_all(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    query.upsert(),
+                    edge_upsert_query_selection_policy(policy),
+                    verified.predicates(),
+                    &mut execution,
+                    true,
+                )
+                .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
+                let mut evaluator = stats.evaluator;
+                let rows = query_cx
+                    .with_restriction(|| {
+                        let mut control = |kind| {
+                            event(
+                                query_cx,
+                                &mut execution,
+                                policy.merge.query,
+                                &mut evaluator,
+                                kind,
+                            )
+                        };
+                        control(GlaExecutionEvent::Work)?;
+                        let mut rows = Vec::new();
+                        for outcome in outcomes {
+                            let edge = outcome.edge().ok_or_else(invalid)?;
+                            control(GlaExecutionEvent::ScratchEntry)?;
+                            let mut cells = Vec::new();
+                            for binding in query.bindings() {
+                                control(GlaExecutionEvent::ScratchEntry)?;
+                                cells.push(match *binding {
+                                    GraphEdgeReturnBinding::Edge => GraphValue::Edge(edge),
+                                    GraphEdgeReturnBinding::Property(key) => {
+                                        let value = if verified.predicates().allows_property(key) {
+                                            edge_upsert_property(
+                                                workspace.transaction(),
+                                                self,
+                                                edge,
+                                                key,
+                                                &mut control,
+                                            )?
+                                        } else {
+                                            control(GlaExecutionEvent::Work)?;
+                                            control(GlaExecutionEvent::ScratchEntry)?;
+                                            CanonicalScalar::Null
+                                        };
+                                        GraphValue::Scalar(value)
+                                    }
+                                });
                             }
-                        });
-                    }
-                    rows.push(cells);
-                }
-                Ok(rows)
-            }).map_err(|error: super::Fault| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
-            let snapshot_records = stats.match_selection.snapshot_records
-                .checked_add(stats.overlay_edges).ok_or_else(overflow)?;
-            let result_rows = u64::try_from(rows.len()).map_err(|_| overflow())?;
-            let result = query_cx.with_restriction(|| {
-                query.project_rows_governed(
-                    rows, GqlExecutionStats { snapshot_records, result_rows },
-                    evaluator, policy.merge.query,
-                    || {
+                            rows.push(cells);
+                        }
+                        Ok(rows)
+                    })
+                    .map_err(|error: super::Fault| {
+                        error.map_source(GraphEdgeUpsertQueryError::Upsert)
+                    })?;
+                let snapshot_records = stats
+                    .match_selection
+                    .snapshot_records
+                    .checked_add(stats.overlay_edges)
+                    .ok_or_else(overflow)?;
+                let result_rows = u64::try_from(rows.len()).map_err(|_| overflow())?;
+                let result = query_cx.with_restriction(|| {
+                    query
+                        .project_rows_governed(
+                            rows,
+                            GqlExecutionStats {
+                                snapshot_records,
+                                result_rows,
+                            },
+                            evaluator,
+                            policy.merge.query,
+                            || {
+                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                                execution.checkpoint()
+                            },
+                        )
+                        .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Returning))
+                })?;
+                let rows =
+                    u64::try_from(result.value.len()).map_err(|_| refusal(Error::TooLarge))?;
+                execution
+                    .permit
+                    .charge_rows_at((execution.clock)(), rows)
+                    .map_err(refusal)?;
+                query_cx
+                    .with_restriction(|| {
+                        admit(&result.value, &mut |work| {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.work(work)
+                        })
+                    })
+                    .map_err(source)?;
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
                         query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         execution.checkpoint()
-                    },
-                ).map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Returning))
-            })?;
-            let rows = u64::try_from(result.value.len()).map_err(|_| refusal(Error::TooLarge))?;
-            execution.permit.charge_rows_at((execution.clock)(), rows).map_err(refusal)?;
-            query_cx.with_restriction(|| {
-                admit(&result.value, &mut |work| {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                    execution.work(work)
-                })
-            }).map_err(source)?;
-            let completion = workspace.transaction()
-                .complete_controlled(self, commit_cx, None, false, || {
-                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                    execution.checkpoint()
-                })
-                .await.map_err(source)?;
-            Ok((stats, result, completion))
-        }).await
+                    })
+                    .await
+                    .map_err(source)?;
+                Ok((stats, result, completion))
+            })
+            .await
     }
 }

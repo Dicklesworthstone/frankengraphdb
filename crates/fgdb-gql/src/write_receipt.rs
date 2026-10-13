@@ -335,8 +335,12 @@ mod tests {
             GraphVertexMergeOutcome::Matched(VId(u128::MAX)),
         ];
         for receipt in [
-            GraphWriteStepReceipt::VertexMergeBatch { outcomes: outcomes.clone() },
-            GraphWriteStepReceipt::VertexUpsertBatch { outcomes: outcomes.clone() },
+            GraphWriteStepReceipt::VertexMergeBatch {
+                outcomes: outcomes.clone(),
+            },
+            GraphWriteStepReceipt::VertexUpsertBatch {
+                outcomes: outcomes.clone(),
+            },
         ] {
             assert_eq!(receipt.merged_vertices(), Some(outcomes.as_slice()));
             assert_eq!(receipt.merged_vertex(), None);

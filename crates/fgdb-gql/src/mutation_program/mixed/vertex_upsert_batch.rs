@@ -37,7 +37,11 @@ impl MixedMeter {
             stats.action_effects,
         )?;
         let visits = if per_target == 0 { 0 } else { target_vertices };
-        let targets = self.common.stats.target_vertex_visits.checked_add(visits)
+        let targets = self
+            .common
+            .stats
+            .target_vertex_visits
+            .checked_add(visits)
             .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?;
         // Source, creation and evaluator validation must also succeed before
         // any successor is installed. This keeps failure meter-atomic.
@@ -63,7 +67,10 @@ mod tests {
                 (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
                 _ => None,
             },
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
     }
 
     fn policy() -> GraphWriteProgramPolicy {
@@ -85,8 +92,14 @@ mod tests {
     fn matched() -> GraphVertexUpsertStats {
         GraphVertexUpsertStats {
             merge: GraphVertexMergeStats {
-                match_selection: GqlExecutionStats { snapshot_records: 10, result_rows: 4 },
-                evaluator: GlaExecutionStats { work_units: 50, scratch_entries: 40 },
+                match_selection: GqlExecutionStats {
+                    snapshot_records: 10,
+                    result_rows: 4,
+                },
+                evaluator: GlaExecutionStats {
+                    work_units: 50,
+                    scratch_entries: 40,
+                },
                 created_vertices: 0,
             },
             branch: GraphVertexUpsertBranch::Match,
@@ -99,7 +112,9 @@ mod tests {
         let input = input();
         let mut meter = meter(policy());
         for statement in 0..2 {
-            meter.absorb_vertex_upsert_batch::<(), (), ()>(statement, &input, matched(), 3).unwrap();
+            meter
+                .absorb_vertex_upsert_batch::<(), (), ()>(statement, &input, matched(), 3)
+                .unwrap();
         }
         assert_eq!(meter.common.stats.completed_statements, 2);
         assert_eq!(meter.common.stats.selection.result_rows, 8);
@@ -124,7 +139,13 @@ mod tests {
         for (stats, targets) in [
             (original, 0),
             (original, 5),
-            (GraphVertexUpsertStats { action_effects: 3, ..original }, 3),
+            (
+                GraphVertexUpsertStats {
+                    action_effects: 3,
+                    ..original
+                },
+                3,
+            ),
             (created, 1), // A create branch must not claim existing MATCH rows.
             (overflow, u64::MAX),
         ] {
@@ -132,14 +153,18 @@ mod tests {
             let before = meter.common.stats;
             assert!(matches!(
                 meter.absorb_vertex_upsert_batch::<(), (), ()>(0, &input, stats, targets),
-                Err(GraphWriteProgramError::Program(GraphMutationProgramError::InvalidStatistics { .. }))
+                Err(GraphWriteProgramError::Program(
+                    GraphMutationProgramError::InvalidStatistics { .. }
+                ))
             ));
             assert_eq!(meter.common.stats, before);
             assert_eq!(meter.vertices, 0);
         }
         created.merge.match_selection.result_rows = 0;
         let mut meter = meter(policy());
-        meter.absorb_vertex_upsert_batch::<(), (), ()>(0, &input, created, 1).unwrap();
+        meter
+            .absorb_vertex_upsert_batch::<(), (), ()>(0, &input, created, 1)
+            .unwrap();
         assert_eq!(meter.vertices, 1);
         assert_eq!(meter.common.stats.selection.result_rows, 0);
         assert_eq!(meter.common.stats.effects, 2);
@@ -158,26 +183,51 @@ mod tests {
         ] {
             policies.push(GraphWriteProgramPolicy::new(query, 18, 1, 0));
         }
-        policies.push(GraphWriteProgramPolicy::new(policy().mutations.query, 17, 1, 0));
+        policies.push(GraphWriteProgramPolicy::new(
+            policy().mutations.query,
+            17,
+            1,
+            0,
+        ));
         for policy in policies {
             let mut meter = meter(policy);
-            meter.absorb_vertex_upsert_batch::<(), (), ()>(0, &input, matched(), 3).unwrap();
+            meter
+                .absorb_vertex_upsert_batch::<(), (), ()>(0, &input, matched(), 3)
+                .unwrap();
             let before = meter.common.stats;
-            assert!(meter.absorb_vertex_upsert_batch::<(), (), ()>(1, &input, matched(), 3).is_err());
+            assert!(
+                meter
+                    .absorb_vertex_upsert_batch::<(), (), ()>(1, &input, matched(), 3)
+                    .is_err()
+            );
             assert_eq!(meter.common.stats, before);
             assert_eq!(meter.vertices, 0);
         }
         let mut meter = meter(policy());
         assert!(matches!(
             meter.absorb_vertex_upsert::<(), (), ()>(0, &input, matched()),
-            Err(GraphWriteProgramError::Program(GraphMutationProgramError::InvalidStatistics { .. }))
+            Err(GraphWriteProgramError::Program(
+                GraphMutationProgramError::InvalidStatistics { .. }
+            ))
         ));
         let no_actions = PreparedGraphVertexUpsert::prepare_with_trailing_actions(
-            input.merge().clone(), Vec::new(), Vec::new(), Vec::new(),
-        ).unwrap();
-        meter.absorb_vertex_upsert_batch::<(), (), ()>(
-            0, &no_actions, GraphVertexUpsertStats { action_effects: 0, ..matched() }, 3,
-        ).unwrap();
+            input.merge().clone(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        meter
+            .absorb_vertex_upsert_batch::<(), (), ()>(
+                0,
+                &no_actions,
+                GraphVertexUpsertStats {
+                    action_effects: 0,
+                    ..matched()
+                },
+                3,
+            )
+            .unwrap();
         assert_eq!(meter.common.stats.target_vertex_visits, 0);
         assert_eq!(meter.common.stats.effects, 0);
     }

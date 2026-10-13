@@ -6,9 +6,9 @@
 //! The enclosing program owns rollback, the live permit and sole completion.
 
 use super::{Database, Execution, Vfs, WriteTxn, WriteTxnError};
+use crate::WriteBatch;
 use crate::write_txn::authorized::{selection, stage};
 use crate::write_txn::{VertexMergeProposal, VertexMergeTargets, collect_vertex_merge_output};
-use crate::WriteBatch;
 use fgdb_gql::insertion::{GraphInsertBatch, GraphInsertIntent};
 use fgdb_gql::{
     GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlQueryError,
@@ -39,11 +39,19 @@ fn event<E, Clock: FnMut() -> u64>(
         .map_err(GqlQueryError::Interrupted)?;
     execution.checkpoint().map_err(GqlQueryError::Interrupted)?;
     let work = u128::from(stats.work_units) + 1;
-    let scratch = u128::from(stats.scratch_entries)
-        + u128::from(event == GlaExecutionEvent::ScratchEntry);
+    let scratch =
+        u128::from(stats.scratch_entries) + u128::from(event == GlaExecutionEvent::ScratchEntry);
     for (observed, limit, dimension) in [
-        (work, policy.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-        (scratch, policy.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+        (
+            work,
+            policy.evaluator.max_work_units,
+            GlaLimitDimension::WorkUnits,
+        ),
+        (
+            scratch,
+            policy.evaluator.max_scratch_entries,
+            GlaLimitDimension::ScratchEntries,
+        ),
     ] {
         if observed > u128::from(limit) {
             return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
@@ -104,7 +112,12 @@ fn stage_creation<V: Vfs + Clone, Clock: FnMut() -> u64>(
         for intent in creation.into_intents() {
             cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
             execution.checkpoint()?;
-            let GraphInsertIntent::Vertex { vertex, labels, properties } = intent else {
+            let GraphInsertIntent::Vertex {
+                vertex,
+                labels,
+                properties,
+            } = intent
+            else {
                 unreachable!("validated vertex MERGE contains no edge creation")
             };
             let mut batch = WriteBatch::new(relation);
@@ -135,10 +148,14 @@ fn outcomes<E, Clock: FnMut() -> u64>(
         GqlQueryError::Interrupted(WriteTxnError::Authorization(fgdb_warden::Error::TooLarge))
     })?;
     execution.checkpoint().map_err(GqlQueryError::Interrupted)?;
-    execution.permit.charge_rows_at((execution.clock)(), rows)
+    execution
+        .permit
+        .charge_rows_at((execution.clock)(), rows)
         .map_err(WriteTxnError::Authorization)
         .map_err(GqlQueryError::Interrupted)?;
-    targets.into_outcomes(|kind| event(cx, execution, policy, evaluator, kind)).map(Some)
+    targets
+        .into_outcomes(|kind| event(cx, execution, policy, evaluator, kind))
+        .map(Some)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -154,12 +171,25 @@ pub(super) fn merge<V: Vfs + Clone, Clock: FnMut() -> u64>(
 ) -> Result<(GraphVertexMergeStats, Option<GraphWriteStepReceipt>), MergeFault> {
     cx.with_restriction(|| {
         let proposal = select(transaction, database, cx, merge, policy, scope, execution)?;
-        stage_creation(transaction, database, cx, merge.relation(), proposal.creation, execution)
-            .map_err(source)?;
+        stage_creation(
+            transaction,
+            database,
+            cx,
+            merge.relation(),
+            proposal.creation,
+            execution,
+        )
+        .map_err(source)?;
         let mut stats = proposal.stats;
         let receipt = outcomes(
-            proposal.outcome, cx, execution, policy.query, &mut stats.evaluator, returning,
-        )?.map(|outcomes| match outcomes.as_slice() {
+            proposal.outcome,
+            cx,
+            execution,
+            policy.query,
+            &mut stats.evaluator,
+            returning,
+        )?
+        .map(|outcomes| match outcomes.as_slice() {
             [outcome] => GraphWriteStepReceipt::VertexMerge { outcome: *outcome },
             _ => GraphWriteStepReceipt::VertexMergeBatch { outcomes },
         });
@@ -167,9 +197,8 @@ pub(super) fn merge<V: Vfs + Clone, Clock: FnMut() -> u64>(
     })
 }
 
-type UpsertFault = GqlQueryError<
-    fgdb_gql::GraphVertexUpsertError<WriteTxnError, WriteTxnError>, WriteTxnError,
->;
+type UpsertFault =
+    GqlQueryError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, WriteTxnError>, WriteTxnError>;
 
 fn upsert_staging(error: WriteTxnError) -> UpsertFault {
     GqlQueryError::Source(fgdb_gql::GraphVertexUpsertError::Staging(error))
@@ -187,15 +216,20 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
     scope: &PlannerPredicates,
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
-) -> Result<
-    (fgdb_gql::GraphWriteStepStats, Option<GraphWriteStepReceipt>),
-    UpsertFault,
-> {
+) -> Result<(fgdb_gql::GraphWriteStepStats, Option<GraphWriteStepReceipt>), UpsertFault> {
     use crate::write_txn::{vertex_upsert_actions, vertex_upsert_property};
     use fgdb_gql::{GraphVertexUpsertBranch, GraphVertexUpsertError, GraphVertexUpsertStats};
     cx.with_restriction(|| {
-        let proposal = select(transaction, database, cx, upsert.merge(), policy.merge, scope, execution)
-            .map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
+        let proposal = select(
+            transaction,
+            database,
+            cx,
+            upsert.merge(),
+            policy.merge,
+            scope,
+            execution,
+        )
+        .map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
         let targets = proposal.outcome;
         let target_vertices = u64::try_from(targets.len()).map_err(|_| {
             GqlQueryError::Source(GraphVertexUpsertError::Merge(
@@ -223,8 +257,14 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
             }));
         }
         stage_creation(
-            transaction, database, cx, upsert.merge().relation(), proposal.creation, execution,
-        ).map_err(upsert_staging)?;
+            transaction,
+            database,
+            cx,
+            upsert.merge().relation(),
+            proposal.creation,
+            execution,
+        )
+        .map_err(upsert_staging)?;
         let mut stats = GraphVertexUpsertStats {
             merge: proposal.stats,
             branch,
@@ -232,13 +272,19 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
         };
         for outcome in targets.outcomes() {
             event(
-                cx, execution, policy.merge.query, &mut stats.merge.evaluator,
+                cx,
+                execution,
+                policy.merge.query,
+                &mut stats.merge.evaluator,
                 GlaExecutionEvent::Work,
             )?;
             let state = RefCell::new((&mut *transaction, &mut *database));
             let controls = RefCell::new(&mut *execution);
             let completed = vertex_upsert_actions::<WriteTxnError, WriteTxnError, WriteTxnError>(
-                upsert, policy, stats.merge, outcome,
+                upsert,
+                policy,
+                stats.merge,
+                outcome,
                 || {
                     cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                     controls.borrow_mut().checkpoint()
@@ -258,7 +304,9 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     let (transaction, database) = &mut *state;
                     let mut execution = controls.borrow_mut();
                     for row in batch.rows {
-                        cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(upsert_staging)?;
+                        cx.checkpoint()
+                            .map_err(WriteTxnError::Interrupted)
+                            .map_err(upsert_staging)?;
                         execution.checkpoint().map_err(upsert_staging)?;
                         stage(transaction, database, batch.relation, row, &mut execution)
                             .map_err(upsert_staging)?;
@@ -271,13 +319,25 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
             stats.merge.evaluator = completed.merge.evaluator;
         }
         let receipt = outcomes(
-            targets, cx, execution, policy.merge.query, &mut stats.merge.evaluator, returning,
-        )?.map(|outcomes| match outcomes.as_slice() {
+            targets,
+            cx,
+            execution,
+            policy.merge.query,
+            &mut stats.merge.evaluator,
+            returning,
+        )?
+        .map(|outcomes| match outcomes.as_slice() {
             [outcome] => GraphWriteStepReceipt::VertexUpsert { outcome: *outcome },
             _ => GraphWriteStepReceipt::VertexUpsertBatch { outcomes },
         });
         // The shared bulk meter validates branch, real selection, complete
         // actions and distinct modified targets before installing any counters.
-        Ok((fgdb_gql::GraphWriteStepStats::VertexUpsertBatch { stats, target_vertices }, receipt))
+        Ok((
+            fgdb_gql::GraphWriteStepStats::VertexUpsertBatch {
+                stats,
+                target_vertices,
+            },
+            receipt,
+        ))
     })
 }

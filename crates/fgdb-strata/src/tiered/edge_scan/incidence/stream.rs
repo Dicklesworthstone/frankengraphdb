@@ -51,9 +51,17 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         BufferedEdgeIncidenceScan {
             as_of: self.as_of,
             work: self.work.used,
-            request: Incidence { endpoint, relation, direction, after },
+            request: Incidence {
+                endpoint,
+                relation,
+                direction,
+                after,
+            },
             state: None,
-            driver: active.then_some(Driver { root: self, routes: None }),
+            driver: active.then_some(Driver {
+                root: self,
+                routes: None,
+            }),
         }
     }
 }
@@ -114,7 +122,11 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
                 Ok(())
             };
             if state.is_none() {
-                state = Some(driver.prepare_incident(cx, request, true, &mut observe).await?);
+                state = Some(
+                    driver
+                        .prepare_incident(cx, request, true, &mut observe)
+                        .await?,
+                );
                 // Successor heads are now self-contained. This fixed request
                 // never needs the complete endpoint/block directory again.
                 driver.routes = None;
@@ -123,9 +135,13 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
             let Some(candidate) = driver.root.advance(state, cx, &mut observe).await? else {
                 return Ok(None);
             };
-            driver.root.resolve_endpoints(cx, candidate, request.relation, &mut observe)
-                .await.map(Some)
-        }.await;
+            driver
+                .root
+                .resolve_endpoints(cx, candidate, request.relation, &mut observe)
+                .await
+                .map(Some)
+        }
+        .await;
         self.work = driver.root.work.used;
         if matches!(result, Ok(Some(_)))
             && state.as_ref().is_some_and(|state| !state.heads.is_empty())
@@ -144,9 +160,10 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
         cx: &QueryCx,
     ) -> Result<Option<BufferedEdgeEndpoints>, BufferedReadError> {
         loop {
-            match self.next_candidate_with(
-                cx, &mut |_| Ok::<_, core::convert::Infallible>(()),
-            ).await {
+            match self
+                .next_candidate_with(cx, &mut |_| Ok::<_, core::convert::Infallible>(()))
+                .await
+            {
                 Ok(Some(candidate)) => {
                     if let Some(row) = candidate.row {
                         return Ok(Some(row));

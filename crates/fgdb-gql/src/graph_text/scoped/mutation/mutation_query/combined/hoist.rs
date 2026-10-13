@@ -27,14 +27,18 @@ fn columns_fit(value: &ReadValueTemplate, width: usize) -> bool {
         ReadValueTemplate::Size(value)
         | ReadValueTemplate::Keys(value)
         | ReadValueTemplate::MapGet { map: value, .. }
-        | ReadValueTemplate::Temporal { argument: value, .. }
-        | ReadValueTemplate::Function { argument: value, .. } => fits(value),
-        ReadValueTemplate::Comprehension { list, filter, map } => {
-            fits(list)
-                && filter.as_deref().is_none_or(fits)
-                && map.as_deref().is_none_or(fits)
+        | ReadValueTemplate::Temporal {
+            argument: value, ..
         }
-        ReadValueTemplate::Quantifier { list, predicate, .. } => fits(list) && fits(predicate),
+        | ReadValueTemplate::Function {
+            argument: value, ..
+        } => fits(value),
+        ReadValueTemplate::Comprehension { list, filter, map } => {
+            fits(list) && filter.as_deref().is_none_or(fits) && map.as_deref().is_none_or(fits)
+        }
+        ReadValueTemplate::Quantifier {
+            list, predicate, ..
+        } => fits(list) && fits(predicate),
         ReadValueTemplate::Slice { list, from, to } => {
             fits(list) && from.as_deref().is_none_or(fits) && to.as_deref().is_none_or(fits)
         }
@@ -48,7 +52,8 @@ fn columns_fit(value: &ReadValueTemplate, width: usize) -> bool {
         ReadValueTemplate::MapOverlay { base, values, .. } => fits(base) && values.iter().all(fits),
         ReadValueTemplate::Let { values, body } => values.iter().all(fits) && fits(body),
         ReadValueTemplate::Case { arms, otherwise } => {
-            arms.iter().all(|(condition, value)| fits(condition) && fits(value))
+            arms.iter()
+                .all(|(condition, value)| fits(condition) && fits(value))
                 && otherwise.as_deref().is_none_or(fits)
         }
         ReadValueTemplate::Literal(_)
@@ -70,11 +75,15 @@ impl WriteReturnGroupTemplate {
     ) -> Result<(), GraphPatternTextError> {
         if keys > width
             || width >= crate::algebra::MAX_PATTERN_VERTICES
-            || projection.iter().any(|output| !columns_fit(&output.value, width))
+            || projection
+                .iter()
+                .any(|output| !columns_fit(&output.value, width))
         {
             return Err(GraphPatternTextError {
                 offset: at,
-                kind: GraphPatternTextErrorKind::Expected("bounded grouped write output references"),
+                kind: GraphPatternTextErrorKind::Expected(
+                    "bounded grouped write output references",
+                ),
             });
         }
         let columns: Vec<_> = (0..width)
@@ -94,7 +103,10 @@ mod tests {
     use fgdb_types::CanonicalScalar;
 
     fn projection(value: ReadValueTemplate) -> ReadProjectionTemplate {
-        ReadProjectionTemplate { name: "result".into(), value }
+        ReadProjectionTemplate {
+            name: "result".into(),
+            value,
+        }
     }
 
     fn transcript(outputs: &[ReadProjectionTemplate]) -> Vec<u8> {
@@ -113,7 +125,11 @@ mod tests {
             values: vec![V::List(vec![V::Column(0), V::Column(summary)])],
             body: Box::new(V::List(vec![
                 V::Local(100),
-                V::Parameter { index: 100, at: 4, null_type: GraphSetColumnType::Scalar },
+                V::Parameter {
+                    index: 100,
+                    at: 4,
+                    null_type: GraphSetColumnType::Scalar,
+                },
                 V::Integer {
                     program: vec![
                         Op::Bound(GraphIntegerOp::Column(0)),
@@ -138,10 +154,16 @@ mod tests {
         };
         let mut outputs = vec![projection(expression(1))];
         WriteReturnGroupTemplate::remap_hidden_key_outputs(&mut outputs, 1, 2, 4).unwrap();
-        assert_eq!(transcript(&outputs), transcript(&[projection(expression(2))]));
+        assert_eq!(
+            transcript(&outputs),
+            transcript(&[projection(expression(2))])
+        );
         // A second hidden key must shift the same summaries again, not a local.
         WriteReturnGroupTemplate::remap_hidden_key_outputs(&mut outputs, 2, 3, 4).unwrap();
-        assert_eq!(transcript(&outputs), transcript(&[projection(expression(3))]));
+        assert_eq!(
+            transcript(&outputs),
+            transcript(&[projection(expression(3))])
+        );
     }
 
     #[test]
@@ -149,9 +171,14 @@ mod tests {
         use ReadValueTemplate as V;
         let invalid = [
             V::Column(2),
-            V::Case { arms: vec![], otherwise: Some(Box::new(V::Column(usize::MAX))) },
+            V::Case {
+                arms: vec![],
+                otherwise: Some(Box::new(V::Column(usize::MAX))),
+            },
             V::Integer {
-                program: vec![MutationIntegerTemplateOp::Bound(GraphIntegerOp::ScalarColumn(2))],
+                program: vec![MutationIntegerTemplateOp::Bound(
+                    GraphIntegerOp::ScalarColumn(2),
+                )],
                 at: 7,
             },
             V::MapLiteral {

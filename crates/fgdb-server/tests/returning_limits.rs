@@ -519,7 +519,12 @@ fn returning_uses_write_query_allowances_not_the_more_permissive_read_policy() {
         );
         let after = state(cx, &mut writer).await;
         assert_eq!(
-            after.0.rows.iter().map(|row| row[2].clone()).collect::<Vec<_>>(),
+            after
+                .0
+                .rows
+                .iter()
+                .map(|row| row[2].clone())
+                .collect::<Vec<_>>(),
             vec![WireValue::Int(3), WireValue::Int(4)]
         );
         limit_refusal(cx, &mut writer, text).await;
@@ -553,7 +558,12 @@ fn signed_rows_and_late_expression_refusals_still_precede_commit() {
         );
         let after = state(cx, &mut observer).await;
         assert_eq!(
-            after.0.rows.iter().map(|row| row[2].clone()).collect::<Vec<_>>(),
+            after
+                .0
+                .rows
+                .iter()
+                .map(|row| row[2].clone())
+                .collect::<Vec<_>>(),
             vec![WireValue::Int(8), WireValue::Int(2)]
         );
         // Returning no rows does not waive read rights.

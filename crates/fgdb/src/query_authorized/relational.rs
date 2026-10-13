@@ -80,34 +80,33 @@ fn set_execution_at<Clock: FnMut() -> u64>(
     fgdb_gql::GqlQueryExecution<GraphValueRow>,
     GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>,
 > {
-    query
-        .execute_governed_with_elements(
-            policy,
-            |pattern, remaining| {
-                pattern_at(snapshot, at, pattern, scope, execution, remaining)
-                    .map_err(|error| error.map_source(GqlError::Read))
-            },
-            |call, arguments, remaining| {
-                procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
-            },
-            // `x.key` on an element (fgdb-xnd7x). Every element here came out
-            // of a pattern or CALL admitted under this capability, so only
-            // the property scope remains: a property the capability cannot
-            // see reads exactly as an absent one, as the pattern tables mask
-            // it (FG-INV-20).
-            |element, key| {
-                if !scope.allows_property(key) {
-                    return Ok(None);
-                }
-                crate::gql_exec::read_element_property(
-                    element,
-                    key,
-                    |vid| snapshot.vertex_at(vid, at),
-                    |eid| snapshot.edge_at(eid, at),
-                )
-            },
-            || execution.borrow_mut().checkpoint(),
-        )
+    query.execute_governed_with_elements(
+        policy,
+        |pattern, remaining| {
+            pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                .map_err(|error| error.map_source(GqlError::Read))
+        },
+        |call, arguments, remaining| {
+            procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+        },
+        // `x.key` on an element (fgdb-xnd7x). Every element here came out
+        // of a pattern or CALL admitted under this capability, so only
+        // the property scope remains: a property the capability cannot
+        // see reads exactly as an absent one, as the pattern tables mask
+        // it (FG-INV-20).
+        |element, key| {
+            if !scope.allows_property(key) {
+                return Ok(None);
+            }
+            crate::gql_exec::read_element_property(
+                element,
+                key,
+                |vid| snapshot.vertex_at(vid, at),
+                |eid| snapshot.edge_at(eid, at),
+            )
+        },
+        || execution.borrow_mut().checkpoint(),
+    )
 }
 
 /// A CALL stage under the capability (fgdb-7qznp). It binds exactly as every
@@ -188,18 +187,17 @@ fn aggregate_execution_at<Clock: FnMut() -> u64>(
     fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
     GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
 > {
-    query
-        .execute_governed_with_procedures(
-            policy,
-            |pattern, remaining| {
-                pattern_at(snapshot, at, pattern, scope, execution, remaining)
-                    .map_err(|error| error.map_source(GqlError::Read))
-            },
-            |call, arguments, remaining| {
-                procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
-            },
-            || execution.borrow_mut().checkpoint(),
-        )
+    query.execute_governed_with_procedures(
+        policy,
+        |pattern, remaining| {
+            pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                .map_err(|error| error.map_source(GqlError::Read))
+        },
+        |call, arguments, remaining| {
+            procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+        },
+        || execution.borrow_mut().checkpoint(),
+    )
 }
 
 impl<V: Vfs + Clone> Database<V> {

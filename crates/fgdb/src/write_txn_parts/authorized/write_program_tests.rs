@@ -1143,32 +1143,55 @@ fn duplicate_match_occurrences_collapse_and_distinct_vertices_keep_complete_rece
                 let limited = token.attenuate(Restriction::MaxRows(2)).unwrap();
                 let error = db
                     .execute_graph_write_program_returning_authorized(
-                        &txn, &query, &commit, &authority, &limited, "main",
-                        &program, policy(), || NOW,
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &limited,
+                        "main",
+                        &program,
+                        policy(),
+                        || NOW,
                     )
                     .await
                     .unwrap_err();
-                assert_eq!(authorization(error), Error::LimitExceeded(LimitDimension::Rows));
                 assert_eq!(
-                    (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+                    authorization(error),
+                    Error::LimitExceeded(LimitDimension::Rows)
+                );
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
                     before
                 );
                 assert_eq!(txn.outstanding_obligations(), 0);
             }
             let (receipt, _) = db
                 .execute_graph_write_program_returning_authorized(
-                    &txn, &query, &commit, &authority, &token, "main",
-                    &program, policy(), || NOW,
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &program,
+                    policy(),
+                    || NOW,
                 )
                 .await
                 .unwrap();
             if ambiguous {
                 assert_eq!(
                     receipt.steps()[1].merged_vertices(),
-                    Some(&[
-                        GraphVertexMergeOutcome::Matched(VId(1)),
-                        GraphVertexMergeOutcome::Matched(VId(3)),
-                    ][..])
+                    Some(
+                        &[
+                            GraphVertexMergeOutcome::Matched(VId(1)),
+                            GraphVertexMergeOutcome::Matched(VId(3)),
+                        ][..]
+                    )
                 );
                 assert_eq!(receipt.steps()[1].merged_vertex(), None);
             } else {
@@ -1177,7 +1200,11 @@ fn duplicate_match_occurrences_collapse_and_distinct_vertices_keep_complete_rece
                     Some(GraphVertexMergeOutcome::Matched(VId(1)))
                 );
             }
-            assert_eq!(receipt.stats().created_vertices, 1, "only the explicit prefix was created");
+            assert_eq!(
+                receipt.stats().created_vertices,
+                1,
+                "only the explicit prefix was created"
+            );
             assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
             assert_eq!(db.vertices().unwrap().len(), before.1.len() + 1);
             for original in before.1 {
