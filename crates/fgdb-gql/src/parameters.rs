@@ -100,6 +100,12 @@ pub struct GqlListParameter {
     canonical: std::sync::Arc<[u8]>,
 }
 impl GqlListParameter {
+    /// A list argument is a row source (`UNWIND $rows`) or a value (a list
+    /// function, membership), never a predicate literal: every predicate
+    /// position refuses a collection parameter. Its node count is the value
+    /// bound and its bytes the whole transcript's (fgdb-zpypj), so one batch
+    /// argument can carry as many rows as the batch writer admits, not the
+    /// 64 KiB of a single scalar predicate literal.
     pub fn new(values: Vec<crate::algebra::GraphValue>) -> Result<Self, GqlParameterError> {
         let value = crate::algebra::GraphValue::List(values.into_boxed_slice());
         if !value.validate_bounds() {
@@ -1439,6 +1445,38 @@ mod tests {
         );
         assert!(GqlParameterType::Map.accepts(GqlParameterType::Scalar(CanonicalScalarKind::Null)));
         assert!(!GqlParameterType::Map.accepts(GqlParameterType::List));
+    }
+
+    /// A list argument is bounded by its node count and the transcript's
+    /// bytes, not by one scalar predicate literal's 64 KiB (fgdb-zpypj): a
+    /// 4,000-row batch of maps, several times that literal bound, admits and
+    /// binds; past the transcript bound the list refuses.
+    #[test]
+    fn list_parameters_admit_a_batch_up_to_the_transcript_bound() {
+        use crate::algebra::GraphValue;
+        use fgdb_types::CanonicalScalar;
+        let row = |id: i64| {
+            GraphValue::map(vec![
+                ("id".into(), GraphValue::Scalar(CanonicalScalar::Int(id))),
+                (
+                    "name".into(),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("row-name").unwrap()),
+                ),
+            ])
+            .unwrap()
+        };
+        let batch = GqlListParameter::new((0..4_000).map(row).collect()).unwrap();
+        assert!(batch.canonical_bytes().len() > crate::algebra::MAX_SCALAR_PREDICATE_BYTES);
+        let args = GqlParameters::new()
+            .with_list("rows", (0..4_000).map(row).collect())
+            .unwrap();
+        assert!(args.canonical_byte_len() > crate::algebra::MAX_SCALAR_PREDICATE_BYTES);
+        let payload = || GraphValue::Scalar(CanonicalScalar::bytes(vec![0xab; 60_000]).unwrap());
+        let over = (MAX_GQL_PARAMETER_TRANSCRIPT_BYTES / 60_000) + 2;
+        assert_eq!(
+            GqlListParameter::new((0..over).map(|_| payload()).collect()),
+            Err(GqlParameterError::ListLiteral)
+        );
     }
 
     #[test]
