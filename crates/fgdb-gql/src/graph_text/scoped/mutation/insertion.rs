@@ -98,6 +98,11 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         self.write_row_scope = true;
         let mut parsed = self.insertion_clauses(Some(schema))?;
+        // A chain step's head follows its clauses: a WITH head, a RETURN, or
+        // (directly before the next write) the implicit `WITH *`.
+        let returning = returning
+            || (self.chain_write
+                && (self.is_word("WITH") || self.is_word("RETURN") || self.at_chained_write()?));
         let returning = if returning {
             Some(self.insertion_return(&mut parsed, schema)?)
         } else {
@@ -1256,9 +1261,9 @@ impl PreparedGraphInsertText {
         let at = parser.current.at;
         let schema = from.row;
         // A chained write without RETURN ends the statement; with a WITH head
-        // or RETURN it is a query step.
-        let returning = parser.is_word("WITH") || parser.is_word("RETURN");
-        let (parsed, returning, continuation) = parser.insertion_over_row(&schema, returning)?;
+        // or RETURN it is a query step. insertion_over_row decides after the
+        // CREATE clauses, where the head is.
+        let (parsed, returning, continuation) = parser.insertion_over_row(&schema, false)?;
         let (columns, types) = schema
             .iter()
             .map(|(name, kind)| (name.text.to_owned(), *kind))
