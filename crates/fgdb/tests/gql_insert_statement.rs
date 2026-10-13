@@ -1120,9 +1120,9 @@ fn vertex_merge_steps_run_over_a_leading_match() {
         assert_eq!(
             rows(grouped),
             [
-                vec![int(1), QueryValue::Count(2)],
-                vec![int(2), QueryValue::Count(2)],
-                vec![int(3), QueryValue::Count(2)]
+                vec![int(1), int(2)],
+                vec![int(2), int(2)],
+                vec![int(3), int(2)]
             ]
         );
         assert_eq!(count(&db, COPY), 3);
