@@ -1626,6 +1626,8 @@ struct ParsedVertexRowsReturn<'r, 'a> {
     offset: ReadPageNumber,
     count: Option<ReadPageNumber>,
     at: usize,
+    /// The output row: each item's name and type.
+    output: Vec<(Name<'a>, GraphSetColumnType)>,
 }
 
 impl<'a> ParsedVertexRowsReturn<'_, 'a> {
@@ -1810,14 +1812,18 @@ impl<'a> ReturnLeaves<'a> for ParsedVertexRowsReturn<'_, 'a> {
 impl<'a> Parser<'a> {
     /// `RETURN ...` after a vertex MERGE step, over `row` and the merged
     /// vertex. Named items only.
+    /// `keyword` is RETURN, or WITH for the head of a step another write
+    /// follows (fgdb-cpny9): the same items, whose output row the next
+    /// write reads.
     fn vertex_rows_return<'r>(
         &mut self,
+        keyword: &'static str,
         variable: Option<Name<'a>>,
         row: &'r [(Name<'a>, GraphSetColumnType)],
         written: Option<Vec<&'a str>>,
     ) -> Result<ParsedVertexRowsReturn<'r, 'a>, GraphVertexMergeTextError> {
         let at = self.current.at;
-        self.word("RETURN")?;
+        self.word(keyword)?;
         let quantifier = if self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
@@ -1843,6 +1849,7 @@ impl<'a> Parser<'a> {
             offset: ReadPageNumber::Literal(0),
             count: None,
             at,
+            output: Vec::new(),
         };
         let items = self.write_return_items(&mut returning)?;
         returning.projection = items.projection;
@@ -1858,6 +1865,7 @@ impl<'a> Parser<'a> {
             returning.offset = offset;
             returning.count = count;
         }
+        returning.output = items.output;
         Ok(returning)
     }
 }
@@ -1995,28 +2003,50 @@ impl PreparedGraphVertexMergeRowsText {
                 parameters: parser.syntax.parameters.clone(),
             })
         } else {
-            if parser.is_word("RETURN") {
-                // A carried element the MERGE also merged would read stale
-                // through its hidden read, so RETURN may not read a property
-                // an ON/SET clause writes, nor labels(), keys() or
-                // properties() of a carried element.
-                let written = parsed_actions.as_ref().map(|(on_match, on_create, after)| {
-                    on_match
-                        .iter()
-                        .chain(on_create)
-                        .chain(after)
-                        .filter_map(|action| match action {
-                            ParsedUpsertAction::Property { key, .. }
-                            | ParsedUpsertAction::Expression { key, .. } => Some(key.text),
-                            ParsedUpsertAction::Label { .. } => None,
-                        })
-                        .collect()
-                });
-                let returning = parser.vertex_rows_return(variable, &row, written)?;
-                parsed_return = Some(returning);
+            // A carried element the MERGE also merged would read stale
+            // through its hidden read, so RETURN (or a WITH head) may not
+            // read a property an ON/SET clause writes, nor labels(), keys()
+            // or properties() of a carried element.
+            let written = parsed_actions.as_ref().map(|(on_match, on_create, after)| {
+                on_match
+                    .iter()
+                    .chain(on_create)
+                    .chain(after)
+                    .filter_map(|action| match action {
+                        ParsedUpsertAction::Property { key, .. }
+                        | ParsedUpsertAction::Expression { key, .. } => Some(key.text),
+                        ParsedUpsertAction::Label { .. } => None,
+                    })
+                    .collect()
+            });
+            if parser.is_word("WITH") {
+                // A WITH head: its output row is what the next write reads.
+                let head = parser.vertex_rows_return("WITH", variable, &row, written)?;
+                if !parser.at_chained_write()? {
+                    return Err(error(
+                        parser.current.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "a CREATE or MERGE after the WITH of a MERGE step",
+                        ),
+                    )
+                    .into());
+                }
+                let continuation = ChainContinuation {
+                    at: parser.current.at,
+                    row: head.output.clone(),
+                    boundary: None,
+                    parameters: parser.syntax.parameters.clone(),
+                };
+                parsed_return = Some(head);
+                Some(continuation)
+            } else {
+                if parser.is_word("RETURN") {
+                    let returning = parser.vertex_rows_return("RETURN", variable, &row, written)?;
+                    parsed_return = Some(returning);
+                }
+                parser.end()?;
+                None
             }
-            parser.end()?;
-            None
         };
         if let Some(parsed) = &parsed_return {
             mutation_query::admit_return(

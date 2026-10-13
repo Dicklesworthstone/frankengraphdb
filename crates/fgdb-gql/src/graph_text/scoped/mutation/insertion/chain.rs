@@ -240,12 +240,17 @@ impl PreparedGraphWriteChainText {
                     &mut resolve,
                     from,
                 )?;
-                match after {
-                    Some((keep, from)) => {
+                match (returning, after) {
+                    // A WITH head: a query step whose rows the next write reads.
+                    (Some(returning), Some((_, from))) => {
+                        steps.push(ChainTextStep::EdgeMerge(Box::new((merge, Some(returning)))));
+                        next = Some(from);
+                    }
+                    (None, Some((keep, from))) => {
                         steps.push(ChainTextStep::EdgeMergeRows(Box::new((merge, keep))));
                         next = Some(from);
                     }
-                    None => {
+                    (returning, None) => {
                         steps.push(ChainTextStep::EdgeMerge(Box::new((merge, returning))));
                         next = None;
                     }
@@ -351,13 +356,17 @@ impl PreparedGraphWriteChainText {
                         return Err(expected(merge.end, "the previous write's WITH row").into());
                     }
                     let bound = merge.bind_parameters(&own)?;
-                    // Its rows: the row's visible columns, then the vertex.
+                    // Its rows: the row's visible columns, then the vertex;
+                    // or the rows of its WITH head (or RETURN).
                     previous = match &bound {
                         GraphWriteChainStep::VertexMerge(rows) => {
                             let mut output = rows.input_column_types().to_vec();
                             output.truncate(merge.keep);
                             output.push(GraphSetColumnType::Vertex);
                             Some(output)
+                        }
+                        GraphWriteChainStep::VertexMergeQuery(query) => {
+                            Some(query.column_types().to_vec())
                         }
                         _ => None,
                     };
@@ -400,12 +409,17 @@ impl PreparedGraphWriteChainText {
                         .checked_arguments(&own)
                         .map_err(crate::GraphEdgeMergeTextError::from)?;
                     let bound = merge.bind_parameters(&own)?;
-                    previous = None;
+                    // A RETURN, or a WITH head another write reads.
                     steps.push(match returning {
-                        Some(returning) => GraphWriteChainStep::EdgeMergeQuery(Box::new(
-                            returning.bind(bound, &values)?,
-                        )),
-                        None => GraphWriteChainStep::EdgeMerge(Box::new(bound)),
+                        Some(returning) => {
+                            let query = returning.bind(bound, &values)?;
+                            previous = Some(query.column_types().to_vec());
+                            GraphWriteChainStep::EdgeMergeQuery(Box::new(query))
+                        }
+                        None => {
+                            previous = None;
+                            GraphWriteChainStep::EdgeMerge(Box::new(bound))
+                        }
                     });
                 }
                 ChainTextStep::EdgeMergeRows(step) => {

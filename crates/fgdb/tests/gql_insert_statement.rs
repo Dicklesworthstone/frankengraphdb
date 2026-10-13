@@ -1348,6 +1348,110 @@ fn vertex_merge_steps_apply_on_and_set_clauses_per_row() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-cpny9: a MERGE step another write follows may have a WITH head. The
+/// next write reads the head's output row: projected items, an aggregate,
+/// DISTINCT rows, and the merged vertex's or relationship's properties
+/// after its clauses.
+#[test]
+fn merge_steps_take_a_with_head() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a7, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, false).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let stored = |value| CanonicalPropertyValue::from(CanonicalScalar::Int(value));
+        let with_p = |db: &Database<MemVfs>, label: LabelId, value: i64| {
+            db.vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| {
+                    vertex.labels == vec![label]
+                        && vertex
+                            .props
+                            .iter()
+                            .any(|(k, v)| *k == P && *v == stored(value))
+                })
+                .count()
+        };
+        // A projected item and the merged vertex's property after ON CREATE.
+        write(
+            &mut db,
+            "MERGE (a:Person {p: 1}) ON CREATE SET a.q = 7 WITH a, a.q AS q \
+             CREATE (a)-[:R]->(:Copy {p: q})",
+        )
+        .await
+        .unwrap();
+        assert_eq!(with_p(&db, PERSON, 1), 1);
+        assert_eq!(with_p(&db, COPY, 7), 1);
+        assert_eq!(db.edges().unwrap().len(), 1);
+        // An aggregate head: one row for three merged rows.
+        write(
+            &mut db,
+            "UNWIND [1, 2, 2] AS v MERGE (n:Source {p: v}) WITH count(*) AS c \
+             CREATE (:Copy {p: c})",
+        )
+        .await
+        .unwrap();
+        assert_eq!(with_p(&db, COPY, 3), 1);
+        // DISTINCT: two vertices, two creations.
+        write(
+            &mut db,
+            "UNWIND [1, 1, 2] AS v MERGE (n:Source {p: v}) WITH DISTINCT n \
+             CREATE (n)-[:R]->(:Copy {p: 9})",
+        )
+        .await
+        .unwrap();
+        assert_eq!(with_p(&db, COPY, 9), 2);
+        assert_eq!(db.edges().unwrap().len(), 3);
+        // After a relationship MERGE step.
+        write(
+            &mut db,
+            "CREATE (a:Person {p: 50}), (b:Person {p: 51}) MERGE (a)-[r:R]->(b) \
+             WITH b CREATE (b)-[:R]->(:Copy {p: 52})",
+        )
+        .await
+        .unwrap();
+        assert_eq!(with_p(&db, COPY, 52), 1);
+        assert_eq!(db.edges().unwrap().len(), 5);
+        // A head no write follows, a WHERE after it and WITH * refuse and
+        // publish nothing.
+        let frontier = db.frontier().unwrap();
+        for refused in [
+            "MERGE (a:Person {p: 60}) WITH a",
+            "MERGE (a:Person {p: 60}) WITH a WHERE a.p > 1 CREATE (b)",
+            "MERGE (a:Person {p: 60}) WITH * CREATE (b)",
+        ] {
+            assert!(write(&mut db, refused).await.is_err(), "{refused}");
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-cpny9 (TCK Merge9 [3], Create3 [12]): a relationship MERGE another
 /// write follows hands that write each row once per relationship its pair
 /// resolved to, the relationship beside the row.
