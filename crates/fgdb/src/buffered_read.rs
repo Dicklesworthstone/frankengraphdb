@@ -6,6 +6,7 @@ use super::*;
 use fgdb_strata::store::BufferedPartition;
 pub use fgdb_strata::store::{BufferedEdge, BufferedReadError, BufferedReadLimits, BufferedValue};
 pub use fgdb_strata::tiered::buffer::{BufferLimits, BufferStats};
+use fgdb_strata::tiered::edge_scan::{BufferedEdgeDirection, BufferedEdgeIncidenceScan};
 pub use fgdb_strata::tiered::memory::{MemoryError, MemoryPool};
 use fgdb_types::QueryCx;
 
@@ -180,6 +181,86 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         self.partition
             .adjacency_at(cx, vertex, relation, incoming, as_of, max_entries)
             .await
+    }
+
+    /// Pull visible incident edges and their same-cut endpoints without building
+    /// a neighborhood vector. Incoming/outgoing/undirected requests preserve
+    /// stored edge orientation; an undirected self-loop is returned once and
+    /// parallel EIds remain distinct. `None` selects all relations, not a grant.
+    ///
+    /// Unlike adjacency(), this stream is ordered by EId, NOT by destination.
+    /// Each output owns its existing MemoryPool reservations independently of
+    /// the cursor and view. Callers retaining outputs retain their charges too.
+    /// The first pull builds bounded resident routing, then releases it after
+    /// seeding persistent merge heads. Initial metadata/routing and individual
+    /// records can still exceed admission. No resident Snapshot, eager fallback,
+    /// complete result vector or cross-process retention lease is introduced.
+    pub fn stream_adjacency(
+        &mut self,
+        cx: &QueryCx,
+        vertex: VId,
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+    ) -> Result<BufferedEdgeIncidenceScan<'_, V>, BufferedReadError> {
+        let as_of = self.frontier();
+        self.stream_adjacency_at(cx, vertex, relation, direction, as_of, None)
+    }
+
+    /// The same owner-level stream at an exact historical cut. `after` excludes
+    /// that EId and every smaller identity; it is not a durable continuation
+    /// token. Future cuts refuse before opening a scan. No identity increment
+    /// or narrowing is used, including at u128::MAX. The caller supplies QueryCx
+    /// on every pull; close, error or a dropped polled pull permanently fuses
+    /// the stream. Earlier rows are delivered, not a promise of complete output.
+    pub fn stream_adjacency_at(
+        &mut self,
+        cx: &QueryCx,
+        vertex: VId,
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+        as_of: CommitSeq,
+        after: Option<EId>,
+    ) -> Result<BufferedEdgeIncidenceScan<'_, V>, BufferedReadError> {
+        self.partition
+            .edge_scan(cx, as_of)
+            .map(|scan| scan.into_incidence_scan(vertex, relation, direction, after))
+    }
+
+    /// Count visible incident edge identities without collecting their rows.
+    /// A self-loop counts ONCE even in the undirected case; this is not the
+    /// graph-theoretic degree convention that counts a loop twice. Parallel
+    /// edges each count once. No partial count escapes a source/work/memory or
+    /// cancellation failure. All history and endpoint reads use one cumulative
+    /// scan allowance, and this does not bypass owner-level visibility rules.
+    pub async fn incident_edge_count(
+        &mut self,
+        cx: &QueryCx,
+        vertex: VId,
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+    ) -> Result<u64, BufferedReadError> {
+        let as_of = self.frontier();
+        self.incident_edge_count_at(cx, vertex, relation, direction, as_of)
+            .await
+    }
+
+    /// Exact-cut counterpart of incident_edge_count(). Missing or retired
+    /// vertices contribute no visible incidence; malformed dangling histories
+    /// still refuse through the canonical endpoint resolver.
+    pub async fn incident_edge_count_at(
+        &mut self,
+        cx: &QueryCx,
+        vertex: VId,
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+        as_of: CommitSeq,
+    ) -> Result<u64, BufferedReadError> {
+        let mut scan = self.stream_adjacency_at(cx, vertex, relation, direction, as_of, None)?;
+        let mut count = 0_u64;
+        while scan.next(cx).await?.is_some() {
+            count = count.checked_add(1).ok_or(BufferedReadError::SizeOverflow)?;
+        }
+        Ok(count)
     }
 }
 
