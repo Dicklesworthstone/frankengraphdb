@@ -245,9 +245,9 @@ pub use trail::GraphTrailCursor;
 pub use vertex_merge::{
     GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
     GraphVertexMergePolicy, GraphVertexMergeRowAction, GraphVertexMergeRowActions,
-    GraphVertexMergeRowInput, GraphVertexMergeRowsBinding, GraphVertexMergeRowsQueryBuildError,
-    GraphVertexMergeRowsQueryError, GraphVertexMergeStats, PreparedGraphVertexMerge,
-    PreparedGraphVertexMergeRows, PreparedGraphVertexMergeRowsQuery,
+    GraphVertexMergeRowComputed, GraphVertexMergeRowInput, GraphVertexMergeRowsBinding,
+    GraphVertexMergeRowsQueryBuildError, GraphVertexMergeRowsQueryError, GraphVertexMergeStats,
+    PreparedGraphVertexMerge, PreparedGraphVertexMergeRows, PreparedGraphVertexMergeRowsQuery,
 };
 pub use vertex_upsert::{
     GraphVertexReturnBinding, GraphVertexUpsertAction, GraphVertexUpsertBranch,

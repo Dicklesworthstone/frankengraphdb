@@ -365,9 +365,9 @@ impl WriteTxn {
     ) -> VertexMergeRowsResult<A> {
         use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
         use fgdb_gql::{
-            GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats, GqlQueryError, GqlQueryPolicy,
-            GraphVertexMergeError, GraphVertexMergeOutcome, GraphVertexMergePolicy,
-            GraphVertexMergeStats, GraphWriteStepReceipt,
+            GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats,
+            GqlQueryError, GqlQueryPolicy, GraphVertexMergeError, GraphVertexMergeOutcome,
+            GraphVertexMergePolicy, GraphVertexMergeStats, GraphWriteStepReceipt,
         };
         let infrastructure = |error| GqlQueryError::Source(GraphVertexMergeError::Source(error));
         self.ensure_database(database).map_err(infrastructure)?;
@@ -416,6 +416,26 @@ impl WriteTxn {
                 used.evaluator.scratch_entries = observed as u64;
                 Ok(())
             };
+            // One evaluation event of a property value computed from the row.
+            let evaluate = |used: &mut GraphVertexMergeStats,
+                            event: GlaExecutionEvent|
+             -> Result<(), TxnGqlError<GraphVertexMergeError<WriteTxnError, A>>> {
+                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                if event == GlaExecutionEvent::ScratchEntry {
+                    return scratch(used);
+                }
+                let observed = u128::from(used.evaluator.work_units) + 1;
+                let limit = policy.query.evaluator.max_work_units;
+                if observed > u128::from(limit) {
+                    return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                        dimension: GlaLimitDimension::WorkUnits,
+                        limit,
+                        observed,
+                    }));
+                }
+                used.evaluator.work_units = observed as u64;
+                Ok(())
+            };
             let mut resolved: std::collections::BTreeMap<Vec<CanonicalScalar>, Vec<VId>> =
                 std::collections::BTreeMap::new();
             let mut outcomes = Vec::new();
@@ -426,7 +446,7 @@ impl WriteTxn {
             let memoized = merge.actions().is_none();
             for (at, row) in rows.iter().enumerate() {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                let tuple = merge.tuple(at, row).map_err(GqlQueryError::Source)?;
+                let tuple = merge.tuple(at, row, &mut |event| evaluate(&mut used, event))?;
                 // Whether this row's MERGE created its vertex.
                 let mut created_here = false;
                 if !memoized || !resolved.contains_key(&tuple) {
@@ -724,6 +744,32 @@ impl WriteTxn {
                                 }
                             })?;
                         batch.set_vertex_property(vertex, *key, Some(value));
+                    }
+                    GraphVertexMergeRowAction::Value { key, value } => {
+                        let refusal = |source| {
+                            GqlQueryError::Source(GraphVertexMergeError::RowAction {
+                                row: at,
+                                clause,
+                                action,
+                                source,
+                            })
+                        };
+                        let written = value
+                            .written(row, &mut |event| charge(used, event))
+                            .map_err(|error| match error {
+                                GraphIntegerEvaluationError::Control(error) => error,
+                                GraphIntegerEvaluationError::Value(source) => refusal(source),
+                            })?
+                            .ok_or_else(|| {
+                                refusal(fgdb_gql::GraphIntegerError {
+                                    instruction: 0,
+                                    kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
+                                })
+                            })?;
+                        point_payload_admission(&written, &mut |event| {
+                            charge(used, payload(event))
+                        })?;
+                        batch.set_vertex_property_value(vertex, *key, Some(written));
                     }
                 }
             }

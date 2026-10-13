@@ -56,6 +56,13 @@ enum ParsedUpsertAction<'a> {
         program: Vec<MutationIntegerTemplateOp>,
         at: usize,
     },
+    /// A vertex MERGE step's right-hand side that reads its row and not the
+    /// MERGE vertex (`prop.name`), by the shared value compiler.
+    RowValue {
+        key: Name<'a>,
+        value: ReadValueTemplate,
+        at: usize,
+    },
     Label {
         label: Name<'a>,
     },
@@ -350,7 +357,20 @@ impl<'a> Parser<'a> {
                 let key = self.name()?;
                 self.punct(b'=', "=")?;
                 let at = self.current.at;
-                if self.set_value_is_list()? {
+                // A vertex MERGE step's right-hand side that reads its row
+                // and not the MERGE vertex (`prop.name`, `xs + [y]`) is the
+                // shared value compiler's value over the row, written as
+                // CREATE writes it (fgdb-cpny9).
+                let row_value = match row {
+                    Some(row) => match self.value_reads(row, Some(variable.text))? {
+                        (true, false) => Some(self.merge_row_value(row)?),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                if let Some(value) = row_value {
+                    ParsedUpsertAction::RowValue { key, value, at }
+                } else if self.set_value_is_list()? {
                     // A constant list (`['a', 'b']`, `$tags`) is a stored List
                     // (fgdb-k3nub), evaluated once when the statement binds.
                     // One built from the MERGE vertex's own fields is not yet.
@@ -513,6 +533,13 @@ fn resolve_row_actions<'a>(
                     key,
                     inputs: resolved,
                     program,
+                    at,
+                }
+            }
+            ParsedUpsertAction::RowValue { key, value, at } => {
+                VertexMergeRowActionTemplate::Value {
+                    key: property_symbol(symbol, key)?,
+                    value: Box::new(value),
                     at,
                 }
             }
@@ -913,6 +940,13 @@ impl PreparedGraphVertexUpsertText {
                                 program,
                                 at,
                             }
+                        }
+                        // A unique MERGE parses with no row to read.
+                        ParsedUpsertAction::RowValue { at, .. } => {
+                            return Err(error(
+                                at,
+                                GraphPatternTextErrorKind::Expected("the MERGE vertex variable"),
+                            ));
                         }
                         ParsedUpsertAction::Label { label } => {
                             let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)?
@@ -1522,9 +1556,25 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 self.punct(b':', ":")?;
-                let value = match self.merge_row_column(row)? {
-                    Some(column) => RowValueTemplate::Column(column),
-                    None => {
+                // A bare column or hidden read is the column itself. A longer
+                // value that reads the row (`prop.login`, `y + 1`) is computed
+                // per row by the shared value compiler; a value that reads no
+                // row binding stays a bound literal or parameter.
+                let start = (self.lexer.clone(), self.current);
+                let column = self.merge_row_column(row)?;
+                let value = match column {
+                    Some(column) if self.is_punct(b',') || self.is_punct(b'}') => {
+                        RowValueTemplate::Column(column)
+                    }
+                    _ if column.is_some() || self.merge_value_reads_row(row)? => {
+                        (self.lexer, self.current) = start;
+                        let at = self.current.at;
+                        RowValueTemplate::Computed {
+                            value: Box::new(self.merge_row_value(row)?),
+                            at,
+                        }
+                    }
+                    _ => {
                         let (_, value) =
                             self.merge_property_value()
                                 .map_err(|refusal| match refusal {
@@ -1599,6 +1649,88 @@ impl<'a> Parser<'a> {
         }
         self.advance()?;
         Ok(Some(column))
+    }
+
+    /// Whether the MERGE map value at the cursor names a visible row binding.
+    fn merge_value_reads_row(
+        &self,
+        row: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<bool, GraphPatternTextError> {
+        Ok(self.value_reads(row, None)?.0)
+    }
+
+    /// Whether the value at the cursor names a visible row binding, and
+    /// whether it names `variable`, read with native tokens and without
+    /// consuming the parser's own. The value ends at a `,` or closing
+    /// bracket outside its own brackets, at a clause keyword, or at the end.
+    /// A property key after `.` names no binding.
+    fn value_reads(
+        &self,
+        row: &[(Name<'a>, GraphSetColumnType)],
+        variable: Option<&str>,
+    ) -> Result<(bool, bool), GraphPatternTextError> {
+        const CLAUSES: [&str; 18] = [
+            "ON", "SET", "RETURN", "WITH", "MERGE", "CREATE", "DELETE", "DETACH", "REMOVE",
+            "UNWIND", "MATCH", "OPTIONAL", "FOREACH", "CALL", "UNION", "ORDER", "SKIP", "LIMIT",
+        ];
+        let visible = &row[..self.visible_width(row)];
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut depth = 0usize;
+        let mut key = false;
+        let (mut reads_row, mut reads_variable) = (false, false);
+        loop {
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}' | b',') if depth == 0 => break,
+                TokenKind::Punct(b')' | b']' | b'}') => depth -= 1,
+                TokenKind::Word(word)
+                    if depth == 0
+                        && CLAUSES
+                            .iter()
+                            .any(|clause| clause.eq_ignore_ascii_case(word)) =>
+                {
+                    break;
+                }
+                TokenKind::Word(word) if !key => {
+                    reads_row |= visible.iter().any(|(name, _)| name.text == word);
+                    reads_variable |= variable == Some(word);
+                }
+                _ => {}
+            }
+            key = matches!(token.kind, TokenKind::Punct(b'.'));
+            token = lexer.next()?;
+        }
+        Ok((reads_row, reads_variable))
+    }
+
+    /// A MERGE map value computed from the row: its columns by name, and
+    /// `a.key` of a carried element through its hidden read.
+    fn merge_row_value(
+        &mut self,
+        row: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<ReadValueTemplate, crate::GraphSetTextError> {
+        let visible = self.visible_width(row);
+        self.read_resolved_value(
+            &mut |parser| {
+                if let Some(column) = parser.boundary_read(row.len())? {
+                    return Ok(Some(column));
+                }
+                let TokenKind::Word(word) = parser.current.kind else {
+                    return Ok(None);
+                };
+                let Some(column) = row[..visible]
+                    .iter()
+                    .position(|(name, _)| name.text == word)
+                else {
+                    return Ok(None);
+                };
+                parser.advance()?;
+                Ok(Some(column))
+            },
+            0,
+        )
     }
 }
 
@@ -2041,7 +2173,8 @@ impl PreparedGraphVertexMergeRowsText {
                     .chain(after)
                     .filter_map(|action| match action {
                         ParsedUpsertAction::Property { key, .. }
-                        | ParsedUpsertAction::Expression { key, .. } => Some(key.text),
+                        | ParsedUpsertAction::Expression { key, .. }
+                        | ParsedUpsertAction::RowValue { key, .. } => Some(key.text),
                         ParsedUpsertAction::Label { .. } => None,
                     })
                     .collect()
@@ -2217,6 +2350,14 @@ impl PreparedGraphVertexMergeRowsText {
                 *key,
                 match value {
                     RowValueTemplate::Column(column) => GraphVertexMergeRowValue::Column(*column),
+                    RowValueTemplate::Computed { value, at } => GraphVertexMergeRowValue::Computed(
+                        return_projection::bind_read_value(value, &values).map_err(|error| {
+                            GraphVertexMergeTextError {
+                                offset: *at,
+                                ..GraphVertexMergeTextError::from(error)
+                            }
+                        })?,
+                    ),
                     RowValueTemplate::Value(VertexMergeValueTemplate::Bound(value)) => {
                         GraphVertexMergeRowValue::Bound(value.clone())
                     }
@@ -2297,6 +2438,19 @@ impl PreparedGraphVertexMergeRowsText {
                         inputs: inputs.clone(),
                         value: super::integer::bind_integer(program, &values, *at)?,
                     },
+                    VertexMergeRowActionTemplate::Value { key, value, at } => {
+                        crate::GraphVertexMergeRowAction::Value {
+                            key: *key,
+                            value: crate::GraphVertexMergeRowComputed(
+                                return_projection::bind_read_value(value, &values).map_err(
+                                    |error| GraphVertexUpsertTextError {
+                                        offset: *at,
+                                        ..GraphVertexUpsertTextError::from(error)
+                                    },
+                                )?,
+                            ),
+                        }
+                    }
                 });
             }
             Ok(actions)

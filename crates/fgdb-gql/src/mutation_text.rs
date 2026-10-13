@@ -349,11 +349,16 @@ pub(crate) enum VertexMergeValueTemplate {
 }
 
 /// A map value of a vertex MERGE step (fgdb-cpny9): a literal or parameter,
-/// or a column of the row the step runs over.
+/// a column of the row the step runs over, or a value computed from that
+/// row (`prop.login`, `y + 1`) by the shared value compiler.
 #[derive(Clone)]
 pub(crate) enum VertexMergeRowValueTemplate {
     Value(VertexMergeValueTemplate),
     Column(usize),
+    Computed {
+        value: Box<crate::set_text::ReadValueTemplate>,
+        at: usize,
+    },
 }
 
 /// The rows a vertex MERGE step reads (fgdb-cpny9).
@@ -409,6 +414,13 @@ pub(crate) enum VertexMergeRowActionTemplate {
         key: PropertyKeyId,
         inputs: Vec<crate::GraphVertexMergeRowInput>,
         program: Vec<MutationIntegerTemplateOp>,
+        at: usize,
+    },
+    /// `v.key = value` whose right-hand side reads the row and not the
+    /// merged vertex, by the shared value compiler.
+    Value {
+        key: PropertyKeyId,
+        value: Box<crate::set_text::ReadValueTemplate>,
         at: usize,
     },
 }

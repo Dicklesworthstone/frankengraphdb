@@ -1373,6 +1373,134 @@ fn vertex_merge_steps_apply_on_and_set_clauses_per_row() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-cpny9 (TCK Unwind1 [14], Merge1 [9]): a MERGE step's map value and a
+/// right-hand side that reads the row and not the MERGE vertex are computed
+/// per row by the shared value compiler (`m.p`, `y + 1`). Rows with equal
+/// computed tuples share one vertex. A NULL or non-scalar computed key, an
+/// arithmetic exception and a Map assignment refuse and publish nothing.
+#[test]
+fn vertex_merge_steps_compute_values_from_the_row() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a7, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, false).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let rows = |result: QueryResult| {
+            let QueryResult::Rows { rows, .. } = result else {
+                unreachable!("a MERGE with RETURN answers rows")
+            };
+            rows
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let stored = |value| CanonicalPropertyValue::from(CanonicalScalar::Int(value));
+        // The one vertex whose `p` is `value`: its labels and properties.
+        let merged = |db: &Database<MemVfs>, value: i64| {
+            let matching: Vec<_> = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| {
+                    vertex
+                        .props
+                        .iter()
+                        .any(|(k, v)| *k == P && *v == stored(value))
+                })
+                .collect();
+            assert_eq!(matching.len(), 1, "one vertex with p = {value}");
+            let vertex = matching.into_iter().next().expect("one vertex");
+            (vertex.labels, vertex.props)
+        };
+        // Unwind1 [14]: a map field keys the MERGE, and the SET reads
+        // another. Row 2 matches row 1's vertex, so its SET wins.
+        let unwound = write(
+            &mut db,
+            "UNWIND [{p: 30, q: 1}, {p: 30, q: 2}, {p: 31, q: 3}] AS m \
+             MERGE (n:Source {p: m.p}) SET n.q = m.q RETURN n.p AS p, n.q AS q",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(unwound),
+            [
+                vec![int(30), int(2)],
+                vec![int(30), int(2)],
+                vec![int(31), int(3)],
+            ]
+        );
+        assert_eq!(
+            merged(&db, 30),
+            (vec![SOURCE], vec![(P, stored(30)), (Q, stored(2))])
+        );
+        assert_eq!(
+            merged(&db, 31),
+            (vec![SOURCE], vec![(P, stored(31)), (Q, stored(3))])
+        );
+        // Merge1 [9]: arithmetic over a WITH row, in a chain's first step and
+        // in a later step over the previous write's rows.
+        let chained = write(
+            &mut db,
+            "MATCH (s:Source {p: 31}) WITH s.p AS x, s.q AS y \
+             MERGE (:Copy {p: x + 10, q: y + 1}) MERGE (:Copy {p: x + 11, q: y}) RETURN x, y",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(chained), [vec![int(31), int(3)]]);
+        assert_eq!(
+            merged(&db, 41),
+            (vec![COPY], vec![(P, stored(41)), (Q, stored(4))])
+        );
+        assert_eq!(
+            merged(&db, 42),
+            (vec![COPY], vec![(P, stored(42)), (Q, stored(3))])
+        );
+        // A rerun computes the same tuples and matches both vertices.
+        write(
+            &mut db,
+            "MATCH (s:Source {p: 31}) WITH s.p AS x, s.q AS y \
+             MERGE (:Copy {p: x + 10, q: y + 1}) MERGE (:Copy {p: x + 11, q: y}) RETURN x, y",
+        )
+        .await
+        .unwrap();
+        assert_eq!(merged(&db, 41).1, vec![(P, stored(41)), (Q, stored(4))]);
+        assert_eq!(merged(&db, 42).1, vec![(P, stored(42)), (Q, stored(3))]);
+        let frontier = db.frontier().unwrap();
+        for refused in [
+            "UNWIND [{q: 1}] AS m MERGE (n:Source {p: m.p})",
+            "UNWIND [{p: [1]}] AS m MERGE (n:Source {p: m.p})",
+            "WITH 9223372036854775807 AS y MERGE (n:Source {p: y + 1})",
+            "UNWIND [{p: 50}] AS m MERGE (n:Source {p: m.p}) SET n.q = m",
+        ] {
+            assert!(write(&mut db, refused).await.is_err(), "{refused}");
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-cpny9: a MERGE step another write follows may have a WITH head. The
 /// next write reads the head's output row: projected items, an aggregate,
 /// DISTINCT rows, and the merged vertex's or relationship's properties

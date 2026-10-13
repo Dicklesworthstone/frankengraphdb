@@ -134,6 +134,19 @@ pub enum GraphVertexMergeError<E, A> {
         action: usize,
         source: crate::GraphIntegerError,
     },
+    /// A property value a MERGE over input rows computes from its row (in
+    /// property-key order) raised an arithmetic exception.
+    RowExpression {
+        row: usize,
+        property: usize,
+        source: crate::GraphIntegerError,
+    },
+    /// A property value a MERGE over input rows computes from its row was
+    /// NULL or no scalar (openCypher refuses a null MERGE property).
+    RowExpressionValue {
+        row: usize,
+        property: usize,
+    },
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphVertexMergeError<E, A>
@@ -170,6 +183,15 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
                 f,
                 "MERGE row {row} clause {clause} action {action}: {source}"
             ),
+            Self::RowExpression {
+                row,
+                property,
+                source,
+            } => write!(f, "MERGE row {row} property {property}: {source}"),
+            Self::RowExpressionValue { row, property } => write!(
+                f,
+                "MERGE row {row} property {property} is not a non-null scalar property value"
+            ),
         }
     }
 }
@@ -182,7 +204,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::Creation(error) => Some(error),
             Self::RowMerge { source, .. } => Some(&**source),
             Self::InputRelation(error) => Some(error),
-            Self::RowAction { source, .. } => Some(source),
+            Self::RowAction { source, .. } | Self::RowExpression { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -283,6 +305,8 @@ pub(crate) enum GraphVertexMergeRowValue {
     Bound(crate::GqlScalarParameter),
     /// One column of the input row.
     Column(usize),
+    /// A value computed from the input row (`prop.login`, `y + 1`).
+    Computed(crate::GraphSetValue),
 }
 
 /// A vertex MERGE over input rows: a step of a chained write (`MERGE (a:A)
@@ -333,6 +357,12 @@ pub enum GraphVertexMergeRowAction {
         inputs: Vec<GraphVertexMergeRowInput>,
         value: crate::GraphIntegerExpression,
     },
+    /// `v.key = value` whose right-hand side reads the row and not the
+    /// merged vertex (`prop.name`, `xs + [y]`).
+    Value {
+        key: fgdb_delta_types::PropertyKeyId,
+        value: GraphVertexMergeRowComputed,
+    },
 }
 impl core::fmt::Debug for GraphVertexMergeRowAction {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -343,7 +373,42 @@ impl core::fmt::Debug for GraphVertexMergeRowAction {
                 .field("inputs", &inputs.len())
                 .field("definition", &"[REDACTED]")
                 .finish(),
+            Self::Value { .. } => f
+                .debug_struct("Value")
+                .field("definition", &"[REDACTED]")
+                .finish(),
         }
+    }
+}
+
+/// A value a vertex MERGE over input rows computes from one row
+/// (fgdb-cpny9), by the shared value compiler.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GraphVertexMergeRowComputed(pub(crate) crate::GraphSetValue);
+
+impl GraphVertexMergeRowComputed {
+    /// The property value written for `row`, each evaluation event charged
+    /// to `control`. A List is the stored List it is. `None` is a value no
+    /// property holds, by the rule CREATE writes with: a Map at any depth, a
+    /// graph element, or a value beyond the stored format's bounds.
+    pub fn written<C>(
+        &self,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphIntegerEvaluationError<C>>
+    {
+        let value =
+            crate::set_ops::evaluate_value(&self.0, row, 0, control).map_err(|failure| {
+                match failure {
+                    crate::set_ops::ProjectionFailure::Control(error) => {
+                        crate::GraphIntegerEvaluationError::Control(error)
+                    }
+                    crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                        crate::GraphIntegerEvaluationError::Value(error)
+                    }
+                }
+            })?;
+        Ok(value.to_written_property())
     }
 }
 
@@ -452,28 +517,58 @@ impl PreparedGraphVertexMergeRows {
     }
 
     /// The property tuple of input row `at`, in property-key order. A NULL
-    /// or non-scalar row value refuses: openCypher cannot MERGE on null.
-    pub fn tuple<E, A>(
+    /// or non-scalar row value refuses: openCypher cannot MERGE on null. A
+    /// computed value charges each evaluation event to `control`.
+    #[allow(clippy::type_complexity)]
+    pub fn tuple<E, A, C>(
         &self,
         at: usize,
         row: &GraphValueRow,
-    ) -> Result<Vec<fgdb_types::CanonicalScalar>, GraphVertexMergeError<E, A>> {
-        self.properties
-            .iter()
-            .map(|(_, value)| match value {
-                GraphVertexMergeRowValue::Bound(value) => Ok(value.value().clone()),
-                GraphVertexMergeRowValue::Column(column) => row
-                    .values()
-                    .get(*column)
-                    .and_then(crate::algebra::GraphValue::as_scalar)
-                    .filter(|value| !matches!(value, fgdb_types::CanonicalScalar::Null))
-                    .cloned()
-                    .ok_or(GraphVertexMergeError::RowValue {
-                        row: at,
-                        column: *column,
-                    }),
-            })
-            .collect()
+        control: &mut impl FnMut(
+            crate::GlaExecutionEvent,
+        )
+            -> Result<(), crate::GqlQueryError<GraphVertexMergeError<E, A>, C>>,
+    ) -> Result<
+        Vec<fgdb_types::CanonicalScalar>,
+        crate::GqlQueryError<GraphVertexMergeError<E, A>, C>,
+    > {
+        let scalar = |value: &crate::algebra::GraphValue| {
+            value
+                .as_scalar()
+                .filter(|value| !matches!(value, fgdb_types::CanonicalScalar::Null))
+                .cloned()
+        };
+        let mut tuple = Vec::with_capacity(self.properties.len());
+        for (property, (_, value)) in self.properties.iter().enumerate() {
+            tuple.push(match value {
+                GraphVertexMergeRowValue::Bound(value) => value.value().clone(),
+                GraphVertexMergeRowValue::Column(column) => {
+                    row.values().get(*column).and_then(scalar).ok_or(
+                        crate::GqlQueryError::Source(GraphVertexMergeError::RowValue {
+                            row: at,
+                            column: *column,
+                        }),
+                    )?
+                }
+                GraphVertexMergeRowValue::Computed(value) => {
+                    let value = crate::set_ops::evaluate_value(value, row, property, control)
+                        .map_err(|failure| match failure {
+                            crate::set_ops::ProjectionFailure::Control(error) => error,
+                            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                                crate::GqlQueryError::Source(GraphVertexMergeError::RowExpression {
+                                    row: at,
+                                    property,
+                                    source: error,
+                                })
+                            }
+                        })?;
+                    scalar(&value).ok_or(crate::GqlQueryError::Source(
+                        GraphVertexMergeError::RowExpressionValue { row: at, property },
+                    ))?
+                }
+            });
+        }
+        Ok(tuple)
     }
 
     /// The ON/SET clauses, if any. With clauses, every row runs its own
