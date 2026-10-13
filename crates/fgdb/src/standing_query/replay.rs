@@ -6,6 +6,8 @@
 //! only a prefix; an oversized tick fences this sink without damaging its input.
 //! Registration, retained frames and cursors are session-local, not durable.
 
+mod coalesced;
+
 use super::*;
 use crate::QueryValue;
 use std::collections::VecDeque;
