@@ -490,6 +490,9 @@ struct Chain<'a> {
     lengths: Vec<usize>,
     /// The endpoint's binding slot (the source is slot 0).
     last: usize,
+    /// A quantified atom scans vertices for its sources; a fixed chain's
+    /// sources are the tails of its first atom's edges.
+    vertex_rooted: bool,
     forward: bool,
     trail: bool,
     source_predicates: Vec<&'a [VertexPredicate]>,
@@ -642,6 +645,7 @@ fn chain_shape(aggregate: &PreparedGraphAggregate) -> Option<Chain<'_>> {
         relations,
         lengths,
         last: usize::try_from(last).ok()?,
+        vertex_rooted: quantified,
         forward: forward?,
         trail,
         source_predicates,
@@ -703,48 +707,65 @@ fn chain_support<E, C>(
         levels.push(next);
     }
     let same = |i: usize, j: usize| chain.relations[i] == chain.relations[j];
+    // Three-hop edge coincidences summed over the sources once, per endpoint:
+    // N12 (the same loop twice at a source, then a third edge) and N13 (an
+    // edge from a source, any edge back, the first edge again). N23 reads the
+    // one-hop level, N123 the endpoint's own loops.
+    let mut n12 = BTreeMap::<VId, u128>::new();
+    let mut n13 = BTreeMap::<VId, u128>::new();
+    let accumulate = |into: &mut BTreeMap<VId, u128>, end: VId, value: u128| {
+        let slot = into.entry(end).or_insert(0);
+        slot.checked_add(value)
+            .map(|sum| *slot = sum)
+            .ok_or_else(overflow)
+    };
+    if chain.trail && chain.lengths.contains(&3) {
+        for &a in sources {
+            let loops = hop(0).loops(a);
+            if same(0, 1) && loops > 0 {
+                for (&end, &third) in hop(2).out.get(&a).into_iter().flatten() {
+                    control(GlaExecutionEvent::Work)?;
+                    accumulate(
+                        &mut n12,
+                        end,
+                        loops.checked_mul(third).ok_or_else(overflow)?,
+                    )?;
+                }
+            }
+            if same(0, 2) {
+                for (&end, &first) in hop(0).out.get(&a).into_iter().flatten() {
+                    control(GlaExecutionEvent::Work)?;
+                    let back = hop(1).multiplicity(end, a);
+                    if back > 0 {
+                        accumulate(&mut n13, end, first.checked_mul(back).ok_or_else(overflow)?)?;
+                    }
+                }
+            }
+        }
+    }
     let mut support = BTreeSet::new();
     for &length in &chain.lengths {
         for (&end, &walks) in &levels[length] {
             control(GlaExecutionEvent::Work)?;
+            let source = sources.binary_search(&end).is_ok();
             let mut trails = walks;
-            if chain.trail && length == 2 && same(0, 1) && sources.binary_search(&end).is_ok() {
+            if chain.trail && length == 2 && same(0, 1) && source {
                 trails = trails.saturating_sub(hop(0).loops(end));
             }
             if chain.trail && length == 3 {
-                // Signed inclusion-exclusion; every term is a count of walks.
-                let mut reused: u128 = 0;
-                let mut add = |value: u128| {
-                    reused
-                        .checked_add(value)
-                        .map(|sum| reused = sum)
-                        .ok_or_else(overflow)
-                };
-                if same(0, 1) {
-                    for &a in sources {
-                        let loops = hop(0).loops(a);
-                        if loops > 0 {
-                            add(loops
-                                .checked_mul(hop(2).multiplicity(a, end))
-                                .ok_or_else(overflow)?)?;
-                        }
-                    }
-                }
-                if same(1, 2) {
+                // trails = walks - N12 - N23 - N13 + 2 N123, all walk counts.
+                let n23 = if same(1, 2) {
                     let into = levels[1].get(&end).copied().unwrap_or(0);
-                    add(hop(1).loops(end).checked_mul(into).ok_or_else(overflow)?)?;
-                }
-                if same(0, 2) {
-                    for &a in sources {
-                        let out = hop(0).multiplicity(a, end);
-                        if out > 0 {
-                            add(out
-                                .checked_mul(hop(1).multiplicity(end, a))
-                                .ok_or_else(overflow)?)?;
-                        }
-                    }
-                }
-                let triple = if same(0, 1) && same(1, 2) && sources.binary_search(&end).is_ok() {
+                    hop(1).loops(end).checked_mul(into).ok_or_else(overflow)?
+                } else {
+                    0
+                };
+                let reused = [n12.get(&end), n13.get(&end)]
+                    .into_iter()
+                    .flatten()
+                    .try_fold(n23, |sum, value| sum.checked_add(*value))
+                    .ok_or_else(overflow)?;
+                let triple = if same(0, 1) && same(1, 2) && source {
                     hop(0).loops(end).checked_mul(2).ok_or_else(overflow)?
                 } else {
                     0
@@ -788,22 +809,11 @@ where
     ) -> Result<(), VisitError<E, C>>,
 {
     let mut admitted = BTreeSet::new();
-    for vertex in vertices {
-        control(GlaExecutionEvent::Work)?;
-        control(GlaExecutionEvent::ScratchEntry)?;
-        admitted.insert(vertex);
-    }
-    let mut sources = Vec::new();
-    for &vertex in &admitted {
-        let mut selected = true;
-        for predicates in &chain.source_predicates {
-            if !test_vertex(vertex, predicates)? {
-                selected = false;
-                break;
-            }
-        }
-        if selected {
-            sources.push(vertex);
+    if chain.vertex_rooted {
+        for vertex in vertices {
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            admitted.insert(vertex);
         }
     }
     let mut hops = BTreeMap::<RelationId, Hops>::new();
@@ -824,6 +834,29 @@ where
         if from == to {
             let loops = hop.loops.entry(from).or_insert(0);
             *loops = loops.checked_add(1).ok_or_else(overflow)?;
+        }
+    }
+    // A fixed chain binds its source from its first atom's edges: an edge
+    // scan admits no vertex table unless rows are read, so the admitted
+    // vertices are not its source domain. A quantified atom scans vertices.
+    let candidates: Vec<VId> = if chain.vertex_rooted {
+        admitted.into_iter().collect()
+    } else {
+        hops.get(&chain.relations[0])
+            .map(|hop| hop.out.keys().copied().collect())
+            .unwrap_or_default()
+    };
+    let mut sources = Vec::new();
+    for vertex in candidates {
+        let mut selected = true;
+        for predicates in &chain.source_predicates {
+            if !test_vertex(vertex, predicates)? {
+                selected = false;
+                break;
+            }
+        }
+        if selected {
+            sources.push(vertex);
         }
     }
     let mut emit = |source: VId,
@@ -1786,11 +1819,13 @@ mod tests {
                             .unwrap();
                         assert!(chain_shape(&factored).is_some(), "{prefix}{group}");
                         assert!(chain_shape(&enumerated).is_none(), "{prefix}{group}");
-                        let run = |aggregate: &PreparedGraphAggregate| {
+                        // An edge scan may admit no vertex table at all (no rows
+                        // read), so every shape also runs without one.
+                        let run = |aggregate: &PreparedGraphAggregate, admitted: &[VId]| {
                             aggregate
                                 .execute_governed_with_element_maps(
                                     edges.len() as u64,
-                                    (0..7).map(VId),
+                                    admitted.iter().copied(),
                                     edges.iter().copied(),
                                     |vid, predicates| {
                                         Ok::<_, ()>(predicates.iter().all(|predicate| {
@@ -1813,10 +1848,19 @@ mod tests {
                                 )
                                 .unwrap()
                         };
-                        let actual = run(&factored);
-                        let expected = run(&enumerated);
-                        assert_eq!(actual.value, expected.value, "{prefix}{group}");
-                        assert_eq!(actual.rows, expected.rows, "{prefix}{group}");
+                        let all: Vec<VId> = (0..7).map(VId).collect();
+                        for admitted in [&all[..], &[]] {
+                            let actual = run(&factored, admitted);
+                            let expected = run(&enumerated, admitted);
+                            assert_eq!(
+                                actual.value,
+                                expected.value,
+                                "{prefix}{group} with {} admitted vertices",
+                                admitted.len()
+                            );
+                            assert_eq!(actual.rows, expected.rows, "{prefix}{group}");
+                        }
+                        let actual = run(&factored, &all);
                         let key = format!("{pattern}{tail}{group}");
                         match answers.get(&key) {
                             Some(trails) => differing += usize::from(*trails != actual.value),

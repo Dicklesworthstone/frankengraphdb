@@ -2072,8 +2072,16 @@ fn closure_fits(
     cap: usize,
 ) -> bool {
     let mut total = admitted.saturating_add(incidences);
+    if incidences == 0 || growth <= 1 {
+        // No growth: every later level repeats this one (or nothing). An
+        // unbounded walk has ~2^32 remaining hops; never iterate them.
+        let later = usize::try_from(remaining).unwrap_or(usize::MAX);
+        total = total.saturating_add(incidences.saturating_mul(later));
+        return total <= cap;
+    }
+    // Growth of at least two saturates within 64 levels.
     let mut level = incidences;
-    for _ in 0..remaining {
+    for _ in 0..remaining.min(64) {
         if total > cap {
             return false;
         }
@@ -2081,6 +2089,34 @@ fn closure_fits(
         total = total.saturating_add(level);
     }
     total <= cap
+}
+
+#[cfg(test)]
+mod closure_fits_tests {
+    use super::closure_fits;
+
+    #[test]
+    fn unbounded_walks_project_without_iterating_their_hops() {
+        let unbounded = u64::from(u32::MAX);
+        // A frontier with no incidences admits nothing more, however far.
+        assert!(closure_fits(10, 0, unbounded, 1, 100));
+        assert!(closure_fits(10, 0, unbounded, 50, 100));
+        // A linear chain repeats its frontier on every later hop.
+        assert!(!closure_fits(0, 1, unbounded, 1, 100));
+        assert!(closure_fits(0, 1, 99, 1, 100));
+        assert!(!closure_fits(0, 1, 100, 1, 100));
+        // Growth of two or more saturates long before 2^32 hops.
+        assert!(!closure_fits(0, 1, unbounded, 2, usize::MAX - 1));
+    }
+
+    #[test]
+    fn geometric_projection_counts_every_level() {
+        // 3 + 6 + 12 = 21 within two later hops at growth 2.
+        assert!(closure_fits(0, 3, 2, 2, 21));
+        assert!(!closure_fits(0, 3, 2, 2, 20));
+        assert!(closure_fits(5, 3, 0, 9, 8));
+        assert!(!closure_fits(6, 3, 0, 9, 8));
+    }
 }
 
 /// A per-slot edge closure for a bound root, with every vertex any slot can
@@ -2147,7 +2183,7 @@ fn slot_closure<'a, E>(
                  control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
      -> Result<(), E> {
         if let std::collections::btree_map::Entry::Vacant(slot) = selected.entry(entry.eid) {
-            control(SourceEvent::SnapshotRecord)?;
+            // Its SnapshotRecord is charged when the closure commits.
             control(SourceEvent::ScratchEntry)?;
             slot.insert((
                 (entry.eid, entry.src, entry.relation, entry.dst),
@@ -2243,6 +2279,13 @@ fn slot_closure<'a, E>(
             frontier = next;
         }
         slots[width + at] = target;
+    }
+    // Records are charged once the closure commits, so a fallback after an
+    // admitted level never counts records the tables do not hold: the budget
+    // check and the reported snapshot_records agree. The walk's work and
+    // scratch were real and stay charged.
+    for _ in 0..selected.len() {
+        control(SourceEvent::SnapshotRecord)?;
     }
     let reached = slots.into_iter().flatten().collect();
     Ok(Some((selected.into_values().collect(), reached)))
