@@ -525,7 +525,28 @@ impl WriteTxn {
         ),
         TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
     > {
-        self.execute_graph_edge_merge_output_governed(database, cx, merge, policy, None, |row| {
+        self.execute_graph_edge_merges_over(database, cx, merge, policy, None, allocate)
+    }
+
+    /// [`Self::execute_graph_edge_merges_governed`] for the last write of a
+    /// chain: `owned` are the previous write's rows, which the MERGE's row
+    /// relation reads through its owned leaf (fgdb-cpny9).
+    pub(crate) fn execute_graph_edge_merges_over<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        merge: &fgdb_gql::PreparedGraphEdgeMerge,
+        policy: fgdb_gql::GraphEdgeMergePolicy,
+        owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
+        mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        (
+            fgdb_gql::GraphEdgeMergeStats,
+            fgdb_gql::GraphWriteStepReceipt,
+        ),
+        TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
+    > {
+        self.execute_graph_edge_merge_output_governed(database, cx, merge, policy, owned, |row| {
             allocate(fgdb_gql::insertion::GraphInsertRequest::Edge { row, edge: 0 })
         })
         .map(|(stats, receipt, _)| (stats, receipt))
@@ -550,6 +571,20 @@ impl WriteTxn {
         cx: &fgdb_types::QueryCx,
         query: &fgdb_gql::PreparedGraphEdgeMergeQuery,
         policy: fgdb_gql::GraphEdgeMergePolicy,
+        allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> EdgeMergeQueryResult<A> {
+        self.execute_graph_edge_merge_query_over(database, cx, query, policy, None, allocate)
+    }
+
+    /// [`Self::execute_graph_edge_merge_query_governed`] for the last write
+    /// of a chain: `owned` are the previous write's rows (fgdb-cpny9).
+    pub(crate) fn execute_graph_edge_merge_query_over<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphEdgeMergeQuery,
+        policy: fgdb_gql::GraphEdgeMergePolicy,
+        owned: Option<Vec<fgdb_gql::algebra::GraphValueRow>>,
         mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> EdgeMergeQueryResult<A> {
         use fgdb_gql::{GqlQueryError, GraphEdgeMergeError, GraphEdgeMergeQueryError};
@@ -567,7 +602,7 @@ impl WriteTxn {
                     cx,
                     query.merge(),
                     policy,
-                    None,
+                    owned,
                     |row| allocate(fgdb_gql::insertion::GraphInsertRequest::Edge { row, edge: 0 }),
                 )
                 .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Merge))?;

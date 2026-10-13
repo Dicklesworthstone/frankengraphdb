@@ -1,26 +1,43 @@
 //! A chained write statement (fgdb-cpny9): `CREATE (a) WITH a CREATE (b)`,
-//! `MATCH (n) WITH n AS a CREATE (a)-[:T]->() WITH a AS x CREATE (x)-[:T]->()`.
+//! `MATCH (n) WITH n AS a CREATE (a)-[:T]->() WITH a AS x CREATE (x)-[:T]->()`,
+//! `CREATE (a), (b) MERGE (a)-[:R]->(b) RETURN count(a)`.
 //!
 //! Each write after the first runs once per row the previous write's WITH
 //! tail returned (openCypher: a clause after a write sees the post-write
-//! state, row by row). Every step is the existing native CREATE family; a
-//! later step's relational input is one owned leaf (`SetNode::Owned`) that the
-//! host fills with the previous step's rows, so a carried element is never
-//! re-read from the graph and its properties are the hidden head columns the
-//! previous write computed. One statement is one transaction: the host stages
-//! each write before the next reads its rows, all inside one atomic workspace,
+//! state, row by row). A write directly after a CREATE reads every binding,
+//! as `WITH *` would. Every step is an existing native write family; a later
+//! step's relational input is one owned leaf (`SetNode::Owned`) that the host
+//! fills with the previous step's rows, so a carried element is never re-read
+//! from the graph and its properties are the hidden head columns the previous
+//! write computed. One statement is one transaction: the host stages each
+//! write before the next reads its rows, all inside one atomic workspace,
 //! under one cumulative allowance.
 
 use crate::insertion::PreparedGraphInsert;
 use crate::insertion_query_text::InsertReturnTemplate;
-use crate::{PreparedGraphInsertQuery, PreparedGraphInsertText};
+use crate::mutation_text::EdgeMergeReturnTemplate;
+use crate::{
+    GraphEdgeMergeQueryError, GraphEdgeMergeTextError, GraphInsertQueryError, GraphInsertTextError,
+    PreparedGraphEdgeMerge, PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeText,
+    PreparedGraphInsertQuery, PreparedGraphInsertText,
+};
 
-/// A parsed chain: two or more writes, each but the last with a WITH head
-/// whose tail ends at the next write. The last write may have a RETURN.
+/// One parsed write of a chain.
+#[derive(Clone)]
+pub(crate) enum ChainTextStep {
+    /// CREATE, with its WITH head (every step but the last) or RETURN.
+    Insert(PreparedGraphInsertText, Option<InsertReturnTemplate>),
+    /// A relationship MERGE over the previous write's rows (the last step).
+    EdgeMerge(PreparedGraphEdgeMergeText, Option<EdgeMergeReturnTemplate>),
+}
+
+/// A parsed chain: two or more writes, each but the last with a (written or
+/// implicit) WITH head whose tail ends at the next write. The last write may
+/// have a RETURN.
 #[derive(Clone)]
 pub struct PreparedGraphWriteChainText {
     pub(crate) statement: String,
-    pub(crate) steps: Vec<(PreparedGraphInsertText, Option<InsertReturnTemplate>)>,
+    pub(crate) steps: Vec<ChainTextStep>,
 }
 
 impl core::fmt::Debug for PreparedGraphWriteChainText {
@@ -32,14 +49,85 @@ impl core::fmt::Debug for PreparedGraphWriteChainText {
     }
 }
 
+/// Preparing or binding a chain: the failing step's own family error.
+#[derive(Debug)]
+pub enum GraphWriteChainTextError {
+    Insert(GraphInsertTextError),
+    EdgeMerge(GraphEdgeMergeTextError),
+}
+impl From<GraphInsertTextError> for GraphWriteChainTextError {
+    fn from(error: GraphInsertTextError) -> Self {
+        Self::Insert(error)
+    }
+}
+impl From<GraphEdgeMergeTextError> for GraphWriteChainTextError {
+    fn from(error: GraphEdgeMergeTextError) -> Self {
+        Self::EdgeMerge(error)
+    }
+}
+impl From<crate::GraphPatternTextError> for GraphWriteChainTextError {
+    fn from(error: crate::GraphPatternTextError) -> Self {
+        Self::Insert(error.into())
+    }
+}
+impl core::fmt::Display for GraphWriteChainTextError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Insert(error) => error.fmt(f),
+            Self::EdgeMerge(error) => error.fmt(f),
+        }
+    }
+}
+impl core::error::Error for GraphWriteChainTextError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Insert(error) => Some(error),
+            Self::EdgeMerge(error) => Some(error),
+        }
+    }
+}
+
+/// Executing a chain: the failing step's own family error. Earlier steps'
+/// staged effects are restored by the host's workspace, as for every write.
+#[derive(Debug)]
+pub enum GraphWriteChainError<E, A> {
+    Insert(GraphInsertQueryError<E, A>),
+    EdgeMerge(GraphEdgeMergeQueryError<E, A>),
+}
+impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
+    for GraphWriteChainError<E, A>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Insert(error) => error.fmt(f),
+            Self::EdgeMerge(error) => error.fmt(f),
+        }
+    }
+}
+impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::error::Error
+    for GraphWriteChainError<E, A>
+{
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Insert(error) => Some(error),
+            Self::EdgeMerge(error) => Some(error),
+        }
+    }
+}
+
 /// One bound write of a chain.
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphWriteChainStep {
-    /// A write with a WITH head (every step but the last) or a RETURN (the
+    /// A CREATE with a WITH head (every step but the last) or a RETURN (the
     /// last step): it returns rows.
     Query(Box<PreparedGraphInsertQuery>),
-    /// The last write when the statement has no RETURN.
+    /// The last write, a CREATE without RETURN.
     Insert(PreparedGraphInsert),
+    /// The last write, a relationship MERGE over the previous write's rows,
+    /// without RETURN.
+    EdgeMerge(Box<PreparedGraphEdgeMerge>),
+    /// The last write, a relationship MERGE with RETURN.
+    EdgeMergeQuery(Box<PreparedGraphEdgeMergeQuery>),
 }
 
 impl core::fmt::Debug for GraphWriteChainStep {
@@ -47,6 +135,8 @@ impl core::fmt::Debug for GraphWriteChainStep {
         f.write_str(match self {
             Self::Query(_) => "Query([REDACTED])",
             Self::Insert(_) => "Insert([REDACTED])",
+            Self::EdgeMerge(_) => "EdgeMerge([REDACTED])",
+            Self::EdgeMergeQuery(_) => "EdgeMergeQuery([REDACTED])",
         })
     }
 }
@@ -77,6 +167,7 @@ impl PreparedGraphWriteChain {
     pub fn columns(&self) -> &[String] {
         match self.steps.last() {
             Some(GraphWriteChainStep::Query(query)) => query.columns(),
+            Some(GraphWriteChainStep::EdgeMergeQuery(query)) => query.columns(),
             _ => &[],
         }
     }
@@ -84,6 +175,9 @@ impl PreparedGraphWriteChain {
     /// Whether the statement returns rows (its last write has a RETURN).
     #[must_use]
     pub fn returns_rows(&self) -> bool {
-        matches!(self.steps.last(), Some(GraphWriteChainStep::Query(_)))
+        matches!(
+            self.steps.last(),
+            Some(GraphWriteChainStep::Query(_) | GraphWriteChainStep::EdgeMergeQuery(_))
+        )
     }
 }

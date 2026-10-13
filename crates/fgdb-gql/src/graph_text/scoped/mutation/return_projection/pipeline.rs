@@ -699,7 +699,7 @@ impl<'a> Parser<'a> {
         let (mut stages, schema, mut depth) = self.row_pipeline_prefix(schema)?;
         // A write tail that meets the next write of a chain ends here: that
         // write reads this row, hidden boundary reads included.
-        if self.chain_write && self.is_word("CREATE") {
+        if self.chain_write && self.at_chained_write()? {
             self.chained_row = Some(schema);
             return Ok(stages);
         }
