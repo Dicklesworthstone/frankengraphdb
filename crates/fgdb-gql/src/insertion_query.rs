@@ -367,6 +367,25 @@ impl PreparedGraphInsertQuery {
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<E, A>, C>> {
+        self.execute_governed_over(None, policy, source, allocate, checkpoint)
+    }
+
+    /// One step of a chained write (`CREATE (a) WITH a CREATE (b)`): `rows`
+    /// are the rows the previous write of the same statement returned, and
+    /// this CREATE's relational input reads them through its one owned leaf.
+    /// The host must have staged that write first, so reads see its effects.
+    /// `None` is [`Self::execute_governed`].
+    pub fn execute_governed_over<E, A, C>(
+        &self,
+        rows: Option<Vec<GraphValueRow>>,
+        policy: GraphInsertPolicy,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<E, A>, C>> {
         let mut creation_policy = policy;
@@ -382,6 +401,7 @@ impl PreparedGraphInsertQuery {
                 creation_policy,
                 &self.bindings,
                 self.property_catalog.as_deref(),
+                rows,
                 source,
                 allocate,
                 &mut checkpoint,

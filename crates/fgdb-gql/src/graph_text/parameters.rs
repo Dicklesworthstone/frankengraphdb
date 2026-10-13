@@ -239,6 +239,7 @@ impl UnresolvedGraphText<'_> {
                 singleton: true,
                 leading: self.leading,
                 correlations: self.correlations,
+                owned: None,
             });
         }
         let selection = if self.projection.is_none() {
@@ -352,6 +353,7 @@ impl UnresolvedGraphText<'_> {
             projection: self.projection,
             quantifier,
             pipeline: self.pipeline,
+            owned: None,
         })
     }
 }

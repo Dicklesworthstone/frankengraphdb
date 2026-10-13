@@ -30,6 +30,7 @@ pub use procedure::{
     ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
     WithElementReads, WithProcedures,
 };
+pub(crate) use procedure::WithOwnedRows;
 pub use projection::{
     GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetProjection,
     GraphSetProjectionError, GraphSetValue, GraphTemporalFunction, GraphValueFunction,
