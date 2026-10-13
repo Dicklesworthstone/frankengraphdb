@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, btree_map};
 
 mod spill;
 pub use spill::{EdgeSpillAggregateCursor, EdgeSpillAggregatePlan};
-mod pipeline;
+pub(crate) mod pipeline;
 use pipeline::InputPipeline;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,37 +102,8 @@ impl EdgeAggregatePlan {
             .aggregates()
             .iter()
             .any(|spec| NumericState::collects(spec.function()));
-        let pipeline = match aggregate.input_relation() {
-            Some(relation) => {
-                // A relational projection canonicalizes its complete result.
-                // That order is immaterial to exact numeric reductions, but
-                // not to COLLECT, even if the raw scan has an identity prefix.
-                let open_extremum_domain = aggregate.aggregates().iter().any(|spec| {
-                    matches!(
-                        spec.function(),
-                        crate::GraphAggregateFunction::Min | crate::GraphAggregateFunction::Max
-                    ) && spec.argument_column().is_some_and(|column| {
-                        relation.column_types()[column] == crate::GraphSetColumnType::Any
-                    })
-                });
-                // Match the relational folded reducer's admission: the owned
-                // extremum cell requires one checked native value domain.
-                if collects || open_extremum_domain {
-                    return Err(EdgeAggregateBuildError::RequiresPlainGlobalAggregate);
-                }
-                Some(
-                    InputPipeline::compile(relation, aggregate.input_pattern())
-                        .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?,
-                )
-            }
-            None => None,
-        };
-        let aggregate = if pipeline.is_some() {
-            aggregate.prepare_complete_group_output()
-        } else {
-            aggregate.prepare_streamed_output()
-        }
-        .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?;
+        let (aggregate, pipeline) = InputPipeline::prepare(aggregate)
+            .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?;
         let canonical_collections = if collects {
             // Preserve the complete existing source-order proof and its
             // finalization path. Only a separately proved plain input may

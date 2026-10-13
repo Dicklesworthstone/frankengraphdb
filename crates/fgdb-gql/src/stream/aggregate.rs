@@ -20,6 +20,7 @@ pub use spill::{VertexSpillAggregateCursor, VertexSpillAggregatePlan};
 
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow, ValueProjection};
+use crate::edge_stream::aggregate::pipeline::InputPipeline;
 use crate::{
     GraphAggregateError, GraphAggregateFunction, GraphAggregateRow, GraphAggregateValue,
     GraphExactAverage, PreparedGraphAggregate,
@@ -60,7 +61,12 @@ impl core::error::Error for VertexAggregateBuildError {
 /// Computed collection inputs must also satisfy the ordinary row-stream order
 /// proof: their batch child sorts rows before evaluating expressions. A child
 /// with a different order refuses rather than silently reordering a list.
-/// Relational inputs still refuse. Argument DISTINCT and output DISTINCT remain
+/// Single-source WITH chains of ALL scalar projections, scopes and filters run
+/// on one admitted source record at a time, before grouping. The same checked
+/// pipeline as edge aggregation refuses intermediate DISTINCT, order, pages,
+/// fanout, additional graph readers, ordinal-dependent expressions and COLLECT.
+/// Group keys and arguments address its final schema, not the source columns.
+/// Argument DISTINCT and output DISTINCT remain
 /// separate stages on opposite sides of aggregation. Collections are metered
 /// owned results, not constant-state numeric summaries or spill-backed values.
 #[derive(Clone)]
@@ -68,6 +74,7 @@ pub struct VertexAggregatePlan {
     input: VertexScanPlan<GraphValueRow>,
     aggregate: PreparedGraphAggregate,
     collects: bool,
+    pipeline: Option<InputPipeline>,
 }
 impl VertexAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, VertexAggregateBuildError> {
@@ -76,8 +83,7 @@ impl VertexAggregatePlan {
         }) {
             return Err(VertexAggregateBuildError::RequiresPlainGlobalAggregate);
         }
-        let aggregate = aggregate
-            .prepare_streamed_output()
+        let (aggregate, pipeline) = InputPipeline::prepare(aggregate)
             .ok_or(VertexAggregateBuildError::RequiresPlainGlobalAggregate)?;
         let collects = aggregate
             .aggregates()
@@ -110,6 +116,7 @@ impl VertexAggregatePlan {
             input,
             aggregate,
             collects,
+            pipeline,
         })
     }
 
@@ -146,7 +153,7 @@ struct Accumulation {
 /// The first demand consumes the source; subsequent demands move completed
 /// groups out in canonical result order. Plain reductions move group state;
 /// result clauses finish and validate all groups before exposing a selected page.
-/// Global empty input has one zero/null row. Grouped empty input has no rows.
+/// Global empty input has one zero/null row; grouped empty input has no rows.
 /// No partial group escapes. Source/data and group-count refusals precede ANY
 /// output; cancellation/work/scratch refusal during delivery may follow earlier
 /// complete rows, as for other pull cursors. One typed error permanently fuses
@@ -319,24 +326,37 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 if !accepted {
                     continue;
                 }
-                // Only computed definitions own a transient source projection.
+                // Computed and relational inputs own one source projection.
                 // The sealed collector retains ordinary property/null behavior
                 // and charges every copy; the shared VM then completes ALL
                 // computed columns before a group can see this occurrence.
-                let computed = if self.plan.aggregate.input_projection().is_some() {
+                let computed = if self.plan.aggregate.input_projection().is_some()
+                    || self.plan.pipeline.is_some()
+                {
                     let input = project_input_row::<GraphValueRow, _>(
                         vid,
                         row,
                         &self.plan.input.projection,
                         &mut |event| meter.event(event).map_err(lift),
                     )?;
-                    Some(
+                    let projected = if let Some(pipeline) = &self.plan.pipeline {
+                        let Some(projected) = pipeline.evaluate(input, &mut |event| {
+                            meter.event(input_event(event)).map_err(lift)
+                        })? else {
+                            // FALSE/UNKNOWN rejects this record, not the scan.
+                            // The source quantum was already spent, so even an
+                            // entirely filtered source keeps yielding Pending.
+                            continue;
+                        };
+                        projected
+                    } else {
                         self.plan
                             .aggregate
                             .evaluate_streamed_input(input, &mut |event| {
                                 meter.event(input_event(event)).map_err(lift)
-                            })?,
-                    )
+                            })?
+                    };
+                    Some(projected)
                 } else {
                     None
                 };
@@ -521,6 +541,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             // no nonnull operand was encountered, so its answer is NULL.
             GraphAggregateRow::from_global_values(values)
         } else if self.plan.aggregate.input_projection().is_some()
+            || self.plan.pipeline.is_some()
             || self.plan.aggregate.has_streamed_output_stage()
             || self.plan.collects
         {

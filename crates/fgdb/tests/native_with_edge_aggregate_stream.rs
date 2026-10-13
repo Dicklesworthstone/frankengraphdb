@@ -188,3 +188,59 @@ fn thousands_of_with_occurrences_share_one_summary_and_intermediate_pages_still_
     });
     assert!(report.lab_test_passed(),"{report:?}");
 }
+
+#[test]
+fn vertex_with_dispatch_rebinds_and_keeps_its_pinned_generation() {
+    let ((), report) = run_async_under_lab(0x5749_544b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, value) in [(START, Some(3)), (VId(1), Some(1)), (VId(2), None), (END, Some(3))] {
+            batch.create_vertex(id, vec![], value.map(|value| vec![(P, CanonicalScalar::Int(value))]).unwrap_or_default());
+        }
+        let basis = db.write(&commit, batch).await.unwrap();
+        let pin = db.read_session().unwrap();
+        let statement = "MATCH (n) WITH n.p AS p WHERE p >= $floor WITH p*2 AS value \
+            RETURN value AS bucket,COUNT(*) AS n,SUM(value) AS total GROUP BY value ORDER BY total DESC";
+        let args = params(0);
+        let prepared = PreparedNativeRead::prepare(statement, &args, symbols()).unwrap();
+        let expected_row = |key, count, total| vec![
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(key))),
+            GraphAggregateValue::Count(count),
+            GraphAggregateValue::Integer(total),
+        ];
+        let expected = vec![expected_row(6, 2, 12), expected_row(2, 1, 2)];
+        let mut old = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+        assert_eq!(old.kind(), ScanKind::Vertex);
+        assert_eq!(old.row_stats().snapshot_records, 0);
+        let mut deletion = WriteBatch::new(R);
+        deletion.delete_vertex(START);
+        db.write(&commit, deletion).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        assert_eq!(drain(&mut old), expected);
+        assert_eq!(old.snapshot_seq(), basis);
+        assert!(old.next().is_none());
+        let mut pinned = prepared.stream_aggregate_in_view(&pin, &cx, &args, wide()).unwrap();
+        assert_eq!(drain(&mut pinned), expected);
+        let current = vec![expected_row(6, 1, 6), expected_row(2, 1, 2)];
+        let mut stream = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+        assert_eq!(drain(&mut stream), current);
+        let QueryResult::Rows { columns, rows } = prepared.execute(&db, &cx, &args, wide()).unwrap() else {
+            panic!("read");
+        };
+        assert_eq!(rows, current);
+        assert_eq!(stream.columns(), columns);
+        let mut rebound = prepared.stream_aggregate(&db, &cx, &params(2), wide()).unwrap();
+        assert_eq!(drain(&mut rebound), vec![expected_row(6, 1, 6)]);
+        let mut empty = prepared.stream_aggregate(&db, &cx, &params(4), wide()).unwrap();
+        assert!(empty.next().is_none());
+        assert!(prepared.stream_aggregate(&db, &cx, &GqlParameters::new(), wide()).is_err());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -8,8 +8,9 @@
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern};
 use crate::{
-    GlaExecutionEvent, GqlQueryError, GraphAggregateError, GraphSetExecutionError,
-    GraphSetPredicateOp, GraphSetProjection, GraphSetQuantifier, GraphSetValue, PreparedGraphSet,
+    GlaExecutionEvent, GqlQueryError, GraphAggregateError, GraphAggregateFunction,
+    GraphSetColumnType, GraphSetExecutionError, GraphSetPredicateOp, GraphSetProjection,
+    GraphSetQuantifier, GraphSetValue, PreparedGraphAggregate, PreparedGraphSet,
 };
 
 #[derive(Clone)]
@@ -24,11 +25,40 @@ enum Stage {
 /// consumers between the source and the final exact groups. COLLECT is refused
 /// by the physical aggregate compiler, including when its input is empty.
 #[derive(Clone)]
-pub(super) struct InputPipeline {
+pub(crate) struct InputPipeline {
     stages: Vec<Stage>,
 }
 
 impl InputPipeline {
+    /// Shared admission for resident vertex and edge reducers. Source compilers
+    /// still admit the complete graph leaf independently; this only admits the
+    /// row-local stages and normalizes the existing completed-group clauses.
+    pub(crate) fn prepare(
+        aggregate: &PreparedGraphAggregate,
+    ) -> Option<(PreparedGraphAggregate, Option<Self>)> {
+        let Some(relation) = aggregate.input_relation() else {
+            return Some((aggregate.prepare_streamed_output()?, None));
+        };
+        // Do not erase another input transform if a future constructor can
+        // represent both. Each admitted relational stage already owns its VM.
+        if aggregate.input_projection().is_some()
+            || aggregate.aggregates().iter().any(|spec| match spec.function() {
+                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => true,
+                // Preserve the folded reducer's open-domain extremum boundary.
+                GraphAggregateFunction::Min | GraphAggregateFunction::Max => {
+                    spec.argument_column().is_some_and(|column| {
+                        relation.column_types()[column] == GraphSetColumnType::Any
+                    })
+                }
+                _ => false,
+            })
+        {
+            return None;
+        }
+        let pipeline = Self::compile(relation, aggregate.input_pattern())?;
+        Some((aggregate.prepare_complete_group_output()?, Some(pipeline)))
+    }
+
     pub(super) fn compile(
         relation: &PreparedGraphSet,
         source: &PreparedGraphPattern<GraphValueRow>,
@@ -89,7 +119,7 @@ impl InputPipeline {
     /// Failure order is physical pull order, not batch phase order. Projection
     /// diagnostics name row zero within this one-row invocation, as do the
     /// existing computed-input streaming and incremental adapters.
-    pub(super) fn evaluate<E, C>(
+    pub(crate) fn evaluate<E, C>(
         &self,
         mut row: GraphValueRow,
         control: &mut impl FnMut(
