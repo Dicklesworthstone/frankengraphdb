@@ -103,7 +103,7 @@ impl Routes {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Incidence {
     endpoint: VId,
     relation: Option<RelationId>,
@@ -120,6 +120,16 @@ impl Incidence {
 struct Driver<'source, V: Vfs> {
     root: BufferedEdgeScan<'source, V>,
     routes: Option<Routes>,
+}
+
+// At most one retained successor stream. `next` is the EXACT request that may
+// reuse its heads, including the last returned historical identity. A repeat,
+// backwards seek or different incidence starts anew; no traversal-depth or
+// caller identity is guessed. None state records proven EOF without retaining
+// a decoded block or heap. This is not a neighborhood/result cache.
+struct Continuation {
+    next: Incidence,
+    state: Option<State>,
 }
 
 /// One root stream plus independently positioned indexed incidence requests.
@@ -141,6 +151,7 @@ struct Driver<'source, V: Vfs> {
 /// storage access, not a Warden grant or cross-process retention lease.
 pub struct BufferedEdgeJoinScan<'source, V: Vfs> {
     driver: Option<Driver<'source, V>>,
+    continuation: Option<Continuation>,
     as_of: CommitSeq,
     work: usize,
 }
@@ -152,6 +163,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         BufferedEdgeJoinScan {
             as_of: self.as_of,
             work: self.work.used,
+            continuation: None,
             driver: Some(Driver {
                 root: self,
                 routes: None,
@@ -183,6 +195,7 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
     }
     pub fn close(&mut self) {
         self.work = self.work_used();
+        self.continuation = None;
         self.driver = None;
     }
 
@@ -195,6 +208,9 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         let Some(mut driver) = self.driver.take() else {
             return Ok(None);
         };
+        // A new root no longer needs its preceding child continuation. Drop
+        // the charged child workspace before the root faults another block.
+        self.continuation = None;
         let used = &mut self.work;
         let result = driver
             .root
@@ -230,6 +246,7 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         let Some(mut driver) = self.driver.take() else {
             return Ok(None);
         };
+        self.continuation = None;
         let request = Incidence {
             endpoint,
             relation,
@@ -252,9 +269,95 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         }
         result
     }
+
+    /// The same exclusive historical successor contract as
+    /// `next_incident_with_endpoints`, retaining one continuation between pulls.
+    /// Reuse occurs only for the same endpoint/relation/direction and `after`
+    /// equal to the last returned candidate's EId (including invisible ones).
+    /// Repeated, skipped, backwards or interleaved positions are valid requests:
+    /// they release the old continuation before seeding another bounded merge.
+    /// Root pulls and the independent successor method also release it.
+    ///
+    /// Only matching histories enter the retained permutation. Original row
+    /// positions remain property locators, and every version of a matching
+    /// identity participates in the ordinary same-cut winner selection. An
+    /// exhausted continuation retains only its request, not heap or payload.
+    /// Even repeated EOF checks observe the cumulative work/cancellation limit.
+    ///
+    /// At most one additional routed heap and bounded decoded block remain
+    /// charged between calls, beside the independent root and routing metadata.
+    /// A deep join may still reseed after switching incidences; this is not a
+    /// per-depth cache, persistent index or optimal I/O guarantee. Errors never
+    /// retry through the independent path. All state is taken before awaiting,
+    /// so a dropped polled future fuses the entire source just like other pulls.
+    pub async fn next_incident_retained_with_endpoints<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        endpoint: VId,
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+        after: Option<EId>,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        // Both ownership roots leave self before the first possible suspension.
+        let mut continuation = self.continuation.take();
+        let request = Incidence { endpoint, relation, direction, after };
+        let used = &mut self.work;
+        let result = driver.continue_incident(cx, request, &mut continuation, &mut |event| {
+            observe(event)?;
+            if event == BufferedEdgeScanEvent::Work {
+                *used = used.saturating_add(1);
+            }
+            Ok(())
+        }).await;
+        self.work = driver.root.work.used;
+        if result.is_ok() {
+            self.continuation = continuation;
+            self.driver = Some(driver);
+        }
+        result
+    }
 }
 
 impl<V: Vfs> Driver<'_, V> {
+    async fn continue_incident<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        request: Incidence,
+        continuation: &mut Option<Continuation>,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
+        self.root.work.step(cx, observe)?;
+        if continuation.as_ref().is_none_or(|saved| saved.next != request) {
+            // Do not retain an obsolete decoded block while allocating its
+            // replacement, and never attach partial heads to a continuation.
+            *continuation = None;
+            let state = self.prepare_incident(cx, request, true, observe).await?;
+            *continuation = Some(Continuation { next: request, state: Some(state) });
+        }
+        let saved = continuation.as_mut().expect("complete continuation");
+        let Some(state) = saved.state.as_mut() else {
+            return Ok(None);
+        };
+        let candidate = self.root.advance(state, cx, observe).await?;
+        let exhausted = state.heads.is_empty();
+        let result = match candidate {
+            Some(candidate) => Some(self.root
+                .resolve_endpoints(cx, candidate, request.relation, observe).await?),
+            None => None,
+        };
+        if let Some(candidate) = &result {
+            saved.next.after = Some(candidate.eid);
+        }
+        if exhausted {
+            saved.state = None;
+        }
+        Ok(result)
+    }
+
     async fn build_routes<C: Send>(
         &mut self,
         cx: &QueryCx,

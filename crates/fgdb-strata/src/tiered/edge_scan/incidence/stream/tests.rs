@@ -294,3 +294,5 @@ fn close_unpolled_pull_and_exhausted_source_preserve_ownership_and_full_width_bo
         assert_eq!(pool.used(), 0);
     });
 }
+
+mod continuations;
