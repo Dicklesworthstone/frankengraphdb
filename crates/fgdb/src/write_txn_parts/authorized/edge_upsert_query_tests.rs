@@ -551,3 +551,96 @@ fn late_expiry_and_each_native_allowance_refuse_before_publication() {
         }
     });
 }
+
+
+#[test]
+fn checked_output_refusal_and_zero_row_admission_stay_inside_rollback_boundary() {
+    lab(0xa9c6, |contexts| async move {
+        let authority = authority();
+        let token = authority.issue_at(&grant(1), NOW).unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        seed(&mut db, &contexts.commit(), None).await;
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let query = prepared(&format!("{HEAD} ON CREATE SET r.p=9 RETURN r.p"));
+        let mut calls = 0;
+        let error = db
+            .execute_graph_edge_upsert_query_authorized_checked(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &authority,
+                &token,
+                "main",
+                &query,
+                policy(1),
+                || NOW,
+                |rows, work| {
+                    calls += 1;
+                    assert_eq!(rows.len(), 1);
+                    work(1)?;
+                    Err(WriteTxnError::AuthorizedMutationRefused)
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(
+            matches!(
+                error,
+                GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
+                    GraphEdgeUpsertError::Staging(
+                        WriteTxnError::AuthorizedMutationRefused
+                    )
+                ))
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
+
+        let zero = prepared(&format!(
+            "{HEAD} ON CREATE SET r.p=9 RETURN r.p LIMIT 0"
+        ));
+        let mut admitted = 0;
+        let (_, outcome, rows, completion) = db
+            .execute_graph_edge_upsert_query_authorized_checked(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                &authority,
+                &authority.issue_at(&grant(0), NOW).unwrap(),
+                "main",
+                &zero,
+                policy(0),
+                || NOW,
+                |rows, _| {
+                    admitted += 1;
+                    assert!(rows.is_empty());
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(admitted, 1);
+        assert!(rows.value.is_empty());
+        assert!(outcome.created());
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { .. }
+        ));
+        assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+}
