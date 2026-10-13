@@ -44,9 +44,9 @@ impl PreparedGraphPattern<GraphValueRow> {
     /// 0.5 s).
     ///
     /// Only a flat positive pattern is rewritten, and only when every capture
-    /// is one fixed relationship: any path predicate, Boolean program, nested
-    /// OPTIONAL or EXISTS scope, quantified atom or projected relationship
-    /// value keeps every capture, read or not.
+    /// is one fixed relationship: any path predicate, Boolean program that
+    /// reads a relationship, nested OPTIONAL or EXISTS scope, quantified atom
+    /// or projected relationship value keeps every capture, read or not.
     #[must_use]
     pub(crate) fn without_unread_captures(mut self) -> Self {
         let mut captured = false;
@@ -55,11 +55,17 @@ impl PreparedGraphPattern<GraphValueRow> {
                 GlaOperator::CapturePath { segments, .. } if segments.len() == 1 => {
                     captured = true;
                 }
+                // A Boolean program keeps them only when it reads a captured
+                // relationship, its identity or one of its properties.
+                GlaOperator::SelectBoolean { expression }
+                    if expression.contains_captured_edge() =>
+                {
+                    return self;
+                }
                 GlaOperator::CapturePath { .. }
                 | GlaOperator::VarLengthExpand { .. }
                 | GlaOperator::SelectPathLength { .. }
                 | GlaOperator::SelectPathNull { .. }
-                | GlaOperator::SelectBoolean { .. }
                 | GlaOperator::Probe { .. }
                 | GlaOperator::ProbeEnd { .. }
                 | GlaOperator::Optional { .. }

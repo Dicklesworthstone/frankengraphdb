@@ -564,6 +564,11 @@ fn unread_relationship_names_leave_the_unnamed_definition() {
             "MATCH (a)-[r:R]->(b)<-[s:S]-(c) RETURN a,COUNT(*) AS n,COUNT(DISTINCT c) AS d GROUP BY a",
             "MATCH (a)-[:R]->(b)<-[:S]-(c) RETURN a,COUNT(*) AS n,COUNT(DISTINCT c) AS d GROUP BY a",
         ),
+        // A Boolean WHERE over vertices only reads no relationship.
+        (
+            "MATCH (a)-[r:R]->(b) WHERE a.n = 1 OR b.n = 2 RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b) WHERE a.n = 1 OR b.n = 2 RETURN COUNT(*) AS n",
+        ),
     ] {
         let (named_query, unnamed_query) = (prepare(named), prepare(unnamed));
         assert_eq!(captures(&named_query), 0, "{named}");
@@ -581,6 +586,7 @@ fn unread_relationship_names_leave_the_unnamed_definition() {
         "MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n",
         "MATCH (a)-[r:R]->(b) RETURN SUM(r.n) AS n",
         "MATCH (a)-[r:R]->(b) WHERE r.n = 1 RETURN COUNT(*) AS n",
+        "MATCH (a)-[r:R]->(b) WHERE r.n = 1 OR a.n = 2 RETURN COUNT(*) AS n",
         "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN COUNT(s) AS n",
     ] {
         let query = prepare(read);
