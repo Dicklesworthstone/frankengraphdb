@@ -1155,9 +1155,22 @@ impl PreparedGraphMutationQueryText {
                             return Ok(false);
                         }
                         let target = matches!(next, TokenKind::Word(_));
+                        // `SET (n).name`: a parenthesized variable is the same
+                        // property target (Set1 [3], [4]).
+                        let parenthesized = matches!(next, TokenKind::Punct(b'('))
+                            && matches!(after, TokenKind::Word(_))
+                            && matches!(
+                                script::next_script_token(&mut lookahead)?.kind,
+                                TokenKind::Punct(b')')
+                            )
+                            && matches!(
+                                script::next_script_token(&mut lookahead)?.kind,
+                                TokenKind::Punct(b'.')
+                            );
                         if (clause("SET") || clause("REMOVE"))
-                            && target
-                            && matches!(after, TokenKind::Punct(b'.' | b':' | b'+' | b'='))
+                            && (parenthesized
+                                || target
+                                    && matches!(after, TokenKind::Punct(b'.' | b':' | b'+' | b'=')))
                             || clause("DETACH")
                                 && matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("DELETE"))
                             || clause("DELETE") && target
@@ -1242,6 +1255,10 @@ mod framing_tests {
             ("MATCH (n) DELETE n RETURN 42 AS num", true),
             ("MATCH ()-[r]->() DELETE r RETURN type(r)", true),
             ("OPTIONAL MATCH (n) SET n.p = 1 RETURN n", true),
+            ("MATCH (n) SET (n).p = 1 RETURN n", true),
+            ("MATCH ()-[r]->() SET (r).p = 1 RETURN r", true),
+            ("MATCH (n) SET (n).p = 1", false),
+            ("MATCH (n) SET (n + 1) RETURN n", false),
             ("MATCH (n) DELETE n", false),
             ("MATCH (n) WHERE n.delete = 1 RETURN n.p AS delete", false),
             ("MATCH (n) SET n.p = 1", false),
