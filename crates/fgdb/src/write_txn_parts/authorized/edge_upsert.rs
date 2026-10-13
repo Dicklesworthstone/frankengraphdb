@@ -149,7 +149,47 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphEdgeUpsertQuery,
         policy: GraphEdgeUpsertPolicy,
+        clock: impl FnMut() -> u64,
+    ) -> Result<QueryReceipt, QueryFault> {
+        self.execute_graph_edge_upsert_query_authorized_checked(
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            query,
+            policy,
+            clock,
+            |_, _| Ok(()),
+        )
+        .await
+    }
+
+    /// Admit the singular relationship-upsert result before native completion.
+    ///
+    /// The trusted callback runs exactly once, including for zero rows, after
+    /// native projection and signed row admission. It receives only immutable
+    /// result rows and a work/cancellation meter tied to the SAME live permit.
+    /// Refusal, expiry, issuer retirement, cancellation or unwind drops the
+    /// unpublished workspace. The ordinary entrypoint uses a no-op callback and
+    /// preserves its existing accounting and result semantics.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_edge_upsert_query_authorized_checked(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphEdgeUpsertQuery,
+        policy: GraphEdgeUpsertPolicy,
         mut clock: impl FnMut() -> u64,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
     ) -> Result<QueryReceipt, QueryFault> {
         let refusal = |error| query_source(WriteTxnError::Authorization(error));
         if authority.namespace() != self.keys.namespace {
@@ -220,6 +260,14 @@ impl<V: Vfs + Clone> Database<V> {
                     .permit
                     .charge_rows_at((execution.clock)(), rows)
                     .map_err(refusal)?;
+                query_cx
+                    .with_restriction(|| {
+                        admit(&result.value, &mut |work| {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.work(work)
+                        })
+                    })
+                    .map_err(query_source)?;
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
