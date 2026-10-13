@@ -3069,7 +3069,7 @@ impl BoundSetTextInput {
         &self,
         values: &[GqlParameterValue],
     ) -> Result<PreparedGraphSet, GraphSetTextError> {
-        let mut input = if let Some((columns, types)) = &self.owned {
+        let mut input = if let Some((columns, types)) = self.owned.as_deref() {
             // A chained write reads the previous write's rows, filled by the
             // executing host; there is no graph source to bind.
             PreparedGraphSet::owned(columns.clone(), types.clone())

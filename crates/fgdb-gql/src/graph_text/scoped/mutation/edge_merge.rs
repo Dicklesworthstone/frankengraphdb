@@ -426,7 +426,8 @@ impl PreparedGraphEdgeMergeText {
             singleton: false,
             leading: Vec::new(),
             correlations: Vec::new(),
-            owned: Some((columns, types)),
+            row_fields: Vec::new(),
+            owned: Some(Box::new((columns, types))),
         };
         let (merge, returning) = Self::resolve_row_merge(statement, resolve, merged, input)?;
         Ok((merge, returning, continuation))

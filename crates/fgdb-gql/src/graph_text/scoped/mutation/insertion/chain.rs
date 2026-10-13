@@ -420,7 +420,7 @@ impl PreparedGraphWriteChainText {
         let mut steps = Vec::with_capacity(self.steps.len());
         let mut previous: Option<Vec<GraphSetColumnType>> = None;
         // The row a later step reads is exactly the previous step's output.
-        let reads_previous = |owned: &Option<(Vec<String>, Vec<GraphSetColumnType>)>,
+        let reads_previous = |owned: Option<&(Vec<String>, Vec<GraphSetColumnType>)>,
                               previous: &Option<Vec<GraphSetColumnType>>,
                               at: usize|
          -> Result<(), GraphInsertTextError> {
@@ -462,7 +462,7 @@ impl PreparedGraphWriteChainText {
                     let values =
                         insertion.checked_arguments(&own(insertion.parameter_schema())?)?;
                     if let InsertTextInput::Relation { input, .. } = &insertion.input {
-                        reads_previous(&input.owned, &previous, insertion.create_at)?;
+                        reads_previous(input.owned.as_deref(), &previous, insertion.create_at)?;
                     }
                     let selection = match &insertion.input {
                         InsertTextInput::Match(selection) => Some(selection.bind_values(&values)?),
@@ -487,7 +487,7 @@ impl PreparedGraphWriteChainText {
                     if let crate::mutation_text::EdgeMergeTextInput::Row { input, .. } =
                         &merge.input
                     {
-                        reads_previous(&input.owned, &previous, merge.input.return_at())?;
+                        reads_previous(input.owned.as_deref(), &previous, merge.input.return_at())?;
                     }
                     let values = merge
                         .input
@@ -513,7 +513,7 @@ impl PreparedGraphWriteChainText {
                     if let crate::mutation_text::EdgeMergeTextInput::Row { input, .. } =
                         &merge.input
                     {
-                        reads_previous(&input.owned, &previous, merge.input.return_at())?;
+                        reads_previous(input.owned.as_deref(), &previous, merge.input.return_at())?;
                     }
                     let bound = merge.bind_parameters(&own)?;
                     // Its rows: the row's visible columns, then the edge. The

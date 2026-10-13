@@ -755,7 +755,7 @@ impl BoundSetTextInput {
             ordinal(bytes, *to);
         }
         // Only an owned input appends: every other transcript keeps its bytes.
-        if let Some((columns, types)) = &self.owned {
+        if let Some((columns, types)) = self.owned.as_deref() {
             bytes.push(0xff);
             ordinal(bytes, columns.len());
             for (name, kind) in columns.iter().zip(types) {
@@ -891,7 +891,9 @@ pub(crate) struct BoundSetTextInput {
     /// A chained write's input (`CREATE (a) WITH a CREATE (b)`): the previous
     /// write's output columns, read through one owned leaf (`SetNode::Owned`)
     /// that the executing host fills with that write's rows. No graph source.
-    pub(crate) owned: Option<(Vec<String>, Vec<GraphSetColumnType>)>,
+    /// Boxed: only chain steps have one, and every read template embeds this.
+    #[allow(clippy::type_complexity)]
+    pub(crate) owned: Option<Box<(Vec<String>, Vec<GraphSetColumnType>)>>,
 }
 
 // A token view, not a lexer. Only graph_text's existing Lexer constructs these.
