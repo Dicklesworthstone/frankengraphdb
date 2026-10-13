@@ -55,7 +55,7 @@ fn aggregate_gql_error(
 }
 
 fn set_at<Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     query: &PreparedGraphSet,
     scope: &PlannerPredicates,
@@ -103,7 +103,7 @@ fn set_at<Clock: FnMut() -> u64>(
 /// permit and allowance. No Prism certificate escapes, as on every
 /// authorized analytics path.
 fn procedure_at<Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     call: &fgdb_gql::PreparedProcedureCall,
     arguments: &[fgdb_gql::algebra::GraphValue],
@@ -149,7 +149,7 @@ fn procedure_at<Clock: FnMut() -> u64>(
 }
 
 fn aggregate_at<Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     query: &PreparedGraphSetAggregate,
     scope: &PlannerPredicates,

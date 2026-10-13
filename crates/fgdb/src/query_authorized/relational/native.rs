@@ -75,7 +75,7 @@ fn explain_authorized(
 fn native_at<Clock: FnMut() -> u64>(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,

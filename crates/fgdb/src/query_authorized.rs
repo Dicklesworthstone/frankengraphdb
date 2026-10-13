@@ -26,6 +26,7 @@ use fgdb_types::{CanonicalScalar, CommitSeq, EId, QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, ExecutionPermit, PlannerPredicates, ReadAccess};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[path = "query_authorized/analytics.rs"]
 mod analytics;
@@ -204,7 +205,7 @@ fn authorized<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
     as_of: Option<CommitSeq>,
     clock: Clock,
     evaluate: impl FnOnce(
-        &Snapshot,
+        &Arc<Snapshot>,
         CommitSeq,
         &PlannerPredicates,
         &RefCell<Execution<'_, '_, Clock>>,
@@ -236,7 +237,7 @@ fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
     mut clock: Clock,
     map_error: fn(QueryError) -> Error,
     evaluate: impl FnOnce(
-        &Snapshot,
+        &Arc<Snapshot>,
         CommitSeq,
         &PlannerPredicates,
         &RefCell<Execution<'_, '_, Clock>>,

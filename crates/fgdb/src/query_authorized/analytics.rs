@@ -4,10 +4,17 @@
 //! and the registered native kernels. This path is explicitly DECODED_CACHE:
 //! it does not confer authority on raw sealed images or publish a reusable view
 //! that could outlive the single live Warden execution allowance.
+//!
+//! An unrestricted scope's projection is retained in a trusted-host sidecar
+//! keyed by the live snapshot allocation (fgdb-0tbrz), never handed to a token
+//! holder. Every reuse spends the build's exact sequence of live calls again,
+//! so it confers nothing a fresh build would not.
 
 use super::{Execution, authorized_with_errors};
 use crate::gql_exec::source::{self, SourceEvent};
-use crate::query::prism::{push_staged, source_admit};
+use crate::query::prism::{
+    PROJECTION_CACHE_BYTES, ProjectionCache, ProjectionRequest, push_staged, source_admit,
+};
 use crate::{Database, QueryError, ReadError, Snapshot};
 use asupersync::fs::Vfs;
 use fgdb_prism::{
@@ -17,9 +24,98 @@ use fgdb_prism::{
 };
 use fgdb_types::{QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, PlannerPredicates};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::mem::size_of;
+use std::sync::Arc;
 
 type Error = FnxReadError<ReadError, QueryError>;
+
+/// Projections reused across authorized calls on one live snapshot
+/// allocation, each with the live calls its build made (fgdb-0tbrz).
+static REUSE: ProjectionCache<Snapshot, Arc<Tape>> = ProjectionCache::new(PROJECTION_CACHE_BYTES);
+
+#[cfg(test)]
+thread_local! {
+    /// Projection builds on this thread: the tests' physical reuse witness.
+    static BUILDS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// A live call of a projection build, other than a charge-free source poll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// An admitted vertex, with the number of its labels the scope shows.
+    Vertex(u32),
+    /// An admitted edge.
+    Edge,
+    /// A builder checkpoint.
+    Checkpoint,
+}
+
+/// `polls` charge-free source polls, then `step` (none: polls only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Token {
+    polls: u32,
+    step: Option<Step>,
+}
+
+/// Every live call a successful build made, in order and run-length coded.
+/// Over a single-version snapshot it is a handful of runs: one per poll and
+/// admission pattern, not one per record.
+#[derive(Debug, Default)]
+struct Tape {
+    runs: Vec<(Token, u32)>,
+    polls: u32,
+}
+
+impl Tape {
+    fn poll(&mut self) {
+        if self.polls == u32::MAX {
+            self.emit(None);
+        }
+        self.polls += 1;
+    }
+
+    fn emit(&mut self, step: Option<Step>) {
+        let token = Token {
+            polls: std::mem::take(&mut self.polls),
+            step,
+        };
+        match self.runs.last_mut() {
+            Some((last, run)) if *last == token && *run < u32::MAX => *run += 1,
+            _ => self.runs.push((token, 1)),
+        }
+    }
+
+    fn finish(mut self) -> Self {
+        if self.polls > 0 {
+            self.emit(None);
+        }
+        self.runs.shrink_to_fit();
+        self
+    }
+
+    fn bytes(&self) -> usize {
+        size_of::<Self>() + self.runs.capacity() * size_of::<(Token, u32)>()
+    }
+
+    fn replay<E>(
+        &self,
+        mut poll: impl FnMut() -> Result<(), E>,
+        mut spend: impl FnMut(Step) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for &(token, run) in &self.runs {
+            for _ in 0..run {
+                for _ in 0..token.polls {
+                    poll()?;
+                }
+                if let Some(step) = token.step {
+                    spend(step)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 // Like governed GQL, the interruption carrier preserves a live authorization
 // refusal. Keep source/frontier errors in their ordinary source error class.
@@ -141,7 +237,7 @@ impl<V: Vfs + Clone> Database<V> {
 // The optional caller meter adds fixed session policy to the SAME source,
 // builder and kernel. It never replaces the live signed execution permit.
 pub(super) fn execute<Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     binding: SnapshotBinding,
     call: &FnxCallSpec,
     options: FnxReadOptions,
@@ -154,46 +250,150 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
         execution.borrow_mut().checkpoint()?;
         observe.borrow_mut()(SourceEvent::Work)
     };
-    let mut work = 0u64;
-    let mut scratch = 0u64;
-    let mut control = |event| {
+    let (work, scratch) = (Cell::new(0u64), Cell::new(0u64));
+    let control = |event: SourceEvent| -> Result<(), Error> {
         execution.borrow_mut().checkpoint().map_err(control_error)?;
         observe.borrow_mut()(event).map_err(control_error)?;
         let (counter, limit, resource) = match event {
-            SourceEvent::Work | SourceEvent::SnapshotRecord => (
-                &mut work,
-                options.source_limits.max_work_units,
-                "work units",
-            ),
+            SourceEvent::Work | SourceEvent::SnapshotRecord => {
+                (&work, options.source_limits.max_work_units, "work units")
+            }
             SourceEvent::ScratchEntry => (
-                &mut scratch,
+                &scratch,
                 options.source_limits.max_scratch_entries,
                 "scratch entries",
             ),
         };
-        *counter = counter.checked_add(1).ok_or(Error::SizeOverflow)?;
-        source_admit(resource, u128::from(*counter), u128::from(limit))
+        let count = counter.get().checked_add(1).ok_or(Error::SizeOverflow)?;
+        counter.set(count);
+        source_admit(resource, u128::from(count), u128::from(limit))
     };
-    // FG-INV-20: history the capability cannot see is walked through `scan`,
+    // FG-INV-20: history the capability cannot see is walked through `poll`,
     // which polls cancellation and charges nothing. Only records that pass the
     // scope (and, for edges, whose endpoints were admitted) are charged, so no
     // signed or source limit's refusal point depends on hidden data.
-    let mut scan = |_| execution.borrow_mut().poll().map_err(control_error);
+    let poll = || execution.borrow_mut().poll().map_err(control_error);
+    // Each admitted record's and builder checkpoint's live calls. A build and
+    // a reuse both spend through here, so their sequences cannot drift apart.
+    let spend = |step: Step| -> Result<(), Error> {
+        match step {
+            Step::Vertex(labels) => {
+                control(SourceEvent::Work)?;
+                for _ in 0..labels {
+                    control(SourceEvent::Work)?;
+                }
+                execution.borrow_mut().node().map_err(control_error)?;
+            }
+            Step::Edge => control(SourceEvent::Work)?,
+            Step::Checkpoint => return checkpoint().map_err(control_error),
+        }
+        observe.borrow_mut()(SourceEvent::SnapshotRecord).map_err(control_error)?;
+        observe.borrow_mut()(SourceEvent::ScratchEntry).map_err(control_error)
+    };
+    // An unrestricted scope sees the whole snapshot, so its projection and
+    // live call sequence depend only on the snapshot and this request. A
+    // scoped capability always builds its own.
+    let request = ProjectionRequest {
+        binding,
+        selection: options.selection,
+        projection: options.projection,
+        projection_limits: options.projection_limits,
+        source_limits: options.source_limits,
+    };
+    let reusable = scope.sees_all_incidence() && scope.sees_all_fields();
+    let graph = match reusable.then(|| REUSE.lookup(snapshot, request)).flatten() {
+        Some((graph, tape)) => {
+            tape.replay(poll, spend)?;
+            graph
+        }
+        None => {
+            let tape = reusable.then(|| RefCell::new(Tape::default()));
+            let graph = build(
+                snapshot,
+                binding,
+                options,
+                scope,
+                tape.as_ref(),
+                poll,
+                spend,
+            )?;
+            if let Some(tape) = tape {
+                let tape = tape.into_inner().finish();
+                let bytes = tape.bytes();
+                REUSE.remember(snapshot, request, &graph, Arc::new(tape), bytes);
+            }
+            graph
+        }
+    };
+    let signed_rows = scope.limits().max_rows;
+    let mut limits = options.execution_limits;
+    limits.max_result_rows = limits
+        .max_result_rows
+        .min(usize::try_from(signed_rows).unwrap_or(usize::MAX));
+    let result = call.execute(&graph, limits, checkpoint);
+    // Translate a signed-row refusal back to Warden, without allocating a
+    // forbidden result first. The shared delivery gate still checks successful
+    // results with fresh time; zero rows do not bypass retirement or expiry.
+    if let Err(FnxExecutionError::LimitExceeded {
+        resource: "result rows",
+        requested,
+        ..
+    }) = &result
+        && *requested as u128 > u128::from(signed_rows)
+    {
+        execution
+            .borrow_mut()
+            .deliver(*requested)
+            .map_err(control_error)?;
+    }
+    let result = result.map_err(|error| match error {
+        FnxExecutionError::Cancelled(error) => control_error(error),
+        other => Error::Execution(other),
+    })?;
+    // The kernel's certificate is trusted-host provenance, not a capability
+    // response. Releasing it could expose the unmasked root/history identity.
+    Ok(result.rows)
+}
+
+/// Visit, admit and build. `tape`, when present, records every live call in
+/// order for a later reuse.
+fn build(
+    snapshot: &Snapshot,
+    binding: SnapshotBinding,
+    options: FnxReadOptions,
+    scope: &PlannerPredicates,
+    tape: Option<&RefCell<Tape>>,
+    poll: impl Fn() -> Result<(), Error>,
+    spend: impl Fn(Step) -> Result<(), Error>,
+) -> Result<SnapshotGraphView, Error> {
+    #[cfg(test)]
+    BUILDS.with(|builds| builds.set(builds.get() + 1));
+    let mut scan = |_| {
+        if let Some(tape) = tape {
+            tape.borrow_mut().poll();
+        }
+        poll()
+    };
+    let admit = |step| {
+        if let Some(tape) = tape {
+            tape.borrow_mut().emit(Some(step));
+        }
+        spend(step)
+    };
     let mut vertices: Vec<VId> = Vec::new();
     let mut staged_bytes = 0;
     source::visit_vertices(&snapshot.patches, binding.as_of, &mut scan, |row, _| {
         if !scope.allows_vertex(&row.labels) {
             return Ok(());
         }
-        control(SourceEvent::Work)?;
-        for &label in &row.labels {
-            if scope.allows_label(label) {
-                control(SourceEvent::Work)?;
-            }
-        }
-        execution.borrow_mut().node().map_err(control_error)?;
-        observe.borrow_mut()(SourceEvent::SnapshotRecord).map_err(control_error)?;
-        observe.borrow_mut()(SourceEvent::ScratchEntry).map_err(control_error)?;
+        let labels = row
+            .labels
+            .iter()
+            .filter(|&&label| scope.allows_label(label))
+            .count();
+        admit(Step::Vertex(
+            u32::try_from(labels).map_err(|_| Error::SizeOverflow)?,
+        ))?;
         if options.selection.vertex_label.is_some_and(|label| {
             !scope.allows_label(label) || row.labels.binary_search(&label).is_err()
         }) {
@@ -220,9 +420,7 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
         {
             return Ok(());
         }
-        control(SourceEvent::Work)?;
-        observe.borrow_mut()(SourceEvent::SnapshotRecord).map_err(control_error)?;
-        observe.borrow_mut()(SourceEvent::ScratchEntry).map_err(control_error)?;
+        admit(Step::Edge)?;
         if entry.src == entry.dst {
             match options.projection.self_loops {
                 SelfLoopPolicy::Drop => return Ok(()),
@@ -265,44 +463,20 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
             options.source_limits.max_staging_bytes,
         )
     })?;
-    let graph = SnapshotGraphView::build_owned_with_checkpoint(
+    SnapshotGraphView::build_owned_with_checkpoint(
         binding,
         vertices,
         edges,
         options.projection,
         options.projection_limits,
-        checkpoint,
+        || admit(Step::Checkpoint),
     )
     .map_err(|error| match error {
-        ProjectionBuildError::Cancelled(error) => control_error(error),
+        ProjectionBuildError::Cancelled(error) => error,
         ProjectionBuildError::Projection(error) => Error::Projection(error),
-    })?;
-    let signed_rows = scope.limits().max_rows;
-    let mut limits = options.execution_limits;
-    limits.max_result_rows = limits
-        .max_result_rows
-        .min(usize::try_from(signed_rows).unwrap_or(usize::MAX));
-    let result = call.execute(&graph, limits, checkpoint);
-    // Translate a signed-row refusal back to Warden, without allocating a
-    // forbidden result first. The shared delivery gate still checks successful
-    // results with fresh time; zero rows do not bypass retirement or expiry.
-    if let Err(FnxExecutionError::LimitExceeded {
-        resource: "result rows",
-        requested,
-        ..
-    }) = &result
-        && *requested as u128 > u128::from(signed_rows)
-    {
-        execution
-            .borrow_mut()
-            .deliver(*requested)
-            .map_err(control_error)?;
-    }
-    let result = result.map_err(|error| match error {
-        FnxExecutionError::Cancelled(error) => control_error(error),
-        other => Error::Execution(other),
-    })?;
-    // The kernel's certificate is trusted-host provenance, not a capability
-    // response. Releasing it could expose the unmasked root/history identity.
-    Ok(result.rows)
+    })
 }
+
+#[cfg(test)]
+#[path = "analytics_tests.rs"]
+mod tests;
