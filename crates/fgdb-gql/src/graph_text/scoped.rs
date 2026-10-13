@@ -734,7 +734,7 @@ impl<'a> Parser<'a> {
 
     /// A clause keyword that ends a root WHERE predicate at depth zero. The
     /// WITH of `STARTS WITH` or `ENDS WITH` is an operator, not a clause.
-    fn ends_where(word: &str, previous: Option<TokenKind<'_>>) -> bool {
+    pub(super) fn ends_where(word: &str, previous: Option<TokenKind<'_>>) -> bool {
         if word.eq_ignore_ascii_case("WITH")
             && matches!(previous, Some(TokenKind::Word(previous))
                 if previous.eq_ignore_ascii_case("STARTS") || previous.eq_ignore_ascii_case("ENDS"))
