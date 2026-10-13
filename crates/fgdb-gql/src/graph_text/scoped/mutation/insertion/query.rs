@@ -578,6 +578,23 @@ impl<'a> Parser<'a> {
                     output.push((name, GraphSetColumnType::Edge));
                 }
             }
+            if output.is_empty() && head && !syntax.vertices.is_empty() {
+                // A WITH head (or a chain's implicit `WITH *`) over anonymous
+                // patterns only (`MATCH () CREATE () WITH * CREATE ()`) still
+                // carries one row per occurrence: an anonymous column of the
+                // first created vertex, which no name addresses (fgdb-cpny9).
+                let name = Name {
+                    text: Self::anonymous_name(0),
+                    at,
+                };
+                let column =
+                    returning.column(Binding::Vertex(0), name, GraphSetColumnType::Vertex)?;
+                returning.projection.push(ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                output.push((name, GraphSetColumnType::Vertex));
+            }
             if output.is_empty() {
                 return Err(expected(
                     at,

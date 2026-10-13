@@ -45,7 +45,7 @@ impl<'a> Parser<'a> {
     fn edge_merge_pattern(&mut self) -> Result<ParsedEdgeMerge<'a>, GraphEdgeMergeTextError> {
         self.word("MERGE")?;
         self.punct(b'(', "(")?;
-        let left = self.variable()?;
+        let left = self.edge_merge_endpoint()?;
         self.punct(b')', ")")?;
 
         let incoming = self.take(b'<')?;
@@ -93,7 +93,7 @@ impl<'a> Parser<'a> {
         }
 
         self.punct(b'(', "(")?;
-        let right = self.variable()?;
+        let right = self.edge_merge_endpoint()?;
         self.punct(b')', ")")?;
         // An undirected MERGE creates left to right, as openCypher does.
         let (source, destination) = if incoming {
@@ -109,6 +109,17 @@ impl<'a> Parser<'a> {
             properties,
             undirected: !incoming && !outgoing,
         })
+    }
+
+    /// An endpoint of the MERGE pattern: a MATCH vertex, or after WITH (or
+    /// in a later write of a chain) a name the row carries, which the row
+    /// MERGE checks against that row (fgdb-cpny9).
+    fn edge_merge_endpoint(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+        if self.write_row_scope {
+            self.name()
+        } else {
+            self.variable()
+        }
     }
 }
 
