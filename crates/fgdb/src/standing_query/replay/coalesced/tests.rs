@@ -182,17 +182,137 @@ fn native_values_and_promoted_signed_weights_are_not_narrowed_or_expanded() {
     assert_eq!(rows.weight(&key(8)), Some(&huge.checked_neg(LIMBS).unwrap()));
     assert!(rows.iter().all(|(_, weight)| weight.to_i128().is_none()));
     // Checked arithmetic is enforced even if a later tick would cancel it.
-    let mut net = ZSet::new();
-    let key = key(0);
     let mut over = huge;
     while let Ok(next) = over.checked_add(&over, LIMBS) {
         over = next;
     }
     let mut checkpoint = || Ok(());
     let mut meter = Meter { policy: policy(2), stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-    add_borrowed(&mut net, &key, &over, &mut meter).unwrap();
-    assert!(matches!(add_borrowed(&mut net, &key, &over, &mut meter),
+    let total = add_weight(&ZWeight::ZERO, &over, &mut meter).unwrap();
+    assert!(matches!(add_weight(&total, &over, &mut meter),
         Err(StandingQueryFailure::Arithmetic)));
+}
+
+#[test]
+fn sorted_merge_has_one_head_per_tick_not_one_entry_per_intermediate_key() {
+    for width in [2_i64, 16_384] {
+        let left = bag((0..=width).map(|n| (key(n), ZWeight::ONE)));
+        let right = bag((0..width).map(|n| (key(n), ZWeight::from_i128(-1))));
+        let empty = ZSet::new();
+        let mut checkpoint = || Ok(());
+        let mut meter = Meter {
+            policy: policy(1), stats: StandingQueryStats::default(), checkpoint: &mut checkpoint,
+        };
+        let mut merged = SortedMerge::new([left.iter(), empty.iter(), right.iter()], &mut meter).unwrap();
+        assert_eq!(merged.sources.len(), 2);
+        assert_eq!(merged.heads.len(), 2);
+        let capacity = (merged.sources.capacity(), merged.heads.capacity());
+        let (row, weight) = merged.next(&mut meter).unwrap().unwrap();
+        assert_eq!(row, &key(width));
+        assert_eq!(weight, ZWeight::ONE);
+        assert_eq!(merged.sources.len(), 2);
+        assert!(merged.heads.len() <= 2);
+        assert_eq!((merged.sources.capacity(), merged.heads.capacity()), capacity);
+        assert!(merged.next(&mut meter).unwrap().is_none());
+        assert_eq!((merged.sources.capacity(), merged.heads.capacity()), capacity);
+        // All inputs are borrowed, including the row selected for delivery.
+        assert!(std::ptr::eq(row, left.iter().next_back().unwrap().0));
+        assert_eq!(left.len(), width as usize + 1);
+        assert_eq!(right.len(), width as usize);
+    }
+}
+
+#[test]
+fn all_signed_three_tick_merges_equal_independent_column_sums() {
+    for mut code in 0..15_625_u32 {
+        let mut weights = [[0_i128; 2]; 3];
+        for tick in &mut weights {
+            for weight in tick { *weight = i128::from(code % 5) - 2; code /= 5; }
+        }
+        let sources: Vec<_> = weights.iter().copied().map(small).collect();
+        let mut checkpoint = || Ok(());
+        let mut meter = Meter {
+            policy: policy(2), stats: StandingQueryStats::default(), checkpoint: &mut checkpoint,
+        };
+        let mut merged = SortedMerge::new(sources.iter().map(ZSet::iter), &mut meter).unwrap();
+        let expected: Vec<_> = (0..2).filter_map(|column| {
+            let sum: i128 = weights.iter().map(|tick| tick[column]).sum();
+            (sum != 0).then(|| (key(column as i64), sum))
+        }).collect();
+        let mut actual = Vec::new();
+        while let Some((row, weight)) = merged.next(&mut meter).unwrap() {
+            actual.push((row.clone(), weight.to_i128().unwrap()));
+            assert!(merged.heads.len() <= 3 && merged.sources.len() <= 3);
+        }
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn equal_keys_fold_oldest_first_and_never_hide_oversized_input_weights() {
+    let mut big = ZWeight::from_i128(i128::MAX);
+    while let Ok(next) = big.checked_add(&big, LIMBS) { big = next; }
+    for cancel_middle in [true, false] {
+        let mut history = History::new(CommitSeq(0));
+        append(&mut history, bag([(key(0), big.checked_clone(LIMBS).unwrap())]));
+        for negative in [cancel_middle, !cancel_middle] {
+            let weight = if negative { big.checked_neg(LIMBS).unwrap() }
+                else { big.checked_clone(LIMBS).unwrap() };
+            append(&mut history, bag([(key(0), weight)]));
+        }
+        let result = run(&history, CommitSeq(0), 3, policy(1)).0;
+        if cancel_middle {
+            assert_eq!(result.unwrap().unwrap().1.weight(&key(0)), Some(&big));
+        } else {
+            // Same mathematical final sum, but the chronological prefix
+            // exceeds admission. Reordering additions would hide this failure.
+            assert!(matches!(result, Err(StandingQueryError::Delivery(StandingQueryFailure::Arithmetic))));
+        }
+    }
+    let wider = LimbLimit::new(8);
+    let oversized = big.checked_add(&big, wider).unwrap();
+    let first = ZSet::from_updates([(key(0), oversized.checked_clone(wider).unwrap())],
+        wider, &mut |_| Ok::<_, ()>(())).unwrap();
+    let second = ZSet::from_updates([(key(0), oversized.checked_neg(wider).unwrap())],
+        wider, &mut |_| Ok::<_, ()>(())).unwrap();
+    let mut checkpoint = || Ok(());
+    let mut meter = Meter {
+        policy: policy(0), stats: StandingQueryStats::default(), checkpoint: &mut checkpoint,
+    };
+    let mut merged = SortedMerge::new([first.iter(), second.iter()], &mut meter).unwrap();
+    assert!(matches!(merged.next(&mut meter), Err(StandingQueryFailure::Arithmetic)));
+    let stats = meter.stats;
+    assert!(merged.next(&mut meter).unwrap().is_none());
+    assert_eq!(meter.stats, stats);
+}
+
+#[test]
+fn merge_keeps_native_representation_identity_and_refuses_invalid_source_order() {
+    let representations = [
+        vec![QueryValue::Count(7)],
+        vec![QueryValue::Integer(7)],
+        key(7),
+        vec![QueryValue::Average(GraphExactAverage::new(7, 1).unwrap())],
+    ];
+    let mut history = History::new(CommitSeq(0));
+    append(&mut history, bag(representations.iter().cloned().map(|row| (row, ZWeight::ONE))));
+    append(&mut history, bag([(key(7), ZWeight::from_i128(-1))]));
+    let (_, rows) = run(&history, CommitSeq(0), 2, policy(3)).0.unwrap().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.weight(&key(7)).is_none());
+    for index in [0, 1, 3] { assert_eq!(rows.weight(&representations[index]), Some(&ZWeight::ONE)); }
+    // Production supplies sealed sorted Z-sets. This negative control guards
+    // the internal merge's monotonic source assumption against future adapters.
+    for sequence in [vec![key(1), key(0)], vec![key(0), key(0)]] {
+        let mut checkpoint = || Ok(());
+        let mut meter = Meter {
+            policy: policy(2), stats: StandingQueryStats::default(), checkpoint: &mut checkpoint,
+        };
+        let one = ZWeight::ONE;
+        let mut merged = SortedMerge::new([sequence.iter().map(|row| (row, &one))], &mut meter).unwrap();
+        assert!(matches!(merged.next(&mut meter), Err(StandingQueryFailure::InvalidDelta)));
+        assert!(merged.next(&mut meter).unwrap().is_none());
+    }
 }
 
 #[test]

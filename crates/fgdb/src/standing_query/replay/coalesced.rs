@@ -1,15 +1,18 @@
 //! Bounded net catch-up over a pinned, contiguous final-result replay range.
 //!
-//! Borrow native keys while adding the exact signed deltas. Only surviving
-//! tuples acquire payload ownership. No endpoint query or snapshot difference
-//! is evaluated, and no intermediate per-commit event is promised to survive.
+//! Merge the already sorted tick bags with one borrowed head per nonempty tick.
+//! Complete each key's chronological signed sum before owning its payload. No
+//! endpoint query, snapshot difference or intermediate-support table is built.
 
 use super::*;
 use fgdb_delta_types::{LimbLimit, ZWeight};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::num::NonZeroUsize;
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 type Coalesced = Option<(CommitSeq, ZSet<Vec<QueryValue>>)>;
+type Entry<'a> = (&'a Vec<QueryValue>, &'a ZWeight);
 
 impl<V: Vfs + Clone> Database<V> {
     /// Read the exact NET change for up to `max_ticks` retained commits after
@@ -26,8 +29,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// One cumulative work/scratch allowance covers all selected ticks, exact
     /// arithmetic and surviving payload copies. ResultRows counts final net
     /// tuples AFTER cancellation, not intermediate support or occurrences.
-    /// No payload copy is made for a cancelled tuple. Private signed support
-    /// is still memory-resident and metered; the tick limit is not a byte bound.
+    /// No payload copy is made for a cancelled tuple. The merge retains one
+    /// iterator and borrowed head per nonempty selected tick, plus one exact
+    /// accumulator; it does not retain all intermediate changed keys. Retained
+    /// history and the final result are still resident. Logical scratch events
+    /// are cumulative work/growth reservations, not a live allocator-byte cap.
     /// Canonical key comparisons retain the existing Z-set cost contract.
     /// Any refusal discards the whole tentative result, leaving history intact.
     ///
@@ -70,83 +76,176 @@ impl History {
         max_ticks: NonZeroUsize,
         meter: &mut Meter<'_>,
     ) -> Result<Coalesced, StandingQueryError> {
-        // Reuse the same O(1) indexed successor and gap validation as atomic
-        // replay. In particular, even an all-empty range must prove every cut.
+        // Validate the complete selected prefix before reading its row bags.
+        // The same immutable history borrow pins these cuts during the merge.
+        // Empty frames still participate in successor validation and metering.
         let mut next = self.next(after)?;
         let mut frontier = after;
-        let mut remaining = max_ticks.get();
-        let mut net = ZSet::new();
+        let mut selected = 0_usize;
         while let Some(frame) = next {
             meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Delivery)?;
-            for (row, weight) in frame.rows.iter() {
-                add_borrowed(&mut net, row, weight, meter)
-                    .map_err(StandingQueryError::Delivery)?;
-            }
             frontier = frame.frontier;
-            remaining -= 1;
-            if remaining == 0 {
+            selected += 1;
+            if selected == max_ticks.get() {
                 break;
             }
             next = self.next(frontier)?;
         }
-        if frontier == after {
+        if selected == 0 {
             (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
             return Ok(None);
         }
-        if meter.policy.rows.max_result_rows()
-            .is_some_and(|limit| net.len() as u128 > u128::from(limit))
-        {
-            return Err(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget));
+        // History::next already proved after lies inside this contiguous range.
+        let start = usize::try_from(after.0 - self.retained_after().0)
+            .map_err(|_| StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
+        let end = start.checked_add(selected)
+            .filter(|end| *end <= self.frames.len())
+            .ok_or(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
+        let sources = self.frames.range(start..end).map(|frame| frame.rows.iter());
+        let mut merge = SortedMerge::new(sources, meter).map_err(StandingQueryError::Delivery)?;
+        let mut rows = ZSet::new();
+        while let Some((row, weight)) = merge.next(meter).map_err(StandingQueryError::Delivery)? {
+            // This key is complete across ALL selected ticks, so no later row
+            // can cancel it. Admit the final support before copying its payload.
+            let count = rows.len().checked_add(1)
+                .ok_or(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget))?;
+            if meter.policy.rows.max_result_rows()
+                .is_some_and(|limit| count as u128 > u128::from(limit))
+            {
+                return Err(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget));
+            }
+            let cells = own_row(row, meter).map_err(StandingQueryError::Delivery)?;
+            rows.accumulate(cells, weight, LIMBS, &mut |event| meter.charge(event))
+                .map_err(zset_error).map_err(StandingQueryError::Delivery)?;
         }
-        let rows = own_survivors(net, meter).map_err(StandingQueryError::Delivery)?;
         (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
         Ok(Some((frontier, rows)))
     }
 }
 
-fn add_borrowed<'a>(
-    net: &mut ZSet<&'a Vec<QueryValue>>,
+struct Head<'a> {
     row: &'a Vec<QueryValue>,
+    weight: &'a ZWeight,
+    source: usize,
+}
+impl PartialEq for Head<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source && self.row.cmp(other.row) == Ordering::Equal
+    }
+}
+impl Eq for Head<'_> {}
+impl PartialOrd for Head<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for Head<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap is a max heap. Reverse BOTH keys: equal rows must add
+        // oldest tick first, preserving checked intermediate-overflow behavior.
+        other.row.cmp(self.row).then_with(|| other.source.cmp(&self.source))
+    }
+}
+
+/// Private source-bounded merge; only immutable canonical Z-set iterators enter
+/// from History. Each source has at most one live heap head, and replacing a
+/// popped head reuses its admitted slot. Keys and payloads remain borrowed.
+struct SortedMerge<'a, I> {
+    sources: Vec<I>,
+    heads: BinaryHeap<Head<'a>>,
+    done: bool,
+}
+impl<'a, I: Iterator<Item = Entry<'a>>> SortedMerge<'a, I> {
+    fn new(
+        sources: impl IntoIterator<Item = I>,
+        meter: &mut Meter<'_>,
+    ) -> Result<Self, StandingQueryFailure> {
+        let mut merged = Self { sources: Vec::new(), heads: BinaryHeap::new(), done: false };
+        for mut source in sources {
+            meter.charge(ZSetEvent::Work)?;
+            if let Some((row, weight)) = source.next() {
+                meter.units(ZSetEvent::ScratchEntry, 2)?;
+                merged.sources.try_reserve(1).map_err(|_| StandingQueryFailure::ScratchBudget)?;
+                merged.heads.try_reserve(1).map_err(|_| StandingQueryFailure::ScratchBudget)?;
+                let at = merged.sources.len();
+                merged.sources.push(source);
+                merged.heads.push(Head { row, weight, source: at });
+            }
+        }
+        Ok(merged)
+    }
+
+    fn next(
+        &mut self,
+        meter: &mut Meter<'_>,
+    ) -> Result<Option<(&'a Vec<QueryValue>, ZWeight)>, StandingQueryFailure> {
+        if self.done { return Ok(None); }
+        // A failed or unwinding partial key can never be resumed as a complete
+        // sum. The caller discards its tentative output on any such refusal.
+        self.done = true;
+        loop {
+            meter.charge(ZSetEvent::Work)?;
+            let Some(mut head) = self.heads.pop() else { return Ok(None); };
+            let row = head.row;
+            let mut total = ZWeight::ZERO;
+            loop {
+                total = add_weight(&total, head.weight, meter)?;
+                meter.charge(ZSetEvent::Work)?;
+                if let Some((next_row, next_weight)) = self.sources[head.source].next() {
+                    if next_row <= head.row { return Err(StandingQueryFailure::InvalidDelta); }
+                    self.heads.push(Head { row: next_row, weight: next_weight, source: head.source });
+                }
+                meter.charge(ZSetEvent::Work)?;
+                if self.heads.peek().is_some_and(|next| next.row == row) {
+                    head = self.heads.pop().ok_or(StandingQueryFailure::InvalidDelta)?;
+                } else {
+                    break;
+                }
+            }
+            if !total.is_zero() {
+                self.done = false;
+                return Ok(Some((row, total)));
+            }
+        }
+    }
+}
+
+fn add_weight(
+    total: &ZWeight,
     weight: &ZWeight,
     meter: &mut Meter<'_>,
-) -> Result<(), StandingQueryFailure> {
+) -> Result<ZWeight, StandingQueryFailure> {
     meter.charge(ZSetEvent::Work)?;
-    if weight.is_zero() {
-        return Err(StandingQueryFailure::InvalidDelta);
-    }
-    // The owning immutable history pins every referenced key for this fold.
-    // Neither a promoted count nor repeated support expands to occurrences.
+    if weight.is_zero() { return Err(StandingQueryFailure::InvalidDelta); }
     let units = weight.magnitude_limb_count().checked_add(1)
         .ok_or(StandingQueryFailure::ScratchBudget)?;
     meter.units(ZSetEvent::ScratchEntry, units)?;
+    // Admit every input even if a later contribution cancels it. A checked
+    // result alone must not launder an oversized promoted source weight.
     let weight = weight.checked_clone(LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)?;
-    net.accumulate(row, weight, LIMBS, &mut |event| meter.charge(event))
-        .map_err(zset_error)
+    meter.charge(ZSetEvent::Work)?;
+    let units = total.magnitude_limb_count().max(weight.magnitude_limb_count())
+        .checked_add(1).ok_or(StandingQueryFailure::ScratchBudget)?;
+    meter.units(ZSetEvent::ScratchEntry, units)?;
+    total.checked_add(&weight, LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)
 }
 
-fn own_survivors(
-    net: ZSet<&Vec<QueryValue>>,
+fn own_row(
+    row: &[QueryValue],
     meter: &mut Meter<'_>,
-) -> Result<ZSet<Vec<QueryValue>>, StandingQueryFailure> {
-    let mut rows = ZSet::new();
-    for (row, weight) in net.into_updates() {
+) -> Result<Vec<QueryValue>, StandingQueryFailure> {
+    meter.charge(ZSetEvent::Work)?;
+    meter.charge(ZSetEvent::ScratchEntry)?;
+    let mut cells = Vec::new();
+    for value in row {
         meter.charge(ZSetEvent::Work)?;
-        meter.charge(ZSetEvent::ScratchEntry)?;
-        let mut cells = Vec::new();
-        for value in row {
-            meter.charge(ZSetEvent::Work)?;
-            let units = match value {
-                QueryValue::Value(value) => value.payload_units(),
-                _ => 0,
-            }.checked_add(1).ok_or(StandingQueryFailure::ScratchBudget)?;
-            meter.units(ZSetEvent::ScratchEntry, units)?;
-            cells.try_reserve(1).map_err(|_| StandingQueryFailure::ScratchBudget)?;
-            cells.push(value.clone());
-        }
-        rows.accumulate(cells, weight, LIMBS, &mut |event| meter.charge(event))
-            .map_err(zset_error)?;
+        let units = match value {
+            QueryValue::Value(value) => value.payload_units(),
+            _ => 0,
+        }.checked_add(1).ok_or(StandingQueryFailure::ScratchBudget)?;
+        meter.units(ZSetEvent::ScratchEntry, units)?;
+        cells.try_reserve(1).map_err(|_| StandingQueryFailure::ScratchBudget)?;
+        cells.push(value.clone());
     }
-    Ok(rows)
+    Ok(cells)
 }
 
 #[cfg(test)]
