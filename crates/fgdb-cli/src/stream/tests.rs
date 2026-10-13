@@ -302,7 +302,7 @@ fn cancellation_after_a_flushed_row_does_not_request_another() {
 }
 
 #[test]
-fn unsupported_plans_or_future_cuts_emit_no_header_but_limit_zero_completes() {
+fn supported_projection_and_pipeline_streams_do_not_weaken_real_refusals() {
     let ((), report) = run_async_under_lab(0x636c_7305, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -310,9 +310,30 @@ fn unsupported_plans_or_future_cuts_emit_no_header_but_limit_zero_completes() {
             .await
             .unwrap();
         db.write(&contexts.commit(), batch(1, 4)).await.unwrap();
+
         for text in [
             "MATCH (n) RETURN n.p AS p",
             "MATCH (n) WITH n.p AS p RETURN COUNT(*) AS total",
+        ] {
+            let opts = options(text);
+            let eager = db
+                .query(&cx, text, &opts.params, &opts, policy())
+                .unwrap();
+            let mut expected = Vec::new();
+            okay(crate::render(eager, 1, "rows", true, &mut expected));
+            let mut bytes = Vec::new();
+            okay(run(&db, &cx, &opts, true, &mut bytes));
+            let streamed = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                row_lines(&streamed),
+                row_lines(&String::from_utf8(expected).unwrap()),
+                "{text}"
+            );
+            assert!(streamed.contains("\"event\":\"columns\""), "{text}");
+            assert!(streamed.contains("\"event\":\"result\""), "{text}");
+        }
+
+        for text in [
             "MATCH (n) RETURN n UNION ALL MATCH (m) RETURN m",
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 2 RETURN n AS id LIMIT 0",
         ] {
@@ -326,6 +347,7 @@ fn unsupported_plans_or_future_cuts_emit_no_header_but_limit_zero_completes() {
                 "preparation/admission must precede transport"
             );
         }
+
         let mut bytes = Vec::new();
         okay(run(
             &db,
