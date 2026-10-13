@@ -218,7 +218,7 @@ impl PreparedGraphEdgeMergeText {
         let source = parser.mutation_projection(&mut projections, parsed.source, None)?;
         let destination = parser.mutation_projection(&mut projections, parsed.destination, None)?;
         let parsed_return = if returning {
-            Some(parser.edge_merge_return(parsed.relationship, &mut projections, None)?)
+            Some(parser.edge_merge_return("RETURN", parsed.relationship, &mut projections, None)?)
         } else {
             None
         };
@@ -414,7 +414,18 @@ impl PreparedGraphEdgeMergeText {
         let schema = from.row;
         let keep = parser.visible_width(&schema);
         let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
-        let continuation = if continues {
+        let continuation = if let (true, Some(head)) = (continues, &merged.3) {
+            // A WITH head: the next write reads its output row.
+            Some((
+                keep,
+                ChainContinuation {
+                    at: parser.current.at,
+                    row: head.output.clone(),
+                    boundary: None,
+                    parameters: parser.syntax.parameters.clone(),
+                },
+            ))
+        } else if continues {
             let mut carried = schema[..keep].to_vec();
             if carried.len() >= MAX_PATTERN_VERTICES {
                 return Err(error(
@@ -499,12 +510,39 @@ impl PreparedGraphEdgeMergeText {
             .into());
         }
         let continues = parser.chain_write && parser.at_chained_write()?;
-        let returning = !continues && returning.unwrap_or_else(|| parser.is_word("RETURN"));
-        let parsed_return = if returning {
-            Some(parser.edge_merge_return(parsed.relationship, &mut Vec::new(), Some(schema))?)
+        // In a chain, a WITH head after the pattern is a query step whose
+        // output row the next write reads.
+        let headed = !continues && parser.chain_write && parser.is_word("WITH");
+        let returning =
+            !continues && !headed && returning.unwrap_or_else(|| parser.is_word("RETURN"));
+        let parsed_return = if headed {
+            let head = parser.edge_merge_return(
+                "WITH",
+                parsed.relationship,
+                &mut Vec::new(),
+                Some(schema),
+            )?;
+            if !parser.at_chained_write()? {
+                return Err(error(
+                    parser.current.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "a CREATE or MERGE after the WITH of a MERGE step",
+                    ),
+                )
+                .into());
+            }
+            Some(head)
+        } else if returning {
+            Some(parser.edge_merge_return(
+                "RETURN",
+                parsed.relationship,
+                &mut Vec::new(),
+                Some(schema),
+            )?)
         } else {
             None
         };
+        let continues = continues || headed;
         if !continues {
             parser.end()?;
         }
@@ -677,6 +715,8 @@ struct ParsedEdgeReturn<'a> {
     count: Option<ReadPageNumber>,
     at: usize,
     tail: Option<Vec<ReadStageTemplate>>,
+    /// A chain step's WITH head output row: each item's name and type.
+    output: Vec<(Name<'a>, GraphSetColumnType)>,
 }
 
 impl<'a> ParsedEdgeReturn<'a> {
@@ -903,16 +943,21 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// `keyword` is RETURN, or WITH for the head of a chain step another
+    /// write follows (fgdb-cpny9): the same items, whose output row the next
+    /// write reads.
     fn edge_merge_return(
         &mut self,
+        keyword: &'static str,
         relationship: Option<Name<'a>>,
         columns: &mut Vec<Projection<'a>>,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<ParsedEdgeReturn<'a>, GraphEdgeMergeTextError> {
         let at = self.current.at;
-        let head = self.take_word("WITH")?;
+        // Under RETURN, a WITH head continues to this statement's own tail.
+        let head = keyword == "RETURN" && self.take_word("WITH")?;
         if !head {
-            self.word("RETURN")?;
+            self.word(keyword)?;
         }
         let quantifier = if self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
@@ -938,6 +983,7 @@ impl<'a> Parser<'a> {
             count: None,
             at,
             tail: None,
+            output: Vec::new(),
         };
         let items = self.write_return_items(&mut EdgeMergeLeaves {
             returning: &mut returning,
@@ -959,6 +1005,8 @@ impl<'a> Parser<'a> {
         }
         if head {
             returning.tail = Some(self.edge_merge_tail(&mut returning, columns, items.output)?);
+        } else {
+            returning.output = items.output;
         }
         Ok(returning)
     }
