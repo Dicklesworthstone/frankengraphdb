@@ -126,10 +126,10 @@ impl PreparedNativeRead {
                 best = Some((offset, priority, facade, source));
             }
         };
-        match PreparedTemporalGraphAggregateText::prepare_with_parameter_types(
+        match PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
             text,
             &declarations,
-            |kind, name| resolve.resolve_symbol(kind, name),
+            &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::TemporalAggregate(prepared)),
             Err(error) => {
@@ -966,4 +966,86 @@ pub(super) fn explain_result(
         columns: vec!["operator".to_owned(), "detail".to_owned()],
         rows,
     })
+}
+
+#[cfg(test)]
+mod temporal_aggregate_resolver_tests {
+    use super::*;
+    use crate::{PinnedTzdb, TzdbZone};
+    use std::sync::Arc;
+
+    struct ZonedResolver(GqlTimeZones);
+
+    impl GraphSymbolResolver for ZonedResolver {
+        fn resolve_symbol(&mut self, _kind: GraphSymbolKind, _name: &str) -> Option<GraphSymbol> {
+            None
+        }
+
+        fn time_zones(&self) -> Option<GqlTimeZones> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn zones(offset: i32) -> GqlTimeZones {
+        let artifact = Arc::new(
+            PinnedTzdb::new(vec![TzdbZone {
+                identifier: "Test/Fixed".to_owned(),
+                initial_offset_seconds: offset,
+                transitions: vec![],
+            }])
+            .unwrap(),
+        );
+        let id = artifact.object_id();
+        GqlTimeZones::new(artifact, id).unwrap()
+    }
+
+    const QUERIES: [&str; 2] = [
+        "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN MAX(datetime({year:2020,month:1,day:1,timezone:'Test/Fixed'})) AS stamp",
+        "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at WITH datetime({year:2020,month:1,day:1,timezone:'Test/Fixed'}) AS stamp RETURN MAX(stamp) AS latest",
+    ];
+
+    #[test]
+    fn historical_aggregate_dispatch_pins_tzdb_in_plan_certificates() {
+        let params = GqlParameters::new().with_uint64("at", 7).unwrap();
+        for text in QUERIES {
+            let first = PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(3600)))
+                .unwrap();
+            let same = PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(3600)))
+                .unwrap();
+            let changed = PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(7200)))
+                .unwrap();
+            assert_eq!(first.facade_class(), NativeReadClass::TemporalAggregate);
+            assert_eq!(
+                first.bound_snapshot_seq(&params, CommitSeq(99)).unwrap(),
+                CommitSeq(7)
+            );
+            let certificate = NativeExplainCertificate::new(&first, CommitSeq(7));
+            assert!(certificate.verifies_at(&same, CommitSeq(7)));
+            assert!(!certificate.verifies_at(&changed, CommitSeq(7)));
+            assert!(!certificate.verifies_at(&same, CommitSeq(8)));
+            assert_ne!(
+                certificate.canonical_bytes(),
+                NativeExplainCertificate::new(&changed, CommitSeq(7)).canonical_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn explain_temporal_aggregates_retains_artifact_and_snapshot_identity() {
+        let params = GqlParameters::new().with_uint64("at", 7).unwrap();
+        for text in QUERIES {
+            let (rows, certificate) = explain_at(
+                text,
+                &params,
+                ZonedResolver(zones(3600)),
+                true,
+                || Ok(CommitSeq(7)),
+            )
+            .unwrap();
+            assert!(rows.iter().any(|row| row.operator == "TemporalSnapshotSelect"));
+            let prepared = PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(3600)))
+                .unwrap();
+            assert!(certificate.unwrap().verifies_at(&prepared, CommitSeq(7)));
+        }
+    }
 }
