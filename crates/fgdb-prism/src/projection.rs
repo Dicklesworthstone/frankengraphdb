@@ -284,13 +284,108 @@ fn offsets<C>(
     Ok(result)
 }
 
-/// In-place O(n log n) worst-case sort, with cancellation inside every sift.
-/// Keys here are fixed-width IDs/tuples, so comparisons are bounded. Using the
-/// standard sort with a callback only before/after it leaves an entire O(m log
-/// m) phase uninterruptible. No adjacency-sized merge/sort scratch is hidden.
+/// In-place O(n log n) worst-case introsort, with cancellation inside every
+/// partition, insertion and heap step. Keys here are fixed-width IDs/tuples,
+/// so comparisons are bounded. Using the standard sort with a callback only
+/// before/after it leaves an entire O(m log m) phase uninterruptible. No
+/// adjacency-sized merge/sort scratch is hidden: recursion takes the smaller
+/// side, so at most O(log n) frames are live, and a depth limit falls back to
+/// heap sort. Heap sort alone is 8-14x slower on 0.5-4M edges: each sift step
+/// misses cache, while a partition scans sequentially against one pivot key.
 fn sort_by_key<T, K: Ord, C>(
     values: &mut [T],
     key: impl Fn(&T) -> K,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<(), ProjectionBuildError<C>> {
+    poll(checkpoint)?;
+    // Snapshot visitors commonly already emit VId/EId order. Keep that case
+    // linear instead of turning every ordered input into a permutation.
+    let mut ordered = true;
+    for pair in values.windows(2) {
+        poll(checkpoint)?;
+        if key(&pair[0]) > key(&pair[1]) {
+            ordered = false;
+            break;
+        }
+    }
+    if ordered {
+        return Ok(());
+    }
+    let depth = 2 * (usize::BITS - values.len().leading_zeros());
+    introsort(values, &key, depth, checkpoint)
+}
+
+/// Slices this short are insertion sorted: fewer comparisons than another
+/// partition, and each step still polls.
+const INSERTION_SORTED: usize = 16;
+
+fn introsort<T, K: Ord, C>(
+    mut values: &mut [T],
+    key: &impl Fn(&T) -> K,
+    mut depth: u32,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<(), ProjectionBuildError<C>> {
+    loop {
+        let n = values.len();
+        if n <= INSERTION_SORTED {
+            for i in 1..n {
+                let mut j = i;
+                while j > 0 {
+                    poll(checkpoint)?;
+                    if key(&values[j - 1]) <= key(&values[j]) {
+                        break;
+                    }
+                    values.swap(j - 1, j);
+                    j -= 1;
+                }
+            }
+            return Ok(());
+        }
+        if depth == 0 {
+            return heap_sort(values, key, checkpoint);
+        }
+        depth -= 1;
+        // The median of the first, middle and last keys becomes the pivot,
+        // parked in the last slot. Lomuto partition: keys below it move left.
+        poll(checkpoint)?;
+        let (middle, last) = (n / 2, n - 1);
+        if key(&values[middle]) < key(&values[0]) {
+            values.swap(0, middle);
+        }
+        if key(&values[last]) < key(&values[0]) {
+            values.swap(0, last);
+        }
+        if key(&values[last]) < key(&values[middle]) {
+            values.swap(middle, last);
+        }
+        values.swap(middle, last);
+        let pivot = key(&values[last]);
+        let mut below = 0;
+        for i in 0..last {
+            poll(checkpoint)?;
+            if key(&values[i]) < pivot {
+                values.swap(i, below);
+                below += 1;
+            }
+        }
+        values.swap(below, last);
+        let (left, rest) = values.split_at_mut(below);
+        let right = &mut rest[1..];
+        // Recurse into the smaller side and continue with the larger one.
+        if left.len() < right.len() {
+            introsort(left, key, depth, checkpoint)?;
+            values = right;
+        } else {
+            introsort(right, key, depth, checkpoint)?;
+            values = left;
+        }
+    }
+}
+
+/// The depth-limit fallback: O(n log n) in place for any key order.
+fn heap_sort<T, K: Ord, C>(
+    values: &mut [T],
+    key: &impl Fn(&T) -> K,
     checkpoint: &mut impl FnMut() -> Result<(), C>,
 ) -> Result<(), ProjectionBuildError<C>> {
     fn sift<T, K: Ord, C>(
@@ -315,29 +410,15 @@ fn sort_by_key<T, K: Ord, C>(
         }
         Ok(())
     }
-    poll(checkpoint)?;
     let n = values.len();
-    // Snapshot visitors commonly already emit VId/EId order. Keep that case
-    // linear instead of turning every ordered input into a heap permutation.
-    let mut ordered = true;
-    for pair in values.windows(2) {
-        poll(checkpoint)?;
-        if key(&pair[0]) > key(&pair[1]) {
-            ordered = false;
-            break;
-        }
-    }
-    if ordered {
-        return Ok(());
-    }
     for root in (0..n / 2).rev() {
         poll(checkpoint)?;
-        sift(values, root, n, &key, checkpoint)?;
+        sift(values, root, n, key, checkpoint)?;
     }
     for end in (1..n).rev() {
         poll(checkpoint)?;
         values.swap(0, end);
-        sift(values, 0, end, &key, checkpoint)?;
+        sift(values, 0, end, key, checkpoint)?;
     }
     Ok(())
 }

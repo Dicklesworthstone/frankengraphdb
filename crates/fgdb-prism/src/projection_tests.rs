@@ -118,6 +118,85 @@ fn cancellation_interrupts_every_heap_sift_and_never_resumes() {
     }
 }
 
+/// Deterministic xorshift values for the larger sort laws.
+fn scrambled(n: usize, seed: u64) -> Vec<u64> {
+    let mut x = seed | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        })
+        .collect()
+}
+
+#[test]
+fn checkpointed_sort_matches_std_past_the_insertion_cutoff_on_adversarial_shapes() {
+    for n in [17, 18, 33, 100, 1000, 5000] {
+        let shapes: [Vec<u64>; 8] = [
+            scrambled(n, n as u64),
+            (0..n as u64).rev().collect(),
+            (0..n as u64).map(|i| i.min(n as u64 - i)).collect(),
+            (0..n as u64).map(|i| i % 7).collect(),
+            scrambled(n, 3).into_iter().map(|value| value % 3).collect(),
+            (0..n as u64)
+                .map(|i| if i == 0 { n as u64 } else { i })
+                .collect(),
+            (0..n as u64)
+                .map(|i| if i + 1 == n as u64 { 0 } else { i + 1 })
+                .collect(),
+            (0..n as u64).map(|i| (i * 7919) % n as u64).collect(),
+        ];
+        for (shape, input) in shapes.into_iter().enumerate() {
+            let mut expected = input.clone();
+            expected.sort_unstable();
+            let mut actual = input.clone();
+            sort_by_key(
+                &mut actual,
+                |value| *value,
+                &mut || Ok::<(), Infallible>(()),
+            )
+            .unwrap();
+            assert_eq!(actual, expected, "n={n} shape={shape}");
+            // The depth-limit fallback alone must also sort every shape.
+            let mut fallback = input;
+            introsort(&mut fallback, &|value: &u64| *value, 0, &mut || {
+                Ok::<(), Infallible>(())
+            })
+            .unwrap();
+            assert_eq!(fallback, expected, "heap fallback n={n} shape={shape}");
+        }
+    }
+}
+
+#[test]
+fn cancellation_interrupts_every_partition_step_and_never_resumes() {
+    let input = scrambled(200, 11);
+    let mut checks = 0;
+    sort_by_key(&mut input.clone(), |value| *value, &mut || {
+        checks += 1;
+        Ok::<(), &'static str>(())
+    })
+    .unwrap();
+    // More than one partition pass over the input must have polled.
+    assert!(checks > input.len() * 3, "{checks} checks");
+    for stop in 1..=checks {
+        let mut observed = 0;
+        let error = sort_by_key(&mut input.clone(), |value| *value, &mut || {
+            observed += 1;
+            if observed == stop {
+                Err("cancel")
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error, ProjectionBuildError::Cancelled("cancel"));
+        assert_eq!(observed, stop);
+    }
+}
+
 #[test]
 fn every_projection_checkpoint_discards_partial_state_for_borrowed_and_owned_inputs() {
     let (vertices, edges) = fixture();
