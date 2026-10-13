@@ -99,7 +99,7 @@ fn writes_after_with_target_the_row_and_return_its_captured_values() {
         let txcx = contexts.txn();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, seed()).await.unwrap();
-        let mut write = async |db: &mut Database<_>, text: &str| {
+        let write = async |db: &mut Database<_>, text: &str| {
             db.query_write(
                 &txcx,
                 &cx,
