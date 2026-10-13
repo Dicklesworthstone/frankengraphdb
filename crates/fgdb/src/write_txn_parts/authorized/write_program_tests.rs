@@ -1093,7 +1093,7 @@ fn hidden_matching_vertices_neither_suppress_creation_nor_make_a_match_ambiguous
 }
 
 #[test]
-fn duplicate_match_occurrences_collapse_but_distinct_vertices_abort_the_whole_program() {
+fn duplicate_match_occurrences_collapse_and_distinct_vertices_keep_complete_receipts() {
     lab(0xa994, |contexts| async move {
         let commit = contexts.commit();
         let query = contexts.query();
@@ -1137,49 +1137,53 @@ fn duplicate_match_occurrences_collapse_but_distinct_vertices_abort_the_whole_pr
                 db.vertices().unwrap(),
                 db.edges().unwrap(),
             );
-            let result = db
-                .execute_graph_write_program_returning_authorized(
-                    &txn,
-                    &query,
-                    &commit,
-                    &authority,
-                    &token,
-                    "main",
-                    &program,
-                    policy(),
-                    || NOW,
-                )
-                .await;
             if ambiguous {
-                assert!(matches!(
-                    result,
-                    Err(Fault::VertexMerge {
-                        statement: 1,
-                        source: GqlQueryError::Source(GraphVertexMergeError::AmbiguousMatches {
-                            observed: 2
-                        }),
-                    })
-                ));
+                // One prefix identity plus TWO distinct targets requires three
+                // signed rows. The parallel occurrences of VId(1) cost one.
+                let limited = token.attenuate(Restriction::MaxRows(2)).unwrap();
+                let error = db
+                    .execute_graph_write_program_returning_authorized(
+                        &txn, &query, &commit, &authority, &limited, "main",
+                        &program, policy(), || NOW,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(authorization(error), Error::LimitExceeded(LimitDimension::Rows));
                 assert_eq!(
-                    (
-                        db.frontier().unwrap(),
-                        db.vertices().unwrap(),
-                        db.edges().unwrap()
-                    ),
+                    (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
                     before
                 );
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+            let (receipt, _) = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn, &query, &commit, &authority, &token, "main",
+                    &program, policy(), || NOW,
+                )
+                .await
+                .unwrap();
+            if ambiguous {
+                assert_eq!(
+                    receipt.steps()[1].merged_vertices(),
+                    Some(&[
+                        GraphVertexMergeOutcome::Matched(VId(1)),
+                        GraphVertexMergeOutcome::Matched(VId(3)),
+                    ][..])
+                );
+                assert_eq!(receipt.steps()[1].merged_vertex(), None);
             } else {
-                let (receipt, _) = result.unwrap();
                 assert_eq!(
                     receipt.steps()[1].merged_vertex(),
                     Some(GraphVertexMergeOutcome::Matched(VId(1)))
                 );
-                assert_eq!(
-                    receipt.stats().created_vertices,
-                    1,
-                    "only the explicit prefix was created"
-                );
             }
+            assert_eq!(receipt.stats().created_vertices, 1, "only the explicit prefix was created");
+            assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+            assert_eq!(db.vertices().unwrap().len(), before.1.len() + 1);
+            for original in before.1 {
+                assert_eq!(db.vertex(original.vid).unwrap(), Some(original));
+            }
+            assert_eq!(db.edges().unwrap(), before.2);
             assert_eq!(txn.outstanding_obligations(), 0);
         }
     });

@@ -26,6 +26,8 @@ mod script;
 pub use script::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
 #[path = "vertex_merge.rs"]
 mod vertex;
+#[path = "vertex_merge_program.rs"]
+mod vertex_program;
 
 type Fault = GraphWriteProgramError<WriteTxnError, WriteTxnError, WriteTxnError>;
 
@@ -51,9 +53,10 @@ impl<V: Vfs + Clone> Database<V> {
     ///
     /// An insert-only program with no MATCH requires Write rights. Any selected
     /// creation, update or deletion requires ReadWrite, even when no rows match.
-    /// Vertex MERGE always requires ReadWrite. Uniqueness is checked only among
-    /// visible matches: hidden vertices never suppress creation or cause an
-    /// ambiguous-match error. This is visible get-or-create, NOT a global
+    /// Vertex MERGE always requires ReadWrite. Plain MERGE retains every
+    /// distinct visible match; hidden vertices never suppress creation or enter
+    /// the receipt. ON/SET currently retains its explicit singular contract.
+    /// This is visible get-or-create, NOT a global
     /// uniqueness constraint or a disclosure contract for hidden constraints.
     /// The ordinary native reducer decides the branch once; only the chosen
     /// ON MATCH/ON CREATE actions are lowered and authorized. Both outcomes
@@ -352,7 +355,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         )
                                     }
                                     GraphWriteStatement::VertexMerge(input) => {
-                                        let (stats, outcome) = vertex::merge(
+                                        let (stats, step) = vertex_program::merge(
                                             workspace.transaction(),
                                             self,
                                             query_cx,
@@ -363,10 +366,10 @@ impl<V: Vfs + Clone> Database<V> {
                                             returning,
                                         )
                                         .map_err(GraphWriteStepError::VertexMerge)?;
-                                        (
-                                            GraphWriteStepStats::VertexMerge(stats),
-                                            GraphWriteStepReceipt::VertexMerge { outcome },
-                                        )
+                                        if let Some(step) = step {
+                                            receipts.push(step);
+                                        }
+                                        return Ok(GraphWriteStepStats::VertexMerge(stats));
                                     }
                                     GraphWriteStatement::VertexUpsert(input) => {
                                         let (stats, outcome) = vertex::upsert(
