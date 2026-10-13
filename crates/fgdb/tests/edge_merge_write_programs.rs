@@ -1141,7 +1141,8 @@ fn relationship_merge_clauses_then_return_read_the_final_relationship() {
             10,
         );
         let arguments = GqlParameters::new();
-        let allocated = std::cell::Cell::new(0u32);
+        // Sync, so the lab future that holds `write` across awaits is Send.
+        let allocated = std::sync::atomic::AtomicU32::new(0);
         let write = async |db: &mut Database<MemVfs>, text: &str| {
             db.query_write(
                 &txcx,
@@ -1153,8 +1154,8 @@ fn relationship_merge_clauses_then_return_read_the_final_relationship() {
                 R,
                 budget,
                 |_| {
-                    allocated.set(allocated.get() + 1);
-                    Ok::<_, ()>(ElementId::Edge(EId(100 + u128::from(allocated.get()))))
+                    let n = allocated.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    Ok::<_, ()>(ElementId::Edge(EId(100 + u128::from(n))))
                 },
             )
             .await
@@ -1205,7 +1206,7 @@ fn relationship_merge_clauses_then_return_read_the_final_relationship() {
             ))]]
         );
         assert_eq!(edges(&db).len(), 1);
-        assert_eq!(allocated.get(), 1);
+        assert_eq!(allocated.load(std::sync::atomic::Ordering::Relaxed), 1);
         // No selected pair: no relationship, no row.
         let none = write(
             &mut db,
