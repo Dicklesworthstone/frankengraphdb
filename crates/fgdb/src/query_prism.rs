@@ -26,6 +26,8 @@ use std::num::NonZeroUsize;
 
 use fgdb_prism::FnxSealedExecutionError;
 
+#[path = "query_prism/cache.rs"]
+mod cache;
 #[path = "query_prism/projection.rs"]
 mod projection;
 pub(crate) use projection::{bind_procedure, procedure_options};
@@ -637,7 +639,30 @@ impl EmbeddedReadView {
     /// The cache owns its decoded data and can outlive this read-view handle.
     /// The source's work/scratch counters are separate from the cache budget;
     /// neither the source nor fnx is presented as a spill-capable operator.
+    ///
+    /// Identical requests on the same live snapshot allocation may reuse one
+    /// complete projection, including its original admission limits. A bounded
+    /// process-local sidecar retains at most eight projections and 64 MiB of
+    /// charged builder workspace. Full or contended caches rebuild normally;
+    /// no live entry is evicted and no weak owner pins a database generation.
+    /// This does not provide cross-process CLI reuse or authorize a secure view.
     pub fn prism_projection_at(
+        &self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+        selection: FnxSelection,
+        spec: ProjectionSpec,
+        limits: ProjectionLimits,
+        source_limits: FnxSourceLimits,
+    ) -> Result<SnapshotGraphView, FnxReadError<ReadError, Cancel>> {
+        cx.with_restriction(|| {
+            cache::projection(self, cx, as_of, selection, spec, limits, source_limits)
+        })
+    }
+
+    // The incumbent source admission and builder remain the miss path and the
+    // native benchmark control. Never construct a second projection algorithm.
+    fn build_prism_projection_at(
         &self,
         cx: &QueryCx,
         as_of: CommitSeq,
