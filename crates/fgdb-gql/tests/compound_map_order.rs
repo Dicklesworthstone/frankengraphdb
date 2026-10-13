@@ -17,7 +17,9 @@ fn prepare(text: &str) -> PreparedGraphSetText {
 }
 
 fn plan(text: &str) -> PreparedGraphSet {
-    prepare(text).bind_parameters(&GqlParameters::new()).unwrap()
+    prepare(text)
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
 }
 
 fn rows(plan: &PreparedGraphSet) -> Vec<GraphValueRow> {
@@ -211,11 +213,13 @@ fn malformed_map_input_is_not_hidden_by_zero_limit() {
     );
     assert_eq!(source_calls.get(), 0);
     assert!(matches!(result, Err(GqlQueryError::Source(_))));
-    assert!(rows(&plan(
-        "RETURN 1 AS value, {rank: 3} AS doc \
+    assert!(
+        rows(&plan(
+            "RETURN 1 AS value, {rank: 3} AS doc \
          UNION ALL RETURN 2 AS value, {} AS doc ORDER BY doc.rank LIMIT 0"
-    ))
-    .is_empty());
+        ))
+        .is_empty()
+    );
 }
 
 #[test]
@@ -246,11 +250,7 @@ fn every_observed_cancellation_point_refuses_the_complete_page() {
             |_, _| Err::<_, GqlQueryError<usize, usize>>(GqlQueryError::Source(1)),
             || {
                 calls.set(calls.get() + 1);
-                if calls.get() == cut {
-                    Err(cut)
-                } else {
-                    Ok(())
-                }
+                if calls.get() == cut { Err(cut) } else { Ok(()) }
             },
         );
         assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == cut));
