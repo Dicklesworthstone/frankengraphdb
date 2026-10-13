@@ -365,9 +365,9 @@ impl WriteTxn {
     ) -> VertexMergeRowsResult<A> {
         use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
         use fgdb_gql::{
-            GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats,
-            GqlQueryError, GqlQueryPolicy, GraphVertexMergeError, GraphVertexMergeOutcome,
-            GraphVertexMergePolicy, GraphVertexMergeStats, GraphWriteStepReceipt,
+            GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats, GqlQueryError, GqlQueryPolicy,
+            GraphVertexMergeError, GraphVertexMergeOutcome, GraphVertexMergePolicy,
+            GraphVertexMergeStats, GraphWriteStepReceipt,
         };
         let infrastructure = |error| GqlQueryError::Source(GraphVertexMergeError::Source(error));
         self.ensure_database(database).map_err(infrastructure)?;
