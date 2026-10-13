@@ -291,7 +291,7 @@ fn deletes_after_with_take_elements_the_row_computes() {
         };
         let empty = GqlParameters::new();
         // Vertices 1..=n labeled L with ids, and R edges by (eid, from, to).
-        let graph = |vertices: u64, edges: &[(u128, u64, u64)]| {
+        let graph = |vertices: u128, edges: &[(u128, u128, u128)]| {
             let mut batch = WriteBatch::new(R);
             for id in 1..=vertices {
                 batch.create_vertex(
@@ -306,7 +306,7 @@ fn deletes_after_with_take_elements_the_row_computes() {
             batch
         };
         let star = [(10, 1, 2), (11, 1, 3), (12, 1, 4)];
-        let live = |db: &Database<_>, ids: core::ops::RangeInclusive<u64>| {
+        let live = |db: &Database<_>, ids: core::ops::RangeInclusive<u128>| {
             ids.filter(|&id| db.vertex(VId(id)).unwrap().is_some())
                 .count()
         };
