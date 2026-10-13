@@ -135,6 +135,27 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 .database
                 .prepare_registered_rows(cx, pattern.clone(), policy)?;
             self.append(query)
+        } else if let Some(definition) = query.incremental_group() {
+            // Keep the entire selected child relation. The existing exact
+            // reducer and checked row sink publish one atomic derivative;
+            // projection, HAVING-as-filter and top-k stay downstream. As for a
+            // terminal group, pre-group occurrences are not result rows.
+            let input = self.compile(
+                cx,
+                definition.input(),
+                group::input_policy(policy),
+                checkpoint,
+            )?;
+            let state = self.database.prepare_standing_group_rows(
+                cx,
+                input,
+                definition.clone(),
+                policy,
+                self.database.standing_queries.len(),
+                query.columns(),
+                query.column_types(),
+            )?;
+            self.append(StandingQuery::Group(Box::new(state)))
         } else if let Some(input) = query.incremental_scope() {
             return self.compile(cx, input, policy, checkpoint);
         } else if let Some((input, projection, quantifier)) = query.incremental_projection() {
@@ -415,18 +436,53 @@ fn rebuild_checked<V: Vfs + Clone>(
     if first > root || root >= database.standing_queries.len() {
         return Err(StandingQueryError::UnknownHandle);
     }
-    // Only the terminal group owns the public result quota. Rebuilding its
-    // private input must preserve the same policy partition as registration.
-    let input_policy = if matches!(&database.standing_queries[root], StandingQuery::Group(_)) {
-        group::input_policy(policy)
-    } else {
-        policy
-    };
+    // Re-derive the same input/result distinction as recursive registration.
+    // Every group's COMPLETE input subtree has no result-row quota, including
+    // nested groups. Follow dependencies rather than clearing a whole prefix:
+    // unrelated sibling branches must retain their own result allowance.
+    let mut private_inputs = Vec::new();
+    for _ in first..=root {
+        checkpoint()?;
+        private_inputs.push(false);
+    }
+    for old in (first..=root).rev() {
+        checkpoint()?;
+        let inherited = private_inputs[old - first];
+        let mut mark = |input: usize, private: bool| {
+            checkpoint()?;
+            if input < first || input >= old {
+                return Err(StandingQueryError::Unsupported);
+            }
+            private_inputs[input - first] |= private;
+            Ok(())
+        };
+        match &database.standing_queries[old] {
+            StandingQuery::Group(query) => mark(query.input, true)?,
+            StandingQuery::Set(query) => {
+                for input in query.inputs {
+                    mark(input, inherited)?;
+                }
+            }
+            StandingQuery::Join(query) => {
+                for input in query.inputs {
+                    mark(input, inherited)?;
+                }
+            }
+            StandingQuery::Projection(query) => mark(query.input, inherited)?,
+            StandingQuery::Window(query) => mark(query.input, inherited)?,
+            StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {}
+            _ => return Err(StandingQueryError::Unsupported),
+        }
+    }
     let mut staged = Staging::new(database);
     let at = staged.database.snapshot.frontier;
     for old in first..=root {
         checkpoint()?;
-        let policy = if old == root { policy } else { input_policy };
+        let policy = if private_inputs[old - first] {
+            group::input_policy(policy)
+        } else {
+            policy
+        };
         let replacement = match &staged.database.standing_queries[old] {
             StandingQuery::Constant(query) => StandingQuery::Constant(Box::new(
                 staged
@@ -516,13 +572,26 @@ fn rebuild_checked<V: Vfs + Clone>(
                     .first
                     .checked_add(query.input - first)
                     .ok_or(StandingQueryError::Unsupported)?;
-                StandingQuery::Group(Box::new(staged.database.prepare_standing_group(
-                    cx,
-                    input,
-                    query.definition().clone(),
-                    policy,
-                    staged.database.standing_queries.len(),
-                )?))
+                let state = if let Some((columns, types)) = query.row_schema() {
+                    staged.database.prepare_standing_group_rows(
+                        cx,
+                        input,
+                        query.definition().clone(),
+                        policy,
+                        staged.database.standing_queries.len(),
+                        columns,
+                        types,
+                    )?
+                } else {
+                    staged.database.prepare_standing_group(
+                        cx,
+                        input,
+                        query.definition().clone(),
+                        policy,
+                        staged.database.standing_queries.len(),
+                    )?
+                };
+                StandingQuery::Group(Box::new(state))
             }
             _ => return Err(StandingQueryError::Unsupported),
         };

@@ -91,6 +91,11 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             source_width: pattern_width(pattern),
         });
     }
+    if let Some(definition) = query.incremental_group() {
+        // The exact reducer and checked row sink share ONE registry node and
+        // its meter. Count the complete child, not only its first graph leaf.
+        return circuit(cx, definition.input())?.append(1);
+    }
     if let Some(input) = query.incremental_scope() {
         return circuit(cx, input);
     }
