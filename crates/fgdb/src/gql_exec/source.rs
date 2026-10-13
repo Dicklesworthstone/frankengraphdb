@@ -1555,7 +1555,7 @@ mod indexed_tests {
 
 type BorrowedEdge<'a> = (IdentifiedEdge, &'a [(PropertyKeyId, CanonicalScalar)]);
 
-fn edge_properties_at(
+pub(crate) fn edge_properties_at(
     props: &[Option<Arc<fgdb_strata::edge_props::BlockProps>>],
     block: usize,
     row: usize,
@@ -1585,6 +1585,29 @@ pub(crate) fn visit_edges_with_properties<'a, E, C>(
 where
     C: FnMut(SourceEvent) -> Result<(), E>,
 {
+    visit_edges_with_coordinates(snapshot, as_of, control, |entry, props, _, _, control| {
+        visit(entry, props, control)
+    })
+}
+
+/// As [`visit_edges_with_properties`], also naming each winner's block and
+/// row, so its statement and properties can be read again in this same
+/// snapshot without another merge ([`edge_properties_at`]).
+pub(crate) fn visit_edges_with_coordinates<'a, E, C>(
+    snapshot: &'a Snapshot,
+    as_of: CommitSeq,
+    control: &mut C,
+    mut visit: impl FnMut(
+        &'a AdjacencyEntry,
+        &'a [(PropertyKeyId, CanonicalScalar)],
+        usize,
+        usize,
+        &mut C,
+    ) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
     visit_edge_coordinates(
         &snapshot.blocks,
         as_of,
@@ -1593,6 +1616,8 @@ where
             visit(
                 entry,
                 edge_properties_at(&snapshot.block_props, block, row),
+                block,
+                row,
                 control,
             )
         },
@@ -1773,6 +1798,22 @@ pub(crate) fn visit_vertices<'a, E, C>(
 where
     C: FnMut(SourceEvent) -> Result<(), E>,
 {
+    visit_vertex_coordinates(patches, as_of, control, |row, _, _, control| {
+        visit(row, control)
+    })
+}
+
+/// As [`visit_vertices`], also naming each winner's patch and row, so it can
+/// be found again in this same patch list without another merge.
+pub(crate) fn visit_vertex_coordinates<'a, E, C>(
+    patches: &'a [VertexPatchRows],
+    as_of: CommitSeq,
+    control: &mut C,
+    mut visit: impl FnMut(&'a VertexRow, usize, usize, &mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
     let mut heap: BinaryHeap<VertexCursor> = BinaryHeap::new();
     for (patch_at, patch) in patches.iter().enumerate() {
         control(SourceEvent::Work)?;
@@ -1782,20 +1823,21 @@ where
         }
     }
     let mut group = None;
-    let mut winner: Option<&VertexRow> = None;
+    let mut winner: Option<(&VertexRow, usize, usize)> = None;
     while let Some(mut cursor) = heap.peek_mut() {
         let Reverse((vid, _, patch_at, row_at)) = *cursor;
         control(SourceEvent::Work)?;
         if group != Some(vid) {
-            if let Some(row) = winner.take().filter(|row| row.visible_at(as_of)) {
-                visit(row, control)?;
+            if let Some((row, patch, at)) = winner.take().filter(|(row, ..)| row.visible_at(as_of))
+            {
+                visit(row, patch, at, control)?;
             }
             group = Some(vid);
         }
         let patch = &patches[patch_at];
         let row = &patch[row_at];
         if row.created_at <= as_of {
-            winner = Some(row);
+            winner = Some((row, patch_at, row_at));
         }
         if let Some(next) = patch.get(row_at + 1) {
             // Advance this patch with one heap repair instead of pop plus push.
@@ -1804,8 +1846,8 @@ where
             std::collections::binary_heap::PeekMut::pop(cursor);
         }
     }
-    if let Some(row) = winner.filter(|row| row.visible_at(as_of)) {
-        visit(row, control)?;
+    if let Some((row, patch, at)) = winner.filter(|(row, ..)| row.visible_at(as_of)) {
+        visit(row, patch, at, control)?;
     }
     Ok(())
 }

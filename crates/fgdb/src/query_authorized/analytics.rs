@@ -10,6 +10,7 @@
 //! holder. Every reuse spends the build's exact sequence of live calls again,
 //! so it confers nothing a fresh build would not.
 
+use super::tape::{Step, Tape};
 use super::{Execution, authorized_with_errors};
 use crate::gql_exec::source::{self, SourceEvent};
 use crate::query::prism::{
@@ -25,7 +26,6 @@ use fgdb_prism::{
 use fgdb_types::{QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, PlannerPredicates};
 use std::cell::{Cell, RefCell};
-use std::mem::size_of;
 use std::sync::Arc;
 
 type Error = FnxReadError<ReadError, QueryError>;
@@ -38,83 +38,6 @@ static REUSE: ProjectionCache<Snapshot, Arc<Tape>> = ProjectionCache::new(PROJEC
 thread_local! {
     /// Projection builds on this thread: the tests' physical reuse witness.
     static BUILDS: Cell<usize> = const { Cell::new(0) };
-}
-
-/// A live call of a projection build, other than a charge-free source poll.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Step {
-    /// An admitted vertex, with the number of its labels the scope shows.
-    Vertex(u32),
-    /// An admitted edge.
-    Edge,
-    /// A builder checkpoint.
-    Checkpoint,
-}
-
-/// `polls` charge-free source polls, then `step` (none: polls only).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Token {
-    polls: u32,
-    step: Option<Step>,
-}
-
-/// Every live call a successful build made, in order and run-length coded.
-/// Over a single-version snapshot it is a handful of runs: one per poll and
-/// admission pattern, not one per record.
-#[derive(Debug, Default)]
-struct Tape {
-    runs: Vec<(Token, u32)>,
-    polls: u32,
-}
-
-impl Tape {
-    fn poll(&mut self) {
-        if self.polls == u32::MAX {
-            self.emit(None);
-        }
-        self.polls += 1;
-    }
-
-    fn emit(&mut self, step: Option<Step>) {
-        let token = Token {
-            polls: std::mem::take(&mut self.polls),
-            step,
-        };
-        match self.runs.last_mut() {
-            Some((last, run)) if *last == token && *run < u32::MAX => *run += 1,
-            _ => self.runs.push((token, 1)),
-        }
-    }
-
-    fn finish(mut self) -> Self {
-        if self.polls > 0 {
-            self.emit(None);
-        }
-        self.runs.shrink_to_fit();
-        self
-    }
-
-    fn bytes(&self) -> usize {
-        size_of::<Self>() + self.runs.capacity() * size_of::<(Token, u32)>()
-    }
-
-    fn replay<E>(
-        &self,
-        mut poll: impl FnMut() -> Result<(), E>,
-        mut spend: impl FnMut(Step) -> Result<(), E>,
-    ) -> Result<(), E> {
-        for &(token, run) in &self.runs {
-            for _ in 0..run {
-                for _ in 0..token.polls {
-                    poll()?;
-                }
-                if let Some(step) = token.step {
-                    spend(step)?;
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 // Like governed GQL, the interruption carrier preserves a live authorization
@@ -320,7 +243,7 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
             if let Some(tape) = tape {
                 let tape = tape.into_inner().finish();
                 let bytes = tape.bytes();
-                REUSE.remember(snapshot, request, &graph, Arc::new(tape), bytes);
+                REUSE.remember_graph(snapshot, request, &graph, Arc::new(tape), bytes);
             }
             graph
         }

@@ -6,7 +6,7 @@ use fgdb_gql::PreparedGraphAggregate;
 use fgdb_gql::algebra::ValueProjection;
 
 pub(super) fn graph_at<Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     query: &PreparedGraphAggregate,
     scope: &PlannerPredicates,
@@ -19,7 +19,7 @@ pub(super) fn graph_at<Clock: FnMut() -> u64>(
 }
 
 pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     query: &PreparedGraphAggregate,
     scope: &PlannerPredicates,
@@ -59,7 +59,7 @@ pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
 // native aggregate visitor. No projected input rows, second matcher or custom
 // collection ordering is introduced. Source and group phases share one policy.
 fn visit_at<Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     query: &PreparedGraphAggregate,
     scope: &PlannerPredicates,
@@ -81,7 +81,7 @@ fn visit_at<Clock: FnMut() -> u64>(
                 .node()
                 .map_err(GqlQueryError::Interrupted)
         },
-        &mut |_| {
+        &mut || {
             execution
                 .borrow_mut()
                 .poll()

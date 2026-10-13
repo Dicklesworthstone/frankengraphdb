@@ -28,6 +28,8 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+#[path = "query_authorized/admission.rs"]
+mod admission;
 #[path = "query_authorized/analytics.rs"]
 mod analytics;
 #[path = "query_authorized/beacon.rs"]
@@ -36,6 +38,8 @@ mod beacon;
 mod overlay;
 #[path = "query_authorized/relational.rs"]
 mod relational;
+#[path = "query_authorized/tape.rs"]
+mod tape;
 pub use relational::{
     AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
     AuthorizedOrderExecution, AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall,
@@ -43,6 +47,15 @@ pub use relational::{
     AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
     AuthorizedSpoolCursor,
 };
+
+use admission::{ADMITTED, AdmissionKey, AdmittedCore, Recording};
+use tape::Step;
+
+#[cfg(test)]
+thread_local! {
+    /// Full-scan admissions on this thread: the tests' physical reuse witness.
+    static SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 type Fault = GqlQueryError<ReadError, QueryError>;
 type Governed<T> = Result<GqlQueryExecution<T>, Fault>;
@@ -307,36 +320,115 @@ impl<'a> Tables<'a> {
     /// cannot count hidden records by finding where a query starts to refuse.
     /// Scanning hidden history still takes time: that timing channel is not
     /// closed here, and the host bounds it with the query's own Cx budget.
+    ///
+    /// `poll` is that charge-free scan call. Under a scope that hides nothing,
+    /// a full scan's records and live calls depend only on the snapshot and
+    /// the cut, so the first one on a snapshot is recorded and later ones
+    /// replay its calls and refill from it (`admission.rs`, fgdb-61p1n).
     fn admit<Row: GlaOutput>(
-        snapshot: &'a Snapshot,
+        snapshot: &'a Arc<Snapshot>,
         plan: &GlaPlan<Row>,
         at: CommitSeq,
         predicates: &PlannerPredicates,
         mut node: impl FnMut() -> Result<(), Fault>,
-        scan: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+        poll: &mut impl FnMut() -> Result<(), Fault>,
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
     ) -> Result<Self, Fault> {
-        if let Some(tables) =
-            Self::admit_bound(snapshot, plan, at, predicates, &mut node, scan, control)?
-        {
+        if let Some(tables) = Self::admit_bound(
+            snapshot,
+            plan,
+            at,
+            predicates,
+            &mut node,
+            &mut |_| poll(),
+            control,
+        )? {
             return Ok(tables);
         }
+        let reusable = predicates.sees_all_incidence() && predicates.sees_all_fields();
+        let key = AdmissionKey {
+            at,
+            edges: plan.reads_edges(),
+        };
         let mut tables = Self::new();
-        source::visit_vertices(&snapshot.patches, at, scan, |row, _| {
-            tables.admit_vertex(row, predicates, &mut node, control)
-        })?;
-        if plan.reads_edges() {
-            source::visit_edges_with_properties(snapshot, at, scan, |edge, properties, _| {
-                tables.admit_edge(
-                    ((edge.eid, edge.src, edge.relation, edge.dst), properties),
-                    predicates,
-                    control,
-                )
+        if let Some(core) = reusable.then(|| ADMITTED.lookup(snapshot, key)).flatten() {
+            // Spend first: every limit refuses before the tables are refilled.
+            core.tape.replay(&mut *poll, |step| match step {
+                Step::Vertex(labels) => charge_vertex(labels as usize, &mut node, control),
+                Step::Edge => charge_edge(control),
+                Step::Checkpoint => Ok(()),
             })?;
+            tables.refill(snapshot, &core);
+        } else {
+            #[cfg(test)]
+            SCANS.with(|scans| scans.set(scans.get() + 1));
+            let recording = reusable.then(|| RefCell::new(Recording::default()));
+            let mut scan = |_| {
+                if let Some(recording) = &recording {
+                    recording.borrow_mut().poll();
+                }
+                poll()
+            };
+            source::visit_vertex_coordinates(
+                &snapshot.patches,
+                at,
+                &mut scan,
+                |row, patch, row_at, _| {
+                    let admitted = tables.admit_vertex(row, predicates, &mut node, control)?;
+                    if let (Some(labels), Some(recording)) = (admitted, &recording) {
+                        recording
+                            .borrow_mut()
+                            .vertex(row.vid, patch, row_at, labels);
+                    }
+                    Ok(())
+                },
+            )?;
+            if plan.reads_edges() {
+                source::visit_edges_with_coordinates(
+                    snapshot,
+                    at,
+                    &mut scan,
+                    |edge, properties, block, row_at, _| {
+                        let identity = (edge.eid, edge.src, edge.relation, edge.dst);
+                        if tables.admit_edge((identity, properties), predicates, control)?
+                            && let Some(recording) = &recording
+                        {
+                            recording.borrow_mut().edge(identity, block, row_at);
+                        }
+                        Ok(())
+                    },
+                )?;
+            }
+            if let Some(core) =
+                recording.and_then(|recording| recording.into_inner().finish(tables.records))
+            {
+                let bytes = core.bytes();
+                ADMITTED.remember(snapshot, key, Arc::new(core), bytes);
+            }
         }
         tables.seal();
         tables.metadata(plan, predicates, control)?;
         Ok(tables)
+    }
+
+    /// Fill empty tables from a core recorded on this same snapshot allocation.
+    fn refill(&mut self, snapshot: &'a Snapshot, core: &AdmittedCore) {
+        self.vertices.extend(
+            core.vertices
+                .iter()
+                .map(|&(vid, patch, row)| (vid, &snapshot.patches[patch as usize][row as usize])),
+        );
+        self.edges.extend(core.edges.iter().map(|edge| {
+            (
+                (edge.eid, edge.src, edge.relation, edge.dst),
+                source::edge_properties_at(
+                    &snapshot.block_props,
+                    edge.block as usize,
+                    edge.row as usize,
+                ),
+            )
+        }));
+        self.records = core.records;
     }
 
     /// The owner source's index-bound selection, for a capability that hides
@@ -397,12 +489,12 @@ impl<'a> Tables<'a> {
                     if admitted.contains(&vid) {
                         continue;
                     }
-                    if let Some(row) = source::find_vertex(snapshot, vid, at, scan)? {
-                        let before = tables.vertices.len();
-                        tables.admit_vertex(row, predicates, node, control)?;
-                        if tables.vertices.len() > before {
-                            admitted.insert(vid);
-                        }
+                    if let Some(row) = source::find_vertex(snapshot, vid, at, scan)?
+                        && tables
+                            .admit_vertex(row, predicates, node, control)?
+                            .is_some()
+                    {
+                        admitted.insert(vid);
                     }
                 }
             }
@@ -452,54 +544,53 @@ impl<'a> Tables<'a> {
 
     // Snapshot visitors and canonical transaction rows use identical masking
     // and logical admission charges. No input source can bypass this boundary.
+    /// Returns the number of labels charged when the vertex is admitted.
     fn admit_vertex(
         &mut self,
         row: &'a VertexRow,
         predicates: &PlannerPredicates,
         node: &mut impl FnMut() -> Result<(), Fault>,
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
-    ) -> Result<(), Fault> {
-        if predicates.allows_vertex(&row.labels) {
-            control(SourceEvent::Work)?;
-            for &label in &row.labels {
-                if predicates.allows_label(label) {
-                    control(SourceEvent::Work)?;
-                }
-            }
-            node()?;
-            control(SourceEvent::SnapshotRecord)?;
-            control(SourceEvent::ScratchEntry)?;
-            self.records += 1;
-            self.vertices_sealed &= self.vertices.last().is_none_or(|&(last, _)| last < row.vid);
-            self.vertices.push((row.vid, row));
+    ) -> Result<Option<usize>, Fault> {
+        if !predicates.allows_vertex(&row.labels) {
+            return Ok(None);
         }
-        Ok(())
+        let labels = row
+            .labels
+            .iter()
+            .filter(|&&label| predicates.allows_label(label))
+            .count();
+        charge_vertex(labels, node, control)?;
+        self.records += 1;
+        self.vertices_sealed &= self.vertices.last().is_none_or(|&(last, _)| last < row.vid);
+        self.vertices.push((row.vid, row));
+        Ok(Some(labels))
     }
 
     /// Endpoint admission is checked against the sealed vertex table; an edge
     /// phase seals it first (a no-op pass when the visitor already sorted it).
+    /// Returns whether the edge was admitted.
     fn admit_edge(
         &mut self,
         edge: Edge<'a>,
         predicates: &PlannerPredicates,
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
-    ) -> Result<(), Fault> {
+    ) -> Result<bool, Fault> {
         let ((_, src, relation, dst), _) = edge;
         if !self.vertices_sealed {
             seal_by_key(&mut self.vertices, |&(vid, _)| vid);
             self.vertices_sealed = true;
         }
-        if predicates.allows_relation(relation)
+        if !(predicates.allows_relation(relation)
             && self.vertex(src).is_some()
-            && self.vertex(dst).is_some()
+            && self.vertex(dst).is_some())
         {
-            control(SourceEvent::Work)?;
-            control(SourceEvent::SnapshotRecord)?;
-            control(SourceEvent::ScratchEntry)?;
-            self.records += 1;
-            self.edges.push(edge);
+            return Ok(false);
         }
-        Ok(())
+        charge_edge(control)?;
+        self.records += 1;
+        self.edges.push(edge);
+        Ok(true)
     }
 
     fn metadata<Row: GlaOutput>(
@@ -628,6 +719,30 @@ impl<'a> Tables<'a> {
     }
 }
 
+/// One admitted vertex's live calls: a unit of work, one more per label the
+/// scope shows, the signed node, then its record and its scratch entry. A
+/// fresh admission and a replayed one both spend through here.
+fn charge_vertex(
+    labels: usize,
+    node: &mut impl FnMut() -> Result<(), Fault>,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+) -> Result<(), Fault> {
+    control(SourceEvent::Work)?;
+    for _ in 0..labels {
+        control(SourceEvent::Work)?;
+    }
+    node()?;
+    control(SourceEvent::SnapshotRecord)?;
+    control(SourceEvent::ScratchEntry)
+}
+
+/// One admitted edge's live calls, likewise shared by admission and replay.
+fn charge_edge(control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>) -> Result<(), Fault> {
+    control(SourceEvent::Work)?;
+    control(SourceEvent::SnapshotRecord)?;
+    control(SourceEvent::ScratchEntry)
+}
+
 /// Sort `items` by `key`, keeping the LAST of any repeated key (a map insert
 /// overwrites). Already strictly ascending input, a full scan's, is one pass.
 fn seal_by_key<T, K: Ord>(items: &mut Vec<T>, key: impl Fn(&T) -> K) {
@@ -661,7 +776,7 @@ fn text(
 }
 
 fn pattern_at<Row: GlaOutput, Clock: FnMut() -> u64>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     pattern: &PreparedGraphPattern<Row>,
     scope: &PlannerPredicates,
@@ -685,7 +800,7 @@ fn pattern_at<Row: GlaOutput, Clock: FnMut() -> u64>(
 // allowance. Separate poll and charge callbacks keep hidden history unbilled.
 #[allow(clippy::too_many_arguments)]
 fn pattern_at_controlled<Row: GlaOutput>(
-    snapshot: &Snapshot,
+    snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     pattern: &PreparedGraphPattern<Row>,
     scope: &PlannerPredicates,
@@ -701,7 +816,7 @@ fn pattern_at_controlled<Row: GlaOutput>(
         at,
         scope,
         || node().map_err(GqlQueryError::Interrupted),
-        &mut |_| poll().map_err(GqlQueryError::Interrupted),
+        &mut || poll().map_err(GqlQueryError::Interrupted),
         &mut |event| {
             checkpoint().map_err(GqlQueryError::Interrupted)?;
             usage.observe::<ReadError, QueryError>(policy, event)

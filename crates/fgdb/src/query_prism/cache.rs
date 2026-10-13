@@ -11,6 +11,9 @@
 //! path keeps the live charge sequence its build made, which every reuse
 //! spends again (fgdb-0tbrz). That sidecar is its own static, so it has its
 //! own entries and an allowance of the same size.
+//!
+//! `LiveCache` is the same sidecar for any key and value: authorized
+//! full-scan admission keeps its admitted records under it (fgdb-61p1n).
 
 use super::{
     EmbeddedReadView, Error, FnxSelection, FnxSourceLimits, ProjectionLimits, ProjectionSpec,
@@ -34,20 +37,25 @@ pub(crate) struct Request {
     pub(crate) source_limits: FnxSourceLimits,
 }
 
-struct Entry<Owner, Extra> {
+struct Entry<Owner, Key, Value> {
     owner: Weak<Owner>,
-    request: Request,
-    graph: SnapshotGraphView,
-    extra: Extra,
+    key: Key,
+    value: Value,
     bytes: usize,
 }
 
-pub(crate) struct ProjectionCache<Owner, Extra = ()> {
-    entries: Mutex<[Option<Entry<Owner, Extra>>; CACHE_ENTRIES]>,
+/// A bounded sidecar of values derived from still-live snapshot allocations,
+/// with the weak-owner, never-evict and never-wait rules in the module docs.
+pub(crate) struct LiveCache<Owner, Key, Value> {
+    entries: Mutex<[Option<Entry<Owner, Key, Value>>; CACHE_ENTRIES]>,
     max_bytes: usize,
 }
 
-impl<Owner, Extra: Clone> ProjectionCache<Owner, Extra> {
+/// Projections by request, with an optional `Extra` beside each graph.
+pub(crate) type ProjectionCache<Owner, Extra = ()> =
+    LiveCache<Owner, Request, (SnapshotGraphView, Extra)>;
+
+impl<Owner, Key: PartialEq, Value: Clone> LiveCache<Owner, Key, Value> {
     pub(crate) const fn new(max_bytes: usize) -> Self {
         Self {
             entries: Mutex::new([const { None }; CACHE_ENTRIES]),
@@ -55,7 +63,7 @@ impl<Owner, Extra: Clone> ProjectionCache<Owner, Extra> {
         }
     }
 
-    fn prune(entries: &mut [Option<Entry<Owner, Extra>>; CACHE_ENTRIES]) {
+    fn prune(entries: &mut [Option<Entry<Owner, Key, Value>>; CACHE_ENTRIES]) {
         for entry in entries {
             if entry
                 .as_ref()
@@ -66,38 +74,20 @@ impl<Owner, Extra: Clone> ProjectionCache<Owner, Extra> {
         }
     }
 
-    pub(crate) fn lookup(
-        &self,
-        owner: &Arc<Owner>,
-        request: Request,
-    ) -> Option<(SnapshotGraphView, Extra)> {
+    pub(crate) fn lookup(&self, owner: &Arc<Owner>, key: Key) -> Option<Value> {
         // Observing a cache must not wait behind another query or escape the
         // caller's cancellation contract through a blocking cache mutex.
         let mut entries = self.entries.try_lock().ok()?;
         Self::prune(&mut entries);
         let owner = Arc::downgrade(owner);
         entries.iter().flatten().find_map(|entry| {
-            (entry.owner.ptr_eq(&owner) && entry.request == request)
-                .then(|| (entry.graph.clone(), entry.extra.clone()))
+            (entry.owner.ptr_eq(&owner) && entry.key == key).then(|| entry.value.clone())
         })
     }
 
-    /// `extra_bytes` is the retained size of `extra`, charged with the graph.
-    pub(crate) fn remember(
-        &self,
-        owner: &Arc<Owner>,
-        request: Request,
-        graph: &SnapshotGraphView,
-        extra: Extra,
-        extra_bytes: usize,
-    ) {
-        if graph.binding() != request.binding || graph.spec() != request.projection {
-            return;
-        }
-        let Some(charge) = graph.charged_workspace_bytes().checked_add(extra_bytes) else {
-            return;
-        };
-        if charge > self.max_bytes {
+    /// `bytes` is the retained size charged for `value`.
+    pub(crate) fn remember(&self, owner: &Arc<Owner>, key: Key, value: Value, bytes: usize) {
+        if bytes > self.max_bytes {
             return;
         }
         let Ok(mut entries) = self.entries.try_lock() else {
@@ -110,26 +100,45 @@ impl<Owner, Extra: Clone> ProjectionCache<Owner, Extra> {
         if entries
             .iter()
             .flatten()
-            .any(|entry| entry.owner.ptr_eq(&owner) && entry.request == request)
+            .any(|entry| entry.owner.ptr_eq(&owner) && entry.key == key)
         {
             return;
         }
         let total = entries
             .iter()
             .flatten()
-            .try_fold(charge, |total, entry| total.checked_add(entry.bytes));
+            .try_fold(bytes, |total, entry| total.checked_add(entry.bytes));
         if total.is_none_or(|total| total > self.max_bytes) {
             return;
         }
         if let Some(slot) = entries.iter_mut().find(|entry| entry.is_none()) {
             *slot = Some(Entry {
                 owner,
-                request,
-                graph: graph.clone(),
-                extra,
-                bytes: charge,
+                key,
+                value,
+                bytes,
             });
         }
+    }
+}
+
+impl<Owner, Extra: Clone> ProjectionCache<Owner, Extra> {
+    /// `extra_bytes` is the retained size of `extra`, charged with the graph.
+    pub(crate) fn remember_graph(
+        &self,
+        owner: &Arc<Owner>,
+        request: Request,
+        graph: &SnapshotGraphView,
+        extra: Extra,
+        extra_bytes: usize,
+    ) {
+        if graph.binding() != request.binding || graph.spec() != request.projection {
+            return;
+        }
+        let Some(bytes) = graph.charged_workspace_bytes().checked_add(extra_bytes) else {
+            return;
+        };
+        self.remember(owner, request, (graph.clone(), extra), bytes);
     }
 }
 
@@ -151,7 +160,7 @@ impl<Owner> ProjectionCache<Owner> {
         }
         let graph = build()?;
         checkpoint()?;
-        self.remember(owner, request, &graph, (), 0);
+        self.remember_graph(owner, request, &graph, (), 0);
         Ok((graph, false))
     }
 }
