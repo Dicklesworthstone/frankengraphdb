@@ -595,6 +595,11 @@ impl<'a> Parser<'a> {
             self.scoped_predicates(true)?;
         }
         loop {
+            // An OPTIONAL continuation ends before the next clause; its
+            // caller draws the implicit `WITH *` there.
+            if self.optional_part && (self.is_word("OPTIONAL") || self.is_word("MATCH")) {
+                break;
+            }
             if self.take_word("OPTIONAL")? {
                 self.match_scope(ScopeKind::Optional)?;
             } else if self.is_word("MATCH") {

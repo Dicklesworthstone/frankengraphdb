@@ -790,6 +790,10 @@ struct Parser<'a> {
     /// The read composition entry lets a root MATCH WHERE that needs the
     /// value language run as a row filter after the match (fgdb-1c29d).
     defer_where: bool,
+    /// An OPTIONAL MATCH continuation is being read: a later clause-level
+    /// MATCH or OPTIONAL MATCH ends it at an implicit `WITH *`, the boundary
+    /// openCypher's clause-by-clause left joins already draw.
+    optional_part: bool,
     /// The lexer and token at that WHERE keyword, once it was deferred.
     deferred_where: Option<(Lexer<'a>, Token<'a>)>,
     /// A write clause after WITH is being read (fgdb-sl4ym): its scope is
@@ -886,6 +890,7 @@ impl<'a> Parser<'a> {
             having_operand: false,
             zones: None,
             defer_where: false,
+            optional_part: false,
             deferred_where: None,
             write_row_scope: false,
             write_prefix: false,
