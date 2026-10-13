@@ -664,9 +664,13 @@ mod query_source {
             // admits its basis rows from the per-generation property index,
             // as the snapshot source does, instead of every vertex
             // (fgdb-0s2pq: one UNWIND row's `MATCH (n {id: row.id})` read the
-            // whole table). A staged effect can move a basis vertex into the
-            // selection, so each staged target joins the table with its basis
-            // row. The plan's own selection still decides every row.
+            // whole table). A staged property or label edit the selection
+            // reads can move a basis vertex into it, so that target joins the
+            // table with its basis row. Any other edit cannot: a basis vertex
+            // that did not match still does not, so an UNWIND batch's earlier
+            // `SET n.x` rows are never reloaded (that made a batch quadratic).
+            // Staged creations and deletions apply below. The plan's own
+            // selection still decides every row.
             let indexed = match logical {
                 Some(plan) if source::PROPERTY_INDEX_SERVING && vertex_scan && !reads_edges => {
                     source::bound_vertices(snapshot, plan, self.basis, control)?
@@ -681,13 +685,47 @@ mod query_source {
                     control(SourceEvent::ScratchEntry)?;
                     vertices.insert(row.vid, VertexView::new(&row.labels, &row.props));
                 }
+                // The keys and labels the selections read; a Boolean
+                // selection's operands are not enumerated, so every edit counts.
+                let mut read_keys = BTreeSet::new();
+                let mut read_labels = BTreeSet::new();
+                let mut reads_all = false;
+                for operator in logical.into_iter().flat_map(GlaPlan::operators) {
+                    control(SourceEvent::Work)?;
+                    match operator {
+                        fgdb_gql::algebra::GlaOperator::Select { predicates, .. } => {
+                            for predicate in predicates {
+                                match predicate {
+                                    VertexPredicate::HasLabel(label) => {
+                                        read_labels.insert(*label);
+                                    }
+                                    predicate => read_keys.extend(predicate.property_key()),
+                                }
+                            }
+                        }
+                        fgdb_gql::algebra::GlaOperator::SelectBoolean { .. } => reads_all = true,
+                        _ => {}
+                    }
+                }
                 for coordinate in (self.prepared.iter())
                     .flat_map(|prepared| prepared.template.coordinate_entries())
                 {
                     control(SourceEvent::Work)?;
                     for effect in &coordinate.rows {
                         control(SourceEvent::Work)?;
-                        let Some(vid) = super::VertexScanRead::target(effect) else {
+                        let moves = match effect {
+                            DeltaRow::Property {
+                                elem: ElementId::Vertex(_),
+                                property,
+                                ..
+                            } => reads_all || read_keys.contains(property),
+                            DeltaRow::LabelMembership { label, .. } => {
+                                reads_all || read_labels.contains(label)
+                            }
+                            _ => false,
+                        };
+                        let Some(vid) = super::VertexScanRead::target(effect).filter(|_| moves)
+                        else {
                             continue;
                         };
                         if vertices.contains_key(&vid) {

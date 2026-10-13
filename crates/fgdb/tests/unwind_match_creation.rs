@@ -7,11 +7,12 @@ use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy,
-    PreparedGraphInsertQueryText, PreparedGraphInsertText, PreparedGraphWriteProgram,
-    PreparedGraphWriteScript,
+    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteIdentityRequest,
+    GraphWriteProgramPolicy, PreparedGraphInsertQueryText, PreparedGraphInsertText,
+    PreparedGraphWriteProgram, PreparedGraphWriteScript,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const R: RelationId = RelationId(1);
@@ -549,18 +550,31 @@ fn an_equality_bound_write_match_admits_index_candidates_under_staged_effects() 
             16,
             16,
         );
-        let ids = GqlParameters::new()
-            .with_list("ids", vec![int(5), int(77), int(300)])
+        // The UNWIND batch writer runs one argument set per row; each row's
+        // keyed MATCH admits its one candidate. Sixty rows fit the hundred
+        // records: an earlier row's `SET n.q`, which no `{p: ..}` selection
+        // reads, is never reloaded by a later row (that was quadratic).
+        let no_allocation = |_: GraphWriteIdentityRequest| -> Result<ElementId, Infallible> {
+            unreachable!("a MATCH ... SET batch allocates no identity")
+        };
+        for ids in [
+            vec![int(5), int(77), int(300)],
+            (401..461).map(int).collect::<Vec<_>>(),
+        ] {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                "UNWIND $ids AS i MATCH (n:Source {p: i}) SET n.q = i * 10",
+                &GqlParameters::new().with_list("ids", ids).unwrap(),
+                symbols,
+                R,
+                tight,
+                no_allocation,
+            )
+            .await
             .unwrap();
-        db.execute_graph_write_program_autocommit_engine_governed(
-            &txcx,
-            &cx,
-            &commit,
-            &program("UNWIND $ids AS i MATCH (n:Source {p: i}) SET n.q = i", &ids),
-            tight,
-        )
-        .await
-        .unwrap();
+        }
         // The control: an unbound label scan reads the whole table, which
         // the same allowance refuses.
         let scan = db
@@ -593,17 +607,14 @@ fn an_equality_bound_write_match_admits_index_candidates_under_staged_effects() 
         )
         .await
         .unwrap();
-        let fgdb::QueryResult::Rows { rows, .. } = db
-            .query(
-                &cx,
-                "MATCH (n:Source) WHERE n.q IS NOT NULL RETURN n.p AS p, n.q AS q ORDER BY p",
-                &GqlParameters::new(),
-                symbols,
-                policy(),
-            )
-            .unwrap()
-        else {
-            unreachable!("a read answers rows")
+        let read = |text: &str| {
+            let fgdb::QueryResult::Rows { rows, .. } = db
+                .query(&cx, text, &GqlParameters::new(), symbols, policy())
+                .unwrap()
+            else {
+                unreachable!("a read answers rows")
+            };
+            rows
         };
         let pair = |p: i64, q: i64| {
             vec![
@@ -612,15 +623,19 @@ fn an_equality_bound_write_match_admits_index_candidates_under_staged_effects() 
             ]
         };
         assert_eq!(
-            rows,
+            read("MATCH (n:Source) WHERE n.q < 4000 RETURN n.p AS p, n.q AS q ORDER BY p"),
             [
-                pair(5, 5),
-                pair(77, 77),
-                pair(300, 300),
+                pair(5, 50),
+                pair(77, 770),
+                pair(300, 3000),
                 pair(1000, -1),
                 pair(2000, -2)
             ]
         );
+        let batch = read("MATCH (n:Source) WHERE n.q >= 4000 RETURN n.p AS p, n.q AS q ORDER BY p");
+        assert_eq!(batch.len(), 60);
+        assert_eq!(batch[0], pair(401, 4010));
+        assert_eq!(batch[59], pair(460, 4600));
         // Two independent roots, each bound by its key, admit only their
         // own candidates, for a read and for a write's MATCH alike.
         let narrow = GqlQueryPolicy::new(100, 1_000, 5_000_000, 2_000_000);
