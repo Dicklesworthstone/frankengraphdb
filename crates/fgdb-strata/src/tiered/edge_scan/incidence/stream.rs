@@ -1,0 +1,164 @@
+//! Persistent incidence positions over the existing authenticated history merge.
+
+use super::*;
+
+/// A forward-only incident-edge stream in full-width EId order at one cut.
+///
+/// The first pull builds the same charged endpoint/block routing directory as
+/// independent incidence requests, then seeds one head per routed block. Later
+/// pulls retain those heads and advance the SAME history merge; they do not
+/// rebuild the routed heap for every returned edge. Refaults filter bounded
+/// position permutations but keep original row indices as property locators.
+/// All versions of a matching identity remain present until history resolution.
+///
+/// This retains merge heads and one bounded decoded block, not an adjacency
+/// result vector. Routing is dropped after seeding. Initial routing is resident,
+/// can scale with source
+/// endpoint/block pairs, and can refuse under the existing MemoryPool or work
+/// ceiling. This is not an optimal sequential-I/O or whole-database memory bound.
+///
+/// Returned edges and endpoints own independent reservations. An undirected
+/// self-loop appears once. Endpoints retain their stored orientation, even for
+/// an incoming request. Missing endpoints are errors, not absent matches.
+/// Close, any error, or dropping a POLLED pending pull releases private state
+/// and permanently fuses the stream. Earlier delivered rows cannot be retracted;
+/// successful completion requires exhausting the stream. An unpolled future
+/// performs no work and leaves the cursor usable. No durable resume/GC lease or
+/// capability grant is created by this owner-level storage API.
+pub struct BufferedEdgeIncidenceScan<'source, V: Vfs> {
+    driver: Option<Driver<'source, V>>,
+    state: Option<State>,
+    request: Incidence,
+    as_of: CommitSeq,
+    work: usize,
+}
+
+impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
+    /// Consume an active admitted source into an independently positioned
+    /// incidence stream. No routing or payload I/O occurs here. `after` is an
+    /// exclusive EId lower bound, not a numeric increment or a durable token;
+    /// zero and u128::MAX remain ordinary identities. The stream keeps the
+    /// source's selected cut and cumulative work allowance. An already closed,
+    /// failed or exhausted source stays terminal and cannot be revived.
+    pub fn into_incidence_scan(
+        mut self,
+        endpoint: VId,
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+        after: Option<EId>,
+    ) -> BufferedEdgeIncidenceScan<'source, V> {
+        let active = self.state.take().is_some();
+        BufferedEdgeIncidenceScan {
+            as_of: self.as_of,
+            work: self.work.used,
+            request: Incidence { endpoint, relation, direction, after },
+            state: None,
+            driver: active.then_some(Driver { root: self, routes: None }),
+        }
+    }
+}
+
+impl<V: Vfs> core::fmt::Debug for BufferedEdgeIncidenceScan<'_, V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BufferedEdgeIncidenceScan")
+            .field("snapshot", &self.as_of)
+            .field("finished", &self.is_finished())
+            .field("work", &self.work)
+            .field("request", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
+    pub const fn snapshot_seq(&self) -> CommitSeq {
+        self.as_of
+    }
+
+    pub const fn work_used(&self) -> usize {
+        self.work
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.driver.is_none()
+    }
+
+    pub fn close(&mut self) {
+        self.state = None;
+        self.driver = None;
+    }
+
+    /// Pull one complete historical identity and resolve its visible endpoints.
+    /// An invisible identity has `row: None` but is still admitted once through
+    /// Identity; it is not EOF. No unrelated identity is reported merely because
+    /// it shares a routed block. Work and controls cover initial routing,
+    /// permutations, history merging and endpoint reads cumulatively.
+    pub async fn next_candidate_with<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        // Both ownership roots move into the pending future before its first
+        // await. A cancelled future cannot leave heads without their source.
+        let mut state = self.state.take();
+        let request = self.request;
+        let used = &mut self.work;
+        let result = async {
+            let mut observe = |event| {
+                observe(event)?;
+                if event == BufferedEdgeScanEvent::Work {
+                    *used = used.saturating_add(1);
+                }
+                Ok(())
+            };
+            if state.is_none() {
+                state = Some(driver.prepare_incident(cx, request, true, &mut observe).await?);
+                // Successor heads are now self-contained. This fixed request
+                // never needs the complete endpoint/block directory again.
+                driver.routes = None;
+            }
+            let state = state.as_mut().expect("complete incidence heads");
+            let Some(candidate) = driver.root.advance(state, cx, &mut observe).await? else {
+                return Ok(None);
+            };
+            driver.root.resolve_endpoints(cx, candidate, request.relation, &mut observe)
+                .await.map(Some)
+        }.await;
+        self.work = driver.root.work.used;
+        if matches!(result, Ok(Some(_)))
+            && state.as_ref().is_some_and(|state| !state.heads.is_empty())
+        {
+            self.state = state;
+            self.driver = Some(driver);
+        }
+        result
+    }
+
+    /// Demand one visible edge with its same-cut endpoints, skipping invisible
+    /// historical candidates without buffering a neighborhood. Callers retaining
+    /// multiple outputs also retain and pay their independent reservations.
+    pub async fn next(
+        &mut self,
+        cx: &QueryCx,
+    ) -> Result<Option<BufferedEdgeEndpoints>, BufferedReadError> {
+        loop {
+            match self.next_candidate_with(
+                cx, &mut |_| Ok::<_, core::convert::Infallible>(()),
+            ).await {
+                Ok(Some(candidate)) => {
+                    if let Some(row) = candidate.row {
+                        return Ok(Some(row));
+                    }
+                }
+                Ok(None) => return Ok(None),
+                Err(BufferedScanError::Read(error)) => return Err(error),
+                Err(BufferedScanError::Control(never)) => match never {},
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

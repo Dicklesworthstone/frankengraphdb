@@ -7,6 +7,9 @@ use fgdb_types::VId;
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
+mod stream;
+pub use stream::BufferedEdgeIncidenceScan;
+
 /// Stored incidence direction, independent of a query language's operator IR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferedEdgeDirection {
@@ -101,14 +104,14 @@ impl Routes {
 }
 
 #[derive(Clone, Copy)]
-struct Incidence {
+pub(super) struct Incidence {
     endpoint: VId,
     relation: Option<RelationId>,
     direction: BufferedEdgeDirection,
     after: Option<EId>,
 }
 impl Incidence {
-    fn matches(self, entry: &AdjacencyEntry) -> bool {
+    pub(super) fn matches(self, entry: &AdjacencyEntry) -> bool {
         self.relation.is_none_or(|r| r == entry.relation)
             && self.direction.matches(entry, self.endpoint)
     }
@@ -296,6 +299,29 @@ impl<V: Vfs> Driver<'_, V> {
         request: Incidence,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate<BufferedEdgeEndpoints>>, BufferedScanError<C>> {
+        let mut state = self.prepare_incident(cx, request, false, observe).await?;
+        // The admission validator fixes each EId's endpoints and relation.
+        // Therefore routing includes EVERY version/restatement of this EId;
+        // native advance sees the same creation/publication order as root scan.
+        let candidate = self.root.advance(&mut state, cx, observe).await?;
+        drop(state);
+        match candidate {
+            Some(candidate) => self
+                .root
+                .resolve_endpoints(cx, candidate, request.relation, observe)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn prepare_incident<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        request: Incidence,
+        retained: bool,
+        observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
+    ) -> Result<State, BufferedScanError<C>> {
         self.build_routes(cx, observe).await?;
         // Only routed blocks receive heads; grow their capacity under a charge
         // before heap insertion. Root heads and their position stay unchanged.
@@ -303,6 +329,7 @@ impl<V: Vfs> Driver<'_, V> {
             heads: Vec::new(),
             active: None,
             initialized: true,
+            incidence: retained.then_some(request),
             _head_charge: self.root.partition.reserve_scan_bytes(cx, 1024)?,
         };
         let mut after_block = None;
@@ -368,19 +395,7 @@ impl<V: Vfs> Driver<'_, V> {
                 })?;
             }
         }
-        // The admission validator fixes each EId's endpoints and relation.
-        // Therefore routing includes EVERY version/restatement of this EId;
-        // native advance sees the same creation/publication order as root scan.
-        let candidate = self.root.advance(&mut state, cx, observe).await?;
-        drop(state);
-        match candidate {
-            Some(candidate) => self
-                .root
-                .resolve_endpoints(cx, candidate, request.relation, observe)
-                .await
-                .map(Some),
-            None => Ok(None),
-        }
+        Ok(state)
     }
 }
 

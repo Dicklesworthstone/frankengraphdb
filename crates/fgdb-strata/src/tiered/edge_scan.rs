@@ -19,7 +19,7 @@ use fgdb_types::{CommitSeq, EId, QueryCx};
 use std::cmp::Reverse;
 
 mod incidence;
-pub use incidence::{BufferedEdgeDirection, BufferedEdgeJoinScan};
+pub use incidence::{BufferedEdgeDirection, BufferedEdgeIncidenceScan, BufferedEdgeJoinScan};
 
 /// Controls precede work and candidate history resolution. Identity is emitted
 /// exactly once per EId, including an identity invisible at the selected cut.
@@ -109,6 +109,9 @@ struct State {
     heads: Vec<Reverse<Head>>,
     active: Option<ActiveBlock>,
     initialized: bool,
+    // A retained incidence merge filters each refault's position permutation,
+    // never its property locators or the versions of a matching identity.
+    incidence: Option<incidence::Incidence>,
     _head_charge: MemoryCharge,
 }
 
@@ -178,6 +181,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 heads,
                 active: None,
                 initialized: false,
+                incidence: None,
                 _head_charge: charge,
             }),
             work: EdgeScanWork { used: 0, limit },
@@ -238,6 +242,9 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         }
         for (at, row) in image.0.iter().enumerate() {
             self.work.step(cx, observe)?;
+            if state.incidence.is_some_and(|request| !request.matches(row)) {
+                continue;
+            }
             order.push((row.eid, row.created_at, at));
         }
         sort(&mut order, &mut || self.work.step(cx, observe))?;
