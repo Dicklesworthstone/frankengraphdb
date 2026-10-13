@@ -929,6 +929,8 @@ impl<'a> Parser<'a> {
                     // cells. Nothing after its AS may request another one.
                     unwind = true;
                 }
+                // `ON MATCH` is a later MERGE's clause, not a new MATCH: its
+                // right-hand sides read the carried row too (fgdb-cpny9).
                 TokenKind::Word(word)
                     if !unwind
                         && depth == 0
