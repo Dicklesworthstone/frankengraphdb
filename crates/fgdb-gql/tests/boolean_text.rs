@@ -543,12 +543,9 @@ fn a_label_test_value_is_label_membership_or_type_equality() {
             "MATCH (a) RETURN (a:L) AS result",
             "MATCH (a) RETURN ('L' IN labels(a)) AS result",
         ),
-        // Spelled with parentheses: an unparenthesized `x IN labels(a) AND
-        // ...` lets the IN's list operand swallow the AND, a separate
-        // pre-existing parser defect (fgdb-klah2).
         (
             "MATCH (a) RETURN a:L:M AS result",
-            "MATCH (a) RETURN ('L' IN labels(a)) AND ('M' IN labels(a)) AS result",
+            "MATCH (a) RETURN 'L' IN labels(a) AND 'M' IN labels(a) AS result",
         ),
         (
             "MATCH (a)-[r:R]->(b) RETURN r, r:R AS result",
@@ -577,6 +574,61 @@ fn a_label_test_value_is_label_membership_or_type_equality() {
         )
         .is_err()
     );
+}
+
+/// openCypher binds IN tighter than comparisons, AND, OR and XOR, and looser
+/// than `+` (TCK Precedence3 [4]-[6]). The list operand of an IN therefore
+/// ends before a following Boolean operator even when it is a graph function,
+/// a name or a parameter: each unparenthesized spelling is its parenthesized
+/// one (fgdb-klah2). The list used to swallow the rest of the conjunction.
+#[test]
+fn in_ends_its_list_operand_before_boolean_operators() {
+    let template = |text: &str| {
+        fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .canonical_template_bytes()
+    };
+    for (bare, grouped) in [
+        (
+            "MATCH (a) RETURN 'L' IN labels(a) AND 'M' IN labels(a) AS r",
+            "MATCH (a) RETURN ('L' IN labels(a)) AND ('M' IN labels(a)) AS r",
+        ),
+        (
+            "MATCH (a) RETURN 'L' IN labels(a) OR 'M' IN labels(a) AS r",
+            "MATCH (a) RETURN ('L' IN labels(a)) OR ('M' IN labels(a)) AS r",
+        ),
+        (
+            "MATCH (a) RETURN 'L' IN labels(a) AND a.n = 1 AS r",
+            "MATCH (a) RETURN ('L' IN labels(a)) AND a.n = 1 AS r",
+        ),
+        (
+            "MATCH (a) RETURN a.n = 1 AND 'L' IN labels(a) AND 'M' IN labels(a) AS r",
+            "MATCH (a) RETURN a.n = 1 AND ('L' IN labels(a)) AND ('M' IN labels(a)) AS r",
+        ),
+        (
+            "MATCH (a) RETURN 'n' IN keys(a) AND 'L' IN labels(a) AS r",
+            "MATCH (a) RETURN ('n' IN keys(a)) AND ('L' IN labels(a)) AS r",
+        ),
+        (
+            "MATCH (a) WITH a, labels(a) AS l RETURN 'L' IN l AND 'M' IN l AS r",
+            "MATCH (a) WITH a, labels(a) AS l RETURN ('L' IN l) AND ('M' IN l) AS r",
+        ),
+    ] {
+        assert_eq!(template(bare), template(grouped), "{bare}");
+        // The grouping is not vacuous: the conjunction is not one membership.
+        assert_ne!(
+            template(bare),
+            template("MATCH (a) RETURN 'L' IN labels(a) AS r"),
+            "{bare}"
+        );
+    }
+    // A lone membership and a literal list keep their reading.
+    for text in [
+        "MATCH (a) RETURN 'L' IN labels(a) AS r",
+        "MATCH (a) RETURN 1 IN [1] AND 2 IN [2] AS r",
+    ] {
+        template(text);
+    }
 }
 
 #[test]

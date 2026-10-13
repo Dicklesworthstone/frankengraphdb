@@ -241,6 +241,20 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// One operand at the concatenation level in a graph scope, with its let
+    /// slots: where `mutation_expression_with_lets` would read on through a
+    /// comparison, AND or OR.
+    pub(super) fn mutation_operand_with_lets(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+    ) -> Result<(Operand, Vec<ReadValueTemplate>), GraphMutationTextError> {
+        self.checked_expression_scoped(
+            &mut ExpressionColumns::Graph(columns),
+            ExpressionBoundary::Operand,
+            true,
+        )
+    }
+
     /// Add `value` as the next let slot of the expression being parsed and
     /// read it as an operand.
     fn let_slot(
@@ -398,6 +412,36 @@ impl<'a> Parser<'a> {
             return self.list_case_value(columns, nesting, at);
         }
         self.composite_value(columns, nesting, at)
+    }
+
+    /// The list operand of `IN`. openCypher binds IN tighter than comparisons,
+    /// AND, OR and XOR, so the operand ends at the concatenation level: in
+    /// `'L' IN labels(a) AND 'M' IN labels(a)` the first list is `labels(a)`,
+    /// not the conjunction after it (fgdb-klah2). A list column or list CASE
+    /// is already one operand.
+    fn membership_list(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        nesting: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        let row = match columns {
+            ExpressionColumns::Row(schema) => Some(*schema),
+            _ => None,
+        };
+        if let Some(column) = self.row_list_column(row)? {
+            self.advance()?;
+            return Ok(ReadValueTemplate::Column(column));
+        }
+        if self.list_case_follows(row)? {
+            return self.list_case_value(columns, nesting, at);
+        }
+        // Only the value read that starts here is bounded: it takes the flag
+        // on entry, so nothing nested inside the operand inherits it.
+        self.membership_list = true;
+        let list = self.composite_value(columns, nesting, at);
+        self.membership_list = false;
+        list
     }
 
     /// One condition or result of a list CASE: a lone list operand read as
@@ -605,7 +649,7 @@ impl<'a> Parser<'a> {
             self.list_operand_value(columns, nesting, at)?
         };
         let (value, negate) = if self.take_word("IN")? {
-            let list = self.list_operand_value(columns, nesting, at)?;
+            let list = self.membership_list(columns, nesting, at)?;
             let value = ReadValueTemplate::In {
                 value: Box::new(left),
                 list: Box::new(list),
@@ -618,7 +662,7 @@ impl<'a> Parser<'a> {
             // `[1, 2] = [3, 4] IN l` compares with the membership
             // (openCypher Precedence3 [6]).
             while self.take_word("IN")? {
-                let list = self.list_operand_value(columns, nesting, at)?;
+                let list = self.membership_list(columns, nesting, at)?;
                 right = ReadValueTemplate::In {
                     value: Box::new(right),
                     list: Box::new(list),
@@ -731,6 +775,19 @@ impl<'a> Parser<'a> {
         self.checked_expression_scoped(
             &mut ExpressionColumns::Row(columns),
             ExpressionBoundary::Whole,
+            true,
+        )
+    }
+
+    /// One operand at the concatenation level in a row scope, with its let
+    /// slots (mutation_operand_with_lets).
+    pub(super) fn row_operand_with_lets(
+        &mut self,
+        columns: &[(Name<'a>, crate::GraphSetColumnType)],
+    ) -> Result<(Operand, Vec<ReadValueTemplate>), GraphMutationTextError> {
+        self.checked_expression_scoped(
+            &mut ExpressionColumns::Row(columns),
+            ExpressionBoundary::Operand,
             true,
         )
     }

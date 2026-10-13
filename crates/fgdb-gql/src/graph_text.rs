@@ -683,6 +683,10 @@ struct Parser<'a> {
     /// began. A composite operand continues from it plus the scalar depth,
     /// so alternating values and expressions stay within one nesting bound.
     let_base: usize,
+    /// Set for exactly the next value read: it is the list operand of `IN`,
+    /// which ends at the concatenation level, so a following AND, OR or
+    /// comparison stays outside it (fgdb-klah2).
+    membership_list: bool,
     /// The repeatable items of the grouping or DISTINCT WITH whose own ORDER
     /// BY is next: a repeat of one item's expression there is that output
     /// (openCypher: `WITH a.name AS name, count(*) AS c ORDER BY a.name`).
@@ -775,6 +779,7 @@ impl<'a> Parser<'a> {
             elements: Vec::new(),
             lets: None,
             let_base: 0,
+            membership_list: false,
             projected_sources: None,
             random_sites: 0,
             aggregate_argument: false,

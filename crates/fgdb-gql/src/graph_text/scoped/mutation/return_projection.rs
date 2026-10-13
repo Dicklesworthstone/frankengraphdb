@@ -1480,19 +1480,23 @@ impl<'a> Parser<'a> {
         self.read_value_inner(inputs, schema, &mut None, depth, false)
     }
 
-    /// A whole scalar expression in a graph or row scope. Its composite
-    /// operands wrap it as a Let.
+    /// A scalar expression in a graph or row scope: whole, or with `operand`
+    /// one operand at the concatenation level (the list of an `IN`). Its
+    /// composite operands wrap it as a Let.
     fn read_scalar_value(
         &mut self,
         inputs: Option<&mut Vec<Projection<'a>>>,
         schema: &[(Name<'a>, GraphSetColumnType)],
         at: usize,
         depth: usize,
+        operand: bool,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let base = core::mem::replace(&mut self.let_base, depth);
-        let parsed = match inputs {
-            Some(columns) => self.mutation_expression_with_lets(columns),
-            None => self.row_expression_with_lets(schema),
+        let parsed = match (inputs, operand) {
+            (Some(columns), false) => self.mutation_expression_with_lets(columns),
+            (Some(columns), true) => self.mutation_operand_with_lets(columns),
+            (None, false) => self.row_expression_with_lets(schema),
+            (None, true) => self.row_operand_with_lets(schema),
         };
         self.let_base = base;
         let (operand, slots) = parsed.map_err(expression_error)?;
@@ -1790,6 +1794,8 @@ impl<'a> Parser<'a> {
         operators: bool,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let at = self.current.at;
+        // Taken here, so only this read is the bounded IN list (fgdb-klah2).
+        let membership_list = core::mem::take(&mut self.membership_list);
         if depth > 64 {
             return Err(GraphSetTextError {
                 offset: at,
@@ -1808,7 +1814,7 @@ impl<'a> Parser<'a> {
                     TokenKind::Word(word) if word.eq_ignore_ascii_case("IN"))
         };
         let mut value = if scalar {
-            self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth)?
+            self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth, false)?
         } else if comprehension {
             // openCypher `[x IN list WHERE p | e]` (fgdb-20foe).
             self.advance()?;
@@ -2120,10 +2126,10 @@ impl<'a> Parser<'a> {
                 let variable = self.any_variable()?;
                 ReadValueTemplate::Column(self.mutation_projection(columns, variable, None)?)
             } else {
-                self.read_scalar_value(Some(columns), schema, at, depth)?
+                self.read_scalar_value(Some(columns), schema, at, depth, membership_list)?
             }
         } else {
-            self.read_scalar_value(None, schema, at, depth)?
+            self.read_scalar_value(None, schema, at, depth, membership_list)?
         };
         // A lone element is the element's whole value, not a scalar program,
         // so a list, vertex or path element passes through intact.
@@ -2509,7 +2515,7 @@ impl<'a> Parser<'a> {
                 let (operand, slots) = parsed.map_err(expression_error)?;
                 self.scalar_let_value(operand, slots, at)?
             } else {
-                self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth + 1)?
+                self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth + 1, false)?
             })
         } else {
             None
