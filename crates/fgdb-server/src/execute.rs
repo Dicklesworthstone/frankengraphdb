@@ -436,11 +436,15 @@ async fn write_inner(
             unix_millis,
         )
         .map_err(|error| write_refusal(&error))?;
-    let (receipt, completion) = session
-        .query(&query, &statement.statement, &parameters)
+    // This path delivers only completion metadata, never identity receipts.
+    // Requesting query() would charge a signed row for each affected identity
+    // before discarding those receipts below, refusing useful max_rows=0
+    // ingestion grants. Keep RETURN on its separately admitted result path.
+    let (stats, completion) = session
+        .query_stats(&query, &statement.statement, &parameters)
         .await
         .map_err(|error| write_refusal(&error))?;
-    let statements = receipt.stats().completed_statements as u64;
+    let statements = stats.completed_statements as u64;
     drop(session);
     drop(guard);
     let outcome = match completion {
