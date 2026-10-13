@@ -517,7 +517,7 @@ impl WriteTxn {
         cx: &fgdb_types::QueryCx,
         merge: &fgdb_gql::PreparedGraphEdgeMerge,
         policy: fgdb_gql::GraphEdgeMergePolicy,
-        mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+        allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> Result<
         (
             fgdb_gql::GraphEdgeMergeStats,
