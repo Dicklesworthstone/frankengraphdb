@@ -58,7 +58,41 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphEdgeUpsertQuery,
         policy: GraphEdgeUpsertPolicy,
+        clock: impl FnMut() -> u64,
+    ) -> Result<Receipt, Fault> {
+        self.execute_graph_edge_upserts_query_authorized_checked(
+            txn_cx, query_cx, commit_cx, authority, token, branch, query, policy, clock,
+            |_, _| Ok(()),
+        ).await
+    }
+
+    /// Admit the complete native result under the same live permit BEFORE
+    /// the sole transaction completion. The trusted callback runs exactly
+    /// once, including for zero rows, after projection and signed row admission.
+    /// It must retain output privately until completion; it cannot replace
+    /// rows, obtain the database or publish a successful prefix.
+    ///
+    /// The meter polls cancellation and charges additional host work to the
+    /// SAME signed permit, including expiry and retirement. Encoding refusal,
+    /// quota exhaustion or unwind drops all private effects and output. No
+    /// fallible host processing follows committed/unknown completion. The
+    /// ordinary entrypoint uses a no-op and preserves its original accounting.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_edge_upserts_query_authorized_checked(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphEdgeUpsertQuery,
+        policy: GraphEdgeUpsertPolicy,
         mut clock: impl FnMut() -> u64,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
     ) -> Result<Receipt, Fault> {
         let refusal = |error| source(WriteTxnError::Authorization(error));
         if authority.namespace() != self.keys.namespace {
@@ -132,6 +166,12 @@ impl<V: Vfs + Clone> Database<V> {
             })?;
             let rows = u64::try_from(result.value.len()).map_err(|_| refusal(Error::TooLarge))?;
             execution.permit.charge_rows_at((execution.clock)(), rows).map_err(refusal)?;
+            query_cx.with_restriction(|| {
+                admit(&result.value, &mut |work| {
+                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                    execution.work(work)
+                })
+            }).map_err(source)?;
             let completion = workspace.transaction()
                 .complete_controlled(self, commit_cx, None, false, || {
                     query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
