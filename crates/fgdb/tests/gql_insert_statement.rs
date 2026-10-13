@@ -979,7 +979,7 @@ fn vertex_merge_steps_run_over_a_leading_unwind_and_return_rows() {
             )
             .await
             .unwrap();
-            assert_eq!(rows(counted), [vec![QueryValue::Count(4)]]);
+            assert_eq!(rows(counted), [vec![int(4)]]);
             assert_eq!(count(&db, PERSON), 4);
         }
         // Equal values share one vertex; RETURN reads the row and the vertex.
@@ -1084,7 +1084,12 @@ fn a_relationship_merge_step_hands_its_rows_to_the_next_write() {
         let QueryResult::Rows { rows, .. } = counted else {
             unreachable!("a chain with RETURN answers rows")
         };
-        assert_eq!(rows, [vec![QueryValue::Count(1)]]);
+        assert_eq!(
+            rows,
+            [vec![QueryValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Int(1)
+            ))]]
+        );
         assert_eq!(db.vertices().unwrap().len(), 3);
         assert_eq!(db.edges().unwrap().len(), 2);
         // Create3 [12]: unlabeled MERGEs bind the one vertex, the MERGE
