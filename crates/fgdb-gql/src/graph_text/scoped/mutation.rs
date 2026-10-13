@@ -1490,6 +1490,7 @@ mod graph_function_tests {
         checkpoint: impl FnMut() -> Result<(), ()>,
     ) -> Result<crate::GraphMutationBatch, crate::GqlQueryError<crate::GraphMutationError<()>, ()>>
     {
+        // Property sources hand stored values (fgdb-k3nub).
         let values: Vec<fgdb_types::CanonicalPropertyValue> =
             values.iter().cloned().map(Into::into).collect();
         mutation.execute_governed(
@@ -1555,7 +1556,7 @@ mod graph_function_tests {
                     &[crate::GraphMutationIntent::Property {
                         vertex: fgdb_types::VId(1),
                         key: PropertyKeyId(1),
-                        value: Some(expected.clone()),
+                        value: Some(expected.clone().into()),
                     }],
                     "{text}"
                 );
@@ -1583,7 +1584,7 @@ mod graph_function_tests {
         .unwrap();
         let [
             crate::GraphMutationIntent::Property {
-                value: Some(CanonicalScalar::Date(date)),
+                value: Some(fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Date(date))),
                 ..
             },
         ] = batch.intents()
@@ -1625,7 +1626,7 @@ mod graph_function_tests {
                 &[crate::GraphMutationIntent::Property {
                     vertex: fgdb_types::VId(1),
                     key: PropertyKeyId(1),
-                    value: Some(CanonicalScalar::Int(7 + extra)),
+                    value: Some(CanonicalScalar::Int(7 + extra).into()),
                 }]
             );
         }

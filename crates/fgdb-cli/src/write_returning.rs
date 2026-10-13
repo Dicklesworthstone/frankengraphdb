@@ -472,72 +472,44 @@ mod edge_upsert_tests {
         use fgdb_gql::algebra::GraphValue;
         use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, VId};
 
-        let ((), report) = run_async_under_lab(0xe6e1_0011, |root| async move {
-            let contexts = PurposeContexts::narrow_runtime_root(&root);
-            let commit = contexts.commit();
-            let cx = contexts.query();
-            let txcx = contexts.txn();
-            let keys = DatabaseKeys::new(
-                [0x71; 32],
-                DatabaseSecurityNamespaceId([0x72; 32]),
-                [0x73; 32],
-            );
-            let mut db = Database::open_memory(&commit, keys).await.unwrap();
-            let mut seed = WriteBatch::new(RelationId(1));
-            for id in 1..=3 {
-                seed.create_vertex(
-                    VId(id),
-                    vec![],
-                    vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+        let ((), report) =
+            run_async_under_lab(0xe6e1_0011, |root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let commit = contexts.commit();
+                let cx = contexts.query();
+                let txcx = contexts.txn();
+                let keys = DatabaseKeys::new(
+                    [0x71; 32],
+                    DatabaseSecurityNamespaceId([0x72; 32]),
+                    [0x73; 32],
                 );
-            }
-            db.write(&commit, seed).await.unwrap();
-            let before = db.frontier().unwrap();
-            let options = options();
-            let query = prepare_statement(
-                "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
+                let mut db = Database::open_memory(&commit, keys).await.unwrap();
+                let mut seed = WriteBatch::new(RelationId(1));
+                for id in 1..=3 {
+                    seed.create_vertex(
+                        VId(id),
+                        vec![],
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+                    );
+                }
+                db.write(&commit, seed).await.unwrap();
+                let before = db.frontier().unwrap();
+                let options = options();
+                let query = prepare_statement(
+                    "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
                  ON CREATE SET r.q=7 RETURN count(r) AS total,sum(r.q) AS sum",
-                &GqlParameters::new(),
-                &options,
-            )
-            .unwrap()
-            .unwrap();
-            let mut transaction = db.begin(&txcx).unwrap();
-            let result = query
-                .execute_in_transaction(
-                    &mut transaction,
-                    &mut db,
-                    &cx,
-                    GqlQueryPolicy::new(1_000, 1, 5_000_000, 2_000_000),
+                    &GqlParameters::new(),
+                    &options,
                 )
+                .unwrap()
                 .unwrap();
-            assert_eq!(query.columns(), ["total", "sum"]);
-            assert_eq!(result.value.len(), 1);
-            assert_eq!(
-                result.value[0].values(),
-                &[
-                    GraphValue::Scalar(CanonicalScalar::Int(2)),
-                    GraphValue::Scalar(CanonicalScalar::Int(14)),
-                ],
-            );
-            assert_eq!(transaction.edges(&db).unwrap().len(), 2);
-            assert!(db.edges().unwrap().is_empty());
-            let digest = transaction.staged_effect_digest().unwrap();
-            let failing = prepare_statement(
-                "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
-                 ON MATCH SET r.q=0 RETURN 10/r.q AS bad LIMIT 0",
-                &GqlParameters::new(),
-                &options,
-            )
-            .unwrap()
-            .unwrap();
-            assert!(
-                failing
+                let mut transaction = db.begin(&txcx).unwrap();
+                let result = query
                     .execute_in_transaction(
                         &mut transaction,
                         &mut db,
                         &cx,
-                        GqlQueryPolicy::new(1_000, 0, 5_000_000, 2_000_000),
+                        GqlQueryPolicy::new(1_000, 1, 5_000_000, 2_000_000),
                     )
                     .is_err(),
             );

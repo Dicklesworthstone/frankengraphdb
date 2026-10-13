@@ -3,8 +3,7 @@
 use super::*;
 use crate::mutation_text::{EdgeMergeReturnTemplate, EdgeMergeTextInput, WriteReturnGroupTemplate};
 use crate::set_text::{
-    BoundSetTextInput, ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate,
-    ReadValueTemplate,
+    BoundSetTextInput, ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
 };
 use crate::{
     GraphEdgeMergeBinding, GraphEdgeMergeTextError, GraphEdgeMergeTextErrorKind,
@@ -1088,7 +1087,8 @@ impl<'a> Parser<'a> {
             returning.count = count;
         }
         if head {
-            returning.tail = Some(self.edge_merge_tail(&mut returning, columns, items.output)?);
+            returning.tail =
+                Some(self.edge_merge_tail(&mut returning, columns, items.output, row.is_some())?);
         } else {
             returning.output = items.output;
         }
@@ -1099,11 +1099,14 @@ impl<'a> Parser<'a> {
     /// post-write property binding. A direct grouping key retains that same
     /// identity; its fields can be hidden keys without splitting its group.
     /// Aggregate representatives and dropped identities never acquire reads.
+    /// Over a WITH row (`row`), an input binding is a row column, read after
+    /// the statement.
     fn edge_merge_tail(
         &mut self,
         returning: &mut ParsedEdgeReturn<'a>,
         columns: &mut Vec<Projection<'a>>,
         mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
+        row: bool,
     ) -> Result<Vec<ReadStageTemplate>, GraphEdgeMergeTextError> {
         let visible = schema.len();
         let mut reads = Vec::new();
@@ -1128,12 +1131,15 @@ impl<'a> Parser<'a> {
             let property = match binding {
                 EdgeBinding::Edge => EdgeBinding::Property(key),
                 EdgeBinding::Endpoint { start } => EdgeBinding::EndpointProperty { start, key },
+                EdgeBinding::Input(column) if row => EdgeBinding::InputProperty { column, key },
                 EdgeBinding::Input(input) => {
                     let variable = columns[input].variable;
                     let column = self.mutation_projection(columns, variable, Some(key))?;
                     EdgeBinding::Input(column)
                 }
-                EdgeBinding::Property(_) | EdgeBinding::EndpointProperty { .. } => continue,
+                EdgeBinding::Property(_)
+                | EdgeBinding::EndpointProperty { .. }
+                | EdgeBinding::InputProperty { .. } => continue,
             };
             let column = returning.column(property, key, GraphSetColumnType::Scalar)?;
             let column = match &mut returning.grouping {

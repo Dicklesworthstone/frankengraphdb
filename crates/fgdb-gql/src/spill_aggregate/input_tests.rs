@@ -11,7 +11,7 @@ use crate::{
     PreparedGraphPipelineAggregateText,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CommitSeq, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
