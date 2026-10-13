@@ -74,11 +74,12 @@ impl PreparedGraphSet {
         fn shape(query: &PreparedGraphSet) -> (bool, bool) {
             let (nested_window, positional_source) = match &query.node {
                 SetNode::Pattern(_) => (false, false),
-                // This new row-domain reducer has no admitted standing
-                // derivative yet. A window cannot make it transparent.
-                // Neither has a procedure call's relation, nor a write's
-                // owned head rows.
-                SetNode::Aggregate(_) | SetNode::ProcedureCall(_) | SetNode::Owned => (true, true),
+                // Grouping completes and canonicalizes its output. Input
+                // sequence requirements belong to the separately compiled
+                // child; an outer window cannot erase that child admission.
+                SetNode::Aggregate(_) => (false, false),
+                // Neither a procedure nor a write-owned head has a derivative.
+                SetNode::ProcedureCall(_) | SetNode::Owned => (true, true),
                 // Hidden-key output preserves a sequence no longer expressible
                 // by its visible cells. An inherited canonical window would
                 // select different occurrences; the ranked proof refuses it.
@@ -127,6 +128,21 @@ impl PreparedGraphSet {
             return None;
         }
         self.split_incremental_window()
+    }
+
+    /// Borrow one intermediate group over its COMPLETE relational input.
+    /// The host must independently admit that input and the native group
+    /// kernel, then retain the checked ordinary-row derivative. This accessor
+    /// never exposes an executable first-leaf substitute. Every outer order
+    /// or page, including LIMIT zero, must be peeled by its own window owner.
+    pub fn incremental_group(&self) -> Option<&PreparedGraphSetAggregate> {
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
+        match &self.node {
+            SetNode::Aggregate(summary) => Some(summary),
+            _ => None,
+        }
     }
 
     /// Borrow a complete bound pattern leaf without erasing a relational page

@@ -43,6 +43,25 @@ impl core::fmt::Debug for PreparedGraphSetAggregate {
     }
 }
 
+impl GraphAggregateRow {
+    /// Copy this exact aggregate result into the ordinary relational row domain.
+    /// Keys precede values. This is the SAME checked conversion used by native
+    /// intermediate grouping and external grouping, not another value evaluator.
+    /// Counts and sums must fit Int64; exact averages refuse rather than round.
+    /// Canonical values and payloads retain their domains and governed copies.
+    ///
+    /// A maintained consumer must validate the complete expected row schema,
+    /// convert every changed group before downstream selection, and publish the
+    /// converted derivative atomically with its upstream group state. This call
+    /// neither scans a source nor spends a delivered-result-row allowance.
+    pub fn to_value_row_with_control<E>(
+        &self,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<GraphValueRow, SpillSetAggregateRowError<E>> {
+        convert_row(self, control)
+    }
+}
+
 impl PreparedGraphSetAggregate {
     /// Keep an already checked relational aggregate in its source-aware owner.
     /// The complete input and all result clauses are retained unchanged. Plain
