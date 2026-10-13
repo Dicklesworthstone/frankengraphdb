@@ -513,7 +513,7 @@ impl PreparedGraphEdgeMergeText {
             Self {
                 input: EdgeMergeTextInput::Row {
                     statement: statement.to_owned(),
-                    input,
+                    input: Box::new(input),
                 },
                 relation: found,
                 source,

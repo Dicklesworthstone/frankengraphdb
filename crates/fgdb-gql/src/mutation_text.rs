@@ -401,7 +401,7 @@ pub(crate) enum EdgeMergeTextInput {
     /// relation whose vertex columns are the endpoints.
     Row {
         statement: String,
-        input: crate::set_text::BoundSetTextInput,
+        input: Box<crate::set_text::BoundSetTextInput>,
     },
 }
 
