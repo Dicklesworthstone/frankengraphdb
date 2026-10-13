@@ -39,6 +39,15 @@ pub enum GraphWriteStepReceipt {
     EdgeUpsert {
         outcome: GraphEdgeMergeOutcome,
     },
+    /// ON/SET outcomes in MATCH occurrence order, then matched identity order.
+    /// Unlike plain MERGE, repeated endpoint pairs and identities are retained:
+    /// each represents another execution of the selected branch and actions.
+    /// `created` contains only creation outcomes, in that same order. Native
+    /// zero/one-outcome steps retain `EdgeUpsert`, including NoInput.
+    EdgeUpsertBatch {
+        outcomes: Vec<GraphEdgeMergeOutcome>,
+        created: Vec<EId>,
+    },
     /// Distinct non-detaching DELETE targets, sorted within each identity domain.
     Delete {
         targets: Vec<VId>,
@@ -56,7 +65,8 @@ impl GraphWriteStepReceipt {
             | Self::VertexUpsert { .. }
             | Self::EdgeMerge { .. }
             | Self::EdgeMergeBatch { .. }
-            | Self::EdgeUpsert { .. } => None,
+            | Self::EdgeUpsert { .. }
+            | Self::EdgeUpsertBatch { .. } => None,
         }
     }
 
@@ -108,6 +118,7 @@ impl GraphWriteStepReceipt {
             | Self::EdgeMerge { .. }
             | Self::EdgeMergeBatch { .. }
             | Self::EdgeUpsert { .. }
+            | Self::EdgeUpsertBatch { .. }
             | Self::Delete { .. } => None,
         }
     }
@@ -116,7 +127,9 @@ impl GraphWriteStepReceipt {
     pub fn created_edges(&self) -> Option<&[EId]> {
         match self {
             Self::Insert { edges, .. } => Some(edges),
-            Self::EdgeMergeBatch { created, .. } => Some(created),
+            Self::EdgeMergeBatch { created, .. } | Self::EdgeUpsertBatch { created, .. } => {
+                Some(created)
+            }
             Self::EdgeMerge {
                 outcome: GraphEdgeMergeOutcome::Created(edge),
             }
@@ -140,13 +153,14 @@ impl GraphWriteStepReceipt {
             | Self::EdgeMerge { .. }
             | Self::EdgeMergeBatch { .. }
             | Self::EdgeUpsert { .. }
+            | Self::EdgeUpsertBatch { .. }
             | Self::Delete { .. } => None,
         }
     }
 
     /// Some(NoInput) distinguishes a relationship step with no endpoints from
     /// a different statement kind; Some(Matched(_)) never claims a creation.
-    /// A multi-pair MERGE returns None; inspect `merged_edges` for its results.
+    /// A bulk receipt returns None; inspect `merged_edges` for its results.
     #[must_use]
     pub const fn merged_edge(&self) -> Option<GraphEdgeMergeOutcome> {
         match self {
@@ -156,16 +170,20 @@ impl GraphWriteStepReceipt {
             | Self::VertexMerge { .. }
             | Self::VertexUpsert { .. }
             | Self::EdgeMergeBatch { .. }
+            | Self::EdgeUpsertBatch { .. }
             | Self::Delete { .. } => None,
         }
     }
 
-    /// Canonical pair outcomes of a multi-pair plain relationship MERGE.
-    /// Singular statements retain their existing `merged_edge` accessor.
+    /// Bulk relationship outcomes: canonical pair order for plain MERGE, or
+    /// occurrence order (including repeats) for ON/SET upserts. Singular
+    /// receipts retain their existing `merged_edge` accessor.
     #[must_use]
     pub fn merged_edges(&self) -> Option<&[GraphEdgeMergeOutcome]> {
         match self {
-            Self::EdgeMergeBatch { outcomes, .. } => Some(outcomes),
+            Self::EdgeMergeBatch { outcomes, .. } | Self::EdgeUpsertBatch { outcomes, .. } => {
+                Some(outcomes)
+            }
             _ => None,
         }
     }
@@ -207,6 +225,12 @@ impl core::fmt::Debug for GraphWriteStepReceipt {
             Self::EdgeUpsert { outcome } => f
                 .debug_struct("EdgeUpsert")
                 .field("outcome", outcome)
+                .finish(),
+            Self::EdgeUpsertBatch { outcomes, created } => f
+                .debug_struct("EdgeUpsertBatch")
+                .field("occurrences", &outcomes.len())
+                .field("created", &created.len())
+                .field("identities", &"[REDACTED]")
                 .finish(),
             Self::Delete { targets, edges } => f
                 .debug_struct("Delete")
@@ -429,5 +453,37 @@ mod tests {
             assert_ne!(step, mutation);
             assert_eq!(mutation.deleted_vertices(), None);
         }
+    }
+
+    #[test]
+    fn bulk_upsert_receipts_retain_repeated_occurrences_without_repeating_creations() {
+        let created = EId(u128::MAX);
+        let matched = EId(u128::MAX - 1);
+        let outcomes = vec![
+            GraphEdgeMergeOutcome::Created(created),
+            GraphEdgeMergeOutcome::Matched(matched),
+            GraphEdgeMergeOutcome::Matched(created),
+            GraphEdgeMergeOutcome::Matched(matched),
+        ];
+        let receipt = GraphWriteStepReceipt::EdgeUpsertBatch {
+            outcomes: outcomes.clone(),
+            created: vec![created],
+        };
+        assert_eq!(receipt.merged_edges(), Some(outcomes.as_slice()));
+        assert_eq!(receipt.created_edges(), Some(&[created][..]));
+        assert_eq!(receipt.merged_edge(), None);
+        assert_eq!(receipt.merged_vertex(), None);
+        assert_eq!(receipt.created_vertices(), None);
+        assert_eq!(receipt.mutation_targets(), None);
+        assert_eq!(receipt.mutation_edges(), None);
+        assert_ne!(receipt, GraphWriteStepReceipt::EdgeMergeBatch {
+            outcomes, created: vec![created],
+        });
+        let debug = format!("{receipt:?}");
+        assert!(debug.contains("EdgeUpsertBatch"));
+        assert!(debug.contains("occurrences: 4"));
+        assert!(debug.contains("created: 1"));
+        assert!(!debug.contains(&created.0.to_string()));
+        assert!(!debug.contains(&matched.0.to_string()));
     }
 }

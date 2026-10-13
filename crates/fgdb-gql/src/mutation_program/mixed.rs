@@ -2,6 +2,7 @@
 //! meter and existing per-statement kernels. The database adapter supplies the
 //! SAME private workspace rollback guard; no matcher, writer or commit lives here.
 
+mod edge_upsert_batch;
 mod merges;
 
 use super::*;
@@ -87,7 +88,8 @@ impl From<PreparedGraphDelete> for GraphWriteStatement {
 /// a plain edge MERGE requests Edge { row: pair_ordinal, edge: 0 } for each
 /// missing distinct endpoint pair, ordered canonically. Matched pairs retain
 /// their ordinal but never allocate, so requested row slots may have gaps.
-/// Singular edge upserts retain row zero; NoInput never calls the allocator.
+/// Bulk edge upserts use the original MATCH occurrence index. Explicit singular
+/// adapters retain row zero; NoInput never calls the allocator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphWriteIdentityRequest {
     pub statement: usize,
@@ -157,6 +159,13 @@ pub enum GraphWriteStepStats {
     VertexUpsert(GraphVertexUpsertStats),
     EdgeMerge(GraphEdgeMergeStats),
     EdgeUpsert(GraphEdgeUpsertStats),
+    /// Occurrence-preserving ON/SET execution. The host separately counts the
+    /// distinct relationships with actions; duplicate occurrences still spend
+    /// their complete action allowance, but do not invent distinct targets.
+    EdgeUpsertBatch {
+        stats: crate::GraphEdgeUpsertBatchStats,
+        target_edges: u64,
+    },
     Delete(GraphDeleteStats),
 }
 #[derive(Debug)]
@@ -486,6 +495,12 @@ impl PreparedGraphWriteProgram {
                     GraphWriteStepStats::EdgeUpsert(stats),
                 ) => {
                     meter.absorb_edge_upsert(statement, input, stats)?;
+                }
+                (
+                    GraphWriteStatement::EdgeUpsert(input),
+                    GraphWriteStepStats::EdgeUpsertBatch { stats, target_edges },
+                ) => {
+                    meter.absorb_edge_upsert_batch(statement, input, stats, target_edges)?;
                 }
                 (GraphWriteStatement::Delete(input), GraphWriteStepStats::Delete(stats)) => {
                     meter.absorb_delete(statement, input, stats)?;
