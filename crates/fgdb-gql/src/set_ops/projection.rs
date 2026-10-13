@@ -228,6 +228,14 @@ pub enum GraphValueFunction {
     /// later argument runs; all NULL is NULL. The scalar COALESCE keeps every
     /// all-scalar call.
     Coalesce,
+    /// openCypher `percentileDisc(x, p)` (fgdb-qbaex), applied after
+    /// aggregation to `[collect(x), p]`: the sorted numbers' element at index
+    /// ceil(p * n) - 1 (at least 0), Int or Float as collected. An empty
+    /// collection is NULL; p outside [0, 1] or a non-number is a typed error.
+    PercentileDisc,
+    /// openCypher `percentileCont(x, p)`: the linear interpolation at
+    /// p * (n - 1) between the neighbouring sorted numbers, always a Float.
+    PercentileCont,
 }
 
 impl GraphValueFunction {
@@ -239,6 +247,8 @@ impl GraphValueFunction {
             Self::Add => 3,
             Self::Subtract => 4,
             Self::Coalesce => 5,
+            Self::PercentileDisc => 6,
+            Self::PercentileCont => 7,
         }
     }
 
@@ -246,7 +256,11 @@ impl GraphValueFunction {
     pub(crate) const fn arity(self) -> Option<usize> {
         match self {
             Self::Reverse => Some(1),
-            Self::Split | Self::Add | Self::Subtract => Some(2),
+            Self::Split
+            | Self::Add
+            | Self::Subtract
+            | Self::PercentileDisc
+            | Self::PercentileCont => Some(2),
             Self::Coalesce => None,
         }
     }
@@ -938,6 +952,9 @@ fn admit(
                 | GraphValueFunction::Subtract
                 | GraphValueFunction::Coalesce => GraphSetColumnType::Any,
                 GraphValueFunction::Split => GraphSetColumnType::List,
+                GraphValueFunction::PercentileDisc | GraphValueFunction::PercentileCont => {
+                    GraphSetColumnType::Scalar
+                }
             }
         }
         // openCypher size(): a list's length or a text's character count
@@ -2755,7 +2772,143 @@ pub(crate) fn value_function<E>(
                 control,
             )
         }
+        GraphValueFunction::PercentileDisc | GraphValueFunction::PercentileCont => percentile(
+            function == GraphValueFunction::PercentileDisc,
+            argument,
+            column,
+            control,
+        ),
     }
+}
+
+/// openCypher percentileDisc and percentileCont over `[collected, p]`
+/// (fgdb-qbaex). p is checked first: NULL is NULL, and outside [0, 1] or not
+/// a number is a typed error whatever was collected. The numbers sort by exact
+/// numeric orderability, equal ones by canonical identity, so the answer never
+/// depends on the collection's order; NULL members are skipped and none left
+/// is NULL. The index and the interpolation use checked binary64 operations in
+/// Neo4j's order.
+fn percentile<E>(
+    discrete: bool,
+    argument: &GraphValue,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValue, ProjectionFailure<E>> {
+    use crate::GraphIntegerErrorKind as Kind;
+    use crate::algebra::OrderableNumber;
+    use fgdb_types::CanonicalF64;
+    let failure = |kind| ProjectionFailure::Arithmetic {
+        column,
+        error: GraphIntegerError {
+            instruction: 0,
+            kind,
+        },
+    };
+    let arithmetic = |_| failure(Kind::Overflow);
+    let Some([collected, p]) = argument
+        .as_list()
+        .and_then(|arguments| <&[GraphValue; 2]>::try_from(arguments).ok())
+    else {
+        return Err(failure(Kind::IncompatibleOperands));
+    };
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let p = match p {
+        GraphValue::Scalar(CanonicalScalar::Null) => {
+            control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+            return Ok(null);
+        }
+        GraphValue::Scalar(CanonicalScalar::Int(value)) if (0..=1).contains(value) => {
+            CanonicalF64::from_i64_rounded(*value)
+        }
+        GraphValue::Scalar(CanonicalScalar::Float(value)) if (0.0..=1.0).contains(&value.get()) => {
+            *value
+        }
+        GraphValue::Scalar(CanonicalScalar::Int(_) | CanonicalScalar::Float(_)) => {
+            return Err(failure(Kind::NumberOutOfRange));
+        }
+        _ => return Err(failure(Kind::IncompatibleOperands)),
+    };
+    let Some(members) = list_members(collected, control).map_err(ProjectionFailure::Control)?
+    else {
+        return Err(failure(Kind::IncompatibleOperands));
+    };
+    // Each number beside its binary64 value, which interpolation reads.
+    let mut numbers: Vec<(&CanonicalScalar, CanonicalF64)> = Vec::with_capacity(members.len());
+    for member in members.iter() {
+        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+        match member {
+            GraphValue::Scalar(CanonicalScalar::Null) => {}
+            GraphValue::Scalar(number @ CanonicalScalar::Int(value)) => {
+                numbers.push((number, CanonicalF64::from_i64_rounded(*value)));
+            }
+            GraphValue::Scalar(number @ CanonicalScalar::Float(value)) => {
+                numbers.push((number, *value));
+            }
+            _ => return Err(failure(Kind::IncompatibleOperands)),
+        }
+    }
+    let Some(last) = numbers.len().checked_sub(1) else {
+        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+        return Ok(null);
+    };
+    let mut comparisons = 0_u64;
+    numbers.sort_by(|(left, _), (right, _)| {
+        comparisons += 1;
+        match (
+            OrderableNumber::scalar(left),
+            OrderableNumber::scalar(right),
+        ) {
+            (Some(a), Some(b)) => a.cmp(b),
+            _ => core::cmp::Ordering::Equal,
+        }
+        .then_with(|| left.cmp(right))
+    });
+    for _ in 0..comparisons {
+        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+    }
+    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+    // The list bound keeps both counts far inside i64.
+    let count = CanonicalF64::from_i64_rounded(numbers.len() as i64);
+    if discrete {
+        // ceil(p * n) - 1, at least 0; p <= 1 keeps it at most n - 1.
+        let position = p
+            .checked_mul(count)
+            .and_then(CanonicalF64::checked_ceil)
+            .and_then(CanonicalF64::checked_to_i64_truncated)
+            .map_err(arithmetic)?;
+        let index = usize::try_from(position.saturating_sub(1))
+            .unwrap_or(0)
+            .min(last);
+        return Ok(GraphValue::Scalar(numbers[index].0.clone()));
+    }
+    // pos = p * (n - 1): v[floor] when floor = ceil or floor = n - 1, else
+    // v[floor] * (ceil - pos) + v[ceil] * (pos - floor).
+    let position = p
+        .checked_mul(CanonicalF64::from_i64_rounded(last as i64))
+        .map_err(arithmetic)?;
+    let floor = position.checked_floor().map_err(arithmetic)?;
+    let ceil = position.checked_ceil().map_err(arithmetic)?;
+    let index = |bound: CanonicalF64| {
+        bound
+            .checked_to_i64_truncated()
+            .map(|index| usize::try_from(index).unwrap_or(0).min(last))
+            .map_err(arithmetic)
+    };
+    let (lower, upper) = (index(floor)?, index(ceil)?);
+    let value = if lower == upper || lower == last {
+        numbers[lower].1
+    } else {
+        let below = ceil
+            .checked_sub(position)
+            .and_then(|weight| numbers[lower].1.checked_mul(weight))
+            .map_err(arithmetic)?;
+        let above = position
+            .checked_sub(floor)
+            .and_then(|weight| numbers[upper].1.checked_mul(weight))
+            .map_err(arithmetic)?;
+        below.checked_add(above).map_err(arithmetic)?
+    };
+    Ok(GraphValue::Scalar(CanonicalScalar::Float(value)))
 }
 
 /// rand()'s draw (fgdb-13l85): FNV-1a over a domain tag, the call site, the

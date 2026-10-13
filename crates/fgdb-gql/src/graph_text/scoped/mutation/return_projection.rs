@@ -2296,6 +2296,43 @@ impl<'a> Parser<'a> {
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{'))
         {
             self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
+        } else if resolve.is_some()
+            && (self.is_word("PERCENTILEDISC") || self.is_word("PERCENTILECONT"))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            // percentileDisc(x, p): the resolver collects x as a hidden
+            // aggregate, and p reads after aggregation (fgdb-qbaex).
+            let function = if self.is_word("PERCENTILEDISC") {
+                crate::GraphValueFunction::PercentileDisc
+            } else {
+                crate::GraphValueFunction::PercentileCont
+            };
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            self.percentile_leaf = true;
+            let collected = match resolve.as_mut() {
+                Some(resolve) => resolve.leaf(self)?,
+                None => None,
+            };
+            let (false, Some(collected)) = (core::mem::take(&mut self.percentile_leaf), collected)
+            else {
+                return Err(GraphSetTextError {
+                    offset: at,
+                    kind: GraphSetTextErrorKind::Expected(
+                        "percentileDisc or percentileCont as an aggregating RETURN item",
+                    ),
+                });
+            };
+            self.punct(b',', ",")?;
+            let p = self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            self.punct(b')', ")")?;
+            ReadValueTemplate::Function {
+                function,
+                argument: Box::new(ReadValueTemplate::List(vec![
+                    ReadValueTemplate::Column(collected),
+                    p,
+                ])),
+            }
         } else if let Some(resolve) = resolve.as_mut() {
             // Element and map entries (`x.p` of a comprehension element over
             // COLLECT, an imported `row.key`) take let slots, as the element

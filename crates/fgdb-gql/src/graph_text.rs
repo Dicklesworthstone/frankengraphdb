@@ -724,6 +724,10 @@ struct Parser<'a> {
     /// An aggregate function's argument is being read. openCypher refuses a
     /// non-constant rand() there (Return6 [15], NonConstantExpression).
     aggregate_argument: bool,
+    /// The value reader asks the resolver for a percentile's collected
+    /// argument (fgdb-qbaex): a resolver that registers a hidden collect of
+    /// the expression here clears it, and one that leaves it set refuses.
+    percentile_leaf: bool,
     /// A HAVING operand is being resolved: an `IS [NOT] NULL` after a group
     /// key belongs to the HAVING test, not to the key expression.
     having_operand: bool,
@@ -824,6 +828,7 @@ impl<'a> Parser<'a> {
             projected_sources: None,
             random_sites: 0,
             aggregate_argument: false,
+            percentile_leaf: false,
             having_operand: false,
             zones: None,
             defer_where: false,
