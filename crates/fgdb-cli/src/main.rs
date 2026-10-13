@@ -173,6 +173,15 @@ Optional limits for diff and query: --max-snapshot-records, --max-result-rows,
 --max-work-units, --max-scratch-entries (decimal u64, including zero).
 Defaults: 100000 source records, 100000 changed tuples, 10000000 work/scratch units.
 One budget covers both endpoint queries and consolidation; results are in memory.
+write, import-csv and transaction also accept --max-snapshot-records,
+--max-result-rows, --max-work-units and --max-scratch-entries with the same defaults.
+One allowance covers the WHOLE write --rows or CSV program, not each input record.
+In a plain write program, --max-result-rows bounds cumulative selected rows even
+when the program has no RETURN. It is not merely a printed-row limit.
+Transaction execution allowances are per native read/write program; a RETURN or
+query step is also capped by the remaining transaction-wide 100000-row buffer.
+These flags do not raise effect/creation caps, input limits, the 64-statement
+transaction limit or the 16 MiB output bound. Zero is a real limit, not unlimited.
 --max-output-bytes bounds UTF-8 diff frames, including the terminal result (default 16 MiB).
 It excludes invocation/error records and does not bound encoding scratch or source memory.
 Robot diff output uses diff_columns, signed change records, then result kind=diff.
@@ -209,7 +218,7 @@ sequence; nothing is silently reshaped:
   --direction directed|reversed|undirected (default directed)
   --parallel-edges reject|collapse|min|max|sum (default reject)
   --self-loops keep|drop|reject (default keep); --as-of <seq> (default frontier)
-Analytics parameters: vertex:<id>, int:<i64>, float:<f64>, bool:true|false, null.
+Analytics parameters: vertex:<id>, int:<i64>, float:<f64>, bool:true|bool:false|null.
 A projection that breaks a procedure's graph laws is refused, never converted.
 A CALL followed by WHERE, WITH, MATCH, UNWIND or RETURN is an ordinary query: its YIELD
 columns feed the pipeline (MATCH (n) on a yielded vertex name is that vertex), over the
@@ -370,7 +379,7 @@ struct Options {
     stream: bool,
     buffered: buffered::BufferedOptions,
     spill: spill::SpillOptions,
-    /// `query`/`replay` execution limits; absent ones keep the CLI defaults.
+    /// Native read/write execution limits; absent ones keep the CLI defaults.
     budget: QueryBudget,
     diff: diff::DiffOptions,
     csv: import::CsvOptions,
@@ -574,7 +583,10 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 | "--max-result-rows"
                 | "--max-work-units"
                 | "--max-scratch-entries"
-                    if matches!(command, "query" | "replay") =>
+                    if matches!(
+                        command,
+                        "query" | "replay" | "write" | "import-csv" | "transaction"
+                    ) =>
                 {
                     budget.set(arg, value)?;
                 }
@@ -1242,8 +1254,8 @@ fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
 }
 
-/// The four execution limits `query` and `diff` accept, each a decimal u64
-/// given at most once; an absent limit keeps [`policy`]'s default.
+/// Native execution limits, each a decimal u64 given at most once.
+/// An absent limit keeps [`policy`]'s default; zero is never an omission.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct QueryBudget {
     records: Option<u64>,
@@ -1275,7 +1287,28 @@ impl QueryBudget {
                 .unwrap_or(defaults.evaluator.max_scratch_entries),
         )
     }
+
+    /// Intersect the per-operation result limit with a separate delivery cap.
+    /// Do not reset snapshot/work/scratch limits or widen an explicit row limit.
+    /// The transaction driver owns the remaining buffer count and savepoints.
+    fn policy_with_result_cap(&self, remaining_rows: u64) -> GqlQueryPolicy {
+        let allowance = self.policy();
+        GqlQueryPolicy {
+            rows: fgdb_gql::GqlExecutionBudget::new(
+                allowance.rows.max_snapshot_records().unwrap_or(u64::MAX),
+                allowance
+                    .rows
+                    .max_result_rows()
+                    .unwrap_or(u64::MAX)
+                    .min(remaining_rows),
+            ),
+            ..allowance
+        }
+    }
 }
+
+#[cfg(test)]
+mod write_budget_tests;
 
 /// Store one decimal u64 flag value, refusing a repeat, signs, whitespace,
 /// fractions and overflow without echoing the value.
@@ -1435,7 +1468,9 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 }
                 if command == "write" {
                     if let Some(prepared) = returning {
-                        return write_returning::run(&mut db, &contexts, prepared, robot, out).await;
+                        return write_returning::run(
+                            &mut db, &contexts, prepared, options.budget.policy(), robot, out,
+                        ).await;
                     }
                     let (program, records) = match batch.as_ref() {
                         Some((program, records)) => (program, Some(*records)),
@@ -1444,7 +1479,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                             (prepared.program(), prepared.input_records())
                         }
                     };
-                    let (receipt, completion) = db.execute_graph_write_program_returning_autocommit_engine_governed(&contexts.txn(), &contexts.query(), &contexts.commit(), program, GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000)).await.map_err(|error| {
+                    let (receipt, completion) = db.execute_graph_write_program_returning_autocommit_engine_governed(&contexts.txn(), &contexts.query(), &contexts.commit(), program, GraphWriteProgramPolicy::new(options.budget.policy(), 100_000, 100_000, 100_000)).await.map_err(|error| {
                         match &native {
                             Some(prepared) => execution_failure(prepared.execution_error(error)),
                             None => execution_failure(error),

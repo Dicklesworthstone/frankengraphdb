@@ -10,13 +10,13 @@
 //! commit publishes nothing. This module never commits/retries individual
 //! records or infers a catalog. Commit-outcome errors retain their native form.
 
-use super::{Failure, Options, emit, execution_failure, policy};
+use super::{Failure, Options, emit, execution_failure};
 use asupersync::fs::Vfs;
 use fgdb::Database;
 use fgdb_gql::csv_parameters::{CsvParameterErrorKind, CsvParameterLimits};
 use fgdb_gql::csv_write_script::GraphWriteScriptCsvStreamError;
 use fgdb_gql::{
-    GqlParameterType, GqlParameterValue, GqlParameters, GraphWriteProgramPolicy,
+    GqlParameterType, GqlParameterValue, GqlParameters, GqlQueryPolicy, GraphWriteProgramPolicy,
     PreparedGraphWriteProgram, PreparedGraphWriteScript,
 };
 use fgdb_types::{CanonicalScalarKind, EmbeddedTxnCompletion, PurposeContexts, QueryCx};
@@ -95,6 +95,8 @@ pub(super) struct PreparedImport {
     program: PreparedGraphWriteProgram,
     records: usize,
     changes: u64,
+    /// One execution allowance for the entire bound CSV, never per record.
+    allowance: GqlQueryPolicy,
 }
 
 /// Read every input and bind every CSV record. Nothing here touches the
@@ -145,6 +147,7 @@ pub(super) fn prepare(options: &Options, cx: &QueryCx) -> Result<PreparedImport,
         program,
         records,
         changes: csv_options.max_changes.unwrap_or(DEFAULT_CHANGES),
+        allowance: options.budget.policy(),
     })
 }
 
@@ -221,7 +224,7 @@ pub(super) async fn run<V: Vfs + Clone>(
             &contexts.query(),
             &contexts.commit(),
             &prepared.program,
-            GraphWriteProgramPolicy::new(policy(), changes, changes, changes),
+            GraphWriteProgramPolicy::new(prepared.allowance, changes, changes, changes),
         )
         .await
         .map_err(execution_failure)?;

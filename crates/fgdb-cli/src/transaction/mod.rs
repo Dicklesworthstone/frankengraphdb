@@ -23,12 +23,12 @@
 
 use super::write_returning::{self, Returning};
 use super::{
-    Failure, Options, cell, execution_failure, human_value, parameter, policy, quoted, value_cell,
+    Failure, Options, cell, execution_failure, human_value, parameter, quoted, value_cell,
 };
 use asupersync::fs::Vfs;
 use fgdb::{Database, NativeReadClass, PreparedNativeRead, QueryResult, QueryValue};
 use fgdb_gql::algebra::GraphValueRow;
-use fgdb_gql::{BoundNativeGraphWrite, GqlParameters, GqlQueryPolicy, GraphWriteProgramPolicy};
+use fgdb_gql::{BoundNativeGraphWrite, GqlParameters, GraphWriteProgramPolicy};
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
 use std::io::Write;
 
@@ -448,12 +448,10 @@ async fn run_with_limits<V: Vfs + Clone>(
                             .rows
                             .checked_sub(count)
                             .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
-                        // Source/work/scratch bounds are per native operation;
-                        // the delivered row allowance spans the entire transaction.
-                        let allowance = GqlQueryPolicy {
-                            rows: fgdb_gql::GqlExecutionBudget::new(100_000, remaining),
-                            ..policy()
-                        };
+                        // Preserve the configured source/work/scratch bounds.
+                        // Both the per-step row limit and the remaining
+                        // transaction-wide delivery allowance must hold.
+                        let allowance = options.budget.policy_with_result_cap(remaining);
                         let rows = query
                             .execute_in_transaction(&txn, db, &cx, params, allowance)
                             .map_err(execution_failure)?;
@@ -468,12 +466,10 @@ async fn run_with_limits<V: Vfs + Clone>(
                             .rows
                             .checked_sub(count)
                             .ok_or_else(|| Failure::query("transaction row limit exceeded"))?;
-                        // Only final RETURN rows consume this allowance; source
-                        // occurrences and effects retain the native write limits.
-                        let allowance = GqlQueryPolicy {
-                            rows: fgdb_gql::GqlExecutionBudget::new(100_000, remaining),
-                            ..policy()
-                        };
+                        // Only final RETURN rows consume delivery capacity.
+                        // Execution limits remain caller-selected; effect and
+                        // creation limits remain the native write limits.
+                        let allowance = options.budget.policy_with_result_cap(remaining);
                         let rows = query.execute_in_transaction(&mut txn, db, &cx, allowance)?;
                         let added = buffer_returning_rows(
                             &mut output,
@@ -495,7 +491,12 @@ async fn run_with_limits<V: Vfs + Clone>(
                                 db,
                                 &cx,
                                 bound.program(),
-                                GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000),
+                                GraphWriteProgramPolicy::new(
+                                    options.budget.policy(),
+                                    100_000,
+                                    100_000,
+                                    100_000,
+                                ),
                             )
                             .map_err(|error| execution_failure(bound.execution_error(error)))?;
                         if robot {
