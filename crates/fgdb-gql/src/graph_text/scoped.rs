@@ -1328,6 +1328,36 @@ impl<'a> Parser<'a> {
                 self.scoped_predicates(false)?;
             }
             if clause && !kind.exports_bindings() {
+                // openCypher `EXISTS { MATCH ... RETURN true }`: a RETURN of
+                // literals or `*` keeps every row, so the subquery still asks
+                // only whether a witness exists (ExistentialSubquery2 [1]).
+                if self.take_word("RETURN")? {
+                    loop {
+                        let literal = match self.current.kind {
+                            TokenKind::Word(word) => ["TRUE", "FALSE", "NULL"]
+                                .iter()
+                                .any(|value| word.eq_ignore_ascii_case(value)),
+                            TokenKind::Digits(_) | TokenKind::Quoted(_) => true,
+                            TokenKind::Punct(b'*') => true,
+                            _ => false,
+                        };
+                        if !literal {
+                            return Err(error(
+                                self.current.at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "a literal or * in an EXISTS subquery's RETURN",
+                                ),
+                            ));
+                        }
+                        self.advance()?;
+                        if self.take_word("AS")? {
+                            self.name()?;
+                        }
+                        if !self.take(b',')? {
+                            break;
+                        }
+                    }
+                }
                 self.punct(b'}', "}")?;
             }
             let mut body = self.take_pattern();
