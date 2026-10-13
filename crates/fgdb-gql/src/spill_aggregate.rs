@@ -253,8 +253,8 @@ impl SpillAggregateDefinition {
     fn compile_row_local(
         aggregate: &PreparedGraphAggregate,
     ) -> Result<Self, SpillAggregateBuildError> {
-        let (physical, pipeline) = InputPipeline::prepare(aggregate)
-            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        let (physical, pipeline) =
+            InputPipeline::prepare(aggregate).ok_or(SpillAggregateBuildError::Unsupported)?;
         let mut definition = Self::from_physical(physical)?;
         definition.input_pipeline = pipeline.map(Arc::new);
         Ok(definition)
@@ -274,7 +274,10 @@ impl SpillAggregateDefinition {
     ) -> Result<Option<GraphValueRow>, GqlQueryError<GraphAggregateError<E>, C>> {
         match &self.input_pipeline {
             Some(pipeline) => pipeline.evaluate(row, control),
-            None => self.aggregate.evaluate_streamed_input(row, control).map(Some),
+            None => self
+                .aggregate
+                .evaluate_streamed_input(row, control)
+                .map(Some),
         }
     }
 
@@ -517,9 +520,11 @@ impl SpillAggregateDefinition {
             // projected comparison reaches the ORIGINAL complete keys below,
             // never a hidden or noninjective projected key as a tiebreak.
             let order = left_projected
-                .compare_incremental_order(right_projected, &self.projected_ordering, &mut |event| {
-                    control(result_event(event))
-                })?
+                .compare_incremental_order(
+                    right_projected,
+                    &self.projected_ordering,
+                    &mut |event| control(result_event(event)),
+                )?
                 .ok_or(GqlQueryError::Source(
                     GraphAggregateError::InvalidReductionInput,
                 ))?;

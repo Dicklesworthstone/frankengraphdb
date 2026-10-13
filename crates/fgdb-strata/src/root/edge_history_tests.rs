@@ -259,13 +259,19 @@ fn per_eid_chains_decide_exactly_as_the_global_statement_map() {
 fn the_chain_index_finds_every_eid_through_growth_and_a_full_collision_cluster() {
     let mut rng = Rng(0x2a2_1dea_c011_1de5);
     let eids: Vec<u64> = (0..6_000u64)
-        .map(|at| if at % 4 == 0 { at } else { rng.next() >> 2 })
+        .map(|at| {
+            if at.is_multiple_of(4) {
+                at
+            } else {
+                rng.next() >> 2
+            }
+        })
         .collect();
     let eid = |at: usize| {
         let raw = eids[at];
         // Every 4th EId repeats its low half in its high half, so the folded
         // hash input is zero for all of them.
-        if at % 4 == 0 {
+        if at.is_multiple_of(4) {
             EId((u128::from(raw) << 64) | u128::from(raw))
         } else {
             EId(u128::from(raw))

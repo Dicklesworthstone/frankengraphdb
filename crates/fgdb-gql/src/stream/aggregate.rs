@@ -342,7 +342,8 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                     let projected = if let Some(pipeline) = &self.plan.pipeline {
                         let Some(projected) = pipeline.evaluate(input, &mut |event| {
                             meter.event(input_event(event)).map_err(lift)
-                        })? else {
+                        })?
+                        else {
                             // FALSE/UNKNOWN rejects this record, not the scan.
                             // The source quantum was already spent, so even an
                             // entirely filtered source keeps yielding Pending.

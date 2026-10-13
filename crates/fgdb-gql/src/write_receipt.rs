@@ -476,9 +476,13 @@ mod tests {
         assert_eq!(receipt.created_vertices(), None);
         assert_eq!(receipt.mutation_targets(), None);
         assert_eq!(receipt.mutation_edges(), None);
-        assert_ne!(receipt, GraphWriteStepReceipt::EdgeMergeBatch {
-            outcomes, created: vec![created],
-        });
+        assert_ne!(
+            receipt,
+            GraphWriteStepReceipt::EdgeMergeBatch {
+                outcomes,
+                created: vec![created],
+            }
+        );
         let debug = format!("{receipt:?}");
         assert!(debug.contains("EdgeUpsertBatch"));
         assert!(debug.contains("occurrences: 4"));

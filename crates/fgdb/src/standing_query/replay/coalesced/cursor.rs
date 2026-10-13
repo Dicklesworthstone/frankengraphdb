@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// One borrowed consolidated replay change and its weight.
+type ReplayChange<'a> = Result<(&'a [QueryValue], ZWeight), StandingQueryError>;
+
 impl<V: Vfs + Clone> Database<V> {
     /// Open a pull iterator over the net changes in a complete retained prefix.
     /// The tuple's sequence names the SELECTED end, not successful delivery.
@@ -43,10 +46,7 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<
         Option<(
             CommitSeq,
-            impl Iterator<Item = Result<(&'a [QueryValue], ZWeight), StandingQueryError>>
-                + core::iter::FusedIterator
-                + 'a
-                + use<'a, V>,
+            impl core::iter::FusedIterator<Item = ReplayChange<'a>> + 'a + use<'a, V>,
         )>,
         StandingQueryError,
     > {
@@ -54,31 +54,48 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(StandingQueryError::Unsupported);
         };
         if state.history.frontier() != state.frontier {
-            return Err(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta));
+            return Err(StandingQueryError::Delivery(
+                StandingQueryFailure::InvalidDelta,
+            ));
         }
         cx.with_restriction(|| {
             let mut checkpoint = || {
-                cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted)
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
             };
             let mut meter = Meter {
                 policy,
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            let Some((frontier, range)) = state.history.select_range(after, max_ticks, &mut meter)? else {
+            let Some((frontier, range)) =
+                state.history.select_range(after, max_ticks, &mut meter)?
+            else {
                 return Ok(None);
             };
-            let sources = state.history.frames.range(range).map(|frame| frame.rows.iter());
-            let merge = SortedMerge::new(sources, &mut meter).map_err(StandingQueryError::Delivery)?;
+            let sources = state
+                .history
+                .frames
+                .range(range)
+                .map(|frame| frame.rows.iter());
+            let merge =
+                SortedMerge::new(sources, &mut meter).map_err(StandingQueryError::Delivery)?;
             (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
-            let mut pull = Pull { merge: Some(merge), delivered: 0, policy, stats: meter.stats };
+            let mut pull = Pull {
+                merge: Some(merge),
+                delivered: 0,
+                policy,
+                stats: meter.stats,
+            };
             let cursor = std::iter::from_fn(move || {
                 cx.with_restriction(|| {
                     pull.advance(&mut || {
-                        cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted)
+                        cx.checkpoint()
+                            .map_err(|_| StandingQueryFailure::Interrupted)
                     })
                 })
-            }).fuse();
+            })
+            .fuse();
             Ok(Some((frontier, cursor)))
         })
     }
@@ -99,15 +116,26 @@ impl<'a, I: Iterator<Item = Entry<'a>>> Pull<'a, I> {
         // Take ownership before any fallible/user code. A refusal or unwind
         // drops the merge and cannot resume a partly summed or undelivered key.
         let mut merge = self.merge.take()?;
-        let mut meter = Meter { policy: self.policy, stats: self.stats, checkpoint };
+        let mut meter = Meter {
+            policy: self.policy,
+            stats: self.stats,
+            checkpoint,
+        };
         let result = (|| {
             let Some((row, weight)) = merge.next(&mut meter)? else {
                 (meter.checkpoint)()?;
                 return Ok(None);
             };
-            let delivered = self.delivered.checked_add(1)
+            let delivered = self
+                .delivered
+                .checked_add(1)
                 .ok_or(StandingQueryFailure::ResultBudget)?;
-            if self.policy.rows.max_result_rows().is_some_and(|limit| delivered > limit) {
+            if self
+                .policy
+                .rows
+                .max_result_rows()
+                .is_some_and(|limit| delivered > limit)
+            {
                 return Err(StandingQueryFailure::ResultBudget);
             }
             // The caller gets a reference to immutable retained cells; no

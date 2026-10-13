@@ -80,7 +80,11 @@ mod tests {
             panic!("ranking cannot read the graph")
         }
         fn charge(&mut self, event: VertexScanEvent) -> core::result::Result<(), ExecutionError> {
-            assert_eq!(event, VertexScanEvent::Work, "native comparison only borrows");
+            assert_eq!(
+                event,
+                VertexScanEvent::Work,
+                "native comparison only borrows"
+            );
             self.calls += 1;
             if self.calls == self.stop {
                 Err(GqlQueryError::Source(
@@ -202,17 +206,28 @@ mod tests {
                     for nulls_first in [false, true] {
                         let definition = definition(descending, nulls_first);
                         let expected = if left.is_null() {
-                            if nulls_first { Ordering::Less } else { Ordering::Greater }
+                            if nulls_first {
+                                Ordering::Less
+                            } else {
+                                Ordering::Greater
+                            }
                         } else if descending {
                             ascending.reverse()
                         } else {
                             ascending
                         };
-                        let mut work = Work { cx: &cx, used: 0, limit: u64::MAX };
+                        let mut work = Work {
+                            cx: &cx,
+                            used: 0,
+                            limit: u64::MAX,
+                        };
                         let a = pair(9, left.clone(), &pool, &mut work);
                         let b = pair(1, right.clone(), &pool, &mut work);
                         let retained = pool.used();
-                        let mut control = Control { calls: 0, stop: usize::MAX };
+                        let mut control = Control {
+                            calls: 0,
+                            stop: usize::MAX,
+                        };
                         let mut comparator = AggregateOrder {
                             definition: &definition,
                             input: &mut control,
@@ -222,7 +237,12 @@ mod tests {
                         };
                         comparator.validate(a.as_ref(), 2, &mut work).unwrap();
                         comparator.validate(b.as_ref(), 2, &mut work).unwrap();
-                        assert_eq!(comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work).unwrap(), expected);
+                        assert_eq!(
+                            comparator
+                                .compare(a.as_ref(), b.as_ref(), 2, &mut work)
+                                .unwrap(),
+                            expected
+                        );
                         assert_eq!(pool.used(), retained);
                         drop(comparator);
                         drop(a);
@@ -234,10 +254,17 @@ mod tests {
             for descending in [false, true] {
                 let definition = definition(descending, false);
                 for distinct in [false, true] {
-                    let mut work = Work { cx: &cx, used: 0, limit: u64::MAX };
+                    let mut work = Work {
+                        cx: &cx,
+                        used: 0,
+                        limit: u64::MAX,
+                    };
                     let a = pair(9, fraction(6, 3), &pool, &mut work);
                     let b = pair(1, GraphAggregateValue::Integer(2), &pool, &mut work);
-                    let mut control = Control { calls: 0, stop: usize::MAX };
+                    let mut control = Control {
+                        calls: 0,
+                        stop: usize::MAX,
+                    };
                     let mut comparator = AggregateOrder {
                         definition: &definition,
                         input: &mut control,
@@ -245,8 +272,18 @@ mod tests {
                         resolver: None,
                         distinct,
                     };
-                    assert_eq!(comparator.compare_projected(a.as_ref(), b.as_ref(), &mut work).unwrap(), Ordering::Equal);
-                    assert_eq!(comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work).unwrap(), Ordering::Greater);
+                    assert_eq!(
+                        comparator
+                            .compare_projected(a.as_ref(), b.as_ref(), &mut work)
+                            .unwrap(),
+                        Ordering::Equal
+                    );
+                    assert_eq!(
+                        comparator
+                            .compare(a.as_ref(), b.as_ref(), 2, &mut work)
+                            .unwrap(),
+                        Ordering::Greater
+                    );
                     drop(comparator);
                     drop(a);
                     drop(b);
@@ -264,10 +301,17 @@ mod tests {
             let storage = MemoryPool::new(1_000_000, 0).unwrap();
             let pool = MemoryPool::new(1_000_000, 0).unwrap();
             let definition = definition(true, false);
-            let mut work = Work { cx: &cx, used: 0, limit: u64::MAX };
+            let mut work = Work {
+                cx: &cx,
+                used: 0,
+                limit: u64::MAX,
+            };
             let a = pair(9, fraction(3, 2), &storage, &mut work);
             let b = pair(1, fraction(6, 4), &storage, &mut work);
-            let mut baseline = Control { calls: 0, stop: usize::MAX };
+            let mut baseline = Control {
+                calls: 0,
+                stop: usize::MAX,
+            };
             {
                 let mut comparator = AggregateOrder {
                     definition: &definition,
@@ -276,7 +320,12 @@ mod tests {
                     resolver: None,
                     distinct: false,
                 };
-                assert_eq!(comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work).unwrap(), Ordering::Greater);
+                assert_eq!(
+                    comparator
+                        .compare(a.as_ref(), b.as_ref(), 2, &mut work)
+                        .unwrap(),
+                    Ordering::Greater
+                );
             }
             assert!(baseline.calls > 0);
             assert_eq!(pool.used(), 0);
@@ -290,7 +339,10 @@ mod tests {
                         resolver: None,
                         distinct: false,
                     };
-                    assert!(matches!(comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work), Err(NativeAggregateSpoolError::Execute(_))));
+                    assert!(matches!(
+                        comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work),
+                        Err(NativeAggregateSpoolError::Execute(_))
+                    ));
                 }
                 assert_eq!(control.calls, stop);
                 assert_eq!(pool.used(), 0);
@@ -302,7 +354,10 @@ mod tests {
             for bytes in [ac, ap, bc, bp] {
                 required += account::decoded(bytes, &cx).unwrap() * 2;
                 let limited = MemoryPool::new(required - 1, 0).unwrap();
-                let mut control = Control { calls: 0, stop: usize::MAX };
+                let mut control = Control {
+                    calls: 0,
+                    stop: usize::MAX,
+                };
                 let mut comparator = AggregateOrder {
                     definition: &definition,
                     input: &mut control,
@@ -310,12 +365,18 @@ mod tests {
                     resolver: None,
                     distinct: false,
                 };
-                assert!(matches!(comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work), Err(
-                    NativeAggregateSpoolError::Spool(NativeSpoolError::Spill(SpillError::Memory(_)))
-                )));
+                assert!(matches!(
+                    comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work),
+                    Err(NativeAggregateSpoolError::Spool(NativeSpoolError::Spill(
+                        SpillError::Memory(_)
+                    )))
+                ));
                 assert_eq!(limited.used(), 0);
             }
-            let mut control = Control { calls: 0, stop: usize::MAX };
+            let mut control = Control {
+                calls: 0,
+                stop: usize::MAX,
+            };
             let mut comparator = AggregateOrder {
                 definition: &definition,
                 input: &mut control,
@@ -325,9 +386,12 @@ mod tests {
             };
             work.used = 0;
             work.limit = 0;
-            assert!(matches!(comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work), Err(
-                NativeAggregateSpoolError::Spool(NativeSpoolError::SortWorkLimit { .. })
-            )));
+            assert!(matches!(
+                comparator.compare(a.as_ref(), b.as_ref(), 2, &mut work),
+                Err(NativeAggregateSpoolError::Spool(
+                    NativeSpoolError::SortWorkLimit { .. }
+                ))
+            ));
             assert_eq!(pool.used(), 0);
             drop(comparator);
             drop(a);
@@ -344,15 +408,26 @@ mod tests {
             let storage = MemoryPool::new(1_000_000, 0).unwrap();
             let pool = MemoryPool::new(1_000_000, 0).unwrap();
             let definition = definition(false, false);
-            let mut work = Work { cx: &cx, used: 0, limit: u64::MAX };
+            let mut work = Work {
+                cx: &cx,
+                used: 0,
+                limit: u64::MAX,
+            };
             let good = pair(0, fraction(-100, 1), &storage, &mut work);
             let other = pair(1, fraction(100, 1), &storage, &mut work);
             let (complete, visible) = split_projected_frame(other.as_ref()).unwrap();
             let malformed = envelope(&GraphAggregateRow::from_group_values(vec![], vec![]))
-                .canonical_bytes().unwrap();
-            for (complete, visible) in [(malformed.as_slice(), visible), (complete, malformed.as_slice())] {
+                .canonical_bytes()
+                .unwrap();
+            for (complete, visible) in [
+                (malformed.as_slice(), visible),
+                (complete, malformed.as_slice()),
+            ] {
                 let bad = projected_frame(complete, visible, &storage, &mut work, 8192).unwrap();
-                let mut control = Control { calls: 0, stop: usize::MAX };
+                let mut control = Control {
+                    calls: 0,
+                    stop: usize::MAX,
+                };
                 let mut comparator = AggregateOrder {
                     definition: &definition,
                     input: &mut control,
@@ -361,8 +436,16 @@ mod tests {
                     distinct: false,
                 };
                 assert!(comparator.validate(bad.as_ref(), 2, &mut work).is_err());
-                assert!(comparator.compare(good.as_ref(), bad.as_ref(), 2, &mut work).is_err());
-                assert!(comparator.compare(bad.as_ref(), good.as_ref(), 2, &mut work).is_err());
+                assert!(
+                    comparator
+                        .compare(good.as_ref(), bad.as_ref(), 2, &mut work)
+                        .is_err()
+                );
+                assert!(
+                    comparator
+                        .compare(bad.as_ref(), good.as_ref(), 2, &mut work)
+                        .is_err()
+                );
                 assert_eq!(pool.used(), 0);
             }
             drop(good);

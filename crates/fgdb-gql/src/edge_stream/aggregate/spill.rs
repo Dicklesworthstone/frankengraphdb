@@ -86,9 +86,10 @@ impl<S: EdgeScanSource, F> EdgeSpillAggregateCursor<S, F> {
             // The join owns source matching and observation; its complete
             // binding passes through the same native projection VM as the
             // resident reducer before any aggregate partition receives it.
-            let Some(row) = self.definition.evaluate_input(row, &mut |event| {
-                meter.event(event).map_err(lift)
-            })? else {
+            let Some(row) = self
+                .definition
+                .evaluate_input(row, &mut |event| meter.event(event).map_err(lift))?
+            else {
                 // A rejected occurrence is not source exhaustion. Keep the
                 // same meter and source position; do not touch spill state.
                 continue;

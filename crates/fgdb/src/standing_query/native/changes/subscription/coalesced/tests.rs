@@ -17,7 +17,9 @@ fn policy() -> GqlQueryPolicy {
 fn delivery(rows: u64) -> GqlQueryPolicy {
     GqlQueryPolicy::new(0, rows, 20_000_000, 20_000_000)
 }
-fn ticks(n: usize) -> NonZeroUsize { NonZeroUsize::new(n).unwrap() }
+fn ticks(n: usize) -> NonZeroUsize {
+    NonZeroUsize::new(n).unwrap()
+}
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
@@ -37,14 +39,21 @@ fn edit(id: u128, value: i64) -> WriteBatch {
     batch
 }
 fn plain(rows: &ZSet<Vec<QueryValue>>) -> Bag {
-    rows.iter().map(|(row, weight)| (row.clone(), weight.to_i128().unwrap())).collect()
+    rows.iter()
+        .map(|(row, weight)| (row.clone(), weight.to_i128().unwrap()))
+        .collect()
 }
 fn snapshot(db: &Database<MemVfs>, cx: &QueryCx, text: &str) -> Bag {
-    let QueryResult::Rows { rows, .. } = db.query(cx, text, &GqlParameters::new(), symbols, policy()).unwrap() else {
+    let QueryResult::Rows { rows, .. } = db
+        .query(cx, text, &GqlParameters::new(), symbols, policy())
+        .unwrap()
+    else {
         panic!("native read must return rows");
     };
     let mut bag = Bag::new();
-    for row in rows { *bag.entry(row).or_default() += 1; }
+    for row in rows {
+        *bag.entry(row).or_default() += 1;
+    }
     bag
 }
 fn integrate(old: &mut Bag, delta: &ZSet<Vec<QueryValue>>) {
@@ -54,10 +63,18 @@ fn integrate(old: &mut Bag, delta: &ZSet<Vec<QueryValue>>) {
     old.retain(|_, weight| *weight != 0);
     assert!(old.values().all(|weight| *weight > 0));
 }
-fn open(db: &mut Database<MemVfs>, cx: &QueryCx, text: &str, retained: usize) -> NativeSubscription {
-    let handle = db.register_standing_native(cx, text, &GqlParameters::new(), symbols, policy()).unwrap();
+fn open(
+    db: &mut Database<MemVfs>,
+    cx: &QueryCx,
+    text: &str,
+    retained: usize,
+) -> NativeSubscription {
+    let handle = db
+        .register_standing_native(cx, text, &GqlParameters::new(), symbols, policy())
+        .unwrap();
     let mut sub = db.open_standing_subscription(cx, &handle).unwrap();
-    sub.enable_replay(db, cx, retained, 10_000, 1_000_000, policy()).unwrap();
+    sub.enable_replay(db, cx, retained, 10_000, 1_000_000, policy())
+        .unwrap();
     sub
 }
 
@@ -65,7 +82,8 @@ fn open(db: &mut Database<MemVfs>, cx: &QueryCx, text: &str, retained: usize) ->
 fn slow_consumers_integrate_bounded_net_ranges_to_each_exact_native_answer() {
     let ((), report) = run_async_under_lab(0x7263_1001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let cx = contexts.query(); let commit = contexts.commit();
+        let cx = contexts.query();
+        let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let basis = db.write(&commit, seed()).await.unwrap();
         let texts = [
@@ -77,10 +95,18 @@ fn slow_consumers_integrate_bounded_net_ranges_to_each_exact_native_answer() {
             "MATCH (n) RETURN n.p AS p UNION ALL MATCH (m) RETURN m.p AS p",
         ];
         let mut consumers = Vec::new();
-        let mut snapshots = vec![texts.iter().map(|text| snapshot(&db, &cx, text)).collect::<Vec<_>>()];
+        let mut snapshots = vec![
+            texts
+                .iter()
+                .map(|text| snapshot(&db, &cx, text))
+                .collect::<Vec<_>>(),
+        ];
         for (index, text) in texts.iter().enumerate() {
             let mut sub = open(&mut db, &cx, text, 8);
-            let initial = sub.poll_coalesced(&db, &cx, ticks(2), delivery(100)).unwrap().unwrap();
+            let initial = sub
+                .poll_coalesced(&db, &cx, ticks(2), delivery(100))
+                .unwrap()
+                .unwrap();
             assert!(initial.is_snapshot());
             assert_eq!(initial.frontier(), basis);
             assert_eq!(plain(initial.rows()), snapshots[0][index]);
@@ -97,12 +123,18 @@ fn slow_consumers_integrate_bounded_net_ranges_to_each_exact_native_answer() {
                     batch
                 }
                 3 => {
-                    let mut batch = WriteBatch::new(RelationId(1)); batch.delete_vertex(VId(7)); batch
+                    let mut batch = WriteBatch::new(RelationId(1));
+                    batch.delete_vertex(VId(7));
+                    batch
                 }
                 4 => edit(2, 9),
                 _ => {
                     let mut batch = WriteBatch::new(RelationId(1));
-                    batch.set_vertex_property(VId(1), PropertyKeyId(99), Some(CanonicalScalar::Int(1)));
+                    batch.set_vertex_property(
+                        VId(1),
+                        PropertyKeyId(99),
+                        Some(CanonicalScalar::Int(1)),
+                    );
                     batch
                 }
             };
@@ -113,16 +145,32 @@ fn slow_consumers_integrate_bounded_net_ranges_to_each_exact_native_answer() {
         for (index, (sub, accepted)) in consumers.iter_mut().enumerate() {
             let mut after = basis;
             let mut frames = 0;
-            while let Some(frame) = sub.poll_coalesced(&db, &cx, ticks(2), delivery(if frames < 2 { 0 } else { 100 })).unwrap() {
+            while let Some(frame) = sub
+                .poll_coalesced(
+                    &db,
+                    &cx,
+                    ticks(2),
+                    delivery(if frames < 2 { 0 } else { 100 }),
+                )
+                .unwrap()
+            {
                 assert_eq!(frame.from(), Some(after));
                 assert_eq!(frame.frontier().0 - after.0, 2);
                 assert!(!frame.is_snapshot());
-                if frames < 2 { assert!(frame.rows().is_empty()); }
+                if frames < 2 {
+                    assert!(frame.rows().is_empty());
+                }
                 // A mode change, a smaller bound and a smaller delivery policy
                 // cannot replace or split an already accepted range/receipt.
-                let retry = sub.poll_coalesced(&db, &cx, ticks(1), delivery(0)).unwrap().unwrap();
+                let retry = sub
+                    .poll_coalesced(&db, &cx, ticks(1), delivery(0))
+                    .unwrap()
+                    .unwrap();
                 assert!(Arc::ptr_eq(&frame, &retry));
-                assert!(Arc::ptr_eq(&frame, &sub.poll(&db, &cx, delivery(0)).unwrap().unwrap()));
+                assert!(Arc::ptr_eq(
+                    &frame,
+                    &sub.poll(&db, &cx, delivery(0)).unwrap().unwrap()
+                ));
                 integrate(accepted, frame.rows());
                 let offset = usize::try_from(frame.frontier().0 - basis.0).unwrap();
                 assert_eq!(*accepted, snapshots[offset][index], "{}", texts[index]);
@@ -143,7 +191,8 @@ fn slow_consumers_integrate_bounded_net_ranges_to_each_exact_native_answer() {
 fn quota_refusal_and_eviction_cannot_rewrite_a_pending_range_or_its_receipt() {
     let ((), report) = run_async_under_lab(0x7263_1002, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let cx = contexts.query(); let commit = contexts.commit();
+        let cx = contexts.query();
+        let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, seed()).await.unwrap();
         let mut sub = open(&mut db, &cx, "MATCH (n) RETURN n.p AS p", 2);
@@ -152,41 +201,89 @@ fn quota_refusal_and_eviction_cannot_rewrite_a_pending_range_or_its_receipt() {
         db.write(&commit, edit(1, 8)).await.unwrap();
         let end = db.write(&commit, edit(2, 9)).await.unwrap();
         let serial = sub.serial;
-        for budget in [delivery(0), GqlQueryPolicy::new(0, 100, 0, 1000), GqlQueryPolicy::new(0, 100, 1000, 0)] {
-            assert!(matches!(sub.poll_coalesced(&db, &cx, ticks(2), budget),
-                Err(SubscriptionError::Query(StandingQueryError::Delivery(_)))));
+        for budget in [
+            delivery(0),
+            GqlQueryPolicy::new(0, 100, 0, 1000),
+            GqlQueryPolicy::new(0, 100, 1000, 0),
+        ] {
+            assert!(matches!(
+                sub.poll_coalesced(&db, &cx, ticks(2), budget),
+                Err(SubscriptionError::Query(StandingQueryError::Delivery(_)))
+            ));
             assert_eq!(sub.serial, serial);
             assert_eq!(sub.acknowledged_frontier(), Some(basis));
             assert!(sub.pending.is_none());
         }
-        let pending = sub.poll_coalesced(&db, &cx, ticks(2), delivery(4)).unwrap().unwrap();
+        let pending = sub
+            .poll_coalesced(&db, &cx, ticks(2), delivery(4))
+            .unwrap()
+            .unwrap();
         assert_eq!(pending.from(), Some(basis));
         assert_eq!(pending.frontier(), end);
         assert_eq!(pending.rows().len(), 4);
         let mut fork = sub.fork(&db, &cx).unwrap();
-        let foreign = fork.poll_coalesced(&db, &cx, ticks(2), delivery(100)).unwrap().unwrap();
-        assert!(matches!(sub.acknowledge(foreign.receipt()), Err(SubscriptionError::InvalidReceipt)));
+        let foreign = fork
+            .poll_coalesced(&db, &cx, ticks(2), delivery(100))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            sub.acknowledge(foreign.receipt()),
+            Err(SubscriptionError::InvalidReceipt)
+        ));
         assert!(Arc::ptr_eq(sub.pending.as_ref().unwrap(), &pending));
-        for value in 10..14 { db.write(&commit, edit(1, value)).await.unwrap(); }
+        for value in 10..14 {
+            db.write(&commit, edit(1, value)).await.unwrap();
+        }
         let replay = sub.replay_handle().unwrap();
-        assert!(db.standing_replay_window(&cx, replay).unwrap().retained_after > end);
-        assert!(Arc::ptr_eq(&pending, &sub.poll_coalesced(&db, &cx, ticks(1), delivery(0)).unwrap().unwrap()));
+        assert!(
+            db.standing_replay_window(&cx, replay)
+                .unwrap()
+                .retained_after
+                > end
+        );
+        assert!(Arc::ptr_eq(
+            &pending,
+            &sub.poll_coalesced(&db, &cx, ticks(1), delivery(0))
+                .unwrap()
+                .unwrap()
+        ));
         assert_eq!(sub.acknowledge(initial.receipt()).unwrap(), basis);
         assert!(Arc::ptr_eq(sub.pending.as_ref().unwrap(), &pending));
         sub.acknowledge(pending.receipt()).unwrap();
-        assert!(matches!(sub.poll_coalesced(&db, &cx, ticks(2), delivery(100)),
-            Err(SubscriptionError::Query(StandingQueryError::ReplayGap { .. }))));
+        assert!(matches!(
+            sub.poll_coalesced(&db, &cx, ticks(2), delivery(100)),
+            Err(SubscriptionError::Query(
+                StandingQueryError::ReplayGap { .. }
+            ))
+        ));
         assert_eq!(sub.acknowledged_frontier(), Some(end));
         assert!(sub.pending.is_none());
         sub.restart_from_current().unwrap();
-        assert!(matches!(sub.acknowledge(pending.receipt()), Err(SubscriptionError::InvalidReceipt)));
-        let reset = sub.poll_coalesced(&db, &cx, ticks(2), delivery(100)).unwrap().unwrap();
+        assert!(matches!(
+            sub.acknowledge(pending.receipt()),
+            Err(SubscriptionError::InvalidReceipt)
+        ));
+        let reset = sub
+            .poll_coalesced(&db, &cx, ticks(2), delivery(100))
+            .unwrap()
+            .unwrap();
         assert!(reset.is_snapshot());
-        assert_eq!(plain(reset.rows()), snapshot(&db, &cx, "MATCH (n) RETURN n.p AS p"));
+        assert_eq!(
+            plain(reset.rows()),
+            snapshot(&db, &cx, "MATCH (n) RETURN n.p AS p")
+        );
         sub.acknowledge(reset.receipt()).unwrap();
-        assert!(sub.poll_coalesced(&db, &cx, ticks(2), delivery(0)).unwrap().is_none());
-        sub.close(); sub.close();
-        assert!(matches!(sub.poll_coalesced(&db, &cx, ticks(2), delivery(100)), Err(SubscriptionError::Closed)));
+        assert!(
+            sub.poll_coalesced(&db, &cx, ticks(2), delivery(0))
+                .unwrap()
+                .is_none()
+        );
+        sub.close();
+        sub.close();
+        assert!(matches!(
+            sub.poll_coalesced(&db, &cx, ticks(2), delivery(100)),
+            Err(SubscriptionError::Closed)
+        ));
         assert!(fork.acknowledge(foreign.receipt()).is_ok());
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -196,42 +293,80 @@ fn quota_refusal_and_eviction_cannot_rewrite_a_pending_range_or_its_receipt() {
 fn no_replay_rebuild_and_foreign_owner_boundaries_cannot_synthesize_history() {
     let ((), report) = run_async_under_lab(0x7263_1003, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let cx = contexts.query(); let commit = contexts.commit();
+        let cx = contexts.query();
+        let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, seed()).await.unwrap();
-        let handle = db.register_standing_native(&cx, "MATCH (n) RETURN n.p AS p", &GqlParameters::new(), symbols, policy()).unwrap();
+        let handle = db
+            .register_standing_native(
+                &cx,
+                "MATCH (n) RETURN n.p AS p",
+                &GqlParameters::new(),
+                symbols,
+                policy(),
+            )
+            .unwrap();
         let mut sub = db.open_standing_subscription(&cx, &handle).unwrap();
-        let initial = sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)).unwrap().unwrap();
+        let initial = sub
+            .poll_coalesced(&db, &cx, ticks(8), delivery(100))
+            .unwrap()
+            .unwrap();
         let basis = sub.acknowledge(initial.receipt()).unwrap();
         let one = db.write(&commit, edit(1, 5)).await.unwrap();
-        let atomic = sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)).unwrap().unwrap();
-        assert_eq!(atomic.from(), Some(basis)); assert_eq!(atomic.frontier(), one);
+        let atomic = sub
+            .poll_coalesced(&db, &cx, ticks(8), delivery(100))
+            .unwrap()
+            .unwrap();
+        assert_eq!(atomic.from(), Some(basis));
+        assert_eq!(atomic.frontier(), one);
         sub.acknowledge(atomic.receipt()).unwrap();
         db.write(&commit, edit(1, 6)).await.unwrap();
         db.write(&commit, edit(1, 7)).await.unwrap();
-        assert!(matches!(sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)),
-            Err(SubscriptionError::Query(StandingQueryError::DeltaUnavailable { .. }))));
+        assert!(matches!(
+            sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)),
+            Err(SubscriptionError::Query(
+                StandingQueryError::DeltaUnavailable { .. }
+            ))
+        ));
         sub.restart_from_current().unwrap();
-        sub.enable_replay(&mut db, &cx, 8, 100, 10_000, policy()).unwrap();
-        let baseline = sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)).unwrap().unwrap();
+        sub.enable_replay(&mut db, &cx, 8, 100, 10_000, policy())
+            .unwrap();
+        let baseline = sub
+            .poll_coalesced(&db, &cx, ticks(8), delivery(100))
+            .unwrap()
+            .unwrap();
         let before = sub.acknowledge(baseline.receipt()).unwrap();
         let replay = sub.replay_handle().unwrap().clone();
         let other = Database::open_memory(&commit, keys()).await.unwrap();
-        assert!(matches!(other.standing_replay_coalesced(&cx, &replay, before, ticks(8), delivery(100)),
-            Err(StandingQueryError::ForeignHandle)));
-        assert!(matches!(db.standing_replay_coalesced(&cx, &handle, before, ticks(8), delivery(100)),
-            Err(StandingQueryError::Unsupported)));
+        assert!(matches!(
+            other.standing_replay_coalesced(&cx, &replay, before, ticks(8), delivery(100)),
+            Err(StandingQueryError::ForeignHandle)
+        ));
+        assert!(matches!(
+            db.standing_replay_coalesced(&cx, &handle, before, ticks(8), delivery(100)),
+            Err(StandingQueryError::Unsupported)
+        ));
         db.write(&commit, edit(1, 8)).await.unwrap();
         db.rebuild_standing_query(&cx, &replay, policy()).unwrap();
-        assert!(matches!(sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)),
-            Err(SubscriptionError::Query(StandingQueryError::ReplayGap { .. }))));
+        assert!(matches!(
+            sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)),
+            Err(SubscriptionError::Query(
+                StandingQueryError::ReplayGap { .. }
+            ))
+        ));
         assert_eq!(sub.acknowledged_frontier(), Some(before));
         sub.restart_from_current().unwrap();
-        let reset = sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)).unwrap().unwrap();
+        let reset = sub
+            .poll_coalesced(&db, &cx, ticks(8), delivery(100))
+            .unwrap()
+            .unwrap();
         sub.acknowledge(reset.receipt()).unwrap();
         db.write(&commit, edit(1, 9)).await.unwrap();
         sub.serial = u64::MAX;
-        assert!(matches!(sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)), Err(SubscriptionError::ReceiptExhausted)));
+        assert!(matches!(
+            sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)),
+            Err(SubscriptionError::ReceiptExhausted)
+        ));
         assert!(sub.pending.is_none());
         assert_eq!(sub.acknowledged_frontier(), Some(reset.frontier()));
     });
@@ -242,35 +377,60 @@ fn no_replay_rebuild_and_foreign_owner_boundaries_cannot_synthesize_history() {
 fn a_failed_maintained_source_never_redelivers_a_cached_coalesced_answer_as_current() {
     let ((), report) = run_async_under_lab(0x7263_1004, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let cx = contexts.query(); let commit = contexts.commit();
+        let cx = contexts.query();
+        let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut first = WriteBatch::new(RelationId(1));
         first.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
         db.write(&commit, first).await.unwrap();
-        let handle = db.register_standing_native(&cx, "MATCH (n) RETURN n.p AS p", &GqlParameters::new(), symbols,
-            GqlQueryPolicy::new(1000, 1, 10_000_000, 10_000_000)).unwrap();
+        let handle = db
+            .register_standing_native(
+                &cx,
+                "MATCH (n) RETURN n.p AS p",
+                &GqlParameters::new(),
+                symbols,
+                GqlQueryPolicy::new(1000, 1, 10_000_000, 10_000_000),
+            )
+            .unwrap();
         let mut sub = db.open_standing_subscription(&cx, &handle).unwrap();
-        sub.enable_replay(&mut db, &cx, 8, 100, 10_000, policy()).unwrap();
-        let initial = sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)).unwrap().unwrap();
+        sub.enable_replay(&mut db, &cx, 8, 100, 10_000, policy())
+            .unwrap();
+        let initial = sub
+            .poll_coalesced(&db, &cx, ticks(8), delivery(100))
+            .unwrap()
+            .unwrap();
         sub.acknowledge(initial.receipt()).unwrap();
         db.write(&commit, edit(1, 2)).await.unwrap();
         db.write(&commit, edit(1, 3)).await.unwrap();
-        let pending = sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)).unwrap().unwrap();
+        let pending = sub
+            .poll_coalesced(&db, &cx, ticks(8), delivery(100))
+            .unwrap()
+            .unwrap();
         let mut grow = WriteBatch::new(RelationId(1));
         grow.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(9))]);
         let durable = db.write(&commit, grow).await.unwrap();
         assert_eq!(db.frontier().unwrap(), durable);
-        assert!(matches!(sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)),
-            Err(SubscriptionError::Query(StandingQueryError::Unavailable { .. }))));
+        assert!(matches!(
+            sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)),
+            Err(SubscriptionError::Query(
+                StandingQueryError::Unavailable { .. }
+            ))
+        ));
         assert!(Arc::ptr_eq(sub.pending.as_ref().unwrap(), &pending));
         let replay = sub.replay_handle().unwrap().clone();
         db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
         db.rebuild_standing_query(&cx, &replay, policy()).unwrap();
         sub.restart_from_current().unwrap();
-        let baseline = sub.poll_coalesced(&db, &cx, ticks(8), delivery(100)).unwrap().unwrap();
+        let baseline = sub
+            .poll_coalesced(&db, &cx, ticks(8), delivery(100))
+            .unwrap()
+            .unwrap();
         assert!(baseline.is_snapshot());
         assert_eq!(baseline.frontier(), durable);
-        assert_eq!(plain(baseline.rows()), snapshot(&db, &cx, "MATCH (n) RETURN n.p AS p"));
+        assert_eq!(
+            plain(baseline.rows()),
+            snapshot(&db, &cx, "MATCH (n) RETURN n.p AS p")
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

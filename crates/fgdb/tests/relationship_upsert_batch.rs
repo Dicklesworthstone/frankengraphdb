@@ -18,7 +18,11 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x61; 32], DatabaseSecurityNamespaceId([0x62; 32]), [0x63; 32])
+    DatabaseKeys::new(
+        [0x61; 32],
+        DatabaseSecurityNamespaceId([0x62; 32]),
+        [0x63; 32],
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -29,8 +33,10 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 fn prepare(text: &str) -> PreparedGraphEdgeUpsertQuery {
-    PreparedGraphEdgeUpsertQueryText::prepare(text, R, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap()
+    PreparedGraphEdgeUpsertQueryText::prepare(text, R, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
 }
 fn policy(created: u64, actions: u64, rows: u64) -> GraphEdgeUpsertPolicy {
     GraphEdgeUpsertPolicy::new(
@@ -72,30 +78,47 @@ fn multiple_pairs_keep_parallel_matches_and_one_atomic_creation() {
              RETURN r,r.q AS q ORDER BY r",
         );
         let mut transaction = db.begin(&txcx).unwrap();
-        let (stats, rows) = transaction.execute_graph_edge_upserts_query_governed(
-            &mut db, &cx, &query, policy(1, 6, 3),
-            |request| -> Result<ElementId, ()> {
-                assert!(matches!(request, GraphInsertRequest::Edge { row: 1, edge: 0 }));
-                Ok(ElementId::Edge(EId(100)))
-            },
-        ).unwrap();
+        let (stats, rows) = transaction
+            .execute_graph_edge_upserts_query_governed(
+                &mut db,
+                &cx,
+                &query,
+                policy(1, 6, 3),
+                |request| -> Result<ElementId, ()> {
+                    assert!(matches!(
+                        request,
+                        GraphInsertRequest::Edge { row: 1, edge: 0 }
+                    ));
+                    Ok(ElementId::Edge(EId(100)))
+                },
+            )
+            .unwrap();
         assert_eq!(stats.match_selection.result_rows, 2);
         assert_eq!(stats.created_edges, 1);
         assert_eq!(stats.matched_occurrences, 2);
         assert_eq!(stats.action_effects, 6);
-        assert_eq!(cells(&rows.value), vec![
-            vec![GraphValue::Edge(EId(10)), int(13)],
-            vec![GraphValue::Edge(EId(11)), int(16)],
-            vec![GraphValue::Edge(EId(100)), int(2)],
-        ]);
+        assert_eq!(
+            cells(&rows.value),
+            vec![
+                vec![GraphValue::Edge(EId(10)), int(13)],
+                vec![GraphValue::Edge(EId(11)), int(16)],
+                vec![GraphValue::Edge(EId(100)), int(2)],
+            ]
+        );
         assert!(rows.evaluator.work_units > stats.evaluator.work_units);
-        assert_eq!(rows.rows.snapshot_records, stats.match_selection.snapshot_records + stats.overlay_edges);
+        assert_eq!(
+            rows.rows.snapshot_records,
+            stats.match_selection.snapshot_records + stats.overlay_edges
+        );
         assert_eq!(db.edges().unwrap().len(), 2);
         assert_eq!(db.frontier().unwrap(), before);
         transaction.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(db.edges().unwrap().len(), 3);
-        assert_eq!(db.edge(EId(100)).unwrap().unwrap().props, vec![(Q, CanonicalScalar::Int(2))]);
+        assert_eq!(
+            db.edge(EId(100)).unwrap().unwrap().props,
+            vec![(Q, CanonicalScalar::Int(2))]
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -117,18 +140,34 @@ fn duplicate_input_occurrences_observe_staging_and_aggregate_the_whole_bag() {
         );
         let calls = AtomicU64::new(0);
         let mut transaction = db.begin(&txcx).unwrap();
-        let (stats, rows) = transaction.execute_graph_edge_upserts_query_governed(
-            &mut db, &cx, &query, policy(1, 2, 1),
-            |_| -> Result<ElementId, ()> {
-                assert_eq!(calls.fetch_add(1, Ordering::Relaxed), 0);
-                Ok(ElementId::Edge(EId(100)))
-            },
-        ).unwrap();
+        let (stats, rows) = transaction
+            .execute_graph_edge_upserts_query_governed(
+                &mut db,
+                &cx,
+                &query,
+                policy(1, 2, 1),
+                |_| -> Result<ElementId, ()> {
+                    assert_eq!(calls.fetch_add(1, Ordering::Relaxed), 0);
+                    Ok(ElementId::Edge(EId(100)))
+                },
+            )
+            .unwrap();
         assert_eq!(stats.match_selection.result_rows, 2);
-        assert_eq!((stats.created_edges, stats.matched_occurrences, stats.action_effects), (1, 1, 2));
-        assert_eq!(cells(&rows.value), vec![vec![
-            int(2), GraphValue::List(vec![int(8), int(8)].into_boxed_slice()),
-        ]]);
+        assert_eq!(
+            (
+                stats.created_edges,
+                stats.matched_occurrences,
+                stats.action_effects
+            ),
+            (1, 1, 2)
+        );
+        assert_eq!(
+            cells(&rows.value),
+            vec![vec![
+                int(2),
+                GraphValue::List(vec![int(8), int(8)].into_boxed_slice()),
+            ]]
+        );
         assert_eq!(rows.rows.result_rows, 1);
         assert_eq!(transaction.edges(&db).unwrap().len(), 1);
         transaction.abort();
@@ -155,20 +194,34 @@ fn changed_merge_key_is_rechecked_in_the_next_occurrence() {
              RETURN r,r.p AS p ORDER BY r",
         );
         let mut transaction = db.begin(&txcx).unwrap();
-        let (stats, rows) = transaction.execute_graph_edge_upserts_query_governed(
-            &mut db, &cx, &query, policy(1, 2, 2),
-            |request| -> Result<ElementId, ()> {
-                assert!(matches!(request, GraphInsertRequest::Edge { row: 1, edge: 0 }));
-                Ok(ElementId::Edge(EId(100)))
-            },
-        ).unwrap();
+        let (stats, rows) = transaction
+            .execute_graph_edge_upserts_query_governed(
+                &mut db,
+                &cx,
+                &query,
+                policy(1, 2, 2),
+                |request| -> Result<ElementId, ()> {
+                    assert!(matches!(
+                        request,
+                        GraphInsertRequest::Edge { row: 1, edge: 0 }
+                    ));
+                    Ok(ElementId::Edge(EId(100)))
+                },
+            )
+            .unwrap();
         assert_eq!((stats.created_edges, stats.matched_occurrences), (1, 1));
-        assert_eq!(cells(&rows.value), vec![
-            vec![GraphValue::Edge(EId(10)), int(8)],
-            vec![GraphValue::Edge(EId(100)), int(42)],
-        ]);
+        assert_eq!(
+            cells(&rows.value),
+            vec![
+                vec![GraphValue::Edge(EId(10)), int(8)],
+                vec![GraphValue::Edge(EId(100)), int(42)],
+            ]
+        );
         transaction.abort();
-        assert_eq!(db.edge(EId(10)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(7))]);
+        assert_eq!(
+            db.edge(EId(10)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(7))]
+        );
         assert!(db.edge(EId(100)).unwrap().is_none());
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -190,18 +243,26 @@ fn opposite_undirected_occurrences_share_the_earlier_created_relationship() {
         );
         let calls = AtomicU64::new(0);
         let mut transaction = db.begin(&txcx).unwrap();
-        let (stats, rows) = transaction.execute_graph_edge_upserts_query_governed(
-            &mut db, &cx, &query, policy(1, 2, 2),
-            |_| -> Result<ElementId, ()> {
-                assert_eq!(calls.fetch_add(1, Ordering::Relaxed), 0);
-                Ok(ElementId::Edge(EId(100)))
-            },
-        ).unwrap();
+        let (stats, rows) = transaction
+            .execute_graph_edge_upserts_query_governed(
+                &mut db,
+                &cx,
+                &query,
+                policy(1, 2, 2),
+                |_| -> Result<ElementId, ()> {
+                    assert_eq!(calls.fetch_add(1, Ordering::Relaxed), 0);
+                    Ok(ElementId::Edge(EId(100)))
+                },
+            )
+            .unwrap();
         assert_eq!((stats.created_edges, stats.matched_occurrences), (1, 1));
-        assert_eq!(cells(&rows.value), vec![
-            vec![GraphValue::Edge(EId(100)), int(8)],
-            vec![GraphValue::Edge(EId(100)), int(8)],
-        ]);
+        assert_eq!(
+            cells(&rows.value),
+            vec![
+                vec![GraphValue::Edge(EId(100)), int(8)],
+                vec![GraphValue::Edge(EId(100)), int(8)],
+            ]
+        );
         transaction.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.edges().unwrap().len(), 1);
         let edge = db.edge(EId(100)).unwrap().unwrap();
@@ -225,16 +286,27 @@ fn late_return_failure_even_with_zero_output_budget_restores_the_entire_prefix()
         let digest = transaction.staged_effect_digest().unwrap();
         let next = AtomicU64::new(100);
         let mut allocate = |_| -> Result<ElementId, ()> {
-            Ok(ElementId::Edge(EId(u128::from(next.fetch_add(1, Ordering::Relaxed)))))
+            Ok(ElementId::Edge(EId(u128::from(
+                next.fetch_add(1, Ordering::Relaxed),
+            ))))
         };
         let failing = prepare(
             "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
              ON CREATE SET r.q=0 RETURN 10/r.q AS bad LIMIT 0",
         );
         let result = transaction.execute_graph_edge_upserts_query_governed(
-            &mut db, &cx, &failing, policy(2, 2, 0), &mut allocate,
+            &mut db,
+            &cx,
+            &failing,
+            policy(2, 2, 0),
+            &mut allocate,
         );
-        assert!(matches!(result, Err(GqlQueryError::Source(GraphEdgeUpsertQueryError::Returning(_)))));
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphEdgeUpsertQueryError::Returning(
+                _
+            )))
+        ));
         assert_eq!(next.load(Ordering::Relaxed), 102);
         assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
         assert!(transaction.edges(&db).unwrap().is_empty());
@@ -245,9 +317,15 @@ fn late_return_failure_even_with_zero_output_budget_restores_the_entire_prefix()
             "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
              ON CREATE SET r.q=1 RETURN r",
         );
-        let (_, rows) = transaction.execute_graph_edge_upserts_query_governed(
-            &mut db, &cx, &successful, policy(2, 2, 2), &mut allocate,
-        ).unwrap();
+        let (_, rows) = transaction
+            .execute_graph_edge_upserts_query_governed(
+                &mut db,
+                &cx,
+                &successful,
+                policy(2, 2, 2),
+                &mut allocate,
+            )
+            .unwrap();
         assert_eq!(rows.value.len(), 2);
         transaction.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
@@ -277,22 +355,43 @@ fn creation_and_action_allowances_are_statement_wide_not_per_occurrence() {
             transaction.write(&mut db, vertices(3)).unwrap();
             let digest = transaction.staged_effect_digest().unwrap();
             let next = AtomicU64::new(100);
-            let allowance = if creation_limit { policy(1, 10, 1) } else { policy(10, 1, 1) };
+            let allowance = if creation_limit {
+                policy(1, 10, 1)
+            } else {
+                policy(10, 1, 1)
+            };
             let result = transaction.execute_graph_edge_upserts_query_governed(
-                &mut db, &cx, &query, allowance,
+                &mut db,
+                &cx,
+                &query,
+                allowance,
                 |_| -> Result<ElementId, ()> {
-                    Ok(ElementId::Edge(EId(u128::from(next.fetch_add(1, Ordering::Relaxed)))))
+                    Ok(ElementId::Edge(EId(u128::from(
+                        next.fetch_add(1, Ordering::Relaxed),
+                    ))))
                 },
             );
             if creation_limit {
-                assert!(matches!(result, Err(GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
-                    GraphEdgeUpsertError::Merge(GraphEdgeMergeError::CreationLimit { limit: 1, observed: 2 })
-                )))));
+                assert!(matches!(
+                    result,
+                    Err(GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
+                        GraphEdgeUpsertError::Merge(GraphEdgeMergeError::CreationLimit {
+                            limit: 1,
+                            observed: 2
+                        })
+                    )))
+                ));
                 assert_eq!(next.load(Ordering::Relaxed), 101);
             } else {
-                assert!(matches!(result, Err(GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
-                    GraphEdgeUpsertError::ActionLimit { limit: 1, observed: 2 }
-                )))));
+                assert!(matches!(
+                    result,
+                    Err(GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
+                        GraphEdgeUpsertError::ActionLimit {
+                            limit: 1,
+                            observed: 2
+                        }
+                    )))
+                ));
                 assert_eq!(next.load(Ordering::Relaxed), 102);
             }
             assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
@@ -318,11 +417,23 @@ fn empty_input_keeps_global_aggregate_without_actions_or_allocation() {
              ON CREATE SET r.q=10/r.q RETURN count(r) AS count",
         );
         let mut transaction = db.begin(&txcx).unwrap();
-        let (stats, rows) = transaction.execute_graph_edge_upserts_query_governed(
-            &mut db, &cx, &query, policy(0, 0, 1),
-            |_| -> Result<ElementId, ()> { panic!("no input cannot allocate") },
-        ).unwrap();
-        assert_eq!((stats.created_edges, stats.matched_occurrences, stats.action_effects), (0, 0, 0));
+        let (stats, rows) = transaction
+            .execute_graph_edge_upserts_query_governed(
+                &mut db,
+                &cx,
+                &query,
+                policy(0, 0, 1),
+                |_| -> Result<ElementId, ()> { panic!("no input cannot allocate") },
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                stats.created_edges,
+                stats.matched_occurrences,
+                stats.action_effects
+            ),
+            (0, 0, 0)
+        );
         assert_eq!(cells(&rows.value), vec![vec![int(0)]]);
         transaction.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -339,36 +450,53 @@ fn bulk_autocommit_survives_compaction_and_reopen() {
         let txcx = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         db.write(&commit, vertices(3)).await.unwrap();
         let before = db.frontier().unwrap();
         let query = prepare(
             "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
              ON CREATE SET r.q=7 RETURN r,r.q AS q ORDER BY r",
         );
-        let (stats, rows, _) = db.execute_graph_edge_upserts_query_autocommit_governed(
-            &txcx, &cx, &commit, &query, policy(2, 2, 2),
-            |request| -> Result<ElementId, ()> {
-                let GraphInsertRequest::Edge { row, edge: 0 } = request else {
-                    panic!("one edge request per missing pair")
-                };
-                Ok(ElementId::Edge(EId(100 + row as u128)))
-            },
-        ).await.unwrap();
+        let (stats, rows, _) = db
+            .execute_graph_edge_upserts_query_autocommit_governed(
+                &txcx,
+                &cx,
+                &commit,
+                &query,
+                policy(2, 2, 2),
+                |request| -> Result<ElementId, ()> {
+                    let GraphInsertRequest::Edge { row, edge: 0 } = request else {
+                        panic!("one edge request per missing pair")
+                    };
+                    Ok(ElementId::Edge(EId(100 + row as u128)))
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(stats.created_edges, 2);
-        assert_eq!(cells(&rows.value), vec![
-            vec![GraphValue::Edge(EId(100)), int(7)],
-            vec![GraphValue::Edge(EId(101)), int(7)],
-        ]);
+        assert_eq!(
+            cells(&rows.value),
+            vec![
+                vec![GraphValue::Edge(EId(100)), int(7)],
+                vec![GraphValue::Edge(EId(101)), int(7)],
+            ]
+        );
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(txcx.outstanding_obligations(), 0);
         db.compact(&commit).await.unwrap();
         drop(db);
-        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(reopened.frontier().unwrap().0, before.0 + 1);
         assert_eq!(reopened.edges().unwrap().len(), 2);
         for edge in [EId(100), EId(101)] {
-            assert_eq!(reopened.edge(edge).unwrap().unwrap().props, vec![(Q, CanonicalScalar::Int(7))]);
+            assert_eq!(
+                reopened.edge(edge).unwrap().unwrap().props,
+                vec![(Q, CanonicalScalar::Int(7))]
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

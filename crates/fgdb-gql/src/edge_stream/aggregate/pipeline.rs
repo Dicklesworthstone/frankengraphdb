@@ -42,16 +42,21 @@ impl InputPipeline {
         // Do not erase another input transform if a future constructor can
         // represent both. Each admitted relational stage already owns its VM.
         if aggregate.input_projection().is_some()
-            || aggregate.aggregates().iter().any(|spec| match spec.function() {
-                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => true,
-                // Preserve the folded reducer's open-domain extremum boundary.
-                GraphAggregateFunction::Min | GraphAggregateFunction::Max => {
-                    spec.argument_column().is_some_and(|column| {
-                        relation.column_types()[column] == GraphSetColumnType::Any
-                    })
-                }
-                _ => false,
-            })
+            || aggregate
+                .aggregates()
+                .iter()
+                .any(|spec| match spec.function() {
+                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => {
+                        true
+                    }
+                    // Preserve the folded reducer's open-domain extremum boundary.
+                    GraphAggregateFunction::Min | GraphAggregateFunction::Max => {
+                        spec.argument_column().is_some_and(|column| {
+                            relation.column_types()[column] == GraphSetColumnType::Any
+                        })
+                    }
+                    _ => false,
+                })
         {
             return None;
         }
@@ -82,14 +87,16 @@ impl InputPipeline {
                 current = child;
             } else if let Some((child, projection, quantifier)) = current.incremental_projection() {
                 if quantifier != GraphSetQuantifier::All
-                    || !projection.iter().all(|column| matches!(
-                        column.value(),
-                        GraphSetValue::Column(_)
-                            | GraphSetValue::Literal(_)
-                            | GraphSetValue::TypedNull(_)
-                            | GraphSetValue::Integer(_)
-                            | GraphSetValue::Value(_)
-                    ))
+                    || !projection.iter().all(|column| {
+                        matches!(
+                            column.value(),
+                            GraphSetValue::Column(_)
+                                | GraphSetValue::Literal(_)
+                                | GraphSetValue::TypedNull(_)
+                                | GraphSetValue::Integer(_)
+                                | GraphSetValue::Value(_)
+                        )
+                    })
                 {
                     // rand() depends on each relational stage's canonical
                     // input ordinal, not physical graph order. MapGet may need
@@ -136,7 +143,11 @@ impl InputPipeline {
                         control,
                         |column, error| {
                             GqlQueryError::Source(GraphAggregateError::InputRelation(
-                                GraphSetExecutionError::Projection { row: 0, column, error },
+                                GraphSetExecutionError::Projection {
+                                    row: 0,
+                                    column,
+                                    error,
+                                },
                             ))
                         },
                     )?;

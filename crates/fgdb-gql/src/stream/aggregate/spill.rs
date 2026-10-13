@@ -110,7 +110,8 @@ impl<S: VertexScanSource, F> VertexSpillAggregateCursor<S, F> {
             // allowance. Plain definitions still move their row unchanged.
             let Some(row) = self.definition.evaluate_input(row, &mut |event| {
                 meter.event(input_event(event)).map_err(lift)
-            })? else {
+            })?
+            else {
                 // FALSE/UNKNOWN drops this admitted record, not the scan.
                 // Later stages never see it and the cumulative meter survives.
                 continue;

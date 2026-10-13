@@ -401,8 +401,14 @@ fn spill_and_maintained_sources_keep_projected_rank_with_checked_companions() {
     assert!(source.output_projection().is_none());
     assert_eq!(source.incremental_result_window(), (0, None));
     assert_eq!(source.input_pattern(), query.input_pattern());
-    assert_eq!(source.evaluation_key_columns(), query.evaluation_key_columns());
-    assert_eq!(source.evaluation_aggregate_columns(), query.evaluation_aggregate_columns());
+    assert_eq!(
+        source.evaluation_key_columns(),
+        query.evaluation_key_columns()
+    );
+    assert_eq!(
+        source.evaluation_aggregate_columns(),
+        query.evaluation_aggregate_columns()
+    );
     assert_eq!(query.canonical_bytes(), before);
     let synchronous = SpillAggregatePlan::compile(&query).unwrap();
     let asynchronous = AsyncSpillAggregatePlan::compile(&query).unwrap();
@@ -416,32 +422,51 @@ fn spill_and_maintained_sources_keep_projected_rank_with_checked_companions() {
         assert!(definition.ordering().is_empty());
         assert!(definition.has_precomputed_output());
         let mut control = |_| Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(());
-        let a = definition.project_output(raw[0].clone(), &mut control).unwrap();
-        let b = definition.project_output(raw[1].clone(), &mut control).unwrap();
+        let a = definition
+            .project_output(raw[0].clone(), &mut control)
+            .unwrap();
+        let b = definition
+            .project_output(raw[1].clone(), &mut control)
+            .unwrap();
         assert_eq!(
-            query.project_incremental_output(&raw[0], &mut |_| Ok::<(), ()>(())).unwrap(),
+            query
+                .project_incremental_output(&raw[0], &mut |_| Ok::<(), ()>(()))
+                .unwrap(),
             Some(a.clone())
         );
         assert_eq!(
-            query.project_incremental_output(&raw[1], &mut |_| Ok::<(), ()>(())).unwrap(),
+            query
+                .project_incremental_output(&raw[1], &mut |_| Ok::<(), ()>(()))
+                .unwrap(),
             Some(b.clone())
         );
         assert_eq!(
-            definition.compare_precomputed_output(&raw[0], &a, &raw[1], &b, &mut control).unwrap(),
+            definition
+                .compare_precomputed_output(&raw[0], &a, &raw[1], &b, &mut control)
+                .unwrap(),
             std::cmp::Ordering::Greater
         );
         // A legacy raw-only consumer must fail, not silently use group order.
         assert!(matches!(
             definition.compare_output(&raw[0], &raw[1], &mut control),
-            Err(GqlQueryError::Source(GraphAggregateError::InvalidReductionInput))
+            Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput
+            ))
         ));
         // The decisive first score cannot hide a malformed companion schema.
         assert!(matches!(
             definition.compare_precomputed_output(&raw[0], &a, &raw[1], &raw[1], &mut control),
-            Err(GqlQueryError::Source(GraphAggregateError::InvalidReductionInput))
+            Err(GqlQueryError::Source(
+                GraphAggregateError::InvalidReductionInput
+            ))
         ));
         // A final projected tuple is not a complete upstream group.
-        assert!(query.project_incremental_output(&a, &mut |_| Ok::<(), ()>(())).unwrap().is_none());
+        assert!(
+            query
+                .project_incremental_output(&a, &mut |_| Ok::<(), ()>(()))
+                .unwrap()
+                .is_none()
+        );
     }
 }
 

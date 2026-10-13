@@ -232,7 +232,6 @@ impl WriteTxn {
                             transaction.write(database, batch).map(|_| ()).map_err(infrastructure)
                         },
                     )?;
-                    drop(state);
                     stats.evaluator = action_stats.evaluator;
                     stats.action_effects = actions as u64;
                     if matches!(outcome, GraphEdgeMergeOutcome::Matched(_)) {

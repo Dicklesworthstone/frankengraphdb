@@ -320,7 +320,10 @@ impl PreparedGraphEdgeUpsertQueryText {
                     let alias = matches!(previous, TokenKind::Punct(b'.'))
                         || matches!(previous, TokenKind::Word(word) if word.eq_ignore_ascii_case("AS"));
                     if !alias {
-                        if PREFIX_ENDS.iter().any(|name| word.eq_ignore_ascii_case(name)) {
+                        if PREFIX_ENDS
+                            .iter()
+                            .any(|name| word.eq_ignore_ascii_case(name))
+                        {
                             return Ok(false);
                         }
                         if word.eq_ignore_ascii_case("MERGE")
@@ -375,9 +378,7 @@ impl PreparedGraphEdgeUpsertQueryText {
                 TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
                 TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
-                TokenKind::Word(word)
-                    if depth == 0 && word.eq_ignore_ascii_case("RETURN") =>
-                {
+                TokenKind::Word(word) if depth == 0 && word.eq_ignore_ascii_case("RETURN") => {
                     let alias = matches!(previous, TokenKind::Punct(b'.'))
                         || matches!(previous, TokenKind::Word(word) if word.eq_ignore_ascii_case("AS"));
                     if !alias {
@@ -449,8 +450,14 @@ mod classification_tests {
             "MATCH (a),(b) WHERE a.RETURN=1 MERGE (a)<-[r:R]-(b) \
              ON CREATE SET r.RETURN=2 RETURN r.RETURN AS value;",
         ] {
-            assert!(PreparedGraphEdgeUpsertQueryText::has_return_clause(text).unwrap(), "{text}");
-            assert!(!crate::PreparedGraphEdgeMergeQueryText::has_return_clause(text).unwrap(), "{text}");
+            assert!(
+                PreparedGraphEdgeUpsertQueryText::has_return_clause(text).unwrap(),
+                "{text}"
+            );
+            assert!(
+                !crate::PreparedGraphEdgeMergeQueryText::has_return_clause(text).unwrap(),
+                "{text}"
+            );
         }
         for text in [
             "MERGE (a) ON CREATE SET a.p=1 RETURN a",
@@ -461,7 +468,10 @@ mod classification_tests {
             "MATCH (a),(b) MERGE (a)-[r:R]->(b) SET r.p='; RETURN r'",
             "MATCH (a),(b) MERGE (a)-[r:R]->(b) SET r.p=1; MATCH (n) RETURN n",
         ] {
-            assert!(!PreparedGraphEdgeUpsertQueryText::has_return_clause(text).unwrap(), "{text}");
+            assert!(
+                !PreparedGraphEdgeUpsertQueryText::has_return_clause(text).unwrap(),
+                "{text}"
+            );
         }
     }
 }

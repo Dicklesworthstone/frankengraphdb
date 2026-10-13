@@ -498,7 +498,10 @@ impl PreparedGraphWriteProgram {
                 }
                 (
                     GraphWriteStatement::EdgeUpsert(input),
-                    GraphWriteStepStats::EdgeUpsertBatch { stats, target_edges },
+                    GraphWriteStepStats::EdgeUpsertBatch {
+                        stats,
+                        target_edges,
+                    },
                 ) => {
                     meter.absorb_edge_upsert_batch(statement, input, stats, target_edges)?;
                 }

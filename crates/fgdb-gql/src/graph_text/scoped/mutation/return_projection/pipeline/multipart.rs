@@ -461,11 +461,8 @@ impl<'a> Parser<'a> {
         }
         let mut comparisons = Vec::new();
         for comparison in row_comparisons {
-            let right = self.mutation_projection(
-                &mut inputs,
-                comparison.variable,
-                comparison.property,
-            )?;
+            let right =
+                self.mutation_projection(&mut inputs, comparison.variable, comparison.property)?;
             comparisons.push((comparison.row, right, comparison.comparison));
         }
         // An aggregate terminal addresses completed row aliases, not graph

@@ -472,7 +472,10 @@ mod with_tests {
         assert_eq!(query.columns(), &["vertex", "p"]);
         assert_eq!(
             query.bindings(),
-            &[GraphVertexReturnBinding::Vertex, GraphVertexReturnBinding::Property(P)]
+            &[
+                GraphVertexReturnBinding::Vertex,
+                GraphVertexReturnBinding::Property(P)
+            ]
         );
         let vertex = GraphValue::Vertex(VId((1_u128 << 100) + 1));
         // The host supplies final state, not the MERGE map's original p=1.
@@ -496,17 +499,13 @@ mod with_tests {
              RETURN p + 1 AS next",
         );
         assert_eq!(finish(&grouped, vec![int(3)], 1), vec![vec![int(4)]]);
-        let empty = prepare(
-            "MERGE (n {p:1}) WITH n.p AS p WHERE p < 0 RETURN count(*) AS total",
-        );
+        let empty = prepare("MERGE (n {p:1}) WITH n.p AS p WHERE p < 0 RETURN count(*) AS total");
         assert_eq!(finish(&empty, vec![int(3)], 1), vec![vec![int(0)]]);
     }
 
     #[test]
     fn only_final_output_spends_rows_and_limit_zero_cannot_hide_expression_failure() {
-        let filtered = prepare(
-            "MERGE (n {p:1}) WITH n AS item WHERE item.p < 0 RETURN item",
-        );
+        let filtered = prepare("MERGE (n {p:1}) WITH n AS item WHERE item.p < 0 RETURN item");
         assert!(finish(&filtered, vec![GraphValue::Vertex(VId(1)), int(3)], 0).is_empty());
         let limited = prepare("MERGE (n {p:1}) WITH n.p AS p RETURN p LIMIT 0");
         assert!(finish(&limited, vec![int(3)], 0).is_empty());
@@ -522,7 +521,9 @@ mod with_tests {
                 policy(0),
                 || Ok(()),
             ),
-            Err(GqlQueryError::Source(GraphSetExecutionError::Projection { .. }))
+            Err(GqlQueryError::Source(
+                GraphSetExecutionError::Projection { .. }
+            ))
         ));
     }
 
@@ -541,7 +542,10 @@ mod with_tests {
             }])
             .unwrap()
             .with_page(1, Some(1));
-        assert_eq!(finish(&selected, vec![int(3)], 1), vec![vec![int(96), int(4)]]);
+        assert_eq!(
+            finish(&selected, vec![int(3)], 1),
+            vec![vec![int(96), int(4)]]
+        );
         assert_ne!(selected.canonical_bytes(), query.canonical_bytes());
         assert!(matches!(
             query.with_order_by(&[GraphValueOrder {
@@ -559,7 +563,7 @@ mod with_tests {
         let template = PreparedGraphVertexUpsertQueryText::prepare(
             "MERGE (n {p:$key}) WITH n.p AS p WHERE p > $minimum RETURN p+$extra AS value",
             RelationId(1),
-            |kind, name| {
+            |kind: crate::GraphSymbolKind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             },
@@ -568,9 +572,12 @@ mod with_tests {
         let prepared_calls = calls.get();
         let args = |minimum| {
             GqlParameters::new()
-                .with_int64("key", 1).unwrap()
-                .with_int64("minimum", minimum).unwrap()
-                .with_int64("extra", 10).unwrap()
+                .with_int64("key", 1)
+                .unwrap()
+                .with_int64("minimum", minimum)
+                .unwrap()
+                .with_int64("extra", 10)
+                .unwrap()
         };
         let first = template.bind_parameters(&args(0)).unwrap();
         let second = template.bind_parameters(&args(5)).unwrap();
@@ -603,10 +610,15 @@ mod with_tests {
             let text = format!("MERGE (n {{p:1}}) {tail}");
             let calls = std::cell::Cell::new(0);
             assert!(
-                PreparedGraphVertexUpsertQueryText::prepare(&text, RelationId(1), |kind, name| {
-                    calls.set(calls.get() + 1);
-                    symbols(kind, name)
-                }).is_err(),
+                PreparedGraphVertexUpsertQueryText::prepare(
+                    &text,
+                    RelationId(1),
+                    |kind: crate::GraphSymbolKind, name: &str| {
+                        calls.set(calls.get() + 1);
+                        symbols(kind, name)
+                    }
+                )
+                .is_err(),
                 "{text}"
             );
             assert_eq!(calls.get(), 0, "{text}");
@@ -624,13 +636,18 @@ mod with_tests {
             ..GlaExecutionStats::default()
         };
         let mut checkpoints = 0;
-        let result = query.project_governed::<(), ()>(
-            vec![int(3)],
-            GqlExecutionStats::default(),
-            prefix,
-            policy(1),
-            || { checkpoints += 1; Ok(()) },
-        ).unwrap();
+        let result = query
+            .project_governed::<(), ()>(
+                vec![int(3)],
+                GqlExecutionStats::default(),
+                prefix,
+                policy(1),
+                || {
+                    checkpoints += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
         assert_eq!(result.value[0].values(), &[int(12)]);
         assert!(result.evaluator.work_units > prefix.work_units);
         assert!(checkpoints > 1);
@@ -660,7 +677,9 @@ mod with_tests {
                     prefix,
                     policy(1),
                     || {
-                        if visited == stop { return Err(()); }
+                        if visited == stop {
+                            return Err(());
+                        }
                         visited += 1;
                         Ok(())
                     },

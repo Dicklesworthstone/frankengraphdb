@@ -78,7 +78,10 @@ fn optional_theta_count_star_includes_null_extension_but_count_value_does_not() 
     );
     assert_eq!(rows.len(), SCORES.len());
     for (index, row) in rows.iter().enumerate() {
-        let matches = SCORES.iter().filter(|value| **value > SCORES[index]).count() as u64;
+        let matches = SCORES
+            .iter()
+            .filter(|value| **value > SCORES[index])
+            .count() as u64;
         assert_eq!(row.keys(), &[GraphValue::Vertex(VId(index as u128 + 1))]);
         assert_eq!(row.values()[0].as_count(), Some(matches.max(1)));
         assert_eq!(row.values()[1].as_count(), Some(matches));

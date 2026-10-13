@@ -22,8 +22,8 @@ impl MixedMeter {
         let create_actions = input.action_count(GraphEdgeUpsertBranch::Create) as u128;
         let match_actions = input.action_count(GraphEdgeUpsertBranch::Match) as u128;
         let expected = created * create_actions + matched * match_actions;
-        let modified = created * u128::from(create_actions != 0)
-            + matched * u128::from(match_actions != 0);
+        let modified =
+            created * u128::from(create_actions != 0) + matched * u128::from(match_actions != 0);
         let targets = u128::from(target_edges);
         // Each occurrence resolves at least once. A creation answers one real
         // input, and each match came from an examined overlay edge. Multiple
@@ -175,10 +175,34 @@ mod tests {
         let input = input();
         let baseline = stats();
         let mut cases = vec![
-            (GraphEdgeUpsertBatchStats { action_effects: 8, ..baseline }, 3),
-            (GraphEdgeUpsertBatchStats { created_edges: 4, ..baseline }, 3),
-            (GraphEdgeUpsertBatchStats { matched_occurrences: 0, ..baseline }, 3),
-            (GraphEdgeUpsertBatchStats { overlay_edges: 2, ..baseline }, 3),
+            (
+                GraphEdgeUpsertBatchStats {
+                    action_effects: 8,
+                    ..baseline
+                },
+                3,
+            ),
+            (
+                GraphEdgeUpsertBatchStats {
+                    created_edges: 4,
+                    ..baseline
+                },
+                3,
+            ),
+            (
+                GraphEdgeUpsertBatchStats {
+                    matched_occurrences: 0,
+                    ..baseline
+                },
+                3,
+            ),
+            (
+                GraphEdgeUpsertBatchStats {
+                    overlay_edges: 2,
+                    ..baseline
+                },
+                3,
+            ),
             (baseline, 0),
             (baseline, 5),
         ];
@@ -218,18 +242,30 @@ mod tests {
         ] {
             policies.push(GraphWriteProgramPolicy::new(query, 18, 0, 2));
         }
-        policies.push(GraphWriteProgramPolicy::new(exact.mutations.query, 17, 0, 2));
-        policies.push(GraphWriteProgramPolicy::new(exact.mutations.query, 18, 0, 1));
+        policies.push(GraphWriteProgramPolicy::new(
+            exact.mutations.query,
+            17,
+            0,
+            2,
+        ));
+        policies.push(GraphWriteProgramPolicy::new(
+            exact.mutations.query,
+            18,
+            0,
+            1,
+        ));
         for policy in policies {
             let mut meter = meter(policy);
-            meter.absorb_edge_upsert_batch::<(), (), ()>(0, &input, stats(), 3).unwrap();
+            meter
+                .absorb_edge_upsert_batch::<(), (), ()>(0, &input, stats(), 3)
+                .unwrap();
             let before = meter.common.stats;
             let result = meter.absorb_edge_upsert_batch::<(), (), ()>(1, &input, stats(), 3);
             assert!(matches!(
                 result,
-                Err(GraphWriteProgramError::Program(GraphMutationProgramError::Budget {
-                    statement: 1, ..
-                })) | Err(GraphWriteProgramError::CreationBudget { statement: 1, .. })
+                Err(GraphWriteProgramError::Program(
+                    GraphMutationProgramError::Budget { statement: 1, .. }
+                )) | Err(GraphWriteProgramError::CreationBudget { statement: 1, .. })
             ));
             assert_eq!(meter.common.stats, before);
             assert_eq!(meter.edges, 1);
@@ -240,23 +276,43 @@ mod tests {
     fn empty_input_and_actionless_branches_do_not_invent_mutation_targets() {
         let original = input();
         let actionless = PreparedGraphEdgeUpsert::prepare_with_clauses(
-            original.merge().clone(), Vec::new(), Vec::new(), Vec::new(),
-        ).unwrap();
+            original.merge().clone(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
         let mut meter = meter(policy());
-        meter.absorb_edge_upsert_batch::<(), (), ()>(
-            0, &actionless, GraphEdgeUpsertBatchStats { action_effects: 0, ..stats() }, 0,
-        ).unwrap();
+        meter
+            .absorb_edge_upsert_batch::<(), (), ()>(
+                0,
+                &actionless,
+                GraphEdgeUpsertBatchStats {
+                    action_effects: 0,
+                    ..stats()
+                },
+                0,
+            )
+            .unwrap();
         assert_eq!(meter.common.stats.effects, 0);
         assert_eq!(meter.common.stats.target_edge_visits, 0);
         let empty = GraphEdgeUpsertBatchStats {
-            match_selection: GqlExecutionStats { snapshot_records: 3, result_rows: 0 },
+            match_selection: GqlExecutionStats {
+                snapshot_records: 3,
+                result_rows: 0,
+            },
             overlay_edges: 0,
             created_edges: 0,
             matched_occurrences: 0,
             action_effects: 0,
-            evaluator: GlaExecutionStats { work_units: 2, scratch_entries: 0 },
+            evaluator: GlaExecutionStats {
+                work_units: 2,
+                scratch_entries: 0,
+            },
         };
-        meter.absorb_edge_upsert_batch::<(), (), ()>(1, &original, empty, 0).unwrap();
+        meter
+            .absorb_edge_upsert_batch::<(), (), ()>(1, &original, empty, 0)
+            .unwrap();
         assert_eq!(meter.edges, 1);
         assert_eq!(meter.common.stats.selection.result_rows, 3);
         assert_eq!(meter.common.stats.effects, 0);
@@ -268,21 +324,24 @@ mod tests {
         let input = input();
         let mut meter = meter(GraphWriteProgramPolicy::new(
             GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
-            u64::MAX, 0, u64::MAX,
+            u64::MAX,
+            0,
+            u64::MAX,
         ));
         let mut impossible = stats();
         impossible.matched_occurrences = u64::MAX;
         impossible.overlay_edges = u64::MAX;
         impossible.action_effects = u64::MAX;
         impossible.evaluator = GlaExecutionStats {
-            work_units: u64::MAX, scratch_entries: u64::MAX,
+            work_units: u64::MAX,
+            scratch_entries: u64::MAX,
         };
         let before = meter.common.stats;
         assert!(matches!(
             meter.absorb_edge_upsert_batch::<(), (), ()>(0, &input, impossible, 3),
-            Err(GraphWriteProgramError::Program(GraphMutationProgramError::InvalidStatistics {
-                statement: 0
-            }))
+            Err(GraphWriteProgramError::Program(
+                GraphMutationProgramError::InvalidStatistics { statement: 0 }
+            ))
         ));
         assert_eq!(meter.common.stats, before);
         assert_eq!(meter.edges, 0);

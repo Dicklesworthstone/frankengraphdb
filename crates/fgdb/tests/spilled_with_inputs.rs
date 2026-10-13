@@ -15,11 +15,16 @@ use fgdb_gql::{
     GraphAggregateTextSlot, GraphAggregateValue, GraphExactAverage, GraphSymbol, GraphSymbolKind,
 };
 use fgdb_strata::tiered::memory::{MemoryPool, SpillFile, SpillLimits};
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId};
+use fgdb_types::{
+    CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Cursor, Seek, SeekFrom};
 use std::pin::Pin;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::task::{Context, Poll};
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -38,7 +43,11 @@ struct File {
     state: Arc<IoState>,
 }
 impl AsyncRead for File {
-    fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let file = &mut self.get_mut().data;
         let at = file.position() as usize;
         let count = out.remaining().min(file.get_ref().len().saturating_sub(at));
@@ -50,7 +59,11 @@ impl AsyncRead for File {
     }
 }
 impl AsyncWrite for File {
-    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let file = self.get_mut();
         file.state.writes.fetch_add(1, Ordering::SeqCst);
         if file.state.fail.load(Ordering::SeqCst) {
@@ -58,8 +71,12 @@ impl AsyncWrite for File {
         }
         Poll::Ready(std::io::Write::write(&mut file.data, bytes))
     }
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
 }
 impl AsyncSeek for File {
     fn poll_seek(self: Pin<&mut Self>, _: &mut Context<'_>, at: SeekFrom) -> Poll<io::Result<u64>> {
@@ -75,21 +92,37 @@ struct Files {
 async fn scratch(cx: &QueryCx, pool: &MemoryPool) -> (SpillFile<File>, Arc<IoState>) {
     let file = File::default();
     let state = file.state.clone();
-    let spill = SpillFile::new(cx, file, pool.clone(), SpillLimits {
-        max_file_bytes: 128_000_000,
-        max_runs: 8192,
-        max_run_bytes: 16_000_000,
-    }).await.unwrap();
+    let spill = SpillFile::new(
+        cx,
+        file,
+        pool.clone(),
+        SpillLimits {
+            max_file_bytes: 128_000_000,
+            max_runs: 8192,
+            max_run_bytes: 16_000_000,
+        },
+    )
+    .await
+    .unwrap();
     (spill, state)
 }
 async fn files(cx: &QueryCx, pool: &MemoryPool) -> Files {
     let (a, _) = scratch(cx, pool).await;
     let (b, partition_io) = scratch(cx, pool).await;
     let (c, _) = scratch(cx, pool).await;
-    Files { a, b, c, partition_io }
+    Files {
+        a,
+        b,
+        c,
+        partition_io,
+    }
 }
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x71; 32], DatabaseSecurityNamespaceId([0x72; 32]), [0x73; 32])
+    DatabaseKeys::new(
+        [0x71; 32],
+        DatabaseSecurityNamespaceId([0x72; 32]),
+        [0x73; 32],
+    )
 }
 fn policy(results: u64) -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, results, 100_000_000, 10_000_000)
@@ -118,52 +151,75 @@ fn prefix(kind: usize) -> &'static str {
     }
 }
 fn text(kind: usize) -> String {
-    format!("{} WHERE p>=$floor WITH q*2 AS value,77 AS unused,p/2 AS bucket \
+    format!(
+        "{} WHERE p>=$floor WITH q*2 AS value,77 AS unused,p/2 AS bucket \
         RETURN bucket,COUNT(*) AS n,SUM(value) AS total,AVG(value) AS average,\
         COUNT(DISTINCT value) AS support,SUM(DISTINCT value) AS unique_total \
-        GROUP BY bucket ORDER BY total DESC NULLS LAST,bucket ASC", prefix(kind))
+        GROUP BY bucket ORDER BY total DESC NULLS LAST,bucket ASC",
+        prefix(kind)
+    )
 }
 fn properties(p: Option<i64>, q: Option<i64>) -> Vec<(PropertyKeyId, CanonicalScalar)> {
     let mut properties = Vec::new();
-    if let Some(p) = p { properties.push((P, CanonicalScalar::Int(p))); }
-    if let Some(q) = q { properties.push((Q, CanonicalScalar::Int(q))); }
+    if let Some(p) = p {
+        properties.push((P, CanonicalScalar::Int(p)));
+    }
+    if let Some(q) = q {
+        properties.push((Q, CanonicalScalar::Int(q)));
+    }
     properties
 }
 
 type Vertex = (VId, Option<i64>, Option<i64>);
 type Edge = (EId, VId, VId, Option<i64>, Option<i64>);
 #[derive(Clone)]
-struct Fixture { vertices: Vec<Vertex>, edges: Vec<Edge> }
+struct Fixture {
+    vertices: Vec<Vertex>,
+    edges: Vec<Edge>,
+}
 impl Fixture {
     fn new() -> Self {
-        let mut fixture = Self { vertices: Vec::new(), edges: Vec::new() };
+        let mut fixture = Self {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+        };
         for id in 0..48_u128 {
             let p = (id % 11 != 0).then_some((id % 9) as i64 - 2);
             let q = (id % 5 != 0).then_some(i64::MAX / 2 - (id % 7) as i64);
             fixture.vertices.push((VId(id), p, q));
             fixture.edges.push((EId(id), VId(id), VId(id + 1), p, q));
             if id % 4 == 0 {
-                fixture.edges.push((EId(1000 + id), VId(id), VId(id + 1), p, q));
+                fixture
+                    .edges
+                    .push((EId(1000 + id), VId(id), VId(id + 1), p, q));
             }
         }
         fixture
     }
     fn batch(&self) -> WriteBatch {
         let mut batch = WriteBatch::new(R);
-        for &(id, p, q) in &self.vertices { batch.create_vertex(id, vec![L], properties(p, q)); }
+        for &(id, p, q) in &self.vertices {
+            batch.create_vertex(id, vec![L], properties(p, q));
+        }
         batch.create_vertex(VId(48), vec![], vec![]);
-        for &(id, a, b, p, q) in &self.edges { batch.add_edge(id, a, b, properties(p, q)); }
+        for &(id, a, b, p, q) in &self.edges {
+            batch.add_edge(id, a, b, properties(p, q));
+        }
         batch
     }
     fn occurrences(&self, kind: usize) -> Vec<(Option<i64>, Option<i64>)> {
         match kind {
             0 => self.vertices.iter().map(|&(_, p, q)| (p, q)).collect(),
             1 => self.edges.iter().map(|&(_, _, _, p, q)| (p, q)).collect(),
-            2 => self.edges.iter().flat_map(|&(id, _, to, p, q)| {
-                self.edges.iter().filter_map(move |&(next, from, _, _, _)| {
-                    (id != next && to == from).then_some((p, q))
+            2 => self
+                .edges
+                .iter()
+                .flat_map(|&(id, _, to, p, q)| {
+                    self.edges.iter().filter_map(move |&(next, from, _, _, _)| {
+                        (id != next && to == from).then_some((p, q))
+                    })
                 })
-            }).collect(),
+                .collect(),
             _ => unreachable!(),
         }
     }
@@ -178,16 +234,21 @@ impl Fixture {
         for (key, values) in groups {
             let count = values.len() as u64;
             let nonnull: Vec<_> = values.into_iter().flatten().collect();
-            let total = (!nonnull.is_empty()).then(|| nonnull.iter().map(|v| i128::from(*v)).sum::<i128>());
+            let total =
+                (!nonnull.is_empty()).then(|| nonnull.iter().map(|v| i128::from(*v)).sum::<i128>());
             let support: BTreeSet<_> = nonnull.iter().copied().collect();
-            let unique = (!support.is_empty()).then(|| support.iter().map(|v| i128::from(*v)).sum::<i128>());
+            let unique =
+                (!support.is_empty()).then(|| support.iter().map(|v| i128::from(*v)).sum::<i128>());
             let null = || GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
             let row = vec![
                 GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(key))),
                 GraphAggregateValue::Count(count),
                 total.map_or_else(null, GraphAggregateValue::Integer),
-                total.map_or_else(null, |sum| GraphAggregateValue::Average(
-                    GraphExactAverage::new(sum, nonnull.len() as u64).unwrap())),
+                total.map_or_else(null, |sum| {
+                    GraphAggregateValue::Average(
+                        GraphExactAverage::new(sum, nonnull.len() as u64).unwrap(),
+                    )
+                }),
                 GraphAggregateValue::Count(support.len() as u64),
                 unique.map_or_else(null, GraphAggregateValue::Integer),
             ];
@@ -198,12 +259,21 @@ impl Fixture {
     }
 }
 fn flatten(row: &GraphAggregateRow, slots: &[GraphAggregateTextSlot]) -> Vec<GraphAggregateValue> {
-    slots.iter().map(|slot| match slot {
-        GraphAggregateTextSlot::GroupKey(at) => GraphAggregateValue::Value(row.keys()[*at].clone()),
-        GraphAggregateTextSlot::Aggregate(at) => row.values()[*at].clone(),
-    }).collect()
+    slots
+        .iter()
+        .map(|slot| match slot {
+            GraphAggregateTextSlot::GroupKey(at) => {
+                GraphAggregateValue::Value(row.keys()[*at].clone())
+            }
+            GraphAggregateTextSlot::Aggregate(at) => row.values()[*at].clone(),
+        })
+        .collect()
 }
-async fn read(cx: &QueryCx, spool: &NativeAggregateSpool, file: &mut SpillFile<File>) -> Vec<Vec<GraphAggregateValue>> {
+async fn read(
+    cx: &QueryCx,
+    spool: &NativeAggregateSpool,
+    file: &mut SpillFile<File>,
+) -> Vec<Vec<GraphAggregateValue>> {
     let mut reader = spool.reader(file, None);
     let mut rows = Vec::new();
     while let Some(row) = reader.next_row(cx).await.unwrap() {
@@ -218,9 +288,22 @@ async fn read(cx: &QueryCx, spool: &NativeAggregateSpool, file: &mut SpillFile<F
 macro_rules! spool {
     ($prepared:expr, $view:expr, $cx:expr, $args:expr, $policy:expr, $files:ident, $groups:expr, $runs:expr, $inputs:expr) => {
         ($prepared).spool_aggregate_in_view(
-            $view, $cx, $args, $policy,
-            &mut $files.a, &mut $files.b, &mut $files.c,
-            $groups, 256, $runs, 128, 257, 16_384, $inputs, 100_000_000, None,
+            $view,
+            $cx,
+            $args,
+            $policy,
+            &mut $files.a,
+            &mut $files.b,
+            &mut $files.c,
+            $groups,
+            256,
+            $runs,
+            128,
+            257,
+            16_384,
+            $inputs,
+            100_000_000,
+            None,
         )
     };
 }
@@ -239,30 +322,62 @@ fn with_spill_matches_independent_occurrences_batch_and_resident_across_layouts_
         for kind in 0..3 {
             let expected = fixture.expected(kind, 0);
             assert!(expected.len() > 1);
-            for (suffix, skip, take) in [("", 0, usize::MAX), (" SKIP 1 LIMIT 2", 1, 2), (" LIMIT 0", 0, 0), (" SKIP 1000 LIMIT 1", 1000, 1)] {
+            for (suffix, skip, take) in [
+                ("", 0, usize::MAX),
+                (" SKIP 1 LIMIT 2", 1, 2),
+                (" LIMIT 0", 0, 0),
+                (" SKIP 1000 LIMIT 1", 1000, 1),
+            ] {
                 let statement = format!("{}{suffix}", text(kind));
                 let prepared = prepare(&statement, &args);
                 let expected: Vec<_> = expected.iter().skip(skip).take(take).cloned().collect();
-                let QueryResult::Rows { columns, rows } = prepared.execute(&db, &cx, &args, policy(100)).unwrap() else { panic!("read"); };
+                let QueryResult::Rows { columns, rows } =
+                    prepared.execute(&db, &cx, &args, policy(100)).unwrap()
+                else {
+                    panic!("read");
+                };
                 assert_eq!(rows, expected, "batch: {statement}");
-                let mut resident = prepared.stream_aggregate_in_view(&view, &cx, &args, policy(100)).unwrap();
+                let mut resident = prepared
+                    .stream_aggregate_in_view(&view, &cx, &args, policy(100))
+                    .unwrap();
                 let slots = resident.output_slots().to_vec();
-                let rows: Vec<_> = resident.by_ref().map(|row| flatten(&row.unwrap(), &slots)).collect();
+                let rows: Vec<_> = resident
+                    .by_ref()
+                    .map(|row| flatten(&row.unwrap(), &slots))
+                    .collect();
                 assert_eq!(rows, expected, "resident: {statement}");
                 for (capacity, run_rows) in [(1, 1), (3, 3)] {
                     let pool = MemoryPool::new(1_000_000, 0).unwrap();
                     let mut io = files(&cx, &pool).await;
                     let before = io.partition_io.writes.load(Ordering::SeqCst);
-                    let (spool, _) = spool!(&prepared, &view, &cx, &args, policy(expected.len() as u64), io, capacity, run_rows, 10_000)
-                        .await.unwrap_or_else(|error| panic!("{statement}: {error}"));
+                    let (spool, _) = spool!(
+                        &prepared,
+                        &view,
+                        &cx,
+                        &args,
+                        policy(expected.len() as u64),
+                        io,
+                        capacity,
+                        run_rows,
+                        10_000
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{statement}: {error}"));
                     assert_eq!(spool.columns(), columns);
                     assert_eq!(spool.row_count(), expected.len() as u64);
                     assert_eq!(spool.row_stats().result_rows, expected.len() as u64);
                     assert_eq!(pool.used(), 0);
                     if capacity == 1 {
-                        assert!(io.partition_io.writes.load(Ordering::SeqCst) > before, "partition file was not exercised: {statement}");
+                        assert!(
+                            io.partition_io.writes.load(Ordering::SeqCst) > before,
+                            "partition file was not exercised: {statement}"
+                        );
                     }
-                    assert_eq!(read(&cx, &spool, &mut io.c).await, expected, "spill: {statement}");
+                    assert_eq!(
+                        read(&cx, &spool, &mut io.c).await,
+                        expected,
+                        "spill: {statement}"
+                    );
                     assert_eq!(pool.used(), 0);
                 }
             }
@@ -281,7 +396,9 @@ fn prepared_spill_keeps_opened_and_pinned_history_across_edits_compaction_and_re
             let fixture = Fixture::new();
             let vfs = MemVfs::new().unwrap();
             let path = vfs.database_dir();
-            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
             let basis = db.write(&commit, fixture.batch()).await.unwrap();
             let pin = db.read_session().unwrap();
             let args = parameters(0);
@@ -298,13 +415,20 @@ fn prepared_spill_keeps_opened_and_pinned_history_across_edits_compaction_and_re
             db.write(&commit, edit).await.unwrap();
             db.compact(&commit).await.unwrap();
             drop(db);
-            let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+            let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
             let (old, _) = pending.await.unwrap();
             assert_eq!(old.snapshot_seq(), basis);
             assert_eq!(read(&cx, &old, &mut io.c).await, fixture.expected(kind, 0));
             assert_eq!(pool.used(), 0);
             let mut changed = fixture.clone();
-            changed.vertices.iter_mut().find(|v| v.0 == VId(3)).unwrap().2 = Some(2);
+            changed
+                .vertices
+                .iter_mut()
+                .find(|v| v.0 == VId(3))
+                .unwrap()
+                .2 = Some(2);
             changed.edges.iter_mut().find(|e| e.0 == EId(3)).unwrap().4 = Some(2);
             changed.edges.retain(|e| e.0 != EId(4));
             assert_ne!(changed.expected(kind, 0), fixture.expected(kind, 0));
@@ -312,12 +436,29 @@ fn prepared_spill_keeps_opened_and_pinned_history_across_edits_compaction_and_re
             for floor in [0, 4, 0, 99] {
                 let args = parameters(floor);
                 let mut io = files(&cx, &pool).await;
-                let (spool, _) = spool!(&prepared, &current, &cx, &args, policy(100), io, 1, 2, 10_000).await.unwrap();
-                assert_eq!(read(&cx, &spool, &mut io.c).await, changed.expected(kind, floor));
+                let (spool, _) = spool!(
+                    &prepared,
+                    &current,
+                    &cx,
+                    &args,
+                    policy(100),
+                    io,
+                    1,
+                    2,
+                    10_000
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    read(&cx, &spool, &mut io.c).await,
+                    changed.expected(kind, floor)
+                );
                 assert_eq!(pool.used(), 0);
             }
             let mut io = files(&cx, &pool).await;
-            let (old, _) = spool!(&prepared, &pin, &cx, &args, policy(100), io, 1, 2, 10_000).await.unwrap();
+            let (old, _) = spool!(&prepared, &pin, &cx, &args, policy(100), io, 1, 2, 10_000)
+                .await
+                .unwrap();
             assert_eq!(read(&cx, &old, &mut io.c).await, fixture.expected(kind, 0));
             assert_eq!(pool.used(), 0);
         }
@@ -334,9 +475,18 @@ fn late_with_errors_and_scratch_write_failure_publish_no_handle_and_release_all_
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut batch = WriteBatch::new(R);
         for id in 0..17_u128 {
-            batch.create_vertex(VId(id), vec![L], properties(Some(if id == 16 { 0 } else { 1 }), None));
+            batch.create_vertex(
+                VId(id),
+                vec![L],
+                properties(Some(if id == 16 { 0 } else { 1 }), None),
+            );
             if id != 0 {
-                batch.add_edge(EId(id), VId(id - 1), VId(id), properties(Some(if id == 16 { 0 } else { 1 }), None));
+                batch.add_edge(
+                    EId(id),
+                    VId(id - 1),
+                    VId(id),
+                    properties(Some(if id == 16 { 0 } else { 1 }), None),
+                );
             }
         }
         db.write(&commit, batch).await.unwrap();
@@ -350,9 +500,12 @@ fn late_with_errors_and_scratch_write_failure_publish_no_handle_and_release_all_
                 let prepared = prepare(&format!("{} {tail}", prefix(kind)), &args);
                 let pool = MemoryPool::new(1_000_000, 0).unwrap();
                 let mut io = files(&cx, &pool).await;
-                let result = spool!(&prepared, &view, &cx, &args, policy(1), io, 1, 1, 10_000).await;
-                assert!(matches!(result, Err(NativeAggregateSpoolError::Execute(error))
-                    if matches!(error.as_ref(), GqlQueryError::Source(GraphAggregateError::InputRelation(_)))));
+                let result =
+                    spool!(&prepared, &view, &cx, &args, policy(1), io, 1, 1, 10_000).await;
+                assert!(
+                    matches!(result, Err(NativeAggregateSpoolError::Execute(error))
+                    if matches!(error.as_ref(), GqlQueryError::Source(GraphAggregateError::InputRelation(_))))
+                );
                 assert_eq!(pool.used(), 0);
             }
         }
@@ -384,20 +537,45 @@ fn native_with_spill_uses_one_cumulative_budget_through_replay_and_delivery() {
         let view = db.read_session().unwrap();
         let args = parameters(0);
         for kind in 0..2 {
-            let prepared = prepare(&format!("{} WHERE p>=$floor WITH q*2 AS value RETURN COUNT(*) AS n,SUM(value) AS total", prefix(kind)), &args);
+            let prepared = prepare(
+                &format!(
+                    "{} WHERE p>=$floor WITH q*2 AS value RETURN COUNT(*) AS n,SUM(value) AS total",
+                    prefix(kind)
+                ),
+                &args,
+            );
             let pool = MemoryPool::new(1_000_000, 0).unwrap();
             let mut io = files(&cx, &pool).await;
-            let (full, _) = spool!(&prepared, &view, &cx, &args, policy(1), io, 1, 2, 10_000).await.unwrap();
+            let (full, _) = spool!(&prepared, &view, &cx, &args, policy(1), io, 1, 2, 10_000)
+                .await
+                .unwrap();
             let expected = read(&cx, &full, &mut io.c).await;
             let rows = full.row_stats();
             let stats = full.evaluator_stats();
-            let exact = GqlQueryPolicy::new(rows.snapshot_records, rows.result_rows, stats.work_units, stats.scratch_entries);
+            let exact = GqlQueryPolicy::new(
+                rows.snapshot_records,
+                rows.result_rows,
+                stats.work_units,
+                stats.scratch_entries,
+            );
             for (limits, succeeds) in [
                 (exact, true),
-                (GqlQueryPolicy::new(rows.snapshot_records - 1, u64::MAX, u64::MAX, u64::MAX), false),
-                (GqlQueryPolicy::new(u64::MAX, rows.result_rows - 1, u64::MAX, u64::MAX), false),
-                (GqlQueryPolicy::new(u64::MAX, u64::MAX, stats.work_units - 1, u64::MAX), false),
-                (GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, stats.scratch_entries - 1), false),
+                (
+                    GqlQueryPolicy::new(rows.snapshot_records - 1, u64::MAX, u64::MAX, u64::MAX),
+                    false,
+                ),
+                (
+                    GqlQueryPolicy::new(u64::MAX, rows.result_rows - 1, u64::MAX, u64::MAX),
+                    false,
+                ),
+                (
+                    GqlQueryPolicy::new(u64::MAX, u64::MAX, stats.work_units - 1, u64::MAX),
+                    false,
+                ),
+                (
+                    GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, stats.scratch_entries - 1),
+                    false,
+                ),
             ] {
                 let mut io = files(&cx, &pool).await;
                 let result = spool!(&prepared, &view, &cx, &args, limits, io, 1, 2, 10_000).await;
@@ -411,7 +589,10 @@ fn native_with_spill_uses_one_cumulative_budget_through_replay_and_delivery() {
             }
             let mut io = files(&cx, &pool).await;
             let result = spool!(&prepared, &view, &cx, &args, policy(1), io, 1, 2, 1).await;
-            assert!(matches!(result, Err(NativeAggregateSpoolError::InputRows { .. })));
+            assert!(matches!(
+                result,
+                Err(NativeAggregateSpoolError::InputRows { .. })
+            ));
             assert_eq!(pool.used(), 0);
         }
     });
@@ -427,29 +608,50 @@ fn external_with_groups_and_argument_support_do_not_spend_the_single_output_gran
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut batch = WriteBatch::new(R);
         for id in 0..1024_u128 {
-            batch.create_vertex(VId(id), vec![L], properties(Some(id as i64), Some(i64::MAX / 2)));
+            batch.create_vertex(
+                VId(id),
+                vec![L],
+                properties(Some(id as i64), Some(i64::MAX / 2)),
+            );
         }
         db.write(&commit, batch).await.unwrap();
         let view = db.read_session().unwrap();
         let args = GqlParameters::new();
-        let prepared = prepare("MATCH (n:L) WITH n.p AS p,n.q AS q WHERE p>=0 \
+        let prepared = prepare(
+            "MATCH (n:L) WITH n.p AS p,n.q AS q WHERE p>=0 \
             WITH p/32 AS bucket,q*2 AS value RETURN DISTINCT COUNT(*) AS n,SUM(value) AS total,\
-            COUNT(DISTINCT value) AS support GROUP BY bucket ORDER BY total DESC LIMIT 1", &args);
+            COUNT(DISTINCT value) AS support GROUP BY bucket ORDER BY total DESC LIMIT 1",
+            &args,
+        );
         let pool = MemoryPool::new(1_000_000, 0).unwrap();
         let mut io = files(&cx, &pool).await;
         let before = io.partition_io.writes.load(Ordering::SeqCst);
-        let (spool, _) = spool!(&prepared, &view, &cx, &args,
-            GqlQueryPolicy::new(1024, 1, 100_000_000, 10_000_000), io, 1, 2, 1024).await.unwrap();
+        let (spool, _) = spool!(
+            &prepared,
+            &view,
+            &cx,
+            &args,
+            GqlQueryPolicy::new(1024, 1, 100_000_000, 10_000_000),
+            io,
+            1,
+            2,
+            1024
+        )
+        .await
+        .unwrap();
         assert_eq!(spool.row_count(), 1);
         assert_eq!(spool.row_stats().snapshot_records, 1024);
         assert_eq!(spool.row_stats().result_rows, 1);
         assert!(io.partition_io.writes.load(Ordering::SeqCst) > before);
         assert_eq!(pool.used(), 0);
-        assert_eq!(read(&cx, &spool, &mut io.c).await, vec![vec![
-            GraphAggregateValue::Count(32),
-            GraphAggregateValue::Integer(32 * i128::from(i64::MAX - 1)),
-            GraphAggregateValue::Count(1),
-        ]]);
+        assert_eq!(
+            read(&cx, &spool, &mut io.c).await,
+            vec![vec![
+                GraphAggregateValue::Count(32),
+                GraphAggregateValue::Integer(32 * i128::from(i64::MAX - 1)),
+                GraphAggregateValue::Count(1),
+            ]]
+        );
         assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

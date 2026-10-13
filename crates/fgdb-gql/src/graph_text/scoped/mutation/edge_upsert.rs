@@ -147,9 +147,7 @@ impl<'a> Parser<'a> {
         // Share literal/parameter, duplicate-key and field-count admission
         // with plain MERGE. The map is part of the match identity, not SET.
         let properties = self.merge_property_map().map_err(|refusal| match refusal {
-            super::merge::MergeMapError::Pattern(error) => {
-                GraphEdgeUpsertTextError::from(error)
-            }
+            super::merge::MergeMapError::Pattern(error) => GraphEdgeUpsertTextError::from(error),
             super::merge::MergeMapError::TooManyFields { at, observed } => {
                 merge_error(GraphEdgeMergeTextError {
                     offset: at,
@@ -614,14 +612,16 @@ mod keyed_pattern_tests {
         let undirected = prepare("(a)-[r:R {p:$key}]-(b)");
         assert!(undirected.merge().undirected());
         assert_ne!(directed.canonical_bytes(), undirected.canonical_bytes());
-        assert!(undirected.merge().accepts_orientation(
-            (VId(1), VId(2)),
-            (VId(2), VId(1)),
-        ));
-        assert!(!directed.merge().accepts_orientation(
-            (VId(1), VId(2)),
-            (VId(2), VId(1)),
-        ));
+        assert!(
+            undirected
+                .merge()
+                .accepts_orientation((VId(1), VId(2)), (VId(2), VId(1)),)
+        );
+        assert!(
+            !directed
+                .merge()
+                .accepts_orientation((VId(1), VId(2)), (VId(2), VId(1)),)
+        );
     }
 
     #[test]
@@ -629,8 +629,7 @@ mod keyed_pattern_tests {
         let text = "MATCH (a),(b) MERGE (a)-[r:R {p:$key}]-(b) \
                     ON CREATE SET r.q=r.p+$step \
                     ON MATCH SET r.q=r.q+$step RETURN r,r.p AS p,r.q AS q";
-        let prepared = crate::PreparedGraphEdgeUpsertQueryText::prepare(text, R, symbols)
-            .unwrap();
+        let prepared = crate::PreparedGraphEdgeUpsertQueryText::prepare(text, R, symbols).unwrap();
         assert_eq!(prepared.parameter_schema().len(), 2);
         for key in [7, 9] {
             let arguments = GqlParameters::new()

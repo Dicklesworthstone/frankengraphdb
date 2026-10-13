@@ -52,8 +52,8 @@ pub(crate) use prism::{
     push_staged as push_prism_staged,
 };
 pub use view::{
-    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeSpoolError,
-    NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeAggregateSpoolError,
+    NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolError,
+    NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor, NativeSpoolError,
     PreparedBufferedAggregate, PreparedBufferedOrder,
 };
 
@@ -1117,13 +1117,25 @@ mod write_return_tests {
             let next = AtomicU64::new(100);
             let mut allocate = |request: GraphWriteIdentityRequest| -> Result<ElementId, ()> {
                 assert_eq!(request.statement, 0);
-                assert!(matches!(request.request, GraphInsertRequest::Edge { row: 0, edge: 0 }));
-                Ok(ElementId::Edge(EId(u128::from(next.fetch_add(1, Ordering::Relaxed)))))
+                assert!(matches!(
+                    request.request,
+                    GraphInsertRequest::Edge { row: 0, edge: 0 }
+                ));
+                Ok(ElementId::Edge(EId(u128::from(
+                    next.fetch_add(1, Ordering::Relaxed),
+                ))))
             };
             let result = db
                 .query_write(
-                    &txcx, &cx, &commit, text, &arguments, &symbols, R,
-                    policy(1, 0, 1), &mut allocate,
+                    &txcx,
+                    &cx,
+                    &commit,
+                    text,
+                    &arguments,
+                    &symbols,
+                    R,
+                    policy(1, 0, 1),
+                    &mut allocate,
                 )
                 .await
                 .unwrap();
@@ -1135,8 +1147,14 @@ mod write_return_tests {
             let mut transaction = db.begin(&txcx).unwrap();
             let result = transaction
                 .query_write(
-                    &mut db, &cx, text, &arguments, &symbols, R,
-                    policy(1, 0, 0), &mut allocate,
+                    &mut db,
+                    &cx,
+                    text,
+                    &arguments,
+                    &symbols,
+                    R,
+                    policy(1, 0, 0),
+                    &mut allocate,
                 )
                 .unwrap();
             assert_eq!(
@@ -1146,11 +1164,16 @@ mod write_return_tests {
             assert_eq!(next.load(Ordering::Relaxed), 101);
             let digest = transaction.staged_effect_digest().unwrap();
             let result = transaction.query_write(
-                &mut db, &cx,
+                &mut db,
+                &cx,
                 "MATCH (a),(b) WHERE a.p=1 AND b.p=2 \
                  MERGE (a)-[r:R {q:99}]->(b) ON CREATE SET r.p=0 \
                  RETURN 10/r.p AS bad LIMIT 0",
-                &GqlParameters::new(), &symbols, R, policy(1, 0, 1), &mut allocate,
+                &GqlParameters::new(),
+                &symbols,
+                R,
+                policy(1, 0, 1),
+                &mut allocate,
             );
             assert!(matches!(
                 result,
@@ -1190,54 +1213,86 @@ mod write_return_tests {
             let before = db.frontier().unwrap();
             let calls = AtomicU64::new(0);
             let args = GqlParameters::new().with_int64("initial", 7).unwrap();
-            let result = db.query_write(
-                &txcx, &cx, &commit,
-                "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
                  ON CREATE SET r.p=$initial RETURN r,r.p AS p ORDER BY r",
-                &args, symbols, R, policy(2, 0, 2),
-                |request| -> Result<ElementId, ()> {
-                    assert_eq!(request.statement, 0);
-                    let GraphInsertRequest::Edge { row, edge: 0 } = request.request else {
-                        panic!("bulk upsert allocates only its missing relationships")
-                    };
-                    assert_eq!(row as u64, calls.fetch_add(1, Ordering::Relaxed));
-                    Ok(ElementId::Edge(EId(500 + row as u128)))
-                },
-            ).await.unwrap();
+                    &args,
+                    symbols,
+                    R,
+                    policy(2, 0, 2),
+                    |request| -> Result<ElementId, ()> {
+                        assert_eq!(request.statement, 0);
+                        let GraphInsertRequest::Edge { row, edge: 0 } = request.request else {
+                            panic!("bulk upsert allocates only its missing relationships")
+                        };
+                        assert_eq!(row as u64, calls.fetch_add(1, Ordering::Relaxed));
+                        Ok(ElementId::Edge(EId(500 + row as u128)))
+                    },
+                )
+                .await
+                .unwrap();
             assert_eq!(calls.load(Ordering::Relaxed), 2);
-            assert_eq!(rows(result, &["r", "p"]), vec![
-                vec![GraphValue::Edge(EId(500)), int(7)],
-                vec![GraphValue::Edge(EId(501)), int(7)],
-            ]);
+            assert_eq!(
+                rows(result, &["r", "p"]),
+                vec![
+                    vec![GraphValue::Edge(EId(500)), int(7)],
+                    vec![GraphValue::Edge(EId(501)), int(7)],
+                ]
+            );
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             let before = db.frontier().unwrap();
             let mut transaction = db.begin(&txcx).unwrap();
-            let result = transaction.query_write(
-                &mut db, &cx,
-                "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
+            let result = transaction
+                .query_write(
+                    &mut db,
+                    &cx,
+                    "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
                  ON MATCH SET r.p=r.p+1 WITH r.p AS p RETURN count(*) AS n,sum(p) AS total",
-                &GqlParameters::new(), symbols, R, policy(1, 0, 0),
-                |_| -> Result<ElementId, ()> { panic!("matched relationships do not allocate") },
-            ).unwrap();
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(1, 0, 0),
+                    |_| -> Result<ElementId, ()> {
+                        panic!("matched relationships do not allocate")
+                    },
+                )
+                .unwrap();
             assert_eq!(rows(result, &["n", "total"]), vec![vec![int(2), int(16)]]);
             let digest = transaction.staged_effect_digest().unwrap();
             let result = transaction.query_write(
-                &mut db, &cx,
+                &mut db,
+                &cx,
                 "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
                  ON MATCH SET r.p=0 RETURN 10/r.p AS bad LIMIT 0",
-                &GqlParameters::new(), symbols, R, policy(0, 0, 0),
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(0, 0, 0),
                 |_| -> Result<ElementId, ()> { panic!("matched relationships do not allocate") },
             );
-            assert!(matches!(result, Err(QueryWriteError::EdgeUpsert(GqlQueryError::Source(
-                GraphEdgeUpsertQueryError::Returning(_)
-            )))));
+            assert!(matches!(
+                result,
+                Err(QueryWriteError::EdgeUpsert(GqlQueryError::Source(
+                    GraphEdgeUpsertQueryError::Returning(_)
+                )))
+            ));
             assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
-            assert_eq!(db.edge(EId(500)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(7))]);
+            assert_eq!(
+                db.edge(EId(500)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(7))]
+            );
             assert_eq!(db.frontier().unwrap(), before);
             transaction.finish(&mut db, &commit).await.unwrap();
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             for edge in [EId(500), EId(501)] {
-                assert_eq!(db.edge(edge).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(8))]);
+                assert_eq!(
+                    db.edge(edge).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(8))]
+                );
             }
             assert_eq!(txcx.outstanding_obligations(), 0);
         });

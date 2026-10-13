@@ -117,7 +117,12 @@ fn optional_relationship_inequality_keeps_the_carried_edge_when_no_witness_exist
             "MATCH (a)-[r:R]->(b) WITH r OPTIONAL MATCH (c)-[s:R]->(d) \
              WHERE r <> s AND c = d RETURN r,s ORDER BY r"
         ),
-        vec![pair(11, Some(14)), pair(12, Some(14)), pair(13, Some(14)), pair(14, None)],
+        vec![
+            pair(11, Some(14)),
+            pair(12, Some(14)),
+            pair(13, Some(14)),
+            pair(14, None)
+        ],
     );
 }
 
@@ -159,7 +164,10 @@ fn relationship_aggregate_terminals_count_matches_not_null_extensions() {
                 .filter(|(s, from, _, to)| s.0 != r && (!optional || from == to))
                 .count() as u64;
             assert_eq!(row.keys(), &[GraphValue::Edge(EId(r))]);
-            assert_eq!(row.values()[0].as_count(), Some(witnesses.max(u64::from(optional))));
+            assert_eq!(
+                row.values()[0].as_count(),
+                Some(witnesses.max(u64::from(optional)))
+            );
             assert_eq!(row.values()[1].as_count(), Some(witnesses));
             assert_eq!(row.values()[2].as_count(), Some(witnesses));
         }
@@ -185,8 +193,12 @@ fn relationship_match_predicates_keep_budgets_and_cancellation_atomic() {
         measured.evaluator.scratch_entries,
     ];
     assert_eq!(
-        run(&query, GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]), &mut || Ok(()))
-            .unwrap(),
+        run(
+            &query,
+            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+            &mut || Ok(())
+        )
+        .unwrap(),
         measured,
     );
     for dimension in 0..4 {

@@ -523,10 +523,14 @@ mod with_tests {
                     WITH r.p AS p WHERE p > $minimum \
                     UNWIND [p, p + 1] AS x WITH sum(x) AS total RETURN total";
         let calls = std::cell::Cell::new(0);
-        let template = PreparedGraphEdgeMergeQueryText::prepare(text, R, |kind, name| {
-            calls.set(calls.get() + 1);
-            symbols(kind, name)
-        })
+        let template = PreparedGraphEdgeMergeQueryText::prepare(
+            text,
+            R,
+            |kind: crate::GraphSymbolKind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
         .unwrap();
         let prepared_calls = calls.get();
         let first = template
@@ -623,7 +627,9 @@ mod with_tests {
                 policy(0),
                 || Ok(()),
             ),
-            Err(GqlQueryError::Source(GraphSetExecutionError::Projection { .. }))
+            Err(GqlQueryError::Source(
+                GraphSetExecutionError::Projection { .. }
+            ))
         ));
     }
 
@@ -658,10 +664,14 @@ mod with_tests {
             let text = format!("MATCH (a),(b) MERGE (a)-[r:R]->(b) {tail}");
             let calls = std::cell::Cell::new(0);
             assert!(
-                PreparedGraphEdgeMergeQueryText::prepare(&text, R, |kind, name| {
-                    calls.set(calls.get() + 1);
-                    symbols(kind, name)
-                })
+                PreparedGraphEdgeMergeQueryText::prepare(
+                    &text,
+                    R,
+                    |kind: crate::GraphSymbolKind, name: &str| {
+                        calls.set(calls.get() + 1);
+                        symbols(kind, name)
+                    }
+                )
                 .is_err(),
                 "{text}"
             );

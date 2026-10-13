@@ -311,7 +311,9 @@ fn projected_ranked_result_larger_than_its_pool_remains_external() {
     let ((), report) = run_async_under_lab(0x5ba1_1023, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
-        let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
         let mut batch = WriteBatch::new(RelationId(1));
         for id in 0..256_u128 {
             let payload = format!("{:04}:{}", 255 - id, "x".repeat(1024));
@@ -320,7 +322,10 @@ fn projected_ranked_result_larger_than_its_pool_remains_external() {
                 vec![LabelId(1)],
                 vec![
                     (PropertyKeyId(1), CanonicalScalar::Int(id as i64)),
-                    (PropertyKeyId(2), CanonicalScalar::ucs_basic_text(&payload).unwrap()),
+                    (
+                        PropertyKeyId(2),
+                        CanonicalScalar::ucs_basic_text(&payload).unwrap(),
+                    ),
                 ],
             );
         }
@@ -364,9 +369,8 @@ fn projected_ranked_result_larger_than_its_pool_remains_external() {
             let mut reader = spool.reader(&mut c, None);
             for index in 0..256 {
                 let row = reader.next_row(&cx).await.unwrap().unwrap();
-                let Some(CanonicalScalar::Text(payload)) = row.values()[0]
-                    .as_value()
-                    .and_then(GraphValue::as_scalar)
+                let Some(CanonicalScalar::Text(payload)) =
+                    row.values()[0].as_value().and_then(GraphValue::as_scalar)
                 else {
                     panic!("expected original text extremum");
                 };

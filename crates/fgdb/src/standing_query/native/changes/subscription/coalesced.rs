@@ -45,16 +45,24 @@ impl NativeSubscription {
         let (Some(from), Some(replay)) = (self.acknowledged, self.replay.as_ref()) else {
             return self.poll(database, cx, policy);
         };
-        let current = database.admitted_standing_query(cx, &self.handle)?.status().1;
+        let current = database
+            .admitted_standing_query(cx, &self.handle)?
+            .status()
+            .1;
         database.standing_replay_window(cx, replay)?;
         if from == current {
             return Ok(None);
         }
-        self.serial.checked_add(1).ok_or(SubscriptionError::ReceiptExhausted)?;
+        self.serial
+            .checked_add(1)
+            .ok_or(SubscriptionError::ReceiptExhausted)?;
         let (frontier, rows) = database
             .standing_replay_coalesced(cx, replay, from, max_ticks, policy)?
-            .ok_or(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
-        if frontier <= from || frontier > current
+            .ok_or(StandingQueryError::Delivery(
+                StandingQueryFailure::InvalidDelta,
+            ))?;
+        if frontier <= from
+            || frontier > current
             || u128::from(frontier.0 - from.0) > max_ticks.get() as u128
         {
             return Err(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta).into());

@@ -54,9 +54,11 @@ fn run(
                 (1..=4).map(VId),
                 EDGES,
                 |vid, tests| {
-                    Ok::<_, &'static str>(tests.iter().all(|test| {
-                        test.matches(&[], &[(P, values[vid.0 as usize - 1].clone())])
-                    }))
+                    Ok::<_, &'static str>(
+                        tests.iter().all(|test| {
+                            test.matches(&[], &[(P, values[vid.0 as usize - 1].clone())])
+                        }),
+                    )
                 },
                 |vid, key| Ok((key == P).then(|| &values[vid.0 as usize - 1])),
                 remaining,
@@ -71,7 +73,10 @@ fn execute(text: &str) -> Vec<GraphValueRow> {
 }
 fn vertices(values: &[u128]) -> GraphValueRow {
     GraphValueRow::from_owned_values(
-        values.iter().map(|id| GraphValue::Vertex(VId(*id))).collect(),
+        values
+            .iter()
+            .map(|id| GraphValue::Vertex(VId(*id)))
+            .collect(),
     )
 }
 fn scalar_vertex(value: i64, vid: u128) -> GraphValueRow {
@@ -97,8 +102,7 @@ fn carried_vertex_inequality_matches_both_spellings_and_operand_orders() {
         .map(|(left, right)| vertices(&[left, right]))
         .collect();
     for predicate in ["n <> m", "m <> n", "n != m", "m != n"] {
-        let text =
-            format!("MATCH (n) WITH n MATCH (m) WHERE {predicate} RETURN n,m ORDER BY n,m");
+        let text = format!("MATCH (n) WITH n MATCH (m) WHERE {predicate} RETURN n,m ORDER BY n,m");
         assert_eq!(execute(&text), expected, "{text}");
     }
 }
@@ -162,7 +166,11 @@ fn any_domain_equality_on_is_conjoined_not_overwritten() {
             "UNWIND [1,2,NULL] AS wanted WITH wanted MATCH (n {p:wanted}) \
              WHERE n.p >= wanted RETURN wanted,n ORDER BY wanted,n"
         ),
-        vec![scalar_vertex(1, 1), scalar_vertex(2, 2), scalar_vertex(2, 3)],
+        vec![
+            scalar_vertex(1, 1),
+            scalar_vertex(2, 2),
+            scalar_vertex(2, 3)
+        ],
     );
     // Replacing the Any equality would incorrectly admit larger values.
     assert!(
@@ -241,9 +249,7 @@ fn earlier_with_page_is_not_moved_after_the_theta_join() {
 fn theta_template_identity_encodes_comparisons_and_normalizes_operand_direction() {
     let template = |predicate: &str| {
         PreparedGraphSetText::prepare(
-            &format!(
-                "MATCH (n) WITH n,n.p AS threshold MATCH (m) WHERE {predicate} RETURN n,m"
-            ),
+            &format!("MATCH (n) WITH n,n.p AS threshold MATCH (m) WHERE {predicate} RETURN n,m"),
             symbols,
         )
         .unwrap()
@@ -260,15 +266,26 @@ fn theta_template_identity_encodes_comparisons_and_normalizes_operand_direction(
         inclusive.canonical_template_bytes()
     );
     assert_ne!(
-        greater.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes(),
-        inclusive.bind_parameters(&GqlParameters::new()).unwrap().canonical_bytes(),
+        greater
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes(),
+        inclusive
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes(),
     );
     assert_eq!(
         template("m.p <> threshold").canonical_template_bytes(),
         template("m.p != threshold").canonical_template_bytes(),
     );
     let marker = b"fgdb:gql:match-continuations:theta:v1\0";
-    assert!(greater.canonical_template_bytes().windows(marker.len()).any(|w| w == marker));
+    assert!(
+        greater
+            .canonical_template_bytes()
+            .windows(marker.len())
+            .any(|w| w == marker)
+    );
     assert!(
         !template("m.p = threshold")
             .canonical_template_bytes()

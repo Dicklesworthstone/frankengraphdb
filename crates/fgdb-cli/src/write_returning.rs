@@ -4,9 +4,7 @@
 //! A RETURN-less write, including a bounded native UNWIND, uses the native
 //! write program path.
 
-use super::{
-    Failure, Options, emit, execution_failure, human_value, render_row_body, value_cell,
-};
+use super::{Failure, Options, emit, execution_failure, human_value, render_row_body, value_cell};
 use asupersync::fs::Vfs;
 use fgdb::{Database, WriteTxn};
 use fgdb_gql::algebra::GraphValueRow;

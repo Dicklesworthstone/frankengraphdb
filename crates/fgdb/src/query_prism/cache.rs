@@ -50,7 +50,10 @@ impl<Owner> ProjectionCache<Owner> {
 
     fn prune(entries: &mut [Option<Entry<Owner>>; CACHE_ENTRIES]) {
         for entry in entries {
-            if entry.as_ref().is_some_and(|entry| entry.owner.strong_count() == 0) {
+            if entry
+                .as_ref()
+                .is_some_and(|entry| entry.owner.strong_count() == 0)
+            {
                 *entry = None;
             }
         }
@@ -63,8 +66,7 @@ impl<Owner> ProjectionCache<Owner> {
         Self::prune(&mut entries);
         let owner = Arc::downgrade(owner);
         entries.iter().flatten().find_map(|entry| {
-            (entry.owner.ptr_eq(&owner) && entry.request == request)
-                .then(|| entry.graph.clone())
+            (entry.owner.ptr_eq(&owner) && entry.request == request).then(|| entry.graph.clone())
         })
     }
 
@@ -83,9 +85,11 @@ impl<Owner> ProjectionCache<Owner> {
         let owner = Arc::downgrade(owner);
         // Two concurrent misses may both complete. Keep the first complete
         // admission, never reserve a slot for an in-flight/failed build.
-        if entries.iter().flatten().any(|entry| {
-            entry.owner.ptr_eq(&owner) && entry.request == request
-        }) {
+        if entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.owner.ptr_eq(&owner) && entry.request == request)
+        {
             return;
         }
         let total = entries.iter().flatten().try_fold(charge, |total, entry| {
@@ -148,19 +152,23 @@ pub(super) fn projection(
         projection_limits,
         source_limits,
     };
-    CACHE.get_or_build(
-        &view.snapshot,
-        request,
-        || cx.checkpoint().map_err(Error::Cancelled),
-        || view.build_prism_projection_at(
-            cx,
-            as_of,
-            selection,
-            projection,
-            projection_limits,
-            source_limits,
-        ),
-    ).map(|(graph, _)| graph)
+    CACHE
+        .get_or_build(
+            &view.snapshot,
+            request,
+            || cx.checkpoint().map_err(Error::Cancelled),
+            || {
+                view.build_prism_projection_at(
+                    cx,
+                    as_of,
+                    selection,
+                    projection,
+                    projection_limits,
+                    source_limits,
+                )
+            },
+        )
+        .map(|(graph, _)| graph)
 }
 
 #[cfg(test)]
@@ -168,8 +176,8 @@ mod tests {
     use super::*;
     use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
     use fgdb_prism::{
-        Directedness, FnxReadOptions, FnxWeightSpec, MissingWeightPolicy,
-        ParallelEdgePolicy, ProjectionEdge, SelfLoopPolicy,
+        Directedness, FnxReadOptions, FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy,
+        ProjectionEdge, SelfLoopPolicy,
     };
     use fgdb_types::{CommitSeq, EId, ObjectId, VId};
     use std::cell::Cell;
@@ -177,7 +185,10 @@ mod tests {
     fn request() -> Request {
         let options = FnxReadOptions::whole_graph(Some(CommitSeq(1)));
         Request {
-            binding: SnapshotBinding { root: ObjectId([1; 32]), as_of: CommitSeq(1) },
+            binding: SnapshotBinding {
+                root: ObjectId([1; 32]),
+                as_of: CommitSeq(1),
+            },
             selection: options.selection,
             projection: options.projection,
             projection_limits: options.projection_limits,
@@ -189,10 +200,16 @@ mod tests {
         SnapshotGraphView::build(
             request.binding,
             &[VId(1), VId(2)],
-            &[ProjectionEdge { eid: EId(1), source: VId(1), target: VId(2), weight: 1.0 }],
+            &[ProjectionEdge {
+                eid: EId(1),
+                source: VId(1),
+                target: VId(2),
+                weight: 1.0,
+            }],
             request.projection,
             request.projection_limits,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn acquire(
@@ -201,10 +218,17 @@ mod tests {
         request: Request,
         builds: &Cell<usize>,
     ) -> (SnapshotGraphView, bool) {
-        cache.get_or_build(owner, request, || Ok::<_, &'static str>(()), || {
-            builds.set(builds.get() + 1);
-            Ok(graph(request))
-        }).unwrap()
+        cache
+            .get_or_build(
+                owner,
+                request,
+                || Ok::<_, &'static str>(()),
+                || {
+                    builds.set(builds.get() + 1);
+                    Ok(graph(request))
+                },
+            )
+            .unwrap()
     }
 
     #[test]
@@ -253,11 +277,13 @@ mod tests {
         variants.push(other);
         other = base;
         other.selection.weight = FnxWeightSpec::Property {
-            key: PropertyKeyId(1), missing: MissingWeightPolicy::Reject,
+            key: PropertyKeyId(1),
+            missing: MissingWeightPolicy::Reject,
         };
         variants.push(other);
         other.selection.weight = FnxWeightSpec::Property {
-            key: PropertyKeyId(1), missing: MissingWeightPolicy::Zero,
+            key: PropertyKeyId(1),
+            missing: MissingWeightPolicy::Zero,
         };
         variants.push(other);
         other = base;
@@ -336,10 +362,18 @@ mod tests {
         let mut extra = request();
         extra.binding.as_of = CommitSeq(CACHE_ENTRIES as u64);
         assert!(!acquire(&cache, &owner, extra, &builds).1);
-        assert!(!acquire(&cache, &owner, request(), &builds).0.vertex_ids().is_empty());
+        assert!(
+            !acquire(&cache, &owner, request(), &builds)
+                .0
+                .vertex_ids()
+                .is_empty()
+        );
         assert!(!acquire(&cache, &owner, extra, &builds).1);
         assert!(acquire(&cache, &owner, request(), &builds).1);
-        assert_eq!(cache.entries.lock().unwrap().iter().flatten().count(), CACHE_ENTRIES);
+        assert_eq!(
+            cache.entries.lock().unwrap().iter().flatten().count(),
+            CACHE_ENTRIES
+        );
     }
 
     #[test]
@@ -349,20 +383,30 @@ mod tests {
         let failed = cache.get_or_build(&owner, request(), || Ok(()), || Err("build"));
         assert_eq!(failed.unwrap_err(), "build");
         let mut checks = 0;
-        let cancelled = cache.get_or_build(&owner, request(), || {
-            checks += 1;
-            if checks == 2 { Err("cancel") } else { Ok(()) }
-        }, || Ok(graph(request())));
+        let cancelled = cache.get_or_build(
+            &owner,
+            request(),
+            || {
+                checks += 1;
+                if checks == 2 { Err("cancel") } else { Ok(()) }
+            },
+            || Ok(graph(request())),
+        );
         assert_eq!(cancelled.unwrap_err(), "cancel");
         assert!(cache.entries.lock().unwrap().iter().all(Option::is_none));
         let builds = Cell::new(0);
         acquire(&cache, &owner, request(), &builds);
         for at in [1, 2] {
             let mut checks = 0;
-            let cancelled = cache.get_or_build(&owner, request(), || {
-                checks += 1;
-                if checks == at { Err("cancel") } else { Ok(()) }
-            }, || Err("hit must not build"));
+            let cancelled = cache.get_or_build(
+                &owner,
+                request(),
+                || {
+                    checks += 1;
+                    if checks == at { Err("cancel") } else { Ok(()) }
+                },
+                || Err("hit must not build"),
+            );
             assert_eq!(cancelled.unwrap_err(), "cancel");
         }
         assert!(acquire(&cache, &owner, request(), &builds).1);
@@ -384,10 +428,17 @@ mod tests {
         assert!(acquire(&cache, &owner, request(), &builds).1);
         let mut changed = request();
         changed.binding.as_of = CommitSeq(0);
-        let (_, hit) = cache.get_or_build(&owner, changed, || Ok::<_, &'static str>(()), || {
-            assert!(cache.entries.try_lock().is_ok());
-            Ok(graph(changed))
-        }).unwrap();
+        let (_, hit) = cache
+            .get_or_build(
+                &owner,
+                changed,
+                || Ok::<_, &'static str>(()),
+                || {
+                    assert!(cache.entries.try_lock().is_ok());
+                    Ok(graph(changed))
+                },
+            )
+            .unwrap();
         assert!(!hit);
     }
 
@@ -396,15 +447,16 @@ mod tests {
         let cache = ProjectionCache::new(CACHE_BYTES);
         let mut owner = Arc::new(1_u64);
         let key = request();
-        let first = cache.get_or_build(&owner, key, || Ok::<_, &'static str>(()), || {
-            Ok(graph(key))
-        }).unwrap().0;
+        let first = cache
+            .get_or_build(&owner, key, || Ok::<_, &'static str>(()), || Ok(graph(key)))
+            .unwrap()
+            .0;
         let old = Arc::downgrade(&owner);
         *Arc::make_mut(&mut owner) = 2;
         assert!(old.upgrade().is_none());
-        let (second, hit) = cache.get_or_build(&owner, key, || Ok::<_, &'static str>(()), || {
-            Ok(graph(key))
-        }).unwrap();
+        let (second, hit) = cache
+            .get_or_build(&owner, key, || Ok::<_, &'static str>(()), || Ok(graph(key)))
+            .unwrap();
         assert!(!hit);
         assert!(!first.shares_cache_with(&second));
     }

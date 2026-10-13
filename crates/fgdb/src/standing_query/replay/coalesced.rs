@@ -12,6 +12,9 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::num::NonZeroUsize;
 
+/// The last coalesced tick and the consolidated change through it.
+type CoalescedTicks = (CommitSeq, ZSet<Vec<QueryValue>>);
+
 const LIMBS: LimbLimit = LimbLimit::new(4);
 type Coalesced = Option<(CommitSeq, ZSet<Vec<QueryValue>>)>;
 type Entry<'a> = (&'a Vec<QueryValue>, &'a ZWeight);
@@ -50,16 +53,19 @@ impl<V: Vfs + Clone> Database<V> {
         after: CommitSeq,
         max_ticks: NonZeroUsize,
         policy: GqlQueryPolicy,
-    ) -> Result<Option<(CommitSeq, ZSet<Vec<QueryValue>>)>, StandingQueryError> {
+    ) -> Result<Option<CoalescedTicks>, StandingQueryError> {
         let StandingQuery::Replay(state) = self.admitted_standing_query(cx, replay)? else {
             return Err(StandingQueryError::Unsupported);
         };
         if state.history.frontier() != state.frontier {
-            return Err(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta));
+            return Err(StandingQueryError::Delivery(
+                StandingQueryFailure::InvalidDelta,
+            ));
         }
         cx.with_restriction(|| {
             let mut checkpoint = || {
-                cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted)
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
             };
             let mut meter = Meter {
                 policy,
@@ -87,16 +93,26 @@ impl History {
         while let Some((row, weight)) = merge.next(meter).map_err(StandingQueryError::Delivery)? {
             // This key is complete across ALL selected ticks, so no later row
             // can cancel it. Admit the final support before copying its payload.
-            let count = rows.len().checked_add(1)
-                .ok_or(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget))?;
-            if meter.policy.rows.max_result_rows()
+            let count = rows
+                .len()
+                .checked_add(1)
+                .ok_or(StandingQueryError::Delivery(
+                    StandingQueryFailure::ResultBudget,
+                ))?;
+            if meter
+                .policy
+                .rows
+                .max_result_rows()
                 .is_some_and(|limit| count as u128 > u128::from(limit))
             {
-                return Err(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget));
+                return Err(StandingQueryError::Delivery(
+                    StandingQueryFailure::ResultBudget,
+                ));
             }
             let cells = own_row(row, meter).map_err(StandingQueryError::Delivery)?;
             rows.accumulate(cells, weight, LIMBS, &mut |event| meter.charge(event))
-                .map_err(zset_error).map_err(StandingQueryError::Delivery)?;
+                .map_err(zset_error)
+                .map_err(StandingQueryError::Delivery)?;
         }
         (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
         Ok(Some((frontier, rows)))
@@ -115,7 +131,9 @@ impl History {
         let mut frontier = after;
         let mut selected = 0_usize;
         while let Some(frame) = next {
-            meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Delivery)?;
+            meter
+                .charge(ZSetEvent::Work)
+                .map_err(StandingQueryError::Delivery)?;
             frontier = frame.frontier;
             selected += 1;
             if selected == max_ticks.get() {
@@ -130,9 +148,12 @@ impl History {
         // History::next already proved after lies inside this contiguous range.
         let start = usize::try_from(after.0 - self.retained_after().0)
             .map_err(|_| StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
-        let end = start.checked_add(selected)
+        let end = start
+            .checked_add(selected)
             .filter(|end| *end <= self.frames.len())
-            .ok_or(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
+            .ok_or(StandingQueryError::Delivery(
+                StandingQueryFailure::InvalidDelta,
+            ))?;
         Ok(Some((frontier, start..end)))
     }
 }
@@ -149,13 +170,18 @@ impl PartialEq for Head<'_> {
 }
 impl Eq for Head<'_> {}
 impl PartialOrd for Head<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for Head<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         // BinaryHeap is a max heap. Reverse BOTH keys: equal rows must add
         // oldest tick first, preserving checked intermediate-overflow behavior.
-        other.row.cmp(self.row).then_with(|| other.source.cmp(&self.source))
+        other
+            .row
+            .cmp(self.row)
+            .then_with(|| other.source.cmp(&self.source))
     }
 }
 
@@ -172,16 +198,30 @@ impl<'a, I: Iterator<Item = Entry<'a>>> SortedMerge<'a, I> {
         sources: impl IntoIterator<Item = I>,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
-        let mut merged = Self { sources: Vec::new(), heads: BinaryHeap::new(), done: false };
+        let mut merged = Self {
+            sources: Vec::new(),
+            heads: BinaryHeap::new(),
+            done: false,
+        };
         for mut source in sources {
             meter.charge(ZSetEvent::Work)?;
             if let Some((row, weight)) = source.next() {
                 meter.units(ZSetEvent::ScratchEntry, 2)?;
-                merged.sources.try_reserve(1).map_err(|_| StandingQueryFailure::ScratchBudget)?;
-                merged.heads.try_reserve(1).map_err(|_| StandingQueryFailure::ScratchBudget)?;
+                merged
+                    .sources
+                    .try_reserve(1)
+                    .map_err(|_| StandingQueryFailure::ScratchBudget)?;
+                merged
+                    .heads
+                    .try_reserve(1)
+                    .map_err(|_| StandingQueryFailure::ScratchBudget)?;
                 let at = merged.sources.len();
                 merged.sources.push(source);
-                merged.heads.push(Head { row, weight, source: at });
+                merged.heads.push(Head {
+                    row,
+                    weight,
+                    source: at,
+                });
             }
         }
         Ok(merged)
@@ -191,21 +231,31 @@ impl<'a, I: Iterator<Item = Entry<'a>>> SortedMerge<'a, I> {
         &mut self,
         meter: &mut Meter<'_>,
     ) -> Result<Option<(&'a Vec<QueryValue>, ZWeight)>, StandingQueryFailure> {
-        if self.done { return Ok(None); }
+        if self.done {
+            return Ok(None);
+        }
         // A failed or unwinding partial key can never be resumed as a complete
         // sum. The caller discards its tentative output on any such refusal.
         self.done = true;
         loop {
             meter.charge(ZSetEvent::Work)?;
-            let Some(mut head) = self.heads.pop() else { return Ok(None); };
+            let Some(mut head) = self.heads.pop() else {
+                return Ok(None);
+            };
             let row = head.row;
             let mut total = ZWeight::ZERO;
             loop {
                 total = add_weight(&total, head.weight, meter)?;
                 meter.charge(ZSetEvent::Work)?;
                 if let Some((next_row, next_weight)) = self.sources[head.source].next() {
-                    if next_row <= head.row { return Err(StandingQueryFailure::InvalidDelta); }
-                    self.heads.push(Head { row: next_row, weight: next_weight, source: head.source });
+                    if next_row <= head.row {
+                        return Err(StandingQueryFailure::InvalidDelta);
+                    }
+                    self.heads.push(Head {
+                        row: next_row,
+                        weight: next_weight,
+                        source: head.source,
+                    });
                 }
                 meter.charge(ZSetEvent::Work)?;
                 if self.heads.peek().is_some_and(|next| next.row == row) {
@@ -228,18 +278,29 @@ fn add_weight(
     meter: &mut Meter<'_>,
 ) -> Result<ZWeight, StandingQueryFailure> {
     meter.charge(ZSetEvent::Work)?;
-    if weight.is_zero() { return Err(StandingQueryFailure::InvalidDelta); }
-    let units = weight.magnitude_limb_count().checked_add(1)
+    if weight.is_zero() {
+        return Err(StandingQueryFailure::InvalidDelta);
+    }
+    let units = weight
+        .magnitude_limb_count()
+        .checked_add(1)
         .ok_or(StandingQueryFailure::ScratchBudget)?;
     meter.units(ZSetEvent::ScratchEntry, units)?;
     // Admit every input even if a later contribution cancels it. A checked
     // result alone must not launder an oversized promoted source weight.
-    let weight = weight.checked_clone(LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)?;
+    let weight = weight
+        .checked_clone(LIMBS)
+        .map_err(|_| StandingQueryFailure::Arithmetic)?;
     meter.charge(ZSetEvent::Work)?;
-    let units = total.magnitude_limb_count().max(weight.magnitude_limb_count())
-        .checked_add(1).ok_or(StandingQueryFailure::ScratchBudget)?;
+    let units = total
+        .magnitude_limb_count()
+        .max(weight.magnitude_limb_count())
+        .checked_add(1)
+        .ok_or(StandingQueryFailure::ScratchBudget)?;
     meter.units(ZSetEvent::ScratchEntry, units)?;
-    total.checked_add(&weight, LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)
+    total
+        .checked_add(&weight, LIMBS)
+        .map_err(|_| StandingQueryFailure::Arithmetic)
 }
 
 fn own_row(
@@ -254,9 +315,13 @@ fn own_row(
         let units = match value {
             QueryValue::Value(value) => value.payload_units(),
             _ => 0,
-        }.checked_add(1).ok_or(StandingQueryFailure::ScratchBudget)?;
+        }
+        .checked_add(1)
+        .ok_or(StandingQueryFailure::ScratchBudget)?;
         meter.units(ZSetEvent::ScratchEntry, units)?;
-        cells.try_reserve(1).map_err(|_| StandingQueryFailure::ScratchBudget)?;
+        cells
+            .try_reserve(1)
+            .map_err(|_| StandingQueryFailure::ScratchBudget)?;
         cells.push(value.clone());
     }
     Ok(cells)

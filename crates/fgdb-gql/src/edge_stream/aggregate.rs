@@ -324,8 +324,8 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
             // single-row transformation completes before any group is changed;
             // a refusal discards accumulation and releases no partial summary.
             let row = if let Some(pipeline) = &self.pipeline {
-                let Some(row) = pipeline
-                    .evaluate(row, &mut |event| meter.event(event).map_err(lift))?
+                let Some(row) =
+                    pipeline.evaluate(row, &mut |event| meter.event(event).map_err(lift))?
                 else {
                     // A rejected binding is not source exhaustion. Continue
                     // within the same cooperative quantum and shared meter.

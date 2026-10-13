@@ -131,9 +131,7 @@ impl<'a> Parser<'a> {
             row(right, right_property),
             graph(right),
         ) {
-            (Some(row), None, None, Some(variable)) => {
-                (row, variable, right_property, comparison)
-            }
+            (Some(row), None, None, Some(variable)) => (row, variable, right_property, comparison),
             (None, Some(variable), Some(row), None) => {
                 (row, variable, left_property, reversed(comparison))
             }

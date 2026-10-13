@@ -110,7 +110,10 @@ fn with_reads_selected_on_actions_and_trailing_set_and_never_suppresses_creation
             assert_eq!(result.value[0].values(), &[int(expected)]);
             assert_eq!(
                 read(&db, &cx),
-                vec![vec![QueryValue::Value(int(1)), QueryValue::Value(int(expected))]]
+                vec![vec![
+                    QueryValue::Value(int(1)),
+                    QueryValue::Value(int(expected))
+                ]]
             );
         }
         assert_eq!(allocations, 1, "ON MATCH must not create another vertex");
@@ -167,7 +170,10 @@ fn late_tail_failure_restores_the_statement_but_preserves_an_earlier_transaction
         prefix.create_vertex(
             VId(40),
             vec![ITEM],
-            vec![(ID, CanonicalScalar::Int(40)), (P, CanonicalScalar::Int(40))],
+            vec![
+                (ID, CanonicalScalar::Int(40)),
+                (P, CanonicalScalar::Int(40)),
+            ],
         );
         txn.write(&mut db, prefix).unwrap();
         let failed = prepare(

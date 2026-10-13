@@ -46,11 +46,7 @@ fn merge_tail_filtering_preserves_effects_and_duplicate_match_occurrences() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut batch = WriteBatch::new(R);
         for id in 1..=3 {
-            batch.create_vertex(
-                VId(id as u128),
-                vec![],
-                vec![(P, CanonicalScalar::Int(id))],
-            );
+            batch.create_vertex(VId(id as u128), vec![], vec![(P, CanonicalScalar::Int(id))]);
         }
         db.write(&commit, batch).await.unwrap();
         let filtered = PreparedGraphEdgeMergeQueryText::prepare(
@@ -134,11 +130,7 @@ fn a_late_tail_failure_rolls_back_creation_even_with_limit_zero() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut batch = WriteBatch::new(R);
         for id in 1..=2 {
-            batch.create_vertex(
-                VId(id as u128),
-                vec![],
-                vec![(P, CanonicalScalar::Int(id))],
-            );
+            batch.create_vertex(VId(id as u128), vec![], vec![(P, CanonicalScalar::Int(id))]);
         }
         db.write(&commit, batch).await.unwrap();
         let query = PreparedGraphEdgeMergeQueryText::prepare(
@@ -183,6 +175,9 @@ fn a_late_tail_failure_rolls_back_creation_even_with_limit_zero() {
         else {
             panic!("row query");
         };
-        assert!(rows.is_empty(), "failed statement leaked a created relationship");
+        assert!(
+            rows.is_empty(),
+            "failed statement leaked a created relationship"
+        );
     });
 }

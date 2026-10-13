@@ -50,9 +50,12 @@ impl Ord for Rank {
                 self.projected
                     .as_ref()
                     .map(|row| (row.keys().len(), row.values().len()))
-                    .cmp(&other.projected.as_ref().map(|row| {
-                        (row.keys().len(), row.values().len())
-                    }))
+                    .cmp(
+                        &other
+                            .projected
+                            .as_ref()
+                            .map(|row| (row.keys().len(), row.values().len())),
+                    )
             })
             .then_with(|| {
                 (self.group.keys().len(), self.group.values().len())
@@ -64,9 +67,9 @@ impl Ord for Rank {
         // Projected rows have no key prefix. Equal computed sort cells must
         // reach the ORIGINAL complete key, never the other visible columns.
         if let (Some(left), Some(right)) = (&self.projected, &other.projected) {
-            match left.compare_incremental_order(right, &self.order, &mut |_| {
-                Ok::<_, Infallible>(())
-            }) {
+            match left
+                .compare_incremental_order(right, &self.order, &mut |_| Ok::<_, Infallible>(()))
+            {
                 Ok(Some(Ordering::Equal)) => {}
                 Ok(Some(order)) => return order,
                 Ok(None) => return left.cmp(right).then_with(|| self.group.cmp(&other.group)),
@@ -78,9 +81,10 @@ impl Ord for Rank {
         } else {
             &self.order
         };
-        match self.group.compare_incremental_order(&other.group, order, &mut |_| {
-            Ok::<_, Infallible>(())
-        }) {
+        match self
+            .group
+            .compare_incremental_order(&other.group, order, &mut |_| Ok::<_, Infallible>(()))
+        {
             Ok(Some(order)) => order,
             // Unreachable for admitted ranks, but still total for an internal
             // malformed key. Preparation refuses malformed schemas first.
@@ -218,19 +222,23 @@ impl State {
         }
         // Lower result positions once into the existing exact row comparator.
         // No per-probe metadata allocation or expression evaluation is needed.
-        let columns = || {
-            definition.ordering().iter().copied().chain(
-                definition.projected_ordering().iter().map(|order| GraphAggregateOrder {
-                    column: GraphAggregateColumn::Aggregate(order.column),
-                    descending: order.descending,
-                    nulls: if order.nulls_first {
-                        GraphNullPlacement::First
-                    } else {
-                        GraphNullPlacement::Last
-                    },
-                }),
-            )
-        };
+        let columns =
+            || {
+                definition.ordering().iter().copied().chain(
+                    definition
+                        .projected_ordering()
+                        .iter()
+                        .map(|order| GraphAggregateOrder {
+                            column: GraphAggregateColumn::Aggregate(order.column),
+                            descending: order.descending,
+                            nulls: if order.nulls_first {
+                                GraphNullPlacement::First
+                            } else {
+                                GraphNullPlacement::Last
+                            },
+                        }),
+                )
+            };
         let order = match &self.order {
             Some(order) => {
                 if self.projected_order != projected_order || !order.iter().copied().eq(columns()) {
@@ -332,11 +340,7 @@ impl State {
                     stage(
                         patch,
                         rank,
-                        if sign < 0 {
-                            None
-                        } else {
-                            Some(projected)
-                        },
+                        if sign < 0 { None } else { Some(projected) },
                         meter,
                     )?;
                 } else {
@@ -348,11 +352,7 @@ impl State {
                     stage(
                         &mut candidates,
                         rank,
-                        if sign < 0 {
-                            None
-                        } else {
-                            Some(projected)
-                        },
+                        if sign < 0 { None } else { Some(projected) },
                         meter,
                     )?;
                 }

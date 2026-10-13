@@ -284,7 +284,11 @@ fn transaction_rows_are_frozen_and_savepoint_rollback_removes_discarded_previews
     );
     rollback.success("rolled_back");
     assert!(rollback.rows(None).is_empty());
-    assert_eq!(rollback.events.len(), 2, "no rolled-back statement previews");
+    assert_eq!(
+        rollback.events.len(),
+        2,
+        "no rolled-back statement previews"
+    );
     assert_eq!(db.state(), before);
 }
 
@@ -364,7 +368,8 @@ fn ambiguous_upserts_refuse_without_narrowing_plain_multi_row_merge() {
     db.run("write", &["CREATE (:Person {p:1})"])
         .success("written");
     let before = db.state();
-    db.run("write", &[UPSERT, "--param", "delta=int:2"]).refusal();
+    db.run("write", &[UPSERT, "--param", "delta=int:2"])
+        .refusal();
     assert_eq!(db.state(), before);
     let plain = db.run(
         "write",
