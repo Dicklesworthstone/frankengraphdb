@@ -4,6 +4,8 @@
 //! Complete each key's chronological signed sum before owning its payload. No
 //! endpoint query, snapshot difference or intermediate-support table is built.
 
+mod cursor;
+
 use super::*;
 use fgdb_delta_types::{LimbLimit, ZWeight};
 use std::cmp::Ordering;
@@ -76,6 +78,36 @@ impl History {
         max_ticks: NonZeroUsize,
         meter: &mut Meter<'_>,
     ) -> Result<Coalesced, StandingQueryError> {
+        let Some((frontier, range)) = self.select_range(after, max_ticks, meter)? else {
+            return Ok(None);
+        };
+        let sources = self.frames.range(range).map(|frame| frame.rows.iter());
+        let mut merge = SortedMerge::new(sources, meter).map_err(StandingQueryError::Delivery)?;
+        let mut rows = ZSet::new();
+        while let Some((row, weight)) = merge.next(meter).map_err(StandingQueryError::Delivery)? {
+            // This key is complete across ALL selected ticks, so no later row
+            // can cancel it. Admit the final support before copying its payload.
+            let count = rows.len().checked_add(1)
+                .ok_or(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget))?;
+            if meter.policy.rows.max_result_rows()
+                .is_some_and(|limit| count as u128 > u128::from(limit))
+            {
+                return Err(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget));
+            }
+            let cells = own_row(row, meter).map_err(StandingQueryError::Delivery)?;
+            rows.accumulate(cells, weight, LIMBS, &mut |event| meter.charge(event))
+                .map_err(zset_error).map_err(StandingQueryError::Delivery)?;
+        }
+        (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
+        Ok(Some((frontier, rows)))
+    }
+
+    fn select_range(
+        &self,
+        after: CommitSeq,
+        max_ticks: NonZeroUsize,
+        meter: &mut Meter<'_>,
+    ) -> Result<Option<(CommitSeq, std::ops::Range<usize>)>, StandingQueryError> {
         // Validate the complete selected prefix before reading its row bags.
         // The same immutable history borrow pins these cuts during the merge.
         // Empty frames still participate in successor validation and metering.
@@ -101,25 +133,7 @@ impl History {
         let end = start.checked_add(selected)
             .filter(|end| *end <= self.frames.len())
             .ok_or(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
-        let sources = self.frames.range(start..end).map(|frame| frame.rows.iter());
-        let mut merge = SortedMerge::new(sources, meter).map_err(StandingQueryError::Delivery)?;
-        let mut rows = ZSet::new();
-        while let Some((row, weight)) = merge.next(meter).map_err(StandingQueryError::Delivery)? {
-            // This key is complete across ALL selected ticks, so no later row
-            // can cancel it. Admit the final support before copying its payload.
-            let count = rows.len().checked_add(1)
-                .ok_or(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget))?;
-            if meter.policy.rows.max_result_rows()
-                .is_some_and(|limit| count as u128 > u128::from(limit))
-            {
-                return Err(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget));
-            }
-            let cells = own_row(row, meter).map_err(StandingQueryError::Delivery)?;
-            rows.accumulate(cells, weight, LIMBS, &mut |event| meter.charge(event))
-                .map_err(zset_error).map_err(StandingQueryError::Delivery)?;
-        }
-        (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
-        Ok(Some((frontier, rows)))
+        Ok(Some((frontier, start..end)))
     }
 }
 
