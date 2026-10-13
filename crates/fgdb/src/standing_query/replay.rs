@@ -7,6 +7,7 @@
 //! Registration, retained frames and cursors are session-local, not durable.
 
 mod coalesced;
+mod pinned;
 
 use super::*;
 use crate::QueryValue;
