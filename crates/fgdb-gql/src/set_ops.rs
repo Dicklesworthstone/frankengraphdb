@@ -126,7 +126,15 @@ impl GraphSetColumnType {
     /// admits every native value, so it remains open when paired with a known
     /// domain. Different concrete domains still refuse; this changes schema
     /// admission only, never canonical equality, values or numeric coercion.
-    pub(crate) fn common_set_domain(self, other: Self) -> Option<Self> {
+    ///
+    /// Native and maintained set compilers share this rule. Apply it to the
+    /// complete declared schemas before inspecting any rows, including empty
+    /// or all-NULL operands. The result must remain the output domain for all
+    /// later updates and consumers; currently observed values cannot narrow it.
+    /// This does not admit a source, grant capabilities, or make unsupported
+    /// operators maintainable.
+    #[must_use]
+    pub fn common_set_domain(self, other: Self) -> Option<Self> {
         if self == Self::Any || other == Self::Any {
             Some(Self::Any)
         } else if self == other {

@@ -267,8 +267,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// EXCEPT with ALL/DISTINCT bag semantics. Operands keep their own DISTINCT,
     /// ordering and page BEFORE composition. Canonical full-row equality makes
     /// NULL equal NULL here; scalar and vertex domains are never coerced.
-    /// Column positions/types must agree, even for empty inputs. Output names
-    /// come from the left operand. The same handle may supply both operands.
+    /// Column positions must agree. Equal concrete domains remain concrete;
+    /// an Any operand keeps the output open, even for empty inputs or EXCEPT.
+    /// Different concrete domains still refuse. Output names come from the
+    /// left operand. The same handle may supply both operands.
     ///
     /// Shared parents are maintained once. Sets and joins may feed each other in
     /// an append-ordered acyclic circuit. Each commit uses both complete input
@@ -362,20 +364,21 @@ impl<V: Vfs + Clone> Database<V> {
                     .map_err(StandingQueryError::Maintenance)?;
                 let l = column_type(left, column).ok_or(StandingQueryError::Unsupported)?;
                 let r = column_type(right, column).ok_or(StandingQueryError::Unsupported)?;
-                if l != r {
-                    return Err(StandingQueryError::SetSchema(
-                        GraphSetBuildError::ColumnType {
-                            column,
-                            left: l,
-                            right: r,
-                        },
-                    ));
-                }
+                // Use the native compiler's declared-domain rule, not the
+                // present data or a left-biased schema. In particular, Any
+                // from UNWIND must remain open across later committed ticks.
+                let common = l.common_set_domain(r).ok_or(StandingQueryError::SetSchema(
+                    GraphSetBuildError::ColumnType {
+                        column,
+                        left: l,
+                        right: r,
+                    },
+                ))?;
                 meter
                     .units(ZSetEvent::ScratchEntry, 2 + name.len().div_ceil(64))
                     .map_err(StandingQueryError::Maintenance)?;
                 names.push(name.clone());
-                types.push(l);
+                types.push(common);
             }
             let left = rows(left).ok_or(StandingQueryError::Unsupported)?;
             let right = rows(right).ok_or(StandingQueryError::Unsupported)?;
@@ -478,3 +481,6 @@ impl<V: Vfs + Clone> Database<V> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod domain_tests;
