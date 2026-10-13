@@ -239,7 +239,9 @@ impl PreparedGraphAggregate {
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
         let plan = self.input.plan();
-        if !plan.requires_identified_edges()
+        // A clause-complete DIFFERENT EDGES count over fixed atoms has an exact
+        // factorized weight; it needs no relationship identities (fgdb-ujaad).
+        if (!plan.requires_identified_edges() || super::weighted::counts_distinct_edges(self))
             && !plan.projects_labels()
             && !plan.projects_types()
             && !plan.projects_property_maps()

@@ -132,8 +132,71 @@ fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
                 ValueProjection::Vertex { .. } | ValueProjection::Property { .. }
             )
         }),
+        GlaOperator::DifferentEdges { .. } => true,
         _ => false,
+    }) && (!has_distinct_edges(operators) || distinct_edges_are_complete(operators))
+}
+
+fn has_distinct_edges(operators: &[GlaOperator]) -> bool {
+    operators
+        .iter()
+        .any(|operator| matches!(operator, GlaOperator::DifferentEdges { .. }))
+}
+
+/// Whether the plan's DIFFERENT EDGES constraint pairs every two fixed atoms
+/// of one relation (fgdb-ujaad). Two such atoms can bind one relationship only
+/// when their bound (source, relation, destination) keys are equal, and atoms
+/// of different relations never can. A clause-complete constraint therefore
+/// has an exact per-binding weight: a falling factorial per equal-key group.
+/// Any other constraint shape keeps the identified evaluator.
+fn distinct_edges_are_complete(operators: &[GlaOperator]) -> bool {
+    // Atom segment slots in compiler order: ScanEdges binds slot 1, each
+    // Expand appends the next slot (algebra/pattern.rs constrain_edge).
+    let mut atoms: Vec<(u32, Option<RelationId>)> = Vec::new();
+    let mut next_slot = 2;
+    for operator in operators {
+        match operator {
+            GlaOperator::ScanEdges { relation, .. } => atoms.push((1, relation.one())),
+            GlaOperator::Expand { relation, .. } => {
+                atoms.push((next_slot, relation.one()));
+                next_slot += 1;
+            }
+            _ => {}
+        }
+    }
+    let pair = |a: u32, b: u32| (a.min(b), a.max(b));
+    let mut constrained = BTreeSet::new();
+    for operator in operators {
+        let GlaOperator::DifferentEdges { segments } = operator else {
+            continue;
+        };
+        let Some((last, previous)) = segments.split_last() else {
+            return false;
+        };
+        if !segments
+            .iter()
+            .all(|slot| atoms.iter().any(|(atom, _)| *atom == slot.ordinal()))
+        {
+            return false;
+        }
+        for slot in previous {
+            constrained.insert(pair(slot.ordinal(), last.ordinal()));
+        }
+    }
+    atoms.iter().enumerate().all(|(at, (left, relation))| {
+        atoms[at + 1..]
+            .iter()
+            .all(|(right, other)| relation != other || constrained.contains(&pair(*left, *right)))
     })
+}
+
+/// The factorized evaluator answers this DIFFERENT EDGES aggregate exactly
+/// (fgdb-ujaad). Computed and relational inputs keep their own evaluators.
+pub(super) fn counts_distinct_edges(aggregate: &PreparedGraphAggregate) -> bool {
+    aggregate.relational_input.is_none()
+        && aggregate.computed_input.is_none()
+        && has_distinct_edges(aggregate.input.plan().operators())
+        && eligible(aggregate)
 }
 
 pub(super) fn needs_original_bindings<R>(plan: &crate::algebra::GlaPlan<R>) -> bool {
@@ -160,7 +223,9 @@ pub(super) fn root_groups_are_contiguous(aggregate: &PreparedGraphAggregate) -> 
     matches!(
         aggregate.input.plan().operators().first(),
         Some(GlaOperator::ScanEdges { .. })
-    ) && (!eligible(aggregate) || needs_original_bindings(aggregate.input.plan()))
+    ) && (!eligible(aggregate)
+        || needs_original_bindings(aggregate.input.plan())
+        || has_distinct_edges(aggregate.input.plan().operators()))
 }
 
 fn normalized(
@@ -174,6 +239,68 @@ fn normalized(
     } else {
         (source, relation, destination)
     }
+}
+
+/// One complete binding's exact bag weight, or `None` when it admits no
+/// relationship choice. Without DIFFERENT EDGES it is the product of the atoms'
+/// endpoint-triple multiplicities. With it, atoms whose bound keys are equal
+/// must choose distinct parallel relationships: k of them over m occurrences
+/// admit m·(m-1)···(m-k+1) choices, none when k > m (fgdb-ujaad).
+fn binding_weight<E, C>(
+    accesses: &[EdgeAccess],
+    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    bindings: &[Option<VId>],
+    distinct: bool,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+) -> Result<Option<Multiplicity>, VisitError<E, C>> {
+    let unavailable = || GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable);
+    let mut keys = [(VId(0), RelationId(0), VId(0)); crate::algebra::MAX_PATTERN_EDGES];
+    let keys = keys.get_mut(..accesses.len()).ok_or_else(unavailable)?;
+    let mut weight = Multiplicity::ONE;
+    for (access, slot) in accesses.iter().zip(keys.iter_mut()) {
+        control(GlaExecutionEvent::Work)?;
+        let source = bindings
+            .get(access.source)
+            .copied()
+            .flatten()
+            .ok_or_else(unavailable)?;
+        let destination = bindings
+            .get(access.destination)
+            .copied()
+            .flatten()
+            .ok_or_else(unavailable)?;
+        *slot = match access.direction {
+            GlaDirection::Forward => (source, access.relation, destination),
+            GlaDirection::Reverse => (destination, access.relation, source),
+            GlaDirection::Undirected => normalized(source, access.relation, destination, true),
+        };
+        if !distinct {
+            weight = weight.product(topology.get(&*slot).copied().ok_or_else(unavailable)?);
+        }
+    }
+    if !distinct {
+        return Ok(Some(weight));
+    }
+    for at in 0..keys.len() {
+        if keys[..at].contains(&keys[at]) {
+            continue;
+        }
+        control(GlaExecutionEvent::Work)?;
+        let group = keys[at..].iter().filter(|key| **key == keys[at]).count() as u64;
+        let available = topology.get(&keys[at]).copied().ok_or_else(unavailable)?;
+        let Some(count) = available.exact_count() else {
+            // More than u64::MAX occurrences: the product stays above-count.
+            weight = weight.product(available);
+            continue;
+        };
+        if group > count {
+            return Ok(None);
+        }
+        for taken in 0..group {
+            weight = weight.product(Multiplicity(NonZeroU64::new(count - taken)));
+        }
+    }
+    Ok(Some(weight))
 }
 
 /// Ordinary/weighted inputs converge on visit_value_bindings, not a second
@@ -283,8 +410,26 @@ where
     // observed: topology-only contractions must not remove a predicate/read.
     // Selections still run in the ordinary visitor, BEFORE a complete witness
     // contributes its multiplicity. Rejected paths cannot cause COUNT overflow.
+    // DIFFERENT EDGES needs every binding complete to see which atoms share a
+    // bound key, so it bypasses the contractions below, which sum over hidden
+    // assignments. The constraint operators leave the plan; their exact
+    // effect is the per-binding falling-factorial weight (fgdb-ujaad).
+    let distinct = has_distinct_edges(plan.operators());
+    let stripped;
+    let plan = if distinct {
+        stripped = crate::algebra::GlaPlan::from_operators(
+            plan.operators()
+                .iter()
+                .filter(|operator| !matches!(operator, GlaOperator::DifferentEdges { .. }))
+                .cloned()
+                .collect(),
+        );
+        &stripped
+    } else {
+        plan
+    };
     let needs_original_bindings = needs_original_bindings(plan);
-    if needs_original_bindings {
+    if needs_original_bindings || distinct {
         // Keep all slots and the complete multiplicity/read callback. Only a
         // topology prefix followed by late reads may use intersection; its
         // guarded fallback is the original visitor, with no extra events.
@@ -296,30 +441,11 @@ where
             property,
             control,
             |columns, bindings, property, control| {
-                let mut weight = Multiplicity::ONE;
-                for access in &accesses {
-                    control(GlaExecutionEvent::Work)?;
-                    let unavailable =
-                        || GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable);
-                    let source = bindings
-                        .get(access.source)
-                        .copied()
-                        .flatten()
-                        .ok_or_else(unavailable)?;
-                    let destination = bindings
-                        .get(access.destination)
-                        .copied()
-                        .flatten()
-                        .ok_or_else(unavailable)?;
-                    let key = match access.direction {
-                        GlaDirection::Forward => (source, access.relation, destination),
-                        GlaDirection::Reverse => (destination, access.relation, source),
-                        GlaDirection::Undirected => {
-                            normalized(source, access.relation, destination, true)
-                        }
-                    };
-                    weight = weight.product(topology.get(&key).copied().ok_or_else(unavailable)?);
-                }
+                let Some(weight) =
+                    binding_weight(&accesses, &topology, bindings, distinct, control)?
+                else {
+                    return Ok(());
+                };
                 if let Some(count) = weight.exact_count() {
                     for _ in 1..count {
                         for operator in plan.operators() {
@@ -446,6 +572,12 @@ mod tests {
             "MATCH (a)-[:R]->(b) WHERE a.n=1 RETURN COUNT(*) AS n",
             "MATCH (a:L)-[:R]->(b) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) WHERE a.n=b.n RETURN COUNT(*) AS n",
+            // Under the DIFFERENT EDGES default the same two shapes must not
+            // share an edge. Their clause-complete constraint has an exact
+            // per-binding falling-factorial weight (fgdb-ujaad); the laws
+            // below hold it to the identified evaluator.
+            "MATCH (a)-[:R]-(b)-[:R]-(a) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b)<-[:R]-(c) WHERE a<>c RETURN COUNT(*) AS n",
         ] {
             assert!(eligible(&query(text)), "{text}");
         }
@@ -455,13 +587,142 @@ mod tests {
             "MATCH (a)-[:R]->(b)-[:R]-(c) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN COUNT(*) AS n",
-            // Under the DIFFERENT EDGES default the same two shapes must not
-            // share an edge, which per-atom weights cannot express.
-            "MATCH (a)-[:R]-(b)-[:R]-(a) RETURN COUNT(*) AS n",
-            "MATCH (a)-[:R]->(b)<-[:R]-(c) WHERE a<>c RETURN COUNT(*) AS n",
         ] {
             assert!(!eligible(&query(text)), "{text}");
         }
+    }
+
+    /// A multigraph whose parallel edges and self-loops make DIFFERENT EDGES
+    /// observable: 1, 2 and 3 parallel self-loops, parallel non-loop edges in
+    /// both directions, 2-cycles, triangles and a sink.
+    fn distinct_edge_graph() -> Vec<(EId, VId, RelationId, VId)> {
+        let r = RelationId(1);
+        [
+            (0, 0),
+            (0, 1),
+            (0, 1),
+            (1, 0),
+            (1, 2),
+            (2, 0),
+            (2, 0),
+            (1, 1),
+            (2, 2),
+            (2, 2),
+            (3, 3),
+            (3, 3),
+            (3, 3),
+            (3, 0),
+            (0, 3),
+            (2, 3),
+            (4, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(eid, (src, dst))| (EId(eid as u128), VId(src), r, VId(dst)))
+        .collect()
+    }
+
+    #[test]
+    fn distinct_edge_counts_equal_the_identified_evaluator() {
+        let edges = distinct_edge_graph();
+        let properties = BTreeMap::from([
+            (VId(0), CanonicalScalar::Int(7)),
+            (VId(1), CanonicalScalar::Null),
+            (VId(2), CanonicalScalar::Int(7)),
+            (VId(3), CanonicalScalar::Int(-2)),
+        ]);
+        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        for pattern in [
+            "(a)-[:R]->(b)-[:R]->(c)-[:R]->(a)",
+            "(a)-[:R]->(b)-[:R]->(a)",
+            "(a)-[:R]->(b)-[:R]->(c)",
+            "(a)-[:R]->(b)<-[:R]-(c)",
+            "(a)-[:R]->(b)-[:R]->(c)-[:R]->(b)",
+            "(a)-[:R]-(b)-[:R]-(a)",
+            "(a)-[:R]->(b)-[:R]->(c) WHERE a.n=7",
+            "(a)-[:R]->(b)<-[:R]-(c) WHERE a<>c",
+        ] {
+            let prefix = format!(
+                "MATCH {pattern} RETURN a.n AS root,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
+            );
+            let factored = query(&format!("{prefix} GROUP BY a.n"));
+            // A hidden COLLECT keeps the same five aggregates on the identified
+            // evaluator, which enforces DIFFERENT EDGES by relationship identity.
+            let identified = query(&format!("{prefix},COLLECT(b.n) AS bag GROUP BY a.n"))
+                .with_aggregate_output_prefix(5)
+                .unwrap();
+            assert!(counts_distinct_edges(&factored), "{pattern}");
+            assert!(!counts_distinct_edges(&identified), "{pattern}");
+            let run = |aggregate: &PreparedGraphAggregate| {
+                aggregate
+                    .execute_governed_with_element_maps(
+                        edges.len() as u64,
+                        (0..5).map(VId),
+                        edges.iter().copied(),
+                        |vid, predicates| {
+                            Ok::<_, ()>(predicates.iter().all(|predicate| {
+                                predicate.matches_borrowed(
+                                    None,
+                                    properties.get(&vid).map(|value| (PropertyKeyId(1), value)),
+                                )
+                            }))
+                        },
+                        |vid, _| Ok(properties.get(&vid)),
+                        |_, _| Ok(None),
+                        |_| Ok(None),
+                        |_| Ok(None),
+                        |_| Ok(None),
+                        |_| Ok(None),
+                        policy,
+                        || Ok::<_, ()>(()),
+                    )
+                    .unwrap()
+            };
+            let actual = run(&factored);
+            let expected = run(&identified);
+            assert_eq!(actual.value, expected.value, "{pattern}");
+            assert_eq!(actual.rows, expected.rows, "{pattern}");
+        }
+    }
+
+    #[test]
+    fn distinct_edge_triangles_count_falling_factorials_of_parallel_loops() {
+        // Independent oracle: enumerate ordered triples of pairwise-distinct
+        // relationships forming a directed 3-cycle.
+        let edges = distinct_edge_graph();
+        let mut expected = 0_u64;
+        for (i, &(_, a, _, b)) in edges.iter().enumerate() {
+            for (j, &(_, b2, _, c)) in edges.iter().enumerate() {
+                for (k, &(_, c2, _, a2)) in edges.iter().enumerate() {
+                    if b2 == b && c2 == c && a2 == a && i != j && j != k && i != k {
+                        expected += 1;
+                    }
+                }
+            }
+        }
+        // The three loops at VId(3) alone contribute 3*2*1 ordered choices,
+        // where homomorphic counting would give 27.
+        assert!(expected >= 6);
+        let aggregate = query("MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN COUNT(*) AS n");
+        assert!(counts_distinct_edges(&aggregate));
+        let result = aggregate
+            .execute_governed(
+                edges.len() as u64,
+                (0..5).map(VId),
+                edges
+                    .iter()
+                    .map(|&(_, src, relation, dst)| (src, relation, dst)),
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok::<_, ()>(None),
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(
+            result.value[0].get(0),
+            Some(&GraphAggregateValue::Count(expected))
+        );
     }
 
     #[test]
