@@ -75,6 +75,62 @@ impl<V: Vfs + Clone> Database<V> {
             state.history.coalesce(after, max_ticks, &mut meter)
         })
     }
+
+    /// Compare two exact retained revisions of one maintained native result.
+    /// Returns the compressed signed bag `result(after) - result(before)` by
+    /// integrating ONLY the complete ticks in `(min(before, after), max(..)]`.
+    /// Neither endpoint need be the live frontier. Reverse cuts invert each
+    /// final exact weight and can be used to move an existing result backwards;
+    /// the matching baseline and source definition remain the caller's duty.
+    ///
+    /// Both endpoints must belong to this replay sink's retained window, even
+    /// when equal. Pre-registration, evicted and future cuts return ReplayGap
+    /// before row bags are read. Every selected successor is checked, including
+    /// empty ticks. There is no shorter-prefix, available-suffix or endpoint
+    /// query fallback. Equal admitted cuts return an empty bag, not missing
+    /// history. A failed or stale sink cannot be used even for equal cuts.
+    ///
+    /// One cumulative policy covers interval validation, merge, exact weight
+    /// arithmetic and surviving payload copies. ResultRows limits final net
+    /// support after cancellation. Reverse arithmetic uses the same bounded
+    /// exact integer domain; it never narrows promoted multiplicities to i128.
+    /// Any refusal or interruption returns no partial bag and leaves retention,
+    /// source state and acknowledgements unchanged. Pure order changes are not
+    /// bag changes, but the source's selected window is already in each delta.
+    ///
+    /// This is session-local derived result history, not arbitrary Chronicle
+    /// history, raw graph DIFF syntax, cross-branch comparison, a durable resume
+    /// token or capability-authorized transport. Registration/rebuild establishes
+    /// the earliest possible baseline; reopening does not reconstruct it.
+    pub fn standing_replay_difference(
+        &self,
+        cx: &QueryCx,
+        replay: &StandingQueryHandle,
+        before: CommitSeq,
+        after: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<ZSet<Vec<QueryValue>>, StandingQueryError> {
+        let StandingQuery::Replay(state) = self.admitted_standing_query(cx, replay)? else {
+            return Err(StandingQueryError::Unsupported);
+        };
+        if state.history.frontier() != state.frontier {
+            return Err(StandingQueryError::Delivery(
+                StandingQueryFailure::InvalidDelta,
+            ));
+        }
+        cx.with_restriction(|| {
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            state.history.difference(before, after, &mut meter)
+        })
+    }
 }
 
 impl History {
@@ -87,6 +143,26 @@ impl History {
         let Some((frontier, range)) = self.select_range(after, max_ticks, meter)? else {
             return Ok(None);
         };
+        let rows = self.collect_range(range, false, meter)?;
+        Ok(Some((frontier, rows)))
+    }
+
+    fn difference(
+        &self,
+        before: CommitSeq,
+        after: CommitSeq,
+        meter: &mut Meter<'_>,
+    ) -> Result<ZSet<Vec<QueryValue>>, StandingQueryError> {
+        let range = self.select_difference(before, after, meter)?;
+        self.collect_range(range, before > after, meter)
+    }
+
+    fn collect_range(
+        &self,
+        range: std::ops::Range<usize>,
+        reverse: bool,
+        meter: &mut Meter<'_>,
+    ) -> Result<ZSet<Vec<QueryValue>>, StandingQueryError> {
         let sources = self.frames.range(range).map(|frame| frame.rows.iter());
         let mut merge = SortedMerge::new(sources, meter).map_err(StandingQueryError::Delivery)?;
         let mut rows = ZSet::new();
@@ -109,13 +185,64 @@ impl History {
                     StandingQueryFailure::ResultBudget,
                 ));
             }
+            let weight = orient_weight(weight, reverse, meter)
+                .map_err(StandingQueryError::Delivery)?;
             let cells = own_row(row, meter).map_err(StandingQueryError::Delivery)?;
             rows.accumulate(cells, weight, LIMBS, &mut |event| meter.charge(event))
                 .map_err(zset_error)
                 .map_err(StandingQueryError::Delivery)?;
         }
         (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
-        Ok(Some((frontier, rows)))
+        Ok(rows)
+    }
+
+    fn select_difference(
+        &self,
+        before: CommitSeq,
+        after: CommitSeq,
+        meter: &mut Meter<'_>,
+    ) -> Result<std::ops::Range<usize>, StandingQueryError> {
+        let retained_after = self.retained_after();
+        let frontier = self.frontier();
+        // Validate BOTH requested cuts before inspecting any selected payload.
+        // Do not turn equal unavailable cuts into an apparently exact empty bag.
+        for cut in [before, after] {
+            meter
+                .charge(ZSetEvent::Work)
+                .map_err(StandingQueryError::Delivery)?;
+            if cut < retained_after || cut > frontier {
+                return Err(StandingQueryError::ReplayGap {
+                    after: cut,
+                    retained_after,
+                    frontier,
+                });
+            }
+        }
+        let low = before.min(after);
+        let high = before.max(after);
+        let invalid = || StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta);
+        let start = usize::try_from(low.0 - retained_after.0).map_err(|_| invalid())?;
+        let count = usize::try_from(high.0 - low.0).map_err(|_| invalid())?;
+        let end = start
+            .checked_add(count)
+            .filter(|end| *end <= self.frames.len())
+            .ok_or_else(invalid)?;
+        let range = start..end;
+        let mut next = low;
+        for frame in self.frames.range(range.clone()) {
+            meter
+                .charge(ZSetEvent::Work)
+                .map_err(StandingQueryError::Delivery)?;
+            if frame.from != next || next.checked_successor().ok() != Some(frame.frontier) {
+                return Err(invalid());
+            }
+            next = frame.frontier;
+        }
+        if next != high {
+            return Err(invalid());
+        }
+        (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
+        Ok(range)
     }
 
     fn select_range(
@@ -303,6 +430,27 @@ fn add_weight(
         .map_err(|_| StandingQueryFailure::Arithmetic)
 }
 
+fn orient_weight(
+    weight: ZWeight,
+    reverse: bool,
+    meter: &mut Meter<'_>,
+) -> Result<ZWeight, StandingQueryFailure> {
+    if !reverse {
+        return Ok(weight);
+    }
+    // Negate only AFTER chronological consolidation. Reversing tick traversal
+    // would change the accepted intermediate sums under the exact limb bound.
+    meter.charge(ZSetEvent::Work)?;
+    let units = weight
+        .magnitude_limb_count()
+        .checked_add(1)
+        .ok_or(StandingQueryFailure::ScratchBudget)?;
+    meter.units(ZSetEvent::ScratchEntry, units)?;
+    weight
+        .checked_neg(LIMBS)
+        .map_err(|_| StandingQueryFailure::Arithmetic)
+}
+
 fn own_row(
     row: &[QueryValue],
     meter: &mut Meter<'_>,
@@ -329,3 +477,202 @@ fn own_row(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod difference_tests {
+    use super::*;
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::CanonicalScalar;
+
+    fn budget(rows: u64) -> GqlQueryPolicy {
+        GqlQueryPolicy::new(0, rows, 1_000_000, 1_000_000)
+    }
+    fn key(value: i64) -> Vec<QueryValue> {
+        vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))]
+    }
+    fn bag(counts: [i128; 2]) -> ZSet<Vec<QueryValue>> {
+        ZSet::from_updates(
+            counts.into_iter().enumerate().map(|(i, count)| {
+                (key(i as i64), ZWeight::from_i128(count))
+            }),
+            LIMBS,
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap()
+    }
+    fn append(history: &mut History, counts: [i128; 2]) {
+        let mut checkpoint = || Ok(());
+        let mut meter = Meter {
+            policy: budget(2),
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        history
+            .prepare(
+                history.frontier().checked_successor().unwrap(),
+                bag(counts),
+                Limits::new(16, 100, 100_000).unwrap(),
+                &mut meter,
+            )
+            .unwrap()
+            .commit();
+    }
+    fn run(
+        history: &History,
+        before: CommitSeq,
+        after: CommitSeq,
+        policy: GqlQueryPolicy,
+        checkpoint: &mut dyn FnMut() -> Result<(), StandingQueryFailure>,
+    ) -> (Result<ZSet<Vec<QueryValue>>, StandingQueryError>, StandingQueryStats) {
+        let mut meter = Meter {
+            policy,
+            stats: StandingQueryStats::default(),
+            checkpoint,
+        };
+        let result = history.difference(before, after, &mut meter);
+        (result, meter.stats)
+    }
+
+    #[test]
+    fn every_endpoint_pair_matches_independent_snapshot_count_arithmetic() {
+        for mut code in 0..729_u32 {
+            let mut counts = [[0_i128; 2]; 3];
+            for snapshot in &mut counts {
+                for count in snapshot {
+                    *count = i128::from(code % 3);
+                    code /= 3;
+                }
+            }
+            let mut history = History::new(CommitSeq(17));
+            for pair in counts.windows(2) {
+                append(&mut history, [pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]]);
+            }
+            let window = history.window();
+            for before in 0..3 {
+                for after in 0..3 {
+                    let actual = run(
+                        &history,
+                        CommitSeq(17 + before as u64),
+                        CommitSeq(17 + after as u64),
+                        budget(2),
+                        &mut || Ok(()),
+                    )
+                    .0
+                    .unwrap();
+                    assert_eq!(actual, bag([
+                        counts[after][0] - counts[before][0],
+                        counts[after][1] - counts[before][1],
+                    ]));
+                    assert_eq!(history.window(), window);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_interval_excludes_later_ticks_and_preserves_promoted_reverse_weights() {
+        let mut history = History::new(CommitSeq(u64::MAX - 3));
+        append(&mut history, [23, 0]);
+        append(&mut history, [i128::MIN, 0]);
+        append(&mut history, [0, 99]);
+        let low = CommitSeq(u64::MAX - 2);
+        let high = CommitSeq(u64::MAX - 1);
+        let forward = run(&history, low, high, budget(1), &mut || Ok(())).0.unwrap();
+        assert_eq!(forward, bag([i128::MIN, 0]));
+        let reverse = run(&history, high, low, budget(1), &mut || Ok(())).0.unwrap();
+        let (row, weight) = reverse.iter().next().unwrap();
+        let positive = ZWeight::from_i128(i128::MAX).checked_add(&ZWeight::ONE, LIMBS).unwrap();
+        assert_eq!(reverse.len(), 1);
+        assert_eq!(row, &key(0));
+        assert_eq!(weight, &positive);
+        assert!(weight.is_promoted());
+    }
+
+    #[test]
+    fn equal_cuts_and_cancelled_intervals_need_no_final_result_allowance() {
+        let mut history = History::new(CommitSeq(4));
+        append(&mut history, [7, 0]);
+        append(&mut history, [0, 0]);
+        append(&mut history, [-7, 0]);
+        for (before, after) in [(4, 4), (5, 5), (7, 7), (4, 7), (7, 4), (5, 6)] {
+            assert!(run(&history, CommitSeq(before), CommitSeq(after), budget(0), &mut || Ok(()))
+                .0.unwrap().is_empty());
+        }
+        assert!(matches!(
+            run(&history, CommitSeq(4), CommitSeq(5), budget(0), &mut || Ok(())).0,
+            Err(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget))
+        ));
+    }
+
+    #[test]
+    fn unavailable_endpoints_and_interior_gaps_never_yield_partial_differences() {
+        let mut history = History::new(CommitSeq(5));
+        append(&mut history, [1, 0]);
+        append(&mut history, [0, 1]);
+        append(&mut history, [-1, 0]);
+        let retired = history.frames.pop_front().unwrap();
+        history.rows -= retired.rows.len();
+        history.units -= retired.units;
+        for (before, after, rejected) in [(5, 8, 5), (8, 5, 5), (5, 5, 5), (6, 9, 9), (9, 6, 9), (9, 9, 9)] {
+            assert!(matches!(
+                run(&history, CommitSeq(before), CommitSeq(after), budget(2), &mut || Ok(())).0,
+                Err(StandingQueryError::ReplayGap { after, retained_after: CommitSeq(6), frontier: CommitSeq(8) })
+                    if after == CommitSeq(rejected)
+            ));
+        }
+        assert_eq!(run(&history, CommitSeq(6), CommitSeq(7), budget(2), &mut || Ok(())).0.unwrap(), bag([0, 1]));
+        Arc::get_mut(history.frames.back_mut().unwrap()).unwrap().from = CommitSeq(6);
+        // Corruption outside a selected interval is not accidentally consumed.
+        assert_eq!(run(&history, CommitSeq(6), CommitSeq(7), budget(2), &mut || Ok(())).0.unwrap(), bag([0, 1]));
+        for (before, after) in [(6, 8), (8, 6)] {
+            assert!(matches!(
+                run(&history, CommitSeq(before), CommitSeq(after), budget(2), &mut || Ok(())).0,
+                Err(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))
+            ));
+        }
+    }
+
+    #[test]
+    fn every_direction_checkpoint_and_budget_refusal_preserves_history_for_retry() {
+        let mut history = History::new(CommitSeq(2));
+        append(&mut history, [4, -2]);
+        append(&mut history, [-3, 0]);
+        append(&mut history, [0, 5]);
+        let window = history.window();
+        let frames = history.frames.iter().cloned().collect::<Vec<_>>();
+        for (before, after, expected) in [(2, 5, [1, 3]), (5, 2, [-1, -3])] {
+            let mut calls = 0;
+            let (result, stats) = run(&history, CommitSeq(before), CommitSeq(after), budget(2), &mut || {
+                calls += 1;
+                Ok(())
+            });
+            assert_eq!(result.unwrap(), bag(expected));
+            for stop in 1..=calls {
+                let mut seen = 0;
+                assert!(matches!(
+                    run(&history, CommitSeq(before), CommitSeq(after), budget(2), &mut || {
+                        seen += 1;
+                        if seen == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
+                    }).0,
+                    Err(StandingQueryError::Delivery(StandingQueryFailure::Interrupted))
+                ));
+                assert_eq!(seen, stop);
+                assert_eq!(history.window(), window);
+                for (actual, original) in history.frames.iter().zip(&frames) {
+                    assert!(Arc::ptr_eq(actual, original));
+                }
+                assert_eq!(run(&history, CommitSeq(before), CommitSeq(after), budget(2), &mut || Ok(())).0.unwrap(), bag(expected));
+            }
+            for (work, scratch, rows, passes) in [
+                (stats.work_units, stats.scratch_entries, 2, true),
+                (stats.work_units - 1, stats.scratch_entries, 2, false),
+                (stats.work_units, stats.scratch_entries - 1, 2, false),
+                (stats.work_units, stats.scratch_entries, 1, false),
+            ] {
+                let result = run(&history, CommitSeq(before), CommitSeq(after), GqlQueryPolicy::new(0, rows, work, scratch), &mut || Ok(())).0;
+                assert_eq!(result.is_ok(), passes);
+                assert_eq!(history.window(), window);
+            }
+        }
+    }
+}
