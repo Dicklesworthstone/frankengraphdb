@@ -480,11 +480,11 @@ fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
         let mut batch = WriteBatch::new(mutation.relation());
         let target = match intent {
             GraphMutationIntent::Property { vertex, key, value } => {
-                batch.set_vertex_property(vertex, key, value);
+                batch.set_vertex_property_value(vertex, key, value);
                 ElementId::Vertex(vertex)
             }
             GraphMutationIntent::EdgeProperty { edge, key, value } => {
-                batch.set_edge_property(edge, key, value);
+                batch.set_edge_property_value(edge, key, value);
                 ElementId::Edge(edge)
             }
             GraphMutationIntent::Label {

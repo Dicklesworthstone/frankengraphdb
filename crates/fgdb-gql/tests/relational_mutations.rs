@@ -12,6 +12,11 @@ use fgdb_gql::{
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 
+/// A written scalar as the stored property value an intent carries.
+fn stored(value: CanonicalScalar) -> Option<CanonicalPropertyValue> {
+    Some(CanonicalPropertyValue::Scalar(value))
+}
+
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
@@ -107,12 +112,12 @@ fn ranked_computed_columns_are_the_actual_assignment_schema() {
             GraphMutationIntent::Property {
                 vertex: VId(2),
                 key: Q,
-                value: Some(CanonicalScalar::Int(8))
+                value: stored(CanonicalScalar::Int(8))
             },
             GraphMutationIntent::Property {
                 vertex: VId(3),
                 key: Q,
-                value: Some(CanonicalScalar::Int(5))
+                value: stored(CanonicalScalar::Int(5))
             },
         ]
     );
@@ -154,7 +159,7 @@ fn generated_filter_rank_pages_match_independent_target_value_oracle() {
                     .map(|(target, value)| GraphMutationIntent::Property {
                         vertex: VId(target as u128),
                         key: Q,
-                        value: Some(CanonicalScalar::Int(value)),
+                        value: stored(CanonicalScalar::Int(value)),
                     })
                     .collect::<Vec<_>>();
                 let scalars = values

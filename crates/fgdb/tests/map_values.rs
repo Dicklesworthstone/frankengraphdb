@@ -8,8 +8,8 @@ use fgdb::{Database, DatabaseKeys, QueryError, QueryResult, QueryValue, WriteBat
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy,
-    PreparedGraphWriteScript,
+    GqlParameterType, GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
+    GraphWriteProgramPolicy, PreparedGraphWriteScript,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, PurposeContexts, QueryCx, TxnCx, VId,
@@ -710,9 +710,10 @@ fn map_rows_drive_create_properties() {
             ),
             vec![vec![list([text("a"), text("b")])]]
         );
-        // SET from a property column that holds a stored List refuses typed
-        // at execution and commits nothing; it panicked the process
-        // ("complete input schema checked"). Writing it is fgdb-k3nub's.
+        // SET from a property column that holds a stored List copies the List
+        // (it panicked the process, "complete input schema checked"). Here two
+        // listed rows assign different Lists to one tag: a conflicting
+        // assignment at execution, so nothing commits.
         let copied = "MATCH (n:Listed), (m:Tag) SET m.first = n.name";
         let result = write(&mut db, cxs, copied, &empty).await;
         assert!(
@@ -725,6 +726,86 @@ fn map_rows_drive_create_properties() {
             query(&db, "MATCH (m:Tag) RETURN m.first AS first"),
             vec![vec![int(42)]]
         );
+    });
+}
+
+/// fgdb-k3nub, the write half: SET writes a List value as the stored List it
+/// is. A literal, a concatenation, a copy of another element's stored List
+/// and a `+=` entry all read back exactly. A map at any depth refuses typed,
+/// as CREATE's does, and two rows assigning different Lists to one field
+/// conflict. Each refusal commits nothing.
+#[test]
+fn set_writes_list_values_as_stored_lists() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let (commit, cx, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+    runtime.block_on(async {
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph()).await.unwrap();
+        let cxs = (&commit, &cx, &txn);
+        let empty = GqlParameters::new();
+        let first = |db: &Database<fgdb::MemVfs>| {
+            let text = "MATCH (n:Person) RETURN n.name AS name, n.first AS first";
+            let mut rows = cells(db.query(&cx, text, &empty, symbols, policy()).expect(text));
+            rows.sort();
+            rows
+        };
+        for statement in [
+            "MATCH (n:Person {name: 'a'}) SET n.first = [1, 2, 3]",
+            "MATCH (n:Person {name: 'a'}) SET n.first = n.first + [4]",
+            "MATCH (a:Person {name: 'a'}), (b:Person {name: 'b'}) SET b.first = a.first",
+            "MATCH (n:Person {name: 'c'}) SET n += {first: ['x', 'y']}",
+        ] {
+            write(&mut db, cxs, statement, &empty)
+                .await
+                .expect(statement);
+        }
+        let numbers = list([int(1), int(2), int(3), int(4)]);
+        let expected = vec![
+            vec![text("a"), numbers.clone()],
+            vec![text("b"), numbers],
+            vec![text("c"), list([text("x"), text("y")])],
+        ];
+        assert_eq!(first(&db), expected);
+        for statement in [
+            "MATCH (n:Person {name: 'a'}) SET n.first = [{k: 1}]",
+            "MATCH (n:Person {name: 'a'}) SET n += {first: [{k: 1}]}",
+            "MATCH (a:Person), (b:Person {name: 'c'}) SET b.first = [a.p]",
+        ] {
+            let result = write(&mut db, cxs, statement, &empty).await;
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.starts_with("execute:")),
+                "{statement}: {result:?}"
+            );
+        }
+        assert_eq!(first(&db), expected);
+        // A parameter the statement declares as a List writes the same way:
+        // `SET n.p = $tags`, the parameterized form of a list write.
+        let tags = GqlParameters::new()
+            .with_list("tags", vec![text("p"), text("q")])
+            .unwrap();
+        let program = PreparedGraphWriteScript::prepare_with_parameter_types(
+            "MATCH (n:Person {name: 'b'}) SET n.first = $tags",
+            R,
+            &[("tags", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&tags)
+        .unwrap();
+        db.execute_graph_write_program_returning_autocommit_engine_governed(
+            &txn,
+            &cx,
+            &commit,
+            &program,
+            GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first(&db)[1], vec![text("b"), list([text("p"), text("q")])]);
     });
 }
 
