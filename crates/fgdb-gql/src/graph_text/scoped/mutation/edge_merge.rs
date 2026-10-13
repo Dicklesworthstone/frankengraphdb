@@ -1,10 +1,8 @@
 //! Native directed relationship MERGE over endpoints bound by the shared MATCH prefix.
 
 use super::*;
-use crate::mutation_text::EdgeMergeReturnTemplate;
-use crate::set_text::{
-    ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
-};
+use crate::mutation_text::{EdgeMergeReturnTemplate, WriteReturnGroupTemplate};
+use crate::set_text::{ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate};
 use crate::{
     GraphEdgeMergeBinding, GraphEdgeMergeTextError, GraphEdgeMergeTextErrorKind,
     GraphSetColumnType, GraphSetProjection, GraphSetQuantifier, PreparedGraphEdgeMerge,
@@ -643,8 +641,9 @@ impl<'a> Parser<'a> {
     }
 
     /// A carried edge, MATCH element or actual MERGE endpoint has one frozen
-    /// post-write property binding. Hoist it into the WITH head; never resolve
-    /// a property by scanning the graph again from the tail.
+    /// post-write property binding. A direct grouping key retains that same
+    /// identity; its fields can be hidden keys without splitting its group.
+    /// Aggregate representatives and dropped identities never acquire reads.
     fn edge_merge_tail(
         &mut self,
         returning: &mut ParsedEdgeReturn<'a>,
@@ -653,41 +652,46 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<ReadStageTemplate>, GraphEdgeMergeTextError> {
         let visible = schema.len();
         let mut reads = Vec::new();
-        if returning.grouping.is_none() {
-            for (alias, key) in self.write_tail_reads(&schema)? {
-                let Some(at) = schema[..visible]
-                    .iter()
-                    .position(|(name, _)| name.text == alias.text)
-                else {
-                    continue;
-                };
-                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
-                    continue;
-                };
-                let (binding, _, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) =
-                    returning.bindings[binding]
-                else {
-                    continue;
-                };
-                let property = match binding {
-                    EdgeBinding::Edge => EdgeBinding::Property(key),
-                    EdgeBinding::Endpoint { start } => EdgeBinding::EndpointProperty { start, key },
-                    EdgeBinding::Input(input) => {
-                        let variable = columns[input].variable;
-                        let column = self.mutation_projection(columns, variable, Some(key))?;
-                        EdgeBinding::Input(column)
-                    }
-                    EdgeBinding::Property(_) | EdgeBinding::EndpointProperty { .. } => continue,
-                };
-                let column = returning.column(property, key, GraphSetColumnType::Scalar)?;
-                mutation_query::push_tail_read(
-                    &mut returning.projection,
-                    &mut schema,
-                    &mut reads,
-                    (alias, key),
-                    column,
-                )?;
-            }
+        for (alias, key) in self.write_tail_reads(&schema)? {
+            let Some(at) = schema[..visible]
+                .iter()
+                .position(|(name, _)| name.text == alias.text)
+            else {
+                continue;
+            };
+            let Some(binding) = WriteReturnGroupTemplate::carried_binding(
+                returning.grouping.as_ref(),
+                &returning.projection[at].value,
+            ) else {
+                continue;
+            };
+            let (binding, _, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) =
+                returning.bindings[binding]
+            else {
+                continue;
+            };
+            let property = match binding {
+                EdgeBinding::Edge => EdgeBinding::Property(key),
+                EdgeBinding::Endpoint { start } => EdgeBinding::EndpointProperty { start, key },
+                EdgeBinding::Input(input) => {
+                    let variable = columns[input].variable;
+                    let column = self.mutation_projection(columns, variable, Some(key))?;
+                    EdgeBinding::Input(column)
+                }
+                EdgeBinding::Property(_) | EdgeBinding::EndpointProperty { .. } => continue,
+            };
+            let column = returning.column(property, key, GraphSetColumnType::Scalar)?;
+            let column = match &mut returning.grouping {
+                Some(group) => group.hoist_property(&mut returning.projection, column, key.at)?,
+                None => column,
+            };
+            mutation_query::push_tail_read(
+                &mut returning.projection,
+                &mut schema,
+                &mut reads,
+                (alias, key),
+                column,
+            )?;
         }
         Ok(self.finish_write_tail(schema, visible, reads)?)
     }
