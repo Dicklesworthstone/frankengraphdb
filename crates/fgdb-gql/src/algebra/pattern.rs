@@ -1142,6 +1142,12 @@ impl GraphPatternBuilder {
             let first = self.edges[0];
             if first.walk.is_some() {
                 operators.push(GlaOperator::ScanVertices);
+                // Filter the walk's start vertices before expanding from them.
+                // The source's own predicates commute with the per-row
+                // expansion, which never rebinds slot 0 and keeps row order,
+                // and a Select directly after ScanVertices is what source
+                // admission narrows by index (fgdb-mdkfb).
+                self.select(first.source, BindingSlot(0), &mut operators);
                 operators.push(first.expansion(BindingSlot(0), first.direction));
             } else {
                 operators.push(GlaOperator::ScanEdges {
@@ -1166,7 +1172,9 @@ impl GraphPatternBuilder {
                 slots[first.destination] = Some(BindingSlot(1));
             }
             self.identities(&slots, &mut emitted, &mut operators);
-            self.select(first.source, BindingSlot(0), &mut operators);
+            if first.walk.is_none() {
+                self.select(first.source, BindingSlot(0), &mut operators);
+            }
             if first.source != first.destination {
                 self.select(first.destination, BindingSlot(1), &mut operators);
             }
