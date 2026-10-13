@@ -366,8 +366,12 @@ impl<'a> Parser<'a> {
             let row = |word: &str| {
                 (self.read_row_bindings.iter()).position(|binding| binding.text == word)
             };
+            // Inside a later required MATCH the variables are that clause's
+            // own, all of them candidates; the root count is the outer one.
+            let roots = (self.syntax.variables.get(..self.syntax.root_variables))
+                .unwrap_or(&self.syntax.variables);
             let element = |word: &str| {
-                (self.syntax.variables[..self.syntax.root_variables].iter())
+                (roots.iter())
                     .copied()
                     .find(|variable| variable.text == word)
                     .or_else(|| {

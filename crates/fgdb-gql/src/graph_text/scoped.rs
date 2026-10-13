@@ -1233,8 +1233,15 @@ impl<'a> Parser<'a> {
         )?;
         let outer = self.take_pattern();
         // Leading row aliases are lowered at the root join. They must not
-        // escape an OPTIONAL/EXISTS predicate into a post-join filter.
-        let row_bindings = core::mem::take(&mut self.read_row_bindings);
+        // escape an OPTIONAL/EXISTS predicate into a post-join filter. A
+        // later required MATCH is an inner join, so its equality with a row
+        // value is the same post-join filter as the root's (fgdb-0s2pq:
+        // `UNWIND $rows AS row MATCH (a {id: row.a}) MATCH (b {id: row.b})`).
+        let row_bindings = if matches!(kind, ScopeKind::Required) && form == ScopeForm::Clause {
+            self.read_row_bindings.clone()
+        } else {
+            core::mem::take(&mut self.read_row_bindings)
+        };
         // Only positive fields change scope. The lexer, global parameters,
         // original offsets, caps and previously completed clauses never reset.
         let clause = form == ScopeForm::Clause;
