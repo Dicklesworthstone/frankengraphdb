@@ -56,6 +56,16 @@ pub(super) struct BoundScope {
 }
 
 impl BoundScope {
+    /// This scope's share of its selection's read summary (fgdb-iqy0t).
+    pub(super) fn property_and_label_reads(
+        &self,
+        keys: &mut std::collections::BTreeSet<fgdb_delta_types::PropertyKeyId>,
+        labels: &mut std::collections::BTreeSet<fgdb_delta_types::LabelId>,
+    ) -> bool {
+        self.builder.property_and_label_reads(keys, labels)
+            && super::filter_reads(&self.filters, keys)
+    }
+
     pub(super) fn clause(&self) -> GraphMatchClause<'_> {
         match self.kind {
             ScopeKind::Required => GraphMatchClause::required(&self.builder),

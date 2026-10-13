@@ -91,6 +91,13 @@ pub enum GraphUnwindWriteError {
     },
     Definition(GraphWriteScriptError),
     Binding(GraphWriteScriptBatchError),
+    /// Statement `statement` writes a property key or label its own MATCH
+    /// reads (fgdb-iqy0t). openCypher matches every row before the write, and
+    /// this batch runs one row at a time, so a later row would see an earlier
+    /// row's write: `MATCH (n {id: row.a}) SET n.id = row.b` re-keying.
+    RowFeedsLaterMatch {
+        statement: usize,
+    },
 }
 
 impl core::fmt::Display for GraphUnwindWriteError {
@@ -125,6 +132,11 @@ impl core::fmt::Display for GraphUnwindWriteError {
                 "UNWIND expanded argument transcripts use {observed} bytes; limit {limit}"
             ),
             Self::Binding(source) => source.fmt(f),
+            Self::RowFeedsLaterMatch { statement } => write!(
+                f,
+                "UNWIND write statement {statement} writes a property or label its own MATCH \
+                 reads; every row must match before any row writes, so it cannot run once per row"
+            ),
         }
     }
 }

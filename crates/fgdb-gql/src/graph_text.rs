@@ -1878,7 +1878,48 @@ fn checked_parameter_values(
     Ok(values)
 }
 
+/// Collect the property keys bound filters read (fgdb-iqy0t). False for a
+/// Boolean WHERE, whose operands this summary does not enumerate.
+fn filter_reads(
+    filters: &[BoundFilter],
+    keys: &mut std::collections::BTreeSet<PropertyKeyId>,
+) -> bool {
+    for filter in filters {
+        match filter {
+            BoundFilter::Property { key, .. } => {
+                keys.insert(*key);
+            }
+            BoundFilter::PathLength { .. } => {}
+            BoundFilter::Boolean(_) => return false,
+        }
+    }
+    true
+}
+
 impl PreparedGraphText {
+    /// The property keys and labels this selection can read, for a write
+    /// that runs once per batch row (fgdb-iqy0t): its own and every scope's
+    /// predicates and filters. None when it reads what this summary does not
+    /// enumerate, a Boolean WHERE or comparison.
+    pub(crate) fn property_and_label_reads(
+        &self,
+    ) -> Option<(
+        std::collections::BTreeSet<PropertyKeyId>,
+        std::collections::BTreeSet<LabelId>,
+    )> {
+        let mut keys = std::collections::BTreeSet::new();
+        let mut labels = std::collections::BTreeSet::new();
+        let known = self
+            .builder
+            .property_and_label_reads(&mut keys, &mut labels)
+            && filter_reads(&self.filters, &mut keys)
+            && self
+                .scopes
+                .iter()
+                .all(|scope| scope.property_and_label_reads(&mut keys, &mut labels));
+        known.then_some((keys, labels))
+    }
+
     /// Prepare the bounded graph-pattern text profile. Keywords are ASCII
     /// case-insensitive; names are case-sensitive. RETURN defaults to ALL.
     /// The mandatory root may have AND-conjoined EXISTS/NOT EXISTS { MATCH }

@@ -274,6 +274,20 @@ impl GraphUnwindWriteText {
         })?;
         control(GraphUnwindBindEvent::Definition(&prepared))
             .map_err(GraphUnwindBindError::Interrupted)?;
+        // openCypher evaluates a MATCH clause over every row before its SET.
+        // This batch runs row by row, so a statement whose write feeds its
+        // own match refuses (fgdb-iqy0t); one row has no later row to feed.
+        if sets.len() > 1
+            && let Some(statement) = prepared.statements().iter().position(|statement| {
+                matches!(
+                    statement,
+                    crate::GraphWriteTemplateStatement::Mutation(mutation)
+                        if mutation.feeds_own_match()
+                )
+            })
+        {
+            return Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement }.into());
+        }
 
         // The admitted definition callback saw the ordinary native template.
         // Only private batch provenance changes now: binding reads its typed

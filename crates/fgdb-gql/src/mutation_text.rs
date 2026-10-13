@@ -120,6 +120,61 @@ impl core::fmt::Debug for PreparedGraphMutationText {
             .finish()
     }
 }
+impl PreparedGraphMutationText {
+    /// Whether one batch row's write can change what a later row's MATCH
+    /// matches (fgdb-iqy0t). openCypher evaluates the MATCH clause over every
+    /// row before SET runs, so a statement whose action writes a property key
+    /// or label its selection reads cannot run once per row: a re-key would
+    /// see its own earlier rows. A selection this summary cannot enumerate (a
+    /// Boolean WHERE, a WITH row) counts as reading everything, and a delete
+    /// beside another write counts too, since a later row could miss the
+    /// element the other write still needs. A delete alone is idempotent.
+    pub(crate) fn feeds_own_match(&self) -> bool {
+        use std::collections::BTreeSet;
+        let (mut keys, mut labels) = (BTreeSet::new(), BTreeSet::new());
+        let (mut every_key, mut writes, mut deletes) = (false, false, false);
+        for action in &self.actions {
+            match action {
+                MutationActionTemplate::Bound(
+                    GraphMutationAction::SetProperty { key, .. }
+                    | GraphMutationAction::RemoveProperty { key, .. },
+                )
+                | MutationActionTemplate::ParameterProperty { key, .. }
+                | MutationActionTemplate::IntegerProperty { key, .. }
+                | MutationActionTemplate::ValueProperty { key, .. } => {
+                    writes = true;
+                    keys.insert(*key);
+                }
+                MutationActionTemplate::Bound(GraphMutationAction::ClearProperties { .. }) => {
+                    writes = true;
+                    every_key = true;
+                }
+                MutationActionTemplate::Bound(GraphMutationAction::SetLabel { label, .. }) => {
+                    writes = true;
+                    labels.insert(*label);
+                }
+                MutationActionTemplate::Bound(
+                    GraphMutationAction::DetachDelete { .. }
+                    | GraphMutationAction::Delete { .. }
+                    | GraphMutationAction::DeleteValue { .. },
+                )
+                | MutationActionTemplate::DeleteValue { .. } => deletes = true,
+            }
+        }
+        if !writes {
+            return false;
+        }
+        if deletes || self.row.is_some() {
+            return true;
+        }
+        let Some((read_keys, read_labels)) = self.selection.property_and_label_reads() else {
+            return true;
+        };
+        (every_key && !read_keys.is_empty())
+            || !keys.is_disjoint(&read_keys)
+            || !labels.is_disjoint(&read_labels)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphMutationTextError {

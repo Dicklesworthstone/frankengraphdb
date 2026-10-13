@@ -632,3 +632,141 @@ fn scalar_batches_share_creation_and_effect_budgets_and_keep_issued_identities_c
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A batch runs one row at a time, but openCypher matches every row before
+/// any row writes (fgdb-iqy0t). A statement whose write feeds its own MATCH,
+/// re-keying `id` or removing the matched label, refuses typed for two or
+/// more rows and leaves the graph unchanged. With one row there is no later
+/// row to feed, and a write the MATCH does not read, or a delete alone, still
+/// runs per row.
+#[test]
+fn a_batch_write_that_feeds_its_own_match_refuses() {
+    let ((), report) = run_async_under_lab(0x7363_6105, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let issued = AtomicU64::new(0);
+        db.query_write(
+            &contexts.txn(),
+            &cx,
+            &commit,
+            "CREATE (:Entity {id: 1})",
+            &GqlParameters::new(),
+            symbols,
+            R,
+            policy(10, 10),
+            |_| {
+                let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                Ok::<_, Infallible>(ElementId::Vertex(VId(next)))
+            },
+        )
+        .await
+        .unwrap();
+        let pairs = |rows: &[(i64, i64)]| {
+            args(
+                rows.iter()
+                    .map(|&(a, b)| object(vec![("a", int(a)), ("b", int(b))]))
+                    .collect(),
+            )
+        };
+        let id_of = |db: &Database<MemVfs>| -> Vec<fgdb_types::CanonicalPropertyValue> {
+            db.vertices()
+                .unwrap()
+                .iter()
+                .flat_map(|vertex| vertex.props.iter())
+                .filter(|(key, _)| *key == ID)
+                .map(|(_, value)| value.clone())
+                .collect()
+        };
+        let stored = |value: i64| -> fgdb_types::CanonicalPropertyValue {
+            CanonicalScalar::Int(value).into()
+        };
+        for query in [
+            "UNWIND $rows AS row MATCH (n:Entity {id: row.a}) SET n.id = row.b",
+            "UNWIND $rows AS row MATCH (n:Entity) WHERE n.id = row.a SET n.id = row.b",
+            "UNWIND $rows AS row MATCH (n:Entity {id: row.a}) REMOVE n:Entity",
+        ] {
+            let error = db
+                .query_write(
+                    &contexts.txn(),
+                    &cx,
+                    &commit,
+                    query,
+                    &pairs(&[(1, 2), (2, 3)]),
+                    symbols,
+                    R,
+                    policy(100, 0),
+                    no_allocation,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    QueryWriteError::UnwindBinding(GraphUnwindWriteError::RowFeedsLaterMatch {
+                        statement: 0
+                    })
+                ),
+                "{query}: {error:?}"
+            );
+            assert_eq!(id_of(&db), [stored(1)], "{query}");
+        }
+        // One row re-keys; a write the MATCH does not read and a delete alone
+        // run per row.
+        for (query, rows) in [
+            (
+                "UNWIND $rows AS row MATCH (n:Entity {id: row.a}) SET n.id = row.b",
+                &[(1, 2)][..],
+            ),
+            (
+                "UNWIND $rows AS row MATCH (n:Entity {id: row.a}) SET n.p = row.b",
+                &[(2, 7), (2, 8)][..],
+            ),
+        ] {
+            db.query_write(
+                &contexts.txn(),
+                &cx,
+                &commit,
+                query,
+                &pairs(rows),
+                symbols,
+                R,
+                policy(100, 0),
+                no_allocation,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(id_of(&db), [stored(2)]);
+        let p: Vec<_> = db
+            .vertices()
+            .unwrap()
+            .iter()
+            .flat_map(|vertex| vertex.props.iter())
+            .filter(|(key, _)| *key == P)
+            .map(|(_, value)| value.clone())
+            .collect();
+        assert_eq!(p, [stored(8)]);
+        db.query_write(
+            &contexts.txn(),
+            &cx,
+            &commit,
+            "UNWIND $rows AS row MATCH (n:Entity {id: row.a}) DETACH DELETE n",
+            &pairs(&[(2, 0), (2, 0)]),
+            symbols,
+            R,
+            policy(100, 0),
+            no_allocation,
+        )
+        .await
+        .unwrap();
+        assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

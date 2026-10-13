@@ -17,6 +17,44 @@ pub(super) enum PropertyComparison {
 }
 
 impl GraphPatternBuilder {
+    /// Collect the property keys and labels this pattern's own predicates
+    /// read, for a write that runs once per batch row (fgdb-iqy0t). False
+    /// when a predicate reads what this summary does not enumerate (a Boolean
+    /// comparison). Edges, identities and path predicates read no property
+    /// or label; a property map on a relationship is a filter of the caller.
+    pub(crate) fn property_and_label_reads(
+        &self,
+        keys: &mut std::collections::BTreeSet<PropertyKeyId>,
+        labels: &mut std::collections::BTreeSet<fgdb_delta_types::LabelId>,
+    ) -> bool {
+        for predicate in self
+            .variables
+            .iter()
+            .flat_map(|variable| &variable.predicates)
+        {
+            match predicate {
+                VertexPredicate::HasLabel(label) => {
+                    labels.insert(*label);
+                }
+                predicate => keys.extend(predicate.property_key()),
+            }
+        }
+        for comparison in &self.property_comparisons {
+            match comparison {
+                PropertyComparison::Properties {
+                    left_key,
+                    right_key,
+                    ..
+                } => {
+                    keys.insert(*left_key);
+                    keys.insert(*right_key);
+                }
+                PropertyComparison::Boolean(_) => return false,
+            }
+        }
+        true
+    }
+
     /// Add a finite, edge-unique TRAIL atom. Repeated vertices and continued
     /// closed trails are legal, but an actual EId cannot be used twice, even
     /// in opposite directions. Parallel edges retain independent identities.
