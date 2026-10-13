@@ -541,11 +541,20 @@ pub(super) fn execute<E, C>(
             let (field, value) = match action {
                 GraphMutationAction::SetProperty { key, value, .. } => {
                     let value = match value {
-                        GraphMutationValue::Column(column) => Value::Property(Some(
-                            row.values()[*column]
-                                .as_scalar()
-                                .expect("complete input schema checked"),
-                        )),
+                        // A Stored-domain property column can hold a List
+                        // or Map at run time (fgdb-k3nub). SET cannot write
+                        // one yet, so it refuses typed; it panicked here.
+                        GraphMutationValue::Column(column) => {
+                            let Some(value) = row.values()[*column].as_scalar() else {
+                                return Err(GqlQueryError::Source(
+                                    GraphMutationError::NonScalarValue {
+                                        row: row_at,
+                                        action: action_at,
+                                    },
+                                ));
+                            };
+                            Value::Property(Some(value))
+                        }
                         GraphMutationValue::Literal(value) => Value::Property(Some(value.value())),
                         GraphMutationValue::Expression(expression) => {
                             let value = expression
