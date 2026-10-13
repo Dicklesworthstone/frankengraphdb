@@ -1776,7 +1776,10 @@ impl PreparedGraphVertexMergeRowsText {
     {
         let parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
-        // `leading` is a first write's UNWIND prefix, if any.
+        // `leading` is a first write's UNWIND prefix, if any; `matched` its
+        // MATCH prefix (a WITH head, or every MATCH binding as `WITH *`
+        // carries them) and the row stages after it.
+        let mut matched = None;
         let (mut parser, row, owned, leading) = match from {
             Some(from) => {
                 let (_, types) = from.owned_columns();
@@ -1788,6 +1791,15 @@ impl PreparedGraphVertexMergeRowsText {
                 if parser.is_word("UNWIND") {
                     let (stages, schema) = parser.insertion_unwind_prefix()?;
                     (parser, schema, None, Some(stages))
+                } else if parser.is_word("MATCH") {
+                    parser.parse_match_prefix()?;
+                    let (head, stages, schema) = if parser.is_word("WITH") {
+                        parser.write_row_prefix()?
+                    } else {
+                        parser.implicit_write_row_prefix()?
+                    };
+                    matched = Some((head, stages));
+                    (parser, schema, None, None)
                 } else {
                     (parser, Vec::new(), None, None)
                 }
@@ -1887,13 +1899,15 @@ impl PreparedGraphVertexMergeRowsText {
         let returning = parsed_return
             .map(|parsed| parsed.resolve(&mut symbol))
             .transpose()?;
-        let input = match (owned, leading) {
-            (Some(types), _) => VertexMergeRowsTextInput::Owned(types),
-            (None, Some(leading)) => {
+        let parameters = parser.syntax.parameters.clone();
+        let parameter_offsets = parser.syntax.parameter_offsets.clone();
+        let input = match (owned, leading, matched) {
+            (Some(types), _, _) => VertexMergeRowsTextInput::Owned(types),
+            (None, Some(leading), _) => {
                 VertexMergeRowsTextInput::Relation(Box::new(crate::set_text::BoundSetTextInput {
                     selection: None,
-                    parameters: parser.syntax.parameters.clone(),
-                    parameter_offsets: parser.syntax.parameter_offsets.clone(),
+                    parameters: parameters.clone(),
+                    parameter_offsets: parameter_offsets.clone(),
                     return_at: statement.len(),
                     projection: None,
                     quantifier: GraphSetQuantifier::All,
@@ -1904,7 +1918,15 @@ impl PreparedGraphVertexMergeRowsText {
                     owned: None,
                 }))
             }
-            (None, None) => VertexMergeRowsTextInput::Unit,
+            // The MATCH rows are the ordinary read relation, as after `MATCH
+            // ... WITH ... CREATE`.
+            (None, None, Some((head, stages))) => {
+                let read = parser.finish_write_row_prefix(statement, head, stages)?;
+                VertexMergeRowsTextInput::Relation(Box::new(
+                    read.resolve(crate::graph_text::LentResolver(&mut *resolve))?,
+                ))
+            }
+            (None, None, None) => VertexMergeRowsTextInput::Unit,
         };
         Ok((
             Self {
@@ -1914,8 +1936,8 @@ impl PreparedGraphVertexMergeRowsText {
                 input,
                 keep,
                 returning,
-                parameters: parser.syntax.parameters,
-                parameter_offsets: parser.syntax.parameter_offsets,
+                parameters,
+                parameter_offsets,
                 end: statement.len(),
             },
             continuation,

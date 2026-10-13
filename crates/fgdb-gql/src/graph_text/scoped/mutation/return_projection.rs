@@ -1184,13 +1184,46 @@ impl<'a> Parser<'a> {
         ),
         GraphSetTextError,
     > {
-        let mut head = self.graph_projection_head()?;
+        let head = self.graph_projection_head()?;
         if !head.with {
             return Err(GraphSetTextError {
                 offset: self.current.at,
                 kind: GraphSetTextErrorKind::Expected("WITH before the write clause"),
             });
         }
+        self.write_row_after_head(head)
+    }
+
+    /// The read part of `MATCH ... MERGE (v ...)` without WITH (fgdb-cpny9):
+    /// the write reads every MATCH binding, as `WITH *` would carry them,
+    /// through any later UNWIND or WITH stages.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn implicit_write_row_prefix(
+        &mut self,
+    ) -> Result<
+        (
+            GraphProjectionHead<'a>,
+            Vec<ReadStageTemplate>,
+            Vec<(Name<'a>, GraphSetColumnType)>,
+        ),
+        GraphSetTextError,
+    > {
+        let head = self.implicit_with_head()?;
+        self.write_row_after_head(head)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn write_row_after_head(
+        &mut self,
+        mut head: GraphProjectionHead<'a>,
+    ) -> Result<
+        (
+            GraphProjectionHead<'a>,
+            Vec<ReadStageTemplate>,
+            Vec<(Name<'a>, GraphSetColumnType)>,
+        ),
+        GraphSetTextError,
+    > {
         self.hoist_boundary_reads(&mut head, 0)?;
         let schema = head.schema(&self.syntax.parameters);
         // A carried element's hidden reads stay in the row: the write's
