@@ -381,6 +381,37 @@ fn parallel_edges_keep_bag_multiplicity_through_with_and_union() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-694ga item 1: a paged query folds its order-preserving projection
+/// row by row, and that projection reads `x.p` of an element value through
+/// the same source as the unpaged query. LIMIT and SKIP select exactly the
+/// unpaged rows' slice, element reads included.
+#[test]
+fn a_folded_page_reads_element_properties_as_the_unpaged_query_does() {
+    let ((), report) = run_async_under_lab(0x71f0_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let rows = |text: &str| -> Vec<GraphValueRow> {
+            db.execute_graph_set_governed(&cx, &query(text), policy())
+                .unwrap()
+                .value
+        };
+        let unpaged = rows("MATCH (n) WITH collect(n) AS ns UNWIND ns AS x RETURN x.p AS v");
+        assert_eq!(unpaged.len(), 4);
+        assert_eq!(
+            rows("MATCH (n) WITH collect(n) AS ns UNWIND ns AS x RETURN x.p AS v LIMIT 2"),
+            unpaged[..2]
+        );
+        assert_eq!(
+            rows("MATCH (n) WITH collect(n) AS ns UNWIND ns AS x RETURN x.p AS v SKIP 1 LIMIT 2"),
+            unpaged[1..3]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-xnd7x: `x.p` over a path's nodes or relationships reads the stored
 /// property at the query's own cut: the frontier, a pinned read view and an
 /// older sequence each see their own value. A key the catalog lacks is NULL.
