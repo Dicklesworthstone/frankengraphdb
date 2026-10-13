@@ -1705,32 +1705,14 @@ impl<'a> Parser<'a> {
         Ok((reads_row, reads_variable))
     }
 
-    /// A MERGE map value computed from the row: its columns by name, and
-    /// `a.key` of a carried element through its hidden read.
+    /// A MERGE map value computed from the row, read as a WITH item over it:
+    /// its columns by name and type, so a map column's `prop.login` reads
+    /// the entry, and `a.key` of a carried element through its hidden read.
     fn merge_row_value(
         &mut self,
         row: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ReadValueTemplate, crate::GraphSetTextError> {
-        let visible = self.visible_width(row);
-        self.read_resolved_value(
-            &mut |parser| {
-                if let Some(column) = parser.boundary_read(row.len())? {
-                    return Ok(Some(column));
-                }
-                let TokenKind::Word(word) = parser.current.kind else {
-                    return Ok(None);
-                };
-                let Some(column) = row[..visible]
-                    .iter()
-                    .position(|(name, _)| name.text == word)
-                else {
-                    return Ok(None);
-                };
-                parser.advance()?;
-                Ok(Some(column))
-            },
-            0,
-        )
+        self.read_row_value(row, 0)
     }
 }
 
