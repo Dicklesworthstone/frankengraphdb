@@ -1474,6 +1474,75 @@ fn merge_steps_take_a_with_head() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-cpny9 (TCK Merge5 [18]): a relationship MERGE over a leading MATCH
+/// heads a chain once another write follows, through the MATCH's WITH head
+/// or with every MATCH binding as `WITH *` carries them.
+#[test]
+fn a_match_led_relationship_merge_heads_a_chain() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a8, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, false).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        write(&mut db, "CREATE (:Person {p: 0})").await.unwrap();
+        // Merge5 [18]: one vertex, so a = b and the MERGE makes a self loop;
+        // the later MERGEs bind that vertex and match the loop. A rerun
+        // matches everything.
+        for _ in 0..2 {
+            let doubled = write(
+                &mut db,
+                "MATCH (n:Person) MATCH (m:Person) WITH n AS a, m AS b MERGE (a)-[:R]->(b) \
+                 WITH a AS x, b AS y MERGE (a) MERGE (b) MERGE (a)-[:R]->(b) \
+                 RETURN x.p AS x, y.p AS y",
+            )
+            .await
+            .unwrap();
+            let QueryResult::Rows { rows, .. } = doubled else {
+                unreachable!("a chain with RETURN answers rows")
+            };
+            assert_eq!(rows, [vec![int(0), int(0)]]);
+            assert_eq!(db.vertices().unwrap().len(), 1);
+            assert_eq!(db.edges().unwrap().len(), 1);
+        }
+        // Without WITH the next write reads every MATCH binding and the
+        // relationship.
+        write(
+            &mut db,
+            "MATCH (a:Person), (b:Person) MERGE (a)-[r:R]->(b) CREATE (b)-[:R]->(:Copy)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(db.edges().unwrap().len(), 2);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-cpny9 (TCK Merge9 [3], Create3 [12]): a relationship MERGE another
 /// write follows hands that write each row once per relationship its pair
 /// resolved to, the relationship beside the row.
