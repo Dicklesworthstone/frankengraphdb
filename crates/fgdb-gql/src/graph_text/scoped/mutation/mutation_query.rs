@@ -1150,7 +1150,7 @@ impl PreparedGraphMutationQueryText {
                         let target = matches!(next, TokenKind::Word(_));
                         if (clause("SET") || clause("REMOVE"))
                             && target
-                            && matches!(after, TokenKind::Punct(b'.' | b':' | b'+'))
+                            && matches!(after, TokenKind::Punct(b'.' | b':' | b'+' | b'='))
                             || clause("DETACH")
                                 && matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("DELETE"))
                             || clause("DELETE") && target
@@ -1228,6 +1228,8 @@ mod framing_tests {
             ("MATCH (n) SET n.p = 1 RETURN n.p", true),
             ("MATCH (n) SET n:L RETURN n", true),
             ("MATCH (n) SET n += {p: 1} RETURN n", true),
+            ("MATCH (n) SET n = {p: 1} RETURN n", true),
+            ("MATCH (n) WITH n SET n.p = 1 RETURN n", true),
             ("MATCH (n) REMOVE n.p RETURN n", true),
             ("MATCH (n) DETACH DELETE n RETURN n", true),
             ("MATCH (n) DELETE n RETURN 42 AS num", true),

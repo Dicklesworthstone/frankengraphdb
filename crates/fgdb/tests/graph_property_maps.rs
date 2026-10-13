@@ -600,6 +600,80 @@ fn mutation_return_maps_use_final_node_and_edge_assignments_before_publication()
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// openCypher `SET n = {...}` (TCK Set4): the target keeps exactly the map's
+/// properties. Every other property it carries is unset, named through the
+/// host's reverse catalog, which must name each property identity once.
+#[test]
+fn set_to_a_literal_map_replaces_every_property() {
+    let ((), report) = run_async_under_lab(0x6d61_000a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit, false).await;
+        let params = GqlParameters::new();
+        let mut write = async |db: &mut Database<MemVfs>, text: &str, catalog: Catalog| {
+            db.query_write_engine(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &params,
+                catalog,
+                R,
+                write_policy(),
+            )
+            .await
+        };
+        let replaced = write(
+            &mut db,
+            "MATCH (a:Thing {name: 'one'}) SET a = {score: 40} \
+             RETURN properties(a) AS node, a.name AS name",
+            Catalog::Full,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            cells(replaced),
+            vec![vec![map(&[("score", int(40))]), null()]]
+        );
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![(SCORE, CanonicalScalar::Int(40).into())]
+        );
+        let emptied = write(
+            &mut db,
+            "MATCH (a:Thing) WHERE a.score = 40 SET a = {} RETURN keys(a) AS keys",
+            Catalog::Full,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cells(emptied), vec![vec![list(&[])]]);
+        assert!(db.vertex(VId(1)).unwrap().unwrap().props.is_empty());
+        let absent = write(
+            &mut db,
+            "OPTIONAL MATCH (a:Foo) SET a = {score: 1} RETURN a",
+            Catalog::Full,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cells(absent), vec![vec![null()]]);
+        let frontier = db.frontier().unwrap();
+        for (refused, catalog) in [
+            (
+                "MATCH (a:Thing) SET a = {score: 1, score: 2}",
+                Catalog::Full,
+            ),
+            // Two identities named "name": a removal could hit either.
+            ("MATCH (a:Thing) SET a = {}", Catalog::DuplicateName),
+        ] {
+            assert!(write(&mut db, refused, catalog).await.is_err(), "{refused}");
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn mutation_return_maps_compose_with_prior_overlay_and_remove_fields() {
     let ((), report) = run_async_under_lab(0x6d61_0006, |root| async move {

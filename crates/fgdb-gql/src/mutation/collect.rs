@@ -153,6 +153,42 @@ fn element(value: &crate::algebra::GraphValue) -> Option<ElementId> {
     }
 }
 
+/// The properties `SET target = {...}` unsets: every name in the target's
+/// frozen property map that `keep` does not name, resolved through the
+/// selection's reverse catalog (injective, checked at preparation).
+fn cleared_fields<E, C, F: FnMut() -> Result<(), C>>(
+    current: &crate::algebra::GraphValue,
+    keep: &[fgdb_delta_types::PropertyKeyId],
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    row: usize,
+    action: usize,
+    meter: &mut Meter<F>,
+) -> ResultOf<Vec<Field>, E, C> {
+    let invalid = || {
+        GqlQueryError::Source(GraphMutationError::InvalidPropertyMap {
+            row,
+            binding: action,
+        })
+    };
+    let catalog = catalog.ok_or_else(invalid)?;
+    let (names, _) = current.as_map().ok_or_else(invalid)?;
+    let mut fields = Vec::new();
+    for name in names {
+        meter.event(GlaExecutionEvent::Work)?;
+        let key = catalog
+            .properties
+            .iter()
+            .find(|(_, known)| known.as_bytes() == name.as_bytes())
+            .map(|(key, _)| *key)
+            .ok_or_else(invalid)?;
+        if !keep.contains(&key) {
+            meter.event(GlaExecutionEvent::ScratchEntry)?;
+            fields.push(Field::Property(key));
+        }
+    }
+    Ok(fields)
+}
+
 enum MapField<'a> {
     Frozen(&'a crate::algebra::GraphValue),
     Assigned(&'a CanonicalScalar),
@@ -538,7 +574,22 @@ pub(super) fn execute<E, C>(
             let Some(target) = element(&row.values()[action.target()]) else {
                 continue;
             };
-            let (field, value) = match action {
+            let proposed = match action {
+                GraphMutationAction::ClearProperties { current, keep, .. } => cleared_fields(
+                    &row.values()[*current],
+                    keep,
+                    mutation.selection.plan().reverse_catalog.as_deref(),
+                    row_at,
+                    action_at,
+                    &mut meter,
+                )?
+                .into_iter()
+                .map(|field| (field, Value::Property(None)))
+                .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            let single = match action {
+                GraphMutationAction::ClearProperties { .. } => None,
                 GraphMutationAction::SetProperty { key, value, .. } => {
                     let value = match value {
                         // A Stored-domain property column can hold a List
@@ -602,45 +653,49 @@ pub(super) fn execute<E, C>(
                             Value::Computed(value)
                         }
                     };
-                    (Field::Property(*key), value)
+                    Some((Field::Property(*key), value))
                 }
                 GraphMutationAction::RemoveProperty { key, .. } => {
-                    (Field::Property(*key), Value::Property(None))
+                    Some((Field::Property(*key), Value::Property(None)))
                 }
                 GraphMutationAction::SetLabel { label, present, .. } => {
-                    (Field::Label(*label), Value::Label(*present))
+                    Some((Field::Label(*label), Value::Label(*present)))
                 }
-                GraphMutationAction::DetachDelete { .. } => (Field::Delete, Value::Delete(true)),
-                GraphMutationAction::Delete { .. } => (Field::Delete, Value::Delete(false)),
+                GraphMutationAction::DetachDelete { .. } => {
+                    Some((Field::Delete, Value::Delete(true)))
+                }
+                GraphMutationAction::Delete { .. } => Some((Field::Delete, Value::Delete(false))),
             };
-            if let Some(previous) = proposals.get(&(target, field)) {
-                if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
-                    return Err(GqlQueryError::Source(
-                        GraphMutationError::ConflictingAssignment {
-                            first_row: previous.row,
-                            first_action: previous.action,
+            for (field, value) in proposed.into_iter().chain(single) {
+                if let Some(previous) = proposals.get(&(target, field)) {
+                    if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
+                        return Err(GqlQueryError::Source(
+                            GraphMutationError::ConflictingAssignment {
+                                first_row: previous.row,
+                                first_action: previous.action,
+                                row: row_at,
+                                action: action_at,
+                            },
+                        ));
+                    }
+                } else {
+                    let observed = proposals.len() as u128 + 1;
+                    if observed > u128::from(policy.max_effects) {
+                        return Err(GqlQueryError::Source(GraphMutationError::EffectLimit {
+                            limit: policy.max_effects,
+                            observed,
+                        }));
+                    }
+                    meter.event(GlaExecutionEvent::ScratchEntry)?;
+                    proposals.insert(
+                        (target, field),
+                        Proposal {
+                            value,
                             row: row_at,
                             action: action_at,
                         },
-                    ));
+                    );
                 }
-            } else {
-                let observed = proposals.len() as u128 + 1;
-                if observed > u128::from(policy.max_effects) {
-                    return Err(GqlQueryError::Source(GraphMutationError::EffectLimit {
-                        limit: policy.max_effects,
-                        observed,
-                    }));
-                }
-                meter.event(GlaExecutionEvent::ScratchEntry)?;
-                proposals.insert(
-                    (target, field),
-                    Proposal {
-                        value,
-                        row: row_at,
-                        action: action_at,
-                    },
-                );
             }
         }
     }
