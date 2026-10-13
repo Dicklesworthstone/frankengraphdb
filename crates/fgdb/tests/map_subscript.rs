@@ -169,6 +169,12 @@ fn parenthesized_values_take_postfix_reads_and_arguments_take_predicates() {
                 vec![null(), null(), int(42)],
             ),
             ("RETURN ([1, 2])[0] AS x", vec!["x"], vec![int(1)]),
+            // A graph function of NULL is NULL (TCK Graph4 [3]).
+            (
+                "RETURN type(null) AS a, nodes(null) AS b",
+                vec!["a", "b"],
+                vec![null(), null()],
+            ),
             ("RETURN (1 + 2) * 3 AS x", vec!["x"], vec![int(9)]),
             (
                 "RETURN toString(1 < 0) AS a, coalesce(1 = 2, true) AS b, \
