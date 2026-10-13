@@ -5,10 +5,15 @@ use super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxnError,
 };
 use crate::write_txn::authorized::{edge_merge, stage};
-use crate::write_txn::{WriteTxn, edge_upsert_actions, edge_upsert_property};
+use crate::write_txn::{
+    WriteTxn, edge_upsert_actions, edge_upsert_property, edge_upsert_query_selection_policy,
+    edge_upsert_returning,
+};
+use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{
-    GqlQueryError, GraphEdgeMergeOutcome, GraphEdgeUpsertError, GraphEdgeUpsertPolicy,
-    GraphEdgeUpsertStats, PreparedGraphEdgeUpsert,
+    GqlQueryError, GqlQueryExecution, GraphEdgeMergeOutcome, GraphEdgeUpsertError,
+    GraphEdgeUpsertPolicy, GraphEdgeUpsertQueryError, GraphEdgeUpsertStats,
+    PreparedGraphEdgeUpsert, PreparedGraphEdgeUpsertQuery,
 };
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::PlannerPredicates;
@@ -20,9 +25,21 @@ type Receipt = (
     GraphEdgeMergeOutcome,
     EmbeddedTxnCompletion,
 );
+type QueryFault =
+    GqlQueryError<GraphEdgeUpsertQueryError<WriteTxnError, WriteTxnError>, WriteTxnError>;
+type QueryReceipt = (
+    GraphEdgeUpsertStats,
+    GraphEdgeMergeOutcome,
+    GqlQueryExecution<GraphValueRow>,
+    EmbeddedTxnCompletion,
+);
 
 fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphEdgeUpsertError::Staging(error))
+}
+
+fn query_source(error: WriteTxnError) -> QueryFault {
+    source(error).map_source(GraphEdgeUpsertQueryError::Upsert)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -102,6 +119,120 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Execute relationship ON/SET actions and their RETURN under one live
+    /// ReadWrite capability, private workspace and native completion.
+    ///
+    /// This is the projected form of the existing singular authorized upsert:
+    /// duplicate endpoint occurrences reduce to one pair; distinct pairs and
+    /// parallel matching edges refuse. It does not choose an arbitrary edge or
+    /// acquire the privileged occurrence-preserving API's wider cardinality.
+    /// The original masked selection, existence probe and attempted-field/image
+    /// admission remain authoritative. RETURN reads the chosen edge's final
+    /// staged properties; hidden fields become NULL BEFORE lookup or witness.
+    ///
+    /// MATCH and the internal identity receipt are private inputs, not results.
+    /// Only the final RETURN page consumes native and signed result-row limits.
+    /// LIMIT 0 still executes and validates actions and projection; NoInput runs
+    /// no action. Source, work, scratch, creation and action limits are unchanged,
+    /// with the same permit covering every phase. Projection, expiry, quota or
+    /// cancellation refusal drops all private effects before the sole commit.
+    /// Nothing reads the graph or reauthorizes after completion. Ordinary
+    /// unknown/recovery outcomes and identity-reservation limitations remain.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_edge_upsert_query_authorized(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphEdgeUpsertQuery,
+        policy: GraphEdgeUpsertPolicy,
+        mut clock: impl FnMut() -> u64,
+    ) -> Result<QueryReceipt, QueryFault> {
+        let refusal = |error| query_source(WriteTxnError::Authorization(error));
+        if authority.namespace() != self.keys.namespace {
+            return Err(refusal(Error::WrongAuthority));
+        }
+        let now = clock();
+        let verified = authority.verify_at(token, branch, now).map_err(refusal)?;
+        let permit = verified.begin_write_at(branch, now).map_err(refusal)?;
+        if !verified.predicates().rights().can_read() {
+            return Err(refusal(Error::PermissionDenied));
+        }
+        if !verified
+            .predicates()
+            .allows_relation(query.upsert().merge().relation())
+        {
+            return Err(refusal(Error::ScopeDenied));
+        }
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
+                execution.checkpoint().map_err(query_source)?;
+                let mut workspace = Workspace(Some(
+                    self.begin(txn_cx)
+                        .map_err(WriteTxnError::Write)
+                        .map_err(query_source)?,
+                ));
+                let (stats, outcome) = apply(
+                    workspace.transaction(),
+                    self,
+                    query_cx,
+                    query.upsert(),
+                    edge_upsert_query_selection_policy(policy),
+                    verified.predicates(),
+                    &mut execution,
+                    false,
+                )
+                .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
+                let result = query_cx.with_restriction(|| {
+                    let controls = RefCell::new(&mut execution);
+                    edge_upsert_returning::<WriteTxnError, WriteTxnError, _>(
+                        query,
+                        stats,
+                        outcome,
+                        policy,
+                        || {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            controls.borrow_mut().checkpoint()
+                        },
+                        |edge, key, control| {
+                            // Do not fetch a hidden payload and mask it later:
+                            // its value, size and history cost must remain private.
+                            if !verified.predicates().allows_property(key) {
+                                control(fgdb_gql::GlaExecutionEvent::Work)?;
+                                control(fgdb_gql::GlaExecutionEvent::ScratchEntry)?;
+                                return Ok(fgdb_types::CanonicalScalar::Null);
+                            }
+                            edge_upsert_property(workspace.transaction(), self, edge, key, control)
+                        },
+                    )
+                })?;
+                let rows =
+                    u64::try_from(result.value.len()).map_err(|_| refusal(Error::TooLarge))?;
+                execution
+                    .permit
+                    .charge_rows_at((execution.clock)(), rows)
+                    .map_err(refusal)?;
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, false, || {
+                        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        execution.checkpoint()
+                    })
+                    .await
+                    .map_err(query_source)?;
+                Ok((stats, outcome, result, completion))
+            })
+            .await
+    }
+
     /// Execute directed MERGE with computed ON and trailing SET clauses.
     /// Expression properties come from the chosen edge's masked native overlay;
     /// each clause freezes its inputs and the next sees preceding checked writes.
@@ -192,3 +323,7 @@ impl<V: Vfs + Clone> Database<V> {
 #[cfg(test)]
 #[path = "edge_upsert_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "edge_upsert_query_tests.rs"]
+mod query_tests;
