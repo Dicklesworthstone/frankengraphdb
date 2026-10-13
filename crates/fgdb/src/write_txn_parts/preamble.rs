@@ -355,6 +355,18 @@ pub(crate) type InsertQueryResult<A> = Result<
     TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, A>>,
 >;
 
+/// A staged chained write (fgdb-cpny9): cumulative creation statistics, the
+/// last step's governed RETURN rows (none without RETURN) and the program
+/// receipt, one insertion step per write, or the failing step's error.
+pub(crate) type WriteChainResult<A> = Result<
+    (
+        fgdb_gql::insertion::GraphInsertStats,
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GraphWriteProgramReceipt,
+    ),
+    TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, A>>,
+>;
+
 /// A staged MERGE RETURN: the upsert's statistics, the chosen vertex and the
 /// governed RETURN row, or the upsert's error with allocator error `A`.
 pub(crate) type UpsertQueryResult<A> = Result<

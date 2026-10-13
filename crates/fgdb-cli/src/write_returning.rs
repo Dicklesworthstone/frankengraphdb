@@ -15,7 +15,7 @@ use fgdb_gql::{
     PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeUpsertQuery,
     PreparedGraphEdgeUpsertQueryText, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
     PreparedGraphMutationQuery, PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
-    PreparedGraphVertexUpsertQueryText,
+    PreparedGraphVertexUpsertQueryText, PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
 use std::io::{self, Write};
@@ -32,6 +32,9 @@ pub(super) enum Returning {
     Merge(Box<PreparedGraphVertexUpsertQuery>),
     EdgeMerge(Box<PreparedGraphEdgeMergeQuery>),
     EdgeUpsert(Box<PreparedGraphEdgeUpsertQuery>),
+    /// `CREATE ... WITH ... CREATE ...` (fgdb-cpny9), with or without a final
+    /// RETURN: its writes stage in order in one transaction.
+    Chain(Box<PreparedGraphWriteChain>),
 }
 impl Returning {
     pub(super) fn columns(&self) -> &[String] {
@@ -41,6 +44,15 @@ impl Returning {
             Self::Merge(query) => query.columns(),
             Self::EdgeMerge(query) => query.columns(),
             Self::EdgeUpsert(query) => query.columns(),
+            Self::Chain(chain) => chain.columns(),
+        }
+    }
+
+    /// False only for a chain without RETURN, which answers as a plain write.
+    pub(super) fn returns_rows(&self) -> bool {
+        match self {
+            Self::Chain(chain) => chain.returns_rows(),
+            _ => true,
         }
     }
 
@@ -112,6 +124,17 @@ impl Returning {
                     .map_err(execution_failure)?
                     .1
             }
+            Self::Chain(chain) => {
+                transaction
+                    .execute_graph_write_chain_engine_governed(
+                        database,
+                        cx,
+                        chain,
+                        GraphInsertPolicy::new(allowance, 100_000, 100_000),
+                    )
+                    .map_err(execution_failure)?
+                    .1
+            }
         })
     }
 }
@@ -128,6 +151,21 @@ pub(super) fn prepare_statement(
     options: &Options,
 ) -> Result<Option<Returning>, Failure> {
     let declarations: Vec<_> = params.parameter_types().collect();
+    // A chain claims its text first: its final RETURN would otherwise route
+    // the whole statement to CREATE RETURN.
+    if PreparedGraphWriteChainText::is_chain(statement).map_err(Failure::query)? {
+        let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+            statement,
+            options.coordinate,
+            &declarations,
+            options,
+        )
+        .map_err(Failure::query)?;
+        return template
+            .bind_parameters(params)
+            .map(|chain| Some(Returning::Chain(Box::new(chain))))
+            .map_err(Failure::query);
+    }
     if PreparedGraphInsertQueryText::has_return_clause(statement).map_err(Failure::query)? {
         let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
             statement,
@@ -257,8 +295,10 @@ pub(super) async fn run<V: Vfs + Clone>(
             bytes: Vec::new(),
             limit: MAX_OUTPUT_BYTES - TERMINAL_RESERVATION,
         };
-        render_row_body(query.columns(), &rendered, robot, &mut buffer)
-            .map_err(|error| Failure::query(error.message))?;
+        if query.returns_rows() {
+            render_row_body(query.columns(), &rendered, robot, &mut buffer)
+                .map_err(|error| Failure::query(error.message))?;
+        }
         cx.checkpoint().map_err(Failure::query)?;
         Ok((buffer.bytes, count))
     })();
@@ -291,15 +331,20 @@ pub(super) async fn run<V: Vfs + Clone>(
     // Only terminal transport can fail from here. No query, conversion, quota,
     // authorization, or cancellation check can discard a committed result.
     out.write_all(&bytes).map_err(Failure::io)?;
-    if robot {
-        emit(
+    // A chain without RETURN answers exactly as a plain write does.
+    match (query.returns_rows(), robot) {
+        (true, true) => emit(
             out,
             &format!(
                 r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"count":{count},"statements":1}}"#
             ),
-        )
-    } else {
-        emit(out, &format!("{count} row(s), completed at seq {seq}"))
+        ),
+        (true, false) => emit(out, &format!("{count} row(s), completed at seq {seq}")),
+        (false, true) => emit(
+            out,
+            &format!(r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"statements":1}}"#),
+        ),
+        (false, false) => emit(out, &format!("completed at seq {seq}")),
     }
 }
 

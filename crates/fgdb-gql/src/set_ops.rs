@@ -25,12 +25,12 @@ pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
+pub(crate) use procedure::WithOwnedRows;
 pub use procedure::{
     GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection,
     ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
     WithElementReads, WithProcedures,
 };
-pub(crate) use procedure::WithOwnedRows;
 pub use projection::{
     GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetProjection,
     GraphSetProjectionError, GraphSetValue, GraphTemporalFunction, GraphValueFunction,
