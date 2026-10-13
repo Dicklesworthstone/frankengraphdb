@@ -250,6 +250,7 @@ mod hidden_alias_tests {
             property: None,
             path: None,
             alias: name("n"),
+            collect: None,
         });
         parser
     }
@@ -312,6 +313,7 @@ mod hidden_alias_tests {
             property: Some(name("p")),
             path: None,
             alias: name("rank"),
+            collect: None,
         });
         parser.parse_row_ordering().unwrap();
         assert_eq!(parser.syntax.visible_columns, Some(2));
@@ -331,6 +333,7 @@ mod hidden_alias_tests {
             property: Some(name("rank")),
             path: None,
             alias: name("rank"),
+            collect: None,
         });
         let error = parser.parse_row_ordering().unwrap_err();
         assert_eq!(error.offset, text.rfind("rank").unwrap());

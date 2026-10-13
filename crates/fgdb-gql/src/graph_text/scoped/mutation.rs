@@ -1148,8 +1148,10 @@ impl PreparedGraphMutationText {
                     MutationActionTemplate::Bound(
                         GraphMutationAction::SetLabel { .. }
                         | GraphMutationAction::DetachDelete { .. }
-                        | GraphMutationAction::Delete { .. },
-                    ) => return false,
+                        | GraphMutationAction::Delete { .. }
+                        | GraphMutationAction::DeleteValue { .. },
+                    )
+                    | MutationActionTemplate::DeleteValue { .. } => return false,
                 };
                 if key != read {
                     return false;
@@ -1179,12 +1181,16 @@ impl PreparedGraphMutationText {
         // A cascade can remove another row's edge or independent anchor, so
         // a larger MATCH needs a frozen selection even without property SET.
         // The ordinary compiler forbids mixing deletion and updates.
+        // A row-computed element (`DELETE friends[$i]`, fgdb-cpny9) is a
+        // deletion too.
         if self.actions.iter().all(|action| {
             matches!(
                 action,
                 MutationActionTemplate::Bound(
-                    GraphMutationAction::DetachDelete { .. } | GraphMutationAction::Delete { .. }
-                )
+                    GraphMutationAction::DetachDelete { .. }
+                        | GraphMutationAction::Delete { .. }
+                        | GraphMutationAction::DeleteValue { .. }
+                ) | MutationActionTemplate::DeleteValue { .. }
             )
         }) {
             return self.selection.deletion_feeds_later_match();
