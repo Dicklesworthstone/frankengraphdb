@@ -238,3 +238,5 @@ fn buffered_incidence_refusal_is_not_eof_and_outputs_outlive_the_view() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+mod retained_gql;

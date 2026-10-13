@@ -34,7 +34,7 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
         };
         let candidate = self
             .cx
-            .with_restriction_async(self.scan.next_incident_with_endpoints(
+            .with_restriction_async(self.scan.next_incident_retained_with_endpoints(
                 self.cx,
                 endpoint,
                 relation,
@@ -54,8 +54,12 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
                     BufferedScanError::Control(error) => EdgeScanSourceError::Control(error),
                 })
             })?;
-        // History, fields and their charges move together. The independent
-        // successor position never replaces or advances the root scan position.
+        // Repeated siblings reuse one charged incidence merge only when their
+        // complete request continues the preceding historical candidate. A
+        // different hop, backtrack or restart remains an independent seek;
+        // the source replaces its old continuation before allocating another.
+        // History, fields and charges still move together, without advancing
+        // the root or caching projected/filtered query answers.
         self.admit_record(candidate)
             .map_err(EdgeExpansionSourceError::Read)
     }
@@ -136,8 +140,13 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// One bounded source record per active hop is retained. Routed incidence
     /// directories, decode workspaces, traversal and copied results all use this
     /// view's MemoryPool. The first nested lookup builds resident block routing;
-    /// it can refuse on memory/work limits. Later successors fault only routed
-    /// blocks. This is not a persistent index or an optimal sequential-I/O claim.
+    /// it can refuse on memory/work limits. Consecutive incidence successors
+    /// retain one charged merge heap and bounded decoded block, instead of
+    /// reseeding for every candidate. Root advances release that continuation;
+    /// different incidences or positions replace it before reseeding. Deep
+    /// alternating traversals may still reseed. This is not a per-hop cache,
+    /// persistent index or optimal sequential-I/O claim. Source refusals remain
+    /// terminal, never retried with another physical implementation.
     ///
     /// Close, error and dropped pending pulls release traversal without draining
     /// input. Delivered rows keep independent guards; callers extracting pairs
