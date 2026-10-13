@@ -2799,6 +2799,147 @@ fn numeric_functions_round_once_and_follow_opencypher_ties_and_specials() {
     );
 }
 
+/// openCypher's math functions run fgdb-types' pinned kernels, so a result
+/// is the same bits on every target: exp, log, log10, sin, cos, tan, cot,
+/// asin, acos, atan, atan2, degrees, radians, haversin, sign, pi() and e().
+/// Integers convert to the nearest binary64 first; sign is an Int; NULL is
+/// NULL; outside a real domain is NaN; a pole or an overflow refuses.
+#[test]
+fn math_functions_run_the_pinned_kernels() {
+    use fgdb_types::CanonicalF64;
+    let float = |value: f64| CanonicalScalar::Float(CanonicalF64::new(value));
+    let kernel = |result: Result<CanonicalF64, fgdb_types::FloatArithmeticError>| {
+        CanonicalScalar::Float(result.expect("an admitted argument"))
+    };
+    let x = CanonicalF64::new(0.7);
+    for (input, expression, expected) in [
+        // Each function is the kernel's bits, not the host libm's.
+        (float(0.7), "exp(n.text)", kernel(x.exp())),
+        (float(0.7), "log(n.text)", kernel(x.ln())),
+        (float(0.7), "log10(n.text)", kernel(x.log10())),
+        (float(0.7), "sin(n.text)", kernel(x.sin())),
+        (float(0.7), "cos(n.text)", kernel(x.cos())),
+        (float(0.7), "tan(n.text)", kernel(x.tan())),
+        (float(0.7), "asin(n.text)", kernel(x.asin())),
+        (float(0.7), "acos(n.text)", kernel(x.acos())),
+        (float(0.7), "atan(n.text)", kernel(x.atan())),
+        (
+            float(0.7),
+            "atan2(n.text, -2.0)",
+            kernel(x.atan2(CanonicalF64::new(-2.0))),
+        ),
+        (
+            float(0.7),
+            "cot(n.text)",
+            kernel(CanonicalF64::new(1.0).checked_div(x.tan().unwrap())),
+        ),
+        (
+            float(1e22),
+            "sin(n.text)",
+            kernel(CanonicalF64::new(1e22).sin()),
+        ),
+        // Exact anchors.
+        (float(0.0), "exp(n.text)", float(1.0)),
+        (float(1.0), "log(n.text)", float(0.0)),
+        (CanonicalScalar::Int(1000), "log10(n.text)", float(3.0)),
+        (float(1e-300), "log10(n.text)", float(-300.0)),
+        (float(0.0), "cos(n.text)", float(1.0)),
+        (float(0.0), "haversin(n.text)", float(0.0)),
+        (float(1.0), "atan2(0.0, -1.0)", float(core::f64::consts::PI)),
+        (
+            float(1.0),
+            "atan2(1, 0)",
+            float(core::f64::consts::FRAC_PI_2),
+        ),
+        (
+            float(core::f64::consts::PI),
+            "degrees(n.text)",
+            float(180.0),
+        ),
+        (
+            CanonicalScalar::Int(180),
+            "radians(n.text)",
+            float(core::f64::consts::PI),
+        ),
+        (float(1.0), "pi()", float(core::f64::consts::PI)),
+        (float(1.0), "e()", float(core::f64::consts::E)),
+        (float(1.0), "PI() * 2", float(core::f64::consts::TAU)),
+        // haversin is (1 - cos x) / 2.
+        (
+            float(1.0),
+            "haversin(n.text)",
+            kernel(
+                CanonicalF64::new(1.0)
+                    .checked_sub(CanonicalF64::new(1.0).cos().unwrap())
+                    .and_then(|gap| gap.checked_div(CanonicalF64::new(2.0))),
+            ),
+        ),
+        // sign is an Int, NaN's 0.
+        (
+            CanonicalScalar::Int(-3),
+            "sign(n.text)",
+            CanonicalScalar::Int(-1),
+        ),
+        (float(2.5), "sign(n.text)", CanonicalScalar::Int(1)),
+        (float(0.0), "sign(n.text)", CanonicalScalar::Int(0)),
+        (float(f64::NAN), "sign(n.text)", CanonicalScalar::Int(0)),
+        // Outside the real domain is NaN; infinities follow IEEE 754.
+        (float(-1.0), "log(n.text)", float(f64::NAN)),
+        (float(2.0), "asin(n.text)", float(f64::NAN)),
+        (float(f64::INFINITY), "sin(n.text)", float(f64::NAN)),
+        (float(f64::NEG_INFINITY), "exp(n.text)", float(0.0)),
+        (
+            float(f64::INFINITY),
+            "atan(n.text)",
+            float(core::f64::consts::FRAC_PI_2),
+        ),
+        (
+            float(f64::INFINITY),
+            "degrees(n.text)",
+            float(f64::INFINITY),
+        ),
+        (CanonicalScalar::Null, "exp(n.text)", CanonicalScalar::Null),
+        (
+            CanonicalScalar::Null,
+            "atan2(1.0, n.text)",
+            CanonicalScalar::Null,
+        ),
+        (CanonicalScalar::Null, "sign(n.text)", CanonicalScalar::Null),
+    ] {
+        assert_eq!(scalar(expression, &input), expected, "{expression}");
+    }
+    // A pole or an overflow refuses at execution, as 1.0 / 0.0 does.
+    for (expression, input) in [
+        ("log(n.text)", float(0.0)),
+        ("log10(n.text)", float(0.0)),
+        ("cot(n.text)", float(0.0)),
+        ("exp(n.text)", float(710.0)),
+    ] {
+        let query = prepare(&format!("MATCH (n) RETURN {expression} AS value"));
+        assert!(execute(&query, &input, policy()).is_err(), "{expression}");
+    }
+    // Text and Boolean operands refuse at preparation.
+    for statement in [
+        "MATCH (n) RETURN exp('a') AS value",
+        "MATCH (n) RETURN sign(TRUE) AS value",
+        "MATCH (n) RETURN pi(1) AS value",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
+    // sign is an Int operand: it adds to an integer without a float.
+    assert_eq!(
+        scalar("sign(n.text) + 1", &CanonicalScalar::Int(5)),
+        CanonicalScalar::Int(2)
+    );
+    // E names a function only before `(`: a variable e still reads.
+    let query = prepare("MATCH (e) RETURN e.text AS value");
+    let result = execute(&query, &float(4.0), policy()).unwrap();
+    assert_eq!(result.value[0].values()[0].as_scalar(), Some(&float(4.0)));
+}
+
 /// A test tzdb artifact: Europe/Stockholm with its 1984 and 2017 summer
 /// time (CET +01:00, CEST +02:00 from 01:00 UTC on the switch days, as
 /// zdump reports them) and Pacific/Honolulu at a fixed -10:00.

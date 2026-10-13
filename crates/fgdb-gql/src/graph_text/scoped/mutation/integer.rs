@@ -1406,6 +1406,39 @@ impl<'a> Parser<'a> {
         }
         Ok(())
     }
+
+    /// openCypher pi() and e(), just after their `(`: the binary64 nearest
+    /// each constant. False, with nothing consumed, for any other function.
+    /// Out of line: integer_unary repeats once per nested parenthesis.
+    #[inline(never)]
+    fn constant_function(
+        &mut self,
+        function: &str,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        let constant = if function.eq_ignore_ascii_case("PI") {
+            core::f64::consts::PI
+        } else if function.eq_ignore_ascii_case("E") {
+            core::f64::consts::E
+        } else {
+            return Ok(false);
+        };
+        self.punct(b')', ")")?;
+        let value = crate::GqlScalarParameter::new(CanonicalScalar::Float(
+            fgdb_types::CanonicalF64::new(constant),
+        ))
+        .map_err(|_| failure(at, GraphMutationTextErrorKind::IntegerOperand))?;
+        emit(
+            program,
+            ParsedOp::Bound(GraphIntegerOp::Scalar(
+                value.predicate(IntegerComparison::Equal),
+            )),
+            at,
+        )?;
+        Ok(true)
+    }
+
     fn integer_unary(
         &mut self,
         columns: &mut ExpressionColumns<'_, 'a>,
@@ -1484,6 +1517,9 @@ impl<'a> Parser<'a> {
         if let Some(function) = function {
             self.advance()?;
             self.punct(b'(', "(")?;
+            if self.constant_function(function, program, at)? {
+                return Ok(());
+            }
             self.scalar_concat(columns, depth + 1, program)?;
             let spelled =
                 |names: [&str; 2]| names.iter().any(|name| function.eq_ignore_ascii_case(name));
@@ -1508,16 +1544,7 @@ impl<'a> Parser<'a> {
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Bound(op), at);
             }
-            let numeric = [
-                ("TOFLOAT", GraphNumericFunction::ToFloat),
-                ("FLOOR", GraphNumericFunction::Floor),
-                ("CEIL", GraphNumericFunction::Ceil),
-                ("ROUND", GraphNumericFunction::Round),
-                ("SQRT", GraphNumericFunction::Sqrt),
-            ]
-            .into_iter()
-            .find_map(|(name, numeric)| function.eq_ignore_ascii_case(name).then_some(numeric));
-            if let Some(numeric) = numeric {
+            if let Some(numeric) = GraphNumericFunction::named(function) {
                 self.punct(b')', ")")?;
                 return emit(
                     program,
@@ -1549,6 +1576,10 @@ impl<'a> Parser<'a> {
             if function.eq_ignore_ascii_case("NULLIF") {
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Binary(GraphIntegerBinary::NullIf), at);
+            }
+            if function.eq_ignore_ascii_case("ATAN2") {
+                self.punct(b')', ")")?;
+                return emit(program, ParsedOp::Bound(GraphIntegerOp::Atan2), at);
             }
             emit(program, ParsedOp::Coalesce, at)?;
             while self.take(b',')? {
