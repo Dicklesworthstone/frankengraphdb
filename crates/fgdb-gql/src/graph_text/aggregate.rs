@@ -369,11 +369,10 @@ impl PreparedGraphAggregateText {
                     && !matches!(
                         parser.lexer.clone().next()?.kind,
                         TokenKind::Punct(b'.' | b'(')
-                    )
-                {
-                    returned.iter().position(|item| {
-                        item.output.is_some() && item.alias.text == word
-                    })
+                    ) {
+                    returned
+                        .iter()
+                        .position(|item| item.output.is_some() && item.alias.text == word)
                 } else {
                     None
                 };
@@ -390,7 +389,10 @@ impl PreparedGraphAggregateText {
                         &mut computed,
                     )?)
                 };
-                if result_order.iter().any(|(previous, _, _, _)| *previous == column) {
+                if result_order
+                    .iter()
+                    .any(|(previous, _, _, _)| *previous == column)
+                {
                     return Err(error(
                         at,
                         GraphPatternTextErrorKind::Expected("unique ORDER BY column"),
@@ -418,9 +420,10 @@ impl PreparedGraphAggregateText {
         }
         let mut ordering = Vec::new();
         let mut projected_ordering = Vec::new();
-        if result_order.iter().any(|(column, _, _, _)| {
-            matches!(column, ResultOrderColumn::Projected(_))
-        }) {
+        if result_order
+            .iter()
+            .any(|(column, _, _, _)| matches!(column, ResultOrderColumn::Projected(_)))
+        {
             // A computed alias selects the existing post-group projection
             // owner. Other keys must be in that same returned tuple; hidden
             // evaluation keys cannot masquerade as projected positions.
@@ -451,7 +454,10 @@ impl PreparedGraphAggregateText {
                         ),
                     )
                 })?;
-                if projected_ordering.iter().any(|key: &GraphValueOrder| key.column == column) {
+                if projected_ordering
+                    .iter()
+                    .any(|key: &GraphValueOrder| key.column == column)
+                {
                     return Err(error(
                         at,
                         GraphPatternTextErrorKind::Expected("unique ORDER BY column"),
@@ -470,7 +476,11 @@ impl PreparedGraphAggregateText {
                 let ResultOrderColumn::Evaluation(column) = column else {
                     unreachable!("projected ordering was selected above");
                 };
-                ordering.push(GraphAggregateOrder { column, descending, nulls });
+                ordering.push(GraphAggregateOrder {
+                    column,
+                    descending,
+                    nulls,
+                });
             }
         }
         if !grouped && let Some(first) = hidden.first() {

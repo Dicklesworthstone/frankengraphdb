@@ -432,7 +432,10 @@ impl PreparedGraphAggregate {
                     column: order.column,
                 });
             }
-            if ordering[..at].iter().any(|prior| prior.column == order.column) {
+            if ordering[..at]
+                .iter()
+                .any(|prior| prior.column == order.column)
+            {
                 return Err(GraphAggregateBuildError::DuplicateProjectedOrder {
                     column: order.column,
                 });
