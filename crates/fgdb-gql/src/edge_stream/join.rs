@@ -601,59 +601,75 @@ fn test_stage<S: EdgeScanSource, C>(
                     return Ok(None);
                 }
             }
-            Instruction::Native(GlaOperator::CapturePath {
-                start, segments, ..
-            }) => {
-                control(GlaExecutionEvent::ScratchEntry)?;
-                for _ in segments {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                }
-                // A closing edge back to a bound vertex was expanded from its
-                // other end: step to whichever endpoint the path is not on.
-                let start = ids[start.ordinal() as usize].expect("captured start");
-                let mut endpoint = start;
-                let mut steps = Vec::with_capacity(segments.len());
-                for slot in segments {
-                    let choice = traversal.choices[slot.ordinal() as usize - 1];
-                    endpoint = if choice.from == endpoint {
-                        choice.target
-                    } else if choice.target == endpoint {
-                        choice.from
-                    } else {
-                        break;
-                    };
-                    steps.push((choice.eid, endpoint));
-                }
-                // Same as the eager executor: a chain that does not connect
-                // captures no path rather than a fabricated one.
-                paths.push(
-                    (steps.len() == segments.len())
-                        .then(|| GraphPath::new(start, steps.into_boxed_slice())),
-                );
-            }
-            Instruction::Native(GlaOperator::DifferentEdges { segments }) => {
-                // Every admitted segment is one retained fixed edge. Compare
-                // identities, not endpoint pairs: parallel edges may form a
-                // valid return path, but traversing one EId twice may not.
-                for (index, slot) in segments.iter().enumerate() {
-                    let eid = traversal.choices[slot.ordinal() as usize - 1].eid;
-                    for prior in &segments[..index] {
-                        control(GlaExecutionEvent::Work)?;
-                        if traversal.choices[prior.ordinal() as usize - 1].eid == eid {
-                            return Ok(None);
-                        }
-                    }
-                }
-            }
             Instruction::Native(op) => {
-                if !accepts(op, ids, &paths, source, control)? {
+                if !test_native_stage(op, traversal, &mut paths, source, control)? {
                     return Ok(None);
                 }
             }
         }
     }
     Ok(Some(paths))
+}
+
+// Captures and fixed-edge constraints stay in this one kernel when the stage
+// driver must await a probe. The driver owns instruction order and its Work
+// event; paths remain live across a probe without rerunning earlier predicates.
+fn test_native_stage<S: EdgeScanSource, C>(
+    op: &GlaOperator,
+    traversal: &Traversal,
+    paths: &mut Vec<Option<GraphPath>>,
+    source: &S,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
+) -> ScanResult<bool, S::Error, C> {
+    let ids = &traversal.bindings;
+    match op {
+        GlaOperator::CapturePath { start, segments, .. } => {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            for _ in segments {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+            }
+            // A closing edge back to a bound vertex was expanded from its
+            // other end: step to whichever endpoint the path is not on.
+            let start = ids[start.ordinal() as usize].expect("captured start");
+            let mut endpoint = start;
+            let mut steps = Vec::with_capacity(segments.len());
+            for slot in segments {
+                let choice = traversal.choices[slot.ordinal() as usize - 1];
+                endpoint = if choice.from == endpoint {
+                    choice.target
+                } else if choice.target == endpoint {
+                    choice.from
+                } else {
+                    break;
+                };
+                steps.push((choice.eid, endpoint));
+            }
+            // Same as the eager executor: a chain that does not connect
+            // captures no path rather than a fabricated one.
+            paths.push(
+                (steps.len() == segments.len())
+                    .then(|| GraphPath::new(start, steps.into_boxed_slice())),
+            );
+            Ok(true)
+        }
+        GlaOperator::DifferentEdges { segments } => {
+            // Every admitted segment is one retained fixed edge. Compare
+            // identities, not endpoint pairs: parallel edges may form a
+            // valid return path, but traversing one EId twice may not.
+            for (index, slot) in segments.iter().enumerate() {
+                let eid = traversal.choices[slot.ordinal() as usize - 1].eid;
+                for prior in &segments[..index] {
+                    control(GlaExecutionEvent::Work)?;
+                    if traversal.choices[prior.ordinal() as usize - 1].eid == eid {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
+        }
+        op => accepts(op, ids, paths, source, control),
+    }
 }
 
 // Shared by outer stages and probe-local stages. In particular, NOT EXISTS

@@ -25,7 +25,9 @@ pub type AsyncIncidentCandidateResult<Record, Error, Control> =
 /// Unavailable, never an empty neighborhood. Relation and endpoint visibility
 /// must be admitted BEFORE opening an index; the selector conveys no authority.
 ///
-/// The cursor holds at most `hops` records. reserve_traversal admits fixed
+/// The outer traversal holds at most `hops` records. A running correlated probe
+/// separately reserves its definition-bounded binding slots and holds at most
+/// one additional record per active fixed expansion. reserve_traversal admits fixed
 /// cursor vectors (record slots, choices, bindings and successor positions)
 /// before allocation and retains its guard until that traversal is dropped.
 /// Each record owns its source payload reservation. reserve_join_output admits
@@ -60,10 +62,11 @@ pub trait AsyncEdgeJoinSource: AsyncEdgeScanSource {
     ) -> Result<Self::OutputGuard, EdgeScanSourceError<Self::Error, C>>;
 }
 
-/// The ordinary fixed-hop compiler, restricted to awaitable positive joins.
+/// The ordinary fixed-hop compiler with awaitable correlated semi/anti probes.
 /// Its identity prefix proves canonical order and DISTINCT without a seen set.
-/// Probes, OPTIONAL and variable-length traversal remain typed refusals; this
-/// compiler cannot unlock them by accidentally treating missing reads as EOF.
+/// Probe bindings copy outer values or expand indexed fixed edges. Independent
+/// vertex scans, OPTIONAL and variable-length traversal remain typed refusals;
+/// missing indexes and interrupted reads never establish existential absence.
 #[derive(Clone)]
 pub struct AsyncEdgeJoinPlan {
     inner: EdgeScanPlan,
@@ -77,7 +80,8 @@ impl AsyncEdgeJoinPlan {
 
     // Only the sealed external-aggregate definition may relax the identity
     // prefix. Reuse the ordinary aggregate input proof: no child DISTINCT,
-    // window, hidden keys, probes or unsupported expansion can be discarded.
+    // window, hidden keys or unsupported expansion can be discarded. Supported
+    // probes run on the complete input binding before aggregate projection.
     pub(crate) fn compile_aggregate(
         plan: &GlaPlan<GraphValueRow>,
     ) -> Result<Self, EdgeScanBuildError> {
@@ -104,7 +108,9 @@ impl AsyncEdgeJoinPlan {
         if let Some(operator) = plan
             .operators()
             .iter()
-            .position(|op| matches!(op, GlaOperator::Probe { .. }))
+            .position(|op| {
+                matches!(op, GlaOperator::ScanVertices | GlaOperator::VarLengthExpand { .. })
+            })
         {
             return Err(EdgeScanBuildError { operator });
         }
@@ -428,25 +434,15 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
             });
             frame.traversal.bindings.push(Some(to));
             frame.records.push(record);
-            let local = FrameSource::<_, S::Error> {
-                records: &frame.records,
-                choices: &frame.traversal.choices,
-                seq: self.seq,
-                error: core::marker::PhantomData,
-            };
-            let mut control = |event| {
-                meter.event(event)?;
-                source
-                    .evaluation_event(&frame.records[depth], event)
-                    .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
-            };
-            let paths = test_stage(
+            let paths = test_async_stage(
                 &plan.stages[depth],
                 &frame.traversal,
-                &local,
-                &mut control,
-                &mut || Err(GqlQueryError::Source(EdgeScanError::ExpansionUnavailable)),
-            )?;
+                &mut frame.records,
+                source,
+                meter,
+                self.seq,
+            )
+            .await?;
             let Some(paths) = paths else {
                 frame.pop();
                 continue;
@@ -472,6 +468,12 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                 self.plan.columns,
                 &mut |event| meter.event(event),
             ))?;
+            let local = FrameSource::<_, S::Error> {
+                records: &frame.records,
+                choices: &frame.traversal.choices,
+                seq: self.seq,
+                error: core::marker::PhantomData,
+            };
             let row = project(
                 &self.plan.inner.projection,
                 &frame.traversal.bindings,
@@ -627,7 +629,56 @@ impl<S: AsyncEdgeJoinSource, F> core::fmt::Debug for AsyncEdgeJoinCursor<S, F> {
     }
 }
 
-fn admit<F: FnMut() -> Result<(), C>, E, C>(
+// Await only the probe's source access. Every native instruction still runs
+// through the same kernel, in its original order, with prior captures intact.
+// Mutable record loans (not shared loans) cross await: cold records may own
+// RefCell-backed reservations and need Send, never an artificial Sync bound.
+async fn test_async_stage<S: AsyncEdgeJoinSource, F, C>(
+    ops: &[Instruction],
+    traversal: &Traversal,
+    records: &mut [S::Record],
+    source: &mut S,
+    meter: &mut Meter<F>,
+    seq: CommitSeq,
+) -> ScanResult<Option<Vec<Option<GraphPath>>>, S::Error, C>
+where
+    F: FnMut() -> Result<(), C> + Send,
+    C: Send,
+{
+    let mut paths = Vec::new();
+    for instruction in ops {
+        meter.event(GlaExecutionEvent::Work)?;
+        source
+            .evaluation_event(records.last().expect("active record"), GlaExecutionEvent::Work)
+            .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))?;
+        match instruction {
+            Instruction::Probe(probe) => {
+                if !probe.accepts_async(traversal, records, source, meter, seq).await? {
+                    return Ok(None);
+                }
+            }
+            Instruction::Native(op) => {
+                let local = FrameSource::<_, S::Error> {
+                    records,
+                    choices: &traversal.choices,
+                    seq,
+                    error: core::marker::PhantomData,
+                };
+                if !test_native_stage(op, traversal, &mut paths, &local, &mut |event| {
+                    meter.event(event)?;
+                    source
+                        .evaluation_event(records.last().expect("active record"), event)
+                        .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
+                })? {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    Ok(Some(paths))
+}
+
+pub(super) fn admit<F: FnMut() -> Result<(), C>, E, C>(
     meter: &mut Meter<F>,
     after: &mut Option<EId>,
     admitted: &mut Option<EId>,
@@ -657,7 +708,8 @@ fn admit<F: FnMut() -> Result<(), C>, E, C>(
         }
     }
 }
-fn check_admission<R, E, C>(
+
+pub(super) fn check_admission<R, E, C>(
     candidate: &Option<AsyncEdgeCandidate<R>>,
     admitted: Option<EId>,
 ) -> ScanResult<(), E, C> {
@@ -671,13 +723,13 @@ fn check_admission<R, E, C>(
 
 // A loan of the CURRENT binding records into the existing synchronous stage
 // kernel, not a graph or another source engine. No I/O, cloned field table or
-// unobserved graph lookup occurs here. Probes are excluded at compilation and
-// every nested-source method retains EdgeScanSource's Unavailable default.
-struct FrameSource<'a, R, E> {
-    records: &'a [R],
-    choices: &'a [Choice],
-    seq: CommitSeq,
-    error: core::marker::PhantomData<E>,
+// unobserved graph lookup occurs here. Probe-local predicate loans include this
+// same outer frame; expansion always uses the separate awaitable source.
+pub(super) struct FrameSource<'a, R, E> {
+    pub(super) records: &'a [R],
+    pub(super) choices: &'a [Choice],
+    pub(super) seq: CommitSeq,
+    pub(super) error: core::marker::PhantomData<E>,
 }
 impl<R: AsyncEdgeScanRecord, E> EdgeScanSource for FrameSource<'_, R, E> {
     type Error = E;
