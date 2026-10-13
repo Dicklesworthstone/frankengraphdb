@@ -448,7 +448,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
     where
         F: FnMut() -> Result<(), C>,
     {
-        if self.aggregate.incremental_output_is_distinct() || !self.aggregate.ordering().is_empty()
+        if self.aggregate.incremental_output_is_distinct() || self.aggregate.has_streamed_ordering()
         {
             return self.select_ordered_output(groups);
         }
