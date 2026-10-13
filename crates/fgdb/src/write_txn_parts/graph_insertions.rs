@@ -389,6 +389,69 @@ impl WriteTxn {
                         };
                         (stats, returning)
                     }
+                    GraphWriteChainStep::EdgeMergeRows { merge, keep } => {
+                        let (stats, resolved, selected) = workspace
+                            .txn
+                            .execute_graph_edge_merge_output_governed::<EdgeMergeRows, V, A>(
+                                database,
+                                cx,
+                                merge,
+                                edge_merge,
+                                rows.take(),
+                                |row| {
+                                    allocate(fgdb_gql::insertion::GraphInsertRequest::Edge {
+                                        row,
+                                        edge: 0,
+                                    })
+                                },
+                            )
+                            .map_err(|error| {
+                                error.map_source(|error| {
+                                    GraphWriteChainError::EdgeMerge(
+                                        GraphEdgeMergeQueryError::Merge(error),
+                                    )
+                                })
+                            })?;
+                        let (source_column, destination_column) =
+                            (merge.source_column(), merge.destination_column());
+                        // Each row continues once per relationship its pair
+                        // resolved to, in row order and then identity order.
+                        let mut output = Vec::new();
+                        for row in &selected {
+                            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                            let values = row.values();
+                            let (Some(source), Some(destination)) = (
+                                values[source_column].as_vertex(),
+                                values[destination_column].as_vertex(),
+                            ) else {
+                                continue;
+                            };
+                            let Some(edges) = resolved.edges.get(&(source, destination)) else {
+                                continue;
+                            };
+                            for &(edge, _) in edges {
+                                let mut cells = values[..(*keep).min(values.len())].to_vec();
+                                cells.push(GraphValue::Edge(edge));
+                                output.push(fgdb_gql::algebra::GraphValueRow::from_owned_values(
+                                    cells,
+                                ));
+                            }
+                        }
+                        receipts.push(GraphWriteStepReceipt::EdgeMergeBatch {
+                            outcomes: resolved.outcomes,
+                            created: resolved.created,
+                        });
+                        let stats = merged(&stats);
+                        let returning = GqlQueryExecution {
+                            value: output,
+                            rows: GqlExecutionStats {
+                                snapshot_records: stats.selection.snapshot_records,
+                                result_rows: 0,
+                            },
+                            evaluator: stats.evaluator,
+                        };
+                        (stats, returning)
+                    }
                     GraphWriteChainStep::VertexMergeQuery(query) => {
                         let merge = query.merge();
                         let chain = |error| {

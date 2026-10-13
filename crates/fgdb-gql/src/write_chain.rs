@@ -30,6 +30,9 @@ pub(crate) enum ChainTextStep {
     Insert(Box<(PreparedGraphInsertText, Option<InsertReturnTemplate>)>),
     /// A relationship MERGE over the previous write's rows (the last step).
     EdgeMerge(Box<(PreparedGraphEdgeMergeText, Option<EdgeMergeReturnTemplate>)>),
+    /// A relationship MERGE another write follows: its rows are the row's
+    /// first `usize` (visible) columns and the relationship.
+    EdgeMergeRows(Box<(PreparedGraphEdgeMergeText, usize)>),
     /// A vertex MERGE over the previous write's rows, or over one empty row
     /// as the first write; any step but one with RETURN.
     VertexMerge(Box<PreparedGraphVertexMergeRowsText>),
@@ -143,6 +146,12 @@ pub enum GraphWriteChainStep {
     EdgeMerge(Box<PreparedGraphEdgeMerge>),
     /// The last write, a relationship MERGE with RETURN.
     EdgeMergeQuery(Box<PreparedGraphEdgeMergeQuery>),
+    /// A relationship MERGE another write follows. Its rows: each input
+    /// row's first `keep` columns and each relationship its pair resolved to.
+    EdgeMergeRows {
+        merge: Box<PreparedGraphEdgeMerge>,
+        keep: usize,
+    },
     /// A vertex MERGE over the previous write's rows (or one empty row, or
     /// a leading UNWIND's rows, as the first write). Its rows are the input
     /// row and the merged vertex.
@@ -158,6 +167,7 @@ impl core::fmt::Debug for GraphWriteChainStep {
             Self::Insert(_) => "Insert([REDACTED])",
             Self::EdgeMerge(_) => "EdgeMerge([REDACTED])",
             Self::EdgeMergeQuery(_) => "EdgeMergeQuery([REDACTED])",
+            Self::EdgeMergeRows { .. } => "EdgeMergeRows([REDACTED])",
             Self::VertexMerge(_) => "VertexMerge([REDACTED])",
             Self::VertexMergeQuery(_) => "VertexMergeQuery([REDACTED])",
         })
