@@ -382,12 +382,29 @@ fn pattern_predicates_are_their_exists_spelling() {
             "MATCH (a)-[:R]->(b) WHERE NOT (b)-[:S]->(a) RETURN a, b",
             "MATCH (a)-[:R]->(b) WHERE NOT EXISTS { MATCH (b)-[:S]->(a) } RETURN a, b",
         ),
+        // A subquery RETURN of literals or `*` keeps every row, so it is the
+        // same existence test (TCK ExistentialSubquery2 [1]).
+        (
+            "MATCH (a) WHERE (a)-[:R]->() RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() RETURN true } RETURN a",
+        ),
+        (
+            "MATCH (a) WHERE NOT (a)-[:R]->() RETURN a",
+            "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->() RETURN *, 1 AS one } RETURN a",
+        ),
     ] {
         assert_eq!(
             query(pattern).canonical_bytes(),
             query(exists).canonical_bytes(),
             "{pattern}"
         );
+    }
+    // An aggregate or a computed RETURN item could change the subquery's rows.
+    for text in [
+        "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() RETURN count(*) } RETURN a",
+        "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) RETURN b } RETURN a",
+    ] {
+        assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
     }
     // Rows on a fixture: 0 -R-> 1, 2 -S-> 0.
     let rows = |text: &str| {
