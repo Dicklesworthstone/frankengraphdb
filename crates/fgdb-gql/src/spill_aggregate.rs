@@ -8,6 +8,7 @@
 
 use crate::algebra::{GlaOperator, GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::edge_stream::EdgeScanBuildError;
+use crate::edge_stream::aggregate::pipeline::InputPipeline;
 use crate::scan_stream::ScanKind;
 use crate::spill_set::{AsyncSpillSetPlan, SpillSetBuildError};
 use crate::stream::VertexScanBuildError;
@@ -50,6 +51,12 @@ impl core::fmt::Display for SpillAggregateBuildError {
 impl core::error::Error for SpillAggregateBuildError {}
 
 /// A source shape selected before opening a snapshot or reading input.
+/// Single-source ALL projection/filter WITH chains run once per binding before
+/// partitioning. Intermediate DISTINCT, ordering, windows, expansion and other
+/// non-row-local relational operators still refuse; the graph leaf is checked
+/// separately. Numeric group/DISTINCT support uses the existing external host,
+/// not an intermediate input table. Source and scalar-VM transient allocations
+/// retain their existing admission contracts; this is not a whole-query RSS cap.
 #[derive(Clone, Debug)]
 pub enum SpillAggregatePlan {
     Vertex(VertexSpillAggregatePlan),
@@ -57,7 +64,7 @@ pub enum SpillAggregatePlan {
 }
 impl SpillAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
-        let definition = SpillAggregateDefinition::compile(aggregate)?;
+        let definition = SpillAggregateDefinition::compile_row_local(aggregate)?;
         if matches!(
             aggregate.input_pattern().plan().operators().first(),
             Some(GlaOperator::ScanEdges { .. })
@@ -194,6 +201,10 @@ pub struct SpillAggregateDefinition {
     // Address the stored projected row through the existing exact comparator.
     // Lower once at preparation, never allocate sort metadata per comparison.
     projected_ordering: Arc<[GraphAggregateOrder]>,
+    // Only the synchronous source owner installs this program. The async
+    // relational owner already produces complete rows and MUST NOT replay it.
+    // Shared metadata, never a retained match bag or per-group support set.
+    input_pipeline: Option<Arc<InputPipeline>>,
 }
 impl core::fmt::Debug for SpillAggregateDefinition {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -237,6 +248,34 @@ impl SpillAggregateDefinition {
             .prepare_streamed_output()
             .ok_or(SpillAggregateBuildError::Unsupported)?;
         Self::from_physical(physical)
+    }
+
+    fn compile_row_local(
+        aggregate: &PreparedGraphAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let (physical, pipeline) = InputPipeline::prepare(aggregate)
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        let mut definition = Self::from_physical(physical)?;
+        definition.input_pipeline = pipeline.map(Arc::new);
+        Ok(definition)
+    }
+
+    /// Source-only transformation. The host validates and partitions its final
+    /// row, and all later reduction/DISTINCT/output passes consume that row
+    /// unchanged. Never call this when replaying an external partition or when
+    /// a complete relational input owner has already evaluated these stages.
+    /// A filtered binding is not EOF; the source adapter must continue scanning.
+    pub(crate) fn evaluate_input<E, C>(
+        &self,
+        row: GraphValueRow,
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<Option<GraphValueRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        match &self.input_pipeline {
+            Some(pipeline) => pipeline.evaluate(row, control),
+            None => self.aggregate.evaluate_streamed_input(row, control).map(Some),
+        }
     }
 
     fn from_physical(aggregate: PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
@@ -289,6 +328,7 @@ impl SpillAggregateDefinition {
         Ok(Self {
             aggregate: Arc::new(aggregate),
             projected_ordering,
+            input_pipeline: None,
         })
     }
 
@@ -770,3 +810,6 @@ fn result_event(event: GlaExecutionEvent) -> VertexScanEvent {
         GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => VertexScanEvent::Work,
     }
 }
+
+#[cfg(test)]
+mod input_tests;

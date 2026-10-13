@@ -99,7 +99,7 @@ impl<S: VertexScanSource, F> VertexSpillAggregateCursor<S, F> {
         if self.input.state != VertexScanState::Open {
             return Ok(None);
         }
-        let result = (|| {
+        let result = (|| loop {
             let Some(row) = self.input.advance_inner::<false, C>().map_err(lift)? else {
                 return Ok(None);
             };
@@ -108,15 +108,16 @@ impl<S: VertexScanSource, F> VertexSpillAggregateCursor<S, F> {
             // partitioning. Aggregate positions name this projected schema,
             // not the graph source columns, and private rows spend no output
             // allowance. Plain definitions still move their row unchanged.
-            let row = self
-                .definition
-                .aggregate
-                .evaluate_streamed_input(row, &mut |event| {
-                    meter.event(input_event(event)).map_err(lift)
-                })?;
+            let Some(row) = self.definition.evaluate_input(row, &mut |event| {
+                meter.event(input_event(event)).map_err(lift)
+            })? else {
+                // FALSE/UNKNOWN drops this admitted record, not the scan.
+                // Later stages never see it and the cumulative meter survives.
+                continue;
+            };
             self.definition
                 .validate_input(&row, &mut |event| meter.event(event).map_err(lift))?;
-            Ok(Some(row))
+            return Ok(Some(row));
         })();
         match &result {
             Ok(None) => {

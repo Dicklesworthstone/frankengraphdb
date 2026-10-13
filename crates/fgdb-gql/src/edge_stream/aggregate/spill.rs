@@ -78,7 +78,7 @@ impl<S: EdgeScanSource, F> EdgeSpillAggregateCursor<S, F> {
         if self.input.state != EdgeScanState::Open {
             return Ok(None);
         }
-        let result = (|| {
+        let result = (|| loop {
             let Some(row) = self.input.advance().map_err(lift)? else {
                 return Ok(None);
             };
@@ -86,14 +86,17 @@ impl<S: EdgeScanSource, F> EdgeSpillAggregateCursor<S, F> {
             // The join owns source matching and observation; its complete
             // binding passes through the same native projection VM as the
             // resident reducer before any aggregate partition receives it.
-            let row = self
-                .definition
-                .aggregate
-                .evaluate_streamed_input(row, &mut |event| meter.event(event).map_err(lift))?;
+            let Some(row) = self.definition.evaluate_input(row, &mut |event| {
+                meter.event(event).map_err(lift)
+            })? else {
+                // A rejected occurrence is not source exhaustion. Keep the
+                // same meter and source position; do not touch spill state.
+                continue;
+            };
             self.definition.validate_input(&row, &mut |event| {
                 meter.event(value_event(event)).map_err(lift)
             })?;
-            Ok(Some(row))
+            return Ok(Some(row));
         })();
         match &result {
             Ok(None) => {
