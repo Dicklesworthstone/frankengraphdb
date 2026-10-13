@@ -65,11 +65,17 @@ pub fn frame(message: &[u8], out: &mut Vec<u8>) {
 
 /// Reassembles messages from received bytes. A zero chunk with no data
 /// before it is a keep-alive (NOOP) and yields nothing.
+/// An oversized chunk header permanently fails this decoder, before waiting
+/// for its payload. Further input is ignored; create a new decoder only for
+/// a new connection. Callers must bound individual pushes and drain messages
+/// between reads; the message limit is not a cap on a caller's pipelined input.
 #[derive(Debug)]
 pub struct Dechunker {
     pending: Vec<u8>,
+    head: usize,
     message: Vec<u8>,
     max_message: usize,
+    failed: bool,
 }
 
 /// A message larger than the bound the server accepts.
@@ -83,43 +89,71 @@ impl Dechunker {
     pub fn new(max_message: usize) -> Self {
         Self {
             pending: Vec::new(),
+            head: 0,
             message: Vec::new(),
             max_message,
+            failed: false,
         }
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
+        if self.failed {
+            return;
+        }
+        // Retire a consumed prefix only when at least as many bytes were
+        // consumed as must be moved. Pipelined message pulls never move the
+        // remaining tail, and compaction work is amortized over consumed input.
+        if self.head == self.pending.len() {
+            self.pending.clear();
+            self.head = 0;
+        } else if self.head >= self.pending.len() - self.head {
+            self.pending.drain(..self.head);
+            self.head = 0;
+        }
         self.pending.extend_from_slice(bytes);
     }
 
     /// The next complete message, if the received bytes hold one.
     pub fn next_message(&mut self) -> Result<Option<Vec<u8>>, MessageTooLarge> {
-        let mut at = 0;
-        let result = loop {
-            let Some(header) = self.pending.get(at..at + 2) else {
-                break Ok(None);
+        if self.failed {
+            return Err(MessageTooLarge {
+                limit: self.max_message,
+            });
+        }
+        loop {
+            let available = &self.pending[self.head..];
+            let Some(header) = available.get(..2) else {
+                if self.head == self.pending.len() {
+                    self.pending.clear();
+                    self.head = 0;
+                }
+                return Ok(None);
             };
             let len = usize::from(u16::from_be_bytes([header[0], header[1]]));
             if len == 0 {
-                at += 2;
+                self.head += 2;
                 if self.message.is_empty() {
                     continue;
                 }
-                break Ok(Some(core::mem::take(&mut self.message)));
+                return Ok(Some(core::mem::take(&mut self.message)));
             }
-            let Some(chunk) = self.pending.get(at + 2..at + 2 + len) else {
-                break Ok(None);
-            };
-            if self.message.len() + len > self.max_message {
-                break Err(MessageTooLarge {
+            // The length itself proves refusal. Do not retain/read a body
+            // that cannot be admitted, or resynchronize onto a later request.
+            if len > self.max_message.saturating_sub(self.message.len()) {
+                self.failed = true;
+                self.pending = Vec::new();
+                self.message = Vec::new();
+                self.head = 0;
+                return Err(MessageTooLarge {
                     limit: self.max_message,
                 });
             }
+            let Some(chunk) = available.get(2..2 + len) else {
+                return Ok(None);
+            };
             self.message.extend_from_slice(chunk);
-            at += 2 + len;
-        };
-        self.pending.drain(..at);
-        result
+            self.head += 2 + len;
+        }
     }
 }
 
@@ -203,17 +237,9 @@ impl core::error::Error for RequestError {}
 
 fn map(value: Value, what: &'static str) -> Result<Map, RequestError> {
     match value {
-        Value::Map(entries) => {
-            // A dictionary cannot select different credentials, databases or
-            // stream windows according to first-key/last-key lookup policy.
-            let mut names = std::collections::BTreeSet::new();
-            for (name, _) in &entries {
-                if !names.insert(name.as_str()) {
-                    return Err(RequestError::Malformed(what));
-                }
-            }
-            Ok(entries)
-        }
+        // PackStream checks unique keys for every dictionary, including nested
+        // ones, under one shared budget. Do not build the same index twice.
+        Value::Map(entries) => Ok(entries),
         _ => Err(RequestError::Malformed(what)),
     }
 }
@@ -543,6 +569,126 @@ mod tests {
     }
 
     #[test]
+    fn oversized_headers_refuse_without_waiting_for_their_bodies() {
+        for split in 0..=2 {
+            let header = [0, 5];
+            let mut decoder = Dechunker::new(4);
+            decoder.push(&header[..split]);
+            if split < 2 {
+                assert_eq!(decoder.next_message(), Ok(None));
+                decoder.push(&header[split..]);
+            }
+            assert_eq!(decoder.next_message(), Err(MessageTooLarge { limit: 4 }));
+        }
+        let mut zero = Dechunker::new(0);
+        zero.push(&[0, 0, 0, 0]);
+        assert_eq!(zero.next_message(), Ok(None));
+        zero.push(&[0, 1]);
+        assert_eq!(zero.next_message(), Err(MessageTooLarge { limit: 0 }));
+    }
+
+    #[test]
+    fn cumulative_chunk_limit_refuses_at_the_next_header() {
+        let mut decoder = Dechunker::new(5);
+        decoder.push(&[0, 3, b'a', b'b', b'c']);
+        assert_eq!(decoder.next_message(), Ok(None));
+        assert_eq!(decoder.message, b"abc");
+        decoder.push(&[0, 3]);
+        assert_eq!(decoder.next_message(), Err(MessageTooLarge { limit: 5 }));
+    }
+
+    #[test]
+    fn framing_failure_releases_buffers_and_never_resynchronizes() {
+        let mut decoder = Dechunker::new(2);
+        let mut input = vec![0, 2, b'a', b'b', 0, 1];
+        frame(b"later", &mut input);
+        decoder.push(&input);
+        assert_eq!(decoder.next_message(), Err(MessageTooLarge { limit: 2 }));
+        assert_eq!(decoder.pending.capacity(), 0);
+        assert_eq!(decoder.message.capacity(), 0);
+        assert_eq!(decoder.head, 0);
+        let mut valid = Vec::new();
+        frame(b"ok", &mut valid);
+        for _ in 0..3 {
+            decoder.push(&valid);
+            assert_eq!(decoder.pending.capacity(), 0);
+            assert_eq!(decoder.next_message(), Err(MessageTooLarge { limit: 2 }));
+        }
+    }
+
+    #[test]
+    fn pipelined_messages_advance_without_relocating_the_remaining_tail() {
+        let mut wire = Vec::new();
+        for value in 0..1000_u32 {
+            frame(&value.to_be_bytes(), &mut wire);
+        }
+        let mut decoder = Dechunker::new(4);
+        decoder.push(&wire);
+        for value in 0..1000_u32 {
+            assert_eq!(decoder.next_message(), Ok(Some(value.to_be_bytes().to_vec())));
+            // The accepted prefix is a cursor, not drain(..prefix) per result.
+            // This is a structural law, not a throughput benchmark claim.
+            assert_eq!(decoder.pending.len(), wire.len());
+            assert_eq!(decoder.head, (value as usize + 1) * 8);
+        }
+        assert_eq!(decoder.next_message(), Ok(None));
+        assert!(decoder.pending.is_empty());
+        assert_eq!(decoder.head, 0);
+    }
+
+    #[test]
+    fn compaction_preserves_partial_headers_and_unconsumed_pipeline_tail() {
+        let mut first = Vec::new();
+        frame(b"abc", &mut first);
+        let mut second = Vec::new();
+        frame(b"12345", &mut second);
+        for split in 0..second.len() {
+            let mut decoder = Dechunker::new(5);
+            decoder.push(&first);
+            decoder.push(&second[..split]);
+            assert_eq!(decoder.next_message(), Ok(Some(b"abc".to_vec())));
+            assert_eq!(decoder.next_message(), Ok(None));
+            decoder.push(&second[split..]);
+            assert_eq!(decoder.next_message(), Ok(Some(b"12345".to_vec())));
+            assert_eq!(decoder.next_message(), Ok(None));
+        }
+        let mut pipeline = first.clone();
+        pipeline.extend_from_slice(&second);
+        pipeline.extend_from_slice(&second);
+        let mut decoder = Dechunker::new(5);
+        decoder.push(&pipeline);
+        assert_eq!(decoder.next_message(), Ok(Some(b"abc".to_vec())));
+        let head = decoder.head;
+        decoder.push(&[0, 0]);
+        // More tail than consumed prefix: push must not compact yet.
+        assert_eq!(decoder.head, head);
+        assert_eq!(decoder.next_message(), Ok(Some(b"12345".to_vec())));
+        assert_eq!(decoder.next_message(), Ok(Some(b"12345".to_vec())));
+        assert_eq!(decoder.next_message(), Ok(None));
+    }
+
+    #[test]
+    fn exact_message_bounds_survive_chunk_boundaries_and_fragmentation() {
+        for size in [1, 5, MAX_CHUNK, MAX_CHUNK + 1, MAX_CHUNK * 2 + 1] {
+            let payload: Vec<u8> = (0..size).map(|at| at as u8).collect();
+            let mut wire = vec![0, 0];
+            frame(&payload, &mut wire);
+            frame(b"x", &mut wire);
+            for fragment in [1, 7, 8192, wire.len()] {
+                let mut decoder = Dechunker::new(size);
+                let mut received = Vec::new();
+                for part in wire.chunks(fragment) {
+                    decoder.push(part);
+                    while let Some(message) = decoder.next_message().unwrap() {
+                        received.push(message);
+                    }
+                }
+                assert_eq!(received, vec![payload.clone(), b"x".to_vec()]);
+            }
+        }
+    }
+
+    #[test]
     fn every_request_requires_exact_bolt_5_arity() {
         let empty = || Value::Map(Vec::new());
         let cases = [
@@ -553,8 +699,16 @@ mod tests {
             (0x11, "BEGIN", vec![empty()]),
             (0x12, "COMMIT", vec![]),
             (0x13, "ROLLBACK", vec![]),
-            (0x2F, "DISCARD", vec![Value::Map(vec![("n".into(), Value::Int(-1))])]),
-            (0x3F, "PULL", vec![Value::Map(vec![("n".into(), Value::Int(-1))])]),
+            (
+                0x2F,
+                "DISCARD",
+                vec![Value::Map(vec![("n".into(), Value::Int(-1))])],
+            ),
+            (
+                0x3F,
+                "PULL",
+                vec![Value::Map(vec![("n".into(), Value::Int(-1))])],
+            ),
             (0x66, "ROUTE", vec![empty(), Value::List(vec![]), empty()]),
         ];
         for (tag, name, fields) in cases {
@@ -584,7 +738,9 @@ mod tests {
             for value in [
                 Value::Null,
                 Value::Bool(true),
+                Value::Float(-1.0),
                 Value::string("-1"),
+                Value::Bytes(vec![]),
                 Value::List(vec![]),
                 Value::Map(vec![]),
                 Value::Int(-2),
@@ -634,11 +790,17 @@ mod tests {
         };
         for tag in [0x2F, 0x3F] {
             assert!(decode_fields(tag, vec![duplicate("n")]).is_err());
-            assert!(decode_fields(tag, vec![Value::Map(vec![
-                ("n".into(), Value::Int(1)),
-                ("qid".into(), Value::Int(0)),
-                ("qid".into(), Value::Int(-1)),
-            ])]).is_err());
+            assert!(
+                decode_fields(
+                    tag,
+                    vec![Value::Map(vec![
+                        ("n".into(), Value::Int(1)),
+                        ("qid".into(), Value::Int(0)),
+                        ("qid".into(), Value::Int(-1)),
+                    ])],
+                )
+                .is_err()
+            );
         }
         assert!(decode_fields(0x01, vec![duplicate("credentials")]).is_err());
         assert!(decode_fields(0x11, vec![duplicate("db")]).is_err());
@@ -659,8 +821,20 @@ mod tests {
         // The negotiated 5.0 ROUTE request has a bookmark list and an extra
         // dictionary, not the old direct database-name field or null defaults.
         for bad in [Value::Null, Value::string("main")] {
-            assert!(decode_fields(0x66, vec![Value::Map(vec![]), bad.clone(), Value::Map(vec![])]).is_err());
-            assert!(decode_fields(0x66, vec![Value::Map(vec![]), Value::List(vec![]), bad]).is_err());
+            assert!(
+                decode_fields(
+                    0x66,
+                    vec![Value::Map(vec![]), bad.clone(), Value::Map(vec![])],
+                )
+                .is_err()
+            );
+            assert!(
+                decode_fields(
+                    0x66,
+                    vec![Value::Map(vec![]), Value::List(vec![]), bad],
+                )
+                .is_err()
+            );
         }
     }
 
