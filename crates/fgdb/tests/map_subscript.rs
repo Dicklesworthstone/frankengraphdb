@@ -5,7 +5,8 @@ use fgdb::{Database, DatabaseKeys, PreparedNativeRead, QueryResult, QueryValue, 
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy,
+    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
+    GraphWriteProgramPolicy, ReverseSymbolCatalog,
 };
 use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
 use std::convert::Infallible;
@@ -27,6 +28,24 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         _ => None,
+    }
+}
+/// [`symbols`] with its reverse catalog: an element subscript reads the
+/// element's property map, which names each stored key.
+#[derive(Clone, Copy)]
+struct Named;
+impl GraphSymbolResolver for Named {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_label(LabelId(1), "Item");
+        catalog.insert_relation(RelationId(1), "R");
+        catalog.insert_property(PropertyKeyId(1), "p");
+        catalog.insert_property(PropertyKeyId(2), "q");
+        Some(catalog)
     }
 }
 fn int(value: i64) -> GraphValue {
@@ -264,7 +283,7 @@ fn element_subscripts_read_the_property_named_by_a_dynamic_key() {
         let text =
             |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
         let read = |statement: &str, params: &GqlParameters| {
-            db.query(&cx, statement, params, symbols, policy())
+            db.query(&cx, statement, params, Named, policy())
         };
         let key = GqlParameters::new().with_text("key", "q").unwrap();
         assert_eq!(
