@@ -1482,6 +1482,15 @@ fn unrestricted_capabilities_admit_only_an_index_bound_closure() {
                 "MATCH (a:L {p: 7})-[:R]->(b) RETURN count(b) AS n",
                 vec![vec![QueryValue::Count(1)]],
             ),
+            // Quantified reaches from the bound root admit only their walk.
+            (
+                "MATCH (a:L {p: 7})-[:R]->{1,3}(b) RETURN count(DISTINCT b) AS n",
+                vec![vec![QueryValue::Count(3)]],
+            ),
+            (
+                "MATCH (a:L {p: 7})<-[:R]-{0,2}(b) RETURN count(b) AS n",
+                vec![vec![QueryValue::Count(3)]],
+            ),
         ] {
             let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
             let QueryResult::Rows { columns, rows } =
