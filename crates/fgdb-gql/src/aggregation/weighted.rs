@@ -405,7 +405,10 @@ fn visit_reach_bindings<'a, E, C, F, R, M, P>(
 ) -> Result<(), VisitError<E, C>>
 where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
-    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    R: FnMut(
+        VId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
     P: FnMut(
         &[ValueProjection],
@@ -1503,11 +1506,11 @@ mod tests {
     #[test]
     fn distinct_edge_counts_equal_the_identified_evaluator() {
         let edges = distinct_edge_graph();
-        let properties = BTreeMap::from([
-            (VId(0), CanonicalScalar::Int(7)),
-            (VId(1), CanonicalScalar::Null),
-            (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Int(-2)),
+        let properties: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::from([
+            (VId(0), CanonicalScalar::Int(7).into()),
+            (VId(1), CanonicalScalar::Null.into()),
+            (VId(2), CanonicalScalar::Int(7).into()),
+            (VId(3), CanonicalScalar::Int(-2).into()),
         ]);
         let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
         for pattern in [
@@ -1852,12 +1855,12 @@ mod tests {
         for (eid, (src, dst)) in [(1, 4), (3, 4), (4, 5)].into_iter().enumerate() {
             edges.push((EId(100 + eid as u128), VId(src), RelationId(1), VId(dst)));
         }
-        let properties = BTreeMap::from([
-            (VId(0), CanonicalScalar::Int(7)),
-            (VId(1), CanonicalScalar::Null),
-            (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Int(-2)),
-            (VId(5), CanonicalScalar::Int(9)),
+        let properties: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::from([
+            (VId(0), CanonicalScalar::Int(7).into()),
+            (VId(1), CanonicalScalar::Null.into()),
+            (VId(2), CanonicalScalar::Int(7).into()),
+            (VId(3), CanonicalScalar::Int(-2).into()),
+            (VId(5), CanonicalScalar::Int(9).into()),
         ]);
         let mut checked = 0;
         for mode in ["", "REPEATABLE ELEMENTS "] {

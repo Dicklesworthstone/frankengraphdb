@@ -760,7 +760,7 @@ fn rank(value: Option<u32>, robot: bool) -> String {
 mod tests {
     use super::*;
     use fgdb_beacon::{BeaconIndex, IndexDocument, WorkBudget};
-    use fgdb_types::{CanonicalScalar, bytes::BoundedBytes};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, bytes::BoundedBytes};
 
     fn options(parts: &[&str]) -> Options {
         let mut args = vec![
@@ -787,8 +787,8 @@ mod tests {
         .expect("search arguments")
     }
 
-    fn bytes(value: Vec<u8>) -> CanonicalScalar {
-        CanonicalScalar::Bytes(BoundedBytes::new(value).unwrap())
+    fn bytes(value: Vec<u8>) -> CanonicalPropertyValue {
+        CanonicalScalar::Bytes(BoundedBytes::new(value).unwrap()).into()
     }
 
     fn vector_request(encoding: &str, metric: &str) -> Prepared {
@@ -930,7 +930,7 @@ mod tests {
         let request = vector_request("packed", "l2");
         let config = request.read.config_for(request.search()).unwrap();
         for value in [
-            CanonicalScalar::Int(1),
+            CanonicalScalar::Int(1).into(),
             bytes(vec![]),
             bytes(vec![0; 7]),
             bytes(vec![0; 9]),
@@ -945,7 +945,10 @@ mod tests {
                     .is_err()
             );
         }
-        for value in [None, Some(CanonicalScalar::Null)] {
+        for value in [
+            None,
+            Some(CanonicalPropertyValue::from(CanonicalScalar::Null)),
+        ] {
             let document = request
                 .read
                 .projection
@@ -984,11 +987,11 @@ mod tests {
                 let properties = BTreeMap::from([
                     (
                         PropertyKeyId(1),
-                        CanonicalScalar::Int(i64::from(coordinates[0])),
+                        CanonicalScalar::Int(i64::from(coordinates[0])).into(),
                     ),
                     (
                         PropertyKeyId(2),
-                        CanonicalScalar::Int(i64::from(coordinates[1])),
+                        CanonicalScalar::Int(i64::from(coordinates[1])).into(),
                     ),
                     (
                         PropertyKeyId(3),

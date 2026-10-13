@@ -355,7 +355,7 @@ impl<V: Vfs + Clone> Database<V> {
                 || vertex
                     .props
                     .binary_search_by_key(key, |(property, _)| *property)
-                    .map_or(true, |at| vertex.props[at].1 != *value)
+                    .map_or(true, |at| vertex.props[at].1.as_scalar() != Some(value))
             {
                 continue;
             }

@@ -793,7 +793,7 @@ fn zone(key: &str, label: LabelId, k: i64) -> BulkRow {
     BulkRow::Vertex(BulkVertex {
         key: key.to_owned(),
         labels: vec![label],
-        props: vec![(K, CanonicalScalar::Int(k))],
+        props: vec![(K, CanonicalScalar::Int(k).into())],
     })
 }
 
@@ -807,7 +807,7 @@ fn trip(n: i64, source: BulkEndpoint, destination: BulkEndpoint) -> BulkRow {
         source,
         destination,
         relation: R,
-        props: vec![(P, CanonicalScalar::Int(n))],
+        props: vec![(P, CanonicalScalar::Int(n).into())],
     })
 }
 

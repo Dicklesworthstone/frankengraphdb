@@ -14,7 +14,7 @@ use fgdb_gql::{
     GraphAggregateRow, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
     PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -25,7 +25,7 @@ const G: PropertyKeyId = PropertyKeyId(1);
 const P: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
-type Record = (VId, Vec<(PropertyKeyId, CanonicalScalar)>);
+type Record = (VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>);
 
 fn policy(results: u64) -> GqlQueryPolicy {
     GqlQueryPolicy::new(10_000, results, 10_000_000, 10_000_000)
@@ -49,9 +49,9 @@ fn records(values: &[(i64, Option<i64>)]) -> Vec<Record> {
         .iter()
         .enumerate()
         .map(|(at, (group, value))| {
-            let mut properties = vec![(G, CanonicalScalar::Int(*group))];
+            let mut properties = vec![(G, CanonicalScalar::Int(*group).into())];
             if let Some(value) = value {
-                properties.push((P, CanonicalScalar::Int(*value)));
+                properties.push((P, CanonicalScalar::Int(*value).into()));
             }
             (VId(at as u128 + 1), properties)
         })
