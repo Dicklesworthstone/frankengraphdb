@@ -203,16 +203,35 @@ impl core::error::Error for RequestError {}
 
 fn map(value: Value, what: &'static str) -> Result<Map, RequestError> {
     match value {
-        Value::Map(entries) => Ok(entries),
+        Value::Map(entries) => {
+            // A dictionary cannot select different credentials, databases or
+            // stream windows according to first-key/last-key lookup policy.
+            let mut names = std::collections::BTreeSet::new();
+            for (name, _) in &entries {
+                if !names.insert(name.as_str()) {
+                    return Err(RequestError::Malformed(what));
+                }
+            }
+            Ok(entries)
+        }
         _ => Err(RequestError::Malformed(what)),
     }
 }
 
-/// `n` and `qid` of PULL/DISCARD: -1 means all rows and the last query.
-fn stream_window(extra: &Map) -> (i64, i64) {
-    let n = get(extra, "n").and_then(Value::as_int).unwrap_or(-1);
-    let qid = get(extra, "qid").and_then(Value::as_int).unwrap_or(-1);
-    (n, qid)
+/// `n` is mandatory; only an absent `qid` defaults to the last query.
+/// Wrongly typed values must not become -1: consuming a queued autocommit
+/// result can execute a write, even when no records are requested back.
+fn stream_window(extra: &Map, what: &'static str) -> Result<(i64, i64), RequestError> {
+    let n = match get(extra, "n") {
+        Some(Value::Int(n)) if *n == -1 || *n > 0 => *n,
+        _ => return Err(RequestError::Malformed(what)),
+    };
+    let qid = match get(extra, "qid") {
+        None => -1,
+        Some(Value::Int(qid)) if *qid >= -1 => *qid,
+        _ => return Err(RequestError::Malformed(what)),
+    };
+    Ok((n, qid))
 }
 
 /// Decode one dechunked message.
@@ -222,6 +241,25 @@ pub fn decode_request(message: &[u8]) -> Result<Request, RequestError> {
     else {
         return Err(RequestError::NotAMessage);
     };
+    // The negotiated protocol is 5.0, not the older zero-field PULL_ALL
+    // dialect. Check complete structure arity before interpreting effects;
+    // in particular COMMIT/ROLLBACK/RESET may not hide ignored extra fields.
+    let (name, arity) = match tag {
+        0x01 => ("HELLO", 1),
+        0x02 => ("GOODBYE", 0),
+        0x0F => ("RESET", 0),
+        0x10 => ("RUN", 3),
+        0x11 => ("BEGIN", 1),
+        0x12 => ("COMMIT", 0),
+        0x13 => ("ROLLBACK", 0),
+        0x2F => ("DISCARD", 1),
+        0x3F => ("PULL", 1),
+        0x66 => ("ROUTE", 3),
+        other => return Err(RequestError::UnknownTag(other)),
+    };
+    if fields.len() != arity {
+        return Err(RequestError::Malformed(name));
+    }
     let mut fields = fields.into_iter();
     let mut next = || fields.next();
     let request = match tag {
@@ -234,8 +272,8 @@ pub fn decode_request(message: &[u8]) -> Result<Request, RequestError> {
             let Some(Value::String(query)) = next() else {
                 return Err(RequestError::Malformed("RUN"));
             };
-            let parameters = map(next().unwrap_or(Value::Map(Vec::new())), "RUN")?;
-            let extra = map(next().unwrap_or(Value::Map(Vec::new())), "RUN")?;
+            let parameters = map(next().ok_or(RequestError::Malformed("RUN"))?, "RUN")?;
+            let extra = map(next().ok_or(RequestError::Malformed("RUN"))?, "RUN")?;
             Request::Run {
                 query,
                 parameters,
@@ -243,16 +281,13 @@ pub fn decode_request(message: &[u8]) -> Result<Request, RequestError> {
             }
         }
         0x11 => Request::Begin {
-            extra: map(next().unwrap_or(Value::Map(Vec::new())), "BEGIN")?,
+            extra: map(next().ok_or(RequestError::Malformed("BEGIN"))?, "BEGIN")?,
         },
         0x12 => Request::Commit,
         0x13 => Request::Rollback,
         0x2F | 0x3F => {
-            let extra = map(next().unwrap_or(Value::Map(Vec::new())), "PULL")?;
-            let (n, qid) = stream_window(&extra);
-            if n == 0 || n < -1 {
-                return Err(RequestError::Malformed("PULL"));
-            }
+            let extra = map(next().ok_or(RequestError::Malformed(name))?, name)?;
+            let (n, qid) = stream_window(&extra, name)?;
             if tag == 0x2F {
                 Request::Discard { n, qid }
             } else {
@@ -260,7 +295,7 @@ pub fn decode_request(message: &[u8]) -> Result<Request, RequestError> {
             }
         }
         0x66 => {
-            let routing = map(next().unwrap_or(Value::Map(Vec::new())), "ROUTE")?;
+            let routing = map(next().ok_or(RequestError::Malformed("ROUTE"))?, "ROUTE")?;
             let bookmarks = match next() {
                 Some(Value::List(items)) => items
                     .into_iter()
@@ -269,16 +304,9 @@ pub fn decode_request(message: &[u8]) -> Result<Request, RequestError> {
                         _ => Err(RequestError::Malformed("ROUTE")),
                     })
                     .collect::<Result<_, _>>()?,
-                None | Some(Value::Null) => Vec::new(),
-                Some(_) => return Err(RequestError::Malformed("ROUTE")),
+                _ => return Err(RequestError::Malformed("ROUTE")),
             };
-            let extra = match next() {
-                Some(Value::Map(entries)) => entries,
-                // 4.3's form named the database directly.
-                Some(Value::String(db)) => vec![("db".to_owned(), Value::String(db))],
-                None | Some(Value::Null) => Vec::new(),
-                Some(_) => return Err(RequestError::Malformed("ROUTE")),
-            };
+            let extra = map(next().ok_or(RequestError::Malformed("ROUTE"))?, "ROUTE")?;
             Request::Route {
                 routing,
                 bookmarks,
@@ -507,6 +535,134 @@ pub mod structure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_fields(tag: u8, fields: Vec<Value>) -> Result<Request, RequestError> {
+        let mut bytes = Vec::new();
+        packstream::encode(&Value::Struct { tag, fields }, &mut bytes);
+        decode_request(&bytes)
+    }
+
+    #[test]
+    fn every_request_requires_exact_bolt_5_arity() {
+        let empty = || Value::Map(Vec::new());
+        let cases = [
+            (0x01, "HELLO", vec![empty()]),
+            (0x02, "GOODBYE", vec![]),
+            (0x0F, "RESET", vec![]),
+            (0x10, "RUN", vec![Value::string("RETURN 1"), empty(), empty()]),
+            (0x11, "BEGIN", vec![empty()]),
+            (0x12, "COMMIT", vec![]),
+            (0x13, "ROLLBACK", vec![]),
+            (0x2F, "DISCARD", vec![Value::Map(vec![("n".into(), Value::Int(-1))])]),
+            (0x3F, "PULL", vec![Value::Map(vec![("n".into(), Value::Int(-1))])]),
+            (0x66, "ROUTE", vec![empty(), Value::List(vec![]), empty()]),
+        ];
+        for (tag, name, fields) in cases {
+            assert!(decode_fields(tag, fields.clone()).is_ok(), "{name}");
+            for width in 0..=8 {
+                if width == fields.len() {
+                    continue;
+                }
+                let mut wrong = fields.clone();
+                wrong.resize(width, Value::Null);
+                assert_eq!(
+                    decode_fields(tag, wrong),
+                    Err(RequestError::Malformed(name)),
+                    "{name} width {width}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stream_windows_require_integer_counts_and_identifiers() {
+        for (tag, name) in [(0x2F, "DISCARD"), (0x3F, "PULL")] {
+            assert_eq!(
+                decode_fields(tag, vec![Value::Map(vec![])]),
+                Err(RequestError::Malformed(name)),
+            );
+            for value in [
+                Value::Null,
+                Value::Bool(true),
+                Value::string("-1"),
+                Value::List(vec![]),
+                Value::Map(vec![]),
+                Value::Int(-2),
+                Value::Int(i64::MIN),
+            ] {
+                for key in ["n", "qid"] {
+                    let mut options = vec![(key.into(), value.clone())];
+                    if key == "qid" {
+                        options.push(("n".into(), Value::Int(1)));
+                    }
+                    assert_eq!(
+                        decode_fields(tag, vec![Value::Map(options)]),
+                        Err(RequestError::Malformed(name)),
+                        "{name} {key} must not default to consume-all",
+                    );
+                }
+            }
+            assert_eq!(
+                decode_fields(tag, vec![Value::Map(vec![("n".into(), Value::Int(0))])]),
+                Err(RequestError::Malformed(name)),
+            );
+            for n in [-1, 1, i64::MAX] {
+                for qid in [None, Some(-1), Some(0), Some(i64::MAX)] {
+                    let mut options = vec![("n".into(), Value::Int(n))];
+                    if let Some(qid) = qid {
+                        options.push(("qid".into(), Value::Int(qid)));
+                    }
+                    let qid = qid.unwrap_or(-1);
+                    let expected = if tag == 0x2F {
+                        Request::Discard { n, qid }
+                    } else {
+                        Request::Pull { n, qid }
+                    };
+                    assert_eq!(decode_fields(tag, vec![Value::Map(options)]), Ok(expected));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn request_dictionaries_cannot_hide_duplicate_authority_or_window_keys() {
+        let duplicate = |name: &str| {
+            Value::Map(vec![
+                (name.into(), Value::Int(1)),
+                (name.into(), Value::Int(-1)),
+            ])
+        };
+        for tag in [0x2F, 0x3F] {
+            assert!(decode_fields(tag, vec![duplicate("n")]).is_err());
+            assert!(decode_fields(tag, vec![Value::Map(vec![
+                ("n".into(), Value::Int(1)),
+                ("qid".into(), Value::Int(0)),
+                ("qid".into(), Value::Int(-1)),
+            ])]).is_err());
+        }
+        assert!(decode_fields(0x01, vec![duplicate("credentials")]).is_err());
+        assert!(decode_fields(0x11, vec![duplicate("db")]).is_err());
+        for at in [1, 2] {
+            let mut fields = vec![
+                Value::string("RETURN $x"),
+                Value::Map(vec![]),
+                Value::Map(vec![]),
+            ];
+            fields[at] = duplicate(if at == 1 { "x" } else { "db" });
+            assert!(decode_fields(0x10, fields).is_err());
+        }
+        for at in [0, 2] {
+            let mut fields = vec![Value::Map(vec![]), Value::List(vec![]), Value::Map(vec![])];
+            fields[at] = duplicate("db");
+            assert!(decode_fields(0x66, fields).is_err());
+        }
+        // The negotiated 5.0 ROUTE request has a bookmark list and an extra
+        // dictionary, not the old direct database-name field or null defaults.
+        for bad in [Value::Null, Value::string("main")] {
+            assert!(decode_fields(0x66, vec![Value::Map(vec![]), bad.clone(), Value::Map(vec![])]).is_err());
+            assert!(decode_fields(0x66, vec![Value::Map(vec![]), Value::List(vec![]), bad]).is_err());
+        }
+    }
 
     #[test]
     fn bolt_5_graph_structures_match_wire_goldens_and_decode_a_reverse_path() {
