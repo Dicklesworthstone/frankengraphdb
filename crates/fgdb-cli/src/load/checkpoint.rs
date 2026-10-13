@@ -398,5 +398,180 @@ fn persist_controlled(
     directory.sync_all()
 }
 
+/// Whether a committed load prefix needs another complete Saved V1 image.
+///
+/// The driver separately publishes the origin/reconciled prefix before work
+/// resumes. Ordinary callbacks publish at chunk counts 1, 2, 4, 8, ... and at
+/// the final (possibly partial) chunk. With a fixed chunk size, the sum of map
+/// entries encoded in one uninterrupted load is less than three times the
+/// source row count, rather than quadratic in the number of chunks. Encoded
+/// bytes have the same bound using the already-admitted maximum key length.
+/// This does not reduce the cost of Chronicle commits or source validation.
+///
+/// No checkpoint is authoritative: resume still verifies the saved maps and
+/// reconstructs EVERY committed creation since the original base. Progress
+/// describes durable chunks and may run ahead of this hint; replayed progress
+/// retains its original sequence number. The final image is always required
+/// before successful completion. No multiplying threshold can wrap at usize::MAX.
+pub(super) fn due(committed_chunks: usize, next_row: usize, source_rows: usize) -> bool {
+    committed_chunks.is_power_of_two() || next_row == source_rows
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::*;
+    use fgdb_types::{EId, VId};
+
+    #[derive(Default)]
+    struct CountBytes(usize);
+    impl Write for CountBytes {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self.0.checked_add(bytes.len()).expect("fixture byte count");
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct Cost {
+        old_bytes: usize,
+        new_bytes: usize,
+        old_entries: usize,
+        new_entries: usize,
+        old_images: usize,
+        new_images: usize,
+    }
+
+    fn view<'a>(
+        checkpoint: &'a BulkLoadCheckpoint,
+        base_marker: &'a str,
+        source_hash: &'a str,
+        rows_per_chunk: usize,
+    ) -> View<'a> {
+        View { checkpoint, base: CommitSeq(7), base_marker, source_hash, rows_per_chunk }
+    }
+
+    // Both arms invoke the incumbent V1 encoder on the SAME actual key maps.
+    // Only publication cadence differs. Full-width IDs, escaping, Unicode and
+    // both key kinds keep this from being a fixed-width byte-counting formula.
+    fn compare(total: usize, chunk: usize) -> Cost {
+        let mut cp = BulkLoadCheckpoint {
+            frontier: CommitSeq(7),
+            ..BulkLoadCheckpoint::default()
+        };
+        let limits = Limits::new(total, total * 32, 32).unwrap();
+        let base_marker = "a".repeat(64);
+        let source_hash = "b".repeat(64);
+        let mut old = CountBytes::default();
+        let mut new = CountBytes::default();
+        let mut cost = Cost {
+            old_bytes: 0, new_bytes: 0,
+            old_entries: 0, new_entries: 0,
+            old_images: 1, new_images: 1,
+        };
+        view(&cp, &base_marker, &source_hash, chunk).write_to(&mut old, limits).unwrap();
+        view(&cp, &base_marker, &source_hash, chunk).write_to(&mut new, limits).unwrap();
+        for first in (0..total).step_by(chunk) {
+            let end = (first + chunk).min(total);
+            for row in first..end {
+                let key = format!("key\"\\\nλ{row:08}");
+                let identity = u128::MAX - row as u128;
+                if row.is_multiple_of(3) {
+                    cp.vertices.insert(key, VId(identity));
+                } else {
+                    cp.edges.insert(key, EId(identity));
+                }
+            }
+            cp.next_row = end;
+            cp.committed_chunks += 1;
+            cp.frontier.0 += 1;
+            view(&cp, &base_marker, &source_hash, chunk).write_to(&mut old, limits).unwrap();
+            cost.old_images += 1;
+            cost.old_entries += end;
+            if due(cp.committed_chunks, end, total) {
+                view(&cp, &base_marker, &source_hash, chunk).write_to(&mut new, limits).unwrap();
+                cost.new_images += 1;
+                cost.new_entries += end;
+            }
+        }
+        let mut final_bytes = Vec::new();
+        view(&cp, &base_marker, &source_hash, chunk).write_to(&mut final_bytes, limits).unwrap();
+        let saved = super::super::Saved::decode(
+            std::str::from_utf8(&final_bytes).unwrap(), limits,
+        ).unwrap();
+        super::super::same_checkpoint(&saved.checkpoint, &cp).unwrap();
+        cost.old_bytes = old.0;
+        cost.new_bytes = new.0;
+        cost
+    }
+
+    #[test]
+    fn cadence_keeps_the_first_two_checkpoints_and_every_final_prefix() {
+        let checkpoints: Vec<_> = (1..=9)
+            .filter(|&chunk| due(chunk, (chunk * 11).min(97), 97))
+            .collect();
+        assert_eq!(checkpoints, [1, 2, 4, 8, 9]);
+        assert!(due(0, 0, 0));
+        assert!(!due(0, 0, 1));
+        // Completion need not coincide with a power of two or a full chunk.
+        assert!(due(3, 17, 17));
+        assert!(!due(3, 17, 18));
+    }
+
+    #[test]
+    fn cadence_is_independent_of_restart_state_and_cannot_overflow() {
+        // An origin checkpoint and reconciliation are forced by the driver.
+        // Resuming from a non-geometric prefix does not reset chunk ordinals.
+        let remaining: Vec<_> = (6..=10).filter(|&n| due(n, n * 7, 70)).collect();
+        assert_eq!(remaining, [8, 10]);
+        let high = 1usize << (usize::BITS - 1);
+        assert!(due(high, high, usize::MAX));
+        assert!(!due(high + 1, high + 1, usize::MAX));
+        assert!(!due(usize::MAX - 1, usize::MAX - 1, usize::MAX));
+        assert!(due(usize::MAX, usize::MAX, usize::MAX));
+    }
+
+    #[test]
+    fn real_v1_encoder_visits_less_than_three_source_prefixes() {
+        for total in [0, 1, 7, 31, 257, 1025] {
+            for chunk in [1, 2, 7, 32, 256] {
+                let cost = compare(total, chunk);
+                assert!(cost.new_bytes <= cost.old_bytes, "{total}/{chunk}: {cost:?}");
+                assert!(cost.new_images <= cost.old_images, "{cost:?}");
+                if total != 0 {
+                    assert!(cost.new_entries < 3 * total, "{total}/{chunk}: {cost:?}");
+                } else {
+                    assert_eq!(cost.new_entries, 0);
+                }
+                if total.div_ceil(chunk) <= 3 {
+                    assert_eq!(cost.new_bytes, cost.old_bytes, "small loads stay unchanged");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn real_v1_encoder_reduces_repeated_mapping_work_at_fixed_source_size() {
+        let cost = compare(1025, 1);
+        assert_eq!(cost.old_entries, 1025 * 1026 / 2);
+        assert_eq!(cost.new_entries, 3072);
+        assert_eq!((cost.old_images, cost.new_images), (1026, 13));
+        assert!(cost.new_bytes * 100 < cost.old_bytes, "{cost:?}");
+    }
+
+    #[test]
+    #[ignore = "same-invocation V1 encoder comparison; not native database latency"]
+    fn benchmark_checkpoint_mapping_serialization() {
+        for (rows, chunk) in [(24_000, 256), (240_000, 8192), (4096, 1)] {
+            let cost = compare(rows, chunk);
+            eprintln!("rows={rows} chunk={chunk} {cost:?}");
+            assert!(cost.new_bytes <= cost.old_bytes);
+            assert!(cost.new_entries < 3 * rows);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -3,6 +3,11 @@
 //! retained for only one bounded engine chunk (one row during reconciliation).
 //! Key maps and block digests still scale with the admitted input. This is not
 //! a claim that the database itself has an external-memory execution engine.
+//!
+//! Saved V1 checkpoints are lagging resume hints. Publish the initial/recovered
+//! prefix, then chunk counts 1, 2, 4, 8, ... and the complete source. Chronicle
+//! still commits every chunk. A resumed invocation may replay progress records
+//! already delivered; their sequence numbers identify the same durable chunks.
 mod checkpoint;
 mod input;
 use super::{Failure, Options, emit, hex, parameter};
@@ -229,9 +234,12 @@ pub(super) async fn run<V: Vfs + Clone>(
             }
         }
     }
-    let save = |cp: &BulkLoadCheckpoint| -> io::Result<()> {
+    let save = |cp: &BulkLoadCheckpoint, force: bool| -> io::Result<()> {
         if let Some(path) = &options.checkpoint {
             cx.checkpoint().map_err(io::Error::other)?;
+            if !force && !checkpoint::due(cp.committed_chunks, cp.next_row, source.records()) {
+                return Ok(());
+            }
             let saved = checkpoint::View {
                 checkpoint: cp,
                 base,
@@ -243,9 +251,10 @@ pub(super) async fn run<V: Vfs + Clone>(
         }
         Ok(())
     };
-    // Establish the import origin before its first commit. A crash in the very
-    // first commit can therefore be reconciled just like later chunks.
-    save(&checkpoint).map_err(Failure::io)?;
+    // Establish the import origin before its first commit, or the complete
+    // reconciled prefix before replaying progress. This write is unconditional:
+    // even a crash before the first scheduled image retains the original base.
+    save(&checkpoint, true).map_err(Failure::io)?;
     if let Some(saved) = &saved {
         // Recovery positively acknowledges history that the interrupted
         // process could not announce. Persist that recovered state first.
@@ -289,7 +298,9 @@ pub(super) async fn run<V: Vfs + Clone>(
     policy.resume = Some(checkpoint);
     let result = db
         .try_bulk_load_with_checkpoint(&cx, &contexts.commit(), rows, policy, crash, |cp| {
-            save(cp)?;
+            // A complete final image is due even at a non-geometric chunk.
+            // A save error still returns before this progress record or success.
+            save(cp, false)?;
             if robot {
                 writeln!(
                     out,
