@@ -1638,6 +1638,26 @@ impl<'a> Parser<'a> {
         self.scalar_let_value(operand, slots, at)
     }
 
+    /// [`Self::read_scalar_value`] for an operand of the scalar compiler, up
+    /// to its concatenation level (fgdb-klah2): `labels(a)` in `'L' IN
+    /// labels(a) AND ...` stops before the AND its enclosing expression owns.
+    fn read_operand_value(
+        &mut self,
+        inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        at: usize,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let base = core::mem::replace(&mut self.let_base, depth);
+        let parsed = match inputs {
+            Some(columns) => self.mutation_operand_with_lets(columns),
+            None => self.row_operand_with_lets(schema),
+        };
+        self.let_base = base;
+        let (operand, slots) = parsed.map_err(expression_error)?;
+        self.scalar_let_value(operand, slots, at)
+    }
+
     /// A parsed scalar operand and the let slots its composites took, as one
     /// value: the body inside a Let when there are slots.
     pub(super) fn scalar_let_value(
@@ -2349,11 +2369,17 @@ impl<'a> Parser<'a> {
             } else if bare {
                 let variable = self.any_variable()?;
                 ReadValueTemplate::Column(self.mutation_projection(columns, variable, None)?)
-            } else {
+            } else if operators {
                 self.read_scalar_value(Some(columns), schema, at, depth)?
+            } else {
+                // An operand of the scalar compiler stops before the
+                // comparisons and connectors it owns (fgdb-klah2).
+                self.read_operand_value(Some(columns), schema, at, depth)?
             }
-        } else {
+        } else if operators {
             self.read_scalar_value(None, schema, at, depth)?
+        } else {
+            self.read_operand_value(None, schema, at, depth)?
         };
         // A lone element is the element's whole value, not a scalar program,
         // so a list, vertex or path element passes through intact.

@@ -766,6 +766,32 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// An operand up to its concatenation level, with its own let slots: the
+    /// comparisons, IN and Boolean connectors after it belong to the
+    /// enclosing expression, as for `'L' IN labels(a) AND ...` (fgdb-klah2).
+    pub(super) fn mutation_operand_with_lets(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+    ) -> Result<(Operand, Vec<ReadValueTemplate>), GraphMutationTextError> {
+        self.checked_expression_scoped(
+            &mut ExpressionColumns::Graph(columns),
+            ExpressionBoundary::Operand,
+            true,
+        )
+    }
+
+    /// [`Self::mutation_operand_with_lets`] over a row scope.
+    pub(super) fn row_operand_with_lets(
+        &mut self,
+        columns: &[(Name<'a>, crate::GraphSetColumnType)],
+    ) -> Result<(Operand, Vec<ReadValueTemplate>), GraphMutationTextError> {
+        self.checked_expression_scoped(
+            &mut ExpressionColumns::Row(columns),
+            ExpressionBoundary::Operand,
+            true,
+        )
+    }
+
     /// A whole Boolean predicate over resolved leaves: a list-comprehension
     /// WHERE in the aggregate-resolution scope (fgdb-20foe).
     pub(super) fn resolved_predicate(
