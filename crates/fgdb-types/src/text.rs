@@ -77,10 +77,15 @@ impl NonBinaryTextBinding {
 }
 
 /// Binary UCS_BASIC or an exact content-addressed non-binary profile.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+///
+/// The non-binary profile is boxed: its four object IDs are 128 bytes, and an
+/// inline copy made every `CanonicalScalar` (and so every stored property,
+/// delta row and query value) 192 bytes wide although almost all text is
+/// UCS_BASIC. Equality, ordering, hashing and encodings are unchanged.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum TextBinding {
     UcsBasic,
-    NonBinary(NonBinaryTextBinding),
+    NonBinary(Box<NonBinaryTextBinding>),
 }
 
 /// Trusted capability for artifact-pinned non-binary collation.
@@ -221,7 +226,7 @@ impl CanonicalText {
         }
         Ok(Self {
             text,
-            binding: TextBinding::NonBinary(binding),
+            binding: TextBinding::NonBinary(Box::new(binding)),
             sort_key: Some(encoded_sort_key),
         })
     }
@@ -298,7 +303,7 @@ impl CanonicalText {
                 requested: capacity,
             })?;
         out.push(TEXT_ENCODING_VERSION);
-        match self.binding {
+        match &self.binding {
             TextBinding::UcsBasic => out.push(UCS_BASIC_TAG),
             TextBinding::NonBinary(binding) => {
                 out.push(NON_BINARY_TAG);
@@ -371,7 +376,7 @@ impl CanonicalText {
         check_ordered_scalar_payload(text.len(), Some(sort_key.len()))?;
         Ok(Self {
             text: copy_string(text)?,
-            binding: TextBinding::NonBinary(binding),
+            binding: TextBinding::NonBinary(Box::new(binding)),
             sort_key: Some(sort_key),
         })
     }

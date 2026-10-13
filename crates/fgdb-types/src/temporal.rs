@@ -107,7 +107,9 @@ impl TimestampZone {
 pub struct CanonicalTimestamp {
     instant_utc_nanos: i128,
     utc_offset_seconds: i32,
-    zone: Option<TimestampZone>,
+    /// Boxed: inline zone metadata (an identifier and a 32-byte tzdb ID) was
+    /// the second-widest `CanonicalScalar` variant, sizing every scalar.
+    zone: Option<Box<TimestampZone>>,
 }
 
 impl CanonicalTimestamp {
@@ -153,10 +155,10 @@ impl CanonicalTimestamp {
         Ok(Self {
             instant_utc_nanos,
             utc_offset_seconds,
-            zone: Some(TimestampZone {
+            zone: Some(Box::new(TimestampZone {
                 identifier: zone_identifier.into(),
                 tzdb_oid,
-            }),
+            })),
         })
     }
 
@@ -172,7 +174,7 @@ impl CanonicalTimestamp {
 
     /// Returns the zoned metadata, if this is not an offset-only timestamp.
     pub fn zone(&self) -> Option<&TimestampZone> {
-        self.zone.as_ref()
+        self.zone.as_deref()
     }
 
     /// Returns the local-wall nanosecond coordinate represented by the stored
