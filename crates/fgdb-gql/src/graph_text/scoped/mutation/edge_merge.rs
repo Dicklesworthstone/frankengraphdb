@@ -325,7 +325,7 @@ impl PreparedGraphEdgeMergeText {
         };
         Ok((
             Self {
-                input: EdgeMergeTextInput::Match(selection),
+                input: EdgeMergeTextInput::Match(Box::new(selection)),
                 relation: found,
                 source,
                 destination,

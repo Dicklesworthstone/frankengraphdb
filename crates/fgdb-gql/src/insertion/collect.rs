@@ -457,6 +457,7 @@ fn allocate_id<E, A, C>(
     Ok(id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn execute<E, A, C>(
     insertion: &PreparedGraphInsert,
     policy: GraphInsertPolicy,
