@@ -744,6 +744,12 @@ fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result
             {
                 return Err(plan_error(VertexScanBuildError { operator }));
             }
+            // A pattern comprehension (fgdb-7nwox) is not admitted under a
+            // capability: its collected elements would need their own
+            // admission before any value reads them.
+            GlaOperator::Collect { .. } | GlaOperator::CollectEnd { .. } => {
+                return Err(plan_error(VertexScanBuildError { operator }));
+            }
             _ => {}
         }
     }

@@ -3191,7 +3191,9 @@ fn bound_edge_hops(operators: &[fgdb_gql::algebra::GlaOperator]) -> Option<usize
             | GlaOperator::Probe { .. }
             | GlaOperator::ProbeEnd { .. }
             | GlaOperator::Optional { .. }
-            | GlaOperator::OptionalEnd { .. } => return None,
+            | GlaOperator::OptionalEnd { .. }
+            | GlaOperator::Collect { .. }
+            | GlaOperator::CollectEnd { .. } => return None,
             _ => {}
         }
     }

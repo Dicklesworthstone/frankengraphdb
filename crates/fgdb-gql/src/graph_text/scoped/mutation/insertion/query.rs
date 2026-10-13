@@ -351,6 +351,7 @@ impl<'a> ParsedReturn<'a> {
                         variable: name,
                         property: None,
                         path: Some(GraphPathFunction::Properties),
+                        collect: None,
                     },
                 )?
             } else {

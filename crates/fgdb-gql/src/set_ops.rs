@@ -90,7 +90,7 @@ impl From<&ValueProjection> for GraphSetColumnType {
             ValueProjection::Vertex { .. } => Self::Vertex,
             ValueProjection::Property { .. } | ValueProjection::EdgeProperty { .. } => Self::Stored,
             ValueProjection::Type { .. } => Self::Scalar,
-            ValueProjection::Labels { .. } => Self::List,
+            ValueProjection::Labels { .. } | ValueProjection::Collected { .. } => Self::List,
             ValueProjection::Properties { .. } | ValueProjection::EdgeProperties { .. } => {
                 Self::Any
             }

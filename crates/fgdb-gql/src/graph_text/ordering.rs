@@ -95,6 +95,7 @@ impl Parser<'_> {
                     variable,
                     property: None,
                     path: Some(function),
+                    collect: None,
                 });
                 if self.syntax.visible_columns.is_none() {
                     self.syntax.visible_columns = Some(width);
@@ -116,6 +117,7 @@ impl Parser<'_> {
                     variable: name,
                     property: Some(property),
                     path: None,
+                    collect: None,
                 });
                 // Multiple hidden keys must all sit in the hidden tail; the
                 // visible prefix is the width BEFORE the first appended cell.
@@ -153,6 +155,7 @@ impl Parser<'_> {
                     variable: name,
                     property: None,
                     path,
+                    collect: None,
                 });
                 if self.syntax.visible_columns.is_none() {
                     self.syntax.visible_columns = Some(width);

@@ -2010,6 +2010,7 @@ impl<'a> Parser<'a> {
                 variable,
                 property: None,
                 path: Some(function),
+                collect: None,
             },
         )?;
         let mut first = true;

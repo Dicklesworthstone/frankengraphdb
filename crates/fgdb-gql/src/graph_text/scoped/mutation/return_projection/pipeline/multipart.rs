@@ -670,6 +670,7 @@ impl<'a> Parser<'a> {
                 property: input.property,
                 path: input.path,
                 alias: input.variable,
+                collect: input.collect,
             })
             .collect();
         let projection = Some(

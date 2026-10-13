@@ -487,6 +487,7 @@ impl PreparedGraphEdgeUpsertText {
                 variable: projection.variable.text.to_owned(),
                 key: None,
                 path: None,
+                collect: None,
             })
             .collect::<Vec<_>>();
         let clauses = scopes.iter().map(BoundScope::clause).collect::<Vec<_>>();

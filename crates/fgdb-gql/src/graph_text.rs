@@ -604,6 +604,9 @@ struct Column<'a> {
     property: Option<Name<'a>>,
     path: Option<GraphPathFunction>,
     alias: Name<'a>,
+    /// The scope index of the pattern comprehension whose list this column
+    /// is (fgdb-7nwox).
+    collect: Option<usize>,
 }
 struct Syntax<'a> {
     match_mode: GraphMatchMode,
@@ -1419,6 +1422,7 @@ impl<'a> Parser<'a> {
                         property: None,
                         path: None,
                         alias: name,
+                        collect: None,
                     }),
             );
             let paths: Vec<_> = (self.syntax.path.iter())
@@ -1437,6 +1441,7 @@ impl<'a> Parser<'a> {
                     property: None,
                     path,
                     alias: name,
+                    collect: None,
                 });
             }
             let edges: Vec<_> = self
@@ -1455,6 +1460,7 @@ impl<'a> Parser<'a> {
                     property: None,
                     path: Some(GraphPathFunction::Edge),
                     alias: name,
+                    collect: None,
                 });
             }
         } else {
@@ -1543,6 +1549,7 @@ impl<'a> Parser<'a> {
                     property,
                     path,
                     alias,
+                    collect: None,
                 });
                 if !self.take(b',')? {
                     break;
@@ -1706,9 +1713,14 @@ struct BoundColumn {
     variable: String,
     key: Option<PropertyKeyId>,
     path: Option<GraphPathFunction>,
+    /// A pattern comprehension's list: its Collect clause (fgdb-7nwox).
+    collect: Option<usize>,
 }
 impl BoundColumn {
     fn declaration(&self) -> GraphColumn<'_> {
+        if let Some(clause) = self.collect {
+            return GraphColumn::collection(&self.alias, clause);
+        }
         if self.path == Some(GraphPathFunction::Edge)
             && let Some(key) = self.key
         {
@@ -1937,6 +1949,7 @@ impl PreparedGraphText {
                 } else {
                     column.path
                 },
+                collect: column.collect,
             });
         }
         // Compile the actual scope topology for structural validation. Do not
@@ -2048,6 +2061,16 @@ impl PreparedGraphText {
         }
         fn append_scope(bytes: &mut Vec<u8>, scope: &BoundScope) {
             bytes.push(scope.kind_tag());
+            // A Collect scope's element follows its tag (fgdb-7nwox).
+            if scope.kind_tag() == 4 {
+                match scope.element() {
+                    Some(element) => {
+                        bytes.push(1);
+                        append_name(bytes, element);
+                    }
+                    None => bytes.push(0),
+                }
+            }
             bytes.extend_from_slice(&scope.builder().canonical_template_bytes());
             bytes.extend_from_slice(&(scope.filters().len() as u64).to_be_bytes());
             for filter in scope.filters() {
@@ -2075,9 +2098,14 @@ impl PreparedGraphText {
                     bytes.extend_from_slice(&key.0.to_be_bytes());
                 }
             }
-            match column.path {
-                None => bytes.push(0),
-                Some(function) => {
+            // A collected list is its clause, in the path slot's tag 2.
+            match (column.path, column.collect) {
+                (_, Some(clause)) => {
+                    bytes.push(2);
+                    bytes.extend_from_slice(&(clause as u64).to_be_bytes());
+                }
+                (None, None) => bytes.push(0),
+                (Some(function), None) => {
                     bytes.push(1);
                     bytes.push(function as u8);
                 }

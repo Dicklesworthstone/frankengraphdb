@@ -365,6 +365,10 @@ impl<'a> GraphProjectionHead<'a> {
                 if input.property.is_some() {
                     return GraphSetColumnType::Stored;
                 }
+                // A pattern comprehension's collected list (fgdb-7nwox).
+                if input.collect.is_some() {
+                    return GraphSetColumnType::List;
+                }
                 match input.path {
                     Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
                     Some(GraphPathFunction::Length | GraphPathFunction::Type) => {
@@ -493,6 +497,7 @@ impl<'a> Parser<'a> {
                 variable: source,
                 property: None,
                 path: Some(GraphPathFunction::Properties),
+                collect: None,
             },
         )
     }
@@ -843,6 +848,7 @@ impl<'a> Parser<'a> {
                 property: source.property,
                 path: source.path,
                 alias: source.variable,
+                collect: source.collect,
             })
             .collect();
         let projection = Some(projection);
@@ -1304,6 +1310,7 @@ impl<'a> Parser<'a> {
                         property: source.property,
                         path: source.path,
                         alias,
+                        collect: source.collect,
                     }
                 })
                 .collect();
@@ -1330,6 +1337,7 @@ impl<'a> Parser<'a> {
                 property: source.property,
                 path: source.path,
                 alias: source.variable,
+                collect: source.collect,
             })
             .collect();
         let mut projection = Vec::new();
@@ -2007,6 +2015,18 @@ impl<'a> Parser<'a> {
         };
         let mut value = if scalar {
             self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth, false)?
+        } else if self.starts_pattern_comprehension()? {
+            // `[(n)-->(m) | m.p]` (fgdb-7nwox) reads the MATCH bindings of a
+            // graph projection; a row or aggregate scope has none to correlate.
+            let Some(inputs) = inputs.as_deref_mut().filter(|_| resolve.is_none()) else {
+                return Err(GraphSetTextError {
+                    offset: at,
+                    kind: GraphSetTextErrorKind::Expected(
+                        "a pattern comprehension over the MATCH bindings of a RETURN",
+                    ),
+                });
+            };
+            self.pattern_comprehension(inputs, schema, resolve, depth)?
         } else if comprehension {
             // openCypher `[x IN list WHERE p | e]` (fgdb-20foe).
             self.advance()?;
@@ -2375,6 +2395,7 @@ impl<'a> Parser<'a> {
                         variable,
                         property: None,
                         path: Some(GraphPathFunction::Properties),
+                        collect: None,
                     },
                 )?)
             } else if bare {
@@ -2803,6 +2824,136 @@ impl<'a> Parser<'a> {
         .find(|(name, _)| word.eq_ignore_ascii_case(name))
         .map(|(_, kind)| kind);
         Ok(kind)
+    }
+
+    /// Whether a pattern comprehension starts here (fgdb-7nwox): `[`, an
+    /// optional `name =`, then a node pattern a relationship follows. A bare
+    /// `--` must reach a node or an arrow head, so `[(x) - -1]` stays
+    /// arithmetic.
+    fn starts_pattern_comprehension(&self) -> Result<bool, GraphPatternTextError> {
+        if !self.is_punct(b'[') {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        let mut first = lexer.next()?;
+        if matches!(first.kind, TokenKind::Word(_)) {
+            if !matches!(lexer.next()?.kind, TokenKind::Punct(b'=')) {
+                return Ok(false);
+            }
+            first = lexer.next()?;
+        }
+        let mut after = lexer.clone();
+        if !crate::graph_text::scoped::pattern_predicate_follows(first.kind, &mut lexer)? {
+            return Ok(false);
+        }
+        skip_group(&mut after)?;
+        if matches!(
+            (after.next()?.kind, after.next()?.kind),
+            (TokenKind::Punct(b'-'), TokenKind::Punct(b'-'))
+        ) {
+            return Ok(matches!(after.next()?.kind, TokenKind::Punct(b'(' | b'>')));
+        }
+        Ok(true)
+    }
+
+    /// The local of Collect scope `scope` that the projection after `|`
+    /// reads: its path, or a vertex or relationship the pattern introduces.
+    /// None when it reads no local (each witness then collects NULL); more
+    /// than one refuses, since one element per witness carries one value.
+    fn comprehension_element(
+        &self,
+        scope: usize,
+    ) -> Result<Option<Name<'a>>, GraphPatternTextError> {
+        let body = &self.syntax.scopes[scope].body;
+        let local = |word: &str| {
+            !word.starts_with(Self::ANONYMOUS_PREFIX)
+                && !self.syntax.variables.iter().any(|outer| outer.text == word)
+                && (body.variables.iter().any(|name| name.text == word)
+                    || body
+                        .edges
+                        .iter()
+                        .any(|edge| edge.variable.is_some_and(|name| name.text == word))
+                    || body.filters.iter().any(
+                        |filter| matches!(filter, Filter::PathCapture(path) if path.text == word),
+                    ))
+        };
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut depth = 0_usize;
+        let mut after_dot = false;
+        let mut element: Option<Name<'a>> = None;
+        loop {
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b']') if depth == 0 => break,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word) if !after_dot && local(word) => {
+                    if element.is_some_and(|seen| seen.text != word) {
+                        return Err(error(
+                            token.at,
+                            GraphPatternTextErrorKind::Expected(
+                                "a pattern comprehension projection that reads one local of its pattern",
+                            ),
+                        ));
+                    }
+                    element = Some(Name {
+                        text: word,
+                        at: token.at,
+                    });
+                }
+                _ => {}
+            }
+            after_dot = matches!(token.kind, TokenKind::Punct(b'.'));
+            token = lexer.next()?;
+        }
+        Ok(element)
+    }
+
+    /// openCypher pattern comprehension (fgdb-7nwox) over the MATCH bindings
+    /// of a graph projection: `[p = (n)-->(m) WHERE pred | expr]`. The
+    /// pattern is a Collect scope, which gathers one element per witness, in
+    /// enumeration order, into a list column: the local `expr` reads, or NULL
+    /// when it reads none. The list then maps through `expr` with that
+    /// element bound to its name, so `[p = (n)-->() | p]` is the column
+    /// itself. An empty match is the empty list, never NULL.
+    fn pattern_comprehension(
+        &mut self,
+        inputs: &mut Vec<Projection<'a>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let at = self.current.at;
+        self.advance()?;
+        let scope = self.syntax.scopes.len();
+        self.scope(ScopeKind::Collect, ScopeForm::Comprehension)?;
+        let element = self.comprehension_element(scope)?;
+        self.syntax.scopes[scope].element = element;
+        let column = self.projection_slot(
+            inputs,
+            Projection {
+                variable: Name { text: "", at },
+                property: None,
+                path: None,
+                collect: Some(scope),
+            },
+        )?;
+        self.punct(b'|', "| and the projection of a pattern comprehension")?;
+        self.elements.push(element.map_or("", |name| name.text));
+        let map = self.read_recursive_value(Some(inputs), schema, resolve, depth + 1);
+        self.elements.pop();
+        let map = map?;
+        self.punct(b']', "]")?;
+        Ok(if matches!(map, ReadValueTemplate::Local(0)) {
+            ReadValueTemplate::Column(column)
+        } else {
+            ReadValueTemplate::Comprehension {
+                list: Box::new(ReadValueTemplate::Column(column)),
+                filter: None,
+                map: Some(Box::new(map)),
+            }
+        })
     }
 }
 

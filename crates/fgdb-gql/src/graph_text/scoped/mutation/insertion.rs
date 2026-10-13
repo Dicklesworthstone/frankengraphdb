@@ -1099,6 +1099,7 @@ impl PreparedGraphInsertText {
                     variable: projection.variable.text.to_owned(),
                     key,
                     path: projection.path,
+                    collect: None,
                 });
             }
             let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();

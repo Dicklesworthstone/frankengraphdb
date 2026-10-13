@@ -104,6 +104,8 @@ impl UnresolvedGraphText<'_> {
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
         use crate::GraphSetColumnType::{Scalar, Stored, Vertex};
         let column_type = |column: &Column<'_>| match column.path {
+            // A pattern comprehension's collected list (fgdb-7nwox).
+            _ if column.collect.is_some() => crate::GraphSetColumnType::List,
             Some(GraphPathFunction::Value) => crate::GraphSetColumnType::Path,
             Some(GraphPathFunction::Length) => Scalar,
             Some(GraphPathFunction::Nodes) => crate::GraphSetColumnType::Vertices,
@@ -298,6 +300,7 @@ impl UnresolvedGraphText<'_> {
                     variable: column.variable.text.to_owned(),
                     key,
                     path: column.path,
+                    collect: column.collect,
                 });
             }
             let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();

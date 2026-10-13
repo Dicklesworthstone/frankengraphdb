@@ -352,6 +352,7 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
                 |operator: &GlaOperator,
                  bindings: &[Option<fgdb_types::VId>],
                  _paths: &[Option<crate::algebra::GraphPath>],
+                 _collected: &[Option<crate::algebra::GraphValue>],
                  _projected: &mut ProjectedRows<crate::algebra::GraphValueRow>,
                  control: &mut C|
                  -> Result<bool, E> {

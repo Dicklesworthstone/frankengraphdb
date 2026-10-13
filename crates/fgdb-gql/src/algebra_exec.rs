@@ -603,6 +603,18 @@ enum Continuation<'i> {
         slots: u32,
         width: usize,
     },
+    /// A pattern comprehension's scope (fgdb-7nwox). Its exhaustion
+    /// publishes the collected list and continues after the scope.
+    Collect {
+        group: usize,
+        end: usize,
+        width: usize,
+    },
+    /// The list a Collect published, and the one it replaced.
+    Collected {
+        group: usize,
+        previous: Option<crate::algebra::GraphValue>,
+    },
 }
 
 struct Execution<'i, F, C, P, Row> {
@@ -622,6 +634,9 @@ struct Execution<'i, F, C, P, Row> {
     identified_index: Option<&'i IdentifiedIndex>,
     segments: [Option<GraphPath>; crate::algebra::MAX_PATTERN_BINDINGS],
     paths: [Option<GraphPath>; crate::algebra::MAX_PATTERN_IDENTITIES],
+    /// Each Collect group's witnesses so far, then its published list.
+    collecting: [Vec<crate::algebra::GraphValue>; crate::algebra::MAX_PATTERN_IDENTITIES],
+    collected: [Option<crate::algebra::GraphValue>; crate::algebra::MAX_PATTERN_IDENTITIES],
     continuations: Vec<Continuation<'i>>,
     terminal_closure: Option<join::TerminalClosure>,
 }
@@ -653,11 +668,16 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                     *yielded = false;
                 }
             }
-            Continuation::Bind { width } | Continuation::Optional { width, .. } => {
+            Continuation::Bind { width }
+            | Continuation::Optional { width, .. }
+            | Continuation::Collect { width, .. } => {
                 bindings.truncate(*width);
             }
             Continuation::CapturePath { capture, previous } => {
                 self.paths[*capture] = previous.take();
+            }
+            Continuation::Collected { group, previous } => {
+                self.collected[*group] = previous.take();
             }
             Continuation::Probe {
                 width, previous, ..
@@ -682,6 +702,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
             &GlaOperator,
             &[Option<VId>],
             &[Option<GraphPath>],
+            &[Option<crate::algebra::GraphValue>],
             &mut ProjectedRows<Row>,
             &mut C,
         ) -> Result<bool, E>,
@@ -710,6 +731,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
             &GlaOperator,
             &[Option<VId>],
             &[Option<GraphPath>],
+            &[Option<crate::algebra::GraphValue>],
             &mut ProjectedRows<Row>,
             &mut C,
         ) -> Result<bool, E>,
@@ -785,7 +807,22 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                             next = Some(end + 1);
                         }
                     }
-                    Continuation::Bind { .. } | Continuation::CapturePath { .. } => {}
+                    // The scope is exhausted: every witness is collected, in
+                    // enumeration order, and the occurrence continues past it
+                    // with its outer bindings (fgdb-7nwox).
+                    Continuation::Collect { group, end, .. } => {
+                        (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                        let list = crate::algebra::GraphValue::List(
+                            core::mem::take(&mut self.collecting[group]).into_boxed_slice(),
+                        );
+                        let previous = self.collected[group].replace(list);
+                        self.continuations
+                            .push(Continuation::Collected { group, previous });
+                        next = Some(end + 1);
+                    }
+                    Continuation::Bind { .. }
+                    | Continuation::CapturePath { .. }
+                    | Continuation::Collected { .. } => {}
                 }
                 continue;
             };
@@ -806,6 +843,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         &operators[closure.projection],
                         bindings,
                         &self.paths,
+                        &self.collected,
                         &mut self.projected,
                         &mut self.control,
                     )?;
@@ -854,6 +892,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         operator,
                         bindings,
                         &self.paths,
+                        &self.collected,
                         &mut self.projected,
                         &mut self.control,
                     )? {
@@ -906,6 +945,7 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         operator,
                         bindings,
                         &self.paths,
+                        &self.collected,
                         &mut self.projected,
                         &mut self.control,
                     )?;
@@ -1055,6 +1095,46 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         width: bindings.len(),
                     });
                 }
+                GlaOperator::Collect { group, end, .. } => {
+                    let group = *group as usize;
+                    self.collecting[group].clear();
+                    self.continuations.push(Continuation::Collect {
+                        group,
+                        end: *end as usize,
+                        width: bindings.len(),
+                    });
+                }
+                // One witness: its element (a NULL for none), then the next.
+                GlaOperator::CollectEnd { group, value } => {
+                    use crate::algebra::{GraphPathFunction, GraphValue, ValueProjection};
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                    let null = || GraphValue::Scalar(fgdb_types::CanonicalScalar::Null);
+                    let element = match value {
+                        Some(ValueProjection::Vertex { slot }) => bindings
+                            .get(slot.ordinal() as usize)
+                            .copied()
+                            .flatten()
+                            .map_or_else(null, GraphValue::Vertex),
+                        Some(ValueProjection::Path { capture, function }) => {
+                            match self.paths[*capture as usize].as_ref() {
+                                Some(path) if *function == GraphPathFunction::Edge => path
+                                    .steps()
+                                    .first()
+                                    .map_or_else(null, |(edge, _)| GraphValue::Edge(*edge)),
+                                Some(path) => {
+                                    for _ in 0..=path.len() {
+                                        (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                                    }
+                                    GraphValue::Path(path.clone())
+                                }
+                                None => null(),
+                            }
+                        }
+                        _ => null(),
+                    };
+                    self.collecting[*group as usize].push(element);
+                    next = None;
+                }
                 GlaOperator::BindVertex { source } | GlaOperator::BindOuterVertex { source } => {
                     let value = bindings[source.ordinal() as usize];
                     if value.is_none() && matches!(operator, GlaOperator::BindVertex { .. }) {
@@ -1180,6 +1260,7 @@ impl<Row: GlaIdentityOutput> GlaPlan<Row> {
                 |operator: &GlaOperator,
                  bindings: &[Option<VId>],
                  _paths: &[Option<GraphPath>],
+                 _collected: &[Option<crate::algebra::GraphValue>],
                  projected: &mut ProjectedRows<Row>,
                  control: &mut _|
                  -> Result<bool, E> {
@@ -1230,6 +1311,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 |operator: &GlaOperator,
                  bindings: &[Option<VId>],
                  paths: &[Option<GraphPath>],
+                 collected: &[Option<crate::algebra::GraphValue>],
                  projected: &mut ProjectedRows<Row>,
                  control: &mut _|
                  -> Result<bool, E> {
@@ -1243,6 +1325,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                         operator,
                         bindings,
                         paths,
+                        collected,
                         projected,
                         &mut property,
                         control,
@@ -1331,6 +1414,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 |operator: &GlaOperator,
                  bindings: &[Option<VId>],
                  paths: &[Option<GraphPath>],
+                 collected: &[Option<crate::algebra::GraphValue>],
                  projected: &mut ProjectedRows<Row>,
                  control: &mut _|
                  -> Result<bool, E> {
@@ -1351,6 +1435,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                         operator,
                         bindings,
                         paths,
+                        collected,
                         projected,
                         &mut property,
                         &mut edge_property,
@@ -1392,6 +1477,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 |operator: &GlaOperator,
                  bindings: &[Option<VId>],
                  paths: &[Option<GraphPath>],
+                 collected: &[Option<crate::algebra::GraphValue>],
                  projected: &mut ProjectedRows<Row>,
                  control: &mut _|
                  -> Result<bool, E> {
@@ -1405,6 +1491,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                         operator,
                         bindings,
                         paths,
+                        collected,
                         projected,
                         &mut property,
                         control,
@@ -1433,6 +1520,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             &GlaOperator,
             &[Option<VId>],
             &[Option<GraphPath>],
+            &[Option<crate::algebra::GraphValue>],
             &mut ProjectedRows<Row>,
             &mut C,
         ) -> Result<bool, E>,
@@ -1465,6 +1553,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             &GlaOperator,
             &[Option<VId>],
             &[Option<GraphPath>],
+            &[Option<crate::algebra::GraphValue>],
             &mut ProjectedRows<Row>,
             &mut C,
         ) -> Result<bool, E>,
@@ -1501,6 +1590,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             identified_index: identified_index.as_ref(),
             segments: core::array::from_fn(|_| None),
             paths: core::array::from_fn(|_| None),
+            collecting: core::array::from_fn(|_| Vec::new()),
+            collected: core::array::from_fn(|_| None),
             continuations: Vec::with_capacity(operators.len()),
             terminal_closure: if terminal && identified_index.is_none() {
                 join::TerminalClosure::compile(operators)

@@ -21,6 +21,8 @@ enum ScopeKind {
     Optional,
     Exists,
     NotExists,
+    /// A pattern comprehension's body (fgdb-7nwox).
+    Collect,
 }
 
 impl ScopeKind {
@@ -41,6 +43,8 @@ struct PatternSyntax<'a> {
 pub(super) struct ScopeSyntax<'a> {
     kind: ScopeKind,
     body: PatternSyntax<'a>,
+    /// A Collect scope's element: the local each witness contributes.
+    element: Option<Name<'a>>,
 }
 
 #[derive(Clone)]
@@ -48,6 +52,7 @@ pub(super) struct BoundScope {
     kind: ScopeKind,
     builder: GraphPatternBuilder,
     filters: Vec<BoundFilter>,
+    element: Option<String>,
 }
 
 impl BoundScope {
@@ -57,17 +62,24 @@ impl BoundScope {
             ScopeKind::Optional => GraphMatchClause::optional(&self.builder),
             ScopeKind::Exists => GraphMatchClause::exists(&self.builder),
             ScopeKind::NotExists => GraphMatchClause::not_exists(&self.builder),
+            ScopeKind::Collect => GraphMatchClause::collect(&self.builder, self.element.as_deref()),
         }
     }
     /// Facade transcript tag for this scope kind, matching the resolved
-    /// lowering distinction: optional extends nulls, exists/not-exists probe.
+    /// lowering distinction: optional extends nulls, exists/not-exists probe,
+    /// collect gathers a list.
     pub(super) fn kind_tag(&self) -> u8 {
         match self.kind {
             ScopeKind::Required => 0,
             ScopeKind::Optional => 1,
             ScopeKind::Exists => 2,
             ScopeKind::NotExists => 3,
+            ScopeKind::Collect => 4,
         }
+    }
+    /// A Collect scope's element name, for its transcript.
+    pub(super) fn element(&self) -> Option<&str> {
+        self.element.as_deref()
     }
     pub(super) fn builder(&self) -> &GraphPatternBuilder {
         &self.builder
@@ -85,6 +97,7 @@ impl BoundScope {
             kind: self.kind,
             builder: bind_builder(&self.builder, &self.filters, values, at)?,
             filters: Vec::new(),
+            element: self.element.clone(),
         })
     }
 }
@@ -121,6 +134,7 @@ impl<'a> ScopeSyntax<'a> {
             kind: self.kind,
             builder,
             filters,
+            element: self.element.map(|name| name.text.to_owned()),
         })
     }
 }
@@ -1224,6 +1238,9 @@ impl<'a> Parser<'a> {
         // Only positive fields change scope. The lexer, global parameters,
         // original offsets, caps and previously completed clauses never reset.
         let clause = form == ScopeForm::Clause;
+        // A pattern comprehension's body (fgdb-7nwox): a pattern that may
+        // name its path and introduce locals, and a WHERE, all private.
+        let comprehension = form == ScopeForm::Comprehension;
         let parsed = (|| {
             if clause {
                 // openCypher `EXISTS { (n)-->() }` leaves out the MATCH of
@@ -1236,7 +1253,9 @@ impl<'a> Parser<'a> {
             // A required or OPTIONAL clause may name its path, exported like
             // its vertices (openCypher Match7, OPTIONAL MATCH p = ...). An
             // existential body's locals never escape, so it names none.
-            let path = if clause && kind.exports_bindings() && self.starts_path_binding()? {
+            let path = if (comprehension || (clause && kind.exports_bindings()))
+                && self.starts_path_binding()?
+            {
                 let path = self.name()?;
                 self.punct(b'=', "=")?;
                 Some(path)
@@ -1255,7 +1274,7 @@ impl<'a> Parser<'a> {
             if let Some(path) = path {
                 self.syntax.filters.push(Filter::PathCapture(path));
             }
-            if !clause {
+            if !clause && !comprehension {
                 // An openCypher pattern predicate tests the bindings it names
                 // and cannot introduce one (UndefinedVariable). Only the
                 // EXISTS { MATCH ... } spelling declares existential locals.
@@ -1273,7 +1292,7 @@ impl<'a> Parser<'a> {
                 }
             }
             let matched_variables = self.syntax.variables.len();
-            if clause && self.take_word("WHERE")? {
+            if (clause || comprehension) && self.take_word("WHERE")? {
                 // The positive pattern is complete. Temporarily expose the
                 // containing symbol table to the SAME predicate parser, without
                 // inserting nodes or altering its name/parameter/token grammar.
@@ -1322,7 +1341,10 @@ impl<'a> Parser<'a> {
                     GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateVariable),
                 ));
             }
-            self.syntax.scope_paths.push(path);
+            // A comprehension's path is its own local, never exported.
+            if !comprehension {
+                self.syntax.scope_paths.push(path);
+            }
         }
         // Captures already name visible values. Only actual new matched names
         // are exported; existential locals never enter the containing table.
@@ -1343,7 +1365,11 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        self.syntax.scopes.push(ScopeSyntax { kind, body });
+        self.syntax.scopes.push(ScopeSyntax {
+            kind,
+            body,
+            element: None,
+        });
         Ok(())
     }
 }
@@ -1352,6 +1378,8 @@ impl<'a> Parser<'a> {
 enum ScopeForm {
     Clause,
     Pattern,
+    /// A pattern comprehension's body (fgdb-7nwox).
+    Comprehension,
 }
 
 /// After an `EXISTS` word: `{` (a subquery), or `(` whose content is a
