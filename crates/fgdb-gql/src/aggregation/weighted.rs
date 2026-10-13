@@ -16,6 +16,7 @@
 //! bounded factorization law, not general FreeJoin, a COLT, or spill storage.
 
 mod chain;
+mod topology;
 mod tree;
 
 use super::*;
@@ -1235,44 +1236,13 @@ where
     }
 
     let filters = endpoint_filters(plan.operators(), &accesses);
-    // Vertex predicate results, cached per (predicate list, vertex).
-    let mut tested = BTreeMap::<(bool, RelationId, VId), bool>::new();
-    let mut topology: BTreeMap<TopologyKey, Multiplicity> = BTreeMap::new();
-    for (source, relation, destination) in edges {
-        control(GlaExecutionEvent::Work)?;
-        if let Some((from, to)) = filters.as_ref().and_then(|filters| filters.get(&relation)) {
-            let mut passes = |at_source: bool, vertex: VId, predicates: &[VertexPredicate]| {
-                if predicates.is_empty() {
-                    return Ok(true);
-                }
-                if let Some(&known) = tested.get(&(at_source, relation, vertex)) {
-                    return Ok(known);
-                }
-                let result = test_vertex(vertex, predicates)?;
-                control(GlaExecutionEvent::ScratchEntry)?;
-                tested.insert((at_source, relation, vertex), result);
-                Ok::<_, VisitError<E, C>>(result)
-            };
-            if !passes(true, source, from)? || !passes(false, destination, to)? {
-                continue;
-            }
-        }
-        let key = normalized(
-            source,
-            relation,
-            destination,
-            undirected.contains(&relation),
-        );
-        if let Some(count) = topology.get_mut(&key) {
-            *count = count.increment();
-        } else {
-            // One key/weight entry, before retaining the record. The original
-            // snapshot-record allowance was already checked against the full
-            // source, not this smaller derived relation.
-            control(GlaExecutionEvent::ScratchEntry)?;
-            topology.insert(key, Multiplicity::ONE);
-        }
-    }
+    let topology = topology::weigh(
+        edges,
+        &undirected,
+        filters.as_ref(),
+        &mut test_vertex,
+        &mut control,
+    )?;
 
     // Properties and positive predicates depend on vertex bindings, not edge
     // occurrences. Keep the original plan and ALL slots whenever either is
