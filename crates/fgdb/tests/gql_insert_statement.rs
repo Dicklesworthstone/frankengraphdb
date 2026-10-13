@@ -906,12 +906,12 @@ fn vertex_merge_steps_bind_or_create_per_row() {
             .filter(|vertex| vertex.props == vec![(P, CanonicalScalar::Int(8).into())])
             .count();
         assert_eq!(eights, 2);
-        // ON/SET on a chained MERGE, RETURN after it, and a NULL map value
-        // refuse and publish nothing.
+        // ON/SET on a chained MERGE, a NULL map value and a MERGE of a row
+        // vertex refuse and publish nothing. (RETURN after chained MERGEs is
+        // vertex_merge_steps_run_over_a_leading_unwind_and_return_rows.)
         let frontier = db.frontier().unwrap();
         for refused in [
             "CREATE (a) MERGE (b:Copy) ON CREATE SET b.p = 1",
-            "MERGE (a:Person) MERGE (b:Copy) RETURN b",
             "CREATE (a:Person) MERGE (b:Copy {p: a.q}) CREATE (a)-[:R]->(b)",
             "CREATE (a:Person) WITH a MERGE (a) CREATE (b)",
         ] {
