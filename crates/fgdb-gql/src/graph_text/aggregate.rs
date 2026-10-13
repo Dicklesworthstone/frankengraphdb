@@ -563,6 +563,7 @@ impl PreparedGraphAggregateText {
                 property: group.property,
                 path: group.path,
                 alias,
+                collect: None,
             });
         }
         let keys = (0..groups.len()).collect();
@@ -597,6 +598,7 @@ impl PreparedGraphAggregateText {
                         property: expression.property,
                         path: expression.path,
                         alias: item.alias,
+                        collect: None,
                     });
                     at
                 });
@@ -656,6 +658,7 @@ impl PreparedGraphAggregateText {
                     property: expression.property,
                     path: expression.path,
                     alias,
+                    collect: None,
                 });
                 at
             });
@@ -714,6 +717,7 @@ impl PreparedGraphAggregateText {
                         at: variable.at,
                     },
                     path,
+                    collect: None,
                 })
                 .collect();
             Some(projection)
@@ -730,6 +734,7 @@ impl PreparedGraphAggregateText {
                     text: "__count_source",
                     at: variable.at,
                 },
+                collect: None,
             });
         }
         let offset = core::mem::replace(

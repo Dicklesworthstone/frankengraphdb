@@ -383,6 +383,22 @@ pub enum GlaOperator {
     OptionalEnd {
         group: u32,
     },
+    /// A pattern comprehension (fgdb-7nwox): evaluate the enclosed scope
+    /// once per outer occurrence and collect one value per complete witness,
+    /// in enumeration order, into the list ValueProjection::Collected reads.
+    /// `slots` is the inner frame width. The scope exports no binding, and
+    /// no witness collects the empty list, never NULL.
+    Collect {
+        group: u32,
+        end: u32,
+        slots: u32,
+    },
+    /// One complete witness of the Collect scope: append the element `value`
+    /// projects (a vertex, a relationship or a path), or NULL for none.
+    CollectEnd {
+        group: u32,
+        value: Option<ValueProjection>,
+    },
     /// Copy a correlated identity into the inner scope, without scanning rows.
     BindVertex {
         source: BindingSlot,
@@ -705,7 +721,9 @@ impl<Row> GlaPlan<Row> {
             // targets aligned with the one newly inserted instruction.
             for op in &mut operators {
                 match op {
-                    GlaOperator::Probe { end, .. } | GlaOperator::Optional { end, .. } => *end += 1,
+                    GlaOperator::Probe { end, .. }
+                    | GlaOperator::Optional { end, .. }
+                    | GlaOperator::Collect { end, .. } => *end += 1,
                     _ => {}
                 }
             }
@@ -914,7 +932,9 @@ impl<Row> GlaPlan<Row> {
                     slots.insert(left.ordinal());
                     slots.insert(right.ordinal());
                 }
-                GlaOperator::SelectBoolean { .. } => return None,
+                // A collected element may be read by the value language
+                // later (fgdb-7nwox), as a path projection may.
+                GlaOperator::SelectBoolean { .. } | GlaOperator::CollectEnd { .. } => return None,
                 GlaOperator::ProjectValues { columns } => {
                     for column in columns {
                         match column {
@@ -923,7 +943,9 @@ impl<Row> GlaPlan<Row> {
                             | ValueProjection::Labels { slot } => {
                                 slots.insert(slot.ordinal());
                             }
-                            ValueProjection::Path { .. } => return None,
+                            ValueProjection::Path { .. } | ValueProjection::Collected { .. } => {
+                                return None;
+                            }
                             ValueProjection::Vertex { .. }
                             | ValueProjection::EdgeProperty { .. }
                             | ValueProjection::EdgeProperties { .. }
@@ -1103,43 +1125,7 @@ impl<Row> GlaPlan<Row> {
                     bytes.push(12);
                     bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
                     for column in columns {
-                        match column {
-                            ValueProjection::Vertex { slot } => {
-                                bytes.push(0);
-                                bytes.extend_from_slice(&slot.0.to_be_bytes());
-                            }
-                            ValueProjection::Property { slot, key } => {
-                                bytes.push(1);
-                                bytes.extend_from_slice(&slot.0.to_be_bytes());
-                                bytes.extend_from_slice(&key.0.to_be_bytes());
-                            }
-                            ValueProjection::EdgeProperty { capture, key } => {
-                                bytes.push(3);
-                                bytes.extend_from_slice(&capture.to_be_bytes());
-                                bytes.extend_from_slice(&key.0.to_be_bytes());
-                            }
-                            ValueProjection::Labels { slot } => {
-                                bytes.push(4);
-                                bytes.extend_from_slice(&slot.0.to_be_bytes());
-                            }
-                            ValueProjection::Type { capture } => {
-                                bytes.push(5);
-                                bytes.extend_from_slice(&capture.to_be_bytes());
-                            }
-                            ValueProjection::Properties { slot } => {
-                                bytes.push(6);
-                                bytes.extend_from_slice(&slot.0.to_be_bytes());
-                            }
-                            ValueProjection::EdgeProperties { capture } => {
-                                bytes.push(7);
-                                bytes.extend_from_slice(&capture.to_be_bytes());
-                            }
-                            ValueProjection::Path { capture, function } => {
-                                bytes.push(2);
-                                bytes.extend_from_slice(&capture.to_be_bytes());
-                                bytes.push(*function as u8);
-                            }
-                        }
+                        append_value_projection_transcript(column, &mut bytes);
                     }
                 }
                 GlaOperator::OrderByValues => bytes.push(13),
@@ -1183,6 +1169,20 @@ impl<Row> GlaPlan<Row> {
                 GlaOperator::OptionalEnd { group } => {
                     bytes.push(18);
                     bytes.extend_from_slice(&group.to_be_bytes());
+                }
+                GlaOperator::Collect { group, end, slots } => {
+                    bytes.push(37);
+                    bytes.extend_from_slice(&group.to_be_bytes());
+                    bytes.extend_from_slice(&end.to_be_bytes());
+                    bytes.extend_from_slice(&slots.to_be_bytes());
+                }
+                GlaOperator::CollectEnd { group, value } => {
+                    bytes.push(38);
+                    bytes.extend_from_slice(&group.to_be_bytes());
+                    bytes.push(u8::from(value.is_some()));
+                    if let Some(value) = value {
+                        append_value_projection_transcript(value, &mut bytes);
+                    }
                 }
                 GlaOperator::CompareProperties {
                     left,
@@ -1252,6 +1252,51 @@ impl<Row> GlaPlan<Row> {
             append_property_catalog_transcript(self.reverse_catalog.as_deref(), &mut bytes);
         }
         bytes
+    }
+}
+
+/// One projected column's bytes in the plan transcript.
+fn append_value_projection_transcript(column: &ValueProjection, bytes: &mut Vec<u8>) {
+    match column {
+        ValueProjection::Vertex { slot } => {
+            bytes.push(0);
+            bytes.extend_from_slice(&slot.0.to_be_bytes());
+        }
+        ValueProjection::Property { slot, key } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&slot.0.to_be_bytes());
+            bytes.extend_from_slice(&key.0.to_be_bytes());
+        }
+        ValueProjection::EdgeProperty { capture, key } => {
+            bytes.push(3);
+            bytes.extend_from_slice(&capture.to_be_bytes());
+            bytes.extend_from_slice(&key.0.to_be_bytes());
+        }
+        ValueProjection::Labels { slot } => {
+            bytes.push(4);
+            bytes.extend_from_slice(&slot.0.to_be_bytes());
+        }
+        ValueProjection::Type { capture } => {
+            bytes.push(5);
+            bytes.extend_from_slice(&capture.to_be_bytes());
+        }
+        ValueProjection::Properties { slot } => {
+            bytes.push(6);
+            bytes.extend_from_slice(&slot.0.to_be_bytes());
+        }
+        ValueProjection::EdgeProperties { capture } => {
+            bytes.push(7);
+            bytes.extend_from_slice(&capture.to_be_bytes());
+        }
+        ValueProjection::Path { capture, function } => {
+            bytes.push(2);
+            bytes.extend_from_slice(&capture.to_be_bytes());
+            bytes.push(*function as u8);
+        }
+        ValueProjection::Collected { group } => {
+            bytes.push(8);
+            bytes.extend_from_slice(&group.to_be_bytes());
+        }
     }
 }
 

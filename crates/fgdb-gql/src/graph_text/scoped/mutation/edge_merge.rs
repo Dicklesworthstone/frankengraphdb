@@ -302,6 +302,7 @@ impl PreparedGraphEdgeMergeText {
                 variable: projection.variable.text.to_owned(),
                 key,
                 path: projection.path,
+                collect: None,
             });
         }
         drop(symbol);

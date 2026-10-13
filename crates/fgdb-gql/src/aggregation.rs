@@ -1134,7 +1134,8 @@ impl PreparedGraphAggregate {
                         | ValueProjection::Properties { .. }
                         | ValueProjection::EdgeProperties { .. }
                         | ValueProjection::Labels { .. }
-                        | ValueProjection::Type { .. } => {
+                        | ValueProjection::Type { .. }
+                        | ValueProjection::Collected { .. } => {
                             return Err(GqlQueryError::IdentifiedEdgesRequired);
                         }
                     };

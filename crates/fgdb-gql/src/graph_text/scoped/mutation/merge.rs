@@ -621,6 +621,7 @@ fn merge_template(
         variable: variable.text.to_owned(),
         key: None,
         path: None,
+        collect: None,
     }];
     let projected = columns
         .iter()

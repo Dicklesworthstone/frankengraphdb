@@ -153,6 +153,7 @@ impl PreparedGraphDeleteText {
                 variable: projection.variable.text.to_owned(),
                 key: None,
                 path: projection.path,
+                collect: None,
             })
             .collect::<Vec<_>>();
         let clauses = scopes.iter().map(BoundScope::clause).collect::<Vec<_>>();

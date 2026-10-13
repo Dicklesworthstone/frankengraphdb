@@ -32,6 +32,9 @@ struct Projection<'a> {
     variable: Name<'a>,
     property: Option<Name<'a>>,
     path: Option<GraphPathFunction>,
+    /// The scope index of the pattern comprehension whose list this input
+    /// is (fgdb-7nwox); it then reads no variable.
+    collect: Option<usize>,
 }
 enum Operand {
     Column(usize),
@@ -267,6 +270,7 @@ impl<'a> Parser<'a> {
                 variable,
                 property,
                 path,
+                collect: None,
             },
         )
     }
@@ -283,6 +287,7 @@ impl<'a> Parser<'a> {
             column.variable.text == projection.variable.text
                 && column.property.map(|key| key.text) == projection.property.map(|key| key.text)
                 && column.path == projection.path
+                && column.collect == projection.collect
         }) {
             return Ok(at);
         }
@@ -354,6 +359,7 @@ impl<'a> Parser<'a> {
                         variable,
                         property: None,
                         path: Some(function),
+                        collect: None,
                     },
                 )
                 .map(Operand::Column);
@@ -671,6 +677,7 @@ impl<'a> Parser<'a> {
                 variable,
                 property: None,
                 path: Some(GraphPathFunction::Properties),
+                collect: None,
             },
         )?;
         let mut keep: Vec<Name<'a>> = Vec::new();
@@ -1012,6 +1019,7 @@ impl PreparedGraphMutationText {
                 variable: projection.variable.text.to_owned(),
                 key,
                 path: projection.path,
+                collect: None,
             });
         }
         let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
@@ -1342,6 +1350,7 @@ mod graph_function_tests {
                             variable: path,
                             property: None,
                             path: Some(function),
+                            collect: None,
                         },
                     )
                     .unwrap(),

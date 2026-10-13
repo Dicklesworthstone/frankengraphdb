@@ -414,12 +414,20 @@ pub enum GraphIntegerErrorKind {
     /// An argument outside its function's domain: a percentile outside
     /// [0, 1] (openCypher ArgumentError NumberOutOfRange, fgdb-qbaex).
     NumberOutOfRange,
+    /// A pattern comprehension's list reached an executor that does not
+    /// collect it (fgdb-7nwox).
+    CollectionSourceRequired,
+    /// A pattern comprehension collected more than one query value holds
+    /// (`GraphValue::MAX_LIST_NODES`, `MAX_LIST_DEPTH`). It is never
+    /// truncated.
+    CollectionBounds,
 }
 impl GraphIntegerErrorKind {
     /// A data exception that every statement family raises, a WHERE predicate
     /// included: division by zero, numeric overflow (GQL class 22), a stored
-    /// value too large to read whole or read by a scalar-only operator, and
-    /// an argument outside its function's domain. The other kinds are a
+    /// value or a collected list too large to read whole, a stored value read
+    /// by a scalar-only operator, and an argument outside its function's
+    /// domain. The other kinds are a
     /// value that does not fit its operator. A Boolean predicate reads those
     /// as UNKNOWN, so a property holding mixed types never escapes as a
     /// query error.
@@ -432,6 +440,7 @@ impl GraphIntegerErrorKind {
                 | Self::StoredValueBounds
                 | Self::StoredCollection
                 | Self::NumberOutOfRange
+                | Self::CollectionBounds
         )
     }
 }

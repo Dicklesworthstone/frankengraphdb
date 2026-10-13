@@ -270,10 +270,12 @@ mod sealed {
             ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E>;
+        /// `collected` holds each Collect group's list (fgdb-7nwox).
         fn collect_properties_with_paths<'a, E: From<crate::GraphIntegerError>>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             _paths: &[Option<super::super::GraphPath>],
+            _collected: &[Option<crate::algebra::GraphValue>],
             projected: &mut ProjectedRows<Self>,
             property: &mut impl FnMut(
                 VId,
@@ -303,7 +305,13 @@ mod sealed {
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             Self::collect_properties_with_paths(
-                operator, bindings, paths, projected, property, control,
+                operator,
+                bindings,
+                paths,
+                &[],
+                projected,
+                property,
+                control,
             )
         }
 
@@ -312,6 +320,7 @@ mod sealed {
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
+            _collected: &[Option<crate::algebra::GraphValue>],
             projected: &mut ProjectedRows<Self>,
             property: &mut impl FnMut(
                 VId,
@@ -447,6 +456,7 @@ mod sealed {
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
+            collected: &[Option<crate::algebra::GraphValue>],
             projected: &mut ProjectedRows<Self>,
             property: &mut impl FnMut(
                 VId,
@@ -472,6 +482,7 @@ mod sealed {
                 columns,
                 bindings,
                 paths,
+                collected,
                 projected,
                 property,
                 edge_property,
@@ -512,6 +523,7 @@ mod sealed {
                 columns,
                 bindings,
                 paths,
+                &[],
                 projected,
                 property,
                 edge_property,
@@ -524,6 +536,7 @@ mod sealed {
             operator: &GlaOperator,
             bindings: &[Option<VId>],
             paths: &[Option<super::super::GraphPath>],
+            collected: &[Option<crate::algebra::GraphValue>],
             projected: &mut ProjectedRows<Self>,
             property: &mut impl FnMut(
                 VId,
@@ -535,7 +548,7 @@ mod sealed {
                 unreachable!("the private value-plan constructor owns its projection shape")
             };
             super::super::values::collect_values_with_paths(
-                columns, bindings, paths, projected, property, control,
+                columns, bindings, paths, collected, projected, property, control,
             )
         }
 

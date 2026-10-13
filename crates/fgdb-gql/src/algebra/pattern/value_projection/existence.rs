@@ -230,8 +230,15 @@ impl GraphPatternBuilder {
             let start = operators.len();
             let optional = clause.kind == GraphMatchKind::Optional;
             let required = clause.kind == GraphMatchKind::Required;
+            let collect = clause.kind == GraphMatchKind::Collect;
             if optional {
                 operators.push(GlaOperator::Optional {
+                    group: group as u32,
+                    end: 0,
+                    slots: 0,
+                });
+            } else if collect {
+                operators.push(GlaOperator::Collect {
                     group: group as u32,
                     end: 0,
                     slots: 0,
@@ -429,6 +436,41 @@ impl GraphPatternBuilder {
                     end,
                     slots: available,
                 };
+            } else if collect {
+                // Each witness contributes its local vertex, relationship or
+                // path, at the slot or capture this clause gave it.
+                let value = clause
+                    .element
+                    .map(|name| {
+                        if let Some(at) = inner.variables.iter().position(|v| v.name == name) {
+                            Ok(ValueProjection::Vertex {
+                                slot: map(inner_slots[at]),
+                            })
+                        } else if let Some(capture) =
+                            inner.path_captures.iter().position(|c| c.name == name)
+                        {
+                            Ok(ValueProjection::Path {
+                                capture: map_capture(capture as u32),
+                                function: if inner.path_captures[capture].edge_identity {
+                                    GraphPathFunction::Edge
+                                } else {
+                                    GraphPathFunction::Value
+                                },
+                            })
+                        } else {
+                            Err(PatternBuildError::UnknownVariable)
+                        }
+                    })
+                    .transpose()?;
+                operators.push(GlaOperator::CollectEnd {
+                    group: group as u32,
+                    value,
+                });
+                operators[start] = GlaOperator::Collect {
+                    group: group as u32,
+                    end,
+                    slots: available,
+                };
             } else if !required {
                 operators.push(GlaOperator::ProbeEnd {
                     group: group as u32,
@@ -461,11 +503,21 @@ impl GraphPatternBuilder {
                 width += available;
             }
         }
+        // A collection column reads its own Collect clause's list.
+        if columns.iter().any(|column| {
+            matches!(column, GraphColumn::Collection { clause, .. }
+                if clauses.get(*clause).map(|clause| clause.kind) != Some(GraphMatchKind::Collect))
+        }) {
+            return Err(PatternBuildError::UnknownVariable);
+        }
         let variables = scope.checked_value_columns(columns)?;
         let projection = columns
             .iter()
             .zip(variables)
             .map(|(column, variable)| match column {
+                GraphColumn::Collection { .. } => ValueProjection::Collected {
+                    group: variable as u32,
+                },
                 GraphColumn::Vertex { .. } => ValueProjection::Vertex {
                     slot: scope_slots[variable],
                 },
@@ -584,6 +636,8 @@ impl GraphPatternBuilder {
                 GraphColumn::Vertex { variable, .. } | GraphColumn::Property { variable, .. } => {
                     self.variable(variable)?
                 }
+                // Its clause index; the clause compiler checks the kind.
+                GraphColumn::Collection { clause, .. } => *clause,
             });
         }
         Ok(variables)

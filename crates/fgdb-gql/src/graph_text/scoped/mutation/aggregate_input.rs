@@ -84,6 +84,7 @@ impl<'a> Parser<'a> {
                 variable,
                 property,
                 path,
+                collect: None,
             })
             .collect();
         // A bound vertex, edge, or path with a literal-looking name retains its identity.

@@ -460,6 +460,7 @@ impl<'a> ParsedMutationReturn<'a> {
                                 variable,
                                 property: None,
                                 path: Some(GraphPathFunction::Labels),
+                                collect: None,
                             },
                         )?;
                         return self
@@ -622,6 +623,7 @@ impl<'a> ParsedMutationReturn<'a> {
                         variable: name,
                         property: None,
                         path: Some(GraphPathFunction::Properties),
+                        collect: None,
                     },
                 )?;
                 self.column(
