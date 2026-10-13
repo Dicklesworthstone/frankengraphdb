@@ -294,6 +294,8 @@ fn read_bounded(cx: &QueryCx, path: &Path, limit: u64, flag: &str) -> Result<Str
 
 /// `kind<TAB>name` lines. Undeclared parameters keep the statement's own
 /// type (a stored property value is int64); values never choose a type.
+/// Float, exact scale-18 decimal and hexadecimal bytes delegate to the native
+/// CSV decoder, including its quote-sensitive NULL and payload admission rules.
 fn parse_types(text: &str) -> Result<Vec<(&str, GqlParameterType)>, Failure> {
     let mut declarations = Vec::new();
     // Reuse the native parameter-name, count and duplicate validation.
@@ -309,6 +311,9 @@ fn parse_types(text: &str) -> Result<Vec<(&str, GqlParameterType)>, Failure> {
             "text" => GqlParameterType::Scalar(CanonicalScalarKind::Text),
             "bool" => GqlParameterType::Scalar(CanonicalScalarKind::Bool),
             "null" => GqlParameterType::Scalar(CanonicalScalarKind::Null),
+            "float" => GqlParameterType::Scalar(CanonicalScalarKind::Float),
+            "decimal" => GqlParameterType::Scalar(CanonicalScalarKind::Decimal),
+            "bytes" => GqlParameterType::Scalar(CanonicalScalarKind::Bytes),
             _ => return Err(Failure::usage("unknown CSV parameter type")),
         };
         names
