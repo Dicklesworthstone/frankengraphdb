@@ -2,6 +2,8 @@
 //! occurrences. A matched element's property is a source column plus the
 //! mutation's proposal for that field; nothing is rescanned or re-matched.
 
+mod combined;
+
 use super::*;
 use crate::mutation_text::{
     MutationReturnTemplate, PreparedGraphMutationQueryText, WriteReturnGroupTemplate,
@@ -99,6 +101,9 @@ impl<'a> Parser<'a> {
         &mut self,
         leaves: &mut impl ReturnLeaves<'a>,
     ) -> Result<ReturnItems<'a>, GraphSetTextError> {
+        if self.write_items_have_combined_aggregate()? {
+            return self.combined_write_return_items(leaves);
+        }
         let mut items = ReturnItems {
             projection: Vec::new(),
             grouping: None,
