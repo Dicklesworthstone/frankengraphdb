@@ -674,6 +674,60 @@ fn set_to_a_literal_map_replaces_every_property() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-k3nub: a write RETURN's property map carries a stored List field
+/// unchanged beside the fields the write assigns, for SET and vertex MERGE.
+#[test]
+fn write_return_maps_carry_stored_list_fields() {
+    let ((), report) = run_async_under_lab(0x6d61_000b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let tags = fgdb_types::CanonicalList::try_new(vec![
+            CanonicalScalar::ucs_basic_text("a").unwrap().into(),
+            CanonicalScalar::Int(2).into(),
+        ])
+        .unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex_values(
+            VId(7),
+            vec![FOO],
+            vec![
+                (SCORE, CanonicalScalar::Int(1).into()),
+                (NAME, fgdb_types::CanonicalPropertyValue::List(tags)),
+            ],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let listed = GraphValue::List(vec![text("a"), int(2)].into_boxed_slice());
+        let params = GqlParameters::new();
+        for statement in [
+            "MATCH (a:Foo) SET a.score = 5 RETURN properties(a) AS node",
+            "MERGE (a:Foo) ON MATCH SET a.score = 5 RETURN properties(a) AS node",
+        ] {
+            let result = db
+                .query_write_engine(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    statement,
+                    &params,
+                    Catalog::Full,
+                    R,
+                    write_policy(),
+                )
+                .await
+                .map_err(|error| format!("{statement}: {error}"))
+                .unwrap();
+            assert_eq!(
+                cells(result),
+                vec![vec![map(&[("name", listed.clone()), ("score", int(5))])]],
+                "{statement}"
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn mutation_return_maps_compose_with_prior_overlay_and_remove_fields() {
     let ((), report) = run_async_under_lab(0x6d61_0006, |root| async move {

@@ -230,9 +230,9 @@ fn returned_properties<E, C, F: FnMut() -> Result<(), C>>(
     }
     for (at, (key, value)) in old_keys.iter().zip(old_values).enumerate() {
         meter.event(GlaExecutionEvent::Work)?;
-        if !matches!(value, GraphValue::Scalar(_))
-            || at != 0 && old_keys[at - 1].as_bytes() >= key.as_bytes()
-        {
+        // A frozen field is any stored value, a List or Map included
+        // (fgdb-k3nub); a graph element never is.
+        if !value.is_stored_value() || at != 0 && old_keys[at - 1].as_bytes() >= key.as_bytes() {
             return Err(invalid());
         }
     }
