@@ -67,6 +67,14 @@ pub(crate) enum MutationActionTemplate {
         program: Vec<MutationIntegerTemplateOp>,
         at: usize,
     },
+    /// A value-language RHS over the same frozen selection. Binding retains
+    /// typed parameter holes and pinned temporal capabilities until it emits
+    /// the existing checked GraphMutationValue::Composite execution plan.
+    CompositeProperty {
+        target: usize,
+        key: PropertyKeyId,
+        value: crate::set_text::ReadValueTemplate,
+    },
 }
 
 /// MATCH [WALK] ... SET / REMOVE / DETACH DELETE, with one parameter schema and

@@ -19,6 +19,7 @@ use crate::graph_text::GraphPathFunction;
 use crate::mutation_text::{
     MutationActionTemplate, MutationIntegerTemplateOp, MutationReturnTemplate,
 };
+use crate::set_text::ReadValueTemplate;
 use crate::{
     GqlScalarParameter, GraphMutationAction, GraphMutationBuildError, GraphMutationTextError,
     GraphMutationTextErrorKind, GraphMutationValue, MAX_GRAPH_MUTATION_ACTIONS,
@@ -44,7 +45,7 @@ enum Operand {
 enum ActionKind<'a> {
     Property {
         key: Name<'a>,
-        value: Option<Operand>,
+        value: Option<ReadValueTemplate>,
     },
     Label {
         label: Name<'a>,
@@ -230,6 +231,37 @@ impl<'a> Parser<'a> {
         self.number(expected).map(Operand::Number)
     }
 
+    /// SET shares the read value grammar, including temporal constructors,
+    /// list/map access, quantifiers and reduce. It still lowers ordinary
+    /// scalar operands to their existing mutation action variants. Preserve
+    /// the mutation API's scalar diagnostics when the shared reader refuses.
+    fn mutation_assignment(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        self.read_graph_value(columns, 0).map_err(|source| {
+            let kind = match source.kind {
+                crate::GraphSetTextErrorKind::Pattern(kind) => {
+                    GraphMutationTextErrorKind::Query(kind)
+                }
+                crate::GraphSetTextErrorKind::IntegerExpression(kind) => {
+                    GraphMutationTextErrorKind::IntegerExpression(kind)
+                }
+                crate::GraphSetTextErrorKind::IntegerOperand => {
+                    GraphMutationTextErrorKind::IntegerOperand
+                }
+                crate::GraphSetTextErrorKind::IntegerNesting { limit } => {
+                    GraphMutationTextErrorKind::IntegerNesting { limit }
+                }
+                kind => GraphMutationTextErrorKind::Relation(kind),
+            };
+            GraphMutationTextError {
+                offset: source.offset,
+                kind,
+            }
+        })
+    }
+
     fn mutation_actions(
         &mut self,
     ) -> Result<(Vec<Projection<'a>>, Vec<Action<'a>>), GraphMutationTextError> {
@@ -327,7 +359,7 @@ impl<'a> Parser<'a> {
                     let key = self.name()?;
                     let value = if setting {
                         self.punct(b'=', "=")?;
-                        Some(self.mutation_expression(&mut columns)?)
+                        Some(self.mutation_assignment(&mut columns)?)
                     } else {
                         None
                     };
@@ -382,7 +414,7 @@ impl<'a> Parser<'a> {
                 .into());
             }
             self.punct(b':', ":")?;
-            let value = self.mutation_expression(columns)?;
+            let value = self.mutation_assignment(columns)?;
             actions.push(Action {
                 target,
                 kind: ActionKind::Property {
@@ -413,14 +445,18 @@ impl PreparedGraphMutationText {
     /// unchanged and NULL remains a stored scalar, with REMOVE used for absence.
     /// Each field counts toward the statement's ordinary action limit. Keys are
     /// property identifiers and must be distinct within each literal map. Empty
-    /// maps, dynamic map arguments, nested maps and map replacement are refused;
-    /// this syntax does not introduce a map value type.
+    /// maps, dynamic map arguments and map replacement are refused. RHS values
+    /// use the read value grammar, but only scalar results may be stored.
     ///
     /// RHS arithmetic supports checked nullable i64 +, -, *, /, %, unary signs,
     /// parentheses, ABS, NULLIF and COALESCE with at least two arguments. Division
     /// truncates toward zero. COALESCE skips unneeded arithmetic but the frozen
     /// GLA projection still performs all requested property reads. Plain scalar
     /// assignments retain their existing types; arithmetic never coerces them.
+    /// Temporal constructors, collection access, list quantifiers and reduce
+    /// use the shared bounded value evaluator over that same frozen row. A
+    /// named timezone requires the resolver's pinned tzdb. A non-scalar result
+    /// or a late expression error returns no mutation batch.
     pub fn prepare(
         statement: &str,
         relation: RelationId,
@@ -541,35 +577,30 @@ impl PreparedGraphMutationText {
                                 key,
                             })
                         }
-                        Some(Operand::Column(column)) => {
+                        Some(ReadValueTemplate::Column(column)) => {
                             MutationActionTemplate::Bound(GraphMutationAction::SetProperty {
                                 target,
                                 key,
                                 value: GraphMutationValue::Column(column),
                             })
                         }
-                        Some(Operand::Literal(value)) => {
+                        Some(ReadValueTemplate::Literal(value)) => {
                             MutationActionTemplate::Bound(GraphMutationAction::SetProperty {
                                 target,
                                 key,
                                 value: GraphMutationValue::Literal(value),
                             })
                         }
-                        Some(Operand::Number(Number::Literal(value))) => {
-                            MutationActionTemplate::Bound(GraphMutationAction::SetProperty {
-                                target,
-                                key,
-                                value: GraphMutationValue::Literal(scalar(value, at)?),
-                            })
-                        }
-                        Some(Operand::Number(Number::Parameter(parameter))) => {
+                        Some(ReadValueTemplate::Parameter {
+                            index: parameter, ..
+                        }) => {
                             MutationActionTemplate::ParameterProperty {
                                 target,
                                 key,
                                 parameter,
                             }
                         }
-                        Some(Operand::Integer { program, at }) => {
+                        Some(ReadValueTemplate::Integer { program, at }) => {
                             MutationActionTemplate::IntegerProperty {
                                 target,
                                 key,
@@ -577,6 +608,11 @@ impl PreparedGraphMutationText {
                                 at,
                             }
                         }
+                        Some(value) => MutationActionTemplate::CompositeProperty {
+                            target,
+                            key,
+                            value,
+                        },
                     }
                 }
             });
@@ -694,6 +730,15 @@ impl PreparedGraphMutationText {
                         program, &values, *at,
                     )?),
                 },
+                MutationActionTemplate::CompositeProperty { target, key, value } => {
+                    GraphMutationAction::SetProperty {
+                        target: *target,
+                        key: *key,
+                        value: GraphMutationValue::Composite(return_projection::bind_read_value(
+                            value, &values,
+                        )?),
+                    }
+                }
             });
         }
         if !self.optional_root {
@@ -850,5 +895,249 @@ mod graph_function_tests {
             assert!(result.is_err(), "{expression}");
             assert_eq!(calls, 0, "{expression}");
         }
+    }
+
+    fn assignment_policy() -> crate::GraphMutationPolicy {
+        crate::GraphMutationPolicy::new(
+            crate::GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+            100,
+        )
+    }
+
+    fn execute_assignment(
+        mutation: &PreparedGraphMutation,
+        values: &[CanonicalScalar],
+        policy: crate::GraphMutationPolicy,
+        checkpoint: impl FnMut() -> Result<(), ()>,
+    ) -> Result<
+        crate::GraphMutationBatch,
+        crate::GqlQueryError<crate::GraphMutationError<()>, ()>,
+    > {
+        mutation.execute_governed(
+            policy,
+            |plan, policy| {
+                plan.plan().execute_governed_with_properties(
+                    values.len() as u64,
+                    [],
+                    (0..values.len()).map(|i| {
+                        (
+                            fgdb_types::VId(1),
+                            RelationId(1),
+                            fgdb_types::VId(i as u128 + 10),
+                        )
+                    }),
+                    |_, _| Ok::<_, ()>(true),
+                    |vid, _| Ok(Some(&values[vid.0 as usize - 10])),
+                    policy,
+                    || Ok::<_, ()>(()),
+                )
+            },
+            checkpoint,
+        )
+    }
+
+    #[test]
+    fn set_composite_rhs_executes_the_native_value_language() {
+        for (expression, expected) in [
+            ("head([b.cost, 100])", CanonicalScalar::Int(7)),
+            ("[b.cost, 100][0]", CanonicalScalar::Int(7)),
+            ("{answer: b.cost}.answer", CanonicalScalar::Int(7)),
+            (
+                "size([x IN [1, 2, 3] WHERE x > 1]) + b.cost",
+                CanonicalScalar::Int(9),
+            ),
+            (
+                "reduce(total = 0, x IN [b.cost, 2] | total + x)",
+                CanonicalScalar::Int(9),
+            ),
+            ("any(x IN [1, null] WHERE x > 1)", CanonicalScalar::Null),
+            (
+                "toString(date({year: 2024, month: 2, day: 29}))",
+                CanonicalScalar::ucs_basic_text("2024-02-29").unwrap(),
+            ),
+        ] {
+            for assignment in [
+                format!("SET a.cost = {expression}"),
+                format!("SET a += {{cost: {expression}}}"),
+            ] {
+                let text = format!("MATCH (a)-[:R]->(b) {assignment}");
+                let prepared = PreparedGraphMutationText::prepare(&text, RelationId(1), symbols)
+                    .unwrap();
+                let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
+                let batch = execute_assignment(
+                    &bound,
+                    &[CanonicalScalar::Int(7)],
+                    assignment_policy(),
+                    || Ok(()),
+                )
+                .unwrap();
+                assert_eq!(
+                    batch.intents(),
+                    &[crate::GraphMutationIntent::Property {
+                        vertex: fgdb_types::VId(1),
+                        key: PropertyKeyId(1),
+                        value: Some(expected.clone()),
+                    }],
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_temporal_rhs_retains_its_storable_scalar_type() {
+        let prepared = PreparedGraphMutationText::prepare(
+            "MATCH (a)-[:R]->(b) SET a.cost = date({year: $year, month: 2, day: 29})",
+            RelationId(1),
+            symbols,
+        )
+        .unwrap();
+        let bound = prepared
+            .bind_parameters(&GqlParameters::new().with_int64("year", 2024).unwrap())
+            .unwrap();
+        let batch = execute_assignment(
+            &bound,
+            &[CanonicalScalar::Int(7)],
+            assignment_policy(),
+            || Ok(()),
+        )
+        .unwrap();
+        let [crate::GraphMutationIntent::Property {
+            value: Some(CanonicalScalar::Date(date)),
+            ..
+        }] = batch.intents()
+        else {
+            panic!("SET must retain a Date, not its text rendering");
+        };
+        assert_eq!(date.to_string(), "2024-02-29");
+    }
+
+    #[test]
+    fn set_composite_rhs_rebinds_without_catalog_access() {
+        let mut calls = 0;
+        let prepared = PreparedGraphMutationText::prepare(
+            "MATCH (a)-[:R]->(b) SET a.cost = head([b.cost, 100]) + $extra",
+            RelationId(1),
+            |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            },
+        )
+        .unwrap();
+        let before = calls;
+        assert!(before > 0);
+        assert_eq!(prepared.parameter_schema().len(), 1);
+        assert_eq!(prepared.parameter_schema()[0].occurrences, 1);
+        for extra in [1, 4] {
+            let bound = prepared
+                .bind_parameters(&GqlParameters::new().with_int64("extra", extra).unwrap())
+                .unwrap();
+            let batch = execute_assignment(
+                &bound,
+                &[CanonicalScalar::Int(7)],
+                assignment_policy(),
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(
+                batch.intents(),
+                &[crate::GraphMutationIntent::Property {
+                    vertex: fgdb_types::VId(1),
+                    key: PropertyKeyId(1),
+                    value: Some(CanonicalScalar::Int(7 + extra)),
+                }]
+            );
+        }
+        assert_eq!(calls, before);
+        assert!(prepared.bind_parameters(&GqlParameters::new()).is_err());
+    }
+
+    #[test]
+    fn set_composite_rhs_keeps_conflict_and_non_scalar_refusals() {
+        let bind = |expression| {
+            PreparedGraphMutationText::prepare(
+                &format!("MATCH (a)-[:R]->(b) SET a.cost = {expression}"),
+                RelationId(1),
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+        };
+        let bound = bind("head([b.cost])").unwrap();
+        for values in [
+            [CanonicalScalar::Int(7), CanonicalScalar::Int(9)],
+            [CanonicalScalar::Int(9), CanonicalScalar::Int(7)],
+        ] {
+            assert!(matches!(
+                execute_assignment(&bound, &values, assignment_policy(), || Ok(())),
+                Err(crate::GqlQueryError::Source(
+                    crate::GraphMutationError::ConflictingAssignment { .. }
+                ))
+            ));
+        }
+        assert!(matches!(
+            bind("[1, 2]"),
+            Err(GraphMutationTextError {
+                kind: GraphMutationTextErrorKind::Build(
+                    GraphMutationBuildError::ValueExpression { .. }
+                ),
+                ..
+            })
+        ));
+        let bound = bind("[[1]][0]").unwrap();
+        assert!(matches!(
+            execute_assignment(&bound, &[CanonicalScalar::Int(7)], assignment_policy(), || Ok(())),
+            Err(crate::GqlQueryError::Source(
+                crate::GraphMutationError::NonScalarValue { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn set_composite_rhs_charges_work_and_observes_cancellation() {
+        let bound = PreparedGraphMutationText::prepare(
+            "MATCH (a)-[:R]->(b) SET a.cost = reduce(s = 0, x IN range(1, 20) | s + x)",
+            RelationId(1),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let values = [CanonicalScalar::Int(7)];
+        let measured =
+            execute_assignment(&bound, &values, assignment_policy(), || Ok(())).unwrap();
+        let stats = measured.stats();
+        let exact = crate::GraphMutationPolicy::new(
+            crate::GqlQueryPolicy::new(
+                100,
+                100,
+                stats.evaluator.work_units,
+                stats.evaluator.scratch_entries,
+            ),
+            1,
+        );
+        assert_eq!(
+            execute_assignment(&bound, &values, exact, || Ok(())).unwrap().stats(),
+            stats
+        );
+        let mut short = exact;
+        short.query.evaluator.max_work_units -= 1;
+        assert!(matches!(
+            execute_assignment(&bound, &values, short, || Ok(())),
+            Err(crate::GqlQueryError::Evaluator(_))
+        ));
+        let mut checkpoints = 0;
+        assert!(matches!(
+            execute_assignment(&bound, &values, assignment_policy(), || {
+                checkpoints += 1;
+                if checkpoints == 10 {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(crate::GqlQueryError::Interrupted(()))
+        ));
+        assert_eq!(checkpoints, 10);
     }
 }
