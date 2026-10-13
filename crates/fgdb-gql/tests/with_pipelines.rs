@@ -998,10 +998,12 @@ fn a_with_where_reads_properties_of_projected_vertices_through_hidden_boundary_c
 /// after a page, and a terminal RETURN. `WITH n ... RETURN n.p` equals the
 /// same query with `n.p` projected as an explicit WITH column, or read before
 /// the WITH, and an unaliased `n.p` is named `p` as in a graph RETURN. Each
-/// UNION arm owns its own scope. A later stage and the private names stay out
-/// of scope, including a later row that happens to have the boundary row's
-/// width. A required later MATCH part re-matches the carried vertex instead
-/// (fgdb-dhcfo).
+/// UNION arm owns its own scope. A later plain WITH that projects the element
+/// under its own name keeps it in scope, items, WHERE and pages included
+/// (TCK WithOrderBy4 [7], [8]). A later stage that drops or renames it, an
+/// UNWIND, and the private names stay out of scope, including a later row
+/// that happens to have the boundary row's width. A required later MATCH part
+/// re-matches the carried vertex instead (fgdb-dhcfo).
 #[test]
 fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
     let values = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
@@ -1035,6 +1037,31 @@ fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
         (
             "MATCH (n) WITH DISTINCT n WHERE n.p > 1 RETURN n.p * 10 AS v, n ORDER BY n",
             "MATCH (n) WHERE n.p > 1 RETURN n.p * 10 AS v, n ORDER BY n",
+        ),
+        (
+            "MATCH (n) WITH n WITH n RETURN n.p AS v ORDER BY v",
+            "MATCH (n) RETURN n.p AS v ORDER BY v",
+        ),
+        (
+            "MATCH (n) WITH n ORDER BY n.p WITH n, 1 AS a RETURN n.p AS v, a ORDER BY v",
+            "MATCH (n) RETURN n.p AS v, 1 AS a ORDER BY v",
+        ),
+        (
+            "MATCH (n) WITH n WITH n, n.p * 10 AS q WHERE n.p >= 2 RETURN n.p AS v, q ORDER BY v",
+            "MATCH (n) WHERE n.p >= 2 RETURN n.p AS v, n.p * 10 AS q ORDER BY v",
+        ),
+        (
+            "MATCH (n) WITH n AS m WITH m ORDER BY m.p DESC LIMIT 2 WITH m \
+             RETURN m.p AS v ORDER BY v",
+            "MATCH (n) WITH n.p AS v ORDER BY v DESC LIMIT 2 RETURN v ORDER BY v",
+        ),
+        (
+            "MATCH (n) WITH n WITH DISTINCT n RETURN n.p AS v ORDER BY v",
+            "MATCH (n) RETURN n.p AS v ORDER BY v",
+        ),
+        (
+            "MATCH (n) WITH n WITH * RETURN n.p AS v ORDER BY v",
+            "MATCH (n) RETURN n.p AS v ORDER BY v",
         ),
     ] {
         let found = rows(boundary);
@@ -1078,11 +1105,14 @@ fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
         "MATCH (n) WITH n RETURN n.p AS v, __fg_boundary_0",
         "MATCH (n) WITH n ORDER BY __fg_boundary_0 RETURN n.p",
         "MATCH (n) WITH n RETURN n.p, n.p",
-        "MATCH (n) WITH n WITH n RETURN n.p",
         "MATCH (n) WITH n UNWIND [1] AS x RETURN n.p",
+        // A later WITH that renames or drops the element ends its scope.
+        "MATCH (n) WITH n WITH n AS m RETURN n.p",
+        "MATCH (n) WITH n WITH n.p AS q RETURN n.p",
         // Two columns again after the second WITH, as the boundary row had
-        // (n plus the hidden n.p): the hidden read must not resolve to `a`.
-        "MATCH (n) WITH n ORDER BY n.p WITH n, 1 AS a RETURN n.p",
+        // (n plus the hidden n.p), but without n: the hidden read must not
+        // resolve to `a` or `b`.
+        "MATCH (n) WITH n ORDER BY n.p WITH 1 AS a, 2 AS b RETURN n.p",
     ] {
         assert!(
             PreparedGraphSetText::prepare(text, symbols).is_err(),
