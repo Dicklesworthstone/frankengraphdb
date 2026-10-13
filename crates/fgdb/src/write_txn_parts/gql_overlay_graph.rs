@@ -660,7 +660,50 @@ mod query_source {
                     },
                 )?;
             }
-            if vertex_scan {
+            // An equality-, range- or prefix-bound single-vertex selection
+            // admits its basis rows from the per-generation property index,
+            // as the snapshot source does, instead of every vertex
+            // (fgdb-0s2pq: one UNWIND row's `MATCH (n {id: row.id})` read the
+            // whole table). A staged effect can move a basis vertex into the
+            // selection, so each staged target joins the table with its basis
+            // row. The plan's own selection still decides every row.
+            let indexed = match logical {
+                Some(plan) if source::PROPERTY_INDEX_SERVING && vertex_scan && !reads_edges => {
+                    source::bound_vertices(snapshot, plan, self.basis, control)?
+                }
+                _ => None,
+            };
+            let mut indexed_records = None;
+            if let Some((rows, records)) = indexed {
+                let mut records = records as usize;
+                for row in rows {
+                    self.note_query_read(&mut observed, ElementId::Vertex(row.vid), control)?;
+                    control(SourceEvent::ScratchEntry)?;
+                    vertices.insert(row.vid, VertexView::new(&row.labels, &row.props));
+                }
+                for coordinate in (self.prepared.iter())
+                    .flat_map(|prepared| prepared.template.coordinate_entries())
+                {
+                    control(SourceEvent::Work)?;
+                    for effect in &coordinate.rows {
+                        control(SourceEvent::Work)?;
+                        let Some(vid) = super::VertexScanRead::target(effect) else {
+                            continue;
+                        };
+                        if vertices.contains_key(&vid) {
+                            continue;
+                        }
+                        if let Some(row) = source::find_vertex(snapshot, vid, self.basis, control)?
+                        {
+                            control(SourceEvent::SnapshotRecord)?;
+                            control(SourceEvent::ScratchEntry)?;
+                            records += 1;
+                            vertices.insert(vid, VertexView::new(&row.labels, &row.props));
+                        }
+                    }
+                }
+                indexed_records = Some(records);
+            } else if vertex_scan {
                 source::visit_vertices(&snapshot.patches, self.basis, control, |row, control| {
                     let view = VertexView::new(&row.labels, &row.props);
                     let selected = match predicates {
@@ -790,7 +833,8 @@ mod query_source {
             let mut vertex_rows = Vec::new();
             for (vid, row) in vertices {
                 control(SourceEvent::Work)?;
-                if vertex_scan {
+                // Index admission charged its candidates and loaded targets.
+                if vertex_scan && indexed_records.is_none() {
                     control(SourceEvent::SnapshotRecord)?;
                 }
                 control(SourceEvent::ScratchEntry)?;
@@ -803,8 +847,12 @@ mod query_source {
                 control(SourceEvent::ScratchEntry)?;
                 edge_rows.push(((eid, src, relation, dst), props));
             }
-            let snapshot_records =
-                edge_rows.len() + if vertex_scan { vertex_rows.len() } else { 0 };
+            let snapshot_records = edge_rows.len()
+                + match indexed_records {
+                    Some(records) => records,
+                    None if vertex_scan => vertex_rows.len(),
+                    None => 0,
+                };
             Ok(OverlayGraphTables {
                 vertices: vertex_rows,
                 edges: edge_rows,

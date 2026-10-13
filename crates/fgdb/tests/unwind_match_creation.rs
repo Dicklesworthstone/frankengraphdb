@@ -447,3 +447,114 @@ fn invalid_imported_script_scopes_refuse_before_any_statement_catalog_resolution
         assert_eq!(calls.load(Ordering::SeqCst), 0, "{tail}");
     }
 }
+
+/// An equality-bound write MATCH admits its property-index candidates, not
+/// the whole vertex table (fgdb-0s2pq). Over 600 Source vertices, a batch of
+/// UNWIND rows that each match one vertex by `p` runs under a snapshot-record
+/// allowance smaller than one table scan, which an unbound label scan exceeds.
+/// Staged effects still decide membership: inside one script,
+/// a vertex an earlier statement moved onto the key, one it created, one it
+/// moved away and one it deleted read as the transaction sees them.
+#[test]
+fn an_equality_bound_write_match_admits_index_candidates_under_staged_effects() {
+    let ((), report) = run_async_under_lab(0xb01c_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.execute_graph_write_program_autocommit_engine_governed(
+            &txcx,
+            &cx,
+            &commit,
+            &program(
+                "UNWIND range(1, 600) AS value CREATE (:Source {p: value})",
+                &GqlParameters::new(),
+            ),
+            GraphWriteProgramPolicy::new(policy(), 10_000, 1_000, 16),
+        )
+        .await
+        .unwrap();
+        // 100 snapshot records: far below the 600-vertex table.
+        let tight = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(100, 1_000, 5_000_000, 2_000_000),
+            1_000,
+            16,
+            16,
+        );
+        let ids = GqlParameters::new()
+            .with_list("ids", vec![int(5), int(77), int(300)])
+            .unwrap();
+        db.execute_graph_write_program_autocommit_engine_governed(
+            &txcx,
+            &cx,
+            &commit,
+            &program("UNWIND $ids AS i MATCH (n:Source {p: i}) SET n.q = i", &ids),
+            tight,
+        )
+        .await
+        .unwrap();
+        // The control: an unbound label scan reads the whole table, which
+        // the same allowance refuses.
+        let scan = db
+            .execute_graph_write_program_autocommit_engine_governed(
+                &txcx,
+                &cx,
+                &commit,
+                &program("MATCH (n:Source) SET n.q = 0", &GqlParameters::new()),
+                tight,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{scan:?}").contains("SnapshotRecords"), "{scan:?}");
+        db.execute_graph_write_program_autocommit_engine_governed(
+            &txcx,
+            &cx,
+            &commit,
+            &program(
+                "MATCH (n:Source {p: 1}) SET n.p = 1000; \
+                 MATCH (m:Source {p: 1000}) SET m.q = -1; \
+                 CREATE (:Source {p: 2000}); \
+                 MATCH (m:Source {p: 2000}) SET m.q = -2; \
+                 MATCH (n:Source {p: 3}) DETACH DELETE n; \
+                 MATCH (m:Source {p: 3}) SET m.q = -3; \
+                 MATCH (n:Source {p: 4}) SET n.p = 4000; \
+                 MATCH (m:Source {p: 4}) SET m.q = -4",
+                &GqlParameters::new(),
+            ),
+            tight,
+        )
+        .await
+        .unwrap();
+        let fgdb::QueryResult::Rows { rows, .. } = db
+            .query(
+                &cx,
+                "MATCH (n:Source) WHERE n.q IS NOT NULL RETURN n.p AS p, n.q AS q ORDER BY p",
+                &GqlParameters::new(),
+                symbols,
+                policy(),
+            )
+            .unwrap()
+        else {
+            unreachable!("a read answers rows")
+        };
+        let pair = |p: i64, q: i64| {
+            vec![
+                fgdb::QueryValue::Value(int(p)),
+                fgdb::QueryValue::Value(int(q)),
+            ]
+        };
+        assert_eq!(
+            rows,
+            [
+                pair(5, 5),
+                pair(77, 77),
+                pair(300, 300),
+                pair(1000, -1),
+                pair(2000, -2)
+            ]
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

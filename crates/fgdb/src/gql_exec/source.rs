@@ -1031,8 +1031,9 @@ impl PropertyEqualityIndex {
     }
 }
 
-/// Whether property-bound single-domain scans use the maintained index.
-const PROPERTY_INDEX_SERVING: bool = true;
+/// Whether property-bound single-domain scans use the maintained index, in
+/// the snapshot source and in a write transaction's overlay source alike.
+pub(crate) const PROPERTY_INDEX_SERVING: bool = true;
 
 /// Serve equality or range predicates over a single vertex domain.
 /// The admitted rows also supply every nested scan and property lookup, so a
