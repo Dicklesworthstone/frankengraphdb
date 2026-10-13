@@ -18,7 +18,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x31; 32], DatabaseSecurityNamespaceId([0x32; 32]), [0x33; 32])
+    DatabaseKeys::new(
+        [0x31; 32],
+        DatabaseSecurityNamespaceId([0x32; 32]),
+        [0x33; 32],
+    )
 }
 
 fn issuer_key() -> AuthKey {
@@ -67,7 +71,11 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         let contexts = PurposeContexts::narrow_runtime_root(cx);
-        drop(Database::create(&contexts.commit(), &path, keys()).await.unwrap());
+        drop(
+            Database::create(&contexts.commit(), &path, keys())
+                .await
+                .unwrap(),
+        );
         let mut server = Server::new(
             cx,
             ServerLimits {
@@ -100,7 +108,12 @@ impl Fixture {
         let task = cx
             .spawn(move |child| async move { server.serve(&child, listener).await.unwrap() })
             .unwrap();
-        Self { address, path, shutdown, task }
+        Self {
+            address,
+            path,
+            shutdown,
+            task,
+        }
     }
 
     async fn client(&self, cx: &Cx, grant: &Grant) -> Client {
@@ -117,7 +130,9 @@ impl Fixture {
         // The server task and its database owner have gone away. Reopen the
         // actual published history, not a second fixture or a cached response.
         let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let database = Database::open(&contexts.commit(), &self.path, keys()).await.unwrap();
+        let database = Database::open(&contexts.commit(), &self.path, keys())
+            .await
+            .unwrap();
         assert_eq!(database.frontier().unwrap(), CommitSeq(seq));
         assert_eq!(database.vertices().unwrap().len(), vertices);
         assert_eq!(database.edges().unwrap().len(), edges);
@@ -125,12 +140,24 @@ impl Fixture {
 }
 
 async fn state(cx: &Cx, observer: &mut Client) -> (Answer, Answer) {
-    let vertices = observer.execute(cx, ExecuteMode::Read,
-        "MATCH (n:Person) RETURN n,n.name AS name,n.age AS age ORDER BY name", vec![])
-        .await.unwrap();
-    let edges = observer.execute(cx, ExecuteMode::Read,
-        "MATCH (a)-[r:KNOWS]->(b) RETURN a.name AS a,b.name AS b,r,r.age AS age ORDER BY a,b", vec![])
-        .await.unwrap();
+    let vertices = observer
+        .execute(
+            cx,
+            ExecuteMode::Read,
+            "MATCH (n:Person) RETURN n,n.name AS name,n.age AS age ORDER BY name",
+            vec![],
+        )
+        .await
+        .unwrap();
+    let edges = observer
+        .execute(
+            cx,
+            ExecuteMode::Read,
+            "MATCH (a)-[r:KNOWS]->(b) RETURN a.name AS a,b.name AS b,r,r.age AS age ORDER BY a,b",
+            vec![],
+        )
+        .await
+        .unwrap();
     assert_eq!(vertices.outcome, edges.outcome);
     (vertices, edges)
 }
@@ -144,13 +171,31 @@ fn committed(answer: Answer, seq: u64, statements: u64) {
 async fn refuse_without_rows(cx: &Cx, client: &mut Client, text: &str, code: ErrorCode) {
     let mut columns = 0;
     let mut rows = 0;
-    let result = client.execute_streaming(cx, ExecuteMode::Write, text, vec![],
-        |_| { columns += 1; Ok(()) },
-        |_| { rows += 1; Ok(()) },
-    ).await;
-    assert!(matches!(result, Err(ClientError::Server { code: actual, .. }) if actual == code),
-        "{text}: {result:?}");
-    assert_eq!((columns, rows), (0, 0), "a refused write leaked tentative results");
+    let result = client
+        .execute_streaming(
+            cx,
+            ExecuteMode::Write,
+            text,
+            vec![],
+            |_| {
+                columns += 1;
+                Ok(())
+            },
+            |_| {
+                rows += 1;
+                Ok(())
+            },
+        )
+        .await;
+    assert!(
+        matches!(result, Err(ClientError::Server { code: actual, .. }) if actual == code),
+        "{text}: {result:?}"
+    );
+    assert_eq!(
+        (columns, rows),
+        (0, 0),
+        "a refused write leaked tentative results"
+    );
 }
 
 #[test]
@@ -159,9 +204,19 @@ fn write_only_zero_row_grant_creates_but_never_acquires_read_rights() {
         let fixture = Fixture::start(cx, "write-only", |_| {}).await;
         let mut writer = fixture.client(cx, &grant(Rights::Write, 0)).await;
         let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
-        committed(writer.execute(cx, ExecuteMode::Write,
-            "CREATE (:Person {name:'Ada',age:1}),(:Person {name:'Bob',age:2})", vec![])
-            .await.unwrap(), 1, 1);
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "CREATE (:Person {name:'Ada',age:1}),(:Person {name:'Bob',age:2})",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
         let before = state(cx, &mut observer).await;
         assert_eq!(before.0.rows.len(), 2);
         assert!(before.1.rows.is_empty());
@@ -174,7 +229,13 @@ fn write_only_zero_row_grant_creates_but_never_acquires_read_rights() {
             refuse_without_rows(cx, &mut writer, text, ErrorCode::PermissionDenied).await;
             assert_eq!(state(cx, &mut observer).await, before);
         }
-        refuse_without_rows(cx, &mut observer, "CREATE (:Person)", ErrorCode::PermissionDenied).await;
+        refuse_without_rows(
+            cx,
+            &mut observer,
+            "CREATE (:Person)",
+            ErrorCode::PermissionDenied,
+        )
+        .await;
         assert_eq!(state(cx, &mut observer).await, before);
         writer.close(cx).await.unwrap();
         observer.close(cx).await.unwrap();
@@ -197,8 +258,14 @@ fn zero_row_grant_applies_crud_and_keeps_real_return_rows_bounded() {
             "MATCH ()-[r:KNOWS]->() SET r.age=r.age+1",
         ];
         for (index, text) in writes.into_iter().enumerate() {
-            committed(writer.execute(cx, ExecuteMode::Write, text, vec![]).await.unwrap(),
-                index as u64 + 1, 1);
+            committed(
+                writer
+                    .execute(cx, ExecuteMode::Write, text, vec![])
+                    .await
+                    .unwrap(),
+                index as u64 + 1,
+                1,
+            );
         }
         let before = state(cx, &mut observer).await;
         assert_eq!((before.0.rows.len(), before.1.rows.len()), (2, 1));
@@ -213,12 +280,36 @@ fn zero_row_grant_applies_crud_and_keeps_real_return_rows_bounded() {
             refuse_without_rows(cx, &mut writer, text, ErrorCode::Budget).await;
             assert_eq!(state(cx, &mut observer).await, before);
         }
-        let empty = writer.execute(cx, ExecuteMode::Write,
-            "MATCH (n:Person {name:'absent'}) SET n.age=0", vec![]).await.unwrap();
+        let empty = writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person {name:'absent'}) SET n.age=0",
+                vec![],
+            )
+            .await
+            .unwrap();
         assert!(empty.rows.is_empty() && empty.columns.is_empty());
-        assert_eq!(empty.outcome, Outcome::ReadClosed { seq: 6, statements: 1 });
-        committed(writer.execute(cx, ExecuteMode::Write,
-            "MATCH (n:Person {name:'Bob'}) DETACH DELETE n", vec![]).await.unwrap(), 7, 1);
+        assert_eq!(
+            empty.outcome,
+            Outcome::ReadClosed {
+                seq: 6,
+                statements: 1
+            }
+        );
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "MATCH (n:Person {name:'Bob'}) DETACH DELETE n",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            7,
+            1,
+        );
         let after = state(cx, &mut observer).await;
         assert_eq!((after.0.rows.len(), after.1.rows.len()), (1, 0));
         writer.close(cx).await.unwrap();
@@ -233,24 +324,53 @@ fn zero_row_writes_preserve_late_rollback_and_signed_work_limits() {
         let fixture = Fixture::start(cx, "rollback", |_| {}).await;
         let mut writer = fixture.client(cx, &grant(Rights::ReadWrite, 0)).await;
         let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
-        committed(writer.execute(cx, ExecuteMode::Write,
-            "CREATE (:Person {name:'Ada',age:1})", vec![]).await.unwrap(), 1, 1);
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "CREATE (:Person {name:'Ada',age:1})",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
         let before = state(cx, &mut observer).await;
         // Establish a changed durable before-image with the same mutation path.
-        committed(writer.execute(cx, ExecuteMode::Write,
-            "MATCH (n:Person) SET n.age=2", vec![]).await.unwrap(), 2, 1);
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "MATCH (n:Person) SET n.age=2",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            2,
+            1,
+        );
         let staged_control = state(cx, &mut observer).await;
         assert_ne!(staged_control, before);
         // The denominator is nonzero in committed state. It becomes zero only
         // after the first statement's private update is visible to the second.
-        let failure = writer.execute(cx, ExecuteMode::Write,
-            "MATCH (n:Person) SET n.age=3; MATCH (n:Person) SET n.age=10/(n.age-3)", vec![])
+        let failure = writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) SET n.age=3; MATCH (n:Person) SET n.age=10/(n.age-3)",
+                vec![],
+            )
             .await;
         let Err(ClientError::Server { message, .. }) = failure else {
             panic!("late arithmetic must refuse: {failure:?}");
         };
-        assert!(message.contains("DivisionByZero") || message.contains("division by zero"),
-            "not an arithmetic refusal: {message}");
+        assert!(
+            message.contains("DivisionByZero") || message.contains("division by zero"),
+            "not an arithmetic refusal: {message}"
+        );
         assert_eq!(state(cx, &mut observer).await, staged_control);
         let mut empty_work = grant(Rights::Write, 0);
         empty_work.limits.max_work = 0;
@@ -269,16 +389,37 @@ fn stats_only_dispatch_keeps_the_hosts_cumulative_creation_ceiling() {
     run(async |cx| {
         let fixture = Fixture::start(cx, "creation-cap", |config| {
             config.write_policy.max_created_vertices = 1;
-        }).await;
+        })
+        .await;
         let mut writer = fixture.client(cx, &grant(Rights::Write, 0)).await;
         let mut observer = fixture.client(cx, &grant(Rights::Read, 100)).await;
         let before = state(cx, &mut observer).await;
-        let failure = writer.execute(cx, ExecuteMode::Write,
-            "CREATE (:Person {name:'First'}); CREATE (:Person {name:'Second'})", vec![]).await;
-        assert!(matches!(failure, Err(ClientError::Server { .. })), "{failure:?}");
+        let failure = writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (:Person {name:'First'}); CREATE (:Person {name:'Second'})",
+                vec![],
+            )
+            .await;
+        assert!(
+            matches!(failure, Err(ClientError::Server { .. })),
+            "{failure:?}"
+        );
         assert_eq!(state(cx, &mut observer).await, before);
-        committed(writer.execute(cx, ExecuteMode::Write,
-            "CREATE (:Person {name:'Only'})", vec![]).await.unwrap(), 1, 1);
+        committed(
+            writer
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    "CREATE (:Person {name:'Only'})",
+                    vec![],
+                )
+                .await
+                .unwrap(),
+            1,
+            1,
+        );
         writer.close(cx).await.unwrap();
         observer.close(cx).await.unwrap();
         fixture.stop(cx, 1, 1, 0).await;

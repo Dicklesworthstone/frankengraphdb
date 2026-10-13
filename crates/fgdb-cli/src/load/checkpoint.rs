@@ -560,8 +560,12 @@ mod cadence_tests {
         rows_per_chunk: usize,
     ) -> View<'a> {
         View {
-            checkpoint, base: CommitSeq(7), base_marker, source_hash,
-            rows_per_chunk, identity_hash: None,
+            checkpoint,
+            base: CommitSeq(7),
+            base_marker,
+            source_hash,
+            rows_per_chunk,
+            identity_hash: None,
         }
     }
 
@@ -579,12 +583,19 @@ mod cadence_tests {
         let mut old = CountBytes::default();
         let mut new = CountBytes::default();
         let mut cost = Cost {
-            old_bytes: 0, new_bytes: 0,
-            old_entries: 0, new_entries: 0,
-            old_images: 1, new_images: 1,
+            old_bytes: 0,
+            new_bytes: 0,
+            old_entries: 0,
+            new_entries: 0,
+            old_images: 1,
+            new_images: 1,
         };
-        view(&cp, &base_marker, &source_hash, chunk).write_to(&mut old, limits).unwrap();
-        view(&cp, &base_marker, &source_hash, chunk).write_to(&mut new, limits).unwrap();
+        view(&cp, &base_marker, &source_hash, chunk)
+            .write_to(&mut old, limits)
+            .unwrap();
+        view(&cp, &base_marker, &source_hash, chunk)
+            .write_to(&mut new, limits)
+            .unwrap();
         for first in (0..total).step_by(chunk) {
             let end = (first + chunk).min(total);
             for row in first..end {
@@ -599,20 +610,25 @@ mod cadence_tests {
             cp.next_row = end;
             cp.committed_chunks += 1;
             cp.frontier.0 += 1;
-            view(&cp, &base_marker, &source_hash, chunk).write_to(&mut old, limits).unwrap();
+            view(&cp, &base_marker, &source_hash, chunk)
+                .write_to(&mut old, limits)
+                .unwrap();
             cost.old_images += 1;
             cost.old_entries += end;
             if due(cp.committed_chunks, end, total) {
-                view(&cp, &base_marker, &source_hash, chunk).write_to(&mut new, limits).unwrap();
+                view(&cp, &base_marker, &source_hash, chunk)
+                    .write_to(&mut new, limits)
+                    .unwrap();
                 cost.new_images += 1;
                 cost.new_entries += end;
             }
         }
         let mut final_bytes = Vec::new();
-        view(&cp, &base_marker, &source_hash, chunk).write_to(&mut final_bytes, limits).unwrap();
-        let saved = super::super::Saved::decode(
-            std::str::from_utf8(&final_bytes).unwrap(), limits,
-        ).unwrap();
+        view(&cp, &base_marker, &source_hash, chunk)
+            .write_to(&mut final_bytes, limits)
+            .unwrap();
+        let saved = super::super::Saved::decode(std::str::from_utf8(&final_bytes).unwrap(), limits)
+            .unwrap();
         super::super::same_checkpoint(&saved.checkpoint, &cp).unwrap();
         cost.old_bytes = old.0;
         cost.new_bytes = new.0;
@@ -650,7 +666,10 @@ mod cadence_tests {
         for total in [0, 1, 7, 31, 257, 1025] {
             for chunk in [1, 2, 7, 32, 256] {
                 let cost = compare(total, chunk);
-                assert!(cost.new_bytes <= cost.old_bytes, "{total}/{chunk}: {cost:?}");
+                assert!(
+                    cost.new_bytes <= cost.old_bytes,
+                    "{total}/{chunk}: {cost:?}"
+                );
                 assert!(cost.new_images <= cost.old_images, "{cost:?}");
                 if total != 0 {
                     assert!(cost.new_entries < 3 * total, "{total}/{chunk}: {cost:?}");

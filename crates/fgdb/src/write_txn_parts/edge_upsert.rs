@@ -473,7 +473,7 @@ mod native_edge_upsert_composite_tests {
             prefix.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
             prefix.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(2))]);
             for (edge, p, q) in [(10, 7, 4), (11, 9, 6)] {
-                prefix.create_edge(EId(edge), VId(1), VId(2), vec![
+                prefix.add_edge(EId(edge), VId(1), VId(2), vec![
                     (P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(q)),
                 ]);
             }

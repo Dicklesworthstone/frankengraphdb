@@ -10,8 +10,8 @@ use fgdb_gql::{
     PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx,
-    TxnCx, VId,
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, TxnCx,
+    VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -28,7 +28,9 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
-        [0x71; 32], DatabaseSecurityNamespaceId([0x72; 32]), [0x73; 32],
+        [0x71; 32],
+        DatabaseSecurityNamespaceId([0x72; 32]),
+        [0x73; 32],
     )
 }
 
@@ -60,7 +62,11 @@ fn run<T>(test: impl AsyncFnOnce(&CommitCx, &QueryCx, &TxnCx) -> T) -> T {
 async fn seed(db: &mut Database<MemVfs>, commit: &CommitCx, parallel: bool) {
     let mut batch = WriteBatch::new(R);
     for id in 1..=3 {
-        batch.create_vertex(VId(id as u128), vec![], vec![(P, CanonicalScalar::Int(id * 10))]);
+        batch.create_vertex(
+            VId(id as u128),
+            vec![],
+            vec![(P, CanonicalScalar::Int(id * 10))],
+        );
     }
     if parallel {
         batch.add_edge(EId(11), VId(1), VId(2), vec![(P, CanonicalScalar::Int(7))]);
@@ -70,15 +76,22 @@ async fn seed(db: &mut Database<MemVfs>, commit: &CommitCx, parallel: bool) {
 }
 
 fn read(db: &Database<MemVfs>, cx: &QueryCx, text: &str) -> Vec<Vec<GraphValue>> {
-    let QueryResult::Rows { rows, .. } = db.query(
-        cx, text, &GqlParameters::new(), symbols, policy(100).query,
-    ).expect(text) else {
+    let QueryResult::Rows { rows, .. } = db
+        .query(cx, text, &GqlParameters::new(), symbols, policy(100).query)
+        .expect(text)
+    else {
         panic!("expected native row result: {text}");
     };
-    rows.into_iter().map(|row| row.into_iter().map(|cell| match cell {
-        QueryValue::Value(value) => value,
-        _ => panic!("expected ordinary row-domain values"),
-    }).collect()).collect()
+    rows.into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| match cell {
+                    QueryValue::Value(value) => value,
+                    _ => panic!("expected ordinary row-domain values"),
+                })
+                .collect()
+        })
+        .collect()
 }
 
 #[test]
@@ -93,18 +106,31 @@ fn grouped_creation_keeps_occurrences_and_final_edge_endpoint_and_match_fields()
         );
         let before = db.frontier().unwrap();
         let mut allocated = 0;
-        let (_, output, _) = db.execute_graph_edge_merge_query_autocommit_governed(
-            txcx, cx, commit, &query, policy(1), |_| {
-                allocated += 1;
-                Ok::<_, ()>(ElementId::Edge(EDGE))
-            },
-        ).await.unwrap();
+        let (_, output, _) = db
+            .execute_graph_edge_merge_query_autocommit_governed(
+                txcx,
+                cx,
+                commit,
+                &query,
+                policy(1),
+                |_| {
+                    allocated += 1;
+                    Ok::<_, ()>(ElementId::Edge(EDGE))
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(allocated, 1);
         assert_eq!(output.value.len(), 1);
-        assert_eq!(output.value[0].values(), &[int(3), int(7), int(10), int(10)]);
+        assert_eq!(
+            output.value[0].values(),
+            &[int(3), int(7), int(10), int(10)]
+        );
         assert_ne!(db.frontier().unwrap(), before);
-        assert_eq!(read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r, r.p"),
-            vec![vec![GraphValue::Edge(EDGE), int(7)]]);
+        assert_eq!(
+            read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r, r.p"),
+            vec![vec![GraphValue::Edge(EDGE), int(7)]]
+        );
     });
 }
 
@@ -117,15 +143,24 @@ fn parallel_groups_are_filtered_before_the_final_one_row_grant() {
             "MATCH (a {p:10}),(b {p:20}),(duplicate) MERGE (a)-[r:R]->(b) \
              WITH r AS edge, count(*) AS n WHERE edge.p > 7 RETURN n, edge.p AS p",
         );
-        let (_, output, _) = db.execute_graph_edge_merge_query_autocommit_governed(
-            txcx, cx, commit, &query, policy(1),
-            |_| -> Result<ElementId, ()> { panic!("both relationships already exist") },
-        ).await.unwrap();
+        let (_, output, _) = db
+            .execute_graph_edge_merge_query_autocommit_governed(
+                txcx,
+                cx,
+                commit,
+                &query,
+                policy(1),
+                |_| -> Result<ElementId, ()> { panic!("both relationships already exist") },
+            )
+            .await
+            .unwrap();
         assert_eq!(output.value.len(), 1);
         assert_eq!(output.value[0].values(), &[int(3), int(9)]);
         assert_eq!(output.rows.result_rows, 1);
-        assert_eq!(read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r.p AS p ORDER BY p"),
-            vec![vec![int(7)], vec![int(9)]]);
+        assert_eq!(
+            read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r.p AS p ORDER BY p"),
+            vec![vec![int(7)], vec![int(9)]]
+        );
     });
 }
 
@@ -139,14 +174,24 @@ fn filtered_grouped_output_still_commits_the_created_relationship() {
              WITH r AS edge, count(*) AS n WHERE edge.p < 0 RETURN n",
         );
         let before = db.frontier().unwrap();
-        let (_, output, _) = db.execute_graph_edge_merge_query_autocommit_governed(
-            txcx, cx, commit, &query, policy(0), |_| Ok::<_, ()>(ElementId::Edge(EDGE)),
-        ).await.unwrap();
+        let (_, output, _) = db
+            .execute_graph_edge_merge_query_autocommit_governed(
+                txcx,
+                cx,
+                commit,
+                &query,
+                policy(0),
+                |_| Ok::<_, ()>(ElementId::Edge(EDGE)),
+            )
+            .await
+            .unwrap();
         assert!(output.value.is_empty());
         assert_eq!(output.rows.result_rows, 0);
         assert_ne!(db.frontier().unwrap(), before);
-        assert_eq!(read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r"),
-            vec![vec![GraphValue::Edge(EDGE)]]);
+        assert_eq!(
+            read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r"),
+            vec![vec![GraphValue::Edge(EDGE)]]
+        );
     });
 }
 
@@ -165,17 +210,26 @@ fn failing_grouped_tail_rolls_back_creation_but_keeps_the_transaction_prefix() {
         );
         let before = db.frontier().unwrap();
         let mut allocated = 0;
-        let result = txn.execute_graph_edge_merge_query_governed(
-            &mut db, cx, &query, policy(0), |_| {
+        let result =
+            txn.execute_graph_edge_merge_query_governed(&mut db, cx, &query, policy(0), |_| {
                 allocated += 1;
                 Ok::<_, ()>(ElementId::Edge(EDGE))
-            },
-        );
+            });
         assert!(result.is_err());
-        assert_eq!(allocated, 1, "the error follows actual creation, not preparation");
-        assert_eq!(db.frontier().unwrap(), before, "no failed statement publishes");
+        assert_eq!(
+            allocated, 1,
+            "the error follows actual creation, not preparation"
+        );
+        assert_eq!(
+            db.frontier().unwrap(),
+            before,
+            "no failed statement publishes"
+        );
         txn.finish(&mut db, commit).await.unwrap();
         assert!(read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r").is_empty());
-        assert_eq!(read(&db, cx, "MATCH (n {p:80}) RETURN n.p"), vec![vec![int(80)]]);
+        assert_eq!(
+            read(&db, cx, "MATCH (n {p:80}) RETURN n.p"),
+            vec![vec![int(80)]]
+        );
     });
 }

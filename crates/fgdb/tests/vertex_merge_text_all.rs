@@ -60,7 +60,10 @@ fn values(result: QueryResult, names: &[&str]) -> Vec<Vec<GraphValue>> {
     };
     assert_eq!(
         columns,
-        names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>()
+        names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
     );
     rows.into_iter()
         .map(|row| {
@@ -90,7 +93,10 @@ async fn seed(db: &mut Database<MemVfs>, commit: &CommitCx) {
     batch.create_vertex(
         OUTSIDE,
         vec![ITEM],
-        vec![(P, CanonicalScalar::Int(100)), (Q, CanonicalScalar::Int(99))],
+        vec![
+            (P, CanonicalScalar::Int(100)),
+            (Q, CanonicalScalar::Int(99)),
+        ],
     );
     db.write(commit, batch).await.unwrap();
 }
@@ -104,7 +110,10 @@ fn assert_targets(db: &Database<MemVfs>, ps: [i64; 3], q: i64) {
     }
     assert_eq!(
         db.vertex(OUTSIDE).unwrap().unwrap().props,
-        vec![(P, CanonicalScalar::Int(100)), (Q, CanonicalScalar::Int(99))]
+        vec![
+            (P, CanonicalScalar::Int(100)),
+            (Q, CanonicalScalar::Int(99))
+        ]
     );
 }
 
@@ -398,7 +407,10 @@ fn public_action_caps_are_statement_wide_and_result_caps_apply_after_all_updates
         assert!(matches!(
             error,
             QueryWriteError::VertexUpsert(GqlQueryError::Source(
-                GraphVertexUpsertError::ActionLimit { limit: 5, observed: 6 }
+                GraphVertexUpsertError::ActionLimit {
+                    limit: 5,
+                    observed: 6
+                }
             ))
         ));
         assert_eq!(transaction.staged_effect_digest().unwrap(), digest);

@@ -267,7 +267,9 @@ fn validate(
             }
             let valid = match &action.value {
                 GraphEdgeUpsertValue::Expression { value, .. } => {
-                    !value.referenced_columns().any(|column| column >= properties.len())
+                    !value
+                        .referenced_columns()
+                        .any(|column| column >= properties.len())
                         && value.referenced_locals().next().is_none()
                 }
                 GraphEdgeUpsertValue::Composite { value, .. } => matches!(
@@ -489,10 +491,7 @@ mod composite_tests {
             ] {
                 assert_eq!(
                     validate(branch, &[action(value)]),
-                    Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {
-                        branch,
-                        action: 0,
-                    }),
+                    Err(GraphEdgeUpsertBuildError::InvalidExpressionInput { branch, action: 0 }),
                 );
             }
             let mut wide = action(integer(1));
@@ -512,10 +511,12 @@ mod composite_tests {
         let value = action(indexed(GraphSetValue::Column(0))).value;
         let input = || vec![GraphValue::Scalar(CanonicalScalar::Int(42))];
         let mut events = Vec::new();
-        let result = value.evaluate_with_control(input(), &mut |event| {
-            events.push(event);
-            Ok::<_, usize>(())
-        }).unwrap();
+        let result = value
+            .evaluate_with_control(input(), &mut |event| {
+                events.push(event);
+                Ok::<_, usize>(())
+            })
+            .unwrap();
         assert_eq!(result, GraphValue::Scalar(CanonicalScalar::Int(42)));
         assert!(events.contains(&GlaExecutionEvent::Work));
         assert!(events.contains(&GlaExecutionEvent::ScratchEntry));
@@ -526,14 +527,19 @@ mod composite_tests {
                 at += 1;
                 if current == stop { Err(stop) } else { Ok(()) }
             });
-            assert!(matches!(result, Err(GraphIntegerEvaluationError::Control(found)) if found == stop));
+            assert!(
+                matches!(result, Err(GraphIntegerEvaluationError::Control(found)) if found == stop)
+            );
             assert_eq!(at, stop + 1);
         }
         // Index has an open result domain. Do not silently flatten a list
         // returned at run time: the native action owner must reject it.
         let dynamic = action(indexed(GraphSetValue::List(vec![integer(7)])));
-        assert!(validate(GraphEdgeUpsertBranch::Match, &[dynamic.clone()]).is_ok());
-        let result = dynamic.value.evaluate_with_control(input(), &mut |_| Ok::<_, ()>(())).unwrap();
+        assert!(validate(GraphEdgeUpsertBranch::Match, std::slice::from_ref(&dynamic)).is_ok());
+        let result = dynamic
+            .value
+            .evaluate_with_control(input(), &mut |_| Ok::<_, ()>(()))
+            .unwrap();
         assert!(matches!(result, GraphValue::List(_)));
     }
 }

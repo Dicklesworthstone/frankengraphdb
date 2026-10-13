@@ -68,9 +68,11 @@ fn edge_row(query: &PreparedGraphEdgeMergeQuery, edge: EId, p: i64, q: i64) -> V
         .collect()
 }
 
-fn finish(query: &PreparedGraphEdgeMergeQuery, rows: Vec<Vec<GraphValue>>, limit: u64)
-    -> Result<Output, Failure>
-{
+fn finish(
+    query: &PreparedGraphEdgeMergeQuery,
+    rows: Vec<Vec<GraphValue>>,
+    limit: u64,
+) -> Result<Output, Failure> {
     query.finish_governed(
         rows,
         GqlExecutionStats::default(),
@@ -81,7 +83,11 @@ fn finish(query: &PreparedGraphEdgeMergeQuery, rows: Vec<Vec<GraphValue>>, limit
 }
 
 fn values(output: Output) -> Vec<Vec<GraphValue>> {
-    output.value.into_iter().map(|row| row.values().to_vec()).collect()
+    output
+        .value
+        .into_iter()
+        .map(|row| row.values().to_vec())
+        .collect()
 }
 
 #[test]
@@ -98,10 +104,13 @@ fn grouped_full_width_identities_do_not_collapse_equal_property_values() {
     ];
     let result = finish(&query, rows, 2).unwrap();
     assert_eq!(result.rows.result_rows, 2);
-    assert_eq!(values(result), vec![
-        vec![GraphValue::Edge(FIRST), int(2), int(7)],
-        vec![GraphValue::Edge(SECOND), int(1), int(7)],
-    ]);
+    assert_eq!(
+        values(result),
+        vec![
+            vec![GraphValue::Edge(FIRST), int(2), int(7)],
+            vec![GraphValue::Edge(SECOND), int(1), int(7)],
+        ]
+    );
 }
 
 #[test]
@@ -114,18 +123,26 @@ fn hidden_keys_remap_all_summaries_but_not_their_argument_slots() {
     );
     // p already feeds SUM and COUNT DISTINCT; q needs a new raw input. Both
     // become hidden keys before the summaries, whose output slots must move.
-    assert_eq!(query.bindings().iter().filter(|b| {
-        **b == GraphEdgeMergeBinding::Property(P)
-    }).count(), 1);
+    assert_eq!(
+        query
+            .bindings()
+            .iter()
+            .filter(|b| { **b == GraphEdgeMergeBinding::Property(P) })
+            .count(),
+        1
+    );
     let rows = vec![
         edge_row(&query, FIRST, 4, 9),
         edge_row(&query, FIRST, 4, 9),
         edge_row(&query, SECOND, 5, 10),
     ];
-    assert_eq!(values(finish(&query, rows, 2).unwrap()), vec![
-        vec![int(8), int(2), int(1), int(4), int(9)],
-        vec![int(5), int(1), int(1), int(5), int(10)],
-    ]);
+    assert_eq!(
+        values(finish(&query, rows, 2).unwrap()),
+        vec![
+            vec![int(8), int(2), int(1), int(4), int(9)],
+            vec![int(5), int(1), int(1), int(5), int(10)],
+        ]
+    );
 }
 
 #[test]
@@ -137,9 +154,15 @@ fn repeated_identity_aliases_reuse_existing_keys_and_hide_private_columns() {
     assert_eq!(query.columns(), &["known", "n", "__fg_boundary_0", "again"]);
     assert_eq!(query.bindings().len(), 3);
     let row = edge_row(&query, FIRST, 4, 9);
-    assert_eq!(values(finish(&query, vec![row.clone(), row], 1).unwrap()), vec![
-        vec![int(4), int(2), GraphValue::Edge(FIRST), GraphValue::Edge(FIRST)],
-    ]);
+    assert_eq!(
+        values(finish(&query, vec![row.clone(), row], 1).unwrap()),
+        vec![vec![
+            int(4),
+            int(2),
+            GraphValue::Edge(FIRST),
+            GraphValue::Edge(FIRST)
+        ],]
+    );
 }
 
 #[test]
@@ -149,23 +172,32 @@ fn actual_undirected_endpoint_and_match_vertex_keep_their_distinct_owners() {
          WITH count(*) AS n, startNode(r) AS source, a AS matched, r AS edge \
          WHERE edge.p > 0 RETURN edge.p AS ep, source.p AS sp, matched.p AS mp, n",
     );
-    assert_eq!(query.bindings(), &[
-        GraphEdgeMergeBinding::Endpoint { start: true },
-        GraphEdgeMergeBinding::Input(0),
-        GraphEdgeMergeBinding::Edge,
-        GraphEdgeMergeBinding::Property(P),
-        GraphEdgeMergeBinding::EndpointProperty { start: true, key: P },
-        GraphEdgeMergeBinding::Input(2),
-    ]);
+    assert_eq!(
+        query.bindings(),
+        &[
+            GraphEdgeMergeBinding::Endpoint { start: true },
+            GraphEdgeMergeBinding::Input(0),
+            GraphEdgeMergeBinding::Edge,
+            GraphEdgeMergeBinding::Property(P),
+            GraphEdgeMergeBinding::EndpointProperty {
+                start: true,
+                key: P
+            },
+            GraphEdgeMergeBinding::Input(2),
+        ]
+    );
     let row = vec![
         GraphValue::Vertex(VId(2)), // Actual edge source, not MATCH a.
         GraphValue::Vertex(VId(1)),
         GraphValue::Edge(FIRST),
-        int(7), int(20), int(10),
+        int(7),
+        int(20),
+        int(10),
     ];
-    assert_eq!(values(finish(&query, vec![row.clone(), row], 1).unwrap()), vec![
-        vec![int(7), int(20), int(10), int(2)],
-    ]);
+    assert_eq!(
+        values(finish(&query, vec![row.clone(), row], 1).unwrap()),
+        vec![vec![int(7), int(20), int(10), int(2)],]
+    );
 }
 
 #[test]
@@ -174,13 +206,18 @@ fn grouped_match_relationship_uses_its_own_frozen_selection_field() {
         "MATCH (a)-[original:S]->(b) MERGE (a)-[r:R]->(b) \
          WITH original AS old, count(*) AS n RETURN old.p AS p, n",
     );
-    assert_eq!(query.bindings(), &[
-        GraphEdgeMergeBinding::Input(2),
-        GraphEdgeMergeBinding::Input(3),
-    ]);
+    assert_eq!(
+        query.bindings(),
+        &[
+            GraphEdgeMergeBinding::Input(2),
+            GraphEdgeMergeBinding::Input(3),
+        ]
+    );
     let row = vec![GraphValue::Edge(FIRST), int(12)];
-    assert_eq!(values(finish(&query, vec![row.clone(), row], 1).unwrap()),
-        vec![vec![int(12), int(2)]]);
+    assert_eq!(
+        values(finish(&query, vec![row.clone(), row], 1).unwrap()),
+        vec![vec![int(12), int(2)]]
+    );
 }
 
 #[test]
@@ -188,27 +225,40 @@ fn head_page_precedes_property_unwind_and_final_page_follows_expansion() {
     let query = prepare(
         "WITH r AS edge, count(*) AS n ORDER BY n DESC LIMIT 1 \
          UNWIND [edge.p, edge.p + 1] AS x RETURN x AS value, n ORDER BY value DESC",
-    ).with_page(1, Some(1));
+    )
+    .with_page(1, Some(1));
     let rows = vec![
         edge_row(&query, FIRST, 4, 0),
         edge_row(&query, FIRST, 4, 0),
         edge_row(&query, SECOND, 50, 0),
     ];
-    assert_eq!(values(finish(&query, rows, 1).unwrap()), vec![vec![int(4), int(2)]]);
+    assert_eq!(
+        values(finish(&query, rows, 1).unwrap()),
+        vec![vec![int(4), int(2)]]
+    );
 }
 
 #[test]
 fn null_keys_empty_groups_and_filtered_groups_do_not_spend_final_row_quota() {
     let query = prepare("WITH r AS edge, count(*) AS n WHERE edge.p IS NULL RETURN n");
-    assert_eq!(query.bindings(), &[
-        GraphEdgeMergeBinding::Edge, GraphEdgeMergeBinding::Property(P),
-    ]);
+    assert_eq!(
+        query.bindings(),
+        &[
+            GraphEdgeMergeBinding::Edge,
+            GraphEdgeMergeBinding::Property(P),
+        ]
+    );
     let row = vec![GraphValue::Edge(FIRST), null()];
-    assert_eq!(values(finish(&query, vec![row.clone(), row], 1).unwrap()),
-        vec![vec![int(2)]]);
+    assert_eq!(
+        values(finish(&query, vec![row.clone(), row], 1).unwrap()),
+        vec![vec![int(2)]]
+    );
     assert!(finish(&query, vec![], 0).unwrap().value.is_empty());
     let query = prepare("WITH r AS edge, count(*) AS n WHERE edge.p < 0 RETURN n");
-    let rows = vec![edge_row(&query, FIRST, 4, 0), edge_row(&query, SECOND, 5, 0)];
+    let rows = vec![
+        edge_row(&query, FIRST, 4, 0),
+        edge_row(&query, SECOND, 5, 0),
+    ];
     assert!(finish(&query, rows, 0).unwrap().value.is_empty());
 }
 
@@ -216,25 +266,39 @@ fn null_keys_empty_groups_and_filtered_groups_do_not_spend_final_row_quota() {
 fn grouped_tail_rebinds_without_catalog_calls_or_identity_changes() {
     let calls = Cell::new(0);
     let template = PreparedGraphEdgeMergeQueryText::prepare(
-        &format!("{PREFIX} WITH r AS edge, count(*) AS n \
-                  WHERE edge.p > $minimum RETURN edge.p + $delta AS value, n"),
+        &format!(
+            "{PREFIX} WITH r AS edge, count(*) AS n \
+                  WHERE edge.p > $minimum RETURN edge.p + $delta AS value, n"
+        ),
         R,
         |kind: GraphSymbolKind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
-    ).unwrap();
+    )
+    .unwrap();
     let resolved = calls.get();
-    let arguments = |minimum| GqlParameters::new()
-        .with_int64("minimum", minimum).unwrap()
-        .with_int64("delta", 10).unwrap();
+    let arguments = |minimum| {
+        GqlParameters::new()
+            .with_int64("minimum", minimum)
+            .unwrap()
+            .with_int64("delta", 10)
+            .unwrap()
+    };
     let shown = template.bind_parameters(&arguments(0)).unwrap();
     let hidden = template.bind_parameters(&arguments(9)).unwrap();
     assert_eq!(calls.get(), resolved);
     assert_ne!(shown.canonical_bytes(), hidden.canonical_bytes());
-    assert_eq!(values(finish(&shown, vec![edge_row(&shown, FIRST, 4, 0)], 1).unwrap()),
-        vec![vec![int(14), int(1)]]);
-    assert!(finish(&hidden, vec![edge_row(&hidden, FIRST, 4, 0)], 0).unwrap().value.is_empty());
+    assert_eq!(
+        values(finish(&shown, vec![edge_row(&shown, FIRST, 4, 0)], 1).unwrap()),
+        vec![vec![int(14), int(1)]]
+    );
+    assert!(
+        finish(&hidden, vec![edge_row(&hidden, FIRST, 4, 0)], 0)
+            .unwrap()
+            .value
+            .is_empty()
+    );
     assert!(template.bind_parameters(&GqlParameters::new()).is_err());
 }
 
@@ -250,7 +314,8 @@ fn representatives_dropped_bindings_and_later_scopes_do_not_gain_field_reads() {
     ] {
         let calls = Cell::new(0);
         let result = PreparedGraphEdgeMergeQueryText::prepare(
-            &format!("{PREFIX} {tail}"), R,
+            &format!("{PREFIX} {tail}"),
+            R,
             |kind: GraphSymbolKind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
@@ -263,11 +328,15 @@ fn representatives_dropped_bindings_and_later_scopes_do_not_gain_field_reads() {
 
 #[test]
 fn late_field_expression_failure_is_not_hidden_by_limit_zero() {
-    let query = prepare(
-        "WITH r AS edge, count(*) AS n RETURN 12 / edge.p AS value LIMIT 0",
-    );
-    let rows = vec![edge_row(&query, FIRST, 4, 0), edge_row(&query, SECOND, 0, 0)];
-    assert!(matches!(finish(&query, rows, 0), Err(GqlQueryError::Source(_))));
+    let query = prepare("WITH r AS edge, count(*) AS n RETURN 12 / edge.p AS value LIMIT 0");
+    let rows = vec![
+        edge_row(&query, FIRST, 4, 0),
+        edge_row(&query, SECOND, 0, 0),
+    ];
+    assert!(matches!(
+        finish(&query, rows, 0),
+        Err(GqlQueryError::Source(_))
+    ));
 }
 
 #[test]
@@ -277,12 +346,23 @@ fn cumulative_work_scratch_and_every_checkpoint_cover_the_grouped_tail() {
          UNWIND [edge.p, edge.p + 1] AS x RETURN x, n ORDER BY x",
     );
     let rows = vec![edge_row(&query, FIRST, 4, 0), edge_row(&query, FIRST, 4, 0)];
-    let prefix = GlaExecutionStats { work_units: 17, scratch_entries: 11 };
+    let prefix = GlaExecutionStats {
+        work_units: 17,
+        scratch_entries: 11,
+    };
     let mut checkpoints = 0;
-    let output = query.finish_governed::<(), ()>(
-        rows.clone(), GqlExecutionStats::default(), prefix, policy(2),
-        || { checkpoints += 1; Ok(()) },
-    ).unwrap();
+    let output = query
+        .finish_governed::<(), ()>(
+            rows.clone(),
+            GqlExecutionStats::default(),
+            prefix,
+            policy(2),
+            || {
+                checkpoints += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
     assert_eq!(output.value.len(), 2);
     assert_eq!(output.value[0].values(), &[int(4), int(2)]);
     let used = output.evaluator;
@@ -295,20 +375,33 @@ fn cumulative_work_scratch_and_every_checkpoint_cover_the_grouped_tail() {
         (used.work_units, used.scratch_entries - 1, false),
     ] {
         let result = query.finish_governed::<(), ()>(
-            rows.clone(), GqlExecutionStats::default(), prefix,
-            GqlQueryPolicy::new(1_000, 2, work, scratch), || Ok(()),
+            rows.clone(),
+            GqlExecutionStats::default(),
+            prefix,
+            GqlQueryPolicy::new(1_000, 2, work, scratch),
+            || Ok(()),
         );
-        if pass { assert_eq!(result.unwrap().value, output.value); }
-        else { assert!(matches!(result, Err(GqlQueryError::Evaluator(_)))); }
+        if pass {
+            assert_eq!(result.unwrap().value, output.value);
+        } else {
+            assert!(matches!(result, Err(GqlQueryError::Evaluator(_))));
+        }
     }
     for fail_at in 0..checkpoints {
         let mut reached = 0;
         let result = query.finish_governed::<(), usize>(
-            rows.clone(), GqlExecutionStats::default(), prefix, policy(2),
+            rows.clone(),
+            GqlExecutionStats::default(),
+            prefix,
+            policy(2),
             || {
                 let current = reached;
                 reached += 1;
-                if current == fail_at { Err(current) } else { Ok(()) }
+                if current == fail_at {
+                    Err(current)
+                } else {
+                    Ok(())
+                }
             },
         );
         assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == fail_at));

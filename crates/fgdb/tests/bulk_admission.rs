@@ -14,7 +14,11 @@ const R: RelationId = RelationId(1);
 const K: PropertyKeyId = PropertyKeyId(1);
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x31; 32], DatabaseSecurityNamespaceId([0x32; 32]), [0x33; 32])
+    DatabaseKeys::new(
+        [0x31; 32],
+        DatabaseSecurityNamespaceId([0x32; 32]),
+        [0x33; 32],
+    )
 }
 fn vertex(key: &str, value: i64) -> BulkRow {
     BulkRow::Vertex(BulkVertex {
@@ -51,39 +55,52 @@ fn admission_precedes_new_commits_and_runs_once_for_empty_and_completed_loads() 
         let rows = vec![vertex("v0", 0), vertex("v1", 1), vertex("v2", 2)];
         let mut events = Vec::new();
         let sink = &mut events;
-        let cp = db.try_bulk_load_with_admission(
-            &query, &commit, source(rows.clone()), BulkLoadPolicy::new(2, R), None,
-            |checked| {
-                sink.push((false, checked.next_row, checked.frontier));
-                Ok(move |durable: &BulkLoadCheckpoint| {
-                    sink.push((true, durable.next_row, durable.frontier));
-                    Ok(())
-                })
-            },
-        ).await.unwrap();
-        assert_eq!(events, [
-            (false, 0, basis),
-            (true, 2, CommitSeq(basis.0 + 1)),
-            (true, 3, CommitSeq(basis.0 + 2)),
-        ]);
+        let cp = db
+            .try_bulk_load_with_admission(
+                &query,
+                &commit,
+                source(rows.clone()),
+                BulkLoadPolicy::new(2, R),
+                None,
+                |checked| {
+                    sink.push((false, checked.next_row, checked.frontier));
+                    Ok(move |durable: &BulkLoadCheckpoint| {
+                        sink.push((true, durable.next_row, durable.frontier));
+                        Ok(())
+                    })
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            events,
+            [
+                (false, 0, basis),
+                (true, 2, CommitSeq(basis.0 + 1)),
+                (true, 3, CommitSeq(basis.0 + 2)),
+            ]
+        );
         let mut policy = BulkLoadPolicy::new(2, R);
         policy.resume = Some(cp.clone());
         let mut admitted = 0;
-        db.try_bulk_load_with_admission(
-            &query, &commit, source(rows), policy, None,
-            |checked| {
-                admitted += 1;
-                assert_eq!(checked.next_row, 3);
-                assert_eq!(checked.frontier, cp.frontier);
-                Ok(|_: &BulkLoadCheckpoint| -> io::Result<()> {
-                    panic!("completed resume must not publish a new chunk")
-                })
-            },
-        ).await.unwrap();
+        db.try_bulk_load_with_admission(&query, &commit, source(rows), policy, None, |checked| {
+            admitted += 1;
+            assert_eq!(checked.next_row, 3);
+            assert_eq!(checked.frontier, cp.frontier);
+            Ok(|_: &BulkLoadCheckpoint| -> io::Result<()> {
+                panic!("completed resume must not publish a new chunk")
+            })
+        })
+        .await
+        .unwrap();
         assert_eq!(admitted, 1);
         assert_eq!(db.frontier().unwrap(), cp.frontier);
         db.try_bulk_load_with_admission(
-            &query, &commit, source(Vec::new()), BulkLoadPolicy::new(2, R), None,
+            &query,
+            &commit,
+            source(Vec::new()),
+            BulkLoadPolicy::new(2, R),
+            None,
             |checked| {
                 admitted += 1;
                 assert_eq!(checked.next_row, 0);
@@ -92,7 +109,9 @@ fn admission_precedes_new_commits_and_runs_once_for_empty_and_completed_loads() 
                     panic!("empty load must not publish a new chunk")
                 })
             },
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(admitted, 2);
         assert_eq!(db.frontier().unwrap(), cp.frontier);
         assert_eq!(db.vertices().unwrap().len(), 3);
@@ -119,17 +138,23 @@ fn all_preflight_refusals_precede_admission_and_do_not_change_the_graph() {
                 policy.max_chunk_bytes = 0;
             }
             let mut calls = 0;
-            let failed = db.try_bulk_load_with_admission(
-                &query, &commit, source(rows), policy, None,
-                |_| {
+            let failed = db
+                .try_bulk_load_with_admission(&query, &commit, source(rows), policy, None, |_| {
                     calls += 1;
                     Ok(quiet as fn(&BulkLoadCheckpoint) -> io::Result<()>)
-                },
-            ).await.unwrap_err();
+                })
+                .await
+                .unwrap_err();
             match (case, failed.kind) {
                 (0, BulkLoadErrorKind::DuplicateCallerKey { .. })
                 | (1, BulkLoadErrorKind::UnresolvedEndpoint { .. })
-                | (2, BulkLoadErrorKind::SourceLimit { dimension: "chunk_bytes", .. }) => {}
+                | (
+                    2,
+                    BulkLoadErrorKind::SourceLimit {
+                        dimension: "chunk_bytes",
+                        ..
+                    },
+                ) => {}
                 (_, other) => panic!("unexpected preflight refusal: {other:?}"),
             }
             assert_eq!(calls, 0);
@@ -139,18 +164,31 @@ fn all_preflight_refusals_precede_admission_and_do_not_change_the_graph() {
             assert!(db.edges().unwrap().is_empty());
         }
         let input = (0..2).map(|index| {
-            if index == 0 { Ok(vertex("first", 1)) }
-            else { Err(io::Error::other("decoder failed after one valid row")) }
+            if index == 0 {
+                Ok(vertex("first", 1))
+            } else {
+                Err(io::Error::other("decoder failed after one valid row"))
+            }
         });
         let mut calls = 0;
-        let failed = db.try_bulk_load_with_admission(
-            &query, &commit, input, BulkLoadPolicy::new(1, R), None,
-            |_| {
-                calls += 1;
-                Ok(quiet as fn(&BulkLoadCheckpoint) -> io::Result<()>)
-            },
-        ).await.unwrap_err();
-        assert!(matches!(failed.kind, BulkLoadErrorKind::Source { row: 1, .. }));
+        let failed = db
+            .try_bulk_load_with_admission(
+                &query,
+                &commit,
+                input,
+                BulkLoadPolicy::new(1, R),
+                None,
+                |_| {
+                    calls += 1;
+                    Ok(quiet as fn(&BulkLoadCheckpoint) -> io::Result<()>)
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failed.kind,
+            BulkLoadErrorKind::Source { row: 1, .. }
+        ));
         assert_eq!(calls, 0);
         assert_eq!(db.frontier().unwrap(), basis);
     });
@@ -164,24 +202,44 @@ fn reconstructed_edge_with_wrong_matching_endpoint_never_reaches_admission() {
         let query = contexts.query();
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        db.bulk_load(&query, &commit, vec![vertex("a", 1), vertex("b", 2)],
-            BulkLoadPolicy::new(2, R)).await.unwrap();
+        db.bulk_load(
+            &query,
+            &commit,
+            vec![vertex("a", 1), vertex("b", 2)],
+            BulkLoadPolicy::new(2, R),
+        )
+        .await
+        .unwrap();
         // Both endpoint selectors are valid and unique at the original basis.
         // The authenticated creation has the correct kind/properties/relation
         // and engine-issued ID, but is NOT the source's intended edge.
-        let cp = db.bulk_load(&query, &commit, vec![matched_edge(2)],
-            BulkLoadPolicy::new(1, R)).await.unwrap();
+        let cp = db
+            .bulk_load(
+                &query,
+                &commit,
+                vec![matched_edge(2)],
+                BulkLoadPolicy::new(1, R),
+            )
+            .await
+            .unwrap();
         let frontier = cp.frontier;
         let mut policy = BulkLoadPolicy::new(1, R);
         policy.resume = Some(cp);
         let mut calls = 0;
-        let failed = db.try_bulk_load_with_admission(
-            &query, &commit, source(vec![matched_edge(1)]), policy, None,
-            |_| {
-                calls += 1;
-                Ok(quiet as fn(&BulkLoadCheckpoint) -> io::Result<()>)
-            },
-        ).await.unwrap_err();
+        let failed = db
+            .try_bulk_load_with_admission(
+                &query,
+                &commit,
+                source(vec![matched_edge(1)]),
+                policy,
+                None,
+                |_| {
+                    calls += 1;
+                    Ok(quiet as fn(&BulkLoadCheckpoint) -> io::Result<()>)
+                },
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(failed.kind, BulkLoadErrorKind::InvalidResume));
         assert_eq!(calls, 0);
         assert!(failed.pending.is_none());
@@ -200,23 +258,44 @@ fn failed_admission_or_durable_callback_has_an_exact_retry_boundary() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let basis = db.frontier().unwrap();
         let rows = vec![vertex("v0", 0), vertex("v1", 1)];
-        let failed = db.try_bulk_load_with_admission(
-            &query, &commit, source(rows.clone()), BulkLoadPolicy::new(1, R), None,
-            |_| Err::<fn(&BulkLoadCheckpoint) -> io::Result<()>, _>(
-                io::Error::other("receipt publication failed before first commit")),
-        ).await.unwrap_err();
+        let failed = db
+            .try_bulk_load_with_admission(
+                &query,
+                &commit,
+                source(rows.clone()),
+                BulkLoadPolicy::new(1, R),
+                None,
+                |_| {
+                    Err::<fn(&BulkLoadCheckpoint) -> io::Result<()>, _>(io::Error::other(
+                        "receipt publication failed before first commit",
+                    ))
+                },
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(failed.kind, BulkLoadErrorKind::Checkpoint(_)));
         assert!(failed.pending.is_none());
         assert_eq!(failed.committed.next_row, 0);
         assert_eq!(db.frontier().unwrap(), basis);
         assert!(db.vertices().unwrap().is_empty());
-        let failed = db.try_bulk_load_with_admission(
-            &query, &commit, source(rows.clone()), BulkLoadPolicy::new(1, R), None,
-            |_| Ok(|cp: &BulkLoadCheckpoint| -> io::Result<()> {
-                assert_eq!(cp.next_row, 1);
-                Err(io::Error::other("delivery failed after the first durable commit"))
-            }),
-        ).await.unwrap_err();
+        let failed = db
+            .try_bulk_load_with_admission(
+                &query,
+                &commit,
+                source(rows.clone()),
+                BulkLoadPolicy::new(1, R),
+                None,
+                |_| {
+                    Ok(|cp: &BulkLoadCheckpoint| -> io::Result<()> {
+                        assert_eq!(cp.next_row, 1);
+                        Err(io::Error::other(
+                            "delivery failed after the first durable commit",
+                        ))
+                    })
+                },
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(failed.kind, BulkLoadErrorKind::Checkpoint(_)));
         assert!(failed.pending.is_none());
         assert_eq!(failed.committed.next_row, 1);
@@ -225,16 +304,16 @@ fn failed_admission_or_durable_callback_has_an_exact_retry_boundary() {
         policy.resume = Some(failed.committed);
         let mut sequence = Vec::new();
         let sink = &mut sequence;
-        let completed = db.try_bulk_load_with_admission(
-            &query, &commit, source(rows), policy, None,
-            |cp| {
+        let completed = db
+            .try_bulk_load_with_admission(&query, &commit, source(rows), policy, None, |cp| {
                 sink.push((false, cp.next_row));
                 Ok(move |cp: &BulkLoadCheckpoint| {
                     sink.push((true, cp.next_row));
                     Ok(())
                 })
-            },
-        ).await.unwrap();
+            })
+            .await
+            .unwrap();
         assert_eq!(sequence, [(false, 1), (true, 2)]);
         assert_eq!(completed.frontier, CommitSeq(basis.0 + 2));
         assert_eq!(db.vertices().unwrap().len(), 2);
@@ -251,16 +330,33 @@ fn checkpoint_only_api_does_not_gain_a_baseline_callback() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let rows = vec![vertex("v0", 0), vertex("v1", 1)];
         let mut positions = Vec::new();
-        let cp = db.try_bulk_load_with_checkpoint(
-            &query, &commit, source(rows.clone()), BulkLoadPolicy::new(1, R), None,
-            |cp| { positions.push(cp.next_row); Ok(()) },
-        ).await.unwrap();
+        let cp = db
+            .try_bulk_load_with_checkpoint(
+                &query,
+                &commit,
+                source(rows.clone()),
+                BulkLoadPolicy::new(1, R),
+                None,
+                |cp| {
+                    positions.push(cp.next_row);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(positions, [1, 2]);
         let mut policy = BulkLoadPolicy::new(1, R);
         policy.resume = Some(cp.clone());
-        db.try_bulk_load_with_checkpoint(&query, &commit, source(rows), policy, None,
+        db.try_bulk_load_with_checkpoint(
+            &query,
+            &commit,
+            source(rows),
+            policy,
+            None,
             |_| -> io::Result<()> { panic!("completed checkpoint-only resume is silent") },
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(db.frontier().unwrap(), cp.frontier);
     });
     assert!(report.lab_test_passed(), "{report:?}");

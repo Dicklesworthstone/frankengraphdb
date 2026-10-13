@@ -298,8 +298,11 @@ impl Fixture {
             // The fixture's independent K property identifies each source
             // row. Do not reuse production issue-order replay to recover IDs.
             let ordinal = |props: &[(PropertyKeyId, CanonicalScalar)]| {
-                let (_, CanonicalScalar::Int(value)) = props.iter()
-                    .find(|(key, _)| *key == K).unwrap() else { panic!("fixture ordinal") };
+                let (_, CanonicalScalar::Int(value)) =
+                    props.iter().find(|(key, _)| *key == K).unwrap()
+                else {
+                    panic!("fixture ordinal")
+                };
                 *value
             };
             self.inspect(|db| {
@@ -307,7 +310,13 @@ impl Fixture {
                     let n = ordinal(&row.props);
                     if n == 999 {
                         assert_eq!(row.labels, [LabelId(2)]);
-                        assert_eq!(row.props, [(K, CanonicalScalar::Int(999)), (P, CanonicalScalar::Int(777))]);
+                        assert_eq!(
+                            row.props,
+                            [
+                                (K, CanonicalScalar::Int(999)),
+                                (P, CanonicalScalar::Int(777))
+                            ]
+                        );
                         continue;
                     }
                     assert!((0..3).contains(&n));
@@ -533,7 +542,10 @@ fn a_forged_lagging_identity_commitment_cannot_be_replaced_by_recovery() {
     assert_eq!(saved.committed_chunks, 4);
     let original = std::fs::read_to_string(&fixture.checkpoint).unwrap();
     let value = parse_json(&original, 10_000, 65_536).unwrap();
-    let old = format!("\"identity_hash\":\"{}\"", string(field(&value, "identity_hash")));
+    let old = format!(
+        "\"identity_hash\":\"{}\"",
+        string(field(&value, "identity_hash"))
+    );
     assert_eq!(original.matches(&old).count(), 1);
     let changed = format!("\"identity_hash\":\"{}\"", "0".repeat(64));
     assert_ne!(old, changed);
@@ -569,18 +581,32 @@ fn a_changed_source_is_refused_even_when_its_commits_run_ahead_of_the_hint() {
 #[test]
 fn unresolved_match_refuses_before_creating_the_import_receipt() {
     let fixture = Fixture::new("unresolved-before-receipt");
-    std::fs::write(&fixture.input, concat!(
-        "{\"kind\":\"edge\",\"key\":\"e0\",",
-        "\"source\":{\"label\":\"Other\",\"property\":\"k\",\"value\":\"int:999\"},",
-        "\"destination\":{\"label\":\"Other\",\"property\":\"k\",\"value\":\"int:1234\"},",
-        "\"relation\":\"R\",\"props\":{}}\n",
-    )).unwrap();
+    std::fs::write(
+        &fixture.input,
+        concat!(
+            "{\"kind\":\"edge\",\"key\":\"e0\",",
+            "\"source\":{\"label\":\"Other\",\"property\":\"k\",\"value\":\"int:999\"},",
+            "\"destination\":{\"label\":\"Other\",\"property\":\"k\",\"value\":\"int:1234\"},",
+            "\"relation\":\"R\",\"props\":{}}\n",
+        ),
+    )
+    .unwrap();
     let before = fixture.markers();
     let refused = fixture.load();
-    assert_eq!(refused.output.status.code(), Some(3), "{:?}", refused.output);
-    assert!(format!("{:?}", field(refused.terminal(), "diagnostics")).contains("UnresolvedEndpoint"));
+    assert_eq!(
+        refused.output.status.code(),
+        Some(3),
+        "{:?}",
+        refused.output
+    );
+    assert!(
+        format!("{:?}", field(refused.terminal(), "diagnostics")).contains("UnresolvedEndpoint")
+    );
     assert!(refused.progress().is_empty());
-    assert!(!fixture.checkpoint.exists(), "failed preflight cannot publish an import origin");
+    assert!(
+        !fixture.checkpoint.exists(),
+        "failed preflight cannot publish an import origin"
+    );
     assert_eq!(fixture.markers(), before);
 }
 
@@ -593,12 +619,16 @@ fn wrong_matched_endpoint_in_recovered_history_cannot_replace_or_acknowledge_a_r
         fixture.basis = number(field(seeded.terminal(), "seq"));
         // Both selectors below are unique at this nonzero original basis.
         // Our source intends the Other vertex's loop, not the Person's loop.
-        std::fs::write(&fixture.input, concat!(
-            "{\"kind\":\"edge\",\"key\":\"e0\",",
-            "\"source\":{\"label\":\"Other\",\"property\":\"k\",\"value\":\"int:999\"},",
-            "\"destination\":{\"label\":\"Other\",\"property\":\"k\",\"value\":\"int:999\"},",
-            "\"relation\":\"R\",\"props\":{\"k\":\"int:100\",\"p\":\"int:-1\"}}\n",
-        )).unwrap();
+        std::fs::write(
+            &fixture.input,
+            concat!(
+                "{\"kind\":\"edge\",\"key\":\"e0\",",
+                "\"source\":{\"label\":\"Other\",\"property\":\"k\",\"value\":\"int:999\"},",
+                "\"destination\":{\"label\":\"Other\",\"property\":\"k\",\"value\":\"int:999\"},",
+                "\"relation\":\"R\",\"props\":{\"k\":\"int:100\",\"p\":\"int:-1\"}}\n",
+            ),
+        )
+        .unwrap();
         let stopped = fixture.crash(0, "before-capsule");
         assert!(stopped.progress().is_empty());
         let compact = std::fs::read_to_string(&fixture.checkpoint).unwrap();
@@ -608,9 +638,11 @@ fn wrong_matched_endpoint_in_recovered_history_cannot_replace_or_acknowledge_a_r
             // A failed resume must not upgrade even a valid legacy origin.
             let old = format!(
                 "{{\"v\":1,\"vertices\":{{}},\"edges\":{{}},\"next_row\":0,\"frontier\":{},\"committed_chunks\":0,\"base_frontier\":{},\"base_marker\":\"{}\",\"source_hash\":\"{}\",\"rows_per_chunk\":{}}}\n",
-                fixture.basis, fixture.basis,
+                fixture.basis,
+                fixture.basis,
                 string(field(&parsed, "base_marker")),
-                string(field(&parsed, "source_hash")), CHUNK,
+                string(field(&parsed, "source_hash")),
+                CHUNK,
             );
             std::fs::write(&fixture.checkpoint, old).unwrap();
         }
@@ -619,17 +651,29 @@ fn wrong_matched_endpoint_in_recovered_history_cannot_replace_or_acknowledge_a_r
         let root = runtime.request_cx_with_budget(Budget::INFINITE);
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let (wrong_id, wrong_vertex) = runtime.block_on(async {
-            let mut db = Database::open(&contexts.commit(), &fixture.database, keys()).await.unwrap();
-            let wrong = fgdb::BulkEndpoint::matching(Some(LabelId(1)), K, CanonicalScalar::Int(998));
-            let cp = db.bulk_load(
-                &contexts.query(), &contexts.commit(),
-                [fgdb::BulkRow::Edge(fgdb::BulkEdge {
-                    key: "e0".into(), source: wrong.clone(), destination: wrong,
-                    relation: RelationId(1),
-                    props: vec![(K, CanonicalScalar::Int(100)), (P, CanonicalScalar::Int(-1))],
-                })],
-                fgdb::BulkLoadPolicy::new(CHUNK, RelationId(1)),
-            ).await.unwrap();
+            let mut db = Database::open(&contexts.commit(), &fixture.database, keys())
+                .await
+                .unwrap();
+            let wrong =
+                fgdb::BulkEndpoint::matching(Some(LabelId(1)), K, CanonicalScalar::Int(998));
+            let cp = db
+                .bulk_load(
+                    &contexts.query(),
+                    &contexts.commit(),
+                    [fgdb::BulkRow::Edge(fgdb::BulkEdge {
+                        key: "e0".into(),
+                        source: wrong.clone(),
+                        destination: wrong,
+                        relation: RelationId(1),
+                        props: vec![
+                            (K, CanonicalScalar::Int(100)),
+                            (P, CanonicalScalar::Int(-1)),
+                        ],
+                    })],
+                    fgdb::BulkLoadPolicy::new(CHUNK, RelationId(1)),
+                )
+                .await
+                .unwrap();
             assert_eq!(cp.frontier, CommitSeq(fixture.basis + 1));
             let edge = db.edge(cp.edges["e0"]).unwrap().unwrap();
             assert_eq!(edge.entry.src, edge.entry.dst);
@@ -641,8 +685,11 @@ fn wrong_matched_endpoint_in_recovered_history_cannot_replace_or_acknowledge_a_r
         // pass Chronicle reconstruction. Only engine resume validation binds
         // its endpoints to the source's Match selectors at the original basis.
         fixture.load().invalid_resume();
-        assert_eq!(std::fs::read(&fixture.checkpoint).unwrap(), saved,
-            "invalid reconstructed prefix cannot replace V1/V2 receipt");
+        assert_eq!(
+            std::fs::read(&fixture.checkpoint).unwrap(),
+            saved,
+            "invalid reconstructed prefix cannot replace V1/V2 receipt"
+        );
         assert_eq!(fixture.markers(), before);
         fixture.inspect(|db| {
             assert_eq!(db.frontier().unwrap(), CommitSeq(fixture.basis + 1));

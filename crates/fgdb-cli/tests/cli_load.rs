@@ -440,7 +440,10 @@ impl Fixture {
         let text = std::fs::read_to_string(&self.checkpoint).unwrap();
         let value = json(&text);
         if value.get("v").unsigned() == 2 {
-            assert!(text.len() <= 1024, "compact receipt must not grow with key maps");
+            assert!(
+                text.len() <= 1024,
+                "compact receipt must not grow with key maps"
+            );
             assert!(!value.object().contains_key("vertices"));
             assert!(!value.object().contains_key("edges"));
             return self.compact_checkpoint(&value);
@@ -495,18 +498,30 @@ impl Fixture {
         let mut vertex_keys = BTreeMap::new();
         let mut edge_keys = BTreeMap::new();
         for row in &source {
-            let ordinal: i64 = row.get("props").get("k").string()
-                .strip_prefix("int:").unwrap().parse().unwrap();
+            let ordinal: i64 = row
+                .get("props")
+                .get("k")
+                .string()
+                .strip_prefix("int:")
+                .unwrap()
+                .parse()
+                .unwrap();
             let keys = match row.get("kind").string() {
                 "vertex" => &mut vertex_keys,
                 "edge" => &mut edge_keys,
                 _ => panic!("generated element kind"),
             };
-            assert!(keys.insert(ordinal, row.get("key").string().to_owned()).is_none());
+            assert!(
+                keys.insert(ordinal, row.get("key").string().to_owned())
+                    .is_none()
+            );
         }
         let ordinal = |props: &[(PropertyKeyId, CanonicalScalar)]| {
-            let (_, CanonicalScalar::Int(value)) = props.iter()
-                .find(|(key, _)| *key == K).expect("fixture ordinal must survive") else {
+            let (_, CanonicalScalar::Int(value)) = props
+                .iter()
+                .find(|(key, _)| *key == K)
+                .expect("fixture ordinal must survive")
+            else {
                 panic!("fixture ordinal must retain integer type");
             };
             *value
@@ -520,17 +535,24 @@ impl Fixture {
             assert_eq!(vertices.len(), vertex_keys.len());
             assert_eq!(edges.len(), edge_keys.len());
             for row in vertices {
-                let key = vertex_keys.get(&ordinal(&row.props)).expect("unexpected vertex");
+                let key = vertex_keys
+                    .get(&ordinal(&row.props))
+                    .expect("unexpected vertex");
                 assert!(cp.vertices.insert(key.clone(), row.vid).is_none());
             }
             for row in edges {
-                let key = edge_keys.get(&ordinal(&row.props)).expect("unexpected edge");
+                let key = edge_keys
+                    .get(&ordinal(&row.props))
+                    .expect("unexpected edge");
                 assert!(cp.edges.insert(key.clone(), row.entry.eid).is_none());
             }
         });
         assert_eq!(cp.vertices.len(), vertex_keys.len());
         assert_eq!(cp.edges.len(), edge_keys.len());
-        assert_eq!(identity_hash(&source, &cp), value.get("identity_hash").string());
+        assert_eq!(
+            identity_hash(&source, &cp),
+            value.get("identity_hash").string()
+        );
         cp
     }
 }
@@ -661,7 +683,11 @@ fn logical(db: &Database, checkpoint: &BulkLoadCheckpoint) -> (Vertices, Edges) 
         vertices.len(),
         "no unmapped duplicate vertices"
     );
-    assert_eq!(actual_edges.len(), edges.len(), "no unmapped duplicate edges");
+    assert_eq!(
+        actual_edges.len(),
+        edges.len(),
+        "no unmapped duplicate edges"
+    );
     (
         actual_vertices
             .into_iter()
@@ -1341,10 +1367,24 @@ fn legacy_checkpoint(value: &Json, cp: &BulkLoadCheckpoint) -> Json {
     let mut fields = value.object().clone();
     fields.insert("v".into(), Json::Number("1".into()));
     assert!(fields.remove("identity_hash").is_some());
-    fields.insert("vertices".into(), Json::Object(cp.vertices.iter()
-        .map(|(key, id)| (key.clone(), Json::String(id.0.to_string()))).collect()));
-    fields.insert("edges".into(), Json::Object(cp.edges.iter()
-        .map(|(key, id)| (key.clone(), Json::String(id.0.to_string()))).collect()));
+    fields.insert(
+        "vertices".into(),
+        Json::Object(
+            cp.vertices
+                .iter()
+                .map(|(key, id)| (key.clone(), Json::String(id.0.to_string())))
+                .collect(),
+        ),
+    );
+    fields.insert(
+        "edges".into(),
+        Json::Object(
+            cp.edges
+                .iter()
+                .map(|(key, id)| (key.clone(), Json::String(id.0.to_string())))
+                .collect(),
+        ),
+    );
     Json::Object(fields)
 }
 
@@ -1352,10 +1392,14 @@ fn legacy_checkpoint(value: &Json, cp: &BulkLoadCheckpoint) -> Json {
 fn compact_identity_commitment_refuses_a_wrong_mapping_before_overwrite_or_resume() {
     let rows = generated(0xc028);
     let fixture = Fixture::new("compact-forgery", &ndjson(&rows));
-    let interrupted = Outcome::new(fixture.load_command(Some(31))
-        .env("FGDB_LOAD_CRASH_CHUNK", "2")
-        .env("FGDB_LOAD_CRASH_POINT", "before-capsule")
-        .output().unwrap());
+    let interrupted = Outcome::new(
+        fixture
+            .load_command(Some(31))
+            .env("FGDB_LOAD_CRASH_CHUNK", "2")
+            .env("FGDB_LOAD_CRASH_POINT", "before-capsule")
+            .output()
+            .unwrap(),
+    );
     assert!(!interrupted.output.status.success());
     let cp = fixture.checkpoint();
     assert_eq!(cp.next_row, 62);
@@ -1370,7 +1414,9 @@ fn compact_identity_commitment_refuses_a_wrong_mapping_before_overwrite_or_resum
     wrong.vertices.insert("v1".into(), first);
     let forged_hash = identity_hash(&source, &wrong);
     let mut forged = json(&good);
-    let Json::Object(fields) = &mut forged else { unreachable!() };
+    let Json::Object(fields) = &mut forged else {
+        unreachable!()
+    };
     assert_ne!(fields["identity_hash"].string(), forged_hash);
     fields.insert("identity_hash".into(), Json::String(forged_hash));
     let forged = encode(&forged);
@@ -1378,7 +1424,10 @@ fn compact_identity_commitment_refuses_a_wrong_mapping_before_overwrite_or_resum
     let refusal = fixture.load(Some(31));
     refusal.refusal("identity commitment", None);
     assert!(refusal.progress().is_empty());
-    assert_eq!(std::fs::read_to_string(&fixture.checkpoint).unwrap(), forged);
+    assert_eq!(
+        std::fs::read_to_string(&fixture.checkpoint).unwrap(),
+        forged
+    );
     runtime_check(async |contexts| {
         let db = open(&fixture.db, &contexts).await;
         assert_eq!(db.frontier().unwrap(), cp.frontier);
@@ -1397,10 +1446,14 @@ fn compact_identity_commitment_refuses_a_wrong_mapping_before_overwrite_or_resum
 fn legacy_maps_are_verified_before_upgrade_and_unacknowledged_history_is_reconciled() {
     let rows = generated(0xc029);
     let fixture = Fixture::new("compact-upgrade", &ndjson(&rows));
-    let interrupted = Outcome::new(fixture.load_command(Some(31))
-        .env("FGDB_LOAD_CRASH_CHUNK", "2")
-        .env("FGDB_LOAD_CRASH_POINT", "after-marker-sync")
-        .output().unwrap());
+    let interrupted = Outcome::new(
+        fixture
+            .load_command(Some(31))
+            .env("FGDB_LOAD_CRASH_CHUNK", "2")
+            .env("FGDB_LOAD_CRASH_POINT", "after-marker-sync")
+            .output()
+            .unwrap(),
+    );
     assert!(!interrupted.output.status.success());
     let cp = fixture.checkpoint();
     assert_eq!(cp.next_row, 62);
@@ -1418,20 +1471,32 @@ fn legacy_maps_are_verified_before_upgrade_and_unacknowledged_history_is_reconci
     let refusal = fixture.load(Some(31));
     refusal.refusal("InvalidResume", None);
     assert!(refusal.progress().is_empty());
-    assert_eq!(std::fs::read_to_string(&fixture.checkpoint).unwrap(), forged);
+    assert_eq!(
+        std::fs::read_to_string(&fixture.checkpoint).unwrap(),
+        forged
+    );
     let mut prefix_markers = Vec::new();
     runtime_check(async |contexts| {
         let mut db = open(&fixture.db, &contexts).await;
         assert_eq!(db.frontier().unwrap(), CommitSeq(fixture.basis + 3));
-        db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis)).await.unwrap();
-        prefix_markers = db.delta_since(CommitSeq(fixture.basis)).unwrap()
-            .map(|batch| batch.commit_marker_identity()).collect();
+        db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
+        prefix_markers = db
+            .delta_since(CommitSeq(fixture.basis))
+            .unwrap()
+            .map(|batch| batch.commit_marker_identity())
+            .collect();
     });
     std::fs::write(&fixture.checkpoint, encode(&legacy)).unwrap();
     let resumed = fixture.load(Some(31));
     resumed.loaded(256, 9, fixture.basis + 9);
-    assert_eq!(resumed.progress(), (3..=9)
-        .map(|chunk| ((chunk * 31).min(256), fixture.basis + chunk)).collect::<Vec<_>>());
+    assert_eq!(
+        resumed.progress(),
+        (3..=9)
+            .map(|chunk| ((chunk * 31).min(256), fixture.basis + chunk))
+            .collect::<Vec<_>>()
+    );
     let upgraded = std::fs::read_to_string(&fixture.checkpoint).unwrap();
     assert_eq!(json(&upgraded).get("v").unsigned(), 2);
     assert!(upgraded.len() <= 1024);
@@ -1439,9 +1504,17 @@ fn legacy_maps_are_verified_before_upgrade_and_unacknowledged_history_is_reconci
     runtime_check(async |contexts| {
         let mut db = open(&fixture.db, &contexts).await;
         assert_eq!(logical(&db, &completed), expected(&rows));
-        db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis)).await.unwrap();
-        assert_eq!(db.delta_since(CommitSeq(fixture.basis)).unwrap().take(3)
-            .map(|batch| batch.commit_marker_identity()).collect::<Vec<_>>(), prefix_markers);
+        db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.delta_since(CommitSeq(fixture.basis))
+                .unwrap()
+                .take(3)
+                .map(|batch| batch.commit_marker_identity())
+                .collect::<Vec<_>>(),
+            prefix_markers
+        );
     });
 }
 
@@ -1454,10 +1527,14 @@ fn compact_receipts_resume_every_durability_boundary_with_original_sequence_prog
     for point in ["before-capsule", "after-d1", "after-marker-sync"] {
         for stop in 0..chunks {
             let fixture = Fixture::new("compact-boundaries", &ndjson(rows));
-            let interrupted = Outcome::new(fixture.load_command(Some(size))
-                .env("FGDB_LOAD_CRASH_CHUNK", stop.to_string())
-                .env("FGDB_LOAD_CRASH_POINT", point)
-                .output().unwrap());
+            let interrupted = Outcome::new(
+                fixture
+                    .load_command(Some(size))
+                    .env("FGDB_LOAD_CRASH_CHUNK", stop.to_string())
+                    .env("FGDB_LOAD_CRASH_POINT", point)
+                    .output()
+                    .unwrap(),
+            );
             assert!(!interrupted.output.status.success(), "{point} chunk={stop}");
             let cp = fixture.checkpoint();
             // The persisted receipt may lag already delivered progress. Keep
@@ -1470,26 +1547,55 @@ fn compact_receipts_resume_every_durability_boundary_with_original_sequence_prog
             runtime_check(async |contexts| {
                 let mut db = open(&fixture.db, &contexts).await;
                 let durable = stop + usize::from(point == "after-marker-sync");
-                assert_eq!(db.frontier().unwrap(), CommitSeq(fixture.basis + durable as u64));
-                db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis)).await.unwrap();
-                markers = db.delta_since(CommitSeq(fixture.basis)).unwrap()
-                    .map(|batch| batch.commit_marker_identity()).collect();
+                assert_eq!(
+                    db.frontier().unwrap(),
+                    CommitSeq(fixture.basis + durable as u64)
+                );
+                db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+                    .await
+                    .unwrap();
+                markers = db
+                    .delta_since(CommitSeq(fixture.basis))
+                    .unwrap()
+                    .map(|batch| batch.commit_marker_identity())
+                    .collect();
             });
             let resumed = fixture.load(Some(size));
             resumed.loaded(rows.len(), chunks, fixture.basis + chunks as u64);
-            assert_eq!(interrupted.progress(), (1..=stop).map(|chunk| (
-                (chunk * size).min(rows.len()) as u64, fixture.basis + chunk as u64,
-            )).collect::<Vec<_>>());
-            assert_eq!(resumed.progress(), (saved + 1..=chunks).map(|chunk| (
-                (chunk * size).min(rows.len()) as u64, fixture.basis + chunk as u64,
-            )).collect::<Vec<_>>(), "{point} chunk={stop}");
+            assert_eq!(
+                interrupted.progress(),
+                (1..=stop)
+                    .map(|chunk| (
+                        (chunk * size).min(rows.len()) as u64,
+                        fixture.basis + chunk as u64,
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                resumed.progress(),
+                (saved + 1..=chunks)
+                    .map(|chunk| (
+                        (chunk * size).min(rows.len()) as u64,
+                        fixture.basis + chunk as u64,
+                    ))
+                    .collect::<Vec<_>>(),
+                "{point} chunk={stop}"
+            );
             let completed = fixture.checkpoint();
             runtime_check(async |contexts| {
                 let mut db = open(&fixture.db, &contexts).await;
                 assert_eq!(logical(&db, &completed), expected(rows));
-                db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis)).await.unwrap();
-                assert_eq!(db.delta_since(CommitSeq(fixture.basis)).unwrap().take(markers.len())
-                    .map(|batch| batch.commit_marker_identity()).collect::<Vec<_>>(), markers);
+                db.ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    db.delta_since(CommitSeq(fixture.basis))
+                        .unwrap()
+                        .take(markers.len())
+                        .map(|batch| batch.commit_marker_identity())
+                        .collect::<Vec<_>>(),
+                    markers
+                );
             });
             let bytes = std::fs::read(&fixture.checkpoint).unwrap();
             assert!(bytes.len() <= 1024);

@@ -705,9 +705,9 @@ impl<V: Vfs + Clone> Database<V> {
         // prefix until the SAME engine preflight has validated all of it.
         // In particular BulkEndpoint::Match must resolve at the load basis,
         // and a previously committed edge must have those exact endpoints.
-        let mut acknowledged = match source::checkpoint(cx).and_then(|()| {
-            admitted(&committed).map_err(BulkLoadErrorKind::Checkpoint)
-        }) {
+        let mut acknowledged = match source::checkpoint(cx)
+            .and_then(|()| admitted(&committed).map_err(BulkLoadErrorKind::Checkpoint))
+        {
             Ok(acknowledged) => acknowledged,
             Err(kind) => {
                 return Err(BulkLoadError {

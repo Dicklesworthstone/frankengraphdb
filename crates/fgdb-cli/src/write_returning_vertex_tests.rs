@@ -47,7 +47,10 @@ fn seed() -> WriteBatch {
         batch.create_vertex(
             VId(id),
             vec![LabelId(1)],
-            vec![(P, CanonicalScalar::Int(key)), (Q, CanonicalScalar::Int(value))],
+            vec![
+                (P, CanonicalScalar::Int(key)),
+                (Q, CanonicalScalar::Int(value)),
+            ],
         );
     }
     batch
@@ -64,7 +67,15 @@ async fn execute<V: Vfs + Clone>(
         crate::transaction::run(database, contexts, options, None, true, output).await
     } else {
         let query = prepare(options)?.expect("vertex MERGE RETURN must be classified");
-        run(database, contexts, query, options.budget.policy(), true, output).await
+        run(
+            database,
+            contexts,
+            query,
+            options.budget.policy(),
+            true,
+            output,
+        )
+        .await
     }
 }
 
@@ -105,7 +116,10 @@ fn both_drivers_update_all_targets_before_grouping_and_preserve_limits() {
             for (id, key, value) in [(1, 1, 2), (2, 1, 3), (3, 9, 3)] {
                 assert_eq!(
                     database.vertex(VId(id)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(key)), (Q, CanonicalScalar::Int(value))],
+                    vec![
+                        (P, CanonicalScalar::Int(key)),
+                        (Q, CanonicalScalar::Int(value))
+                    ],
                 );
             }
             let committed = database.frontier().unwrap();
@@ -126,7 +140,10 @@ fn both_drivers_update_all_targets_before_grouping_and_preserve_limits() {
                 for (id, key, value) in [(1, 1, 2), (2, 1, 3), (3, 9, 3)] {
                     assert_eq!(
                         database.vertex(VId(id)).unwrap().unwrap().props,
-                        vec![(P, CanonicalScalar::Int(key)), (Q, CanonicalScalar::Int(value))],
+                        vec![
+                            (P, CanonicalScalar::Int(key)),
+                            (Q, CanonicalScalar::Int(value))
+                        ],
                     );
                 }
                 assert_eq!(contexts.txn().outstanding_obligations(), 0);
@@ -152,9 +169,8 @@ fn pagination_and_with_filters_do_not_limit_the_frozen_match_set() {
             database.write(&contexts.commit(), seed()).await.unwrap();
             let before = database.frontier().unwrap();
             let options = options_for("write", &["CREATE (n)"]);
-            let text = format!(
-                "MERGE (n:Person {{p:1}}) ON MATCH SET n.p=n.p+1 SET n.q=n.q+10 {tail}"
-            );
+            let text =
+                format!("MERGE (n:Person {{p:1}}) ON MATCH SET n.p=n.p+1 SET n.q=n.q+10 {tail}");
             let query = prepare_statement(&text, &GqlParameters::new(), &options)
                 .unwrap()
                 .unwrap();
@@ -185,7 +201,10 @@ fn pagination_and_with_filters_do_not_limit_the_frozen_match_set() {
             for (id, key, value) in [(1, 2, 11), (2, 2, 12), (3, 9, 3)] {
                 assert_eq!(
                     database.vertex(VId(id)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(key)), (Q, CanonicalScalar::Int(value))],
+                    vec![
+                        (P, CanonicalScalar::Int(key)),
+                        (Q, CanonicalScalar::Int(value))
+                    ],
                 );
             }
             assert_eq!(contexts.txn().outstanding_obligations(), 0);
@@ -226,7 +245,10 @@ fn an_empty_match_creates_once_and_subsequent_execution_uses_on_match() {
                 assert_eq!(vertices.len(), 1);
                 assert_eq!(
                     vertices[0].props,
-                    vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(expected))],
+                    vec![
+                        (P, CanonicalScalar::Int(7)),
+                        (Q, CanonicalScalar::Int(expected))
+                    ],
                 );
                 assert_eq!(contexts.txn().outstanding_obligations(), 0);
             }
@@ -282,7 +304,10 @@ fn a_late_return_error_restores_the_prior_staged_prefix() {
         for (id, value) in [(1, 1), (2, 2)] {
             assert_eq!(
                 database.vertex(VId(id)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(value))],
+                vec![
+                    (P, CanonicalScalar::Int(1)),
+                    (Q, CanonicalScalar::Int(value))
+                ],
             );
         }
         assert_eq!(contexts.txn().outstanding_obligations(), 0);

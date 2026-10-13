@@ -12,7 +12,9 @@ use fgdb_gql::{
     GraphWriteProgramError, GraphWriteProgramPolicy, GraphWriteProgramStats, GraphWriteStepReceipt,
     PreparedGraphEdgeUpsertText, PreparedGraphWriteProgram,
 };
-use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
@@ -70,9 +72,9 @@ fn allocate(request: GraphWriteIdentityRequest) -> Result<ElementId, ()> {
     let GraphInsertRequest::Edge { row, edge: 0 } = request.request else {
         panic!("only MERGE relationships may allocate")
     };
-    Ok(ElementId::Edge(EId(
-        500 + request.statement as u128 * 100 + row as u128,
-    )))
+    Ok(ElementId::Edge(EId(500
+        + request.statement as u128 * 100
+        + row as u128)))
 }
 
 fn no_allocation(_: GraphWriteIdentityRequest) -> Result<ElementId, ()> {

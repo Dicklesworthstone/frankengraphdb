@@ -256,7 +256,9 @@ pub(super) async fn run<V: Vfs + Clone>(
         }
         Ok(())
     };
-    let recovery_start = saved.as_ref().map(|saved| saved.checkpoint.committed_chunks);
+    let recovery_start = saved
+        .as_ref()
+        .map(|saved| saved.checkpoint.committed_chunks);
     let source_rows = source.records();
     // Map/commitment reconciliation alone is not admission: Match endpoints
     // and the complete source's chunk-byte limits are validated by the engine.
@@ -286,47 +288,46 @@ pub(super) async fn run<V: Vfs + Clone>(
     // final result delivery below still owns `out` after ingestion completes.
     let progress_out = &mut *out;
     let result = db
-        .try_bulk_load_with_admission(
-            &cx,
-            &contexts.commit(),
-            rows,
-            policy,
-            crash,
-            |validated| {
-                // Force the origin or fully validated recovered prefix before
-                // any new write and before replaying its progress. A crash in
-                // the first write retains the original import basis as before.
-                save(validated, true)?;
-                if let Some(start) = recovery_start {
-                    for chunk in start..validated.committed_chunks {
-                        let count = (chunk + 1)
-                            .saturating_mul(rows_per_chunk)
-                            .min(source_rows);
-                        let seq = base.0 + chunk as u64 + 1;
-                        if robot {
-                            writeln!(progress_out,
-                                "{{\"v\":1,\"event\":\"progress\",\"rows\":{count},\"seq\":{seq}}}")?;
-                        } else {
-                            writeln!(progress_out, "loaded {count} rows (seq {seq})")?;
-                        }
-                        progress_out.flush()?;
-                    }
-                }
-                // Ownership passes from admission to per-commit delivery, so
-                // both phases share one checkpoint cursor and output writer.
-                Ok(move |cp: &BulkLoadCheckpoint| {
-                    save(cp, false)?;
+        .try_bulk_load_with_admission(&cx, &contexts.commit(), rows, policy, crash, |validated| {
+            // Force the origin or fully validated recovered prefix before
+            // any new write and before replaying its progress. A crash in
+            // the first write retains the original import basis as before.
+            save(validated, true)?;
+            if let Some(start) = recovery_start {
+                for chunk in start..validated.committed_chunks {
+                    let count = (chunk + 1).saturating_mul(rows_per_chunk).min(source_rows);
+                    let seq = base.0 + chunk as u64 + 1;
                     if robot {
-                        writeln!(progress_out,
-                            "{{\"v\":1,\"event\":\"progress\",\"rows\":{},\"seq\":{}}}",
-                            cp.next_row, cp.frontier.0)?;
+                        writeln!(
+                            progress_out,
+                            "{{\"v\":1,\"event\":\"progress\",\"rows\":{count},\"seq\":{seq}}}"
+                        )?;
                     } else {
-                        writeln!(progress_out, "loaded {} rows (seq {})", cp.next_row, cp.frontier.0)?;
+                        writeln!(progress_out, "loaded {count} rows (seq {seq})")?;
                     }
-                    progress_out.flush()
-                })
-            },
-        )
+                    progress_out.flush()?;
+                }
+            }
+            // Ownership passes from admission to per-commit delivery, so
+            // both phases share one checkpoint cursor and output writer.
+            Ok(move |cp: &BulkLoadCheckpoint| {
+                save(cp, false)?;
+                if robot {
+                    writeln!(
+                        progress_out,
+                        "{{\"v\":1,\"event\":\"progress\",\"rows\":{},\"seq\":{}}}",
+                        cp.next_row, cp.frontier.0
+                    )?;
+                } else {
+                    writeln!(
+                        progress_out,
+                        "loaded {} rows (seq {})",
+                        cp.next_row, cp.frontier.0
+                    )?;
+                }
+                progress_out.flush()
+            })
+        })
         .await
         .map_err(|e| match e.kind {
             BulkLoadErrorKind::Checkpoint(error) => Failure::io(error),

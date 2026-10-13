@@ -357,22 +357,14 @@ mod relational_input_tests {
     fn seed() -> WriteBatch {
         let mut batch = WriteBatch::new(R);
         for (id, value) in [(1, 1), (2, 3)] {
-            batch.create_vertex(
-                VId(id),
-                vec![],
-                vec![(P, CanonicalScalar::Int(value))],
-            );
+            batch.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(value))]);
         }
         batch.add_edge(EId(10), VId(1), VId(2), vec![]);
         batch
     }
     fn extension() -> WriteBatch {
         let mut batch = WriteBatch::new(R);
-        batch.create_vertex(
-            VId(3),
-            vec![],
-            vec![(P, CanonicalScalar::Int(5))],
-        );
+        batch.create_vertex(VId(3), vec![], vec![(P, CanonicalScalar::Int(5))]);
         batch.add_edge(EId(11), VId(1), VId(3), vec![]);
         batch
     }
@@ -536,9 +528,7 @@ mod relational_input_tests {
                 high_result
             );
             assert!(matches!(
-                prepared.diff_in_view(
-                    &view, &cx, &GqlParameters::new(), before, after, policy()
-                ),
+                prepared.diff_in_view(&view, &cx, &GqlParameters::new(), before, after, policy()),
                 Err(GqlQueryError::Source(GraphDiffError::Definition(
                     QueryError::PipelineText(_)
                 )))
@@ -622,24 +612,41 @@ mod relational_input_tests {
             assert_eq!(rows.result_rows, 2);
             assert!(rows.snapshot_records >= 10);
             let exact = GqlQueryPolicy::new(
-                rows.snapshot_records, 2, work.work_units, work.scratch_entries,
+                rows.snapshot_records,
+                2,
+                work.work_units,
+                work.scratch_entries,
             );
             assert_eq!(
-                prepared.diff(&db, &cx, &params, before, after, exact).unwrap(),
+                prepared
+                    .diff(&db, &cx, &params, before, after, exact)
+                    .unwrap(),
                 result
             );
             for smaller in [
                 GqlQueryPolicy::new(
-                    rows.snapshot_records - 1, 2, work.work_units, work.scratch_entries,
+                    rows.snapshot_records - 1,
+                    2,
+                    work.work_units,
+                    work.scratch_entries,
                 ),
                 GqlQueryPolicy::new(
-                    rows.snapshot_records, 1, work.work_units, work.scratch_entries,
+                    rows.snapshot_records,
+                    1,
+                    work.work_units,
+                    work.scratch_entries,
                 ),
                 GqlQueryPolicy::new(
-                    rows.snapshot_records, 2, work.work_units - 1, work.scratch_entries,
+                    rows.snapshot_records,
+                    2,
+                    work.work_units - 1,
+                    work.scratch_entries,
                 ),
                 GqlQueryPolicy::new(
-                    rows.snapshot_records, 2, work.work_units, work.scratch_entries - 1,
+                    rows.snapshot_records,
+                    2,
+                    work.work_units,
+                    work.scratch_entries - 1,
                 ),
             ] {
                 assert!(matches!(
@@ -647,7 +654,9 @@ mod relational_input_tests {
                     Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
                 ));
                 assert_eq!(
-                    prepared.diff(&db, &cx, &params, before, after, exact).unwrap(),
+                    prepared
+                        .diff(&db, &cx, &params, before, after, exact)
+                        .unwrap(),
                     result
                 );
             }

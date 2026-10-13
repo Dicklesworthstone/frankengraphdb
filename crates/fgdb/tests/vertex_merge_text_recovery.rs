@@ -72,7 +72,10 @@ fn seed(entries: &[(VId, i64, i64)]) -> WriteBatch {
         batch.create_vertex(
             id,
             vec![LabelId(1)],
-            vec![(P, CanonicalScalar::Int(key)), (Q, CanonicalScalar::Int(value))],
+            vec![
+                (P, CanonicalScalar::Int(key)),
+                (Q, CanonicalScalar::Int(value)),
+            ],
         );
     }
     batch
@@ -157,8 +160,7 @@ fn staged_and_committed_targets_share_results_budgets_and_statement_rollback() {
             Err(QueryWriteError::VertexUpsert(GqlQueryError::Rows(_)))
         ));
         assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
-        let cancelled =
-            cx.with_checkpoint_probe(Arc::new(SimulationCheckpointProbe::new(Some(1))));
+        let cancelled = cx.with_checkpoint_probe(Arc::new(SimulationCheckpointProbe::new(Some(1))));
         let refused = transaction.query_write(
             &mut db,
             &cancelled,
@@ -186,7 +188,10 @@ fn staged_and_committed_targets_share_results_budgets_and_statement_rollback() {
         for (id, key, value) in [(VId(1), 1, 7), (WIDE, 1, 10), (VId(3), 99, 20)] {
             assert_eq!(
                 db.vertex(id).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(key)), (Q, CanonicalScalar::Int(value))],
+                vec![
+                    (P, CanonicalScalar::Int(key)),
+                    (Q, CanonicalScalar::Int(value))
+                ],
             );
         }
         assert_eq!(txcx.outstanding_obligations(), 0);

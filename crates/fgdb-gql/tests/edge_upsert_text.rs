@@ -215,6 +215,9 @@ fn evaluate(
                 .evaluate_scalar_with_control(&input, &mut |_| Ok::<(), ()>(()))
                 .unwrap()
         }
+        GraphEdgeUpsertValue::Composite { .. } => {
+            panic!("composite actions are evaluated by their native owner, not this fixture")
+        }
     }
 }
 
