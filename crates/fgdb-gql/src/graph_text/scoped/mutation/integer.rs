@@ -684,6 +684,35 @@ impl<'a> Parser<'a> {
         Ok(false)
     }
 
+    /// A graph function of literal NULL (`type(null)`, `nodes(null)`) is NULL
+    /// (TCK Graph4 [3], Path1 [1], Path2 [3]); false, with nothing consumed,
+    /// otherwise. Out of line: integer_unary repeats once per nesting level.
+    #[inline(never)]
+    fn null_graph_function(
+        &mut self,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        let mut lexer = self.lexer.clone();
+        if Parser::path_function(Name { text: word, at }).is_err()
+            || !matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
+            || !matches!(lexer.next()?.kind, TokenKind::Word(null) if null.eq_ignore_ascii_case("NULL"))
+            || !matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
+        {
+            return Ok(false);
+        }
+        for _ in 0..4 {
+            self.advance()?;
+        }
+        let null = GqlScalarParameter::new(CanonicalScalar::Null)
+            .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
+        emit(program, ParsedOp::Atom(Operand::Literal(null), at), at)?;
+        Ok(true)
+    }
+
     /// Whether `.field` follows the current name and names a temporal field,
     /// the only read a scalar column can answer with a value.
     fn temporal_field_follows(&self) -> Result<bool, GraphPatternTextError> {
@@ -1468,6 +1497,9 @@ impl<'a> Parser<'a> {
             && self.element_subscript_follows()?
         {
             return self.composite_slot(columns, depth, program, at);
+        }
+        if self.null_graph_function(program, at)? {
+            return Ok(());
         }
         let function = if crate::graph_text::SCALAR_FUNCTIONS
             .iter()
