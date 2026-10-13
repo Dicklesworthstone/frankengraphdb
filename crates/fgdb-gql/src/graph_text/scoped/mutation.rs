@@ -537,11 +537,12 @@ impl<'a> Parser<'a> {
                             self.punct(b'=', "=")?;
                             if self.set_value_is_list()? {
                                 // A list value (`[1, 2]`, `n.tags + ['x']`)
-                                // reads in the value language, as a CREATE
-                                // property does, and is written as the
-                                // stored List it is (fgdb-k3nub).
+                                // reads in the value language over the MATCH
+                                // columns, a `+` chain through the list sum,
+                                // and is written as the stored List it is
+                                // (fgdb-k3nub).
                                 let at = self.current.at;
-                                let value = self.insertion_source_value(&mut columns, &[])?;
+                                let value = self.read_graph_value(&mut columns, 0)?;
                                 ActionKind::RowProperty { key, value, at }
                             } else {
                                 ActionKind::Property {
@@ -714,9 +715,13 @@ impl<'a> Parser<'a> {
             self.punct(b':', ":")?;
             // An entry's list value is a stored List, as in `SET n.p = [..]`.
             let listed = row.is_none() && self.set_value_is_list()?;
-            let kind = if row.is_some() || listed {
+            let kind = if let Some(row) = row {
                 let at = self.current.at;
-                let value = self.insertion_source_value(columns, row.unwrap_or(&[]))?;
+                let value = self.insertion_source_value(columns, row)?;
+                ActionKind::RowProperty { key, value, at }
+            } else if listed {
+                let at = self.current.at;
+                let value = self.read_graph_value(columns, 0)?;
                 ActionKind::RowProperty { key, value, at }
             } else {
                 ActionKind::Property {

@@ -864,6 +864,32 @@ fn set_writes_list_values_as_stored_lists() {
             ),
             vec![vec![list([int(1), int(2)])]]
         );
+        // A `+` chain with a List operand reads whole whichever operand
+        // leads: SET with a literal head, CREATE with a literal or a stored
+        // List head, and a constant MERGE branch.
+        for statement in [
+            "MATCH (n:Person {name: 'c'}) SET n.first = ['w'] + n.first",
+            "CREATE (:Person {name: 'f', first: [1] + [2]})",
+            "MATCH (n:Person {name: 'c'}) CREATE (:Person {name: 'g', first: n.first + ['z']})",
+            "MERGE (n:Person {name: 'h'}) ON CREATE SET n.first = ['m'] + ['n']",
+        ] {
+            write(&mut db, cxs, statement, &empty)
+                .await
+                .expect(statement);
+        }
+        let people = first(&db);
+        assert_eq!(people.len(), 7);
+        let chain = list([text("w"), text("x"), text("y")]);
+        assert_eq!(people[2], vec![text("c"), chain]);
+        assert_eq!(people[4], vec![text("f"), list([int(1), int(2)])]);
+        assert_eq!(
+            people[5],
+            vec![
+                text("g"),
+                list([text("w"), text("x"), text("y"), text("z")])
+            ]
+        );
+        assert_eq!(people[6], vec![text("h"), list([text("m"), text("n")])]);
     });
 }
 
