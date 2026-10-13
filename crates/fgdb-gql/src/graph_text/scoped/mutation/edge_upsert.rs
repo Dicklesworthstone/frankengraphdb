@@ -1,4 +1,8 @@
-//! Native directed relationship MERGE branch actions over bound MATCH endpoints.
+//! Native relationship MERGE branch actions over bound MATCH endpoints.
+//!
+//! Property maps and either orientation use the ordinary MERGE matcher. The
+//! action owner still requires one endpoint pair and one matching relationship;
+//! admitting these patterns does not silently choose among parallel matches.
 
 use super::*;
 use crate::edge_upsert_text::{
@@ -29,6 +33,8 @@ struct ParsedEdgeUpsert<'a> {
     source: Name<'a>,
     destination: Name<'a>,
     relation: Name<'a>,
+    properties: Vec<super::merge::MergeProperty<'a>>,
+    undirected: bool,
     on_match: Vec<ParsedEdgeUpsertAction<'a>>,
     on_create: Vec<ParsedEdgeUpsertAction<'a>>,
     after: Vec<ParsedEdgeUpsertAction<'a>>,
@@ -127,29 +133,50 @@ impl<'a> Parser<'a> {
         self.punct(b'-', "-")?;
         self.punct(b'[', "[")?;
         let relationship = self.name()?;
-        if self
-            .syntax
-            .variables
-            .iter()
-            .any(|variable| variable.text == relationship.text)
-        {
+        if self.insertion_match_kind(relationship.text).is_some() {
             return Err(error(
                 relationship.at,
                 GraphPatternTextErrorKind::Expected(
-                    "a relationship variable distinct from vertex variables",
+                    "a relationship variable distinct from MATCH bindings",
                 ),
             )
             .into());
         }
         self.punct(b':', ":")?;
         let relation = self.name()?;
+        // Share literal/parameter, duplicate-key and field-count admission
+        // with plain MERGE. The map is part of the match identity, not SET.
+        let properties = self.merge_property_map().map_err(|refusal| match refusal {
+            super::merge::MergeMapError::Pattern(error) => {
+                GraphEdgeUpsertTextError::from(error)
+            }
+            super::merge::MergeMapError::TooManyFields { at, observed } => {
+                merge_error(GraphEdgeMergeTextError {
+                    offset: at,
+                    kind: crate::GraphEdgeMergeTextErrorKind::Build(
+                        crate::GraphEdgeMergeBuildError::TooManyProperties {
+                            limit: crate::MAX_GRAPH_EDGE_MERGE_PROPERTIES,
+                            observed,
+                        },
+                    ),
+                })
+            }
+            super::merge::MergeMapError::DuplicateProperty { at } => {
+                merge_error(GraphEdgeMergeTextError {
+                    offset: at,
+                    kind: crate::GraphEdgeMergeTextErrorKind::Build(
+                        crate::GraphEdgeMergeBuildError::DuplicateProperty,
+                    ),
+                })
+            }
+        })?;
         self.punct(b']', "]")?;
         self.punct(b'-', "-")?;
         let outgoing = self.take(b'>')?;
-        if incoming == outgoing {
+        if incoming && outgoing {
             return Err(error(
                 relation.at,
-                GraphPatternTextErrorKind::Expected("exactly one relationship direction"),
+                GraphPatternTextErrorKind::Expected("at most one relationship direction"),
             )
             .into());
         }
@@ -230,6 +257,8 @@ impl<'a> Parser<'a> {
             )
             .into());
         }
+        // An undirected create uses the written left-to-right orientation;
+        // the ordinary matcher accepts an existing edge either way round.
         let (source, destination) = if incoming {
             (right, left)
         } else {
@@ -240,6 +269,8 @@ impl<'a> Parser<'a> {
             source,
             destination,
             relation,
+            properties,
+            undirected: !incoming && !outgoing,
             on_match,
             on_create,
             after,
@@ -354,6 +385,14 @@ impl PreparedGraphEdgeUpsertText {
         else {
             unreachable!("symbol domain checked")
         };
+        let mut properties = Vec::new();
+        for property in parsed.properties {
+            let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, property.key)?
+            else {
+                unreachable!("symbol domain checked")
+            };
+            properties.push((key, property.value));
+        }
         let on_match = resolve_actions(parsed.on_match, &mut symbol)?;
         let on_create = resolve_actions(parsed.on_create, &mut symbol)?;
         let after = resolve_actions(parsed.after, &mut symbol)?;
@@ -396,15 +435,16 @@ impl PreparedGraphEdgeUpsertText {
             return_at: at,
             reverse_catalog: None,
         };
-        // The ON MATCH / ON CREATE form keeps the directed, map-free pattern
-        // until its own per-match action contract is in place (fgdb-at06q).
+        // Keep the map and orientation on the native MERGE definition. Its
+        // binder checks nulls and resolved-key aliases before any execution;
+        // its owner supplies the selected edge to the unchanged action engine.
         let merge = PreparedGraphEdgeMergeText {
             selection,
             relation: found,
             source,
             destination,
-            properties: Vec::new(),
-            undirected: false,
+            properties,
+            undirected: parsed.undirected,
         };
         Ok((
             Self {
@@ -525,4 +565,111 @@ fn resolve_actions<'a>(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod keyed_pattern_tests {
+    use super::*;
+    use fgdb_types::{CanonicalScalar, VId};
+
+    const R: RelationId = RelationId(1);
+    const P: PropertyKeyId = PropertyKeyId(1);
+    const Q: PropertyKeyId = PropertyKeyId(2);
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Property, "p" | "alias") => Some(GraphSymbol::Property(P)),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn keyed_upserts_preserve_maps_parameters_and_direction() {
+        let arguments = GqlParameters::new().with_int64("key", 7).unwrap();
+        let suffix = "ON CREATE SET r.q=r.p+1 ON MATCH SET r.q=r.p+2 SET r.p=r.q";
+        let prepare = |pattern: &str| {
+            PreparedGraphEdgeUpsertText::prepare(
+                &format!("MATCH (a),(b) MERGE {pattern} {suffix}"),
+                R,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&arguments)
+            .unwrap()
+        };
+        let directed = prepare("(a)-[r:R {p:$key}]->(b)");
+        let incoming = prepare("(b)<-[r:R {p:$key}]-(a)");
+        assert_eq!(directed.canonical_bytes(), incoming.canonical_bytes());
+        assert_eq!(directed.merge().properties().len(), 1);
+        assert_eq!(directed.merge().properties()[0].0, P);
+        assert_eq!(
+            directed.merge().properties()[0].1.value(),
+            &CanonicalScalar::Int(7)
+        );
+        assert_eq!(directed.on_match().len(), 1);
+        assert_eq!(directed.on_create().len(), 1);
+        assert_eq!(directed.after().len(), 1);
+        let undirected = prepare("(a)-[r:R {p:$key}]-(b)");
+        assert!(undirected.merge().undirected());
+        assert_ne!(directed.canonical_bytes(), undirected.canonical_bytes());
+        assert!(undirected.merge().accepts_orientation(
+            (VId(1), VId(2)),
+            (VId(2), VId(1)),
+        ));
+        assert!(!directed.merge().accepts_orientation(
+            (VId(1), VId(2)),
+            (VId(2), VId(1)),
+        ));
+    }
+
+    #[test]
+    fn returning_upsert_uses_the_same_keyed_pattern_and_parameter_namespace() {
+        let text = "MATCH (a),(b) MERGE (a)-[r:R {p:$key}]-(b) \
+                    ON CREATE SET r.q=r.p+$step \
+                    ON MATCH SET r.q=r.q+$step RETURN r,r.p AS p,r.q AS q";
+        let prepared = crate::PreparedGraphEdgeUpsertQueryText::prepare(text, R, symbols)
+            .unwrap();
+        assert_eq!(prepared.parameter_schema().len(), 2);
+        for key in [7, 9] {
+            let arguments = GqlParameters::new()
+                .with_int64("key", key)
+                .unwrap()
+                .with_int64("step", 2)
+                .unwrap();
+            let query = prepared.bind_parameters(&arguments).unwrap();
+            assert!(query.upsert().merge().undirected());
+            assert_eq!(
+                query.upsert().merge().properties()[0].1.value(),
+                &CanonicalScalar::Int(key)
+            );
+            assert_eq!(query.columns(), &["r", "p", "q"]);
+        }
+    }
+
+    #[test]
+    fn keyed_upserts_refuse_null_duplicate_aliases_and_binding_collisions() {
+        for pattern in [
+            "(a)-[r:R {p:null}]->(b)",
+            "(a)-[r:R {p:1,p:2}]->(b)",
+            "(a)-[r:R {p:1,alias:2}]->(b)",
+            "(a)<-[r:R {p:1}]->(b)",
+        ] {
+            let text = format!("MATCH (a),(b) MERGE {pattern} SET r.q=2");
+            let result = PreparedGraphEdgeUpsertText::prepare(&text, R, symbols)
+                .and_then(|prepared| prepared.bind_parameters(&GqlParameters::new()));
+            assert!(result.is_err(), "{text}");
+        }
+        let collision = "MATCH (a)-[r:R]->(b) \
+                         MERGE (a)-[r:R {p:1}]->(b) SET r.q=2";
+        assert!(PreparedGraphEdgeUpsertText::prepare(collision, R, symbols).is_err());
+        let prepared = PreparedGraphEdgeUpsertText::prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R {p:$key}]->(b) SET r.q=2",
+            R,
+            symbols,
+        )
+        .unwrap();
+        assert!(prepared.bind_parameters(&GqlParameters::new()).is_err());
+    }
 }
