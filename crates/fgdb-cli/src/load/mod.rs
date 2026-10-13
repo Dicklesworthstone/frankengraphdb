@@ -4,7 +4,7 @@
 //! Key maps and block digests still scale with the admitted input. This is not
 //! a claim that the database itself has an external-memory execution engine.
 //!
-//! Saved V1 checkpoints are lagging resume hints. Publish the initial/recovered
+//! Saved V1/V2 checkpoints are lagging resume hints. Publish the initial/recovered
 //! prefix, then chunk counts 1, 2, 4, 8, ... and the complete source. Chronicle
 //! still commits every chunk. A resumed invocation may replay progress records
 //! already delivered; their sequence numbers identify the same durable chunks.
@@ -208,9 +208,12 @@ pub(super) async fn run<V: Vfs + Clone>(
         frontier: base,
         ..BulkLoadCheckpoint::default()
     };
+    // The checkpoint identity transcript advances once through the sealed
+    // source, rather than scanning/serializing all prior maps after each chunk.
+    let mut prefix = checkpoint::Prefix::new(rows.clone());
     if let Some(saved) = &saved {
         if saved.checkpoint.frontier == base {
-            same_checkpoint(&saved.checkpoint, &checkpoint)?;
+            same_saved_checkpoint(saved, &checkpoint, &mut prefix)?;
         }
         // Reconstruct maps from authenticated creation effects, including the
         // commit -> checkpoint crash window. No checkpoint guesses an identity.
@@ -230,22 +233,24 @@ pub(super) async fn run<V: Vfs + Clone>(
                 &order,
             )?;
             if checkpoint.frontier == saved.checkpoint.frontier {
-                same_checkpoint(&saved.checkpoint, &checkpoint)?;
+                same_saved_checkpoint(saved, &checkpoint, &mut prefix)?;
             }
         }
     }
-    let save = |cp: &BulkLoadCheckpoint, force: bool| -> io::Result<()> {
+    let mut save = |cp: &BulkLoadCheckpoint, force: bool| -> io::Result<()> {
         if let Some(path) = &options.checkpoint {
             cx.checkpoint().map_err(io::Error::other)?;
             if !force && !checkpoint::due(cp.committed_chunks, cp.next_row, source.records()) {
                 return Ok(());
             }
+            let identity_hash = prefix.advance(cp)?;
             let saved = checkpoint::View {
                 checkpoint: cp,
                 base,
                 base_marker: &base_marker,
                 source_hash: &source_hash,
                 rows_per_chunk,
+                identity_hash: Some(&identity_hash),
             };
             checkpoint::persist(&contexts.commit(), path, saved, checkpoint_limits)?;
         }
@@ -480,6 +485,32 @@ fn marker<V: Vfs + Clone>(db: &Database<V>, seq: CommitSeq) -> Result<String, Fa
     }
     Ok(hex(&batch.commit_marker_identity().marker_oid.0))
 }
+fn same_saved_checkpoint(
+    saved: &Saved,
+    b: &BulkLoadCheckpoint,
+    prefix: &mut checkpoint::Prefix<Rows<'_>>,
+) -> Result<(), Failure> {
+    let a = &saved.checkpoint;
+    if a.next_row != b.next_row
+        || a.frontier != b.frontier
+        || a.committed_chunks != b.committed_chunks
+    {
+        return Err(invalid("checkpoint does not match recovered source prefix"));
+    }
+    match &saved.identity_hash {
+        Some(expected) => {
+            if prefix.advance(b).map_err(invalid)? != *expected {
+                return Err(invalid(
+                    "checkpoint identity commitment does not match recovered source prefix",
+                ));
+            }
+        }
+        None => same_checkpoint(a, b)?,
+    }
+    Ok(())
+}
+// V1 remains a checked durable input format. Keep its exact identity-map law
+// separate from V2's recomputed prefix commitment.
 fn same_checkpoint(a: &BulkLoadCheckpoint, b: &BulkLoadCheckpoint) -> Result<(), Failure> {
     if a.vertices != b.vertices
         || a.edges != b.edges
@@ -636,6 +667,7 @@ struct Saved {
     base_marker: String,
     source_hash: String,
     rows_per_chunk: usize,
+    identity_hash: Option<String>,
 }
 impl Saved {
     fn view(&self) -> checkpoint::View<'_> {
@@ -645,6 +677,7 @@ impl Saved {
             base_marker: &self.base_marker,
             source_hash: &self.source_hash,
             rows_per_chunk: self.rows_per_chunk,
+            identity_hash: self.identity_hash.as_deref(),
         }
     }
     fn decode(text: &str, limits: checkpoint::Limits) -> Result<Self, String> {
@@ -655,9 +688,18 @@ impl Saved {
         let Json::Object(mut fields) = json else {
             return Err("expected object".into());
         };
-        if number(field(&fields, "v")?)? != 1 || fields.len() != 10 {
+        let version = number(field(&fields, "v")?)?;
+        if !matches!((version, fields.len()), (1, 10) | (2, 9)) {
             return Err("unknown checkpoint format".into());
         }
+        if version == 2 && text.len() > checkpoint::MAX_COMPACT_BYTES {
+            return Err("compact checkpoint exceeds format bound".into());
+        }
+        let identity_hash = if version == 2 {
+            Some(string(field(&fields, "identity_hash")?)?.to_owned())
+        } else {
+            None
+        };
         let id = |value: &Json| -> Result<u128, String> {
             let text = string(value)?;
             let value: u128 = text.parse().map_err(|_| "invalid identity")?;
@@ -683,14 +725,19 @@ impl Saved {
             Some(Json::Object(map)) => Ok(map),
             _ => Err("expected checkpoint identity map".to_owned()),
         };
-        let vertices = take_object("vertices")?
-            .into_iter()
-            .map(|(k, v)| Ok((k, VId(id(&v)?))))
-            .collect::<Result<_, String>>()?;
-        let edges = take_object("edges")?
-            .into_iter()
-            .map(|(k, v)| Ok((k, EId(id(&v)?))))
-            .collect::<Result<_, String>>()?;
+        let (vertices, edges) = if version == 1 {
+            let vertices = take_object("vertices")?
+                .into_iter()
+                .map(|(k, v)| Ok((k, VId(id(&v)?))))
+                .collect::<Result<_, String>>()?;
+            let edges = take_object("edges")?
+                .into_iter()
+                .map(|(k, v)| Ok((k, EId(id(&v)?))))
+                .collect::<Result<_, String>>()?;
+            (vertices, edges)
+        } else {
+            (BTreeMap::new(), BTreeMap::new())
+        };
         let saved = Self {
             checkpoint: BulkLoadCheckpoint {
                 vertices,
@@ -703,6 +750,7 @@ impl Saved {
             base_marker,
             source_hash,
             rows_per_chunk,
+            identity_hash,
         };
         saved.view().validate(limits).map_err(|e| e.to_string())?;
         Ok(saved)

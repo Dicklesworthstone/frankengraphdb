@@ -1,4 +1,4 @@
-//! Fresh-process recovery of lagging Saved V1 checkpoints (fgdb-28oee).
+//! Fresh-process recovery of lagging Saved V1/V2 checkpoints (fgdb-28oee).
 //! The real CLI commits every chunk. Native reopened state is checked by caller
 //! keys, while already durable marker identities must survive every resume.
 //! No checkpoint decoder, graph evaluator or commit implementation is mocked.
@@ -182,9 +182,67 @@ impl Fixture {
     fn checkpoint(&self) -> BulkLoadCheckpoint {
         let text = std::fs::read_to_string(&self.checkpoint).unwrap();
         let value = parse_json(&text, 10_000, 65_536).unwrap();
-        assert_eq!(number(field(&value, "v")), 1);
         assert_eq!(number(field(&value, "base_frontier")), self.basis);
         assert_eq!(string(field(&value, "base_marker")).len(), 64);
+        if number(field(&value, "v")) == 2 {
+            assert!(text.len() <= 1024);
+            assert!(!object(&value).contains_key("vertices"));
+            assert!(!object(&value).contains_key("edges"));
+            let mut cp = BulkLoadCheckpoint {
+                next_row: number(field(&value, "next_row")) as usize,
+                committed_chunks: number(field(&value, "committed_chunks")) as usize,
+                frontier: CommitSeq(number(field(&value, "frontier"))),
+                ..BulkLoadCheckpoint::default()
+            };
+            // The fixture's independent K property identifies each source
+            // row. Do not reuse production issue-order replay to recover IDs.
+            let ordinal = |props: &[(PropertyKeyId, CanonicalScalar)]| {
+                let (_, CanonicalScalar::Int(value)) = props.iter()
+                    .find(|(key, _)| *key == K).unwrap() else { panic!("fixture ordinal") };
+                *value
+            };
+            self.inspect(|db| {
+                for row in db.vertices_at(cp.frontier).unwrap() {
+                    let n = ordinal(&row.props);
+                    if n == 999 {
+                        assert_eq!(row.labels, [LabelId(2)]);
+                        assert_eq!(row.props, [(K, CanonicalScalar::Int(999)), (P, CanonicalScalar::Int(777))]);
+                        continue;
+                    }
+                    assert!((0..3).contains(&n));
+                    assert!(cp.vertices.insert(format!("v{n}"), row.vid).is_none());
+                }
+                for row in db.edges_at(cp.frontier).unwrap() {
+                    let n = ordinal(&row.props) - 100;
+                    assert!((0..23).contains(&n));
+                    assert!(cp.edges.insert(format!("e{n}"), row.entry.eid).is_none());
+                }
+            });
+            assert_eq!(cp.vertices.len(), cp.next_row.min(3));
+            assert_eq!(cp.edges.len(), cp.next_row.saturating_sub(3));
+            let domain = b"fgdb.cli.load.identity-prefix.v2\0";
+            let mut digest = fgdb_crypto::hash(domain).0;
+            for line in source().lines().take(cp.next_row) {
+                let row = parse_json(line, 100, 1024).unwrap();
+                let key = string(field(&row, "key"));
+                let (kind, id) = match string(field(&row, "kind")) {
+                    "vertex" => (0_u8, cp.vertices[key].0),
+                    "edge" => (1_u8, cp.edges[key].0),
+                    _ => panic!("source kind"),
+                };
+                let mut transcript = domain.to_vec();
+                transcript.extend_from_slice(&digest);
+                transcript.push(kind);
+                transcript.extend_from_slice(&(key.len() as u64).to_be_bytes());
+                transcript.extend_from_slice(key.as_bytes());
+                transcript.extend_from_slice(&id.to_be_bytes());
+                digest = fgdb_crypto::hash(&transcript).0;
+            }
+            let expected: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert_eq!(string(field(&value, "identity_hash")), expected);
+            return cp;
+        }
+        assert_eq!(number(field(&value, "v")), 1);
         BulkLoadCheckpoint {
             vertices: object(field(&value, "vertices")).iter()
                 .map(|(key, id)| (key.clone(), VId(string(id).parse().unwrap()))).collect(),
@@ -299,15 +357,18 @@ fn a_recovered_non_geometric_prefix_is_persisted_before_the_next_attempt() {
 }
 
 #[test]
-fn a_forged_lagging_identity_map_cannot_be_replaced_by_recovery() {
+fn a_forged_lagging_identity_commitment_cannot_be_replaced_by_recovery() {
     let fixture = Fixture::new("forged");
     fixture.crash(7, "before-capsule");
     let saved = fixture.checkpoint();
     assert_eq!(saved.committed_chunks, 4);
     let original = std::fs::read_to_string(&fixture.checkpoint).unwrap();
-    let old = format!("\"v0\":\"{}\"", saved.vertices["v0"].0);
+    let value = parse_json(&original, 10_000, 65_536).unwrap();
+    let old = format!("\"identity_hash\":\"{}\"", string(field(&value, "identity_hash")));
     assert_eq!(original.matches(&old).count(), 1);
-    let forged = original.replacen(&old, &format!("\"v0\":\"{}\"", u128::MAX), 1);
+    let changed = format!("\"identity_hash\":\"{}\"", "0".repeat(64));
+    assert_ne!(old, changed);
+    let forged = original.replacen(&old, &changed, 1);
     std::fs::write(&fixture.checkpoint, &forged).unwrap();
     let before = fixture.markers();
     fixture.load().invalid_resume();

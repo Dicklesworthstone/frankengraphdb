@@ -1,13 +1,16 @@
-//! Bounded Saved V1 checkpoint I/O. The Chronicle stream remains authoritative.
+//! Bounded Saved V1/V2 checkpoint I/O. Chronicle remains authoritative.
 //!
-//! Publication streams borrowed ID maps into an exclusive, private staging
-//! file, syncs its contents, atomically renames it, then syncs its directory.
+//! V2 replaces repeated full ID maps with a source-ordered identity commitment.
+//! Its producer advances through only newly acknowledged rows; a checkpoint
+//! never supplies identities to recovery. V1 maps remain readable and checked.
+//! Publication uses an exclusive, private staging file, syncs its contents,
+//! atomically renames it, then syncs its directory.
 //! Failure before rename preserves the old checkpoint; failure after rename
 //! may expose the new hint, which recovery still checks against Chronicle.
 //! No buffered writer flushes from Drop. Abandoned staging is never recovered.
 
 use super::super::quoted;
-use fgdb::{BulkLoadCheckpoint, BulkLoadPolicy};
+use fgdb::{BulkLoadCheckpoint, BulkLoadPolicy, BulkRow};
 use fgdb_types::{CommitCx, CommitSeq, QueryCx};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -15,11 +18,87 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const BUFFER_BYTES: usize = 64 * 1024;
+pub(super) const MAX_COMPACT_BYTES: usize = 1024;
+const IDENTITY_PREFIX_DOMAIN: &[u8] = b"fgdb.cli.load.identity-prefix.v2\0";
 const MAX_STAGE_ATTEMPTS: usize = 64;
 static NEXT_STAGE: AtomicU64 = AtomicU64::new(0);
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+/// One independent cursor over the sealed, prevalidated source. No duplicate
+/// key map is retained. On a successful pass each source row is visited once,
+/// across all checkpoint publications (including a resumed prefix). A failed
+/// preparation can be retried without losing its source position.
+pub(super) struct Prefix<R> {
+    rows: R,
+    next_row: usize,
+    digest: [u8; 32],
+}
+
+impl<R> Prefix<R> {
+    pub(super) fn new(rows: R) -> Self {
+        Self {
+            rows,
+            next_row: 0,
+            digest: fgdb_crypto::hash(IDENTITY_PREFIX_DOMAIN).0,
+        }
+    }
+}
+
+// Length framing, kind tagging and fixed-width IDs make the transcript
+// unambiguous even for NUL/Unicode keys, overlapping ID domains and wide IDs.
+// Chaining is source-order, not BTreeMap or permuted allocation-ID order.
+fn identity_step(previous: &[u8; 32], kind: u8, key: &str, id: u128) -> io::Result<[u8; 32]> {
+    let len = u64::try_from(key.len()).map_err(|_| invalid("checkpoint key length overflow"))?;
+    let mut hash = fgdb_crypto::Hasher::new();
+    hash.update(IDENTITY_PREFIX_DOMAIN);
+    hash.update(previous);
+    hash.update(&[kind]);
+    hash.update(&len.to_be_bytes());
+    hash.update(key.as_bytes());
+    hash.update(&id.to_be_bytes());
+    Ok(hash.finalize().0)
+}
+
+impl<R, E> Prefix<R>
+where
+    R: Iterator<Item = Result<BulkRow, E>> + Clone,
+    E: std::fmt::Display,
+{
+    pub(super) fn advance(&mut self, cp: &BulkLoadCheckpoint) -> io::Result<String> {
+        if cp.next_row < self.next_row
+            || cp.vertices.len().checked_add(cp.edges.len()) != Some(cp.next_row)
+        {
+            return Err(invalid(
+                "checkpoint identity prefix regressed or has missing rows",
+            ));
+        }
+        // The private caller supplies append-only, engine-produced or fully
+        // reconciled maps. Untrusted Saved maps NEVER feed this producer.
+        // Rows clones have independent positions over the SAME sealed input.
+        // Publish cursor and digest together; a source error, missing ID or
+        // interruption cannot skip an entry when the operation is retried.
+        let mut rows = self.rows.clone();
+        let mut digest = self.digest;
+        for _ in self.next_row..cp.next_row {
+            let row = rows
+                .next()
+                .ok_or_else(|| invalid("source shorter than checkpoint"))?
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            let (kind, key, id) = match &row {
+                BulkRow::Vertex(row) => (0, &row.key, cp.vertices.get(&row.key).map(|id| id.0)),
+                BulkRow::Edge(row) => (1, &row.key, cp.edges.get(&row.key).map(|id| id.0)),
+            };
+            let id = id.ok_or_else(|| invalid("checkpoint is missing a source identity"))?;
+            digest = identity_step(&digest, kind, key, id)?;
+        }
+        self.rows = rows;
+        self.next_row = cp.next_row;
+        self.digest = digest;
+        Ok(super::hex(&digest))
+    }
 }
 
 /// Limits come from the completely validated SOURCE, never a checkpoint's own
@@ -77,6 +156,9 @@ pub(super) struct View<'a> {
     pub(super) base_marker: &'a str,
     pub(super) source_hash: &'a str,
     pub(super) rows_per_chunk: usize,
+    /// None selects the durable V1 map format. V2 is a receipt over a prefix
+    /// derived from Chronicle/engine output, never caller-supplied identities.
+    pub(super) identity_hash: Option<&'a str>,
 }
 impl View<'_> {
     fn header(self, limits: Limits) -> io::Result<()> {
@@ -84,7 +166,8 @@ impl View<'_> {
         if self.rows_per_chunk == 0
             || self.rows_per_chunk > BulkLoadPolicy::MAX_ROWS_PER_CHUNK
             || cp.next_row > limits.rows
-            || cp.vertices.len().checked_add(cp.edges.len()) != Some(cp.next_row)
+            || (self.identity_hash.is_none()
+                && cp.vertices.len().checked_add(cp.edges.len()) != Some(cp.next_row))
             || (cp.next_row < limits.rows && !cp.next_row.is_multiple_of(self.rows_per_chunk))
             || cp.committed_chunks != cp.next_row.div_ceil(self.rows_per_chunk)
         {
@@ -104,6 +187,7 @@ impl View<'_> {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
         if !digest(self.source_hash)
+            || self.identity_hash.is_some_and(|value| !digest(value))
             || (self.base.0 == 0 && !self.base_marker.is_empty())
             || (self.base.0 != 0 && !digest(self.base_marker))
         {
@@ -113,6 +197,11 @@ impl View<'_> {
     }
     pub(super) fn validate(self, limits: Limits) -> io::Result<()> {
         self.header(limits)?;
+        if self.identity_hash.is_some() {
+            // Decoded V2 checkpoints deliberately have no maps. Only the
+            // recovered source prefix can establish their identity commitment.
+            return Ok(());
+        }
         let mut bytes = 0;
         for key in self
             .checkpoint
@@ -135,6 +224,20 @@ impl View<'_> {
     fn write_to(self, out: &mut impl Write, limits: Limits) -> io::Result<()> {
         self.header(limits)?;
         let cp = self.checkpoint;
+        if let Some(identity_hash) = self.identity_hash {
+            return writeln!(
+                out,
+                "{{\"v\":2,\"next_row\":{},\"frontier\":{},\"committed_chunks\":{},\"base_frontier\":{},\"base_marker\":{},\"source_hash\":{},\"rows_per_chunk\":{},\"identity_hash\":{}}}",
+                cp.next_row,
+                cp.frontier.0,
+                cp.committed_chunks,
+                self.base.0,
+                quoted(self.base_marker),
+                quoted(self.source_hash),
+                self.rows_per_chunk,
+                quoted(identity_hash),
+            );
+        }
         let mut key_bytes = 0;
         out.write_all(b"{\"v\":1,\"vertices\":{")?;
         for (index, (key, id)) in cp.vertices.iter().enumerate() {
@@ -383,7 +486,12 @@ fn persist_controlled(
         control,
     )?;
     {
-        let mut out = Buffer::new(&mut file, control, limits.bytes)?;
+        let maximum = if view.identity_hash.is_some() {
+            limits.bytes.min(MAX_COMPACT_BYTES)
+        } else {
+            limits.bytes
+        };
+        let mut out = Buffer::new(&mut file, control, maximum)?;
         view.write_to(&mut out, limits)?;
         out.flush()?;
     }
@@ -398,17 +506,18 @@ fn persist_controlled(
     directory.sync_all()
 }
 
-/// Whether a committed load prefix needs another complete Saved V1 image.
+/// Whether a committed load prefix needs another complete saved receipt.
 ///
 /// The driver separately publishes the origin/reconciled prefix before work
 /// resumes. Ordinary callbacks publish at chunk counts 1, 2, 4, 8, ... and at
-/// the final (possibly partial) chunk. With a fixed chunk size, the sum of map
+/// the final (possibly partial) chunk. For V1 and a fixed chunk size, the sum of map
 /// entries encoded in one uninterrupted load is less than three times the
 /// source row count, rather than quadratic in the number of chunks. Encoded
 /// bytes have the same bound using the already-admitted maximum key length.
-/// This does not reduce the cost of Chronicle commits or source validation.
+/// V2 bounds each image independently of maps and advances its commitment only
+/// over newly covered rows. Neither changes Chronicle commits or validation.
 ///
-/// No checkpoint is authoritative: resume still verifies the saved maps and
+/// No checkpoint is authoritative: resume verifies saved maps/commitments and
 /// reconstructs EVERY committed creation since the original base. Progress
 /// describes durable chunks and may run ahead of this hint; replayed progress
 /// retains its original sequence number. The final image is always required
@@ -450,7 +559,10 @@ mod cadence_tests {
         source_hash: &'a str,
         rows_per_chunk: usize,
     ) -> View<'a> {
-        View { checkpoint, base: CommitSeq(7), base_marker, source_hash, rows_per_chunk }
+        View {
+            checkpoint, base: CommitSeq(7), base_marker, source_hash,
+            rows_per_chunk, identity_hash: None,
+        }
     }
 
     // Both arms invoke the incumbent V1 encoder on the SAME actual key maps.
