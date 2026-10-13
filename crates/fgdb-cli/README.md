@@ -123,14 +123,51 @@ offset) without echoing its value.
 - The statement comes from exactly one of `--query-file <file.gql|->` or a GQL
   argument.
 - `--types-file` holds one `kind<TAB>name` per line with kinds `int64`,
-  `uint64`, `int`, `text`, `bool` or `null`. Undeclared parameters keep native
-  inference.
+  `uint64`, `int`, `text`, `bool`, `null`, `float`, `decimal` or `bytes`.
+  Undeclared parameters keep native inference (stored-property operands default
+  to `int64`); values never choose a type.
 - `--max-input-bytes N` bounds the encoded CSV including its header. The
   default is 16 MiB, and the decoder's hard ceiling of 64 MiB still applies.
 - `--max-changes N` is ONE allowance for effects, new vertices and new edges
   across the whole file, from 1 to 1,000,000 (default 100,000). It never resets
   per record.
 - `-` reads stdin, and at most one input may use it.
+
+### Floating-point, decimal and binary CSV columns
+
+`float` parses finite binary64 values, including decimal exponents; nonfinite
+values, leading `+`, surrounding whitespace and overflow refuse. `decimal`
+is exact fixed scale 18, never a conversion through binary floating point:
+`0.1` and `9007199254740993.000000000000000001` retain every digit. Exponents
+are not decimal syntax; extra fractional places must all be trailing zeros.
+The native coefficient/range limits still apply.
+
+`bytes` accepts pairs of hexadecimal digits (either case), with no `0x` or
+`bytes:` prefix. This carries arbitrary binary data, including packed embedding
+vectors. A quoted empty field `""` is empty bytes, not NULL. Unquoted `\N`
+means NULL in every type; quoted `"\N"` is data and is invalid for these three
+types. Declaring `bytes` does not validate an embedding's shape: vector length
+and finiteness are checked when the existing Beacon projection reads it.
+
+For an existing database and key file, import two-dimensional packed f32
+embeddings (little-endian, four bytes per coordinate) and search them:
+
+```sh
+printf 'text\tname\nbytes\tembedding\n' > embedding.types
+printf 'name,embedding\nfirst,0000803f00000000\nsecond,000000000000803f\n' > embeddings.csv
+fgdb --robot import-csv --db ./graph --key-file ./graph.keys \
+  --label Doc=1 --property name=1 --property embedding=2 \
+  --input embeddings.csv --types-file embedding.types \
+  'CREATE (n:Doc {name:$name, embedding:$embedding})'
+fgdb --robot search --db ./graph --key-file ./graph.keys \
+  --label Doc=1 --property embedding=2 --vertex-label Doc \
+  --vector 1,0 --vector-property embedding --vector-encoding packed --k 2
+```
+
+All CSV records still form one atomic program. A malformed value in a late
+record refuses the complete input before database open; a late execution
+failure discards all earlier records' staged effects. The existing source,
+parameter, execution and change limits are neither bypassed nor reset per row.
 
 ## Analytics: `CALL fnx.*`
 
@@ -184,7 +221,10 @@ corpus is an explicit projection chosen by flags:
 - Vector lane: `--vector <x,y,...>` with one `--vector-property <property>` per
   coordinate, in order. It finds nearest neighbours over those numeric
   properties. `--metric l2|cosine|dot` defaults to `l2`. The search is exact
-  unless `--ann <ef_search>` asks for the approximate HNSW walk.
+  unless `--ann <ef_search>` asks for the approximate HNSW walk. With
+  `--vector-encoding packed`, name exactly one bytes property containing all
+  coordinates as little-endian f32 values (see CSV example above). The default
+  encoding remains `coordinates`; no stored-value type is used to guess it.
 - Both lanes: exact reciprocal-rank fusion of `--candidates` hits per lane
   (default `--k`). This fuses two candidate sets. It is not an exhaustive
   hybrid answer.
@@ -221,7 +261,8 @@ A lane that did not rank a hit leaves its fields `null`. These are usage errors
 
 - no lane;
 - a lane flag without its lane;
-- a vector whose length differs from its `--vector-property` count;
+- a coordinate-encoded vector whose length differs from its property count,
+  or packed encoding without exactly one vector property;
 - a non-finite coordinate;
 - `--candidates` without a fused search (both lanes, or the graph lane);
 - `--max-expansions` without a fuzzy mode;
@@ -249,8 +290,9 @@ fgdb --robot create --db ./graph --key-file ./graph.keys
 fgdb --robot write --db ./graph --key-file ./graph.keys --label Person=1 --property name=1 \
   "INSERT (:Person {name: 'Ada'})"
 printf 'name\nGrace\nLinus\n' > people.csv
+printf 'text\tname\n' > people.types
 fgdb --robot import-csv --db ./graph --key-file ./graph.keys --label Person=1 --property name=1 \
-  --input people.csv 'INSERT (:Person {name: $name})'
+  --input people.csv --types-file people.types 'INSERT (:Person {name: $name})'
 fgdb --robot query --db ./graph --key-file ./graph.keys --label Person=1 --property name=1 \
   'MATCH (p:Person) RETURN p.name AS name ORDER BY name'
 fgdb --robot compact --db ./graph --key-file ./graph.keys
@@ -282,6 +324,9 @@ engine.
   write text on `query`); the `diff` output cap.
 - `write_import.rs`: CSV atomicity, admission before mutation, the
   whole-program budget, spent identities, and stdin bounds.
+- `csv_scalar_import.rs`: exact numeric/binary round-trips, atomic late refusals,
+  independent limits, and CSV-loaded 384-dimensional vectors searched at current
+  and historical sequences.
 
 The frozen schema lives once, in `tests/support/robot_schema.rs`. To change the
 schema, edit it and `ROBOT_SCHEMA` in `src/main.rs` in the same commit.
