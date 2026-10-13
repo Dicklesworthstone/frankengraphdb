@@ -389,16 +389,25 @@ fn every_checkpoint_failure_is_retryable_and_zero_work_remains_a_refusal() {
 }
 
 #[test]
-fn spill_compilers_admit_projected_rank_while_incomplete_consumers_still_refuse() {
+fn spill_and_maintained_sources_keep_projected_rank_with_checked_companions() {
     let query = projection(native(0, None))
         .with_projected_order_by(&[order(0, true, false)])
         .unwrap();
+    let before = query.canonical_bytes();
     assert!(query.has_incremental_ranking());
-    assert!(query.incremental_source_definition().is_none());
+    let source = query.incremental_source_definition().unwrap();
+    assert!(!source.has_incremental_output_transform());
+    assert!(source.projected_ordering().is_empty());
+    assert!(source.output_projection().is_none());
+    assert_eq!(source.incremental_result_window(), (0, None));
+    assert_eq!(source.input_pattern(), query.input_pattern());
+    assert_eq!(source.evaluation_key_columns(), query.evaluation_key_columns());
+    assert_eq!(source.evaluation_aggregate_columns(), query.evaluation_aggregate_columns());
+    assert_eq!(query.canonical_bytes(), before);
     let synchronous = SpillAggregatePlan::compile(&query).unwrap();
     let asynchronous = AsyncSpillAggregatePlan::compile(&query).unwrap();
     let values = data(&[(1, Some(5)), (2, Some(9))]);
-    let raw = execute(&native(0, None), &values, policy(), || Ok::<_, ()>(()))
+    let raw = execute(&source, &values, policy(), || Ok::<_, ()>(()))
         .unwrap()
         .value;
     for definition in [synchronous.definition(), asynchronous.definition()] {
@@ -409,6 +418,14 @@ fn spill_compilers_admit_projected_rank_while_incomplete_consumers_still_refuse(
         let mut control = |_| Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(());
         let a = definition.project_output(raw[0].clone(), &mut control).unwrap();
         let b = definition.project_output(raw[1].clone(), &mut control).unwrap();
+        assert_eq!(
+            query.project_incremental_output(&raw[0], &mut |_| Ok::<(), ()>(())).unwrap(),
+            Some(a.clone())
+        );
+        assert_eq!(
+            query.project_incremental_output(&raw[1], &mut |_| Ok::<(), ()>(())).unwrap(),
+            Some(b.clone())
+        );
         assert_eq!(
             definition.compare_precomputed_output(&raw[0], &a, &raw[1], &b, &mut control).unwrap(),
             std::cmp::Ordering::Greater
@@ -423,13 +440,9 @@ fn spill_compilers_admit_projected_rank_while_incomplete_consumers_still_refuse(
             definition.compare_precomputed_output(&raw[0], &a, &raw[1], &raw[1], &mut control),
             Err(GqlQueryError::Source(GraphAggregateError::InvalidReductionInput))
         ));
+        // A final projected tuple is not a complete upstream group.
+        assert!(query.project_incremental_output(&a, &mut |_| Ok::<(), ()>(())).unwrap().is_none());
     }
-    assert!(
-        query
-            .project_incremental_output(&raw[0], &mut |_| Ok::<_, ()>(()))
-            .unwrap()
-            .is_none()
-    );
 }
 
 fn catalog(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {

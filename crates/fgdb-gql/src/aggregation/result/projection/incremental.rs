@@ -32,11 +32,12 @@ impl PreparedGraphAggregate {
     /// projection, DISTINCT, ordering and window execute there, never on source
     /// bindings or incomplete groups. Source, input expressions, aggregates and
     /// HAVING are unchanged. No runtime source is read by this split.
+    /// Both ordering domains are removed from the source. The output owner
+    /// retains projected_ordering() and compares its stored projected cells;
+    /// ordering() alone does not describe a computed result's rank.
     #[must_use]
     pub fn incremental_source_definition(&self) -> Option<Self> {
-        // The maintained rank owner compares evaluation cells only. Do not
-        // split away a projected ordering that it cannot execute downstream.
-        if !self.projected_ordering.is_empty() || !self.supports_incremental_input() {
+        if !self.supports_incremental_input() {
             return None;
         }
         let mut source = self.clone();
@@ -46,6 +47,7 @@ impl PreparedGraphAggregate {
         source.output_names.clear();
         source.output_distinct = false;
         source.ordering.clear();
+        source.projected_ordering.clear();
         source.offset = 0;
         source.count = None;
         source
@@ -56,7 +58,9 @@ impl PreparedGraphAggregate {
     /// Project one already HAVING-qualified, complete evaluation group. All
     /// referenced columns address the full keys followed by the full summaries.
     /// This does not execute HAVING again, deduplicate, rank or publish rows.
-    /// The caller must apply the original ordering/window AFTER projection.
+    /// The caller must apply the original ordering/window AFTER projection,
+    /// retaining these cells when projected_ordering() is nonempty. Never
+    /// re-evaluate expressions inside the rank comparator or discard that order.
     /// None denotes unsupported definition/schema, never SQL NULL. Exact count,
     /// sum and average cells remain exact, including inside scalar expressions.
     /// Every output expression executes, and errors retain their column/cause.
@@ -69,8 +73,7 @@ impl PreparedGraphAggregate {
             control(event).map_err(GqlQueryError::<GraphAggregateError<Infallible>, C>::Interrupted)
         };
         govern(GlaExecutionEvent::Work)?;
-        if !self.projected_ordering.is_empty()
-            || !self.supports_incremental_input()
+        if !self.supports_incremental_input()
             || row.keys.len() != self.keys.len()
             || row.values.len() != self.aggregates.len()
         {
