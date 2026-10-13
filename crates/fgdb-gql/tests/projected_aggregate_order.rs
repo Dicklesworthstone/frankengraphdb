@@ -11,13 +11,14 @@ use fgdb_gql::{
     GraphSetProjection, GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
     PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100, 100, 1_000_000, 1_000_000)
 }
 
-fn data(values: &[(i64, Option<i64>)]) -> Vec<[CanonicalScalar; 2]> {
+// Property sources hand the aggregate stored property values (fgdb-k3nub).
+fn data(values: &[(i64, Option<i64>)]) -> Vec<[CanonicalPropertyValue; 2]> {
     values
         .iter()
         .map(|(group, value)| {
@@ -25,13 +26,14 @@ fn data(values: &[(i64, Option<i64>)]) -> Vec<[CanonicalScalar; 2]> {
                 CanonicalScalar::Int(*group),
                 value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
             ]
+            .map(CanonicalPropertyValue::Scalar)
         })
         .collect()
 }
 
 fn execute<C>(
     query: &PreparedGraphAggregate,
-    values: &[[CanonicalScalar; 2]],
+    values: &[[CanonicalPropertyValue; 2]],
     policy: GqlQueryPolicy,
     checkpoint: impl FnMut() -> Result<(), C>,
 ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<()>, C>> {
