@@ -22,7 +22,7 @@ machine-readable contract that the tests freeze.
 | `replay --certificate <file>` | Re-execute a certified query at its recorded sequence, byte for byte. |
 | `diff --before <seq> --after <seq> <gql>` | Net bag difference of one query's complete results at two committed sequences. |
 | `transaction --write <gql> --query <gql> …` | Ordered steps in ONE native transaction; `--rollback` discards everything. `--savepoint <name>`, `--rollback-to <name>` and `--release <name>` steps rewind or keep the effects staged after a savepoint; rolling back also drops the rows and records those later steps buffered. |
-| `load --input <file.ndjson>` | Chunked bulk load with an optional resumable `--checkpoint`. |
+| `load --input <file.ndjson>` | Chunked bulk load with an optional resumable `--checkpoint`. `--max-source-rows N` and `--max-total-key-bytes N` raise the whole-input bounds (defaults 1,000,000 rows and 64 MiB of keys; a resume repeats them). |
 | `import-csv --input <file.csv\|-> (--query-file <f> \| <gql>)` | Bind a native write script once per CSV record, and commit every record in ONE transaction or none. |
 | `compact` | Publish a consolidated storage generation. Answers at every retained sequence are unchanged, and the frontier does not move. |
 | `scrub` | Verify every capsule the history names and the current admitted generation's blocks, vertex patches, manifest, partition root and root segments. Damaged capsule redundancy is repaired in place, restoring the exact bytes. Each damaged object gets a `scrub` record; any loss exits 5 after the records, and lost objects are never overwritten. Damage that prevents admission is refused at open, naming the object; scrub also verifies capsule history deferred by checkpoint opens. |
@@ -64,6 +64,12 @@ Label, relation and property IDs are explicit on every invocation:
 `--label Person=1 --relation KNOWS=1 --property name=1`. Supply the same
 bindings when you reopen. The CLI never guesses or hashes names, and `labels()`
 / `type()` reflection answers from the supplied bindings.
+
+`--bindings-file <file>` reads the same mapping once from a file, one binding
+per line (`label Person=1`, `relation KNOWS=1`, `property name=1`; `#` comments
+and blank lines are ignored; at most 1 MiB). File and flags combine, and must
+not repeat a name or an ID within a kind. `fgdbd serve` accepts the same file
+per database. It is an explicit mapping you keep, not a catalog in the database.
 
 ### Parameters: typed, never interpolated
 

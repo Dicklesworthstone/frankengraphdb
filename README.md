@@ -309,6 +309,15 @@ fgdb import-csv --db mydb.fgdbdir --key-file fgdb.keys --input edges.csv "<gql>"
 fgdb load       --db mydb.fgdbdir --key-file fgdb.keys --input batch.ndjson
 fgdb compact    --db mydb.fgdbdir --key-file fgdb.keys
 
+# Inputs past the default 1,000,000 rows or 64 MiB of keys name their own bounds
+fgdb load --db mydb.fgdbdir --key-file fgdb.keys --input big.ndjson \
+  --max-source-rows 80000000 --max-total-key-bytes 2000000000
+
+# Write the name bindings once instead of repeating --label/--relation/--property
+printf 'label Person=1\nrelation KNOWS=1\nproperty name=1\n' > social.bindings
+fgdb query --db mydb.fgdbdir --key-file fgdb.keys --bindings-file social.bindings \
+  "MATCH (p:Person) RETURN p.name"
+
 # Verify every capsule and block; repair damaged redundancy in place
 fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys
 
@@ -358,6 +367,9 @@ fgdb robot schema
 fgdbd keygen --issuer issuer.key
 fgdbd serve --listen 127.0.0.1:7687 --database social=mydb.fgdbdir --key-file fgdb.keys \
   --issuer-key-file issuer.key --label Person=1 --relation KNOWS=1 --property name=1
+#   per-database query limits default to the CLI's (100,000 records): raise them for
+#   larger graphs with --max-snapshot-records/--max-result-rows/--max-work-units/
+#   --max-scratch-entries; --bindings-file replaces the --label/... flags
 fgdbd token --key-file fgdb.keys --issuer-key-file issuer.key --rights read-write > token && chmod 600 token
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social query "MATCH (p:Person) RETURN p.name"
 

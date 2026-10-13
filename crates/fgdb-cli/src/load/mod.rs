@@ -41,6 +41,12 @@ pub(super) async fn run<V: Vfs + Clone>(
     if policy.rows_per_chunk == 0 || policy.rows_per_chunk > BulkLoadPolicy::MAX_ROWS_PER_CHUNK {
         return Err(Failure::usage("invalid rows-per-chunk"));
     }
+    if let Some(rows) = options.max_source_rows {
+        policy.max_source_rows = rows;
+    }
+    if let Some(bytes) = options.max_total_key_bytes {
+        policy.max_total_key_bytes = bytes;
+    }
     // Without --rows-per-chunk, fit chunks to the source. A chunk commits as
     // one capsule, whose container measured 1.29x its source transcript on a
     // 42,048-row load (3,302,237 -> 4,249,172 bytes), and a V1 capsule carries

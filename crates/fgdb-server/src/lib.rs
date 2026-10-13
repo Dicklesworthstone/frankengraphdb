@@ -170,10 +170,14 @@ pub struct DatabaseConfig {
 }
 
 impl DatabaseConfig {
+    /// The `fgdb` CLI's default query limits, in [`Self::set_query_limits`] order.
+    pub const DEFAULT_QUERY_LIMITS: [u64; 4] = [100_000, 100_000, 10_000_000, 10_000_000];
+
     /// The defaults the `fgdb` CLI uses for one invocation.
     #[must_use]
     pub fn new(name: impl Into<String>, keys: DatabaseKeys, issuer_key: AuthKey) -> Self {
-        let query_policy = GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000);
+        let [records, rows, work, scratch] = Self::DEFAULT_QUERY_LIMITS;
+        let query_policy = GqlQueryPolicy::new(records, rows, work, scratch);
         Self {
             name: name.into(),
             keys,
@@ -187,6 +191,15 @@ impl DatabaseConfig {
             max_subscriptions: 64,
             ordered_reads: None,
         }
+    }
+
+    /// Replace the per-statement query limits: snapshot records, result rows,
+    /// work units and scratch entries, in [`GqlQueryPolicy::new`] order. The
+    /// write policy's selection phase gets the same limits, so a write's MATCH
+    /// admits exactly what a read can; its effect ceilings are unchanged.
+    pub fn set_query_limits(&mut self, [records, rows, work, scratch]: [u64; 4]) {
+        self.query_policy = GqlQueryPolicy::new(records, rows, work, scratch);
+        self.write_policy.mutations.query = self.query_policy;
     }
 }
 

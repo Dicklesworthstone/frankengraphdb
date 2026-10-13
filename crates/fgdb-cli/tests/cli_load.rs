@@ -805,6 +805,60 @@ fn the_default_chunk_is_fitted_to_the_input() {
     );
 }
 
+/// The whole-input row and key-byte bounds are the caller's: a graph past the
+/// engine defaults (1,000,000 rows) needs no rebuild to load. Each bound admits
+/// an input exactly at it and refuses one row or byte past it, before anything
+/// commits; omitting a flag keeps its default.
+#[test]
+fn source_row_and_key_byte_bounds_are_caller_selected() {
+    let rows: String = (0..300)
+        .map(|n| {
+            format!(
+                "{{\"kind\":\"vertex\",\"key\":\"v{n:03}\",\"labels\":[\"Person\"],\"props\":{{\"p\":\"int:{n}\"}}}}\n"
+            )
+        })
+        .collect();
+    // 300 keys of four bytes each: 1,200 key bytes.
+    for (flags, admitted, refusal) in [
+        (vec!["--max-source-rows", "300"], true, ""),
+        (vec!["--max-source-rows", "299"], false, "source_rows"),
+        (vec!["--max-total-key-bytes", "1200"], true, ""),
+        (
+            vec!["--max-total-key-bytes", "1199"],
+            false,
+            "total_key_bytes",
+        ),
+        (vec![], true, ""),
+    ] {
+        let fixture = Fixture::new("source-bounds", &rows);
+        let outcome = Outcome::new(fixture.load_command(None).args(&flags).output().unwrap());
+        if admitted {
+            outcome.loaded(300, 1, fixture.basis + 1);
+        } else {
+            outcome.refusal(refusal, None);
+            assert!(outcome.progress().is_empty(), "{flags:?}");
+            runtime_check(async |contexts| {
+                let db = open(&fixture.db, &contexts).await;
+                assert_eq!(
+                    db.frontier().unwrap(),
+                    CommitSeq(fixture.basis),
+                    "{flags:?}"
+                );
+            });
+        }
+    }
+    // Repeating a bound, or a non-decimal bound, is a usage error.
+    let fixture = Fixture::new("source-bounds-usage", &rows);
+    for flags in [
+        ["--max-source-rows", "1", "--max-source-rows", "2"].as_slice(),
+        ["--max-source-rows", "-1"].as_slice(),
+        ["--max-total-key-bytes", "many"].as_slice(),
+    ] {
+        let output = fixture.load_command(None).args(flags).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{flags:?}: {output:?}");
+    }
+}
+
 fn refusal_preserves_frontier(bad: &str, kind: &str) {
     let prefix = "{\"kind\":\"vertex\",\"key\":\"v0\",\"labels\":[\"Person\"],\"props\":{\"p\":\"int:7\"}}\n";
     let fixture = Fixture::new("refusal", &format!("{prefix}{bad}\n"));

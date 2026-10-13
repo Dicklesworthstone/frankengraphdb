@@ -24,6 +24,8 @@ USAGE:
       [--bolt-listen <addr:port>] [--tls-cert-file <path> --tls-key-file <path>] DATABASE...
       DATABASE := --database <name>=<path> --key-file <path> --issuer-key-file <path>
                   [--policy-epoch <n>] [--write-relation <u32>] [--query-scratch-dir <path>]
+                  [--max-snapshot-records <n>] [--max-result-rows <n>]
+                  [--max-work-units <n>] [--max-scratch-entries <n>] [--bindings-file <path>]
                   [--label <name>=<u32>]... [--relation <name>=<u32>]... [--property <name>=<u32>]...
       [--max-connections <n>]
   fgdbd token --key-file <path> --issuer-key-file <path> [--policy-epoch <n>]
@@ -43,10 +45,17 @@ capability token minted by `fgdbd token` for that database's key file and
 issuer key; it can select exactly the databases whose issuer accepts it.
 Statements run through capability-authorized sessions, so a token's label,
 relation and property scope applies before expansion. Names resolve through
-the bindings given here (there is no durable catalog yet). serve prints one
+the bindings given here (there is no durable catalog yet); --bindings-file reads
+them once from the fgdb CLI's bindings file format. serve prints one
 NDJSON line {\"v\":1,\"event\":\"listening\",\"protocol\":\"fgp\",\"addr\":...} per
 listener once bound, drains on SIGINT/SIGTERM (in-flight statements finish,
 idle connections say GOODBYE), and exits 0.
+
+--max-snapshot-records, --max-result-rows, --max-work-units and
+--max-scratch-entries set that database's per-statement query limits (the
+fgdb CLI's query limits; defaults 100000, 100000, 10000000 and 10000000).
+They apply to every read and to the selection phase of every write. A token's
+own --max-nodes/--max-work/--max-rows caveats still bound each statement too.
 
 --query-scratch-dir enables FGP ordered reads for that database using bounded
 query-private files in an existing directory. The operator chooses this path;
@@ -167,8 +176,20 @@ struct DatabaseOptions {
     query_scratch_dir: Option<PathBuf>,
     policy_epoch: u64,
     write_relation: u32,
+    /// `--max-snapshot-records`, `--max-result-rows`, `--max-work-units` and
+    /// `--max-scratch-entries`, in [`fgdb_gql::GqlQueryPolicy::new`] order.
+    query_limits: [Option<u64>; 4],
     symbols: Symbols,
+    /// `--bindings-file`: more bindings, merged in before the database opens.
+    bindings_file: Option<PathBuf>,
 }
+
+const QUERY_LIMIT_FLAGS: [&str; 4] = [
+    "--max-snapshot-records",
+    "--max-result-rows",
+    "--max-work-units",
+    "--max-scratch-entries",
+];
 
 struct ServeOptions {
     listen: String,
@@ -252,7 +273,9 @@ impl ServeOptions {
                         query_scratch_dir: None,
                         policy_epoch: 1,
                         write_relation: 1,
+                        query_limits: [None; 4],
                         symbols: Symbols::new(),
+                        bindings_file: None,
                     });
                 }
                 _ => {
@@ -276,6 +299,23 @@ impl ServeOptions {
                         }
                         "--write-relation" => {
                             db.write_relation = number(value(args, &mut at, flag)?, flag)?
+                        }
+                        "--bindings-file" if db.bindings_file.is_none() => {
+                            db.bindings_file = Some(PathBuf::from(value(args, &mut at, flag)?));
+                        }
+                        "--max-snapshot-records"
+                        | "--max-result-rows"
+                        | "--max-work-units"
+                        | "--max-scratch-entries" => {
+                            let slot = QUERY_LIMIT_FLAGS
+                                .iter()
+                                .position(|limit| *limit == flag)
+                                .expect("listed in QUERY_LIMIT_FLAGS");
+                            if db.query_limits[slot].is_some() {
+                                return Err(Failure::usage(format!("duplicate flag {flag}")));
+                            }
+                            db.query_limits[slot] =
+                                Some(number(value(args, &mut at, flag)?, flag)?);
                         }
                         "--label" | "--relation" | "--property" => {
                             let kind = match flag {
@@ -339,7 +379,19 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
             .map_err(Failure::open)?;
         server.enable_tls(config);
     }
-    for db in options.databases {
+    for mut db in options.databases {
+        if let Some(path) = &db.bindings_file {
+            let bytes = asupersync::fs::read(path).await.map_err(Failure::io)?;
+            let bindings =
+                fgdb_gql::symbol_bindings::parse_symbol_bindings(&bytes).map_err(Failure::usage)?;
+            for binding in bindings {
+                db.symbols
+                    .bind(binding.kind, &binding.name, binding.id)
+                    .map_err(|error| {
+                        Failure::usage(format!("bindings file line {}: {error}", binding.line))
+                    })?;
+            }
+        }
         let keys = fgdb_server::read_database_keys(cx, db.key_file.as_deref().expect("checked"))
             .await
             .map_err(Failure::open)?;
@@ -352,6 +404,9 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         config.write_relation = RelationId(u64::from(db.write_relation));
         config.symbols = db.symbols;
         config.ordered_reads = db.query_scratch_dir.map(OrderedReadConfig::new);
+        config.set_query_limits(core::array::from_fn(|at| {
+            db.query_limits[at].unwrap_or(DatabaseConfig::DEFAULT_QUERY_LIMITS[at])
+        }));
         server
             .open_database(cx, &db.path, config)
             .await
@@ -823,6 +878,63 @@ mod tests {
             .is_err()
         );
         let misplaced: Vec<String> = ["--query-scratch-dir", "scratch"]
+            .iter()
+            .chain(&base)
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert!(ServeOptions::parse(&misplaced).is_err());
+    }
+
+    #[test]
+    fn query_limits_are_per_database_and_default_to_the_cli_limits() {
+        let base = [
+            "--listen",
+            "127.0.0.1:0",
+            "--database",
+            "first=first-db",
+            "--key-file",
+            "first.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let parse = |extra: &[&str]| {
+            let args: Vec<String> = base.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+            ServeOptions::parse(&args)
+        };
+        let defaults = parse(&[]).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(defaults.databases[0].query_limits, [None; 4]);
+        let options = parse(&[
+            "--max-snapshot-records",
+            "50000000",
+            "--max-work-units",
+            "0",
+            "--database",
+            "second=second-db",
+            "--key-file",
+            "second.key",
+            "--issuer-key-file",
+            "issuer.key",
+            "--max-result-rows",
+            "7",
+            "--max-scratch-entries",
+            "18446744073709551615",
+        ])
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            options.databases[0].query_limits,
+            [Some(50_000_000), None, Some(0), None]
+        );
+        assert_eq!(
+            options.databases[1].query_limits,
+            [None, Some(7), None, Some(u64::MAX)]
+        );
+        // Duplicates, missing or non-decimal values, overflow and a limit
+        // before any --database are usage errors.
+        assert!(parse(&["--max-result-rows", "1", "--max-result-rows", "2"]).is_err());
+        assert!(parse(&["--max-work-units"]).is_err());
+        assert!(parse(&["--max-work-units", "-1"]).is_err());
+        assert!(parse(&["--max-work-units", "18446744073709551616"]).is_err());
+        let misplaced: Vec<String> = ["--max-snapshot-records", "1"]
             .iter()
             .chain(&base)
             .map(|s| (*s).to_owned())

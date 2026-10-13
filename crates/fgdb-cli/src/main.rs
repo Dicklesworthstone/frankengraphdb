@@ -55,6 +55,7 @@ Usage: fgdb [--robot] <command>
     (steps may include --savepoint <name>, --rollback-to <name>, --release <name>)
   replay --db <dir> --key-file <file> [bindings] [--param name=value]... [limits] --certificate <file>
   load --db <dir> --key-file <file> [bindings] --input <file.ndjson> [--rows-per-chunk N] [--checkpoint <file>]
+       [--max-source-rows N] [--max-total-key-bytes N]
   search --db <dir> --key-file <file> [bindings] [text lane] [vector lane] [--k N]
          [--candidates N] [--vertex-label <label>] [--as-of <seq>]
   remote --addr <ip:port> --token-file <file> --database <name> [--param name=value]...
@@ -91,6 +92,10 @@ and commits every row as ONE atomic program (MERGE sees earlier rows).
 --tzdb-file <file> supplies a pinned transition-table artifact on every invocation.
 Bindings: repeat --label name=u32, --relation name=u32, --property name=u32.
 Supply the same bindings on reopen; no implicit catalog or hashed names.
+--bindings-file <file> adds bindings written once, one per line:
+`label <name>=<u32>`, `relation <name>=<u32>` or `property <name>=<u32>`
+(# comments and blank lines ignored, at most 1 MiB); fgdbd serve accepts the
+same file per database. Flags and file must not repeat a name or an ID.
 query --certify-to <file> saves a portable result certificate after emitting rows.
 query and replay take the same four limits as diff; a refusal names the limit it hit.
 query --stream pulls and flushes one native row at a time. Use a single-vertex
@@ -183,6 +188,9 @@ declare every text or bool column. --max-input-bytes bounds the CSV (default 16 
 load commits the NDJSON input in chunks of --rows-per-chunk rows (at most 65536).
 By default it takes the largest power of two whose every chunk carries at most 4 MiB
 of source transcript, chosen from the input itself, so a resume chooses the same.
+--max-source-rows (default 1000000) bounds the rows of the whole input and
+--max-total-key-bytes (default 67108864) the bytes of all its distinct keys,
+counting a resumed prefix; both are decimal and a resume must repeat them.
 compact rewrites the storage layout durably; query results are unchanged.
 adopt needs no keys. Run it once after copying a database without syncing its files,
 before the first write; it syncs all regular files, directories and the parent.
@@ -274,6 +282,10 @@ impl Failure {
         Self::new(2, "usage", message)
     }
     fn query(message: impl ToString) -> Self {
+        let mut message = message.to_string();
+        if let Some(flag) = budget_flag(&message) {
+            message.push_str(&format!(" (raise with {flag})"));
+        }
         Self::new(3, "query", message)
     }
     fn open(message: impl ToString) -> Self {
@@ -342,11 +354,16 @@ struct Options {
     labels: BTreeMap<String, u32>,
     relations: BTreeMap<String, u32>,
     properties: BTreeMap<String, u32>,
+    /// `--bindings-file`: more bindings, merged in before any name resolves.
+    bindings_file: Option<PathBuf>,
     coordinate: RelationId,
     certify_to: Option<PathBuf>,
     certificate: Option<PathBuf>,
     input: Option<PathBuf>,
     rows_per_chunk: Option<usize>,
+    /// `load` whole-source bounds; absent ones keep the engine defaults.
+    max_source_rows: Option<usize>,
+    max_total_key_bytes: Option<usize>,
     checkpoint: Option<PathBuf>,
     steps: Vec<transaction::Step>,
     rollback: bool,
@@ -439,6 +456,61 @@ impl GraphSymbolResolver for &Options {
         (*self).time_zones()
     }
 }
+/// The flag that raises the execution limit a refusal names, read from the
+/// typed refusals' Display spelling (`GqlBudgetExceeded`, `GlaLimitExceeded`).
+fn budget_flag(message: &str) -> Option<&'static str> {
+    [
+        (
+            "GQL SnapshotRecords budget exceeded",
+            "--max-snapshot-records",
+        ),
+        ("GQL ResultRows budget exceeded", "--max-result-rows"),
+        ("GLA WorkUnits limit exceeded", "--max-work-units"),
+        ("GLA ScratchEntries limit exceeded", "--max-scratch-entries"),
+    ]
+    .into_iter()
+    .find_map(|(refusal, flag)| message.contains(refusal).then_some(flag))
+}
+
+/// One binding, from a flag or a bindings file: names and IDs are unique per kind.
+fn bind_symbol(map: &mut BTreeMap<String, u32>, name: &str, id: u32) -> Result<(), Failure> {
+    if name.is_empty() || map.contains_key(name) || map.values().any(|old| *old == id) {
+        return Err(Failure::usage(
+            "bindings must have unique names and IDs per kind",
+        ));
+    }
+    map.insert(name.to_owned(), id);
+    Ok(())
+}
+
+/// Merge `--bindings-file` into the flag bindings under the same uniqueness rule.
+async fn read_bindings_file(
+    options: &mut Options,
+    cx: &fgdb_types::QueryCx,
+) -> Result<(), Failure> {
+    let Some(path) = options.bindings_file.clone() else {
+        return Ok(());
+    };
+    cx.checkpoint().map_err(Failure::io)?;
+    let bytes = asupersync::fs::read(&path).await.map_err(Failure::io)?;
+    let bindings = fgdb_gql::symbol_bindings::parse_symbol_bindings(&bytes)
+        .map_err(|error| Failure::usage(error.to_string()))?;
+    for binding in bindings {
+        let map = match binding.kind {
+            GraphSymbolKind::Label => &mut options.labels,
+            GraphSymbolKind::Relation => &mut options.relations,
+            GraphSymbolKind::Property => &mut options.properties,
+        };
+        bind_symbol(map, &binding.name, binding.id).map_err(|_| {
+            Failure::usage(format!(
+                "bindings file line {}: bindings must have unique names and IDs per kind",
+                binding.line
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let create = command == "create";
     let mut db = None;
@@ -451,11 +523,14 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut labels = BTreeMap::new();
     let mut relations = BTreeMap::new();
     let mut properties = BTreeMap::new();
+    let mut bindings_file = None;
     let mut coordinate = RelationId(1);
     let mut certify_to = None;
     let mut certificate = None;
     let mut input = None;
     let mut rows_per_chunk = None;
+    let mut max_source_rows = None;
+    let mut max_total_key_bytes = None;
     let mut checkpoint = None;
     let mut steps: Vec<transaction::Step> = Vec::new();
     let mut rollback = false;
@@ -540,6 +615,16 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                     }
                     rows_per_chunk = Some(rows);
                 }
+                "--max-source-rows" if command == "load" && max_source_rows.is_none() => {
+                    max_source_rows = Some(value.parse().map_err(|_| {
+                        Failure::usage("max-source-rows must be a decimal integer")
+                    })?);
+                }
+                "--max-total-key-bytes" if command == "load" && max_total_key_bytes.is_none() => {
+                    max_total_key_bytes = Some(value.parse().map_err(|_| {
+                        Failure::usage("max-total-key-bytes must be a decimal integer")
+                    })?);
+                }
                 "--rows" if command == "write" && rows.is_none() => {
                     rows = Some(value.clone());
                 }
@@ -594,15 +679,10 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                         "--relation" => &mut relations,
                         _ => &mut properties,
                     };
-                    if name.is_empty()
-                        || map.contains_key(name)
-                        || map.values().any(|old| *old == id)
-                    {
-                        return Err(Failure::usage(
-                            "bindings must have unique names and IDs per kind",
-                        ));
-                    }
-                    map.insert(name.to_owned(), id);
+                    bind_symbol(map, name, id)?;
+                }
+                "--bindings-file" if bindings_file.is_none() => {
+                    bindings_file = Some(PathBuf::from(value));
                 }
                 "--write-relation"
                     if !matches!(command, "diff" | "compact" | "scrub" | "search") =>
@@ -618,7 +698,11 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 flag if command == "search" && search::SearchFlags::FLAGS.contains(&flag) => {
                     search_flags.set(flag, value)?;
                 }
-                _ => return Err(Failure::usage("unknown, duplicate, or inapplicable flag")),
+                _ => {
+                    return Err(Failure::usage(format!(
+                        "unknown, duplicate, or inapplicable flag {arg} for {command}"
+                    )));
+                }
             }
         } else if create
             || matches!(command, "compact" | "scrub" | "search")
@@ -700,11 +784,14 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         labels,
         relations,
         properties,
+        bindings_file,
         coordinate,
         certify_to,
         certificate,
         input,
         rows_per_chunk,
+        max_source_rows,
+        max_total_key_bytes,
         checkpoint,
         steps,
         rollback,
@@ -1233,6 +1320,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             let root = runtime.request_cx_with_budget(Budget::INFINITE);
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             runtime.block_on(async {
+                read_bindings_file(&mut options, &contexts.query()).await?;
                 let mut keys = read_keys(&contexts.query(), &options.key).await?;
                 let artifact = if let Some(path) = &options.tzdb_file {
                     contexts.query().checkpoint().map_err(Failure::io)?;
@@ -1758,5 +1846,69 @@ fn render_row_body(
             emit(out, &line(row))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod budget_hint_tests {
+    use super::budget_flag;
+    use fgdb_gql::{GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlBudgetExceeded};
+
+    /// Each typed refusal's own Display text maps to the flag that raises it,
+    /// so a renamed dimension or reworded refusal fails here, not in a user's
+    /// terminal; an unrelated message gets no hint.
+    #[test]
+    fn every_execution_limit_refusal_names_its_flag() {
+        let refusals = [
+            (
+                GqlBudgetExceeded {
+                    dimension: GqlBudgetDimension::SnapshotRecords,
+                    limit: 100_000,
+                    observed: 100_001,
+                }
+                .to_string(),
+                "--max-snapshot-records",
+            ),
+            (
+                GqlBudgetExceeded {
+                    dimension: GqlBudgetDimension::ResultRows,
+                    limit: 1,
+                    observed: 2,
+                }
+                .to_string(),
+                "--max-result-rows",
+            ),
+            (
+                GlaLimitExceeded {
+                    dimension: GlaLimitDimension::WorkUnits,
+                    limit: 10,
+                    observed: 11,
+                }
+                .to_string(),
+                "--max-work-units",
+            ),
+            (
+                GlaLimitExceeded {
+                    dimension: GlaLimitDimension::ScratchEntries,
+                    limit: 10,
+                    observed: 11,
+                }
+                .to_string(),
+                "--max-scratch-entries",
+            ),
+        ];
+        for (message, flag) in refusals {
+            assert_eq!(budget_flag(&message), Some(flag), "{message}");
+            let rendered = super::Failure::query(&message).message;
+            assert!(
+                rendered.ends_with(&format!(" (raise with {flag})")),
+                "{rendered}"
+            );
+        }
+        assert_eq!(budget_flag("unknown label Person"), None);
+        assert_eq!(
+            super::Failure::query("unknown label Person").message,
+            "unknown label Person"
+        );
     }
 }

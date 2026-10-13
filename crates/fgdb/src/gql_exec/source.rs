@@ -1009,7 +1009,7 @@ const PROPERTY_INDEX_SERVING: bool = true;
 /// The admitted rows also supply every nested scan and property lookup, so a
 /// root predicate cannot prune that shared table when later operators introduce
 /// other bindings. Such plans retain the complete scan source.
-fn bound_vertices<'a, E, Row>(
+pub(crate) fn bound_vertices<'a, E, Row>(
     snapshot: &'a Snapshot,
     logical: &fgdb_gql::algebra::GlaPlan<Row>,
     as_of: CommitSeq,
@@ -1747,10 +1747,14 @@ fn bound_edge_hops(operators: &[fgdb_gql::algebra::GlaOperator]) -> Option<usize
 /// Admit a conservative edge closure for a predicate-bound root. The algebra
 /// still evaluates every predicate/join and owns multiplicity and ordering.
 /// Unbound scans retain the original source and its accounting verbatim.
-fn bound_edges<'a, E, Row>(
+/// With `indexed_only`, a root the property index cannot seek returns `None`
+/// instead of testing the predicate on every vertex: an unselective root
+/// (a label alone) would walk the adjacency of most of the graph.
+pub(crate) fn bound_edges<'a, E, Row>(
     snapshot: &'a Snapshot,
     logical: &fgdb_gql::algebra::GlaPlan<Row>,
     as_of: CommitSeq,
+    indexed_only: bool,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<Vec<BorrowedEdge<'a>>>, E> {
     use fgdb_gql::algebra::{GlaDirection, GlaOperator};
@@ -1801,6 +1805,7 @@ fn bound_edges<'a, E, Row>(
     // so a bound hub costs its candidates, not a predicate test per vertex.
     let roots = match indexed_roots(snapshot, predicates, as_of, control)? {
         Some(roots) => roots,
+        None if indexed_only => return Ok(None),
         None => {
             let mut roots = Vec::new();
             visit_vertices(&snapshot.patches, as_of, control, |row, control| {
@@ -2011,7 +2016,7 @@ pub(super) fn admit<'a, E, Row>(
             edges,
         });
     }
-    let edges = match bound_edges(snapshot, logical, as_of, control)? {
+    let edges = match bound_edges(snapshot, logical, as_of, false, control)? {
         Some(edges) => edges,
         None => scan_edges(&snapshot.blocks, &snapshot.block_props, as_of, control)?,
     };
