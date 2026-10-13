@@ -1,10 +1,14 @@
-//! Prepare shared wire cells before authorized relationship writes commit.
+//! Prepare shared wire cells before any authorized write-RETURN commits.
 //! The protocol's existing codec owns body admission, not a second value codec.
 
 use super::{Refusal, convert, write_refusal};
 use fgdb::WriteTxnError;
 use fgdb_gql::algebra::GraphValueRow;
-use fgdb_protocol::body::{BodyError, ErrorCode, ResultChunk, WireValue};
+use fgdb_protocol::body::{
+    BodyError, ErrorCode, MAX_COLUMNS, MAX_NAME_BYTES, ResultChunk, WireValue,
+};
+
+mod admission;
 
 fn body_refusal(error: BodyError) -> Refusal {
     let code = match error {
@@ -17,7 +21,8 @@ fn body_refusal(error: BodyError) -> Refusal {
 
 /// The native caller retains its rollback workspace and live permit. Only
 /// completed wire cells escape this helper; a later row failure exposes none.
-/// Charge each cell and each 64 encoded bytes as additional signed host work.
+/// Admit every borrowed value node and payload before converting the row.
+/// Copy work and the codec's encoded-byte work share the live signed permit.
 /// The codec may retain a temporary row-sized encoding; this is not a new
 /// byte-memory bound. Negotiated frame sizes, flow credit, delivery/revocation
 /// and I/O failures remain transport responsibilities after native completion.
@@ -28,7 +33,13 @@ pub(super) fn collect(
 ) -> Result<Vec<Vec<WireValue>>, Refusal> {
     let mut charge = |units| work(units).map_err(|error| write_refusal(&error));
     charge(1)?;
+    if columns.len() > MAX_COLUMNS {
+        return Err(body_refusal(BodyError::TooLarge));
+    }
     for column in columns {
+        if column.len() > MAX_NAME_BYTES {
+            return Err(body_refusal(BodyError::TooLarge));
+        }
         let units = u64::try_from(column.len().div_ceil(64))
             .map_err(|_| body_refusal(BodyError::TooLarge))?;
         charge(units.saturating_add(1))?;
@@ -43,11 +54,11 @@ pub(super) fn collect(
         if row.values().len() != columns.len() {
             return Err(Refusal::new(ErrorCode::Execution, "native RETURN row width mismatch"));
         }
-        let mut cells = Vec::new();
-        for cell in row.values() {
-            charge(1)?;
-            cells.push(convert::graph(cell));
-        }
+        // The old per-cell charge could admit an arbitrarily large nested
+        // value for one unit, then bill its payload only AFTER copying it.
+        // Validate and reserve the entire borrowed row before any wire copy.
+        admission::row(row.values(), &mut charge)?;
+        let cells: Vec<_> = row.values().iter().map(convert::graph).collect();
         let bytes = ResultChunk::row_len(&cells).map_err(body_refusal)?;
         let units = u64::try_from(bytes.div_ceil(64))
             .map_err(|_| body_refusal(BodyError::TooLarge))?;
