@@ -836,6 +836,7 @@ pub(super) struct ParsedVertexReturn<'a> {
     offset: ReadPageNumber,
     count: Option<ReadPageNumber>,
     at: usize,
+    tail: Option<Vec<ReadStageTemplate>>,
 }
 
 impl<'a> mutation_query::ReturnLeaves<'a> for ParsedVertexReturn<'a> {
@@ -993,6 +994,7 @@ impl<'a> ParsedVertexReturn<'a> {
             count: self.count,
             at: self.at,
             property_catalog: None,
+            tail: self.tail,
         })
     }
 }
@@ -1003,7 +1005,10 @@ impl<'a> Parser<'a> {
         variable: Name<'a>,
     ) -> Result<ParsedVertexReturn<'a>, GraphVertexUpsertTextError> {
         let at = self.current.at;
-        self.word("RETURN")?;
+        let head = self.take_word("WITH")?;
+        if !head {
+            self.word("RETURN")?;
+        }
         let quantifier = if self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
@@ -1020,6 +1025,7 @@ impl<'a> Parser<'a> {
             offset: ReadPageNumber::Literal(0),
             count: None,
             at,
+            tail: None,
         };
         let (output, spellings) = if self.take(b'*')? {
             returning
@@ -1047,7 +1053,55 @@ impl<'a> Parser<'a> {
             returning.offset = offset;
             returning.count = count;
         }
+        if head {
+            let tail = self.vertex_return_tail(&mut returning, output)?;
+            returning.tail = Some(tail);
+        }
         Ok(returning)
+    }
+
+    /// A carried MERGE vertex reads its final staged properties through the
+    /// write owner's existing bindings. Aliases never become a new MATCH and
+    /// the native row pipeline owns all subsequent expression execution.
+    fn vertex_return_tail(
+        &mut self,
+        returning: &mut ParsedVertexReturn<'a>,
+        mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
+    ) -> Result<Vec<ReadStageTemplate>, GraphVertexUpsertTextError> {
+        let visible = schema.len();
+        let mut reads = Vec::new();
+        if returning.grouping.is_none() {
+            for (alias, key) in self.write_tail_reads(&schema)? {
+                let Some(at) = schema[..visible]
+                    .iter()
+                    .position(|(name, _)| name.text == alias.text)
+                else {
+                    continue;
+                };
+                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
+                    continue;
+                };
+                if !matches!(
+                    returning.bindings[binding],
+                    (VertexBinding::Vertex, _, GraphSetColumnType::Vertex)
+                ) {
+                    continue;
+                }
+                let column = returning.column(
+                    VertexBinding::Property(key),
+                    key,
+                    GraphSetColumnType::Scalar,
+                )?;
+                mutation_query::push_tail_read(
+                    &mut returning.projection,
+                    &mut schema,
+                    &mut reads,
+                    (alias, key),
+                    column,
+                )?;
+            }
+        }
+        Ok(self.finish_write_tail(schema, visible, reads)?)
     }
 }
 
@@ -1087,12 +1141,19 @@ impl VertexReturnTemplate {
                     kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
                 })?;
         }
-        Ok(query.with_page(
+        let query = query.with_page(
             return_projection::pipeline::page_value(&self.offset, values),
             self.count
                 .as_ref()
                 .map(|count| return_projection::pipeline::page_value(count, values)),
-        ))
+        );
+        let Some(stages) = &self.tail else {
+            return Ok(query);
+        };
+        let owned =
+            crate::PreparedGraphSet::owned(query.columns().to_vec(), query.column_types().to_vec());
+        let tail = return_projection::bind_stages(owned, stages, values)?;
+        Ok(query.with_tail(tail))
     }
 }
 

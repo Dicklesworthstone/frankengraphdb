@@ -1,7 +1,8 @@
 //! Native `MERGE (n ...) [ON MATCH SET ...] [ON CREATE SET ...] [SET ...]
-//! RETURN ...`. MERGE chooses exactly one vertex, so RETURN projects one row.
+//! RETURN ...`. MERGE chooses exactly one vertex, so its result head has one row.
 //! The host reads the chosen vertex's fields after every clause is staged and
-//! hands them back here; nothing is re-matched.
+//! hands them back here; nothing is re-matched. A WITH continues those owned
+//! values through the native relational pipeline under the same write budget.
 
 use super::*;
 use crate::algebra::{GraphOrderError, GraphValue, GraphValueOrder, GraphValueRow};
@@ -60,6 +61,8 @@ pub struct PreparedGraphVertexUpsertQuery {
     offset: u64,
     count: Option<u64>,
     property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
+    /// Row stages over the WITH head, not another graph selection.
+    tail: Option<crate::PreparedGraphSet>,
 }
 impl core::fmt::Debug for PreparedGraphVertexUpsertQuery {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -163,6 +166,7 @@ impl PreparedGraphVertexUpsertQuery {
             offset: 0,
             count: None,
             property_catalog,
+            tail: None,
         })
     }
 
@@ -189,7 +193,12 @@ impl PreparedGraphVertexUpsertQuery {
         &self.types
     }
 
+    /// Rank the public output, leaving an earlier WITH's order/page alone.
     pub fn with_order_by(mut self, order: &[GraphValueOrder]) -> Result<Self, GraphOrderError> {
+        if let Some(tail) = self.tail.take() {
+            self.tail = Some(tail.with_order_by(order)?);
+            return Ok(self);
+        }
         if order.is_empty() {
             return Err(GraphOrderError::EmptyOrder);
         }
@@ -212,8 +221,20 @@ impl PreparedGraphVertexUpsertQuery {
     }
     #[must_use]
     pub fn with_page(mut self, offset: u64, count: Option<u64>) -> Self {
-        self.offset = offset;
-        self.count = count;
+        if let Some(tail) = self.tail.take() {
+            self.tail = Some(tail.with_page(offset, count));
+        } else {
+            self.offset = offset;
+            self.count = count;
+        }
+        self
+    }
+
+    /// Continue the WITH head over its own rows. Only the tail is public output.
+    pub(crate) fn with_tail(mut self, tail: crate::PreparedGraphSet) -> Self {
+        self.columns = tail.columns().to_vec();
+        self.types = tail.column_types().to_vec();
+        self.tail = Some(tail);
         self
     }
 
@@ -222,7 +243,8 @@ impl PreparedGraphVertexUpsertQuery {
     /// cumulative counters, so the result counters cover the whole statement.
     /// Complete property-map inputs must contain bounded, canonical maps of
     /// scalar fields, and label inputs bounded lists of text, even when
-    /// grouping or LIMIT would discard their values.
+    /// grouping or LIMIT would discard their values. A WITH head remains
+    /// private input: only the final tail's rows spend the result-row grant.
     pub fn project_governed<E, C>(
         &self,
         row: Vec<GraphValue>,
@@ -306,15 +328,24 @@ impl PreparedGraphVertexUpsertQuery {
                 &mut checkpoint,
             )?;
         }
-        crate::set_ops::finish_owned_projection(
+        let head = if self.tail.is_some() {
+            crate::set_ops::owned_head_policy(policy)
+        } else {
+            policy
+        };
+        let returning = crate::set_ops::finish_owned_projection(
             returning,
-            policy,
+            head,
             &self.projection,
             self.quantifier,
             &self.order,
             (self.offset, self.count),
-            checkpoint,
-        )
+            &mut checkpoint,
+        )?;
+        match &self.tail {
+            None => Ok(returning),
+            Some(tail) => crate::set_ops::finish_owned_tail(returning, tail, policy, checkpoint),
+        }
     }
 
     /// Definition identity, not a durable effect format.
@@ -369,6 +400,273 @@ impl PreparedGraphVertexUpsertQuery {
                 &mut bytes,
             );
         }
+        if let Some(tail) = &self.tail {
+            bytes.extend_from_slice(b"fgdb:write-tail:v1\0");
+            let tail = tail.canonical_bytes();
+            bytes.extend_from_slice(&(tail.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&tail);
+        }
         bytes
+    }
+}
+
+#[cfg(test)]
+mod with_tests {
+    use super::*;
+    use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphVertexUpsertQueryText};
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::{CanonicalScalar, VId};
+
+    const P: PropertyKeyId = PropertyKeyId(1);
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            _ => None,
+        }
+    }
+
+    fn prepare(text: &str) -> PreparedGraphVertexUpsertQuery {
+        assert!(PreparedGraphVertexUpsertQueryText::has_return_clause(text).unwrap());
+        PreparedGraphVertexUpsertQueryText::prepare(text, RelationId(1), symbols)
+            .expect(text)
+            .bind_parameters(&GqlParameters::new())
+            .expect(text)
+    }
+
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+
+    fn policy(rows: u64) -> GqlQueryPolicy {
+        GqlQueryPolicy::new(100, rows, 100_000, 100_000)
+    }
+
+    fn finish(
+        query: &PreparedGraphVertexUpsertQuery,
+        row: Vec<GraphValue>,
+        rows: u64,
+    ) -> Vec<Vec<GraphValue>> {
+        query
+            .project_governed::<(), ()>(
+                row,
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(rows),
+                || Ok(()),
+            )
+            .unwrap()
+            .value
+            .into_iter()
+            .map(|row| row.values().to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn aliases_and_star_carry_final_vertex_properties_without_a_graph_source() {
+        let query = prepare(
+            "MERGE (n {p:1}) ON CREATE SET n.p = 2 ON MATCH SET n.p = 3 \
+             SET n.p = n.p + 10 WITH n AS item WHERE item.p > 0 \
+             RETURN item AS vertex, item.p AS p",
+        );
+        assert_eq!(query.columns(), &["vertex", "p"]);
+        assert_eq!(
+            query.bindings(),
+            &[GraphVertexReturnBinding::Vertex, GraphVertexReturnBinding::Property(P)]
+        );
+        let vertex = GraphValue::Vertex(VId((1_u128 << 100) + 1));
+        // The host supplies final state, not the MERGE map's original p=1.
+        assert_eq!(
+            finish(&query, vec![vertex.clone(), int(12)], 1),
+            vec![vec![vertex.clone(), int(12)]]
+        );
+        let star = prepare("MERGE (n {p:1}) WITH * RETURN n.p AS p");
+        assert_eq!(finish(&star, vec![vertex, int(12)], 1), vec![vec![int(12)]]);
+    }
+
+    #[test]
+    fn expansion_distinct_and_aggregate_keep_one_final_row_allowance() {
+        let query = prepare(
+            "MERGE (n {p:1}) WITH n.p AS p UNWIND [p,p+1,p] AS x \
+             WITH DISTINCT x RETURN sum(x) AS total",
+        );
+        assert_eq!(finish(&query, vec![int(3)], 1), vec![vec![int(7)]]);
+        let grouped = prepare(
+            "MERGE (n {p:1}) WITH collect(n.p) AS ps UNWIND ps AS p \
+             RETURN p + 1 AS next",
+        );
+        assert_eq!(finish(&grouped, vec![int(3)], 1), vec![vec![int(4)]]);
+        let empty = prepare(
+            "MERGE (n {p:1}) WITH n.p AS p WHERE p < 0 RETURN count(*) AS total",
+        );
+        assert_eq!(finish(&empty, vec![int(3)], 1), vec![vec![int(0)]]);
+    }
+
+    #[test]
+    fn only_final_output_spends_rows_and_limit_zero_cannot_hide_expression_failure() {
+        let filtered = prepare(
+            "MERGE (n {p:1}) WITH n AS item WHERE item.p < 0 RETURN item",
+        );
+        assert!(finish(&filtered, vec![GraphValue::Vertex(VId(1)), int(3)], 0).is_empty());
+        let limited = prepare("MERGE (n {p:1}) WITH n.p AS p RETURN p LIMIT 0");
+        assert!(finish(&limited, vec![int(3)], 0).is_empty());
+        let failed = prepare(
+            "MERGE (n {p:1}) WITH n.p AS p UNWIND [1,0] AS divisor \
+             RETURN p / divisor AS value LIMIT 0",
+        );
+        assert!(matches!(
+            failed.project_governed::<(), ()>(
+                vec![int(3)],
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(0),
+                || Ok(()),
+            ),
+            Err(GqlQueryError::Source(GraphSetExecutionError::Projection { .. }))
+        ));
+    }
+
+    #[test]
+    fn final_builder_windows_use_tail_columns_without_paging_away_the_head() {
+        let query = prepare(
+            "MERGE (n {p:1}) WITH n.p AS p LIMIT 1 UNWIND [p,p+1,p+2] AS x \
+             RETURN 100-x AS inverse, x AS value",
+        );
+        let selected = query
+            .clone()
+            .with_order_by(&[GraphValueOrder {
+                column: 1,
+                descending: true,
+                nulls_first: false,
+            }])
+            .unwrap()
+            .with_page(1, Some(1));
+        assert_eq!(finish(&selected, vec![int(3)], 1), vec![vec![int(96), int(4)]]);
+        assert_ne!(selected.canonical_bytes(), query.canonical_bytes());
+        assert!(matches!(
+            query.with_order_by(&[GraphValueOrder {
+                column: 2,
+                descending: false,
+                nulls_first: false,
+            }]),
+            Err(GraphOrderError::UnknownColumn { column: 2 })
+        ));
+    }
+
+    #[test]
+    fn rebind_parameters_without_catalog_and_keep_tail_semantics_in_identity() {
+        let calls = std::cell::Cell::new(0);
+        let template = PreparedGraphVertexUpsertQueryText::prepare(
+            "MERGE (n {p:$key}) WITH n.p AS p WHERE p > $minimum RETURN p+$extra AS value",
+            RelationId(1),
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .unwrap();
+        let prepared_calls = calls.get();
+        let args = |minimum| {
+            GqlParameters::new()
+                .with_int64("key", 1).unwrap()
+                .with_int64("minimum", minimum).unwrap()
+                .with_int64("extra", 10).unwrap()
+        };
+        let first = template.bind_parameters(&args(0)).unwrap();
+        let second = template.bind_parameters(&args(5)).unwrap();
+        assert_eq!(calls.get(), prepared_calls);
+        assert_eq!(finish(&first, vec![int(3)], 1), vec![vec![int(13)]]);
+        assert!(finish(&second, vec![int(3)], 0).is_empty());
+        assert_ne!(first.canonical_bytes(), second.canonical_bytes());
+        assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+
+        let plain = prepare("MERGE (n {p:1}) RETURN n.p AS p");
+        let piped = prepare("MERGE (n {p:1}) WITH n.p AS p RETURN p");
+        let mut expected = plain.canonical_bytes();
+        let tail = piped.tail.as_ref().unwrap().canonical_bytes();
+        expected.extend_from_slice(b"fgdb:write-tail:v1\0");
+        expected.extend_from_slice(&(tail.len() as u64).to_be_bytes());
+        expected.extend_from_slice(&tail);
+        assert!(plain.tail.is_none());
+        assert_eq!(piped.canonical_bytes(), expected);
+    }
+
+    #[test]
+    fn malformed_tails_and_dropped_bindings_refuse_before_catalog_access() {
+        for tail in [
+            "WITH n AS item RETURN n",
+            "WITH n AS item RETURN missing",
+            "WITH n AS item SET item.p = 3 RETURN item",
+            "WITH n AS item RETURN item; CREATE (m)",
+            "WITH n AS item WHERE RETURN item",
+        ] {
+            let text = format!("MERGE (n {{p:1}}) {tail}");
+            let calls = std::cell::Cell::new(0);
+            assert!(
+                PreparedGraphVertexUpsertQueryText::prepare(&text, RelationId(1), |kind, name| {
+                    calls.set(calls.get() + 1);
+                    symbols(kind, name)
+                }).is_err(),
+                "{text}"
+            );
+            assert_eq!(calls.get(), 0, "{text}");
+        }
+    }
+
+    #[test]
+    fn exact_work_budget_and_every_cancellation_checkpoint_cover_the_native_tail() {
+        let query = prepare(
+            "MERGE (n {p:1}) WITH n.p AS p UNWIND [p,p+1,p+2] AS x \
+             RETURN sum(x) AS total",
+        );
+        let prefix = GlaExecutionStats {
+            work_units: 17,
+            ..GlaExecutionStats::default()
+        };
+        let mut checkpoints = 0;
+        let result = query.project_governed::<(), ()>(
+            vec![int(3)],
+            GqlExecutionStats::default(),
+            prefix,
+            policy(1),
+            || { checkpoints += 1; Ok(()) },
+        ).unwrap();
+        assert_eq!(result.value[0].values(), &[int(12)]);
+        assert!(result.evaluator.work_units > prefix.work_units);
+        assert!(checkpoints > 1);
+        for (limit, success) in [
+            (result.evaluator.work_units, true),
+            (result.evaluator.work_units - 1, false),
+        ] {
+            let checked = query.project_governed::<(), ()>(
+                vec![int(3)],
+                GqlExecutionStats::default(),
+                prefix,
+                GqlQueryPolicy::new(100, 1, limit, 100_000),
+                || Ok(()),
+            );
+            if success {
+                assert!(checked.is_ok());
+            } else {
+                assert!(matches!(checked, Err(GqlQueryError::Evaluator(_))));
+            }
+        }
+        for stop in 0..checkpoints {
+            let mut visited = 0;
+            assert!(matches!(
+                query.project_governed::<(), ()>(
+                    vec![int(3)],
+                    GqlExecutionStats::default(),
+                    prefix,
+                    policy(1),
+                    || {
+                        if visited == stop { return Err(()); }
+                        visited += 1;
+                        Ok(())
+                    },
+                ),
+                Err(GqlQueryError::Interrupted(()))
+            ));
+        }
     }
 }

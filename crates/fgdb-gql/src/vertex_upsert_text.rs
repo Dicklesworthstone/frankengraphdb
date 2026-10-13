@@ -132,18 +132,23 @@ pub(crate) struct VertexReturnTemplate {
     pub count: Option<crate::set_text::ReadPageNumber>,
     pub at: usize,
     pub property_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
+    /// Native row stages after a WITH over the chosen vertex's final values.
+    pub tail: Option<Vec<crate::set_text::ReadStageTemplate>>,
 }
 
 /// `MERGE (n ...) [ON MATCH SET ...] [ON CREATE SET ...] [SET ...] RETURN ...`.
-/// MERGE chooses exactly one vertex, so RETURN projects one row: the merge
-/// variable's identity and its properties after every clause, read from the
-/// staged transaction state, plus expressions, DISTINCT, ordering and paging
+/// MERGE chooses exactly one vertex, so its result head projects one row: the
+/// merge variable's identity and its properties after every clause, read from
+/// the staged transaction state, plus expressions, DISTINCT, ordering and paging
 /// over them, including grouped COUNT/SUM/AVG/MIN/MAX/COLLECT with argument
 /// DISTINCT. A MERGE with no SET clause is accepted here. Grouped output keeps
 /// the ordinary row numeric domain. `properties(n)`, `keys(n)`, and selective
 /// or wildcard map projections read the final staged vertex through the same
-/// governed owner; complete maps require trusted reverse property names.
-/// `labels(n)` remains outside this shape.
+/// governed owner; complete maps and `labels(n)` require trusted reverse names.
+/// A WITH head continues through native row stages to a terminal RETURN
+/// (fgdb-cpny9), retaining the statement's rollback and cumulative budget.
+/// Carried vertex property reads are private final-state bindings, not another
+/// MATCH. This does not enable writes before MERGE or another write after it.
 #[derive(Clone)]
 pub struct PreparedGraphVertexUpsertQueryText {
     pub(crate) statement: String,
