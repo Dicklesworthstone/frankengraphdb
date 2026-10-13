@@ -36,6 +36,9 @@ pub enum GraphEdgeUpsertValue {
         properties: Vec<PropertyKeyId>,
         value: GraphIntegerExpression,
     },
+    /// A constant List value (fgdb-k3nub), evaluated when the statement
+    /// binds and written as it is.
+    Stored(fgdb_types::CanonicalPropertyValue),
 }
 impl core::fmt::Debug for GraphEdgeUpsertValue {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -47,7 +50,7 @@ impl GraphEdgeUpsertValue {
     pub fn literal(&self) -> Option<&GqlScalarParameter> {
         match self {
             Self::Literal(value) => Some(value),
-            Self::Expression { .. } => None,
+            Self::Expression { .. } | Self::Stored(_) => None,
         }
     }
 }
@@ -360,6 +363,17 @@ impl PreparedGraphEdgeUpsert {
                         bytes.extend_from_slice(&(expression.len() as u64).to_be_bytes());
                         bytes.extend_from_slice(&expression);
                     }
+                    // Binding admitted the value through the stored format's
+                    // bounds, so it encodes; tag 3 marks the impossible
+                    // failure instead of a panic.
+                    GraphEdgeUpsertValue::Stored(value) => match value.encode() {
+                        Ok(encoded) => {
+                            bytes.push(2);
+                            bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                            bytes.extend_from_slice(&encoded);
+                        }
+                        Err(_) => bytes.push(3),
+                    },
                 }
             }
         }

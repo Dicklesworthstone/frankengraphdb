@@ -19,6 +19,12 @@ pub(crate) enum EdgeUpsertValueTemplate {
         program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
         at: usize,
     },
+    /// A constant list value (`['a', 'b']`, `$tags`), read in the value
+    /// language and evaluated when the statement binds (fgdb-k3nub).
+    Composite {
+        value: crate::set_text::ReadValueTemplate,
+        at: usize,
+    },
 }
 #[derive(Clone)]
 pub(crate) struct EdgeUpsertActionTemplate {

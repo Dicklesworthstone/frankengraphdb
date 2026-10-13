@@ -23,9 +23,15 @@ use crate::{
 // endpoint selection nor a source-text evaluator is used to read these inputs.
 struct ParsedEdgeUpsertAction<'a> {
     key: Name<'a>,
-    value: Operand,
+    value: ParsedEdgeValue,
     properties: Vec<Name<'a>>,
     at: usize,
+}
+
+/// A scalar right-hand side, or a constant list (fgdb-k3nub).
+enum ParsedEdgeValue {
+    Scalar(Operand),
+    Composite(crate::set_text::ReadValueTemplate),
 }
 
 struct ParsedEdgeUpsert<'a> {
@@ -138,6 +144,28 @@ impl<'a> Parser<'a> {
         key: Name<'a>,
     ) -> Result<ParsedEdgeUpsertAction<'a>, GraphEdgeUpsertTextError> {
         let at = self.current.at;
+        if self.set_value_is_list()? {
+            // A constant list (`['a', 'b']`, `$tags`) is a stored List
+            // (fgdb-k3nub), evaluated once when the statement binds. One built
+            // from the relationship's own fields is not yet.
+            let mut inputs = Vec::new();
+            let value = self
+                .insertion_source_value(&mut inputs, &[])
+                .map_err(crate::GraphMutationTextError::from)?;
+            if !inputs.is_empty() {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("a list value of literals and parameters"),
+                )
+                .into());
+            }
+            return Ok(ParsedEdgeUpsertAction {
+                key,
+                value: ParsedEdgeValue::Composite(value),
+                properties: Vec::new(),
+                at,
+            });
+        }
         let mut properties: Vec<Name<'a>> = Vec::new();
         let value = self.resolved_predicate(&mut |parser| {
             if !matches!(parser.current.kind, TokenKind::Word(_))
@@ -168,7 +196,7 @@ impl<'a> Parser<'a> {
         })?;
         Ok(ParsedEdgeUpsertAction {
             key,
-            value,
+            value: ParsedEdgeValue::Scalar(value),
             properties,
             at,
         })
@@ -536,6 +564,29 @@ impl PreparedGraphEdgeUpsertText {
                             properties: properties.clone(),
                             value: integer::bind_integer(program, &values, *at)?,
                         },
+                        // A constant list (fgdb-k3nub): a scalar result is a
+                        // literal, a List the stored List; anything else
+                        // refuses (Parser::constant_written_value).
+                        EdgeUpsertValueTemplate::Composite { value, at } => {
+                            let refused = || GraphEdgeUpsertTextError {
+                                offset: *at,
+                                kind: GraphEdgeUpsertTextErrorKind::Expression(
+                                    crate::GraphMutationTextErrorKind::IntegerOperand,
+                                ),
+                            };
+                            match Parser::constant_written_value(value, &values)
+                                .map_err(crate::GraphMutationTextError::from)?
+                            {
+                                Some(fgdb_types::CanonicalPropertyValue::Scalar(scalar)) => {
+                                    GraphEdgeUpsertValue::Literal(
+                                        crate::GqlScalarParameter::new(scalar)
+                                            .map_err(|_| refused())?,
+                                    )
+                                }
+                                Some(stored) => GraphEdgeUpsertValue::Stored(stored),
+                                None => return Err(refused()),
+                            }
+                        }
                     };
                     Ok(GraphEdgeUpsertAction {
                         key: action.key,
@@ -568,7 +619,19 @@ fn resolve_actions<'a>(
             let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, action.key)? else {
                 unreachable!("symbol domain checked")
             };
-            let expression = match action.value {
+            let operand = match action.value {
+                ParsedEdgeValue::Composite(value) => {
+                    return Ok(EdgeUpsertActionTemplate {
+                        key,
+                        value: EdgeUpsertValueTemplate::Composite {
+                            value,
+                            at: action.at,
+                        },
+                    });
+                }
+                ParsedEdgeValue::Scalar(operand) => operand,
+            };
+            let expression = match operand {
                 Operand::Literal(value) => {
                     return Ok(EdgeUpsertActionTemplate {
                         key,

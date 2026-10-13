@@ -84,7 +84,18 @@ fn edge_upsert_actions<E, A, C>(
                                 _ => GlaExecutionEvent::Work,
                             })
                         })?;
-                        value.value().clone()
+                        CanonicalPropertyValue::Scalar(value.value().clone())
+                    }
+                    // A constant List (fgdb-k3nub), admitted element by
+                    // element before the copy.
+                    GraphEdgeUpsertValue::Stored(value) => {
+                        point_payload_admission(value, &mut |event| {
+                            control(match event {
+                                SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                                _ => GlaExecutionEvent::Work,
+                            })
+                        })?;
+                        value.clone()
                     }
                     GraphEdgeUpsertValue::Expression { properties, value } => {
                         for _ in properties {
@@ -98,21 +109,23 @@ fn edge_upsert_actions<E, A, C>(
                                 &mut control,
                             )?));
                         }
-                        value
-                            .evaluate_scalar_with_control(&inputs, &mut control)
-                            .map_err(|error| match error {
-                                GraphIntegerEvaluationError::Control(error) => error,
-                                GraphIntegerEvaluationError::Value(source) => {
-                                    GqlQueryError::Source(GraphEdgeUpsertError::Expression {
-                                        clause,
-                                        action,
-                                        source,
-                                    })
-                                }
-                            })?
+                        CanonicalPropertyValue::Scalar(
+                            value
+                                .evaluate_scalar_with_control(&inputs, &mut control)
+                                .map_err(|error| match error {
+                                    GraphIntegerEvaluationError::Control(error) => error,
+                                    GraphIntegerEvaluationError::Value(source) => {
+                                        GqlQueryError::Source(GraphEdgeUpsertError::Expression {
+                                            clause,
+                                            action,
+                                            source,
+                                        })
+                                    }
+                                })?,
+                        )
                     }
                 };
-                batch.set_edge_property(edge, definition.key, Some(value));
+                batch.set_edge_property_value(edge, definition.key, Some(value));
             }
             // All right-hand sides have succeeded before the first write of
             // this clause. The next clause must observe this native staging.

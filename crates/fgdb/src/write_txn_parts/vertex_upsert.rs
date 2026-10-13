@@ -345,32 +345,10 @@ fn vertex_upsert_actions<E, A, C>(
                     })?;
                     batch.set_vertex_property(outcome.vertex(), *key, Some(value.value().clone()));
                 }
-                // A constant List (fgdb-k3nub): one unit per collection node
-                // and each scalar's payload, admitted before the copy.
+                // A constant List (fgdb-k3nub), admitted element by element
+                // before the copy.
                 GraphVertexUpsertAction::SetStored { key, value } => {
-                    fn admit<E>(
-                        value: &fgdb_types::CanonicalPropertyValue,
-                        charge: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-                    ) -> Result<(), E> {
-                        match value {
-                            fgdb_types::CanonicalPropertyValue::Scalar(scalar) => {
-                                point_scalar_payload_admission(scalar, charge)
-                            }
-                            fgdb_types::CanonicalPropertyValue::List(list) => {
-                                charge(SourceEvent::ScratchEntry)?;
-                                list.values()
-                                    .iter()
-                                    .try_for_each(|value| admit(value, charge))
-                            }
-                            fgdb_types::CanonicalPropertyValue::Map(map) => {
-                                charge(SourceEvent::ScratchEntry)?;
-                                map.entries()
-                                    .iter()
-                                    .try_for_each(|entry| admit(entry.value(), charge))
-                            }
-                        }
-                    }
-                    admit(value, &mut |event| {
+                    point_payload_admission(value, &mut |event| {
                         control(match event {
                             SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
                             _ => GlaExecutionEvent::Work,

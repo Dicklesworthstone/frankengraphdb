@@ -562,6 +562,28 @@ impl<'a> Parser<'a> {
         Ok((columns, actions))
     }
 
+    /// A MERGE branch's constant list value (fgdb-k3nub), evaluated once
+    /// when the statement binds: the stored value it writes, by CREATE's rule
+    /// (to_written_property). `None` refuses a map at any depth, a graph
+    /// element, or a value past the event budget or the stored bounds.
+    /// Binding is not a budgeted query, so a literal like range(1, 100000000)
+    /// refuses here instead of allocating.
+    fn constant_written_value(
+        template: &crate::set_text::ReadValueTemplate,
+        values: &[crate::GqlParameterValue],
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphSetTextError> {
+        const CONSTANT_LIST_EVENTS: u32 = 1 << 20;
+        let value = return_projection::bind_read_value(template, values)?;
+        let row = crate::algebra::GraphValueRow::from_owned_values(Vec::new());
+        let mut remaining = CONSTANT_LIST_EVENTS;
+        Ok(crate::set_ops::evaluate_value(&value, &row, 0, &mut |_| {
+            remaining = remaining.checked_sub(1).ok_or(())?;
+            Ok::<_, ()>(())
+        })
+        .ok()
+        .and_then(|value| value.to_written_property()))
+    }
+
     /// Whether a SET value here is a list (fgdb-k3nub), read in the value
     /// language and written as a stored List: a list operand or a `+` chain
     /// with one (list_operand_here, list_chain_follows), or a parameter the
