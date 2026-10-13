@@ -154,6 +154,72 @@ fn bulk_connect_script_observes_staged_sources_and_reopens_at_one_frontier() {
 /// in a node map or as a WHERE equality either way round; a row whose field
 /// matches nothing creates nothing. A read correlates the same way.
 #[test]
+fn a_later_required_match_correlates_with_the_imported_row() {
+    // `MATCH (a {..}) MATCH (b {..})` is the inner join `MATCH (a {..}),
+    // (b {..})` makes (fgdb-0s2pq): the later clause reads the row too.
+    let ((), report) = run_async_under_lab(0xb01c_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let cx = contexts.query();
+        let pair = |from: i64, to: i64| {
+            GraphValue::map(vec![("from".into(), int(from)), ("to".into(), int(to))]).unwrap()
+        };
+        let parameters = GqlParameters::new()
+            .with_list("pairs", vec![pair(1, 2), pair(2, 3), pair(9, 1)])
+            .unwrap();
+        let mut found = Vec::new();
+        for text in [
+            "UNWIND $pairs AS row MATCH (a:Source {p: row.from}), (b:Source {p: row.to}) \
+             CREATE (a)-[:R]->(b)",
+            "UNWIND $pairs AS row MATCH (a:Source {p: row.from}) MATCH (b:Source {p: row.to}) \
+             CREATE (a)-[:R]->(b)",
+            "UNWIND $pairs AS row MATCH (a:Source) WHERE a.p = row.from \
+             MATCH (b:Source) WHERE b.p = row.to CREATE (a)-[:R]->(b)",
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            for statement in [
+                program(
+                    "UNWIND [1, 2, 3] AS value CREATE (:Source {p: value})",
+                    &GqlParameters::new(),
+                ),
+                program(text, &parameters),
+            ] {
+                db.execute_graph_write_program_autocommit_engine_governed(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &statement,
+                    GraphWriteProgramPolicy::new(policy(), 1_000, 16, 16),
+                )
+                .await
+                .unwrap();
+            }
+            let fgdb::QueryResult::Rows { rows, .. } = db
+                .query(
+                    &cx,
+                    "MATCH (a:Source)-[:R]->(b) RETURN a.p AS a, b.p AS b ORDER BY a",
+                    &GqlParameters::new(),
+                    symbols,
+                    policy(),
+                )
+                .unwrap()
+            else {
+                unreachable!("a read answers rows")
+            };
+            found.push(rows);
+        }
+        let value = |value: i64| fgdb::QueryValue::Value(int(value));
+        let expected = [vec![value(1), value(2)], vec![value(2), value(3)]];
+        for rows in &found {
+            assert_eq!(rows, &expected);
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn map_fields_of_imported_rows_correlate_matched_endpoints() {
     let ((), report) = run_async_under_lab(0xb01c_0005, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
