@@ -227,14 +227,22 @@ impl PreparedGraphWriteChainText {
                 steps.push(ChainTextStep::VertexMerge(Box::new(merge)));
                 next = after;
             } else if merge {
-                let (merge, returning) = crate::PreparedGraphEdgeMergeText::prepare_chained(
+                let (merge, returning, after) = crate::PreparedGraphEdgeMergeText::prepare_chained(
                     body,
                     declarations,
                     &mut resolve,
                     from,
                 )?;
-                steps.push(ChainTextStep::EdgeMerge(Box::new((merge, returning))));
-                next = None;
+                match after {
+                    Some((keep, from)) => {
+                        steps.push(ChainTextStep::EdgeMergeRows(Box::new((merge, keep))));
+                        next = Some(from);
+                    }
+                    None => {
+                        steps.push(ChainTextStep::EdgeMerge(Box::new((merge, returning))));
+                        next = None;
+                    }
+                }
             } else {
                 let (step, returning, after) = PreparedGraphInsertText::prepare_chained(
                     body,
@@ -274,6 +282,7 @@ impl PreparedGraphWriteChainText {
             let specs = match step {
                 ChainTextStep::Insert(step) => step.0.parameter_schema(),
                 ChainTextStep::EdgeMerge(step) => step.0.parameter_schema(),
+                ChainTextStep::EdgeMergeRows(step) => step.0.parameter_schema(),
                 ChainTextStep::VertexMerge(merge) => merge.parameter_schema(),
             };
             for spec in specs {
@@ -389,6 +398,28 @@ impl PreparedGraphWriteChainText {
                             returning.bind(bound, &values)?,
                         )),
                         None => GraphWriteChainStep::EdgeMerge(Box::new(bound)),
+                    });
+                }
+                ChainTextStep::EdgeMergeRows(step) => {
+                    let (merge, keep) = &**step;
+                    let own = own(merge.parameter_schema())?;
+                    let mut output = Vec::new();
+                    if let crate::mutation_text::EdgeMergeTextInput::Row { input, .. } =
+                        &merge.input
+                    {
+                        reads_previous(&input.owned, &previous, merge.input.return_at())?;
+                        if let Some((_, types)) = &input.owned {
+                            output = types.clone();
+                        }
+                    }
+                    let bound = merge.bind_parameters(&own)?;
+                    // Its rows: the row's visible columns, then the edge.
+                    output.truncate(*keep);
+                    output.push(GraphSetColumnType::Edge);
+                    previous = Some(output);
+                    steps.push(GraphWriteChainStep::EdgeMergeRows {
+                        merge: Box::new(bound),
+                        keep: *keep,
                     });
                 }
             }

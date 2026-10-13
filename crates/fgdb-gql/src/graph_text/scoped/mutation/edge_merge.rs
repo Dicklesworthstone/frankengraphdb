@@ -371,7 +371,7 @@ impl PreparedGraphEdgeMergeText {
         R: GraphSymbolResolver + ?Sized,
     {
         let (head, stages, schema) = parser.write_row_prefix()?;
-        let (parsed, source, destination, parsed_return) =
+        let ((parsed, source, destination, parsed_return), _) =
             Self::row_merge(&mut parser, &schema, Some(returning))?;
         let read = parser.finish_write_row_prefix(statement, head, stages)?;
         let input = read.resolve(crate::graph_text::LentResolver(&mut *resolve))?;
@@ -383,16 +383,26 @@ impl PreparedGraphEdgeMergeText {
         )
     }
 
-    /// The last write of a chain (`CREATE (a), (b) MERGE (a)-[:R]->(b)`):
-    /// a relationship MERGE over the previous write's rows, read through one
+    /// A later write of a chain (`CREATE (a), (b) MERGE (a)-[:R]->(b)`): a
+    /// relationship MERGE over the previous write's rows, read through one
     /// owned leaf. As after `MATCH ... WITH`, that row is the whole scope.
-    /// A RETURN after the pattern makes it a query step.
+    /// A RETURN after the pattern makes it a query step. A next write after
+    /// it makes it a row step: the continuation carries the row's visible
+    /// columns and the relationship, as `WITH *` would.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn prepare_chained<'a, R>(
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
         resolve: &mut R,
         from: ChainContinuation<'a>,
-    ) -> Result<(Self, Option<EdgeMergeReturnTemplate>), GraphEdgeMergeTextError>
+    ) -> Result<
+        (
+            Self,
+            Option<EdgeMergeReturnTemplate>,
+            Option<(usize, ChainContinuation<'a>)>,
+        ),
+        GraphEdgeMergeTextError,
+    >
     where
         R: GraphSymbolResolver + ?Sized,
     {
@@ -400,8 +410,40 @@ impl PreparedGraphEdgeMergeText {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones())
             .resume_after(from.boundary, &from.parameters, from.at)?;
+        parser.chain_write = true;
         let schema = from.row;
-        let merged = Self::row_merge(&mut parser, &schema, None)?;
+        let keep = parser.visible_width(&schema);
+        let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
+        let continuation = if continues {
+            let mut carried = schema[..keep].to_vec();
+            if carried.len() >= MAX_PATTERN_VERTICES {
+                return Err(error(
+                    parser.current.at,
+                    GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                        dimension: crate::algebra::PatternLimitDimension::Columns,
+                        limit: MAX_PATTERN_VERTICES,
+                        observed: carried.len() + 1,
+                    }),
+                )
+                .into());
+            }
+            let name = merged.0.relationship.unwrap_or(Name {
+                text: Parser::anonymous_name(carried.len()),
+                at: parser.current.at,
+            });
+            carried.push((name, GraphSetColumnType::Edge));
+            Some((
+                keep,
+                ChainContinuation {
+                    at: parser.current.at,
+                    row: carried,
+                    boundary: None,
+                    parameters: parser.syntax.parameters.clone(),
+                },
+            ))
+        } else {
+            None
+        };
         let input = BoundSetTextInput {
             selection: None,
             parameters: parser.syntax.parameters.clone(),
@@ -415,17 +457,19 @@ impl PreparedGraphEdgeMergeText {
             correlations: Vec::new(),
             owned: Some((columns, types)),
         };
-        Self::resolve_row_merge(statement, resolve, merged, input)
+        let (merge, returning) = Self::resolve_row_merge(statement, resolve, merged, input)?;
+        Ok((merge, returning, continuation))
     }
 
     /// A relationship MERGE pattern over a WITH row, its endpoint columns and
     /// RETURN, through the statement end. `returning` None takes a RETURN
-    /// when one follows the pattern.
+    /// when one follows the pattern. In a chain, a next write directly after
+    /// the pattern ends it instead (the `bool`): that write reads the row.
     fn row_merge<'a>(
         parser: &mut Parser<'a>,
         schema: &[(Name<'a>, GraphSetColumnType)],
         returning: Option<bool>,
-    ) -> Result<RowMerge<'a>, GraphEdgeMergeTextError> {
+    ) -> Result<(RowMerge<'a>, bool), GraphEdgeMergeTextError> {
         parser.write_row_scope = true;
         let parsed = parser.edge_merge_pattern()?;
         let endpoint = |name: Name<'_>| {
@@ -454,13 +498,16 @@ impl PreparedGraphEdgeMergeText {
             )
             .into());
         }
-        let returning = returning.unwrap_or_else(|| parser.is_word("RETURN"));
+        let continues = parser.chain_write && parser.at_chained_write()?;
+        let returning = !continues && returning.unwrap_or_else(|| parser.is_word("RETURN"));
         let parsed_return = if returning {
             Some(parser.edge_merge_return(parsed.relationship, &mut Vec::new(), Some(schema))?)
         } else {
             None
         };
-        parser.end()?;
+        if !continues {
+            parser.end()?;
+        }
         parser.write_row_scope = false;
         if let Some(parsed) = &parsed_return {
             mutation_query::admit_return(
@@ -471,7 +518,7 @@ impl PreparedGraphEdgeMergeText {
                 parsed.at,
             )?;
         }
-        Ok((parsed, source, destination, parsed_return))
+        Ok(((parsed, source, destination, parsed_return), continues))
     }
 
     /// Symbols, map and RETURN of a relationship MERGE over a row relation.

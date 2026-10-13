@@ -1040,6 +1040,82 @@ fn vertex_merge_steps_run_over_a_leading_unwind_and_return_rows() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-cpny9 (TCK Merge9 [3], Create3 [12]): a relationship MERGE another
+/// write follows hands that write each row once per relationship its pair
+/// resolved to, the relationship beside the row.
+#[test]
+fn a_relationship_merge_step_hands_its_rows_to_the_next_write() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a5, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        // Merge9 [3]: CREATE, MERGE between the created pair, then CREATE.
+        let mut db = fresh(&commit, false).await;
+        let counted = write(
+            &mut db,
+            "CREATE (a:Person), (b:Copy) MERGE (a)-[:R]->(b) \
+             CREATE (b)-[:R]->(c:Source) RETURN count(*) AS c",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = counted else {
+            unreachable!("a chain with RETURN answers rows")
+        };
+        assert_eq!(rows, [vec![QueryValue::Count(1)]]);
+        assert_eq!(db.vertices().unwrap().len(), 3);
+        assert_eq!(db.edges().unwrap().len(), 2);
+        // Create3 [12]: unlabeled MERGEs bind the one vertex, the MERGE
+        // between them makes a self-loop, and the CREATEs read the row.
+        let mut db = fresh(&commit, false).await;
+        let written = write(
+            &mut db,
+            "CREATE (a) WITH a MERGE (x) MERGE (y) MERGE (x)-[:R]->(y) \
+             CREATE (b) CREATE (a)<-[:R]-(b)",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Write { receipt, .. } = written else {
+            unreachable!("a chain without RETURN answers a write receipt")
+        };
+        assert_eq!(receipt.stats().created_vertices, 2);
+        assert_eq!(receipt.stats().created_edges, 2);
+        let edges = db.edges().unwrap();
+        assert_eq!(edges.len(), 2);
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|edge| edge.entry.src == edge.entry.dst)
+                .count(),
+            1
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn readme_insert_example_runs_through_database_query_write() {
     let ((), report) = run_async_under_lab(0x1a5e_adaa, |root| async move {

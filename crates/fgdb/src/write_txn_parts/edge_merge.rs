@@ -44,6 +44,10 @@ type ResolvedPairEdges = std::collections::BTreeMap<(VId, VId), Vec<(EId, (VId, 
 struct EdgeMergeRows {
     edges: ResolvedPairEdges,
     resolved: u64,
+    /// Every resolved edge's outcome and the created edges, in canonical
+    /// pair and identity order: a chain step's receipt (fgdb-cpny9).
+    outcomes: Vec<fgdb_gql::GraphEdgeMergeOutcome>,
+    created: Vec<EId>,
 }
 
 /// The shared collector's result for one output kind, with the frozen MATCH
@@ -79,6 +83,10 @@ impl EdgeMergeOutput for EdgeMergeRows {
             .or_default()
             .push((edge, resolved.endpoints));
         self.resolved += 1;
+        self.outcomes.push(outcome);
+        if outcome.created() {
+            self.created.push(edge);
+        }
         Ok(())
     }
 
