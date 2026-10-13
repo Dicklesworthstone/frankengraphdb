@@ -3,6 +3,7 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy,
@@ -913,6 +914,123 @@ fn vertex_merge_steps_bind_or_create_per_row() {
             "MERGE (a:Person) MERGE (b:Copy) RETURN b",
             "CREATE (a:Person) MERGE (b:Copy {p: a.q}) CREATE (a)-[:R]->(b)",
             "CREATE (a:Person) WITH a MERGE (a) CREATE (b)",
+        ] {
+            assert!(write(&mut db, refused).await.is_err(), "{refused}");
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-cpny9 (TCK Merge9 [1], [2]): a vertex MERGE runs over a leading
+/// UNWIND of a non-parameter list, alone or heading a chain, and the last
+/// MERGE of a statement may RETURN. RETURN sees one row per input row and
+/// vertex it merged: the row's columns, the vertex and its properties.
+#[test]
+fn vertex_merge_steps_run_over_a_leading_unwind_and_return_rows() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a4, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, false).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let rows = |result: QueryResult| {
+            let QueryResult::Rows { rows, .. } = result else {
+                unreachable!("a MERGE with RETURN answers rows")
+            };
+            rows
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let count = |db: &Database<MemVfs>, label: LabelId| {
+            db.vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == vec![label])
+                .count()
+        };
+        // Merge9 [1]: four values, four vertices; a second run matches them.
+        for _ in 0..2 {
+            let counted = write(
+                &mut db,
+                "UNWIND [1, 2, 3, 4] AS int MERGE (n:Person {p: int}) RETURN count(*) AS c",
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows(counted), [vec![QueryValue::Count(4)]]);
+            assert_eq!(count(&db, PERSON), 4);
+        }
+        // Equal values share one vertex; RETURN reads the row and the vertex.
+        let shared = write(
+            &mut db,
+            "UNWIND [5, 5, 6] AS v MERGE (n:Copy {p: v}) RETURN v, n.p AS p ORDER BY v",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(shared),
+            [
+                vec![int(5), int(5)],
+                vec![int(5), int(5)],
+                vec![int(6), int(6)]
+            ]
+        );
+        assert_eq!(count(&db, COPY), 2);
+        // Merge9 [2]: one shared MERGE, one per value, and a relationship each.
+        write(
+            &mut db,
+            "UNWIND ['a', 'b', 'c'] AS who MERGE (m:Source {name: 'M'}) \
+             MERGE (p:Person {name: who}) MERGE (p)-[:R]->(m)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(count(&db, SOURCE), 1);
+        assert_eq!(count(&db, PERSON), 7);
+        assert_eq!(db.edges().unwrap().len(), 3);
+        // RETURN after chained MERGEs and over a carried row column.
+        let pair = write(
+            &mut db,
+            "MERGE (a:Copy {p: 9}) MERGE (b:Copy {p: 10}) RETURN a.p AS x, b.p AS y",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(pair), [vec![int(9), int(10)]]);
+        let carried = write(
+            &mut db,
+            "CREATE (a:Person {p: 11}) WITH a, a.p AS q MERGE (b:Copy {p: q}) RETURN q, b.p AS p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(carried), [vec![int(11), int(11)]]);
+        // RETURN *, a NULL UNWIND value and a non-scalar one refuse and
+        // publish nothing.
+        let frontier = db.frontier().unwrap();
+        for refused in [
+            "UNWIND [1] AS x MERGE (n:Person {p: x}) RETURN *",
+            "UNWIND [null] AS x MERGE (n:Person {p: x})",
+            "UNWIND [[1]] AS x MERGE (n:Person {p: x})",
         ] {
             assert!(write(&mut db, refused).await.is_err(), "{refused}");
         }
