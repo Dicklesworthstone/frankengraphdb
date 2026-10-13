@@ -142,6 +142,14 @@ fn writes_after_with_target_the_row_and_return_its_captured_values() {
             rows(carried, &["id", "p"]),
             vec![vec![int(104), int(4)], vec![int(107), int(7)]]
         );
+        // A map column of the row reads its entry in the write.
+        let mapped = write(
+            &mut db,
+            "MATCH (n:L) WITH n, {k: n.p * 2} AS m SET n.id = m.k RETURN n.id AS id ORDER BY id",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(mapped, &["id"]), vec![vec![int(8)], vec![int(14)]]);
         // A plain WITH may order and page the rows the write then reads.
         assert!(matches!(
             write(

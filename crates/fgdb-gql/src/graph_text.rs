@@ -703,6 +703,10 @@ struct Parser<'a> {
     /// (`UNWIND $rows AS row MATCH (n {id: row.id})`), as (row column, key).
     /// A correlation addresses field `k` as row `read_row_bindings.len() + k`.
     read_row_fields: Vec<(usize, &'a str)>,
+    /// The types of the leading columns a column resolver addresses, while
+    /// one runs over a known row (a write's WITH row), so a map column's
+    /// `m.key` reads its entry. `None` keeps resolved columns untyped.
+    resolved_column_types: Option<Vec<crate::GraphSetColumnType>>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
@@ -819,6 +823,7 @@ impl<'a> Parser<'a> {
             read_correlations: Vec::new(),
             read_comparisons: None,
             read_row_fields: Vec::new(),
+            resolved_column_types: None,
             boundary_reads: None,
             elements: Vec::new(),
             lets: None,
