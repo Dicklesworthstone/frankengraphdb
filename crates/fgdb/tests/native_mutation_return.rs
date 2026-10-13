@@ -212,7 +212,7 @@ fn deleting_a_path_deletes_its_elements() {
         batch.add_edge(fgdb_types::EId(11), VId(2), VId(3), vec![]);
         batch.add_edge(fgdb_types::EId(12), VId(2), VId(4), vec![]);
         db.write(&commit, batch).await.unwrap();
-        let mut write = async |db: &mut Database<_>, text: &str| {
+        let write = async |db: &mut Database<_>, text: &str| {
             db.query_write(
                 &txcx,
                 &cx,

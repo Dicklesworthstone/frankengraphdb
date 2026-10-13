@@ -611,7 +611,7 @@ fn set_to_a_literal_map_replaces_every_property() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit, false).await;
         let params = GqlParameters::new();
-        let mut write = async |db: &mut Database<MemVfs>, text: &str, catalog: Catalog| {
+        let write = async |db: &mut Database<MemVfs>, text: &str, catalog: Catalog| {
             db.query_write_engine(
                 &txcx,
                 &cx,
