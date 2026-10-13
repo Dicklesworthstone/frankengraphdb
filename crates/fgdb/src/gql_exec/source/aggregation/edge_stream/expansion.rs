@@ -192,8 +192,9 @@ impl Snapshot {
     }
 }
 
-fn successor<C>(
-    face: &IndexMap<VId, IndexMap<EId, ()>>,
+/// Only a face's identities are read; each entry's carried history is not.
+fn successor<V, C>(
+    face: &IndexMap<VId, IndexMap<EId, V>>,
     endpoint: VId,
     after: Option<EId>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,

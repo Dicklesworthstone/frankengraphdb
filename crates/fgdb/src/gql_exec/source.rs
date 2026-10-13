@@ -351,7 +351,12 @@ mod persistent_index_tests {
 /// Rebuildable, structurally shared coordinates into an admitted generation.
 /// Publishing a suffix copies search paths, never a pinned predecessor's tree.
 type History = IndexMap<(CommitSeq, usize, usize), ()>;
-type Incidence = IndexMap<EId, ()>;
+/// Each incident identity with its statement history: the same root
+/// `histories` holds, so a visit reads it without a second tree descent per
+/// incident edge (fgdb-61p1n follow-up; that descent was most of a bound
+/// traversal). Every statement of an identity names the same endpoints, so
+/// both faces are rewritten whenever its history grows.
+type Incidence = IndexMap<EId, History>;
 
 /// Only the ordered statement coordinates of an admitted generation. A writer
 /// resolving a version chain needs neither endpoint incidence nor property
@@ -459,19 +464,32 @@ impl AdjacencyIndex {
                 incoming.entry(entry.dst).or_default().push(entry.eid);
             }
         }
+        let histories: Vec<(EId, History)> = histories
+            .into_iter()
+            .map(|(eid, versions)| (eid, unit_set(versions, &mut work)))
+            .collect();
         let face = |map: BTreeMap<VId, Vec<EId>>, work: &mut u64| {
             let items = map
                 .into_iter()
-                .map(|(vid, eids)| (vid, unit_set(eids, work)))
+                .map(|(vid, mut eids)| {
+                    eids.sort_unstable();
+                    eids.dedup();
+                    let entries = eids
+                        .into_iter()
+                        .map(|eid| {
+                            let at = histories
+                                .binary_search_by_key(&eid, |&(eid, _)| eid)
+                                .expect("every incident identity has a history");
+                            (eid, histories[at].1.clone())
+                        })
+                        .collect();
+                    (vid, IndexMap::from_sorted(entries, work))
+                })
                 .collect();
             IndexMap::from_sorted(items, work)
         };
         let outgoing = face(outgoing, &mut work);
         let incoming = face(incoming, &mut work);
-        let histories = histories
-            .into_iter()
-            .map(|(eid, versions)| (eid, unit_set(versions, &mut work)))
-            .collect();
         Self {
             histories: IndexMap::from_sorted(histories, &mut work),
             outgoing,
@@ -494,18 +512,40 @@ impl AdjacencyIndex {
     }
 
     pub(crate) fn equivalent(&self, other: &Self) -> bool {
-        fn same<K: Ord + Clone + PartialEq, I: Ord + Clone + PartialEq>(
-            a: &IndexMap<K, IndexMap<I, ()>>,
-            b: &IndexMap<K, IndexMap<I, ()>>,
+        // Inner keys only: a face entry's value is checked against
+        // `histories` below, and the histories themselves compare here.
+        fn same<K: Ord + Clone + PartialEq, I: Ord + Clone + PartialEq, V: Clone>(
+            a: &IndexMap<K, IndexMap<I, V>>,
+            b: &IndexMap<K, IndexMap<I, V>>,
         ) -> bool {
             a.len() == b.len()
                 && a.iter().zip(b.iter()).all(|((ak, av), (bk, bv))| {
-                    ak == bk && av.len() == bv.len() && av.iter().eq(bv.iter())
+                    ak == bk
+                        && av.len() == bv.len()
+                        && av
+                            .iter()
+                            .map(|(key, _)| key)
+                            .eq(bv.iter().map(|(key, _)| key))
                 })
         }
         same(&self.histories, &other.histories)
             && same(&self.outgoing, &other.outgoing)
             && same(&self.incoming, &other.incoming)
+            && self.faces_carry_histories()
+            && other.faces_carry_histories()
+    }
+
+    /// Every incidence entry carries exactly its identity's current history.
+    fn faces_carry_histories(&self) -> bool {
+        [&self.outgoing, &self.incoming].iter().all(|face| {
+            face.iter().all(|(_, incidence)| {
+                incidence.iter().all(|(eid, carried)| {
+                    self.histories.get(eid).is_some_and(|history| {
+                        history.len() == carried.len() && history.iter().eq(carried.iter())
+                    })
+                })
+            })
+        })
     }
 
     pub(crate) fn apply_added(
@@ -517,20 +557,37 @@ impl AdjacencyIndex {
         for (block, entries) in blocks.iter().enumerate().skip(added_from) {
             for (row, entry) in entries.as_ref().iter().enumerate() {
                 self.work += 1;
-                let history = self
+                let previous = self
                     .histories
                     .get(&entry.eid)
                     .cloned()
                     .unwrap_or_else(IndexMap::new);
-                let history = history.insert((entry.created_at, block, row), (), &mut self.work);
-                self.histories = self.histories.insert(entry.eid, history, &mut self.work);
-                for (face, endpoint) in [
-                    (&mut self.outgoing, entry.src),
-                    (&mut self.incoming, entry.dst),
-                ] {
-                    let incidence = face.get(&endpoint).cloned().unwrap_or_else(IndexMap::new);
-                    let incidence = incidence.insert(entry.eid, (), &mut self.work);
-                    *face = face.insert(endpoint, incidence, &mut self.work);
+                let history = previous.insert((entry.created_at, block, row), (), &mut self.work);
+                self.histories = self
+                    .histories
+                    .insert(entry.eid, history.clone(), &mut self.work);
+                // Every face entry for this identity must carry its new
+                // history. Published statements of one identity name the same
+                // endpoints (the history validator refuses otherwise), so this
+                // is the new statement's two; any other an earlier statement
+                // named is refreshed too, rather than left stale.
+                let (mut sources, mut targets) = (vec![entry.src], vec![entry.dst]);
+                for (&(_, earlier_block, earlier_row), ()) in previous.iter() {
+                    let earlier = &blocks[earlier_block].as_ref()[earlier_row];
+                    sources.push(earlier.src);
+                    targets.push(earlier.dst);
+                }
+                for (face, mut endpoints) in
+                    [(&mut self.outgoing, sources), (&mut self.incoming, targets)]
+                {
+                    endpoints.sort_unstable();
+                    endpoints.dedup();
+                    for endpoint in endpoints {
+                        let incidence = face.get(&endpoint).cloned().unwrap_or_else(IndexMap::new);
+                        let incidence =
+                            incidence.insert(entry.eid, history.clone(), &mut self.work);
+                        *face = face.insert(endpoint, incidence, &mut self.work);
+                    }
                 }
             }
         }
@@ -605,7 +662,7 @@ impl AdjacencyIndex {
     {
         use fgdb_gql::algebra::GlaDirection;
         control(SourceEvent::Work)?;
-        let face = |set: &'a Incidence| set.iter().map(|(key, _)| key).peekable();
+        let face = |set: &'a Incidence| set.iter().peekable();
         let outgoing = self.outgoing.get(&endpoint).map(face);
         let incoming = self.incoming.get(&endpoint).map(face);
         let (mut left, mut right) = match direction {
@@ -614,30 +671,30 @@ impl AdjacencyIndex {
             GlaDirection::Undirected => (outgoing, incoming),
         };
         loop {
-            let id = match (&mut left, &mut right) {
+            // The lower identity of the two faces, with its history.
+            let next = match (&mut left, &mut right) {
                 (Some(a), Some(b)) => match (a.peek(), b.peek()) {
-                    (Some(x), Some(y)) => Some((*x).min(*y)),
-                    (Some(x), None) => Some(*x),
-                    (None, Some(y)) => Some(*y),
+                    (Some(&(x, hx)), Some(&(y, hy))) => {
+                        Some(if x <= y { (x, hx) } else { (y, hy) })
+                    }
+                    (Some(&pair), None) | (None, Some(&pair)) => Some(pair),
                     (None, None) => break,
                 },
-                (Some(a), None) => a.peek().copied(),
-                (None, Some(b)) => b.peek().copied(),
+                (Some(a), None) | (None, Some(a)) => a.peek().copied(),
                 (None, None) => break,
             };
-            let Some(id) = id else { break };
+            let Some((id, history)) = next else { break };
             control(SourceEvent::Work)?;
             if let Some(a) = left.as_mut()
-                && a.peek() == Some(&id)
+                && a.peek().is_some_and(|&(x, _)| x == id)
             {
                 a.next();
             }
             if let Some(b) = right.as_mut()
-                && b.peek() == Some(&id)
+                && b.peek().is_some_and(|&(x, _)| x == id)
             {
                 b.next();
             }
-            let history = self.histories.get(id).expect("incidence has a history");
             let Some((block, row)) = latest_statement(history, as_of) else {
                 continue;
             };
@@ -1382,8 +1439,12 @@ mod indexed_tests {
         (node.height, node.len)
     }
 
-    fn assert_nested_avl<K: Ord + Clone + std::fmt::Debug, I: Ord + Clone + std::fmt::Debug>(
-        map: &IndexMap<K, IndexMap<I, ()>>,
+    fn assert_nested_avl<
+        K: Ord + Clone + std::fmt::Debug,
+        I: Ord + Clone + std::fmt::Debug,
+        V: Clone,
+    >(
+        map: &IndexMap<K, IndexMap<I, V>>,
     ) {
         assert_avl(map);
         for (_, inner) in map.iter() {
@@ -1479,6 +1540,128 @@ mod indexed_tests {
             );
             assert_nested_avl(&extended.candidates);
         }
+    }
+
+    /// A visit reads each incident identity's history from its face entry. It
+    /// must yield exactly what resolving every identity through the global
+    /// `histories` map did, for every endpoint, direction and cut, in built
+    /// and incrementally folded generations, including histories whose
+    /// statements name different endpoints (which publication refuses).
+    #[test]
+    fn visits_through_carried_histories_equal_the_global_lookup() {
+        fn global(
+            index: &AdjacencyIndex,
+            blocks: &[Vec<AdjacencyEntry>],
+            endpoint: VId,
+            direction: GlaDirection,
+            as_of: CommitSeq,
+        ) -> Vec<(EId, usize, usize)> {
+            let keys = |face: &IndexMap<VId, Incidence>| -> Vec<EId> {
+                face.get(&endpoint)
+                    .map(|set| set.iter().map(|(eid, _)| *eid).collect())
+                    .unwrap_or_default()
+            };
+            let mut ids = match direction {
+                GlaDirection::Forward => keys(&index.outgoing),
+                GlaDirection::Reverse => keys(&index.incoming),
+                GlaDirection::Undirected => {
+                    let mut both = keys(&index.outgoing);
+                    both.extend(keys(&index.incoming));
+                    both
+                }
+            };
+            ids.sort_unstable();
+            ids.dedup();
+            ids.into_iter()
+                .filter_map(|eid| {
+                    let (block, row) = latest_statement(index.histories.get(&eid)?, as_of)?;
+                    let entry = &blocks[block][row];
+                    let incident = match direction {
+                        GlaDirection::Forward => entry.src == endpoint,
+                        GlaDirection::Reverse => entry.dst == endpoint,
+                        GlaDirection::Undirected => entry.src == endpoint || entry.dst == endpoint,
+                    };
+                    (incident && entry.visible_at(as_of)).then_some((eid, block, row))
+                })
+                .collect()
+        }
+        let (mut visits, mut changed_endpoints) = (0, 0);
+        for seed in [3_u64, 11, 47, 101, 977] {
+            let mut state = seed;
+            let mut next = |bound: u64| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 33) % bound
+            };
+            let mut blocks: Vec<Vec<AdjacencyEntry>> = Vec::new();
+            for seq in 1..=9_u64 {
+                let mut block = Vec::new();
+                for _ in 0..next(40) {
+                    block.push(AdjacencyEntry {
+                        src: VId(u128::from(next(8))),
+                        dst: VId(u128::from(next(8))),
+                        relation: RelationId(1),
+                        eid: EId(u128::from(next(30))),
+                        created_at: CommitSeq(seq),
+                        retired_at: (next(4) == 0).then_some(CommitSeq(seq + next(3))),
+                    });
+                }
+                blocks.push(block);
+            }
+            let built = AdjacencyIndex::build(&blocks);
+            let mut folded = AdjacencyIndex::build(&[] as &[Vec<AdjacencyEntry>]);
+            for carried in 0..blocks.len() {
+                folded = folded.extend(&blocks[..=carried], carried);
+            }
+            assert!(built.faces_carry_histories() && folded.faces_carry_histories());
+            for (_, history) in built.histories.iter() {
+                let mut ends: Vec<_> = history
+                    .iter()
+                    .map(|(&(_, block, row), ())| (blocks[block][row].src, blocks[block][row].dst))
+                    .collect();
+                ends.dedup();
+                changed_endpoints += usize::from(ends.len() > 1);
+            }
+            for index in [&built, &folded] {
+                for vid in 0..8 {
+                    for direction in [
+                        GlaDirection::Forward,
+                        GlaDirection::Reverse,
+                        GlaDirection::Undirected,
+                    ] {
+                        for as_of in 0..=11 {
+                            let (endpoint, as_of) = (VId(vid), CommitSeq(as_of));
+                            let mut seen = Vec::new();
+                            let mut control = |_| Ok::<(), ()>(());
+                            index
+                                .visit(
+                                    &blocks,
+                                    endpoint,
+                                    direction,
+                                    as_of,
+                                    &mut control,
+                                    |entry, block, row, _| {
+                                        seen.push((entry.eid, block, row));
+                                        Ok(())
+                                    },
+                                )
+                                .unwrap();
+                            assert_eq!(
+                                seen,
+                                global(index, &blocks, endpoint, direction, as_of),
+                                "seed {seed} vid {vid} {direction:?} at {as_of:?}"
+                            );
+                            visits += seen.len();
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            visits > 2_000 && changed_endpoints > 20,
+            "{visits} {changed_endpoints}"
+        );
     }
 
     #[test]
