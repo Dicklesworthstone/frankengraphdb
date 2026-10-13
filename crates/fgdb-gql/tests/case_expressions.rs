@@ -12,6 +12,11 @@ use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
+/// A written scalar as the stored property value an intent carries.
+fn stored(value: CanonicalScalar) -> Option<CanonicalPropertyValue> {
+    Some(CanonicalPropertyValue::Scalar(value))
+}
+
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(1);
@@ -304,12 +309,12 @@ fn conditional_mutations_reuse_frozen_assignments_and_conflict_reduction() {
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: P,
-                value: Some(CanonicalScalar::Int(3))
+                value: stored(CanonicalScalar::Int(3))
             },
             GraphMutationIntent::Property {
                 vertex: VId(2),
                 key: P,
-                value: Some(CanonicalScalar::Int(1))
+                value: stored(CanonicalScalar::Int(1))
             },
         ]
     );

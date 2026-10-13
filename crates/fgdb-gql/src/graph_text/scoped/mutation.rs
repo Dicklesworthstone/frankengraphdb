@@ -533,15 +533,24 @@ impl<'a> Parser<'a> {
                             let value = self.insertion_source_value(&mut columns, row)?;
                             ActionKind::RowProperty { key, value, at }
                         }
-                        _ => {
-                            let value = if setting {
-                                self.punct(b'=', "=")?;
-                                Some(self.mutation_assignment(&mut columns)?)
+                        _ if setting => {
+                            self.punct(b'=', "=")?;
+                            if self.set_value_is_list()? {
+                                // A list value (`[1, 2]`, `n.tags + ['x']`)
+                                // reads in the value language, as a CREATE
+                                // property does, and is written as the
+                                // stored List it is (fgdb-k3nub).
+                                let at = self.current.at;
+                                let value = self.insertion_source_value(&mut columns, &[])?;
+                                ActionKind::RowProperty { key, value, at }
                             } else {
-                                None
-                            };
-                            ActionKind::Property { key, value }
+                                ActionKind::Property {
+                                    key,
+                                    value: Some(self.mutation_assignment(&mut columns)?),
+                                }
+                            }
                         }
+                        _ => ActionKind::Property { key, value: None },
                     }
                 };
                 actions.push(Action { target, kind });
@@ -551,6 +560,22 @@ impl<'a> Parser<'a> {
             }
         }
         Ok((columns, actions))
+    }
+
+    /// Whether a SET value here is a list (fgdb-k3nub), read in the value
+    /// language and written as a stored List: a list operand or a `+` chain
+    /// with one (list_operand_here, list_chain_follows), or a parameter the
+    /// statement declares as a List (`SET n.tags = $tags`).
+    fn set_value_is_list(&self) -> Result<bool, GraphPatternTextError> {
+        if let TokenKind::Parameter(name) = self.current.kind
+            && matches!(
+                self.parameter_types.get(name),
+                Some(crate::GqlParameterType::List)
+            )
+        {
+            return Ok(true);
+        }
+        Ok(self.list_operand_here(None)? || self.list_chain_follows(None)?)
     }
 
     /// `SET n = {k: v, ...}` (openCypher replace, Set4): the listed
@@ -666,21 +691,21 @@ impl<'a> Parser<'a> {
             }
             self.punct(b':', ":")?;
             let at = self.current.at;
-            let kind = match row {
-                Some(row) => {
-                    let value = self.insertion_source_value(columns, row)?;
-                    ActionKind::RowProperty { key, value, at }
-                }
-                None => ActionKind::Property {
+            // An entry's list value is a stored List, as in `SET n.p = [..]`.
+            let listed = row.is_none() && self.set_value_is_list()?;
+            let kind = if row.is_some() || listed {
+                let value = self.insertion_source_value(columns, row.unwrap_or(&[]))?;
+                ActionKind::RowProperty { key, value, at }
+            } else {
+                ActionKind::Property {
                     key,
                     value: Some(self.mutation_assignment(columns)?),
-                },
+                }
             };
-            // A field's map construction is never a written property, and the
-            // scalar SET build refuses a list literal: refuse either here,
-            // before any catalog access. The WITH-row path writes stored Lists
-            // (fgdb-k3nub). A subscripted or computed value stays a per-row
-            // check.
+            // A field's map construction is never a written property: refuse
+            // it here, before any catalog access. A list field is a stored
+            // List (fgdb-k3nub). A subscripted or computed value stays a
+            // per-row check.
             let map = |value: &ReadValueTemplate| {
                 matches!(
                     value,
@@ -690,7 +715,7 @@ impl<'a> Parser<'a> {
             let refused = match &kind {
                 ActionKind::Property {
                     value: Some(value), ..
-                } => map(value) || matches!(value, ReadValueTemplate::List(_)),
+                } => map(value),
                 ActionKind::RowProperty { value, .. } => map(value),
                 _ => false,
             };

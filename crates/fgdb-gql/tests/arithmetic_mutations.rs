@@ -74,7 +74,9 @@ fn property(vertex: u128, key: PropertyKeyId, value: Option<i64>) -> GraphMutati
     GraphMutationIntent::Property {
         vertex: VId(vertex),
         key,
-        value: Some(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int)),
+        value: Some(CanonicalPropertyValue::Scalar(
+            value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+        )),
     }
 }
 

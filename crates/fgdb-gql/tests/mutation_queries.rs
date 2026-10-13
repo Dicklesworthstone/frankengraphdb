@@ -11,6 +11,11 @@ use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, V
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
+/// A written scalar as the stored property value an intent carries.
+fn stored(value: CanonicalScalar) -> Option<CanonicalPropertyValue> {
+    Some(CanonicalPropertyValue::Scalar(value))
+}
+
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
@@ -104,12 +109,12 @@ fn reciprocal_updates_freeze_rhs_and_collapse_parallel_matches() {
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: P,
-                value: Some(CanonicalScalar::Int(20))
+                value: stored(CanonicalScalar::Int(20))
             },
             GraphMutationIntent::Property {
                 vertex: VId(2),
                 key: P,
-                value: Some(CanonicalScalar::Int(10))
+                value: stored(CanonicalScalar::Int(10))
             },
         ]
     );
@@ -186,7 +191,7 @@ fn literal_map_updates_share_frozen_values_across_targets_and_other_assignments(
         assert!(result.intents().contains(&GraphMutationIntent::Property {
             vertex: VId(vertex),
             key,
-            value: Some(CanonicalScalar::Int(value)),
+            value: stored(CanonicalScalar::Int(value)),
         }));
     }
     assert!(result.intents().contains(&GraphMutationIntent::Label {
@@ -234,12 +239,12 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: P,
-                value: Some(CanonicalScalar::Null),
+                value: stored(CanonicalScalar::Null),
             },
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: Q,
-                value: Some(CanonicalScalar::Int(10)),
+                value: stored(CanonicalScalar::Int(10)),
             },
             GraphMutationIntent::Property {
                 vertex: VId(1),
@@ -249,7 +254,7 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: TEXT,
-                value: Some(CanonicalScalar::ucs_basic_text(payload).unwrap()),
+                value: stored(CanonicalScalar::ucs_basic_text(payload).unwrap()),
             },
         ]
     );
@@ -276,8 +281,14 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
 
 #[test]
 fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() {
-    // `SET n = {map}` replaces every property of n (7761ea35, TCK Set4).
-    assert!(PreparedGraphMutationText::prepare("MATCH (a) SET a = {p: 1}", R, symbols).is_ok());
+    // `SET n = {map}` replaces every property of n (7761ea35, TCK Set4), and a
+    // list field is a stored List (fgdb-k3nub, TCK Set1 [5]).
+    for text in ["MATCH (a) SET a = {p: 1}", "MATCH (a) SET a += {p: [1, 2]}"] {
+        assert!(
+            PreparedGraphMutationText::prepare(text, R, symbols).is_ok(),
+            "{text}"
+        );
+    }
     for text in [
         "MATCH (a) SET a += {}",
         "MATCH (a) SET a.p=1,a += {}",
@@ -293,11 +304,9 @@ fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() 
         "MATCH (a) SET a += {p: 1},",
         "MATCH (a) SET a += {p: 1, p: 1}",
         "MATCH (a) SET a += {p: 1, p: 2}",
-        // A composite field is refused before catalog access (f0f89eca): a
-        // stored map awaits the owner's ruling, and SET of a list still
-        // refuses at bind (openCypher Set1 [5]).
+        // A map field is refused before catalog access (f0f89eca): a stored
+        // map awaits the owner's ruling.
         "MATCH (a) SET a += {p: {q: 1}}",
-        "MATCH (a) SET a += {p: [1, 2]}",
         "MATCH (a) SET a += {p: 1} RETURN a",
         "MATCH (a) SET a += {p: 1} DETACH DELETE a",
         "MATCH (a) SET missing += {p: 1}",
@@ -356,7 +365,7 @@ fn literal_map_fields_share_the_complete_statement_action_bound() {
             &GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: PropertyKeyId(index as u64),
-                value: Some(CanonicalScalar::Int(index as i64)),
+                value: stored(CanonicalScalar::Int(index as i64)),
             }
         );
     }
@@ -488,7 +497,7 @@ fn optional_null_targets_are_skipped_and_missing_rhs_is_a_canonical_null() {
         &[GraphMutationIntent::Property {
             vertex: VId(2),
             key: Q,
-            value: Some(CanonicalScalar::Int(10)),
+            value: stored(CanonicalScalar::Int(10)),
         }]
     );
     let missing = prepare("MATCH (a) SET a.p=a.q REMOVE a.old");
@@ -499,7 +508,7 @@ fn optional_null_targets_are_skipped_and_missing_rhs_is_a_canonical_null() {
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: P,
-                value: Some(CanonicalScalar::Null)
+                value: stored(CanonicalScalar::Null)
             },
             GraphMutationIntent::Property {
                 vertex: VId(1),
@@ -640,7 +649,7 @@ fn typed_arguments_and_catalog_resolution_are_shared_by_read_and_write_clauses()
     assert!(result.intents().contains(&GraphMutationIntent::Property {
         vertex: VId(1),
         key: TEXT,
-        value: Some(CanonicalScalar::ucs_basic_text(payload).unwrap()),
+        value: stored(CanonicalScalar::ucs_basic_text(payload).unwrap()),
     }));
     assert!(result.intents().contains(&GraphMutationIntent::Label {
         vertex: VId(1),

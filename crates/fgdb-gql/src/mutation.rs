@@ -21,7 +21,7 @@ use crate::{
     GqlScalarParameter, GraphIntegerError, GraphIntegerExpression, GraphSetColumnType,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
 pub const MAX_GRAPH_MUTATION_ACTIONS: usize = 256;
 
@@ -326,17 +326,19 @@ pub struct GraphMutationStats {
     pub effects: u64,
 }
 
+/// `value` is a stored property value (fgdb-k3nub): a scalar, canonical
+/// NULL included, or a List; `None` removes the property.
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphMutationIntent {
     Property {
         vertex: VId,
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     },
     EdgeProperty {
         edge: EId,
         key: PropertyKeyId,
-        value: Option<CanonicalScalar>,
+        value: Option<CanonicalPropertyValue>,
     },
     Label {
         vertex: VId,
@@ -512,7 +514,11 @@ impl PreparedGraphMutation {
                             |kind| GraphMutationBuildError::ValueExpression { action: at, kind };
                         let kind = crate::GraphSetProjection::admit_output(value, &columns, at)
                             .map_err(|kind| refused(Some(kind)))?;
-                        if !(kind.is_scalar_like() || kind == GraphSetColumnType::Any) {
+                        // A List is a stored value (fgdb-k3nub); a list that
+                        // holds a map or a graph element refuses when it runs.
+                        if !(kind.is_scalar_like()
+                            || matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::List))
+                        {
                             return Err(refused(None));
                         }
                     }

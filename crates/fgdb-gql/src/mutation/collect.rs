@@ -16,7 +16,7 @@ type ResultOf<T, E, C> = Result<T, GqlQueryError<GraphMutationError<E>, C>>;
 fn property_intent(
     target: ElementId,
     key: PropertyKeyId,
-    value: Option<CanonicalScalar>,
+    value: Option<CanonicalPropertyValue>,
 ) -> GraphMutationIntent {
     match target {
         ElementId::Vertex(vertex) => GraphMutationIntent::Property { vertex, key, value },
@@ -34,6 +34,9 @@ enum Value<'a> {
     Property(Option<&'a CanonicalScalar>),
     /// Canonical NULL is stored, never a property-removal intention.
     Computed(CanonicalScalar),
+    /// A List value (fgdb-k3nub), written as the stored List it is. A Map
+    /// is not a property value until the owner rules on stored maps.
+    Stored(CanonicalPropertyValue),
     Label(bool),
     /// DETACH DELETE when true. Preparation keeps one mode per statement.
     Delete(bool),
@@ -150,10 +153,57 @@ fn equal<E>(
             }
             Ok(Some(computed) == *scalar)
         }
+        (Value::Stored(left), Value::Stored(right)) => {
+            charge_stored(left, control)?;
+            charge_stored(right, control)?;
+            Ok(left == right)
+        }
         (Value::Label(left), Value::Label(right)) => Ok(left == right),
         (Value::Delete(left), Value::Delete(right)) => Ok(left == right),
+        // A List never equals a scalar, and a field holds one kind of value.
         _ => Ok(false),
     }
+}
+
+/// One unit per collection node plus every scalar's payload, as the scalars
+/// would be charged one by one.
+fn charge_stored<E>(
+    value: &CanonicalPropertyValue,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    match value {
+        CanonicalPropertyValue::Scalar(scalar) => charge_payload(scalar, control),
+        CanonicalPropertyValue::List(list) => {
+            control(GlaExecutionEvent::Work)?;
+            list.values()
+                .iter()
+                .try_for_each(|value| charge_stored(value, control))
+        }
+        CanonicalPropertyValue::Map(map) => {
+            control(GlaExecutionEvent::Work)?;
+            map.entries()
+                .iter()
+                .try_for_each(|entry| charge_stored(entry.value(), control))
+        }
+    }
+}
+
+/// A SET value that is not a scalar: a List becomes the stored List it is
+/// (fgdb-k3nub), its copy charged before it is kept. A Map at any depth, a
+/// graph element or a value beyond the stored format's bounds refuses typed,
+/// by the same rule CREATE writes with (to_written_property).
+fn stored_list<'a, E, C, F: FnMut() -> Result<(), C>>(
+    value: &crate::algebra::GraphValue,
+    row: usize,
+    action: usize,
+    meter: &mut Meter<F>,
+) -> ResultOf<Value<'a>, E, C> {
+    let stored = value.to_written_property().ok_or(GqlQueryError::Source(
+        GraphMutationError::NonScalarValue { row, action },
+    ))?;
+    meter.event(GlaExecutionEvent::ScratchEntry)?;
+    charge_stored(&stored, &mut |event| meter.event(event))?;
+    Ok(Value::Stored(stored))
 }
 
 /// Same logical payload units used by value-row projection. Reserve before
@@ -230,6 +280,8 @@ fn cleared_fields<E, C, F: FnMut() -> Result<(), C>>(
 enum MapField<'a> {
     Frozen(&'a crate::algebra::GraphValue),
     Assigned(&'a CanonicalScalar),
+    /// A List this statement assigned (fgdb-k3nub).
+    Stored(&'a CanonicalPropertyValue),
 }
 
 /// Merge the final proposal range for this actual element into its frozen
@@ -292,8 +344,9 @@ fn returned_properties<E, C, F: FnMut() -> Result<(), C>>(
                 },
             ))?;
         let value = match &proposal.value {
-            Value::Property(value) => *value,
-            Value::Computed(value) => Some(value),
+            Value::Property(value) => value.map(MapField::Assigned),
+            Value::Computed(value) => Some(MapField::Assigned(value)),
+            Value::Stored(value) => Some(MapField::Stored(value)),
             _ => unreachable!("property fields hold property proposals"),
         };
         meter.event(GlaExecutionEvent::ScratchEntry)?;
@@ -317,6 +370,9 @@ fn returned_properties<E, C, F: FnMut() -> Result<(), C>>(
                 reserve_copy(value, &mut |event| meter.event(event))?;
                 GraphValue::Scalar(value.clone())
             }
+            MapField::Stored(value) => {
+                GraphValue::admit_property_value(value, &mut |event| meter.event(event))?
+            }
         };
         keys.push(key.into());
         values.push(value);
@@ -332,7 +388,7 @@ fn returned_properties<E, C, F: FnMut() -> Result<(), C>>(
             old += 1;
         }
         if let Some(value) = value {
-            append(key, MapField::Assigned(value))?;
+            append(key, value)?;
         }
     }
     for at in old..old_keys.len() {
@@ -483,6 +539,12 @@ fn returned_row<E, C, F: FnMut() -> Result<(), C>>(
                             reserve_copy(scalar, &mut |event| meter.event(event))?;
                             GraphValue::Scalar(scalar.clone())
                         }
+                        Some(Proposal {
+                            value: Value::Stored(stored),
+                            ..
+                        }) => GraphValue::admit_property_value(stored, &mut |event| {
+                            meter.event(event)
+                        })?,
                         Some(_) => unreachable!("property fields hold property proposals"),
                         None => row.values()[current]
                             .copy_with_control(&mut |event| meter.event(event))?,
@@ -684,19 +746,16 @@ fn execute_erased<E, C>(
                 GraphMutationAction::SetProperty { key, value, .. } => {
                     let value = match value {
                         // A Stored-domain property column can hold a List
-                        // or Map at run time (fgdb-k3nub). SET cannot write
-                        // one yet, so it refuses typed; it panicked here.
-                        GraphMutationValue::Column(column) => {
-                            let Some(value) = row.values()[*column].as_scalar() else {
-                                return Err(GqlQueryError::Source(
-                                    GraphMutationError::NonScalarValue {
-                                        row: row_at,
-                                        action: action_at,
-                                    },
-                                ));
-                            };
-                            Value::Property(Some(value))
-                        }
+                        // or Map at run time (fgdb-k3nub): a List is copied
+                        // as the stored List, a Map refuses typed.
+                        GraphMutationValue::Column(column) => match row.values()[*column]
+                            .as_scalar()
+                        {
+                            Some(value) => Value::Property(Some(value)),
+                            None => {
+                                stored_list(&row.values()[*column], row_at, action_at, &mut meter)?
+                            }
+                        },
                         GraphMutationValue::Literal(value) => Value::Property(Some(value.value())),
                         GraphMutationValue::Expression(expression) => {
                             let value = expression
@@ -733,15 +792,10 @@ fn execute_erased<E, C>(
                                 }
                             })?;
                             // Computed values already own their charged payload.
-                            let crate::algebra::GraphValue::Scalar(value) = value else {
-                                return Err(GqlQueryError::Source(
-                                    GraphMutationError::NonScalarValue {
-                                        row: row_at,
-                                        action: action_at,
-                                    },
-                                ));
-                            };
-                            Value::Computed(value)
+                            match value {
+                                crate::algebra::GraphValue::Scalar(value) => Value::Computed(value),
+                                other => stored_list(&other, row_at, action_at, &mut meter)?,
+                            }
                         }
                     };
                     Some((Field::Property(*key), value))
@@ -802,10 +856,18 @@ fn execute_erased<E, C>(
                 if let Some(scalar) = value {
                     reserve_copy(scalar, &mut |event| meter.event(event))?;
                 }
-                property_intent(target, key, value.cloned())
+                property_intent(
+                    target,
+                    key,
+                    value.cloned().map(CanonicalPropertyValue::Scalar),
+                )
             }
             (target, Field::Property(key), Value::Computed(value)) => {
                 meter.event(GlaExecutionEvent::ScratchEntry)?;
+                property_intent(target, key, Some(CanonicalPropertyValue::Scalar(value)))
+            }
+            // Charged when the List was copied into the proposal.
+            (target, Field::Property(key), Value::Stored(value)) => {
                 property_intent(target, key, Some(value))
             }
             (ElementId::Vertex(vertex), Field::Label(label), Value::Label(present)) => {
@@ -904,11 +966,12 @@ mod tests {
         GraphMutationPolicy::new(GqlQueryPolicy::new(100, 100, 100_000, 100_000), 100)
     }
     /// fgdb-2jw3z: a composite value runs on the shared row evaluator per
-    /// row. A scalar result is assigned; a list result is a typed refusal; a
-    /// value that is never scalar, or reads a column the selection lacks,
-    /// refuses at build.
+    /// row. A scalar result is assigned, and so is a List, as the stored List
+    /// it is (fgdb-k3nub). A Map or a list holding one is a typed refusal
+    /// when it runs; a value that is a graph element, or reads a column the
+    /// selection lacks, refuses at build.
     #[test]
-    fn composite_values_assign_scalars_and_refuse_everything_else() {
+    fn composite_values_assign_scalars_and_lists_and_refuse_everything_else() {
         use crate::GraphSetValue;
         use crate::algebra::GraphValue;
         let composite = |value| {
@@ -936,30 +999,53 @@ mod tests {
                 &[GraphMutationIntent::Property {
                     vertex: VId(1),
                     key: PropertyKeyId(2),
-                    value: Some(CanonicalScalar::Bool(expected)),
+                    value: Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(
+                        expected
+                    ))),
                 }]
             );
         }
-        // [[1]][0] is a list, known only when it runs.
-        let nested = composite(GraphSetValue::Index {
-            list: Box::new(GraphSetValue::List(vec![GraphSetValue::List(vec![int(1)])])),
-            index: Box::new(int(0)),
-        })
+        // [[1]][0] is a list, known only when it runs: written as the
+        // stored List [1], as the literal [1] is.
+        let one = fgdb_types::CanonicalList::try_new(vec![CanonicalPropertyValue::Scalar(
+            CanonicalScalar::Int(1),
+        )])
         .unwrap();
-        assert!(matches!(
-            run_with(&nested, &[CanonicalScalar::Int(7)], policy()),
-            Err(GqlQueryError::Source(GraphMutationError::NonScalarValue {
-                row: 0,
-                action: 0
-            }))
-        ));
-        assert!(matches!(
-            composite(GraphSetValue::List(vec![int(1)])),
-            Err(GraphMutationBuildError::ValueExpression {
-                action: 0,
-                kind: None
-            })
-        ));
+        for list in [
+            GraphSetValue::Index {
+                list: Box::new(GraphSetValue::List(vec![GraphSetValue::List(vec![int(1)])])),
+                index: Box::new(int(0)),
+            },
+            GraphSetValue::List(vec![int(1)]),
+        ] {
+            let listed = composite(list).unwrap();
+            assert_eq!(
+                run_with(&listed, &[CanonicalScalar::Int(7)], policy())
+                    .unwrap()
+                    .intents(),
+                &[GraphMutationIntent::Property {
+                    vertex: VId(1),
+                    key: PropertyKeyId(2),
+                    value: Some(CanonicalPropertyValue::List(one.clone())),
+                }]
+            );
+        }
+        // A map is not a property value: a list holding one refuses when it
+        // runs, and so does a map itself (its static type is Any).
+        let map = GraphSetValue::Value(GraphValue::Map {
+            keys: vec!["a".into()].into_boxed_slice(),
+            values: vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice(),
+        });
+        for refused in [GraphSetValue::List(vec![map.clone()]), map] {
+            let refused = composite(refused).unwrap();
+            assert!(matches!(
+                run_with(&refused, &[CanonicalScalar::Int(7)], policy()),
+                Err(GqlQueryError::Source(GraphMutationError::NonScalarValue {
+                    row: 0,
+                    action: 0
+                }))
+            ));
+        }
         assert!(matches!(
             composite(GraphSetValue::Size(Box::new(GraphSetValue::Column(9)))),
             Err(GraphMutationBuildError::ValueExpression {
@@ -977,7 +1063,7 @@ mod tests {
             &[GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: PropertyKeyId(2),
-                value: Some(CanonicalScalar::Int(7)),
+                value: Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7))),
             }]
         );
         assert_eq!(result.stats().selection.result_rows, 2);
