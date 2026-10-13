@@ -199,6 +199,28 @@ fn parenthesized_values_take_postfix_reads_and_arguments_take_predicates() {
                 "{statement}"
             );
         }
+        // `$from..$to` are slice bounds, not field reads (TCK List2 [10]).
+        let bounds = GqlParameters::new()
+            .with_int64("from", 1)
+            .unwrap()
+            .with_int64("to", 3)
+            .unwrap();
+        assert_eq!(
+            db.query(
+                &cx,
+                "WITH [1, 2, 3] AS list RETURN list[$from..$to] AS r",
+                &bounds,
+                symbols,
+                policy()
+            )
+            .unwrap(),
+            expected(
+                &["r"],
+                vec![vec![GraphValue::List(
+                    vec![int(2), int(3)].into_boxed_slice()
+                )]]
+            )
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

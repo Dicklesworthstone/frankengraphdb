@@ -1593,8 +1593,10 @@ impl<'a> Parser<'a> {
             self.punct(b')', ")")?;
             return Ok(());
         }
+        // `$doc.key` reads a map argument's field; `$from..` is a slice bound
+        // before the range dots (TCK List2 [10]), not a field read.
         if let TokenKind::Parameter(name) = self.current.kind
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+            && self.property_dot_follows()?
         {
             self.parameter_types
                 .entry(name.to_owned())
