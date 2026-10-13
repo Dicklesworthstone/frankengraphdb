@@ -3,7 +3,8 @@
 use super::*;
 use crate::mutation_text::{EdgeMergeReturnTemplate, EdgeMergeTextInput, WriteReturnGroupTemplate};
 use crate::set_text::{
-    ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
+    BoundSetTextInput, ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate,
+    ReadValueTemplate,
 };
 use crate::{
     GraphEdgeMergeBinding, GraphEdgeMergeTextError, GraphEdgeMergeTextErrorKind,
@@ -20,6 +21,15 @@ struct ParsedEdgeMerge<'a> {
     properties: Vec<super::merge::MergeProperty<'a>>,
     undirected: bool,
 }
+/// A relationship MERGE over a WITH row: the pattern, its source and
+/// destination row columns, and its RETURN.
+type RowMerge<'a> = (
+    ParsedEdgeMerge<'a>,
+    usize,
+    usize,
+    Option<ParsedEdgeReturn<'a>>,
+);
+
 fn build_error(at: usize, source: crate::GraphEdgeMergeBuildError) -> GraphEdgeMergeTextError {
     GraphEdgeMergeTextError {
         offset: at,
@@ -350,6 +360,61 @@ impl PreparedGraphEdgeMergeText {
         R: GraphSymbolResolver + ?Sized,
     {
         let (head, stages, schema) = parser.write_row_prefix()?;
+        let (parsed, source, destination, parsed_return) =
+            Self::row_merge(&mut parser, &schema, Some(returning))?;
+        let read = parser.finish_write_row_prefix(statement, head, stages)?;
+        let input = read.resolve(crate::graph_text::LentResolver(&mut *resolve))?;
+        Self::resolve_row_merge(
+            statement,
+            resolve,
+            (parsed, source, destination, parsed_return),
+            input,
+        )
+    }
+
+    /// The last write of a chain (`CREATE (a), (b) MERGE (a)-[:R]->(b)`):
+    /// a relationship MERGE over the previous write's rows, read through one
+    /// owned leaf. As after `MATCH ... WITH`, that row is the whole scope.
+    /// A RETURN after the pattern makes it a query step.
+    pub(crate) fn prepare_chained<'a, R>(
+        statement: &'a str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+        from: ChainContinuation<'a>,
+    ) -> Result<(Self, Option<EdgeMergeReturnTemplate>), GraphEdgeMergeTextError>
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
+        let (columns, types) = from.owned_columns();
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones())
+            .resume_after(from.boundary, &from.parameters, from.at)?;
+        let schema = from.row;
+        let merged = Self::row_merge(&mut parser, &schema, None)?;
+        let input = BoundSetTextInput {
+            selection: None,
+            parameters: parser.syntax.parameters.clone(),
+            parameter_offsets: parser.syntax.parameter_offsets.clone(),
+            return_at: statement.len(),
+            projection: None,
+            quantifier: GraphSetQuantifier::All,
+            pipeline: Vec::new(),
+            singleton: false,
+            leading: Vec::new(),
+            correlations: Vec::new(),
+            owned: Some((columns, types)),
+        };
+        Self::resolve_row_merge(statement, resolve, merged, input)
+    }
+
+    /// A relationship MERGE pattern over a WITH row, its endpoint columns and
+    /// RETURN, through the statement end. `returning` None takes a RETURN
+    /// when one follows the pattern.
+    fn row_merge<'a>(
+        parser: &mut Parser<'a>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        returning: Option<bool>,
+    ) -> Result<RowMerge<'a>, GraphEdgeMergeTextError> {
         parser.write_row_scope = true;
         let parsed = parser.edge_merge_pattern()?;
         let endpoint = |name: Name<'_>| {
@@ -378,8 +443,9 @@ impl PreparedGraphEdgeMergeText {
             )
             .into());
         }
+        let returning = returning.unwrap_or_else(|| parser.is_word("RETURN"));
         let parsed_return = if returning {
-            Some(parser.edge_merge_return(parsed.relationship, &mut Vec::new(), Some(&schema))?)
+            Some(parser.edge_merge_return(parsed.relationship, &mut Vec::new(), Some(schema))?)
         } else {
             None
         };
@@ -394,8 +460,19 @@ impl PreparedGraphEdgeMergeText {
                 parsed.at,
             )?;
         }
-        let read = parser.finish_write_row_prefix(statement, head, stages)?;
-        let input = read.resolve(crate::graph_text::LentResolver(&mut *resolve))?;
+        Ok((parsed, source, destination, parsed_return))
+    }
+
+    /// Symbols, map and RETURN of a relationship MERGE over a row relation.
+    fn resolve_row_merge<'a, R>(
+        statement: &'a str,
+        resolve: &mut R,
+        (parsed, source, destination, parsed_return): RowMerge<'a>,
+        input: BoundSetTextInput,
+    ) -> Result<(Self, Option<EdgeMergeReturnTemplate>), GraphEdgeMergeTextError>
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
@@ -886,7 +963,7 @@ impl<'a> Parser<'a> {
 }
 
 impl EdgeMergeReturnTemplate {
-    fn bind(
+    pub(super) fn bind(
         &self,
         merge: PreparedGraphEdgeMerge,
         values: &[GqlParameterValue],

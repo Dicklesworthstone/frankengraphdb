@@ -480,14 +480,19 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         // A WITH after the CREATE heads a row pipeline over the created
         // occurrences (openCypher Create6 "... WITH n WHERE ... RETURN").
-        let head = self.take_word("WITH")?;
+        // In a chain, a next write directly after it (`CREATE (a), (b) MERGE
+        // (a)-[:R]->(b)`) reads every binding, as `WITH *` would.
+        let implicit = self.chain_write && self.at_chained_write()?;
+        let head = implicit || self.take_word("WITH")?;
         if !head {
             self.word("RETURN")?;
         }
-        let quantifier = if self.take_word("DISTINCT")? {
+        let quantifier = if !implicit && self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
-            self.take_all_quantifier()?;
+            if !implicit {
+                self.take_all_quantifier()?;
+            }
             GraphSetQuantifier::All
         };
         let mut returning = ParsedReturn {
@@ -504,7 +509,7 @@ impl<'a> Parser<'a> {
         let mut output: Vec<(Name<'a>, GraphSetColumnType)> = Vec::new();
         // The source spelling of every non-star output, for ORDER BY.
         let mut spellings = Vec::new();
-        if self.take(b'*')? {
+        if implicit || self.take(b'*')? {
             // A WITH row's hidden reads are never columns of `*`.
             let visible = self.visible_width(source);
             for (index, &(name, kind)) in source[..visible].iter().enumerate() {

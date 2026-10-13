@@ -79,49 +79,7 @@ pub(crate) type InsertStep<'a> = (
     Option<ChainContinuation<'a>>,
 );
 
-/// Where the next write of a chain starts, and the row it reads: the previous
-/// write's WITH tail output, whose hidden boundary reads stay resolvable.
-/// `parameters` are the types the statement gave its parameters so far, so a
-/// parameter keeps one type across the chain.
-pub(crate) struct ChainContinuation<'a> {
-    at: usize,
-    row: Vec<(Name<'a>, GraphSetColumnType)>,
-    boundary: Option<BoundaryReads<'a>>,
-    parameters: Vec<GqlParameterSpec>,
-}
-
 impl<'a> Parser<'a> {
-    /// The continuation a chained WITH tail left, at the next write.
-    fn continuation(&mut self) -> Option<ChainContinuation<'a>> {
-        let row = self.chained_row.take()?;
-        Some(ChainContinuation {
-            at: self.current.at,
-            row,
-            boundary: self.boundary_reads.take(),
-            parameters: self.syntax.parameters.clone(),
-        })
-    }
-
-    /// Start a later write of a chain at its own clause, in the scope the
-    /// previous write's tail left: its hidden reads and parameter types.
-    fn resume_after(
-        mut self,
-        boundary: Option<BoundaryReads<'a>>,
-        parameters: &[GqlParameterSpec],
-        at: usize,
-    ) -> Result<Self, GraphPatternTextError> {
-        for spec in parameters {
-            self.parameter_types
-                .entry(spec.name.clone())
-                .or_insert(spec.parameter_type);
-        }
-        self.lexer.at = at;
-        self.lexer.tokens = 0;
-        self.current = self.lexer.next()?;
-        self.boundary_reads = boundary;
-        Ok(self)
-    }
-
     /// CREATE clauses over a WITH row, then its RETURN or WITH head. A
     /// chained tail stops at the next write, which is the continuation;
     /// otherwise the statement must end here.

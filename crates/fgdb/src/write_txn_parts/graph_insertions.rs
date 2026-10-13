@@ -145,6 +145,11 @@ impl WriteTxn {
     /// Failure, cancellation and unwinding restore the staged prefix the
     /// statement found, as for every write program. Issued identities are not
     /// reclaimed. A chain without RETURN returns zero rows.
+    ///
+    /// A relationship MERGE step resolves every distinct endpoint pair of the
+    /// previous write's rows as a native MERGE program does; its creations
+    /// count against the statement's edge allowance. A MERGE with RETURN adds
+    /// no step receipt: such a statement answers with its rows.
     pub fn execute_graph_write_chain_governed<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -156,13 +161,24 @@ impl WriteTxn {
         use fgdb_gql::insertion::{GraphInsertError, GraphInsertPolicy, GraphInsertStats};
         use fgdb_gql::{
             GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-            GraphInsertQueryError, GraphWriteChainStep, GraphWriteProgramReceipt,
-            GraphWriteProgramStats, GraphWriteStepReceipt,
+            GraphEdgeMergePolicy, GraphEdgeMergeQueryError, GraphEdgeMergeStats,
+            GraphInsertQueryError, GraphWriteChainError, GraphWriteChainStep,
+            GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStepReceipt,
         };
         let source = |error| {
-            GqlQueryError::Source(GraphInsertQueryError::Insertion(GraphInsertError::Source(
-                error,
-            )))
+            GqlQueryError::Source(GraphWriteChainError::Insert(
+                GraphInsertQueryError::Insertion(GraphInsertError::Source(error)),
+            ))
+        };
+        let insertion = |error: GraphInsertError<WriteTxnError, A>| {
+            GraphWriteChainError::Insert(GraphInsertQueryError::Insertion(error))
+        };
+        // A MERGE step's counters in the statement's cumulative form.
+        let merged = |stats: &GraphEdgeMergeStats| GraphInsertStats {
+            selection: stats.match_selection,
+            evaluator: stats.evaluator,
+            created_vertices: 0,
+            created_edges: stats.created_edges,
         };
         self.ensure_database(database).map_err(source)?;
         let live = database
@@ -241,35 +257,20 @@ impl WriteTxn {
             let last = chain.steps().len().saturating_sub(1);
             for (at, step) in chain.steps().iter().enumerate() {
                 let allowance = remaining(&used, at == last);
+                // A step without RETURN rows: its own counters, no rows.
+                let unreturned = |stats: &GraphInsertStats| GqlQueryExecution {
+                    value: Vec::new(),
+                    rows: GqlExecutionStats {
+                        snapshot_records: stats.selection.snapshot_records,
+                        result_rows: 0,
+                    },
+                    evaluator: stats.evaluator,
+                };
+                let edge_merge = GraphEdgeMergePolicy::new(allowance.query)
+                    .with_creation_limit(allowance.max_edges);
                 let (stats, returning) = match step {
                     GraphWriteChainStep::Query(query) => {
-                        let proposal = query.execute_governed_over(
-                            rows.take(),
-                            allowance,
-                            |pattern, allowance| {
-                                workspace.txn.execute_graph_pattern_governed(
-                                    database, cx, pattern, allowance,
-                                )
-                            },
-                            &mut allocate,
-                            || cx.checkpoint(),
-                        )?;
-                        let (insertion, returning) = proposal.into_parts();
-                        let (stats, vertices, edges) = workspace
-                            .txn
-                            .stage_graph_insert_batch(
-                                database,
-                                cx,
-                                query.insertion().relation(),
-                                insertion,
-                                true,
-                            )
-                            .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
-                        receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
-                        (stats, returning)
-                    }
-                    GraphWriteChainStep::Insert(insertion) => {
-                        let proposal = insertion
+                        let proposal = query
                             .execute_governed_over(
                                 rows.take(),
                                 allowance,
@@ -281,27 +282,83 @@ impl WriteTxn {
                                 &mut allocate,
                                 || cx.checkpoint(),
                             )
-                            .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
+                            .map_err(|error| error.map_source(GraphWriteChainError::Insert))?;
+                        let (insertion_batch, returning) = proposal.into_parts();
                         let (stats, vertices, edges) = workspace
                             .txn
                             .stage_graph_insert_batch(
                                 database,
                                 cx,
-                                insertion.relation(),
+                                query.insertion().relation(),
+                                insertion_batch,
+                                true,
+                            )
+                            .map_err(|error| error.map_source(insertion))?;
+                        receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
+                        (stats, returning)
+                    }
+                    GraphWriteChainStep::Insert(prepared) => {
+                        let proposal = prepared
+                            .execute_governed_over(
+                                rows.take(),
+                                allowance,
+                                |pattern, allowance| {
+                                    workspace.txn.execute_graph_pattern_governed(
+                                        database, cx, pattern, allowance,
+                                    )
+                                },
+                                &mut allocate,
+                                || cx.checkpoint(),
+                            )
+                            .map_err(|error| error.map_source(insertion))?;
+                        let (stats, vertices, edges) = workspace
+                            .txn
+                            .stage_graph_insert_batch(
+                                database,
+                                cx,
+                                prepared.relation(),
                                 proposal,
                                 true,
                             )
-                            .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
+                            .map_err(|error| error.map_source(insertion))?;
                         receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
-                        let returning = GqlQueryExecution {
-                            value: Vec::new(),
-                            rows: GqlExecutionStats {
-                                snapshot_records: stats.selection.snapshot_records,
-                                result_rows: 0,
-                            },
-                            evaluator: stats.evaluator,
-                        };
-                        (stats, returning)
+                        (stats, unreturned(&stats))
+                    }
+                    GraphWriteChainStep::EdgeMerge(merge) => {
+                        let (stats, receipt) = workspace
+                            .txn
+                            .execute_graph_edge_merges_over(
+                                database,
+                                cx,
+                                merge,
+                                edge_merge,
+                                rows.take(),
+                                &mut allocate,
+                            )
+                            .map_err(|error| {
+                                error.map_source(|error| {
+                                    GraphWriteChainError::EdgeMerge(
+                                        GraphEdgeMergeQueryError::Merge(error),
+                                    )
+                                })
+                            })?;
+                        receipts.push(receipt);
+                        let stats = merged(&stats);
+                        (stats, unreturned(&stats))
+                    }
+                    GraphWriteChainStep::EdgeMergeQuery(query) => {
+                        let (stats, returning) = workspace
+                            .txn
+                            .execute_graph_edge_merge_query_over(
+                                database,
+                                cx,
+                                query,
+                                edge_merge,
+                                rows.take(),
+                                &mut allocate,
+                            )
+                            .map_err(|error| error.map_source(GraphWriteChainError::EdgeMerge))?;
+                        (merged(&stats), returning)
                     }
                 };
                 add(&mut used, &stats);
@@ -348,11 +405,11 @@ impl WriteTxn {
         policy: fgdb_gql::insertion::GraphInsertPolicy,
     ) -> WriteChainResult<WriteTxnError> {
         use fgdb_gql::insertion::GraphInsertError;
-        use fgdb_gql::{GqlQueryError, GraphInsertQueryError};
+        use fgdb_gql::{GqlQueryError, GraphInsertQueryError, GraphWriteChainError};
         let source = |error| {
-            GqlQueryError::Source(GraphInsertQueryError::Insertion(GraphInsertError::Source(
-                error,
-            )))
+            GqlQueryError::Source(GraphWriteChainError::Insert(
+                GraphInsertQueryError::Insertion(GraphInsertError::Source(error)),
+            ))
         };
         self.ensure_database(database).map_err(source)?;
         let allocate = database.engine_allocator(cx).map_err(source)?;

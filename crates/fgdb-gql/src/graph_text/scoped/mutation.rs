@@ -1241,6 +1241,79 @@ impl PreparedGraphMutationText {
     }
 }
 
+/// Where the next write of a chain starts, and the row it reads: the previous
+/// write's WITH tail output, whose hidden boundary reads stay resolvable.
+/// `parameters` are the types the statement gave its parameters so far, so a
+/// parameter keeps one type across the chain (fgdb-cpny9).
+pub(crate) struct ChainContinuation<'a> {
+    at: usize,
+    row: Vec<(Name<'a>, crate::GraphSetColumnType)>,
+    boundary: Option<BoundaryReads<'a>>,
+    parameters: Vec<GqlParameterSpec>,
+}
+
+impl<'a> ChainContinuation<'a> {
+    /// The row the next write reads, as owned-leaf columns.
+    fn owned_columns(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
+        self.row
+            .iter()
+            .map(|(name, kind)| (name.text.to_owned(), *kind))
+            .unzip()
+    }
+}
+
+impl<'a> Parser<'a> {
+    /// At `MERGE`: whether its pattern is a relationship, `(a)-` or `(a)<-`,
+    /// read with native tokens and without consuming the parser's own.
+    pub(super) fn at_relationship_merge(&self) -> Result<bool, GraphPatternTextError> {
+        if !self.is_word("MERGE") {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
+            && matches!(lexer.next()?.kind, TokenKind::Word(_))
+            && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
+            && matches!(lexer.next()?.kind, TokenKind::Punct(b'-' | b'<')))
+    }
+
+    /// The next write of a chain this slice compiles: a CREATE, or a
+    /// relationship MERGE over the carried row.
+    pub(super) fn at_chained_write(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(self.is_word("CREATE") || self.at_relationship_merge()?)
+    }
+
+    /// The continuation a chained WITH tail left, at the next write.
+    fn continuation(&mut self) -> Option<ChainContinuation<'a>> {
+        let row = self.chained_row.take()?;
+        Some(ChainContinuation {
+            at: self.current.at,
+            row,
+            boundary: self.boundary_reads.take(),
+            parameters: self.syntax.parameters.clone(),
+        })
+    }
+
+    /// Start a later write of a chain at its own clause, in the scope the
+    /// previous write's tail left: its hidden reads and parameter types.
+    fn resume_after(
+        mut self,
+        boundary: Option<BoundaryReads<'a>>,
+        parameters: &[GqlParameterSpec],
+        at: usize,
+    ) -> Result<Self, GraphPatternTextError> {
+        for spec in parameters {
+            self.parameter_types
+                .entry(spec.name.clone())
+                .or_insert(spec.parameter_type);
+        }
+        self.lexer.at = at;
+        self.lexer.tokens = 0;
+        self.current = self.lexer.next()?;
+        self.boundary_reads = boundary;
+        Ok(self)
+    }
+}
+
 #[cfg(test)]
 mod graph_function_tests {
     use super::*;

@@ -1,7 +1,7 @@
 //! INSERT must preserve CREATE's native program, receipts and complete graph state.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{
@@ -622,6 +622,139 @@ fn chained_creates_read_the_previous_writes_rows() {
             .is_err()
         );
         assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-cpny9 (TCK Merge5-shaped `CREATE (a), (b) MERGE (a)-[:R]->(b)`): a
+/// relationship MERGE after a CREATE, with or without WITH between, resolves
+/// every row the CREATE produced against the graph that CREATE left. A
+/// missing relationship is created once per distinct endpoint pair, an
+/// existing one (even one the same statement created) is matched, and a
+/// failure anywhere publishes nothing.
+#[test]
+fn a_relationship_merge_after_create_resolves_the_created_rows() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a2, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, false).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        // The source of every edge between a Person and a Copy, by the
+        // Person's `p`.
+        let sources = |db: &Database<MemVfs>| {
+            let vertices = db.vertices().unwrap();
+            db.edges()
+                .unwrap()
+                .into_iter()
+                .map(|edge| {
+                    let source = vertices
+                        .iter()
+                        .find(|vertex| vertex.vid == edge.entry.src)
+                        .expect("an edge's source is stored");
+                    (source.labels.clone(), source.props.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        // RETURN reads the relationship the MERGE created.
+        let returned = write(
+            &mut db,
+            "CREATE (a:Person), (b:Copy) MERGE (a)-[r:R]->(b) RETURN count(r) AS c",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { columns, rows } = returned else {
+            unreachable!("a chain with RETURN answers rows")
+        };
+        assert_eq!(columns, ["c"]);
+        assert_eq!(rows, [vec![QueryValue::Count(1)]]);
+        assert_eq!(db.edges().unwrap().len(), 1);
+        // Without RETURN, after a WITH and written right to left: a receipt
+        // with one step per write, and the edge runs from `a`.
+        let written = write(
+            &mut db,
+            "CREATE (a:Person {p: 1}), (b:Copy {p: 2}) WITH a, b MERGE (b)<-[:R]-(a)",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Write { receipt, .. } = written else {
+            unreachable!("a chain without RETURN answers a write receipt")
+        };
+        assert_eq!(receipt.stats().created_vertices, 2);
+        assert_eq!(receipt.stats().created_edges, 1);
+        assert_eq!(receipt.steps().len(), 2);
+        // An undirected MERGE creates its edge left to right.
+        write(
+            &mut db,
+            "CREATE (a:Person {p: 3}), (b:Copy {p: 4}) MERGE (a)-[:R]-(b)",
+        )
+        .await
+        .unwrap();
+        let from = sources(&db);
+        assert_eq!(from.len(), 3);
+        for p in [1, 3] {
+            assert!(
+                from.contains(&(vec![PERSON], vec![(P, CanonicalScalar::Int(p).into())])),
+                "{from:?}"
+            );
+        }
+        // Three rows of one pair: one creation, and every row resolves to it.
+        let counted = write(
+            &mut db,
+            "CREATE (a:Person), (b:Copy) WITH a, b UNWIND [1, 2, 3] AS i \
+             MERGE (a)-[r:R]->(b) RETURN count(*) AS c",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = counted else {
+            unreachable!("a chain with RETURN answers rows")
+        };
+        assert_eq!(rows, [vec![QueryValue::Count(3)]]);
+        assert_eq!(db.edges().unwrap().len(), 4);
+        // The MERGE sees the CREATE's own relationship and matches it.
+        write(
+            &mut db,
+            "CREATE (a:Person)-[:R]->(b:Copy) MERGE (a)-[:R]->(b)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.edges().unwrap().len(), 5);
+        // A refusal after the MERGE staged publishes neither write.
+        let frontier = db.frontier().unwrap();
+        let vertices = db.vertices().unwrap().len();
+        assert!(
+            write(
+                &mut db,
+                "CREATE (a:Person {p: 0}), (b:Copy) MERGE (a)-[:R]->(b) RETURN 1 / a.p AS bad",
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(db.vertices().unwrap().len(), vertices);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

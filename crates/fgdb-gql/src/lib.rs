@@ -92,7 +92,10 @@ pub use pipeline_aggregate_text::{
     GraphPipelineAggregateTextError, GraphPipelineAggregateTextErrorKind,
     PreparedGraphPipelineAggregateText,
 };
-pub use write_chain::{GraphWriteChainStep, PreparedGraphWriteChain, PreparedGraphWriteChainText};
+pub use write_chain::{
+    GraphWriteChainError, GraphWriteChainStep, GraphWriteChainTextError, PreparedGraphWriteChain,
+    PreparedGraphWriteChainText,
+};
 pub use write_script::{
     BoundGraphWriteScriptBatch, GraphWriteScriptBatchBindError, GraphWriteScriptBatchError,
     GraphWriteScriptBatchLocation, GraphWriteScriptError, GraphWriteScriptErrorKind,

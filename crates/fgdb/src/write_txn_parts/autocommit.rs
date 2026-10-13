@@ -68,14 +68,14 @@ impl<V: Vfs + Clone> Database<V> {
             fgdb_gql::GraphWriteProgramReceipt,
             EmbeddedTxnCompletion,
         ),
-        TxnGqlError<fgdb_gql::GraphInsertQueryError<WriteTxnError, A>>,
+        TxnGqlError<fgdb_gql::GraphWriteChainError<WriteTxnError, A>>,
     > {
         use fgdb_gql::insertion::GraphInsertError;
-        use fgdb_gql::{GqlQueryError, GraphInsertQueryError};
+        use fgdb_gql::{GqlQueryError, GraphInsertQueryError, GraphWriteChainError};
         let infrastructure = |error| {
-            GqlQueryError::Source(GraphInsertQueryError::Insertion(GraphInsertError::Source(
-                error,
-            )))
+            GqlQueryError::Source(GraphWriteChainError::Insert(
+                GraphInsertQueryError::Insertion(GraphInsertError::Source(error)),
+            ))
         };
         let mut transaction = self
             .begin(txcx)

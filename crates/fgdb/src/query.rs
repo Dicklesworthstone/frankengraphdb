@@ -216,6 +216,9 @@ pub enum QueryWriteError<A> {
     /// match, retaining native action, result and completion errors.
     EdgeUpsertText(GraphEdgeUpsertTextError),
     EdgeUpsert(GqlQueryError<GraphEdgeUpsertQueryError<WriteTxnError, A>, Cancel>),
+    /// A chained write (fgdb-cpny9): the failing step's own family error.
+    ChainText(GraphWriteChainTextError),
+    Chain(GqlQueryError<GraphWriteChainError<WriteTxnError, A>, Cancel>),
 }
 impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -233,6 +236,8 @@ impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
             Self::EdgeMerge(e) => e.fmt(f),
             Self::EdgeUpsertText(e) => e.fmt(f),
             Self::EdgeUpsert(e) => e.fmt(f),
+            Self::ChainText(e) => e.fmt(f),
+            Self::Chain(e) => e.fmt(f),
         }
     }
 }
@@ -252,6 +257,8 @@ impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> 
             Self::EdgeMerge(error) => Some(error),
             Self::EdgeUpsertText(error) => Some(error),
             Self::EdgeUpsert(error) => Some(error),
+            Self::ChainText(error) => Some(error),
+            Self::Chain(error) => Some(error),
         }
     }
 }
@@ -306,7 +313,7 @@ fn prepare_write_chain(
     params: &GqlParameters,
     resolver: impl GraphSymbolResolver,
     relation: RelationId,
-) -> Result<PreparedGraphWriteChain, GraphInsertTextError> {
+) -> Result<PreparedGraphWriteChain, GraphWriteChainTextError> {
     let declarations = write_return_declarations(params);
     PreparedGraphWriteChainText::prepare_with_parameter_types(
         text,
@@ -493,7 +500,7 @@ impl<V: Vfs + Clone> Database<V> {
         // would otherwise see the final RETURN of a multi-write statement.
         if PreparedGraphWriteChainText::is_chain(text).map_err(QueryWriteError::InsertText)? {
             let chain = prepare_write_chain(text, params, resolver, relation)
-                .map_err(QueryWriteError::InsertText)?;
+                .map_err(QueryWriteError::ChainText)?;
             let columns = chain.columns().to_vec();
             let (_, rows, receipt, completion) = self
                 .execute_graph_write_chain_autocommit_governed(
@@ -510,7 +517,7 @@ impl<V: Vfs + Clone> Database<V> {
                     },
                 )
                 .await
-                .map_err(QueryWriteError::Insert)?;
+                .map_err(QueryWriteError::Chain)?;
             return Ok(if chain.returns_rows() {
                 values(columns, rows.value)
             } else {
@@ -684,7 +691,7 @@ impl WriteTxn {
     ) -> Result<QueryResult, QueryWriteError<A>> {
         if PreparedGraphWriteChainText::is_chain(text).map_err(QueryWriteError::InsertText)? {
             let chain = prepare_write_chain(text, params, resolver, relation)
-                .map_err(QueryWriteError::InsertText)?;
+                .map_err(QueryWriteError::ChainText)?;
             let columns = chain.columns().to_vec();
             let (_, rows, receipt) = self
                 .execute_graph_write_chain_governed(
@@ -699,7 +706,7 @@ impl WriteTxn {
                         })
                     },
                 )
-                .map_err(QueryWriteError::Insert)?;
+                .map_err(QueryWriteError::Chain)?;
             return Ok(if chain.returns_rows() {
                 values(columns, rows.value)
             } else {
