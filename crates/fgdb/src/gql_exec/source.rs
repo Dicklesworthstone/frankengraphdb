@@ -1623,7 +1623,13 @@ fn visit_edge_coordinates<'a, E, C>(
 where
     C: FnMut(SourceEvent) -> Result<(), E>,
 {
-    let mut winners: BTreeMap<EId, (&AdjacencyEntry, usize, usize)> = BTreeMap::new();
+    // One winner per EId in first-seen order, found through a hashed index and
+    // sorted once for the visit: an ordered map descended and rebalanced a
+    // tree for every history row of every statement (fgdb-61p1n). Every
+    // control event keeps its place, so the scratch limit still gates each
+    // new winner before it is retained.
+    let mut winners: Vec<EdgeWinner<'a>> = Vec::new();
+    let mut index = WinnerIndex::default();
     for (block_at, block) in blocks.iter().enumerate() {
         control(SourceEvent::Work)?;
         for (row_at, entry) in block.as_ref().iter().enumerate() {
@@ -1631,21 +1637,112 @@ where
             if entry.created_at > as_of {
                 continue;
             }
-            match winners.get(&entry.eid) {
-                Some((previous, _, _)) if previous.created_at > entry.created_at => continue,
-                Some(_) => {}
-                None => control(SourceEvent::ScratchEntry)?,
+            match index.find(entry.eid, &winners) {
+                Some(at) if winners[at].1.created_at > entry.created_at => {}
+                Some(at) => winners[at] = (entry.eid, entry, block_at, row_at),
+                None => {
+                    control(SourceEvent::ScratchEntry)?;
+                    index.insert(entry.eid, &winners);
+                    winners.push((entry.eid, entry, block_at, row_at));
+                }
             }
-            winners.insert(entry.eid, (entry, block_at, row_at));
         }
     }
-    for (entry, block, row) in winners.into_values() {
+    drop(index);
+    winners.sort_unstable_by_key(|&(eid, ..)| eid);
+    for (_, entry, block, row) in winners {
         control(SourceEvent::Work)?;
         if entry.visible_at(as_of) {
             visit(entry, block, row, control)?;
         }
     }
     Ok(())
+}
+
+/// An EId's latest statement at the cut, with its block coordinates. The EId
+/// is held inline so probes and the final sort never chase the entry.
+type EdgeWinner<'a> = (EId, &'a AdjacencyEntry, usize, usize);
+
+/// Open-addressed (linear probing) positions into a statement's edge winners.
+///
+/// The hash is a fixed mix, not seeded from ambient randomness, so the merge
+/// stays deterministic. Engine-issued EIds are keyed-permutation values and
+/// spread without help; an embedding host may also write EIds of its own
+/// choosing, so both halves are mixed (a structured `(a, b)` identity must
+/// not fold into a few buckets) and a probe run is bounded: an EId that
+/// cannot be placed within `PROBE_LIMIT` slots goes to an ordered overflow.
+/// The worst EId distribution therefore costs what the ordered map this
+/// replaced did, never a quadratic scan.
+#[derive(Default)]
+struct WinnerIndex {
+    /// `EMPTY` or a position in the winners; the length is zero or a power of
+    /// two, at most three-quarters full. `EMPTY` is no position: a vector
+    /// never holds `usize::MAX` winners.
+    slots: Vec<usize>,
+    /// Positions of the EIds whose probe run was full when they arrived. A
+    /// slot never empties between rebuilds, so such an EId is never found,
+    /// and never shadowed, within its run.
+    overflow: BTreeMap<EId, usize>,
+}
+
+impl WinnerIndex {
+    const EMPTY: usize = usize::MAX;
+    const PROBE_LIMIT: usize = 32;
+
+    fn bucket(eid: EId, slots: usize) -> usize {
+        // A folded 64x64 multiply of the two halves, each offset by an odd
+        // constant so a zero half does not zero the product.
+        let low = (eid.0 as u64) ^ 0x9e37_79b9_7f4a_7c15;
+        let high = ((eid.0 >> 64) as u64) ^ 0xc2b2_ae3d_27d4_eb4f;
+        let product = u128::from(low) * u128::from(high);
+        let mixed = (product as u64) ^ ((product >> 64) as u64);
+        // `slots` is a power of two: keep the high bits.
+        (mixed >> (64 - slots.trailing_zeros())) as usize
+    }
+
+    /// The position of `eid`'s winner, if it has one.
+    fn find(&self, eid: EId, winners: &[EdgeWinner<'_>]) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut at = Self::bucket(eid, self.slots.len());
+        for _ in 0..Self::PROBE_LIMIT {
+            match self.slots[at] {
+                Self::EMPTY => return None,
+                position if winners[position].0 == eid => return Some(position),
+                _ => at = (at + 1) & mask,
+            }
+        }
+        self.overflow.get(&eid).copied()
+    }
+
+    /// Record that `eid`, absent until now, is about to be pushed onto `winners`.
+    fn insert(&mut self, eid: EId, winners: &[EdgeWinner<'_>]) {
+        let position = winners.len();
+        if (position + 1) * 4 > self.slots.len() * 3 {
+            let grown = (self.slots.len() * 2).max(64);
+            self.slots = vec![Self::EMPTY; grown];
+            self.overflow.clear();
+            for (at, &(known, ..)) in winners.iter().enumerate() {
+                self.place(known, at);
+            }
+        }
+        self.place(eid, position);
+    }
+
+    fn place(&mut self, eid: EId, position: usize) {
+        let mask = self.slots.len() - 1;
+        let mut at = Self::bucket(eid, self.slots.len());
+        for _ in 0..Self::PROBE_LIMIT {
+            if self.slots[at] == Self::EMPTY {
+                self.slots[at] = position;
+                return;
+            }
+            at = (at + 1) & mask;
+        }
+        self.overflow.insert(eid, position);
+    }
 }
 fn scan_edges<'a, E>(
     blocks: &[impl AsRef<[AdjacencyEntry]>],
@@ -2998,3 +3095,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod edge_merge_tests;
