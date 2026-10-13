@@ -261,3 +261,6 @@ pub(super) fn apply_many<V: Vfs + Clone, Clock: FnMut() -> u64>(
     };
     Ok((GraphWriteStepStats::EdgeUpsertBatch { stats, target_edges }, receipt))
 }
+
+#[path = "edge_upsert_program_returning.rs"]
+mod returning;
