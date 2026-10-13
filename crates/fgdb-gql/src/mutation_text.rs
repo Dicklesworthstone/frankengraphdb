@@ -3,7 +3,7 @@
 
 use crate::algebra::GraphValueOrder;
 use crate::insertion::GraphInsertBuildError;
-use crate::set_text::{ReadPageNumber, ReadProjectionTemplate};
+use crate::set_text::{ReadPageNumber, ReadProjectionTemplate, ReadValueTemplate};
 use crate::{
     GqlScalarParameter, GraphDeleteBuildError, GraphEdgeMergeBuildError, GraphIntegerBuildError,
     GraphIntegerOp, GraphMutationAction, GraphMutationBuildError, GraphPatternTextError,
@@ -150,6 +150,85 @@ pub(crate) struct WriteReturnGroupTemplate {
     pub inputs: Vec<ReadProjectionTemplate>,
     pub keys: Vec<usize>,
     pub aggregates: Vec<crate::set_text::aggregate::ReadAggregateSpec>,
+}
+
+impl WriteReturnGroupTemplate {
+    /// The raw write binding a WITH item carries unchanged. A grouped item
+    /// must be a direct identity key, never a MIN/MAX/COLLECT representative.
+    /// The caller still checks the binding's actual vertex/edge domain.
+    pub(crate) fn carried_binding(group: Option<&Self>, value: &ReadValueTemplate) -> Option<usize> {
+        let ReadValueTemplate::Column(column) = value else {
+            return None;
+        };
+        let Some(group) = group else {
+            return Some(*column);
+        };
+        let input = *group.keys.get(*column)?;
+        match &group.inputs.get(input)?.value {
+            ReadValueTemplate::Column(binding) => Some(*binding),
+            _ => None,
+        }
+    }
+
+    /// Retain a final-state field of an already-kept identity as a hidden
+    /// grouping key. It is a function of that identity, so it cannot split
+    /// its group or change occurrence counts. No representative is chosen.
+    /// Native aggregate arguments keep their input slots; only key-first
+    /// output slots move when a new key precedes the summaries.
+    pub(crate) fn hoist_property(
+        &mut self,
+        projection: &mut [ReadProjectionTemplate],
+        binding: usize,
+        at: usize,
+    ) -> Result<usize, GraphPatternTextError> {
+        let existing = self.inputs.iter().position(|input| {
+            matches!(input.value, ReadValueTemplate::Column(column) if column == binding)
+        });
+        let input = existing.unwrap_or(self.inputs.len());
+        if let Some(key) = self.keys.iter().position(|&column| column == input) {
+            return Ok(key);
+        }
+        let old_keys = self.keys.len();
+        let width = old_keys + self.aggregates.len();
+        let limit = crate::algebra::MAX_PATTERN_VERTICES;
+        let observed = (self.inputs.len() + usize::from(existing.is_none())).max(width + 1);
+        if observed > limit {
+            return Err(GraphPatternTextError {
+                offset: at,
+                kind: GraphPatternTextErrorKind::Build(crate::algebra::PatternBuildError::LimitExceeded {
+                    dimension: crate::algebra::PatternLimitDimension::Columns,
+                    limit,
+                    observed,
+                }),
+            });
+        }
+        // write_return_items emits a column permutation of keys/summaries.
+        // Refuse an unexpected projection shape rather than partially remap
+        // it, even if a future compiler broadens that internal contract.
+        if projection.iter().any(|output| {
+            !matches!(output.value, ReadValueTemplate::Column(column) if column < width)
+        }) {
+            return Err(GraphPatternTextError {
+                offset: at,
+                kind: GraphPatternTextErrorKind::Expected("native grouped write output columns"),
+            });
+        }
+        if existing.is_none() {
+            self.inputs.push(ReadProjectionTemplate {
+                name: format!("__write_input_{input}"),
+                value: ReadValueTemplate::Column(binding),
+            });
+        }
+        self.keys.push(input);
+        for output in projection {
+            if let ReadValueTemplate::Column(column) = &mut output.value
+                && *column >= old_keys
+            {
+                *column += 1;
+            }
+        }
+        Ok(old_keys)
+    }
 }
 
 #[derive(Clone)]

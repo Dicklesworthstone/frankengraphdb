@@ -189,7 +189,7 @@ impl<'a> Parser<'a> {
         Ok(returning)
     }
 
-    /// Carry only the actual selected relationship, under any direct alias.
+    /// Carry the selected relationship under a direct alias or identity key.
     /// Its hidden property cells are read after all ON/SET actions by the
     /// existing owner, with the same authority and rollback boundary.
     fn edge_upsert_tail(
@@ -199,33 +199,38 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<ReadStageTemplate>, GraphEdgeUpsertTextError> {
         let visible = schema.len();
         let mut reads = Vec::new();
-        if returning.grouping.is_none() {
-            for (alias, key) in self.write_tail_reads(&schema)? {
-                let Some(at) = schema[..visible]
-                    .iter()
-                    .position(|(name, _)| name.text == alias.text)
-                else {
-                    continue;
-                };
-                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
-                    continue;
-                };
-                if !matches!(
-                    returning.bindings[binding],
-                    (EdgeBinding::Edge, GraphSetColumnType::Edge)
-                ) {
-                    continue;
-                }
-                let variable = returning.variable;
-                let column = returning.map_input(self, variable, ReturnMapInput::Property(key))?;
-                mutation_query::push_tail_read(
-                    &mut returning.projection,
-                    &mut schema,
-                    &mut reads,
-                    (alias, key),
-                    column,
-                )?;
+        for (alias, key) in self.write_tail_reads(&schema)? {
+            let Some(at) = schema[..visible]
+                .iter()
+                .position(|(name, _)| name.text == alias.text)
+            else {
+                continue;
+            };
+            let Some(binding) = WriteReturnGroupTemplate::carried_binding(
+                returning.grouping.as_ref(),
+                &returning.projection[at].value,
+            ) else {
+                continue;
+            };
+            if !matches!(
+                returning.bindings[binding],
+                (EdgeBinding::Edge, GraphSetColumnType::Edge)
+            ) {
+                continue;
             }
+            let variable = returning.variable;
+            let column = returning.map_input(self, variable, ReturnMapInput::Property(key))?;
+            let column = match &mut returning.grouping {
+                Some(group) => group.hoist_property(&mut returning.projection, column, key.at)?,
+                None => column,
+            };
+            mutation_query::push_tail_read(
+                &mut returning.projection,
+                &mut schema,
+                &mut reads,
+                (alias, key),
+                column,
+            )?;
         }
         Ok(self.finish_write_tail(schema, visible, reads)?)
     }
