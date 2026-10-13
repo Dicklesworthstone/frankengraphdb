@@ -48,6 +48,9 @@ impl PreparedGraphWriteChainText {
         // the parameter batch writer's (unwind_write).
         let (mut written, mut merged, mut headed) = (false, false, false);
         let (mut unwound, mut matched) = (false, false);
+        // `UNWIND $rows`: one MERGE after it is the batch writer's, but a
+        // vertex MERGE another write follows heads a chain (fgdb-0s2pq).
+        let mut parameter_unwound = false;
         let mut depth = 0_usize;
         let mut previous: Option<TokenKind<'_>> = None;
         loop {
@@ -80,10 +83,11 @@ impl PreparedGraphWriteChainText {
                     } else if clause && written && word.eq_ignore_ascii_case("WITH") {
                         headed = true;
                     } else if previous.is_none() && word.eq_ignore_ascii_case("UNWIND") {
-                        unwound = !matches!(
+                        parameter_unwound = matches!(
                             script::next_script_token(&mut lexer.clone())?.kind,
                             TokenKind::Parameter(_)
                         );
+                        unwound = !parameter_unwound;
                     } else if previous.is_none() && word.eq_ignore_ascii_case("WITH") {
                         // A leading source-free WITH (`WITH 42 AS v MERGE ...`)
                         // is a row prefix, as a leading UNWIND is.
@@ -97,7 +101,7 @@ impl PreparedGraphWriteChainText {
                         // A first-clause vertex MERGE heads a chain, and one
                         // after a leading UNWIND or MATCH is one; a
                         // relationship MERGE there is its own statement.
-                        if previous.is_none() || unwound || matched {
+                        if previous.is_none() || unwound || matched || parameter_unwound {
                             let mut lookahead = lexer.clone();
                             let mut nested = 0_usize;
                             loop {
@@ -117,15 +121,16 @@ impl PreparedGraphWriteChainText {
                                 script::next_script_token(&mut lookahead)?.kind,
                                 TokenKind::Punct(b'-' | b'<')
                             );
-                            if previous.is_some() && (vertex || !matched) {
+                            if previous.is_some() && !parameter_unwound && (vertex || !matched) {
                                 // A vertex MERGE after the leading UNWIND or
                                 // MATCH; a relationship MERGE after UNWIND is
                                 // its own statement.
                                 return Ok(vertex);
                             }
-                            // A first vertex MERGE, or a relationship MERGE
-                            // after a leading MATCH: a chain once another
-                            // write follows.
+                            // A first vertex MERGE, a vertex MERGE after
+                            // `UNWIND $rows`, or a relationship MERGE after a
+                            // leading MATCH: a chain once another write
+                            // follows.
                             merged = vertex || matched;
                         }
                     }
@@ -590,6 +595,10 @@ mod tests {
             "WITH 42 AS var MERGE (c:N {var: var})",
             "UNWIND [42] AS props WITH props WHERE props > 32 WITH DISTINCT props AS p \
              MERGE (a:A {num: p}) RETURN a.num AS prop",
+            // Chained writes over a parameter UNWIND (fgdb-0s2pq).
+            "UNWIND $pairs AS row MERGE (a:N {id: row.a}) MERGE (b:N {id: row.b}) \
+             MERGE (a)-[:S]->(b)",
+            "UNWIND $rows AS row MERGE (n:N {id: row.id}) CREATE (n)-[:R]->(:M)",
         ] {
             assert!(
                 PreparedGraphWriteChainText::is_chain(text).unwrap(),
@@ -614,8 +623,11 @@ mod tests {
             "MATCH (a), (b) WITH a, b MERGE (a)-[:X]->(b)",
             "MATCH (a), (b) MERGE (a)-[:X]->(b) RETURN a",
             "OPTIONAL MATCH (a) MERGE (b)",
-            // An UNWIND of a parameter before MERGE is the batch writer's.
+            // An UNWIND of a parameter before one MERGE is the batch writer's,
+            // its ON/SET clauses and a relationship MERGE after MATCH included.
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id})",
+            "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.name = row.name",
+            "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b)",
             "UNWIND [1] AS x MERGE (a)-[:R]->(b)",
             "MERGE (a:A) ON CREATE SET a.p = 1",
             "MERGE (a:A) ON CREATE SET a.p = 1 ON MATCH SET a.q = 2 RETURN a",
