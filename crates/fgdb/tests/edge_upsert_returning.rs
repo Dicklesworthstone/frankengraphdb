@@ -233,3 +233,66 @@ fn autocommit_refusal_never_publishes_the_private_result_or_creation() {
         assert!(read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r").is_empty());
     });
 }
+
+#[test]
+fn parsed_return_expression_failure_restores_the_statement_workspace() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        seed(&mut db, commit, true).await;
+        let text = format!("{UPSERT} RETURN r.p / 0 AS invalid LIMIT 0");
+        let query = fgdb_gql::PreparedGraphEdgeUpsertQueryText::prepare(&text, S, symbols)
+            .unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(80), vec![ITEM], vec![(P, CanonicalScalar::Int(80))]);
+        txn.write(&mut db, prefix).unwrap();
+        assert!(txn.execute_graph_edge_upsert_query_governed(
+            &mut db, cx, &query, policy(0), |_| Ok::<_, ()>(ElementId::Edge(EId(90))),
+        ).is_err());
+        txn.finish(&mut db, commit).await.unwrap();
+        assert!(read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r").is_empty());
+        assert_eq!(read(&db, cx, "MATCH (a:Item {p:80}) RETURN a.p AS p"), vec![vec![int(80)]]);
+    });
+}
+
+#[test]
+fn native_text_return_composes_parameters_branch_effects_and_aggregate_results() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        seed(&mut db, commit, true).await;
+        let text = "MATCH (a:Item)-[:S]->(b:Item) MERGE (a)-[r:R]->(b) \
+            ON CREATE SET r.p = $initial SET r.p = r.p * 2 \
+            RETURN count(*) AS rows,sum(r.p) AS total,collect(r) AS edges";
+        let template = fgdb_gql::PreparedGraphEdgeUpsertQueryText::prepare(text, S, symbols).unwrap();
+        let query = template.bind_parameters(&GqlParameters::new().with_int64("initial", 7).unwrap()).unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let (_, outcome, output) = txn.execute_graph_edge_upsert_query_engine_governed(&mut db, cx, &query, policy(1)).unwrap();
+        let edge = outcome.edge().unwrap();
+        assert_eq!(output.value, vec![GraphValueRow::from_owned_values(vec![
+            int(1), int(14), GraphValue::List(vec![GraphValue::Edge(edge)].into_boxed_slice()),
+        ])]);
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r.p AS p"), vec![vec![int(14)]]);
+    });
+}
+
+#[test]
+fn native_no_action_merge_return_counts_no_input_without_creating_an_edge() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        seed(&mut db, commit, false).await;
+        let query = fgdb_gql::PreparedGraphEdgeUpsertQueryText::prepare(
+            "MATCH (a:Item)-[:S]->(b:Item) MERGE (a)-[r:R]->(b) RETURN count(*) AS rows", S, symbols,
+        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        let frontier = db.frontier().unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let (stats, outcome, output) = txn.execute_graph_edge_upsert_query_governed(
+            &mut db, cx, &query, policy(1), |_| -> Result<ElementId, ()> { panic!("no endpoint input") },
+        ).unwrap();
+        assert_eq!(stats.branch, GraphEdgeUpsertBranch::NoInput);
+        assert!(outcome.edge().is_none());
+        assert_eq!(output.value, vec![GraphValueRow::from_owned_values(vec![int(0)])]);
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(db.frontier().unwrap(), frontier);
+    });
+}

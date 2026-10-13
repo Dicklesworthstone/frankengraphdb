@@ -130,6 +130,7 @@ pub use edge_upsert_query::{
 };
 pub use edge_upsert_text::{
     GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertText,
+    PreparedGraphEdgeUpsertQueryText,
 };
 pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,
