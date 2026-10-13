@@ -378,6 +378,17 @@ pub(crate) type UpsertQueryResult<A> = Result<
     TxnGqlError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>>,
 >;
 
+/// A staged vertex MERGE over input rows (a chain step, fgdb-cpny9): its
+/// cumulative statistics, its step receipt and its output rows.
+pub(crate) type VertexMergeRowsResult<A> = Result<
+    (
+        fgdb_gql::GraphVertexMergeStats,
+        fgdb_gql::GraphWriteStepReceipt,
+        Vec<fgdb_gql::algebra::GraphValueRow>,
+    ),
+    TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>,
+>;
+
 /// A staged relationship MERGE RETURN (fgdb-at06q): the MERGE's statistics
 /// and its governed RETURN rows, or the query's error with allocator error `A`.
 pub(crate) type EdgeMergeQueryResult<A> = Result<

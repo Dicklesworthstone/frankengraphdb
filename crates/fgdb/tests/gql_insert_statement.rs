@@ -760,6 +760,161 @@ fn a_relationship_merge_after_create_resolves_the_created_rows() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-cpny9 (TCK Merge5 [9], Create3 [11], [13], Merge1 [7], [12]): a
+/// vertex MERGE is a chain step. As the first write it runs once; after a
+/// write it runs once per row that write produced, and rows with equal
+/// property values share one MERGE. It binds every vertex it selects (one
+/// row each) or creates exactly one, and the next write reads the merged
+/// vertex beside the row.
+#[test]
+fn vertex_merge_steps_bind_or_create_per_row() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a3, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, false).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let count = |db: &Database<MemVfs>, label: LabelId| {
+            db.vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == vec![label])
+                .count()
+        };
+        // Merge5 [9]: two MERGEs then a relationship MERGE between them.
+        let first = write(
+            &mut db,
+            "MERGE (a:Person) MERGE (b:Copy) MERGE (a)-[:R]->(b)",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Write { receipt, .. } = first else {
+            unreachable!("a chain without RETURN answers a write receipt")
+        };
+        assert_eq!(receipt.steps().len(), 3);
+        assert_eq!(receipt.stats().created_vertices, 2);
+        assert_eq!(receipt.stats().created_edges, 1);
+        // Run again: everything matches and nothing is created.
+        let again = write(
+            &mut db,
+            "MERGE (a:Person) MERGE (b:Copy) MERGE (a)-[:R]->(b)",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Write { receipt, .. } = again else {
+            unreachable!("a chain without RETURN answers a write receipt")
+        };
+        assert_eq!(receipt.stats().created_vertices, 0);
+        assert_eq!(receipt.stats().created_edges, 0);
+        assert_eq!((count(&db, PERSON), count(&db, COPY)), (1, 1));
+        assert_eq!(db.edges().unwrap().len(), 1);
+        // Create3 [13]: a merged vertex is an endpoint of a later CREATE.
+        write(
+            &mut db,
+            "MERGE (t:Source {p: 42}) CREATE (f:Copy) CREATE (t)-[:R]->(f)",
+        )
+        .await
+        .unwrap();
+        write(
+            &mut db,
+            "MERGE (t:Source {p: 42}) CREATE (f:Copy) CREATE (t)-[:R]->(f)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(count(&db, SOURCE), 1);
+        assert_eq!(count(&db, COPY), 3);
+        assert_eq!(db.edges().unwrap().len(), 3);
+        let source = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .find(|vertex| vertex.labels == vec![SOURCE])
+            .expect("the merged Source")
+            .vid;
+        let from_source = db
+            .edges()
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.entry.src == source)
+            .count();
+        assert_eq!(from_source, 2);
+        // Merge1 [7]: a MERGE after two CREATEs binds both, creating none.
+        let bound = write(&mut db, "CREATE (:Person) CREATE (:Person) MERGE (:Person)")
+            .await
+            .unwrap();
+        let QueryResult::Write { receipt, .. } = bound else {
+            unreachable!("a chain without RETURN answers a write receipt")
+        };
+        assert_eq!(receipt.stats().created_vertices, 2);
+        assert_eq!(count(&db, PERSON), 3);
+        // A row value and a carried element's property feed the MERGE map
+        // (Merge1 [12]); equal values share one vertex.
+        write(
+            &mut db,
+            "CREATE (a:Person {p: 7}) WITH a, a.p AS q UNWIND [1, 2] AS i \
+             MERGE (b:Copy {p: q}) CREATE (a)-[:R]->(b)",
+        )
+        .await
+        .unwrap();
+        let sevens = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| {
+                vertex.labels == vec![COPY]
+                    && vertex.props == vec![(P, CanonicalScalar::Int(7).into())]
+            })
+            .count();
+        assert_eq!(sevens, 1);
+        write(&mut db, "CREATE (a:Person {p: 8}) MERGE (:Copy {p: a.p})")
+            .await
+            .unwrap();
+        let eights = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| vertex.props == vec![(P, CanonicalScalar::Int(8).into())])
+            .count();
+        assert_eq!(eights, 2);
+        // ON/SET on a chained MERGE, RETURN after it, and a NULL map value
+        // refuse and publish nothing.
+        let frontier = db.frontier().unwrap();
+        for refused in [
+            "CREATE (a) MERGE (b:Copy) ON CREATE SET b.p = 1",
+            "MERGE (a:Person) MERGE (b:Copy) RETURN b",
+            "CREATE (a:Person) MERGE (b:Copy {p: a.q}) CREATE (a)-[:R]->(b)",
+            "CREATE (a:Person) WITH a MERGE (a) CREATE (b)",
+        ] {
+            assert!(write(&mut db, refused).await.is_err(), "{refused}");
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn readme_insert_example_runs_through_database_query_write() {
     let ((), report) = run_async_under_lab(0x1a5e_adaa, |root| async move {
