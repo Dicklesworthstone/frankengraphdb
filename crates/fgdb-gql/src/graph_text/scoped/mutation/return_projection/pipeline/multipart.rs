@@ -150,12 +150,11 @@ fn join_spec(
     let typed_keys = !keys.is_empty()
         && keys.iter().all(|&(l, r)| {
             left[l] == right[r]
-                && matches!(
-                    left[l],
-                    GraphSetColumnType::Scalar
-                        | GraphSetColumnType::Vertex
-                        | GraphSetColumnType::Edge
-                )
+                && (left[l].is_scalar_like()
+                    || matches!(
+                        left[l],
+                        GraphSetColumnType::Vertex | GraphSetColumnType::Edge
+                    ))
         });
     let spec = if typed_keys {
         RowJoinSpec::new(&left, &right, keys)

@@ -133,7 +133,7 @@ impl PreparedGraphEdgeUpsertQuery {
             .iter()
             .map(|binding| match binding {
                 GraphEdgeReturnBinding::Edge => GraphSetColumnType::Edge,
-                GraphEdgeReturnBinding::Property(_) => GraphSetColumnType::Scalar,
+                GraphEdgeReturnBinding::Property(_) => GraphSetColumnType::Stored,
             })
             .collect::<Vec<_>>();
         let grouping = grouping

@@ -239,7 +239,7 @@ impl<'a> Parser<'a> {
         if matches!(function, F::SumInt | F::AverageInt)
             && !matches!(
                 inputs.kind(column, schema),
-                GraphSetColumnType::Scalar | GraphSetColumnType::Any
+                GraphSetColumnType::Scalar | GraphSetColumnType::Stored | GraphSetColumnType::Any
             )
         {
             return Err(expected(

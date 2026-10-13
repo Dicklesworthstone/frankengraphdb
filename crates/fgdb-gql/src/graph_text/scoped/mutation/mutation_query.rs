@@ -154,7 +154,9 @@ impl<'a> Parser<'a> {
                 if matches!(function, F::SumInt | F::AverageInt)
                     && !matches!(
                         value.column_type(&leaves.types(), &self.syntax.parameters),
-                        GraphSetColumnType::Scalar | GraphSetColumnType::Any
+                        GraphSetColumnType::Scalar
+                            | GraphSetColumnType::Stored
+                            | GraphSetColumnType::Any
                     )
                 {
                     return Err(error(
@@ -548,7 +550,7 @@ impl<'a> ParsedMutationReturn<'a> {
                         current,
                     },
                     key,
-                    GraphSetColumnType::Scalar,
+                    GraphSetColumnType::Stored,
                 )
             }
             ReturnMapInput::Properties => {
@@ -979,7 +981,7 @@ pub(super) fn push_tail_read<'a>(
             text: name,
             at: key.at,
         },
-        GraphSetColumnType::Scalar,
+        GraphSetColumnType::Stored,
     ));
     reads.push((alias.text, key, schema.len() - 1));
     Ok(())

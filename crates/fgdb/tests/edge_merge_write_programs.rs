@@ -14,12 +14,14 @@ use fgdb_gql::{
     PreparedGraphWriteProgram, PreparedGraphWriteProgramTemplate,
 };
 use fgdb_types::{
-    CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
+    CanonicalList, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId,
+    EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
+const TAGS: PropertyKeyId = PropertyKeyId(3);
 const PERSON: LabelId = LabelId(1);
 const EDGE_TEXT: &str =
     "MATCH (a:Person),(b:Person) WHERE a.p=$left AND b.p=$right MERGE (a)-[:R]->(b)";
@@ -36,6 +38,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(PERSON)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        (GraphSymbolKind::Property, "tags") => Some(GraphSymbol::Property(TAGS)),
         _ => None,
     }
 }
@@ -835,6 +838,21 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
                 vec![(P, CanonicalScalar::Int(p))],
             );
         }
+        // fgdb-kr8j1: a stored List field is a RETURN cell like a scalar.
+        let tags = CanonicalList::try_new(vec![
+            CanonicalScalar::Int(1).into(),
+            CanonicalScalar::ucs_basic_text("x").unwrap().into(),
+        ])
+        .unwrap();
+        existing.add_edge_values(
+            EId(44),
+            VId(1),
+            VId(2),
+            vec![
+                (P, CanonicalScalar::Int(6).into()),
+                (TAGS, CanonicalPropertyValue::List(tags)),
+            ],
+        );
         db.write(&commit, existing).await.unwrap();
         // RETURN rows as graph values; None if the statement was dispatched
         // to the no-result program engine or a cell left the value domain.
@@ -909,6 +927,21 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
                 &["n"],
             ),
             Some(vec![vec![int(2)]])
+        );
+        let text = |value| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+        assert_eq!(
+            rows(
+                staged(
+                    "(a)-[e:S {p: 6}]->(b) RETURN e.tags AS tags, e.p AS p",
+                    0,
+                    &mut none,
+                ),
+                &["tags", "p"],
+            ),
+            Some(vec![vec![
+                GraphValue::List(vec![int(1), text("x")].into_boxed_slice()),
+                int(6),
+            ]])
         );
         // A miss creates one edge; RETURN reads it from the staged graph.
         let created = staged(

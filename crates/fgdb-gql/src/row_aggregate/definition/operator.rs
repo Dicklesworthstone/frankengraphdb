@@ -355,10 +355,9 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                 | Function::SumIntDistinct
                 | Function::AverageInt
                 | Function::AverageIntDistinct => column.is_some_and(|column| {
-                    matches!(
-                        schema.get(column),
-                        Some(GraphSetColumnType::Scalar | GraphSetColumnType::Any)
-                    )
+                    schema.get(column).is_some_and(|kind| {
+                        kind.is_scalar_like() || *kind == GraphSetColumnType::Any
+                    })
                 }),
                 Function::Collect | Function::CollectDistinct => {
                     column.is_some() && definition.incremental_collection_order().is_some()

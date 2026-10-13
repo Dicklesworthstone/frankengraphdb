@@ -101,16 +101,7 @@ pub(super) fn append_transcript(spec: &RowJoinSpec, bytes: &mut Vec<u8>) {
     for types in [spec.left_types(), spec.right_types()] {
         bytes.extend_from_slice(&(types.len() as u64).to_be_bytes());
         for kind in types {
-            bytes.push(match kind {
-                GraphSetColumnType::Vertex => 0,
-                GraphSetColumnType::Scalar => 1,
-                GraphSetColumnType::Path => 2,
-                GraphSetColumnType::Vertices => 3,
-                GraphSetColumnType::Edges => 4,
-                GraphSetColumnType::Edge => 5,
-                GraphSetColumnType::List => 6,
-                GraphSetColumnType::Any => 7,
-            });
+            bytes.push(kind.tag());
         }
     }
     bytes.extend_from_slice(&(spec.keys().len() as u64).to_be_bytes());

@@ -670,7 +670,9 @@ impl<'a> Parser<'a> {
                 .position(|(name, _)| name.text == word)
             && match schema[column].1 {
                 crate::GraphSetColumnType::Any => true,
-                crate::GraphSetColumnType::Scalar => self.temporal_field_follows()?,
+                crate::GraphSetColumnType::Scalar | crate::GraphSetColumnType::Stored => {
+                    self.temporal_field_follows()?
+                }
                 _ => false,
             }
         {
@@ -859,10 +861,8 @@ impl<'a> Parser<'a> {
                     // projection) is checked per value by the evaluator, which
                     // answers a typed NonScalar/NonInteger error, never a panic.
                     if let ExpressionColumns::Row(schema) = columns
-                        && !matches!(
-                            schema[column].1,
-                            crate::GraphSetColumnType::Scalar | crate::GraphSetColumnType::Any
-                        )
+                        && !schema[column].1.is_scalar_like()
+                        && schema[column].1 != crate::GraphSetColumnType::Any
                     {
                         return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
                     }

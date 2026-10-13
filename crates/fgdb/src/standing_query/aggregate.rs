@@ -137,8 +137,15 @@ fn aggregate_functions_eligible(query: &PreparedGraphAggregate) -> bool {
             | GraphAggregateFunction::AverageInt
             | GraphAggregateFunction::AverageIntDistinct => {
                 aggregate.argument_column().is_some_and(|column| {
-                    query.incremental_input_column_type(column)
-                        == Some(fgdb_gql::GraphSetColumnType::Scalar)
+                    query
+                        .incremental_input_column_type(column)
+                        .is_some_and(|kind| {
+                            matches!(
+                                kind,
+                                fgdb_gql::GraphSetColumnType::Scalar
+                                    | fgdb_gql::GraphSetColumnType::Stored
+                            )
+                        })
                 })
             }
             _ => false,

@@ -140,7 +140,7 @@ impl PreparedGraphEdgeMergeQuery {
                 GraphEdgeMergeBinding::Edge => GraphSetColumnType::Edge,
                 GraphEdgeMergeBinding::Endpoint { .. } => GraphSetColumnType::Vertex,
                 GraphEdgeMergeBinding::Property(_)
-                | GraphEdgeMergeBinding::EndpointProperty { .. } => GraphSetColumnType::Scalar,
+                | GraphEdgeMergeBinding::EndpointProperty { .. } => GraphSetColumnType::Stored,
             });
         }
         let grouping = grouping
@@ -265,15 +265,14 @@ impl PreparedGraphEdgeMergeQuery {
             }
             for ((binding, kind), value) in self.bindings.iter().zip(&self.input_types).zip(row) {
                 work()?;
+                // A field cell is a stored value: a scalar or a stored list.
                 let admitted = match binding {
-                    GraphEdgeMergeBinding::Input(_) => kind.accepts(value),
+                    GraphEdgeMergeBinding::Input(_)
+                    | GraphEdgeMergeBinding::Property(_)
+                    | GraphEdgeMergeBinding::EndpointProperty { .. } => kind.accepts(value),
                     GraphEdgeMergeBinding::Edge => matches!(value, GraphValue::Edge(_)),
                     GraphEdgeMergeBinding::Endpoint { .. } => {
                         matches!(value, GraphValue::Vertex(_))
-                    }
-                    GraphEdgeMergeBinding::Property(_)
-                    | GraphEdgeMergeBinding::EndpointProperty { .. } => {
-                        matches!(value, GraphValue::Scalar(_))
                     }
                 };
                 if !admitted {

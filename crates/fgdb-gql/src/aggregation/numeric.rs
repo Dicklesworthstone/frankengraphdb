@@ -357,7 +357,7 @@ impl PreparedGraphAggregate {
         keys: &[GraphValue],
         values: &[GraphAggregateValue],
     ) -> bool {
-        use crate::GraphSetColumnType::{Any, Scalar};
+        use crate::GraphSetColumnType::{Any, Scalar, Stored};
         if keys.len() != self.keys.len() || values.len() != self.aggregates.len() {
             return false;
         }
@@ -385,13 +385,13 @@ impl PreparedGraphAggregate {
                     argument.is_some() && matches!(value, GraphAggregateValue::Count(_))
                 }
                 GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
-                    matches!(argument, Some(Scalar | Any))
+                    matches!(argument, Some(Scalar | Stored | Any))
                         && (matches!(value, GraphAggregateValue::Integer(_))
                             || floating
                             || value.is_null())
                 }
                 GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
-                    matches!(argument, Some(Scalar | Any))
+                    matches!(argument, Some(Scalar | Stored | Any))
                         && (matches!(value, GraphAggregateValue::Average(_))
                             || floating
                             || value.is_null())

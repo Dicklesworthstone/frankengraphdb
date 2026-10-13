@@ -263,7 +263,7 @@ impl<'a> ParsedReturn<'a> {
                 ReturnMapInput::Property(key) => (
                     Binding::VertexProperty(vertex, key),
                     key,
-                    GraphSetColumnType::Scalar,
+                    GraphSetColumnType::Stored,
                 ),
                 ReturnMapInput::Properties => (
                     Binding::VertexProperties(vertex),
@@ -279,7 +279,7 @@ impl<'a> ParsedReturn<'a> {
                 ReturnMapInput::Property(key) => (
                     Binding::EdgeProperty(edge, key),
                     key,
-                    GraphSetColumnType::Scalar,
+                    GraphSetColumnType::Stored,
                 ),
                 ReturnMapInput::Properties => {
                     (Binding::EdgeProperties(edge), name, GraphSetColumnType::Any)
@@ -330,7 +330,7 @@ impl<'a> ParsedReturn<'a> {
                 if matches!(input, ReturnMapInput::Properties) {
                     GraphSetColumnType::Any
                 } else if property.is_some() {
-                    GraphSetColumnType::Scalar
+                    GraphSetColumnType::Stored
                 } else {
                     kind
                 },
