@@ -351,3 +351,117 @@ fn one_permit_covers_native_aggregate_admission_and_late_failures_under_zero_pag
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+// fgdb-xtsw3: parallel edges, parallel self-loops and a hidden vertex that
+// closes one more triangle separate DIFFERENT EDGES counts from walk counts and
+// the scoped graph from the unscoped one.
+async fn cycles(cx: &CommitCx, visible_only: bool) -> Database<MemVfs> {
+    let mut db = Database::open_memory(cx, DatabaseKeys::new([0x25; 32], NS, [0x36; 32]))
+        .await
+        .unwrap();
+    let mut batch = WriteBatch::new(RelationId(1));
+    for (id, value) in [(0, 0), (1, 10), (2, 20), (3, 30), (4, 40), (9, 90)] {
+        if visible_only && id == 9 {
+            continue;
+        }
+        let labels = vec![LabelId(if id == 9 { 99 } else { 1 })];
+        let mut properties = vec![(P, CanonicalScalar::Int(value))];
+        if !visible_only {
+            properties.push((H, CanonicalScalar::Int(value + 1)));
+        }
+        batch.create_vertex(VId(id), labels, properties);
+    }
+    for (id, from, to) in [
+        (20, 0, 1),
+        (21, 0, 1),
+        (22, 1, 2),
+        (23, 2, 0),
+        (24, 2, 0),
+        (25, 3, 3),
+        (26, 3, 3),
+        (27, 4, 4),
+        (28, 4, 4),
+        (29, 4, 4),
+        (30, 1, 9),
+        (31, 9, 0),
+    ] {
+        if !visible_only || (from != 9 && to != 9) {
+            batch.add_edge(EId(id), VId(from), VId(to), vec![]);
+        }
+    }
+    db.write(cx, batch).await.unwrap();
+    db
+}
+
+#[test]
+fn identified_edge_counts_and_reach_take_the_native_visitor_with_owner_results() {
+    let ((), report) = run_async_under_lab(0x5ec0_8504, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = cycles(&c.commit(), false).await;
+        let reference = cycles(&c.commit(), true).await;
+        let issuer = authority();
+        let scoped = issuer.issue_at(&grant(), 100).unwrap();
+        let mut open = grant();
+        open.labels = Scope::All;
+        open.relations = Scope::All;
+        open.properties = Scope::All;
+        let open = issuer.issue_at(&open, 100).unwrap();
+        // (text, visible count, unscoped count, scratch): triangles are 3
+        // rotations of 2*1*2 and 2*1*1 bindings plus 3! over three loops; two
+        // loops give 0. The visitor answers within a scratch allowance that
+        // materializing every pattern row first exceeds. Measured minimum
+        // scratch, visitor vs materialized: triangles 105..131 vs 339..467,
+        // reach 50..58 vs 507..725, bound reach 43..51 vs 131..183.
+        for (text, visible, unscoped, scratch) in [
+            (
+                "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN COUNT(*) AS n",
+                18,
+                24,
+                220,
+            ),
+            (
+                "MATCH (a)-[:R]->{1,3}(b) RETURN COUNT(DISTINCT b) AS n,MIN(b.p) AS lo,MAX(b.p) AS hi",
+                5,
+                6,
+                220,
+            ),
+            (
+                "MATCH (a {p: 0})-[:R]->{1,3}(b) RETURN COUNT(DISTINCT b) AS n,MAX(b.p) AS hi",
+                3,
+                4,
+                90,
+            ),
+        ] {
+            let definition = prepare(text);
+            assert!(
+                definition.answers_identified_edges_from_topology(),
+                "{text} must exercise the identified-edge route"
+            );
+            for (token, source, count) in [(&scoped, &reference, visible), (&open, &db, unscoped)] {
+                let expected = source
+                    .execute_graph_aggregate_governed(&cx, &definition, policy())
+                    .unwrap()
+                    .value;
+                assert_eq!(
+                    expected[0].values()[0],
+                    GraphAggregateValue::Count(count),
+                    "{text}"
+                );
+                let got = db
+                    .execute_graph_aggregate_authorized(
+                        &cx,
+                        &issuer,
+                        token,
+                        "main",
+                        &definition,
+                        GqlQueryPolicy::new(10_000, 1000, 1_000_000, scratch),
+                        || 100,
+                    )
+                    .unwrap();
+                assert_eq!(got, expected, "{text}");
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

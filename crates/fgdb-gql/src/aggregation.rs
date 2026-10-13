@@ -691,6 +691,16 @@ impl PreparedGraphAggregate {
     pub fn input_pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
         &self.input
     }
+    /// Whether execute_governed answers this definition exactly from
+    /// `(source, relation, target)` topology although its plan requires
+    /// identified edges: a clause-complete DIFFERENT EDGES count (fgdb-ujaad)
+    /// or a support-only quantified reach (fgdb-20vwx). Hosts that route on
+    /// `requires_identified_edges` use this to keep such definitions on the
+    /// binding visitor instead of materializing every pattern row.
+    #[must_use]
+    pub fn answers_identified_edges_from_topology(&self) -> bool {
+        self.input.plan().requires_identified_edges() && weighted::answers_identified_exactly(self)
+    }
     #[must_use]
     pub fn key_columns(&self) -> &[String] {
         if self.output_projection.is_some() {
