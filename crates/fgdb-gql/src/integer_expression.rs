@@ -411,14 +411,18 @@ pub enum GraphIntegerErrorKind {
     /// scalars, such as a numeric aggregate or a path weight (fgdb-k3nub).
     /// Refused, never read as NULL: NULL would silently change the answer.
     StoredCollection,
+    /// An argument outside its function's domain: a percentile outside
+    /// [0, 1] (openCypher ArgumentError NumberOutOfRange, fgdb-qbaex).
+    NumberOutOfRange,
 }
 impl GraphIntegerErrorKind {
     /// A data exception that every statement family raises, a WHERE predicate
-    /// included: division by zero, numeric overflow (GQL class 22), and a
-    /// stored value too large to read whole or read by a scalar-only
-    /// operator. The other kinds are a value that does not fit its operator.
-    /// A Boolean predicate reads those as UNKNOWN, so a property holding
-    /// mixed types never escapes as a query error.
+    /// included: division by zero, numeric overflow (GQL class 22), a stored
+    /// value too large to read whole or read by a scalar-only operator, and
+    /// an argument outside its function's domain. The other kinds are a
+    /// value that does not fit its operator. A Boolean predicate reads those
+    /// as UNKNOWN, so a property holding mixed types never escapes as a
+    /// query error.
     #[must_use]
     pub const fn is_arithmetic_exception(self) -> bool {
         matches!(
@@ -427,6 +431,7 @@ impl GraphIntegerErrorKind {
                 | Self::Overflow
                 | Self::StoredValueBounds
                 | Self::StoredCollection
+                | Self::NumberOutOfRange
         )
     }
 }

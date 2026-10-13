@@ -444,3 +444,71 @@ fn integer_only_native_division_and_nullable_float_results_remain_distinct() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// percentileDisc and percentileCont (fgdb-qbaex, TCK Aggregation6): NULL is
+/// skipped, the numbers sort whatever order they are collected in, Disc
+/// returns the element as stored and Cont interpolates as a Float. A
+/// percentile outside [0, 1] or not a number raises; a NULL one, or an empty
+/// group, is NULL.
+#[test]
+fn percentile_aggregates_sort_the_collected_numbers_and_check_the_percentile() {
+    let ((), report) = run_async_under_lab(0xf10a_0107, |root| async move {
+        let cx = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&cx.commit(), keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        // Scanned as 30.0, 10, 40.0, 20.0 and an absent p.
+        seed.create_vertex(VId(1), vec![NODE], vec![(P, float(30.0))]);
+        seed.create_vertex(VId(2), vec![NODE], vec![(P, CanonicalScalar::Int(10))]);
+        seed.create_vertex(VId(3), vec![NODE], vec![(P, float(40.0))]);
+        seed.create_vertex(VId(4), vec![NODE], vec![(P, float(20.0))]);
+        seed.create_vertex(VId(5), vec![NODE], vec![(ID, CanonicalScalar::Int(5))]);
+        db.write(&cx.commit(), seed).await.unwrap();
+        let run = |text: &str, arguments: &GqlParameters| {
+            db.query(&cx.query(), text, arguments, symbols, query_policy())
+        };
+        let disc = "MATCH (n:Node) RETURN percentileDisc(n.p, $rate) AS value";
+        let cont = "MATCH (n:Node) RETURN percentileCont(n.p, $rate) AS value";
+        let one = GqlParameters::new().with_int64("rate", 1).unwrap();
+        for (text, arguments, expected) in [
+            (disc, parameter(float(0.0)), CanonicalScalar::Int(10)),
+            (disc, parameter(float(0.5)), float(20.0)),
+            (disc, parameter(float(0.6)), float(30.0)),
+            (disc, one.clone(), float(40.0)),
+            (cont, parameter(float(0.0)), float(10.0)),
+            (cont, parameter(float(0.25)), float(17.5)),
+            (cont, parameter(float(0.5)), float(25.0)),
+            (cont, one, float(40.0)),
+            (
+                disc,
+                parameter(CanonicalScalar::Null),
+                CanonicalScalar::Null,
+            ),
+            (
+                "MATCH (n:Node) WHERE n.p > 100 RETURN percentileCont(n.p, $rate) AS value",
+                parameter(float(0.5)),
+                CanonicalScalar::Null,
+            ),
+        ] {
+            assert_eq!(
+                cells(run(text, &arguments).unwrap()),
+                vec![vec![expected]],
+                "{text}"
+            );
+        }
+        for (text, arguments) in [
+            (disc, parameter(float(1.5))),
+            (cont, GqlParameters::new().with_int64("rate", -1).unwrap()),
+        ] {
+            let refused = run(text, &arguments);
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|error| format!("{error:?}").contains("NumberOutOfRange")),
+                "{text}: {refused:?}"
+            );
+        }
+        let text = parameter(CanonicalScalar::ucs_basic_text("half").unwrap());
+        assert!(run(disc, &text).is_err());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
