@@ -710,6 +710,21 @@ fn map_rows_drive_create_properties() {
             ),
             vec![vec![list([text("a"), text("b")])]]
         );
+        // SET from a property column that holds a stored List refuses typed
+        // at execution and commits nothing; it panicked the process
+        // ("complete input schema checked"). Writing it is fgdb-k3nub's.
+        let copied = "MATCH (n:Listed), (m:Tag) SET m.first = n.name";
+        let result = write(&mut db, cxs, copied, &empty).await;
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.starts_with("execute:")),
+            "{copied}: {result:?}"
+        );
+        assert_eq!(
+            query(&db, "MATCH (m:Tag) RETURN m.first AS first"),
+            vec![vec![int(42)]]
+        );
     });
 }
 
