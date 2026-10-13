@@ -101,8 +101,9 @@ pub struct PreparedGraphMutationText {
     pub(crate) optional_root: bool,
     /// `MATCH ... WITH ... SET`: the read relation through the last WITH
     /// stage (fgdb-sl4ym). Every action and RETURN binding indexes its row,
-    /// and it owns the statement's parameter table.
-    pub(crate) row: Option<crate::set_text::BoundSetTextInput>,
+    /// and it owns the statement's parameter table. Boxed: most mutations
+    /// have no WITH row, and inline it doubled every write statement's size.
+    pub(crate) row: Option<Box<crate::set_text::BoundSetTextInput>>,
 }
 impl core::fmt::Debug for PreparedGraphMutationText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

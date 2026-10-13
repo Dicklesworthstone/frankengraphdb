@@ -756,7 +756,7 @@ impl PreparedGraphMutationText {
                     relation,
                     actions,
                     optional_root: false,
-                    row: Some(row),
+                    row: Some(Box::new(row)),
                 },
                 returning,
             ));
