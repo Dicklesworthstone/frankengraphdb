@@ -242,3 +242,311 @@ impl WriteTxn {
         })
     }
 }
+
+type NativeEdgeUpsertQueryResult<A> = Result<
+    (
+        fgdb_gql::GraphEdgeUpsertStats,
+        fgdb_gql::GraphEdgeMergeOutcome,
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+    ),
+    TxnGqlError<fgdb_gql::GraphEdgeUpsertQueryError<WriteTxnError, A>>,
+>;
+
+impl WriteTxn {
+    /// Execute relationship MERGE, ON/SET actions and RETURN atomically in the
+    /// caller's workspace. RETURN observes the selected edge's final staged
+    /// properties through the ordinary governed, witnessed point reader.
+    ///
+    /// Result cells, property payloads and projection/aggregation/order/page
+    /// evaluation consume the original cumulative allowance. The workspace is
+    /// accepted only after all results succeed; refusal or unwinding restores
+    /// its prior staged prefix without discarding read witnesses or issued IDs.
+    /// NoInput evaluates no row-local expression, but a global aggregate may
+    /// still return its empty-input result. Returned rows are not a commit.
+    pub fn execute_graph_edge_upsert_query_governed<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphEdgeUpsertQuery,
+        policy: fgdb_gql::GraphEdgeUpsertPolicy,
+        allocate: impl FnMut(fgdb_gql::GraphEdgeMergeRequest) -> Result<ElementId, A>,
+    ) -> NativeEdgeUpsertQueryResult<A> {
+        use fgdb_gql::algebra::GraphValue;
+        use fgdb_gql::{
+            GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlQueryError,
+            GraphEdgeReturnBinding, GraphEdgeUpsertError, GraphEdgeUpsertQueryError,
+        };
+        self.ensure_database(database).map_err(|error| {
+            GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
+                GraphEdgeUpsertError::Staging(error),
+            ))
+        })?;
+        cx.with_restriction(|| {
+            let workspace = MutationProgramWorkspace::new(self);
+            let (stats, outcome) = workspace
+                .txn
+                .execute_graph_edge_upsert_governed(
+                    database,
+                    cx,
+                    query.upsert(),
+                    policy,
+                    allocate,
+                )
+                .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
+            let mut evaluator = stats.evaluator;
+            let mut control = |event| -> Result<
+                (),
+                TxnGqlError<GraphEdgeUpsertError<WriteTxnError, A>>,
+            > {
+                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                let work = u128::from(evaluator.work_units) + 1;
+                let scratch = u128::from(evaluator.scratch_entries)
+                    + u128::from(event == GlaExecutionEvent::ScratchEntry);
+                for (observed, limit, dimension) in [
+                    (
+                        work,
+                        policy.merge.query.evaluator.max_work_units,
+                        GlaLimitDimension::WorkUnits,
+                    ),
+                    (
+                        scratch,
+                        policy.merge.query.evaluator.max_scratch_entries,
+                        GlaLimitDimension::ScratchEntries,
+                    ),
+                ] {
+                    if observed > u128::from(limit) {
+                        return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                            dimension,
+                            limit,
+                            observed,
+                        }));
+                    }
+                }
+                evaluator.work_units = work as u64;
+                evaluator.scratch_entries = scratch as u64;
+                Ok(())
+            };
+            let row = (|| -> Result<
+                Option<Vec<GraphValue>>,
+                TxnGqlError<GraphEdgeUpsertError<WriteTxnError, A>>,
+            > {
+                let Some(edge) = outcome.edge() else {
+                    return Ok(None);
+                };
+                control(GlaExecutionEvent::ScratchEntry)?;
+                let mut cells = Vec::new();
+                for binding in query.bindings() {
+                    // Admit ownership before allocating a cell or cloning a
+                    // property. The shared reader also admits its payload.
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    cells.push(match *binding {
+                        GraphEdgeReturnBinding::Edge => GraphValue::Edge(edge),
+                        GraphEdgeReturnBinding::Property(key) => GraphValue::Scalar(
+                            edge_upsert_property(
+                                workspace.txn,
+                                database,
+                                edge,
+                                key,
+                                &mut control,
+                            )?,
+                        ),
+                    });
+                }
+                Ok(Some(cells))
+            })()
+            .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
+            drop(control);
+            let returning = query
+                .project_governed(
+                    row,
+                    stats.merge.match_selection,
+                    evaluator,
+                    policy.merge.query,
+                    || cx.checkpoint(),
+                )
+                .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Returning))?;
+            workspace.accept();
+            Ok((stats, outcome, returning))
+        })
+    }
+
+    /// The same RETURN executor with identities reserved by the database.
+    pub fn execute_graph_edge_upsert_query_engine_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphEdgeUpsertQuery,
+        policy: fgdb_gql::GraphEdgeUpsertPolicy,
+    ) -> NativeEdgeUpsertQueryResult<WriteTxnError> {
+        let infrastructure = |error| {
+            fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphEdgeUpsertQueryError::Upsert(
+                fgdb_gql::GraphEdgeUpsertError::Staging(error),
+            ))
+        };
+        self.ensure_database(database).map_err(infrastructure)?;
+        let mut allocate = database.engine_allocator(cx).map_err(infrastructure)?;
+        self.execute_graph_edge_upsert_query_governed(database, cx, query, policy, |_| {
+            allocate(fgdb_gql::insertion::GraphInsertRequest::Edge { row: 0, edge: 0 })
+        })
+    }
+}
+
+#[cfg(test)]
+mod native_edge_upsert_return_tests {
+    use super::*;
+    use crate::DatabaseKeys;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{
+        GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeMergeOutcome,
+        GraphEdgeMergePolicy, GraphEdgeUpsertPolicy, GraphEdgeUpsertQueryError,
+        GraphSymbol, GraphSymbolKind, PreparedGraphEdgeUpsertQueryText,
+    };
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const R: RelationId = RelationId(1);
+    const P: PropertyKeyId = PropertyKeyId(1);
+    const Q: PropertyKeyId = PropertyKeyId(2);
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn keyed_upsert_return_reads_staged_branches_and_restores_failed_creation() {
+        let ((), report) = run_async_under_lab(0xe6e0_0002, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let keys = DatabaseKeys::new(
+                [0x41; 32],
+                DatabaseSecurityNamespaceId([0x42; 32]),
+                [0x43; 32],
+            );
+            let mut db = Database::open_memory(&commit, keys).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
+            prefix.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(2))]);
+            transaction.write(&mut db, prefix).unwrap();
+            let policy = GraphEdgeUpsertPolicy::new(
+                GraphEdgeMergePolicy::new(GqlQueryPolicy::new(
+                    1_000, 100, 5_000_000, 2_000_000,
+                )),
+                100,
+            );
+            let next = AtomicU64::new(100);
+            let mut allocate = |_| -> Result<ElementId, ()> {
+                Ok(ElementId::Edge(EId(u128::from(
+                    next.fetch_add(1, Ordering::Relaxed),
+                ))))
+            };
+            for (pattern, key, expected_edge, expected_count, created) in [
+                ("(a)-[r:R {p:$key}]-(b)", 7, 100, 9, true),
+                ("(a)-[r:R {p:$key}]-(b)", 7, 100, 20, false),
+                ("(b)-[r:R {p:$key}]-(a)", 7, 100, 31, false),
+                ("(a)-[r:R {p:$key}]-(b)", 8, 101, 10, true),
+            ] {
+                let text = format!(
+                    "MATCH (a),(b) WHERE a.p=1 AND b.p=2 MERGE {pattern} \
+                     ON CREATE SET r.q=r.p+1 ON MATCH SET r.q=r.q+10 \
+                     SET r.q=r.q+1 RETURN r,r.p AS key,r.q AS count"
+                );
+                let arguments = GqlParameters::new().with_int64("key", key).unwrap();
+                let query = PreparedGraphEdgeUpsertQueryText::prepare(&text, R, symbols)
+                    .unwrap()
+                    .bind_parameters(&arguments)
+                    .unwrap();
+                let (stats, outcome, rows) = transaction
+                    .execute_graph_edge_upsert_query_governed(
+                        &mut db,
+                        &cx,
+                        &query,
+                        policy,
+                        &mut allocate,
+                    )
+                    .unwrap();
+                assert_eq!(outcome.created(), created);
+                assert_eq!(outcome.edge(), Some(EId(expected_edge)));
+                assert_eq!(rows.value.len(), 1);
+                assert_eq!(
+                    rows.value[0].values(),
+                    &[
+                        GraphValue::Edge(EId(expected_edge)),
+                        GraphValue::Scalar(CanonicalScalar::Int(key)),
+                        GraphValue::Scalar(CanonicalScalar::Int(expected_count)),
+                    ]
+                );
+                assert!(rows.evaluator.work_units > stats.evaluator.work_units);
+                assert!(rows.evaluator.scratch_entries > stats.evaluator.scratch_entries);
+            }
+            assert_eq!(next.load(Ordering::Relaxed), 102);
+            let digest = transaction.staged_effect_digest().unwrap();
+            let failing = PreparedGraphEdgeUpsertQueryText::prepare(
+                "MATCH (a),(b) WHERE a.p=1 AND b.p=2 \
+                 MERGE (a)-[r:R {p:9}]-(b) ON CREATE SET r.q=0 \
+                 RETURN 10/r.q AS bad LIMIT 0",
+                R,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let result = transaction.execute_graph_edge_upsert_query_governed(
+                &mut db,
+                &cx,
+                &failing,
+                policy,
+                &mut allocate,
+            );
+            assert!(matches!(
+                result,
+                Err(GqlQueryError::Source(GraphEdgeUpsertQueryError::Returning(_)))
+            ));
+            assert_eq!(next.load(Ordering::Relaxed), 103);
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.edges(&db).unwrap().len(), 2);
+            assert!(db.edges().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), before);
+            transaction.finish(&mut db, &commit).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            let first = db.edge(EId(100)).unwrap().unwrap();
+            assert_eq!((first.entry.src, first.entry.dst), (VId(1), VId(2)));
+            assert_eq!(first.props, vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(31))]);
+            assert!(db.edge(EId(102)).unwrap().is_none());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+            // A missing MATCH input does not allocate an edge or evaluate the
+            // failing row-local RETURN expression.
+            let query = PreparedGraphEdgeUpsertQueryText::prepare(
+                "MATCH (a),(b) WHERE a.p=99 AND b.p=2 \
+                 MERGE (a)-[r:R {p:9}]-(b) ON CREATE SET r.q=0 RETURN 10/r.q AS bad",
+                R,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let mut empty = db.begin(&txcx).unwrap();
+            let (_, outcome, rows) = empty
+                .execute_graph_edge_upsert_query_governed(
+                    &mut db, &cx, &query, policy, &mut allocate,
+                )
+                .unwrap();
+            assert_eq!(outcome, GraphEdgeMergeOutcome::NoInput);
+            assert!(rows.value.is_empty());
+            assert_eq!(next.load(Ordering::Relaxed), 103);
+            empty.abort();
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
