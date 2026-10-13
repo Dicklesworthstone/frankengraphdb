@@ -141,6 +141,7 @@ impl PreparedGraphMutationText {
                 )
                 | MutationActionTemplate::ParameterProperty { key, .. }
                 | MutationActionTemplate::IntegerProperty { key, .. }
+                | MutationActionTemplate::CompositeProperty { key, .. }
                 | MutationActionTemplate::ValueProperty { key, .. } => {
                     writes = true;
                     keys.insert(*key);
