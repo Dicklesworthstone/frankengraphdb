@@ -690,7 +690,14 @@ fn a_relationship_merge_after_create_resolves_the_created_rows() {
             unreachable!("a chain with RETURN answers rows")
         };
         assert_eq!(columns, ["c"]);
-        assert_eq!(rows, [vec![QueryValue::Count(1)]]);
+        // A write RETURN's count is an Int value, as main's edge upsert
+        // RETURN laws pin it.
+        let int = |value| {
+            QueryValue::Value(fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(
+                value,
+            )))
+        };
+        assert_eq!(rows, [vec![int(1)]]);
         assert_eq!(db.edges().unwrap().len(), 1);
         // Without RETURN, after a WITH and written right to left: a receipt
         // with one step per write, and the edge runs from `a`.
@@ -732,7 +739,7 @@ fn a_relationship_merge_after_create_resolves_the_created_rows() {
         let QueryResult::Rows { rows, .. } = counted else {
             unreachable!("a chain with RETURN answers rows")
         };
-        assert_eq!(rows, [vec![QueryValue::Count(3)]]);
+        assert_eq!(rows, [vec![int(3)]]);
         assert_eq!(db.edges().unwrap().len(), 4);
         // The MERGE sees the CREATE's own relationship and matches it.
         write(
