@@ -468,6 +468,7 @@ impl<'a> Parser<'a> {
         let mut arithmetic = false;
         let mut operand_end = false;
         let mut after_dot = false;
+        let mut previous = None;
         let property_compound = self.starts_compound_property_predicate()?;
         // A comparison chain (`a.p < b.q = c.r`) needs the scalar compiler;
         // `<=`, `<>`, `>=` and `!=` each count once.
@@ -528,14 +529,13 @@ impl<'a> Parser<'a> {
                     {
                         return Ok(true);
                     }
+                    // The atom ends at AND/OR or at any clause keyword: a
+                    // following `CREATE (a)-[:R]->(b)` is not arithmetic.
                     if depth == 0
                         && !after_dot
-                        && [
-                            "AND", "OR", "RETURN", "SET", "REMOVE", "WITH", "MATCH", "OPTIONAL",
-                            "CREATE", "INSERT", "DELETE", "DETACH", "MERGE",
-                        ]
-                        .iter()
-                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                        && (word.eq_ignore_ascii_case("AND")
+                            || word.eq_ignore_ascii_case("OR")
+                            || Self::ends_where(word, previous))
                     {
                         break;
                     }
@@ -570,6 +570,7 @@ impl<'a> Parser<'a> {
             };
             after_dot = matches!(token.kind, TokenKind::Punct(b'.'));
             comparing = matches!(token.kind, TokenKind::Punct(b'<' | b'>' | b'=' | b'!'));
+            previous = Some(token.kind);
             token = lexer.next()?;
         }
         Ok(arithmetic)
