@@ -215,17 +215,9 @@ impl WriteReturnGroupTemplate {
                 ),
             });
         }
-        // write_return_items emits a column permutation of keys/summaries.
-        // Refuse an unexpected projection shape rather than partially remap
-        // it, even if a future compiler broadens that internal contract.
-        if projection.iter().any(
-            |output| !matches!(output.value, ReadValueTemplate::Column(column) if column < width),
-        ) {
-            return Err(GraphPatternTextError {
-                offset: at,
-                kind: GraphPatternTextErrorKind::Expected("native grouped write output columns"),
-            });
-        }
+        // Validate every nested output before changing the grouping shape.
+        // Remap native expression references, including compound summaries.
+        Self::remap_hidden_key_outputs(projection, old_keys, width, at)?;
         if existing.is_none() {
             self.inputs.push(ReadProjectionTemplate {
                 name: format!("__write_input_{input}"),
@@ -233,13 +225,7 @@ impl WriteReturnGroupTemplate {
             });
         }
         self.keys.push(input);
-        for output in projection {
-            if let ReadValueTemplate::Column(column) = &mut output.value
-                && *column >= old_keys
-            {
-                *column += 1;
-            }
-        }
+
         Ok(old_keys)
     }
 }

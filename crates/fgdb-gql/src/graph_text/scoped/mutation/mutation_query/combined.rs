@@ -1,6 +1,11 @@
 //! Compound aggregates over the write owner's final-state rows. No source
 //! text is rewritten, no graph is rescanned, and no second evaluator exists.
 
+mod hoist;
+
+#[cfg(test)]
+mod grouped_tests;
+
 use super::*;
 use crate::GraphAggregateFunction as Function;
 use crate::graph_text::aggregate::remap_output_columns;
