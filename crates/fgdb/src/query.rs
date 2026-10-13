@@ -453,6 +453,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// and its errors retain input-record coordinates; no per-row commit occurs.
     /// Relationship ON/SET RETURN preserves every MATCH occurrence and parallel
     /// match, using one atomic bulk executor and the original allocator row IDs.
+    /// Vertex MERGE RETURN/WITH processes every matching target, or creates
+    /// one vertex when absent. Explicit unique typed entrypoints stay unique.
     #[allow(clippy::too_many_arguments)]
     // Returns once per statement/script and wraps the script execution error,
     // whose record location plus program error is deliberate (write_scripts).
@@ -517,8 +519,8 @@ impl<V: Vfs + Clone> Database<V> {
             let query = prepare_vertex_upsert_return(text, params, resolver, relation)
                 .map_err(QueryWriteError::VertexUpsertText)?;
             let columns = query.columns().to_vec();
-            let (_, _, rows, _) = self
-                .execute_graph_vertex_upsert_query_autocommit_governed(
+            let (_, rows, _) = self
+                .execute_graph_vertex_upserts_query_autocommit_governed(
                     txcx,
                     cx,
                     commit_cx,
@@ -616,6 +618,8 @@ impl WriteTxn {
     /// Result pagination never limits effects or hides a failing expression.
     /// Relationship ON/SET RETURN processes the complete occurrence bag before
     /// projection or WITH; a late failure restores the prior staged prefix.
+    /// Returning vertex MERGE uses the same all-target semantics as the
+    /// autocommit API; output limits never choose which targets are updated.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)] // once-per-statement report, as above
     pub fn query_write<V: Vfs + Clone, A>(
@@ -668,8 +672,8 @@ impl WriteTxn {
             let query = prepare_vertex_upsert_return(text, params, resolver, relation)
                 .map_err(QueryWriteError::VertexUpsertText)?;
             let columns = query.columns().to_vec();
-            let (_, _, rows) = self
-                .execute_graph_vertex_upsert_query_governed(
+            let (_, rows) = self
+                .execute_graph_vertex_upserts_query_governed(
                     database,
                     cx,
                     &query,
