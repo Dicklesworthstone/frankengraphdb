@@ -349,9 +349,11 @@ impl WriteTxn {
     /// next tuple selects, so a later row sees an earlier row's vertex, as
     /// openCypher's row-by-row MERGE does. That holds even when two
     /// different tuples compare equal, such as `1` and `1.0`. The receipt
-    /// lists each tuple's outcomes. The rows are each input row's kept
-    /// columns followed by each of its vertices; each one, like each tuple,
-    /// takes one scratch entry.
+    /// lists each tuple's outcomes. The result carries the input rows (the
+    /// previous write's, a leading UNWIND's, or one empty row) and one
+    /// (input row, vertex) pair per vertex each row merged, in row order and
+    /// then identity order. Each pair, like each tuple, takes one scratch
+    /// entry.
     pub(crate) fn execute_graph_vertex_merges_over<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -379,14 +381,22 @@ impl WriteTxn {
                 live,
             }));
         }
-        let rows = merge.input_rows(owned).map_err(GqlQueryError::Source)?;
         cx.with_restriction(|| {
+            let selected = merge.select_governed::<WriteTxnError, A, _>(
+                owned,
+                policy.query,
+                |pattern, allowance| {
+                    self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                },
+                || cx.checkpoint(),
+            )?;
+            let rows = selected.value;
             let mut used = GraphVertexMergeStats {
                 match_selection: GqlExecutionStats {
-                    snapshot_records: 0,
+                    snapshot_records: selected.rows.snapshot_records,
                     result_rows: 0,
                 },
-                evaluator: GlaExecutionStats::default(),
+                evaluator: selected.evaluator,
                 created_vertices: 0,
             };
             // One scratch entry, within the statement's cumulative allowance.
@@ -410,7 +420,7 @@ impl WriteTxn {
                 std::collections::BTreeMap::new();
             let mut outcomes = Vec::new();
             let mut created = Vec::new();
-            let mut output = Vec::new();
+            let mut pairs = Vec::new();
             for (at, row) in rows.iter().enumerate() {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                 let tuple = merge.tuple(at, row).map_err(GqlQueryError::Source)?;
@@ -532,15 +542,28 @@ impl WriteTxn {
                 }
                 for vertex in &resolved[&tuple] {
                     scratch(&mut used)?;
-                    output.push(merge.output_row(row, *vertex));
+                    pairs.push((at, *vertex));
                 }
             }
             Ok((
                 used,
                 GraphWriteStepReceipt::VertexMergeRows { outcomes, created },
-                output,
+                rows,
+                pairs,
             ))
         })
+    }
+
+    /// One final-state stored property of a vertex a MERGE step returned,
+    /// read through the governed point projection and witnessed, as
+    /// relationship MERGE RETURN reads its endpoints. A missing field is NULL.
+    pub(crate) fn merged_vertex_property<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        vertex: VId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Result<Option<CanonicalPropertyValue>, WriteTxnError> {
+        self.merge_return_property(database, ElementId::Vertex(vertex), key)
     }
 }
 

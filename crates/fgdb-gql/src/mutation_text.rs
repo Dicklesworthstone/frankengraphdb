@@ -349,6 +349,30 @@ pub(crate) enum VertexMergeRowValueTemplate {
     Column(usize),
 }
 
+/// The rows a vertex MERGE step reads (fgdb-cpny9).
+#[derive(Clone)]
+pub(crate) enum VertexMergeRowsTextInput {
+    /// The one empty row of a statement whose first write is this MERGE.
+    Unit,
+    /// The previous write's rows, of these column types.
+    Owned(Vec<crate::GraphSetColumnType>),
+    /// A statement's leading UNWIND.
+    Relation(Box<crate::set_text::BoundSetTextInput>),
+}
+
+/// The RETURN of a vertex MERGE step, resolved (fgdb-cpny9).
+#[derive(Clone)]
+pub(crate) struct VertexMergeRowsReturnTemplate {
+    pub(crate) bindings: Vec<crate::GraphVertexMergeRowsBinding>,
+    pub(crate) projection: Vec<ReadProjectionTemplate>,
+    pub(crate) grouping: Option<WriteReturnGroupTemplate>,
+    pub(crate) quantifier: crate::GraphSetQuantifier,
+    pub(crate) order: Vec<GraphValueOrder>,
+    pub(crate) offset: ReadPageNumber,
+    pub(crate) count: Option<ReadPageNumber>,
+    pub(crate) at: usize,
+}
+
 /// A vertex MERGE step of a chained write (fgdb-cpny9), resolved: each map
 /// value is a literal, a parameter or a column of the row it runs over.
 #[derive(Clone)]
@@ -356,10 +380,11 @@ pub(crate) struct PreparedGraphVertexMergeRowsText {
     pub(crate) relation: RelationId,
     pub(crate) labels: Vec<LabelId>,
     pub(crate) properties: Vec<(PropertyKeyId, VertexMergeRowValueTemplate)>,
-    /// The carried row's column types; `None` for a statement's first write.
-    pub(crate) input: Option<Vec<crate::GraphSetColumnType>>,
+    pub(crate) input: VertexMergeRowsTextInput,
     /// Leading row columns the output keeps (the visible ones).
     pub(crate) keep: usize,
+    /// The RETURN of the statement's last write, if any.
+    pub(crate) returning: Option<VertexMergeRowsReturnTemplate>,
     pub(crate) parameters: Vec<crate::GqlParameterSpec>,
     pub(crate) parameter_offsets: Vec<usize>,
     pub(crate) end: usize,
@@ -396,12 +421,30 @@ pub enum GraphVertexMergeTextErrorKind {
     Query(GraphPatternTextErrorKind),
     InsertBuild(GraphInsertBuildError),
     MergeBuild(GraphVertexMergeBuildError),
+    /// A leading UNWIND, or a RETURN expression, page or projection name of
+    /// a vertex MERGE step (fgdb-cpny9).
+    Relation(crate::GraphSetTextErrorKind),
+    ReturnBuild(crate::GraphVertexMergeRowsQueryBuildError),
 }
 impl From<GraphPatternTextError> for GraphVertexMergeTextError {
     fn from(error: GraphPatternTextError) -> Self {
         Self {
             offset: error.offset,
             kind: GraphVertexMergeTextErrorKind::Query(error.kind),
+        }
+    }
+}
+impl From<crate::GraphSetTextError> for GraphVertexMergeTextError {
+    fn from(error: crate::GraphSetTextError) -> Self {
+        let kind = match error.kind {
+            crate::GraphSetTextErrorKind::Pattern(kind) => {
+                GraphVertexMergeTextErrorKind::Query(kind)
+            }
+            kind => GraphVertexMergeTextErrorKind::Relation(kind),
+        };
+        Self {
+            offset: error.offset,
+            kind,
         }
     }
 }

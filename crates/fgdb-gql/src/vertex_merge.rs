@@ -124,6 +124,8 @@ pub enum GraphVertexMergeError<E, A> {
         row: usize,
         source: Box<crate::GraphVertexMergeTextError>,
     },
+    /// The leading UNWIND relation of a MERGE over input rows refused.
+    InputRelation(crate::GraphSetExecutionError<E>),
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphVertexMergeError<E, A>
@@ -150,6 +152,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
                 "MERGE row {row} column {column} is not a non-null scalar property value"
             ),
             Self::RowMerge { row, source } => write!(f, "MERGE row {row}: {source}"),
+            Self::InputRelation(error) => write!(f, "MERGE input rows: {error}"),
         }
     }
 }
@@ -161,6 +164,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::Source(error) => Some(error),
             Self::Creation(error) => Some(error),
             Self::RowMerge { source, .. } => Some(&**source),
+            Self::InputRelation(error) => Some(error),
             _ => None,
         }
     }
@@ -276,12 +280,22 @@ pub struct PreparedGraphVertexMergeRows {
     pub(crate) labels: Vec<fgdb_delta_types::LabelId>,
     /// In property-key order.
     pub(crate) properties: Vec<(fgdb_delta_types::PropertyKeyId, GraphVertexMergeRowValue)>,
-    /// The input row's column types. `None` is the one empty row of a
-    /// statement's first write.
-    pub(crate) input: Option<Vec<crate::GraphSetColumnType>>,
+    pub(crate) input: GraphVertexMergeRowsInput,
     /// Leading input columns the output keeps. Hidden reads after them are
     /// the MERGE's own inputs, read by no later write.
     pub(crate) keep: usize,
+}
+
+/// The rows a vertex MERGE step runs over (fgdb-cpny9).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum GraphVertexMergeRowsInput {
+    /// The one empty row of a statement whose first write is this MERGE.
+    Unit,
+    /// The previous write's rows, of these column types.
+    Owned(Vec<crate::GraphSetColumnType>),
+    /// A statement's leading UNWIND, run as a relation (`UNWIND [1, 2] AS x
+    /// MERGE (n {id: x})`).
+    Relation(Box<crate::PreparedGraphSet>),
 }
 impl core::fmt::Debug for PreparedGraphVertexMergeRows {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -298,36 +312,73 @@ impl PreparedGraphVertexMergeRows {
         self.relation
     }
 
-    /// The input row's column types; `None` for a statement's first write.
+    /// The input row's column types: the previous write's row, the leading
+    /// UNWIND's columns, or none for a first write over one empty row.
     #[must_use]
-    pub fn input_column_types(&self) -> Option<&[crate::GraphSetColumnType]> {
-        self.input.as_deref()
+    pub fn input_column_types(&self) -> &[crate::GraphSetColumnType] {
+        match &self.input {
+            GraphVertexMergeRowsInput::Unit => &[],
+            GraphVertexMergeRowsInput::Owned(types) => types,
+            GraphVertexMergeRowsInput::Relation(relation) => relation.column_types(),
+        }
     }
 
-    /// The rows this MERGE runs over: `owned`, the previous write's rows, or
-    /// the one empty row of a first write. Owned rows must have the input
-    /// width, and a first write takes none.
-    pub fn input_rows<E, A>(
+    /// The rows this MERGE runs over, with the statistics of producing them.
+    /// The rows are `owned` (the previous write's), the leading UNWIND's
+    /// rows, or the one empty row of a first write. Owned rows must have the
+    /// input width; a first write takes none.
+    pub fn select_governed<E, A, C>(
         &self,
         owned: Option<Vec<GraphValueRow>>,
-    ) -> Result<Vec<GraphValueRow>, GraphVertexMergeError<E, A>> {
-        match (&self.input, owned) {
-            (None, None) => Ok(vec![GraphValueRow::from_owned_values(Vec::new())]),
-            (Some(types), Some(rows)) => {
-                if let Some(row) = rows.iter().position(|row| row.len() != types.len()) {
-                    return Err(GraphVertexMergeError::InputSchema {
-                        row,
-                        column: types.len(),
-                    });
-                }
-                Ok(rows)
+        policy: GqlQueryPolicy,
+        patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<
+            crate::GqlQueryExecution<GraphValueRow>,
+            crate::GqlQueryError<E, C>,
+        >,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<
+        crate::GqlQueryExecution<GraphValueRow>,
+        crate::GqlQueryError<GraphVertexMergeError<E, A>, C>,
+    > {
+        let schema = |row, column| {
+            crate::GqlQueryError::Source(GraphVertexMergeError::InputSchema { row, column })
+        };
+        let rows = match (&self.input, owned) {
+            (GraphVertexMergeRowsInput::Unit, None) => {
+                vec![GraphValueRow::from_owned_values(Vec::new())]
             }
-            (Some(types), None) => Err(GraphVertexMergeError::InputSchema {
-                row: 0,
-                column: types.len(),
-            }),
-            (None, Some(_)) => Err(GraphVertexMergeError::InputSchema { row: 0, column: 0 }),
-        }
+            (GraphVertexMergeRowsInput::Owned(types), Some(rows)) => {
+                if let Some(row) = rows.iter().position(|row| row.len() != types.len()) {
+                    return Err(schema(row, types.len()));
+                }
+                rows
+            }
+            (GraphVertexMergeRowsInput::Relation(relation), None) => {
+                return relation
+                    .execute_governed(policy, patterns, checkpoint)
+                    .map_err(|error| error.map_source(GraphVertexMergeError::InputRelation));
+            }
+            (input, _) => {
+                return Err(schema(
+                    0,
+                    match input {
+                        GraphVertexMergeRowsInput::Owned(types) => types.len(),
+                        _ => 0,
+                    },
+                ));
+            }
+        };
+        Ok(crate::GqlQueryExecution {
+            value: rows,
+            rows: GqlExecutionStats {
+                snapshot_records: 0,
+                result_rows: 0,
+            },
+            evaluator: GlaExecutionStats::default(),
+        })
     }
 
     /// The property tuple of input row `at`, in property-key order. A NULL
@@ -361,5 +412,276 @@ impl PreparedGraphVertexMergeRows {
         let mut values = row.values()[..self.keep.min(row.len())].to_vec();
         values.push(crate::algebra::GraphValue::Vertex(vertex));
         GraphValueRow::from_owned_values(values)
+    }
+}
+
+/// One input column of a RETURN after a vertex MERGE step (fgdb-cpny9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphVertexMergeRowsBinding {
+    /// A column of the row the MERGE read, hidden reads included. MERGE
+    /// changes no element that row carries, so its value is also final.
+    Input(usize),
+    /// The vertex this row merged.
+    Vertex,
+    /// A property of that vertex after the statement. A missing field reads
+    /// NULL.
+    Property(fgdb_delta_types::PropertyKeyId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphVertexMergeRowsQueryBuildError {
+    TooManyBindings {
+        limit: usize,
+        observed: usize,
+    },
+    /// An Input binding names no input column.
+    Binding {
+        binding: usize,
+    },
+    Projection(crate::row_projection::RowProjectionBuildError),
+    Aggregate(crate::GraphAggregateBuildError),
+}
+impl core::fmt::Display for GraphVertexMergeRowsQueryBuildError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "vertex MERGE RETURN definition: {self:?}")
+    }
+}
+impl core::error::Error for GraphVertexMergeRowsQueryBuildError {}
+
+/// A refusal of a vertex MERGE step with or without RETURN: the MERGE, or
+/// its RETURN.
+#[derive(Debug)]
+pub enum GraphVertexMergeRowsQueryError<E, A> {
+    Merge(GraphVertexMergeError<E, A>),
+    Returning(crate::GraphSetExecutionError<E>),
+}
+impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
+    for GraphVertexMergeRowsQueryError<E, A>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Merge(error) => error.fmt(f),
+            Self::Returning(error) => error.fmt(f),
+        }
+    }
+}
+impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::error::Error
+    for GraphVertexMergeRowsQueryError<E, A>
+{
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Merge(error) => Some(error),
+            Self::Returning(error) => Some(error),
+        }
+    }
+}
+
+/// `... MERGE (n ...) RETURN ...` as the last write of a chain, or over a
+/// leading UNWIND (fgdb-cpny9). RETURN sees one row per input row and vertex
+/// that row merged, in input order and then identity order. Aggregation,
+/// projection, DISTINCT, ORDER BY and paging use the shared write-RETURN
+/// kernels.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PreparedGraphVertexMergeRowsQuery {
+    merge: PreparedGraphVertexMergeRows,
+    bindings: Vec<GraphVertexMergeRowsBinding>,
+    input_types: Vec<crate::GraphSetColumnType>,
+    projection: Vec<crate::GraphSetProjection>,
+    grouping: Option<crate::set_ops::WriteReturnGroup>,
+    quantifier: crate::GraphSetQuantifier,
+    columns: Vec<String>,
+    types: Vec<crate::GraphSetColumnType>,
+    order: Vec<crate::algebra::GraphValueOrder>,
+    offset: u64,
+    count: Option<u64>,
+}
+impl core::fmt::Debug for PreparedGraphVertexMergeRowsQuery {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphVertexMergeRowsQuery")
+            .field("columns", &self.columns.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
+    }
+}
+impl PreparedGraphVertexMergeRowsQuery {
+    pub(crate) fn prepare_with_grouping(
+        merge: PreparedGraphVertexMergeRows,
+        bindings: Vec<GraphVertexMergeRowsBinding>,
+        projection: Vec<crate::GraphSetProjection>,
+        quantifier: crate::GraphSetQuantifier,
+        grouping: Option<crate::set_ops::WriteReturnGroupSpec>,
+    ) -> Result<Self, GraphVertexMergeRowsQueryBuildError> {
+        let limit = crate::algebra::MAX_PATTERN_VERTICES;
+        if bindings.len() > limit {
+            return Err(GraphVertexMergeRowsQueryBuildError::TooManyBindings {
+                limit,
+                observed: bindings.len(),
+            });
+        }
+        let input = merge.input_column_types();
+        let mut input_types = Vec::with_capacity(bindings.len());
+        for (at, binding) in bindings.iter().enumerate() {
+            input_types.push(match *binding {
+                GraphVertexMergeRowsBinding::Input(column) => input
+                    .get(column)
+                    .copied()
+                    .ok_or(GraphVertexMergeRowsQueryBuildError::Binding { binding: at })?,
+                GraphVertexMergeRowsBinding::Vertex => crate::GraphSetColumnType::Vertex,
+                GraphVertexMergeRowsBinding::Property(_) => crate::GraphSetColumnType::Stored,
+            });
+        }
+        let grouping = grouping
+            .map(|group| group.prepare(input_types.clone()))
+            .transpose()
+            .map_err(GraphVertexMergeRowsQueryBuildError::Aggregate)?;
+        let output_input = grouping
+            .as_ref()
+            .map(|group| group.column_types().to_vec())
+            .unwrap_or_else(|| input_types.clone());
+        let checked = crate::row_projection::RowProjectionSpec::new(
+            output_input,
+            projection.clone(),
+            quantifier,
+        )
+        .map_err(GraphVertexMergeRowsQueryBuildError::Projection)?;
+        Ok(Self {
+            merge,
+            bindings,
+            input_types,
+            columns: checked.columns().map(str::to_owned).collect(),
+            types: checked.column_types().to_vec(),
+            projection,
+            grouping,
+            quantifier,
+            order: Vec::new(),
+            offset: 0,
+            count: None,
+        })
+    }
+
+    #[must_use]
+    pub const fn merge(&self) -> &PreparedGraphVertexMergeRows {
+        &self.merge
+    }
+    #[must_use]
+    pub fn bindings(&self) -> &[GraphVertexMergeRowsBinding] {
+        &self.bindings
+    }
+    #[must_use]
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    #[must_use]
+    pub fn column_types(&self) -> &[crate::GraphSetColumnType] {
+        &self.types
+    }
+
+    pub fn with_order_by(
+        mut self,
+        order: &[crate::algebra::GraphValueOrder],
+    ) -> Result<Self, crate::algebra::GraphOrderError> {
+        use crate::algebra::GraphOrderError;
+        if order.is_empty() {
+            return Err(GraphOrderError::EmptyOrder);
+        }
+        if order.len() > self.columns.len() {
+            return Err(GraphOrderError::TooManyColumns {
+                limit: self.columns.len(),
+                observed: order.len(),
+            });
+        }
+        for (at, key) in order.iter().enumerate() {
+            if key.column >= self.columns.len() {
+                return Err(GraphOrderError::UnknownColumn { column: key.column });
+            }
+            if order[..at].iter().any(|prior| prior.column == key.column) {
+                return Err(GraphOrderError::DuplicateColumn { column: key.column });
+            }
+        }
+        self.order = order.to_vec();
+        Ok(self)
+    }
+    #[must_use]
+    pub fn with_page(mut self, offset: u64, count: Option<u64>) -> Self {
+        self.offset = offset;
+        self.count = count;
+        self
+    }
+
+    /// Finalize the statement's rows, one per input row and vertex it merged,
+    /// under the statement's cumulative counters. Every cell is checked
+    /// against its binding before any projection runs. The host keeps its
+    /// rollback guard until this succeeds. LIMIT 0 discards output, never
+    /// the MERGE or its field reads.
+    pub fn finish_governed<E, C>(
+        &self,
+        rows: Vec<Vec<crate::algebra::GraphValue>>,
+        selection: GqlExecutionStats,
+        mut evaluator: GlaExecutionStats,
+        policy: GqlQueryPolicy,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<
+        crate::GqlQueryExecution<GraphValueRow>,
+        crate::GqlQueryError<crate::GraphSetExecutionError<E>, C>,
+    > {
+        use crate::algebra::GraphValue;
+        use crate::{GqlQueryError, GraphSetExecutionError};
+        let mut work = || -> Result<(), GqlQueryError<GraphSetExecutionError<E>, C>> {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            let observed = u128::from(evaluator.work_units) + 1;
+            if observed > u128::from(policy.evaluator.max_work_units) {
+                return Err(GqlQueryError::Evaluator(crate::GlaLimitExceeded {
+                    dimension: crate::GlaLimitDimension::WorkUnits,
+                    limit: policy.evaluator.max_work_units,
+                    observed,
+                }));
+            }
+            evaluator.work_units = observed as u64;
+            Ok(())
+        };
+        work()?;
+        let invalid = || GqlQueryError::Source(GraphSetExecutionError::InputSchema { operand: 0 });
+        for row in &rows {
+            if row.len() != self.bindings.len() {
+                return Err(invalid());
+            }
+            for ((binding, kind), value) in self.bindings.iter().zip(&self.input_types).zip(row) {
+                work()?;
+                let admitted = match binding {
+                    GraphVertexMergeRowsBinding::Input(_)
+                    | GraphVertexMergeRowsBinding::Property(_) => kind.accepts(value),
+                    GraphVertexMergeRowsBinding::Vertex => matches!(value, GraphValue::Vertex(_)),
+                };
+                if !admitted {
+                    return Err(invalid());
+                }
+            }
+        }
+        drop(work);
+        let mut returning = crate::GqlQueryExecution {
+            value: rows
+                .into_iter()
+                .map(GraphValueRow::from_owned_values)
+                .collect(),
+            rows: selection,
+            evaluator,
+        };
+        if let Some(grouping) = &self.grouping {
+            returning = crate::set_ops::finish_owned_aggregate(
+                returning,
+                policy,
+                grouping,
+                &mut checkpoint,
+            )?;
+        }
+        crate::set_ops::finish_owned_projection(
+            returning,
+            policy,
+            &self.projection,
+            self.quantifier,
+            &self.order,
+            (self.offset, self.count),
+            checkpoint,
+        )
     }
 }

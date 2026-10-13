@@ -379,12 +379,14 @@ pub(crate) type UpsertQueryResult<A> = Result<
 >;
 
 /// A staged vertex MERGE over input rows (a chain step, fgdb-cpny9): its
-/// cumulative statistics, its step receipt and its output rows.
+/// cumulative statistics, its step receipt, its input rows and one (input
+/// row, merged vertex) pair per output row.
 pub(crate) type VertexMergeRowsResult<A> = Result<
     (
         fgdb_gql::GraphVertexMergeStats,
         fgdb_gql::GraphWriteStepReceipt,
         Vec<fgdb_gql::algebra::GraphValueRow>,
+        Vec<(usize, VId)>,
     ),
     TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>,
 >;

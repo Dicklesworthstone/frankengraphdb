@@ -4,7 +4,8 @@ use super::*;
 use crate::insertion::{GraphInsertBuildError, GraphInsertVertex, PreparedGraphInsert};
 use crate::mutation_text::{
     PreparedGraphVertexMergeRowsText, VertexMergeRowValueTemplate as RowValueTemplate,
-    VertexMergeValueTemplate, WriteReturnGroupTemplate,
+    VertexMergeRowsReturnTemplate, VertexMergeRowsTextInput, VertexMergeValueTemplate,
+    WriteReturnGroupTemplate,
 };
 use crate::set_text::{
     ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
@@ -1494,6 +1495,270 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// One RETURN leaf of a vertex MERGE step before symbol resolution.
+#[derive(Clone, Copy)]
+enum RowsBinding<'a> {
+    Input(usize),
+    Vertex,
+    Property(Name<'a>),
+}
+
+/// RETURN after a vertex MERGE step (fgdb-cpny9): the row it read (names
+/// and hidden reads), the merged vertex and that vertex's properties after
+/// the statement.
+struct ParsedVertexRowsReturn<'r, 'a> {
+    variable: Option<Name<'a>>,
+    row: &'r [(Name<'a>, GraphSetColumnType)],
+    bindings: Vec<(RowsBinding<'a>, GraphSetColumnType)>,
+    projection: Vec<ReadProjectionTemplate>,
+    grouping: Option<WriteReturnGroupTemplate>,
+    quantifier: GraphSetQuantifier,
+    order: Vec<crate::algebra::GraphValueOrder>,
+    offset: ReadPageNumber,
+    count: Option<ReadPageNumber>,
+    at: usize,
+}
+
+impl<'a> ParsedVertexRowsReturn<'_, 'a> {
+    fn column(
+        &mut self,
+        binding: RowsBinding<'a>,
+        kind: GraphSetColumnType,
+        at: usize,
+    ) -> Result<usize, GraphPatternTextError> {
+        if let Some(column) = self
+            .bindings
+            .iter()
+            .position(|(old, _)| match (old, binding) {
+                (RowsBinding::Input(old), RowsBinding::Input(new)) => *old == new,
+                (RowsBinding::Vertex, RowsBinding::Vertex) => true,
+                (RowsBinding::Property(old), RowsBinding::Property(new)) => old.text == new.text,
+                _ => false,
+            })
+        {
+            return Ok(column);
+        }
+        if self.bindings.len() == MAX_PATTERN_VERTICES {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                    dimension: crate::algebra::PatternLimitDimension::Columns,
+                    limit: MAX_PATTERN_VERTICES,
+                    observed: self.bindings.len() + 1,
+                }),
+            ));
+        }
+        self.bindings.push((binding, kind));
+        Ok(self.bindings.len() - 1)
+    }
+
+    fn resolve(
+        self,
+        symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
+    ) -> Result<VertexMergeRowsReturnTemplate, GraphPatternTextError> {
+        let mut bindings = Vec::with_capacity(self.bindings.len());
+        for (binding, _) in self.bindings {
+            bindings.push(match binding {
+                RowsBinding::Input(column) => crate::GraphVertexMergeRowsBinding::Input(column),
+                RowsBinding::Vertex => crate::GraphVertexMergeRowsBinding::Vertex,
+                RowsBinding::Property(key) => {
+                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
+                        unreachable!("symbol domain checked by shared resolver")
+                    };
+                    crate::GraphVertexMergeRowsBinding::Property(key)
+                }
+            });
+        }
+        Ok(VertexMergeRowsReturnTemplate {
+            bindings,
+            projection: self.projection,
+            grouping: self.grouping,
+            quantifier: self.quantifier,
+            order: self.order,
+            offset: self.offset,
+            count: self.count,
+            at: self.at,
+        })
+    }
+}
+
+impl<'a> ReturnLeaves<'a> for ParsedVertexRowsReturn<'_, 'a> {
+    fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
+        let TokenKind::Word(word) = parser.current.kind else {
+            return Ok(None);
+        };
+        // Functions stay with the shared compiler; their arguments return here.
+        if matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+            || parser.elements.contains(&word)
+        {
+            return Ok(None);
+        }
+        let at = parser.current.at;
+        if self.variable.is_some_and(|variable| variable.text == word) {
+            parser.advance()?;
+            if parser.take(b'.')? {
+                let key = parser.name()?;
+                return self
+                    .column(RowsBinding::Property(key), GraphSetColumnType::Stored, at)
+                    .map(Some);
+            }
+            return self
+                .column(RowsBinding::Vertex, GraphSetColumnType::Vertex, at)
+                .map(Some);
+        }
+        // `a.key` of a carried element is its hidden read; MERGE changes no
+        // element the row carries, so that read is the final value too.
+        if matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'.')) {
+            let Some(column) = parser.boundary_read(self.row.len())? else {
+                return Ok(None);
+            };
+            let kind = self.row[column].1;
+            return self.column(RowsBinding::Input(column), kind, at).map(Some);
+        }
+        let visible = parser.visible_width(self.row);
+        let Some(column) = self.row[..visible]
+            .iter()
+            .position(|(name, _)| name.text == word)
+        else {
+            return Ok(None);
+        };
+        parser.advance()?;
+        let kind = self.row[column].1;
+        self.column(RowsBinding::Input(column), kind, at).map(Some)
+    }
+
+    fn map_input(
+        &mut self,
+        _: &mut Parser<'a>,
+        source: Name<'a>,
+        input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        if !self
+            .variable
+            .is_some_and(|variable| variable.text == source.text)
+        {
+            return Err(error(source.at, GraphPatternTextErrorKind::UnknownVariable));
+        }
+        match input {
+            ReturnMapInput::Identity | ReturnMapInput::Guard => {
+                self.column(RowsBinding::Vertex, GraphSetColumnType::Vertex, source.at)
+            }
+            ReturnMapInput::Property(key) => self.column(
+                RowsBinding::Property(key),
+                GraphSetColumnType::Stored,
+                key.at,
+            ),
+            ReturnMapInput::Properties => Err(error(
+                source.at,
+                GraphPatternTextErrorKind::Expected(
+                    "named vertex properties in RETURN after a chained MERGE",
+                ),
+            )),
+        }
+    }
+
+    fn types(&self) -> Vec<GraphSetColumnType> {
+        self.bindings.iter().map(|(_, kind)| *kind).collect()
+    }
+}
+
+impl<'a> Parser<'a> {
+    /// `RETURN ...` after a vertex MERGE step, over `row` and the merged
+    /// vertex. Named items only.
+    fn vertex_rows_return<'r>(
+        &mut self,
+        variable: Option<Name<'a>>,
+        row: &'r [(Name<'a>, GraphSetColumnType)],
+    ) -> Result<ParsedVertexRowsReturn<'r, 'a>, GraphVertexMergeTextError> {
+        let at = self.current.at;
+        self.word("RETURN")?;
+        let quantifier = if self.take_word("DISTINCT")? {
+            GraphSetQuantifier::Distinct
+        } else {
+            self.take_all_quantifier()?;
+            GraphSetQuantifier::All
+        };
+        if self.is_punct(b'*') {
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::Expected("named RETURN items after a chained MERGE"),
+            )
+            .into());
+        }
+        let mut returning = ParsedVertexRowsReturn {
+            variable,
+            row,
+            bindings: Vec::new(),
+            projection: Vec::new(),
+            grouping: None,
+            quantifier,
+            order: Vec::new(),
+            offset: ReadPageNumber::Literal(0),
+            count: None,
+            at,
+        };
+        let items = self.write_return_items(&mut returning)?;
+        returning.projection = items.projection;
+        returning.grouping = items.grouping;
+        if let Some(ReadStageTemplate::Page {
+            order,
+            offset,
+            count,
+            ..
+        }) = self.row_page_sourced(&items.output, &items.spellings)?
+        {
+            returning.order = order;
+            returning.offset = offset;
+            returning.count = count;
+        }
+        Ok(returning)
+    }
+}
+
+impl VertexMergeRowsReturnTemplate {
+    fn bind(
+        &self,
+        merge: crate::PreparedGraphVertexMergeRows,
+        values: &[GqlParameterValue],
+    ) -> Result<crate::PreparedGraphVertexMergeRowsQuery, GraphVertexMergeTextError> {
+        let mut projection = Vec::with_capacity(self.projection.len());
+        for output in &self.projection {
+            projection.push(GraphSetProjection::new(
+                &output.name,
+                return_projection::bind_read_value(&output.value, values)?,
+            ));
+        }
+        let mut query = crate::PreparedGraphVertexMergeRowsQuery::prepare_with_grouping(
+            merge,
+            self.bindings.clone(),
+            projection,
+            self.quantifier,
+            self.grouping
+                .as_ref()
+                .map(|group| group.bind(values))
+                .transpose()?,
+        )
+        .map_err(|kind| GraphVertexMergeTextError {
+            offset: self.at,
+            kind: GraphVertexMergeTextErrorKind::ReturnBuild(kind),
+        })?;
+        if !self.order.is_empty() {
+            query = query
+                .with_order_by(&self.order)
+                .map_err(|kind| crate::GraphSetTextError {
+                    offset: self.at,
+                    kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
+                })?;
+        }
+        Ok(query.with_page(
+            return_projection::pipeline::page_value(&self.offset, values),
+            self.count
+                .as_ref()
+                .map(|count| return_projection::pipeline::page_value(count, values)),
+        ))
+    }
+}
+
 impl PreparedGraphVertexMergeRowsText {
     /// A vertex MERGE step of a chain. `from` is the row the previous write
     /// left, or `None` when this MERGE is the statement's first write. The
@@ -1511,13 +1776,22 @@ impl PreparedGraphVertexMergeRowsText {
     {
         let parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
-        let (mut parser, row, input) = match from {
+        // `leading` is a first write's UNWIND prefix, if any.
+        let (mut parser, row, owned, leading) = match from {
             Some(from) => {
                 let (_, types) = from.owned_columns();
                 let parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
-                (parser, from.row, Some(types))
+                (parser, from.row, Some(types), None)
             }
-            None => (parser, Vec::new(), None),
+            None => {
+                let mut parser = parser;
+                if parser.is_word("UNWIND") {
+                    let (stages, schema) = parser.insertion_unwind_prefix()?;
+                    (parser, schema, None, Some(stages))
+                } else {
+                    (parser, Vec::new(), None, None)
+                }
+            }
         };
         parser.chain_write = true;
         let keep = parser.visible_width(&row);
@@ -1531,6 +1805,7 @@ impl PreparedGraphVertexMergeRowsText {
             )
             .into());
         }
+        let mut parsed_return = None;
         let continuation = if parser.at_chained_write()? {
             let mut carried = row[..keep].to_vec();
             if carried.len() >= MAX_PATTERN_VERTICES {
@@ -1556,9 +1831,22 @@ impl PreparedGraphVertexMergeRowsText {
                 parameters: parser.syntax.parameters.clone(),
             })
         } else {
+            if parser.is_word("RETURN") {
+                let returning = parser.vertex_rows_return(variable, &row)?;
+                parsed_return = Some(returning);
+            }
             parser.end()?;
             None
         };
+        if let Some(parsed) = &parsed_return {
+            mutation_query::admit_return(
+                &parsed.projection,
+                &parsed.types(),
+                &parser.syntax.parameters,
+                parsed.grouping.as_ref(),
+                parsed.at,
+            )?;
+        }
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
@@ -1596,6 +1884,28 @@ impl PreparedGraphVertexMergeRowsText {
         }
         labels.sort_unstable();
         properties.sort_by_key(|(key, _)| *key);
+        let returning = parsed_return
+            .map(|parsed| parsed.resolve(&mut symbol))
+            .transpose()?;
+        let input = match (owned, leading) {
+            (Some(types), _) => VertexMergeRowsTextInput::Owned(types),
+            (None, Some(leading)) => {
+                VertexMergeRowsTextInput::Relation(Box::new(crate::set_text::BoundSetTextInput {
+                    selection: None,
+                    parameters: parser.syntax.parameters.clone(),
+                    parameter_offsets: parser.syntax.parameter_offsets.clone(),
+                    return_at: statement.len(),
+                    projection: None,
+                    quantifier: GraphSetQuantifier::All,
+                    pipeline: Vec::new(),
+                    singleton: true,
+                    leading,
+                    correlations: Vec::new(),
+                    owned: None,
+                }))
+            }
+            (None, None) => VertexMergeRowsTextInput::Unit,
+        };
         Ok((
             Self {
                 relation,
@@ -1603,6 +1913,7 @@ impl PreparedGraphVertexMergeRowsText {
                 properties,
                 input,
                 keep,
+                returning,
                 parameters: parser.syntax.parameters,
                 parameter_offsets: parser.syntax.parameter_offsets,
                 end: statement.len(),
@@ -1615,17 +1926,22 @@ impl PreparedGraphVertexMergeRowsText {
         &self.parameters
     }
 
-    /// The column types of the row this step reads; `None` for a first write.
-    pub(crate) fn input_column_types(&self) -> Option<&[GraphSetColumnType]> {
-        self.input.as_deref()
+    /// The column types of the previous write's row this step reads; `None`
+    /// for a statement's first write.
+    pub(crate) fn owned_column_types(&self) -> Option<&[GraphSetColumnType]> {
+        match &self.input {
+            VertexMergeRowsTextInput::Owned(types) => Some(types),
+            VertexMergeRowsTextInput::Unit | VertexMergeRowsTextInput::Relation(_) => None,
+        }
     }
 
-    /// Bind with exactly the arguments this step names.
+    /// Bind with exactly the arguments this step names: a chain step that
+    /// hands its rows on, or the statement's RETURN.
     pub(crate) fn bind_parameters(
         &self,
         arguments: &GqlParameters,
-    ) -> Result<crate::PreparedGraphVertexMergeRows, GraphVertexMergeTextError> {
-        use crate::vertex_merge::GraphVertexMergeRowValue;
+    ) -> Result<crate::GraphWriteChainStep, GraphVertexMergeTextError> {
+        use crate::vertex_merge::{GraphVertexMergeRowValue, GraphVertexMergeRowsInput};
         let values = crate::graph_text::checked_parameter_values(
             &self.parameters,
             &self.parameter_offsets,
@@ -1657,12 +1973,27 @@ impl PreparedGraphVertexMergeRowsText {
                 },
             ));
         }
-        Ok(crate::PreparedGraphVertexMergeRows {
+        let input = match &self.input {
+            VertexMergeRowsTextInput::Unit => GraphVertexMergeRowsInput::Unit,
+            VertexMergeRowsTextInput::Owned(types) => {
+                GraphVertexMergeRowsInput::Owned(types.clone())
+            }
+            VertexMergeRowsTextInput::Relation(input) => {
+                GraphVertexMergeRowsInput::Relation(Box::new(input.bind_values(&values)?))
+            }
+        };
+        let merge = crate::PreparedGraphVertexMergeRows {
             relation: self.relation,
             labels: self.labels.clone(),
             properties,
-            input: self.input.clone(),
+            input,
             keep: self.keep,
+        };
+        Ok(match &self.returning {
+            Some(returning) => crate::GraphWriteChainStep::VertexMergeQuery(Box::new(
+                returning.bind(merge, &values)?,
+            )),
+            None => crate::GraphWriteChainStep::VertexMerge(Box::new(merge)),
         })
     }
 }

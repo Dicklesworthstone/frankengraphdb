@@ -158,13 +158,14 @@ impl WriteTxn {
         policy: fgdb_gql::insertion::GraphInsertPolicy,
         mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> WriteChainResult<A> {
+        use fgdb_gql::algebra::GraphValue;
         use fgdb_gql::insertion::{GraphInsertError, GraphInsertPolicy, GraphInsertStats};
         use fgdb_gql::{
             GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
             GraphEdgeMergePolicy, GraphEdgeMergeQueryError, GraphEdgeMergeStats,
-            GraphInsertQueryError, GraphVertexMergePolicy, GraphWriteChainError,
-            GraphWriteChainStep, GraphWriteProgramReceipt, GraphWriteProgramStats,
-            GraphWriteStepReceipt,
+            GraphInsertQueryError, GraphVertexMergePolicy, GraphVertexMergeRowsBinding,
+            GraphVertexMergeRowsQueryError, GraphWriteChainError, GraphWriteChainStep,
+            GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStepReceipt,
         };
         let source = |error| {
             GqlQueryError::Source(GraphWriteChainError::Insert(
@@ -348,7 +349,7 @@ impl WriteTxn {
                         (stats, unreturned(&stats))
                     }
                     GraphWriteChainStep::VertexMerge(merge) => {
-                        let (stats, receipt, output) = workspace
+                        let (stats, receipt, input, pairs) = workspace
                             .txn
                             .execute_graph_vertex_merges_over(
                                 database,
@@ -359,8 +360,18 @@ impl WriteTxn {
                                 rows.take(),
                                 &mut allocate,
                             )
-                            .map_err(|error| error.map_source(GraphWriteChainError::VertexMerge))?;
+                            .map_err(|error| {
+                                error.map_source(|error| {
+                                    GraphWriteChainError::VertexMerge(
+                                        GraphVertexMergeRowsQueryError::Merge(error),
+                                    )
+                                })
+                            })?;
                         receipts.push(receipt);
+                        let output = pairs
+                            .into_iter()
+                            .map(|(at, vertex)| merge.output_row(&input[at], vertex))
+                            .collect();
                         let stats = GraphInsertStats {
                             selection: stats.match_selection,
                             evaluator: stats.evaluator,
@@ -376,6 +387,91 @@ impl WriteTxn {
                             },
                             evaluator: stats.evaluator,
                         };
+                        (stats, returning)
+                    }
+                    GraphWriteChainStep::VertexMergeQuery(query) => {
+                        let merge = query.merge();
+                        let chain = |error| {
+                            GqlQueryError::Source(GraphWriteChainError::VertexMerge(
+                                GraphVertexMergeRowsQueryError::Merge(
+                                    fgdb_gql::GraphVertexMergeError::Source(error),
+                                ),
+                            ))
+                        };
+                        let (stats, receipt, input, pairs) = workspace
+                            .txn
+                            .execute_graph_vertex_merges_over(
+                                database,
+                                cx,
+                                merge,
+                                GraphVertexMergePolicy::new(allowance.query)
+                                    .with_creation_limit(allowance.max_vertices),
+                                rows.take(),
+                                &mut allocate,
+                            )
+                            .map_err(|error| {
+                                error.map_source(|error| {
+                                    GraphWriteChainError::VertexMerge(
+                                        GraphVertexMergeRowsQueryError::Merge(error),
+                                    )
+                                })
+                            })?;
+                        receipts.push(receipt);
+                        // RETURN's input: each bound column of each pair,
+                        // properties read after the statement.
+                        let mut returned = Vec::with_capacity(pairs.len());
+                        for (at, vertex) in pairs {
+                            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                            let mut row = Vec::with_capacity(query.bindings().len());
+                            for binding in query.bindings() {
+                                row.push(match *binding {
+                                    GraphVertexMergeRowsBinding::Input(column) => input[at]
+                                        .values()
+                                        .get(column)
+                                        .cloned()
+                                        .unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
+                                    GraphVertexMergeRowsBinding::Vertex => GraphValue::Vertex(vertex),
+                                    GraphVertexMergeRowsBinding::Property(key) => {
+                                        match workspace
+                                            .txn
+                                            .merged_vertex_property(database, vertex, key)
+                                            .map_err(chain)?
+                                        {
+                                            None => GraphValue::Scalar(CanonicalScalar::Null),
+                                            Some(value) => GraphValue::from_property_value(&value)
+                                                .ok_or(GqlQueryError::Data(
+                                                    fgdb_gql::GraphIntegerError {
+                                                        instruction: 0,
+                                                        kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+                                                    },
+                                                ))?,
+                                        }
+                                    }
+                                });
+                            }
+                            returned.push(row);
+                        }
+                        let stats = GraphInsertStats {
+                            selection: stats.match_selection,
+                            evaluator: stats.evaluator,
+                            created_vertices: stats.created_vertices,
+                            created_edges: 0,
+                        };
+                        let returning = query
+                            .finish_governed(
+                                returned,
+                                stats.selection,
+                                stats.evaluator,
+                                allowance.query,
+                                || cx.checkpoint(),
+                            )
+                            .map_err(|error| {
+                                error.map_source(|error| {
+                                    GraphWriteChainError::VertexMerge(
+                                        GraphVertexMergeRowsQueryError::Returning(error),
+                                    )
+                                })
+                            })?;
                         (stats, returning)
                     }
                     GraphWriteChainStep::EdgeMergeQuery(query) => {
