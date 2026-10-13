@@ -186,7 +186,12 @@ impl PreparedGraphEdgeMergeQuery {
         &self.types
     }
 
+    /// Rank the public output, leaving an earlier WITH's order/page alone.
     pub fn with_order_by(mut self, order: &[GraphValueOrder]) -> Result<Self, GraphOrderError> {
+        if let Some(tail) = self.tail.take() {
+            self.tail = Some(tail.with_order_by(order)?);
+            return Ok(self);
+        }
         if order.is_empty() {
             return Err(GraphOrderError::EmptyOrder);
         }
@@ -209,8 +214,12 @@ impl PreparedGraphEdgeMergeQuery {
     }
     #[must_use]
     pub fn with_page(mut self, offset: u64, count: Option<u64>) -> Self {
-        self.offset = offset;
-        self.count = count;
+        if let Some(tail) = self.tail.take() {
+            self.tail = Some(tail.with_page(offset, count));
+        } else {
+            self.offset = offset;
+            self.count = count;
+        }
         self
     }
 
@@ -549,6 +558,73 @@ mod with_tests {
                 .value
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn public_windows_address_tail_columns_and_preserve_the_with_window() {
+        let query = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) \
+             WITH r.p AS p ORDER BY p DESC LIMIT 2 \
+             RETURN 100-p AS inverse, p AS value",
+        );
+        let selected = query
+            .clone()
+            .with_order_by(&[GraphValueOrder {
+                column: 1,
+                descending: false,
+                nulls_first: false,
+            }])
+            .unwrap()
+            .with_page(1, Some(1));
+        // Head: p=3,2. Tail sorted by its second column: p=2,3.
+        // Skip one tail row, not one source row or the entire WITH input.
+        assert_eq!(
+            values(finish(
+                &selected,
+                vec![vec![int(1)], vec![int(2)], vec![int(3)]],
+                1,
+            )),
+            vec![vec![int(97), int(3)]]
+        );
+        assert_eq!(selected.order, query.order);
+        assert_eq!((selected.offset, selected.count), (0, Some(2)));
+        assert_ne!(selected.canonical_bytes(), query.canonical_bytes());
+        assert!(matches!(
+            query.with_order_by(&[GraphValueOrder {
+                column: 2,
+                descending: false,
+                nulls_first: false,
+            }]),
+            Err(GraphOrderError::UnknownColumn { column: 2 })
+        ));
+    }
+
+    #[test]
+    fn public_paging_follows_expansion_and_cannot_hide_a_tail_failure() {
+        let query = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) WITH r.p AS p \
+             UNWIND [p,p+1,p+2] AS x RETURN x AS value",
+        )
+        .with_page(1, Some(1));
+        assert_eq!(
+            values(finish(&query, vec![vec![int(3)]], 1)),
+            vec![vec![int(4)]]
+        );
+        let failed = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) WITH r.p AS p \
+             UNWIND [1,0] AS divisor RETURN p / divisor AS value",
+        )
+        .with_page(0, Some(0));
+        assert!(matches!(
+            failed.finish_governed::<(), ()>(
+                vec![vec![int(3)]],
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(0),
+                || Ok(()),
+            ),
+            Err(GqlQueryError::Source(GraphSetExecutionError::Projection { .. }))
+        ));
     }
 
     #[test]
