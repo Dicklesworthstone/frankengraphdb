@@ -413,7 +413,9 @@ fn property_collections(s: &Source, direction: usize, grouped: bool) -> Vec<Grap
                 Vec::new()
             };
             let values = groups.entry(key).or_default();
-            if let Some((_, CanonicalScalar::Int(value))) = properties.first() {
+            if let Some((_, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)))) =
+                properties.first()
+            {
                 values.push(*value);
             }
         }
