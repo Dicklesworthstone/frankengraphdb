@@ -360,22 +360,30 @@ fn computed_collections_keep_original_child_order_and_unproved_shapes_refuse() {
     // A directed root's edge identity alone proves its order and uniqueness
     // (67506bf7), so a collection of the edge itself streams and equals the
     // batch answer.
-    let edges = prepare("MATCH (a)-[r:R]->(b) RETURN COLLECT(r) AS values");
-    let s = source(31);
-    let expected = batch(&edges, &s);
-    assert_eq!(
-        EdgeAggregateCursor::new(
-            s,
-            EdgeAggregatePlan::compile(&edges).unwrap(),
-            wide(),
-            || Ok::<_, ()>(())
-        )
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap(),
-        expected
-    );
+    // A single collected column with no earlier input column is also a
+    // proved canonical collection (24425ee7): sorting the retained endpoint
+    // values reproduces the batch child order, so it streams too.
     for text in [
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(r) AS values",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(b) AS values",
+    ] {
+        let edges = prepare(text);
+        let s = source(31);
+        let expected = batch(&edges, &s);
+        assert_eq!(
+            EdgeAggregateCursor::new(
+                s,
+                EdgeAggregatePlan::compile(&edges).unwrap(),
+                wide(),
+                || Ok::<_, ()>(())
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+            expected,
+            "{text}"
+        );
+    }
+    for text in [
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(a) AS starts,COLLECT(r) AS edges",
         "MATCH (a)-[r:R]->(b) RETURN COUNT(b) AS ends,COLLECT(r.p) AS values",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values,COLLECT(r) AS edges",

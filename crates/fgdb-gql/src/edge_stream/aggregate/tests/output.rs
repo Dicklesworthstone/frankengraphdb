@@ -501,12 +501,23 @@ fn close_discards_validated_pages_without_more_demand_and_other_profiles_remain_
             .unwrap(),
         expected
     );
-    assert!(
-        EdgeAggregatePlan::compile(&prepare(
-            "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values"
-        ))
-        .is_err()
-    );
+    // A single collected column is a proved canonical collection (24425ee7):
+    // it streams, and its rows are the batch answer.
+    for text in [
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values",
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT b) AS n",
+    ] {
+        let collected = prepare(text);
+        let s = source(63);
+        let expected = eager(&collected, &s);
+        assert_eq!(
+            run(&collected, s, wide())
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected,
+            "{text}"
+        );
+    }
     assert!(
         EdgeAggregatePlan::compile(&prepare(
             "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n ORDER BY n"
