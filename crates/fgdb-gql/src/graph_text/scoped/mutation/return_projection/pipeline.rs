@@ -41,7 +41,10 @@ pub(in crate::graph_text) const BOUNDARY_READ_NAMES: [&str; 16] = [
 /// stage, another MATCH, a CALL, or a set operator. The WITH's own WHERE, its
 /// pages and a terminal RETURN are inside the scope. `WITH` after STARTS/ENDS
 /// is a text predicate, not a new clause.
-fn ends_boundary_scope(word: &str, previous: Option<TokenKind<'_>>) -> bool {
+pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
+    word: &str,
+    previous: Option<TokenKind<'_>>,
+) -> bool {
     if word.eq_ignore_ascii_case("WITH") {
         return !matches!(previous, Some(TokenKind::Word(previous))
             if previous.eq_ignore_ascii_case("STARTS") || previous.eq_ignore_ascii_case("ENDS"));
@@ -676,7 +679,37 @@ impl<'a> Parser<'a> {
         &mut self,
         schema: RowSchema<'a>,
     ) -> Result<Vec<ReadStageTemplate>, GraphSetTextError> {
+        self.row_pipeline_output(schema, false)
+    }
+
+    /// A write's owned final-state rows may end in an aggregate RETURN.
+    /// Keep ordinary read dispatch on its existing, separately typed lanes.
+    pub(in crate::graph_text::scoped::mutation) fn write_row_pipeline(
+        &mut self,
+        schema: RowSchema<'a>,
+    ) -> Result<Vec<ReadStageTemplate>, GraphSetTextError> {
+        self.row_pipeline_output(schema, true)
+    }
+
+    fn row_pipeline_output(
+        &mut self,
+        schema: RowSchema<'a>,
+        aggregate_return: bool,
+    ) -> Result<Vec<ReadStageTemplate>, GraphSetTextError> {
         let (mut stages, schema, mut depth) = self.row_pipeline_prefix(schema)?;
+        if aggregate_return && self.return_has_aggregate()? {
+            let (stage, schema) = self.return_aggregate_stage(&schema)?;
+            append_stage(&mut stages, stage, &mut depth)?;
+            // This page belongs to the completed groups, not their input.
+            // All input expressions still execute under the statement's
+            // original work, scratch and cancellation allowance.
+            if let Some(page) = self.row_expression_page(&schema)? {
+                append_stage(&mut stages, page, &mut depth)?;
+            }
+            self.boundary_reads = None;
+            self.projected_sources = None;
+            return Ok(stages);
+        }
         let at = self.current.at;
         self.word("RETURN")?;
         let distinct = self.take_word("DISTINCT")?;

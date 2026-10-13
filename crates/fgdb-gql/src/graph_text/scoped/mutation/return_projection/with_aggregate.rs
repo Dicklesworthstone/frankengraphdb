@@ -98,7 +98,15 @@ enum Leaf {
 /// Quoted strings, property names and aliases cannot choose an aggregate lane.
 impl<'a> Parser<'a> {
     pub(super) fn with_has_aggregate(&self) -> Result<bool, GraphPatternTextError> {
-        if !self.is_word("WITH") {
+        self.projection_has_aggregate("WITH")
+    }
+
+    pub(super) fn return_has_aggregate(&self) -> Result<bool, GraphPatternTextError> {
+        self.projection_has_aggregate("RETURN")
+    }
+
+    fn projection_has_aggregate(&self, clause: &str) -> Result<bool, GraphPatternTextError> {
+        if !self.is_word(clause) {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();
@@ -540,8 +548,26 @@ impl<'a> Parser<'a> {
         &mut self,
         schema: &pipeline::RowSchema<'a>,
     ) -> Result<(ReadStageTemplate, pipeline::RowSchema<'a>), GraphSetTextError> {
+        self.aggregate_projection_stage(schema, false)
+    }
+
+    /// Reuse native grouping for a write tail without synthesizing query text.
+    /// RETURN permits source-spelled names; intermediate WITH still requires
+    /// explicit aliases for computed values.
+    pub(super) fn return_aggregate_stage(
+        &mut self,
+        schema: &pipeline::RowSchema<'a>,
+    ) -> Result<(ReadStageTemplate, pipeline::RowSchema<'a>), GraphSetTextError> {
+        self.aggregate_projection_stage(schema, true)
+    }
+
+    fn aggregate_projection_stage(
+        &mut self,
+        schema: &pipeline::RowSchema<'a>,
+        returning: bool,
+    ) -> Result<(ReadStageTemplate, pipeline::RowSchema<'a>), GraphSetTextError> {
         let at = self.current.at;
-        self.word("WITH")?;
+        self.word(if returning { "RETURN" } else { "WITH" })?;
         let distinct = self.take_word("DISTINCT")?;
         if !distinct {
             self.take_all_quantifier()?;
@@ -562,8 +588,11 @@ impl<'a> Parser<'a> {
             if self.starts_combined_aggregate()? {
                 let (template, leaves) =
                     self.with_combined_item(schema, &mut inputs, &mut aggregates)?;
+                let end = self.current.at;
                 let name = if self.take_word("AS")? {
                     self.name()?
+                } else if returning {
+                    self.source_name(item_at, end)
                 } else {
                     return Err(expected(item_at, "AS alias for a computed WITH value"));
                 };
@@ -611,8 +640,11 @@ impl<'a> Parser<'a> {
             if self.repeatable_item(item_at, self.current.at)? {
                 sources.push((item_at, self.current.at, returned.len()));
             }
+            let end = self.current.at;
             let name = if self.take_word("AS")? {
                 self.name()?
+            } else if returning {
+                self.source_name(item_at, end)
             } else {
                 default_name
                     .ok_or_else(|| expected(item_at, "AS alias for a computed WITH value"))?
@@ -635,7 +667,13 @@ impl<'a> Parser<'a> {
             ));
         }
         let visible = returned.len();
-        let reads = self.grouped_keys(schema, &mut inputs, &mut keys, &mut returned)?;
+        // A terminal RETURN has no later element-reading scope. Its explicit
+        // key and argument expressions already consumed the boundary cells.
+        let reads = if returning {
+            Vec::new()
+        } else {
+            self.grouped_keys(schema, &mut inputs, &mut keys, &mut returned)?
+        };
         if inputs.is_empty() {
             // COUNT(*) needs occurrences, not an invented graph source or a
             // guessed cardinality. A constant projection preserves those rows.

@@ -798,7 +798,7 @@ impl<'a> Parser<'a> {
                 scoped: Vec::new(),
             });
         }
-        self.row_pipeline(schema)
+        self.write_row_pipeline(schema)
     }
 
     /// `alias.key` reads of a carried vertex or edge from the current token
@@ -829,9 +829,10 @@ impl<'a> Parser<'a> {
                 TokenKind::Word(word)
                     if depth == 0
                         && !after_dot
-                        && ["WITH", "UNWIND", "MATCH", "CALL"]
-                            .iter()
-                            .any(|clause| word.eq_ignore_ascii_case(clause)) =>
+                        && return_projection::pipeline::ends_boundary_scope(
+                            word,
+                            back[2].map(|token| token.kind),
+                        ) =>
                 {
                     break;
                 }
