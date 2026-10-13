@@ -371,8 +371,14 @@ impl<'a> Parser<'a> {
         let optional = kind == Some(RowJoinKind::Left);
         self.read_row_bindings = incoming.iter().map(|(name, _)| *name).collect();
         self.read_comparisons = Some(Vec::new());
-        self.parse_match_prefix()?;
+        // `OPTIONAL MATCH (a) OPTIONAL MATCH (b)` left-joins clause by
+        // clause: this part ends before the next clause, at an implicit
+        // `WITH *` (multipart_head), never wrapping it in one left join.
+        self.optional_part = optional;
+        let parsed = self.parse_match_prefix();
+        self.optional_part = false;
         let row_comparisons = self.read_comparisons.take().unwrap_or_default();
+        parsed?;
         // Wrapping several independently scoped clauses in one left join
         // would move their null-extension boundary. Keep this continuation a
         // positive pattern; another WITH may begin the next required/optional
@@ -613,20 +619,24 @@ impl<'a> Parser<'a> {
         mut inputs: Vec<Projection<'a>>,
         optional: bool,
     ) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
-        if self.with_has_aggregate()? {
+        // An OPTIONAL part that stopped at the next clause: `WITH *`.
+        let implicit = optional && (self.is_word("OPTIONAL") || self.is_word("MATCH"));
+        if !implicit && self.with_has_aggregate()? {
             return self.with_graph_head(incoming, inputs, optional);
         }
-        let with = self.take_word("WITH")?;
+        let with = implicit || self.take_word("WITH")?;
         if !with {
             self.word("RETURN")?;
         }
-        self.syntax.distinct = self.take_word("DISTINCT")?;
-        if !self.syntax.distinct {
-            self.take_all_quantifier()?;
+        if !implicit {
+            self.syntax.distinct = self.take_word("DISTINCT")?;
+            if !self.syntax.distinct {
+                self.take_all_quantifier()?;
+            }
         }
         let width = incoming.len();
         let mut outputs = Vec::new();
-        if self.take(b'*')? {
+        if implicit || self.take(b'*')? {
             outputs = self.star_outputs(incoming, &mut inputs)?;
         } else {
             loop {

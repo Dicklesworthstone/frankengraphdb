@@ -682,6 +682,31 @@ fn a_carried_relationship_matches_itself_again() {
     }
 }
 
+/// Consecutive OPTIONAL MATCH clauses left-join clause by clause (TCK Match7
+/// [21], Aggregation5 [2], Graph9 [3]): `OPTIONAL MATCH (a) OPTIONAL MATCH
+/// (b)` reads exactly as `OPTIONAL MATCH (a) WITH * OPTIONAL MATCH (b)`. An
+/// empty first clause still lets the second one match, and a correlated
+/// second clause extends each row of the first.
+#[test]
+fn consecutive_optional_matches_join_clause_by_clause() {
+    for (implicit, explicit) in [
+        (
+            "OPTIONAL MATCH (a {score: 70}) OPTIONAL MATCH (b {score: 20}) RETURN a, b",
+            "OPTIONAL MATCH (a {score: 70}) WITH * OPTIONAL MATCH (b {score: 20}) RETURN a, b",
+        ),
+        (
+            "OPTIONAL MATCH (a {score: 10}) OPTIONAL MATCH (a)-[:R]->(b) RETURN a, b",
+            "OPTIONAL MATCH (a {score: 10}) WITH * OPTIONAL MATCH (a)-[:R]->(b) RETURN a, b",
+        ),
+    ] {
+        assert_eq!(rows(implicit), rows(explicit), "{implicit}");
+    }
+    assert_eq!(
+        rows("OPTIONAL MATCH (a {score: 70}) OPTIONAL MATCH (b {score: 20}) RETURN a, b"),
+        vec![vertices(&[None, Some(2)])]
+    );
+}
+
 /// After WITH, a property of an alias that returns a graph element of the
 /// last part bare is that element's property, as in a single-part RETURN
 /// (TCK With3 [1], WithOrderBy4 [15]: `RETURN r AS rel ORDER BY rel.id`). The
