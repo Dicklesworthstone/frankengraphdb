@@ -196,7 +196,6 @@ impl WriteTxn {
     ) -> Result<(Vec<VId>, u64), E> {
         use AdjacencyReadEvent::{ResultRow, Source};
         use AdjacencySourceEvent::{ScratchEntry, Work};
-        use fgdb_delta_types::DeltaRow;
         use std::collections::BTreeSet;
 
         // Do not install any observation for a foreign owner or unhealthy cut.
@@ -216,7 +215,7 @@ impl WriteTxn {
             element: ElementId::Vertex(vertex),
             accepted: false,
         };
-        let mut matching = self.adjacency_basis_controlled(
+        let (matching, observed_edges, snapshot_records) = self.adjacency_overlay_controlled(
             database,
             vertex,
             relation,
@@ -224,57 +223,6 @@ impl WriteTxn {
             &mut |event| control(Source(event)),
             source_error,
         )?;
-        let snapshot_records =
-            u64::try_from(matching.len()).expect("resident source row count fits u64");
-        let mut observed_edges = BTreeSet::new();
-        for eid in matching.keys() {
-            control(Source(ScratchEntry))?;
-            observed_edges.insert(*eid);
-        }
-        // The sole canonical overlay body, shared with ordinary neighbours().
-        if let Some(prepared) = &self.prepared {
-            for coordinate in prepared.template.coordinate_entries() {
-                control(Source(Work))?;
-                for effect in &coordinate.rows {
-                    control(Source(Work))?;
-                    match effect {
-                        DeltaRow::CreateEdge {
-                            eid,
-                            src,
-                            relation: edge_relation,
-                            dst,
-                            ..
-                        } => {
-                            let (anchor, neighbour) =
-                                if incoming { (*dst, *src) } else { (*src, *dst) };
-                            if anchor == vertex && *edge_relation == relation {
-                                if !matching.contains_key(eid) {
-                                    control(Source(ScratchEntry))?;
-                                }
-                                if !observed_edges.contains(eid) {
-                                    control(Source(ScratchEntry))?;
-                                }
-                                matching.insert(*eid, neighbour);
-                                observed_edges.insert(*eid);
-                            }
-                        }
-                        DeltaRow::DeleteEdge { eid, .. } => {
-                            matching.remove(eid);
-                        }
-                        DeltaRow::DeleteVertex {
-                            sorted_retired_incident_edges,
-                            ..
-                        } => {
-                            for eid in sorted_retired_incident_edges {
-                                control(Source(Work))?;
-                                matching.remove(eid);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
         let mut distinct = BTreeSet::new();
         for neighbour in matching.into_values() {
             control(Source(Work))?;
@@ -304,6 +252,150 @@ impl WriteTxn {
         control(Source(Work))?;
         attempt.accepted = true;
         Ok((value, snapshot_records))
+    }
+
+    /// One vertex's live incident edges of `relation` in one direction, as
+    /// edge to neighbour, through the adjacency index plus the canonical
+    /// overlay, with every edge the read observed and the basis candidate
+    /// count. The sole overlay body, shared with neighbours().
+    #[allow(clippy::type_complexity)]
+    fn adjacency_overlay_controlled<V: Vfs + Clone, E>(
+        &self,
+        database: &Database<V>,
+        vertex: VId,
+        relation: RelationId,
+        incoming: bool,
+        control: &mut impl FnMut(AdjacencySourceEvent) -> Result<(), E>,
+        source_error: &impl Fn(WriteTxnError) -> E,
+    ) -> Result<
+        (
+            std::collections::BTreeMap<EId, VId>,
+            std::collections::BTreeSet<EId>,
+            u64,
+        ),
+        E,
+    > {
+        use AdjacencySourceEvent::{ScratchEntry, Work};
+        use fgdb_delta_types::DeltaRow;
+        let mut matching = self.adjacency_basis_controlled(
+            database,
+            vertex,
+            relation,
+            incoming,
+            control,
+            source_error,
+        )?;
+        let snapshot_records =
+            u64::try_from(matching.len()).expect("resident source row count fits u64");
+        let mut observed_edges = std::collections::BTreeSet::new();
+        for eid in matching.keys() {
+            control(ScratchEntry)?;
+            observed_edges.insert(*eid);
+        }
+        if let Some(prepared) = &self.prepared {
+            for coordinate in prepared.template.coordinate_entries() {
+                control(Work)?;
+                for effect in &coordinate.rows {
+                    control(Work)?;
+                    match effect {
+                        DeltaRow::CreateEdge {
+                            eid,
+                            src,
+                            relation: edge_relation,
+                            dst,
+                            ..
+                        } => {
+                            let (anchor, neighbour) =
+                                if incoming { (*dst, *src) } else { (*src, *dst) };
+                            if anchor == vertex && *edge_relation == relation {
+                                if !matching.contains_key(eid) {
+                                    control(ScratchEntry)?;
+                                }
+                                if !observed_edges.contains(eid) {
+                                    control(ScratchEntry)?;
+                                }
+                                matching.insert(*eid, neighbour);
+                                observed_edges.insert(*eid);
+                            }
+                        }
+                        DeltaRow::DeleteEdge { eid, .. } => {
+                            matching.remove(eid);
+                        }
+                        DeltaRow::DeleteVertex {
+                            sorted_retired_incident_edges,
+                            ..
+                        } => {
+                            for eid in sorted_retired_incident_edges {
+                                control(Work)?;
+                                matching.remove(eid);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok((matching, observed_edges, snapshot_records))
+    }
+
+    /// The edges a relationship MERGE between `source` and `destination` can
+    /// match (fgdb-xckmv): `source`'s live incident edges of `relation` in
+    /// both directions whose other endpoint is `destination`, each as its
+    /// full overlay record. The read goes through the adjacency index, not the
+    /// complete edge table, and both incidence gaps become witnesses, so a
+    /// concurrent edge of `relation` at `source` still conflicts with a
+    /// zero-edge MERGE decision, as the complete scan's witness did. The
+    /// caller keeps the orientation and property tests.
+    pub(crate) fn merge_candidate_edges<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        source: VId,
+        destination: VId,
+        relation: RelationId,
+    ) -> Result<Vec<EdgeRecord>, WriteTxnError> {
+        self.ensure_database(database)?;
+        database.ensure_readable().map_err(WriteTxnError::from)?;
+        database
+            .snapshot
+            .check_frontier(self.basis)
+            .map_err(WriteTxnError::from)?;
+        let mut attempt = ProjectionReadAttempt {
+            reads: &self.point_reads,
+            element: ElementId::Vertex(source),
+            accepted: false,
+        };
+        let mut candidates = std::collections::BTreeSet::new();
+        for incoming in [false, true] {
+            let (matching, observed_edges, _) = self.adjacency_overlay_controlled(
+                database,
+                source,
+                relation,
+                incoming,
+                &mut |_| Ok::<(), WriteTxnError>(()),
+                &core::convert::identity,
+            )?;
+            candidates.extend(
+                matching
+                    .into_iter()
+                    .filter(|(_, neighbour)| *neighbour == destination)
+                    .map(|(eid, _)| eid),
+            );
+            self.point_reads.borrow_mut().record_adjacency_controlled(
+                source,
+                relation,
+                incoming,
+                observed_edges,
+                &mut || Ok::<(), WriteTxnError>(()),
+            )?;
+        }
+        let mut records = Vec::new();
+        for eid in candidates {
+            if let Some(record) = self.edge(database, eid)? {
+                records.push(record);
+            }
+        }
+        attempt.accepted = true;
+        Ok(records)
     }
 }
 

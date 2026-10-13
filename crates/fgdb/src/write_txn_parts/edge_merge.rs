@@ -744,7 +744,12 @@ impl WriteTxn {
                         || cx.checkpoint(),
                     )
                 },
-                |_, _| self.edges(database).map_err(GqlQueryError::Source),
+                // The pair's candidates through the adjacency index, with
+                // incidence-gap witnesses (fgdb-xckmv), not the edge table.
+                |source, destination| {
+                    self.merge_candidate_edges(database, source, destination, merge.relation())
+                        .map_err(GqlQueryError::Source)
+                },
                 allocate,
                 || cx.checkpoint(),
             )?;

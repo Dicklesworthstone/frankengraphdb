@@ -853,6 +853,33 @@ fn a_keyed_edge_load_batch_reads_only_its_endpoints() {
             CanonicalScalar::Int(value).into()
         };
         assert_eq!(found, [(stored(5), stored(77)), (stored(77), stored(300))]);
+        // The MERGE form of the load probes each pair through the adjacency
+        // index (fgdb-xckmv), not the edge table, so it fits the same
+        // allowance: it matches the relationship the CREATE made, creates
+        // the ten new ones once, and a second run creates nothing.
+        let merges = args(
+            (0..10)
+                .map(|at| object(vec![("a", int(400 + at)), ("b", int(500 + at))]))
+                .chain([object(vec![("a", int(5)), ("b", int(77))])])
+                .collect(),
+        );
+        for _ in 0..2 {
+            db.query_write(
+                &contexts.txn(),
+                &cx,
+                &commit,
+                "UNWIND $rows AS row MATCH (a:Entity {id: row.a}), (b:Entity {id: row.b}) \
+                 MERGE (a)-[:R]->(b)",
+                &merges,
+                symbols,
+                R,
+                narrow,
+                allocate,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.edges().unwrap().len(), 12);
+        }
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

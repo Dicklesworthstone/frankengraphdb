@@ -371,13 +371,15 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
                         )));
                     }
                 }
-                // Retain the native scan witness even when no edge exists.
-                // Raw records stay private. Only exact pair/relation candidates
-                // (either orientation for an undirected MERGE) reach the shared
+                // Retain the native incidence-gap witnesses even when no edge
+                // exists (fgdb-xckmv: the pair's candidates through the
+                // adjacency index, not the edge table). Raw records stay
+                // private. Only exact pair/relation candidates (either
+                // orientation for an undirected MERGE) reach the shared
                 // collector's counts and uniqueness reducer; every such edge
                 // has the two admitted endpoints above.
                 let edges = transaction
-                    .edges(&database.borrow())
+                    .merge_candidate_edges(&database.borrow(), src, dst, merge.relation())
                     .map_err(redacted)
                     .map_err(GqlQueryError::Source)?;
                 let mut admitted = Vec::new();
