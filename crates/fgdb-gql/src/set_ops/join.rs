@@ -77,6 +77,14 @@ impl PreparedGraphSet {
     }
 }
 
+impl RowJoinSpec {
+    /// Native multipart templates reuse the bound join's canonical semantics;
+    /// no caller-maintained encoding can omit ON predicates or equality keys.
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        append_transcript(self, bytes);
+    }
+}
+
 /// New application-node transcript. Existing node tags and bytes are unchanged.
 /// Explicit tags never depend on enum layout. Predicate bytes come from the
 /// ordinary row predicate transcript, including literal types and payloads.

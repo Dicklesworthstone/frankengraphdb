@@ -668,6 +668,9 @@ struct Parser<'a> {
     parameter_types: BTreeMap<String, GqlParameterType>,
     read_row_bindings: Vec<Name<'a>>,
     read_correlations: Vec<(Name<'a>, Option<Name<'a>>, usize)>,
+    /// Enabled only while a multipart graph part can lower its WHERE to ON.
+    /// Other read/write owners must not silently accept an unexecuted predicate.
+    read_comparisons: Option<Vec<boolean::RowComparison<'a>>>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
@@ -767,6 +770,7 @@ impl<'a> Parser<'a> {
             parameter_types: BTreeMap::new(),
             read_row_bindings: Vec::new(),
             read_correlations: Vec::new(),
+            read_comparisons: None,
             boundary_reads: None,
             elements: Vec::new(),
             lets: None,

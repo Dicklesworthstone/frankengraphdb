@@ -123,6 +123,29 @@ impl BoundReadInput {
             self.first.append_template_transcript(bytes);
             return;
         }
+        // Non-equality ON predicates are not derivable from the old equality
+        // correlation list. Give them a separate framed input format and use
+        // the ordinary relational join transcript, including exact operands.
+        // Equality-only definitions (including Any-domain ON) keep their bytes.
+        let theta = self.continuations.iter().any(|part| {
+            part.join.predicate().is_some_and(|code| {
+                code.iter().any(|op| {
+                    matches!(op, crate::GraphSetPredicateOp::Compare { comparison, .. }
+                        if *comparison != IntegerComparison::Equal)
+                })
+            })
+        });
+        if theta {
+            bytes.push(3);
+            bytes.extend_from_slice(b"fgdb:gql:match-continuations:theta:v1\0");
+            bytes.extend_from_slice(&(self.continuations.len() as u64).to_be_bytes());
+            self.first.append_template_transcript(bytes);
+            for part in &self.continuations {
+                part.join.append_template_transcript(bytes);
+                part.input.append_template_transcript(bytes);
+            }
+            return;
+        }
         // Ordinary input transcripts start with the closed 0/1 selection tag.
         // Tag 2 therefore cannot collide with any existing input definition.
         bytes.push(2);

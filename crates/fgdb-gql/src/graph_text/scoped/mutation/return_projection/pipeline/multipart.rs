@@ -142,6 +142,7 @@ fn join_spec(
     incoming: &RowSchema<'_>,
     inputs: &[Projection<'_>],
     keys: &[(usize, usize)],
+    comparisons: &[(usize, usize, IntegerComparison)],
     at: usize,
 ) -> Result<RowJoinSpec, GraphSetTextError> {
     let left: Vec<_> = incoming.iter().map(|(_, kind)| *kind).collect();
@@ -179,7 +180,26 @@ fn join_spec(
             spec.with_predicate(&code)
         })
     };
-    spec.map_err(|_| expected(at, "bounded, type-compatible MATCH correlations"))
+    let spec = spec.map_err(|_| expected(at, "bounded, type-compatible MATCH correlations"))?;
+    if comparisons.is_empty() {
+        return Ok(spec);
+    }
+    // Keep typed equality keys selective. An Any-domain equality may already
+    // be ON bytecode; append to it, never overwrite it with the theta test.
+    let mut code = spec.predicate().unwrap_or_default().to_vec();
+    for &(l, r, comparison) in comparisons {
+        let conjunction = !code.is_empty();
+        code.push(GraphSetPredicateOp::Compare {
+            left: GraphSetOperand::Column(l),
+            comparison,
+            right: GraphSetOperand::Column(left.len() + r),
+        });
+        if conjunction {
+            code.push(GraphSetPredicateOp::And);
+        }
+    }
+    spec.with_predicate(&code)
+        .map_err(|_| expected(at, "bounded, type-compatible MATCH comparisons"))
 }
 
 impl<'a> Parser<'a> {
@@ -350,7 +370,9 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         let optional = kind == Some(RowJoinKind::Left);
         self.read_row_bindings = incoming.iter().map(|(name, _)| *name).collect();
+        self.read_comparisons = Some(Vec::new());
         self.parse_match_prefix()?;
+        let row_comparisons = self.read_comparisons.take().unwrap_or_default();
         // Wrapping several independently scoped clauses in one left join
         // would move their null-extension boundary. Keep this continuation a
         // positive pattern; another WITH may begin the next required/optional
@@ -428,11 +450,23 @@ impl<'a> Parser<'a> {
         if !self.read_correlations.is_empty() && !self.syntax.scopes.is_empty() {
             return Err(expected(at, "root-only imported property-map correlations"));
         }
+        if !row_comparisons.is_empty() && !self.syntax.scopes.is_empty() {
+            return Err(expected(at, "root-only imported MATCH comparisons"));
+        }
         for (variable, key, left) in core::mem::take(&mut self.read_correlations) {
             let right = self.mutation_projection(&mut inputs, variable, key)?;
             if !keys.contains(&(left, right)) {
                 keys.push((left, right));
             }
+        }
+        let mut comparisons = Vec::new();
+        for comparison in row_comparisons {
+            let right = self.mutation_projection(
+                &mut inputs,
+                comparison.variable,
+                comparison.property,
+            )?;
+            comparisons.push((comparison.row, right, comparison.comparison));
         }
         // An aggregate terminal addresses completed row aliases, not graph
         // slots. A continuation's own RETURN reads every visible binding, so
@@ -487,7 +521,7 @@ impl<'a> Parser<'a> {
         // A continuation joins its incoming relation even when its schema is
         // empty; column count is not evidence that there was no earlier part.
         let join = if let Some(kind) = kind {
-            Some(join_spec(incoming, &head.inputs, &keys, at)?.with_kind(kind))
+            Some(join_spec(incoming, &head.inputs, &keys, &comparisons, at)?.with_kind(kind))
         } else {
             None
         };

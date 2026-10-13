@@ -7,6 +7,9 @@
 //! Property IN/NOT IN lists and BETWEEN/NOT BETWEEN ranges lower to the same
 //! checked comparisons, preserving UNKNOWN, typed arguments and source errors.
 
+mod row_comparison;
+pub(super) use row_comparison::RowComparison;
+
 use super::*;
 use crate::algebra::{
     GraphBooleanExpression, GraphBooleanOp as Op, GraphBooleanOperand as Operand,
@@ -37,6 +40,8 @@ struct Parsed<'a> {
     /// conjunct, where it is the join key `(q {v: m})` already makes. With
     /// no property, `q = m` equates the element itself with the row value.
     correlations: Vec<(Name<'a>, Option<Name<'a>>, usize, usize)>,
+    /// Non-equality top-level conjuncts owned by a multipart join's ON.
+    comparisons: Vec<RowComparison<'a>>,
     /// `v:L` label predicates. Valid only as top-level AND conjuncts, where
     /// each is the label `(v:L)` writes inline in this scope.
     labels: Vec<(Name<'a>, Name<'a>)>,
@@ -58,6 +63,7 @@ impl<'a> Parser<'a> {
             program: Vec::new(),
             extended: false,
             correlations: Vec::new(),
+            comparisons: Vec::new(),
             labels: Vec::new(),
         };
         self.boolean_or(0, &mut parsed)?;
@@ -88,6 +94,20 @@ impl<'a> Parser<'a> {
             self.read_correlations.extend(
                 (parsed.correlations.iter()).map(|&(variable, key, row, _)| (variable, key, row)),
             );
+        }
+        if let Some(comparison) = parsed.comparisons.first() {
+            if parsed.extended {
+                return Err(error(
+                    comparison.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "an imported row comparison only as a top-level AND conjunct",
+                    ),
+                ));
+            }
+            self.read_comparisons
+                .as_mut()
+                .expect("row comparisons require a multipart ON owner")
+                .extend(parsed.comparisons);
         }
         if !parsed.extended {
             // This is the old AND-only profile, not a migration to a different
@@ -288,6 +308,10 @@ impl<'a> Parser<'a> {
             // No program item: the flat profile ignores its AND, and any
             // other profile refuses the correlation (boolean_predicates).
             parsed.correlations.push(correlation);
+            return Ok(());
+        }
+        if let Some(comparison) = self.row_comparison()? {
+            parsed.comparisons.push(comparison);
             return Ok(());
         }
         self.positive_predicate()?;
