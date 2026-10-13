@@ -83,6 +83,13 @@ pub(crate) enum MutationActionTemplate {
         value: crate::set_text::ReadValueTemplate,
         at: usize,
     },
+    /// DELETE or DETACH DELETE of a value the WITH row computes (TCK
+    /// Delete5): `friends[$i]`, `map.key`.
+    DeleteValue {
+        value: crate::set_text::ReadValueTemplate,
+        detach: bool,
+        at: usize,
+    },
 }
 
 /// MATCH [WALK] ... SET / REMOVE / DETACH DELETE, with one parameter schema and

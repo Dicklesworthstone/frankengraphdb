@@ -116,10 +116,7 @@ impl PreparedGraphMutationQuery {
                 .map_err(GraphMutationQueryBuildError::InputDepth)?;
         }
         let columns = &mutation.columns;
-        let deleting = mutation
-            .actions
-            .iter()
-            .any(|action| matches!(action, GraphMutationAction::DetachDelete { .. }));
+        let deleting = mutation.actions.iter().any(GraphMutationAction::detaches);
         let mut input_types = Vec::new();
         for (at, binding) in bindings.iter().enumerate() {
             let kind = match *binding {
