@@ -659,7 +659,7 @@ impl Properties {
         for (at, (key, value)) in fields.into_iter().enumerate() {
             // A list column is a stored list field (fgdb-k3nub); execution
             // still refuses a list holding a map or a graph element.
-            let check = |column| {
+            let check = |column: usize| {
                 if columns.get(column).is_some_and(|kind| {
                     kind.is_scalar_like()
                         || matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any)
