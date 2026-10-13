@@ -500,9 +500,10 @@ impl<'a> ParsedMutationReturn<'a> {
             .map(Some)
     }
 
-    /// A RETURN leaf after a write after WITH: a value of the WITH row. The
-    /// element it carries is the post-write element; its property would need
-    /// the pre-write value beside the write's proposal, which the row lacks.
+    /// A RETURN leaf after a write after WITH: a value of the WITH row. A
+    /// property of an element the row carries is that element after the
+    /// write: the row's hidden read of it before the write, overlaid by the
+    /// write's own proposal for the field.
     fn row_leaf(
         &mut self,
         parser: &mut Parser<'a>,
@@ -519,8 +520,29 @@ impl<'a> ParsedMutationReturn<'a> {
         let Some(index) = row.iter().position(|(name, _)| name.text == word) else {
             return Ok(None);
         };
-        let name = parser.name()?;
         let kind = row[index].1;
+        if matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) {
+            let mut lookahead = parser.lexer.clone();
+            if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.'))
+                && let key = lookahead.next()?
+                && let TokenKind::Word(text) = key.kind
+                && let Some(current) = parser.boundary_read(row.len())?
+            {
+                let key = Name { text, at: key.at };
+                return self
+                    .column(
+                        Binding::Property {
+                            target: index,
+                            key,
+                            current,
+                        },
+                        key,
+                        GraphSetColumnType::Stored,
+                    )
+                    .map(Some);
+            }
+        }
+        let name = parser.name()?;
         if parser.is_punct(b'.')
             && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
         {
@@ -711,7 +733,9 @@ impl<'a> Parser<'a> {
         if let Some(row) = row
             && self.take(b'*')?
         {
-            for (index, &(name, kind)) in row.iter().enumerate() {
+            // A WITH row's hidden reads are never columns of `*`.
+            let visible = self.visible_width(row);
+            for (index, &(name, kind)) in row[..visible].iter().enumerate() {
                 let column = returning.column(Binding::Input(index), name, kind)?;
                 returning.projection.push(ReadProjectionTemplate {
                     name: name.text.to_owned(),

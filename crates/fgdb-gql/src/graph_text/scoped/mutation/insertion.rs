@@ -121,6 +121,11 @@ impl<'a> Parser<'a> {
     ) -> Result<ReadValueTemplate, crate::GraphSetTextError> {
         self.read_resolved_value(
             &mut |parser| {
+                // After WITH, `a.key` of an element the row carries is that
+                // row's hidden read (fgdb-sl4ym).
+                if let Some(column) = parser.boundary_read(imports.len())? {
+                    return Ok(Some(column));
+                }
                 let TokenKind::Word(word) = parser.current.kind else {
                     return Ok(None);
                 };
