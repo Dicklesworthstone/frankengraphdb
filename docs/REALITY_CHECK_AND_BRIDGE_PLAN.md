@@ -1,6 +1,13 @@
 # Reality Check and Bridge Plan
 
-**Latest measurement: 2026-10-04**, at `5df67f66`. `main` was red from
+**Latest measurement: 2026-10-12/13**, the first end-to-end run on real
+datasets against other engines. It covers `8d3ace1d` through `13023505`, plus
+the landings `7392832d`, `2420931a`, `fb18c95d` and `53ea2eef`, on an Apple M5
+Ultra. See
+[Current delta — 2026-10-12](#current-delta--2026-10-12). The 2026-10-04 summary
+that follows is kept as history.
+
+**Previous measurement: 2026-10-04**, at `5df67f66`. `main` was red from
 2026-09-30 17:20 −0400 on five gates: fmt, clippy, tests (8 never-run laws for
 UNWIND … MERGE, a feature that had never worked), the UBS ratchet, and commit
 provenance. The landing on top of it is another session's unpushed `e062a907`
@@ -12,7 +19,7 @@ and neither is a code finding:
 - The determinism e2e. The host's disk reaper deleted the proof's target dir
   mid-run, which is an environment failure.
 
-See [Current delta — 2026-10-04](#current-delta--2026-10-04).
+See [Historical delta — 2026-10-04](#historical-delta--2026-10-04-superseded-by-2026-10-12).
 
 **After the landing (same evening).** The toolchain-less stream resumed with 5
 uncompiled commits (`f6cca5e5`..`5c21f28c`). This pass checked them at
@@ -33,7 +40,202 @@ verified green on `main`'s history. (The earlier `9adf484d` of 2026-09-08 is
 not an ancestor; NE-0046.) The next proof of `main` ran on 2026-10-04 at
 `5df67f66`. It was stopped before finishing, with 5 gates already red.
 
-## Current delta — 2026-10-04
+## Current delta — 2026-10-12
+
+This is the first time the system was built for macOS and Linux and pointed at
+real data next to other databases. Machine: Apple M5 Ultra (36 cores), 256 GiB
+RAM, macOS 27, with other agents' builds running concurrently, so wall times
+are upper bounds. Every number below comes from an interleaved A/B or a
+gold-checked run whose artifacts are in the sibling repository
+`/Users/jemanuel/projects/fgdb_gauntlet` (local git). It lives outside the
+workspace on purpose: its competitor drivers are Python packages, and the
+closed dependency universe must not see them.
+
+### Product verdict
+
+**fgdb answers correctly on real graphs. It is two to four orders of
+magnitude slower than every incumbent on the same queries, and it cannot load
+any graph above one million rows.** Three of the slowest paths were fixed
+this pass, plus a vector-search defect. One severe regression was found and
+fixed (`fb18c95d`).
+
+1. **Correct.**
+   - On seven SNAP/DIMACS graphs (4K–264K vertices, 88K–730K edges), every
+     fgdb answer equals an independent numpy/scipy/igraph gold. That covers
+     counts, hub degree, 2-hop, top-10 degree, SHORTEST, PageRank top-10,
+     WCC and directed triangles.
+   - fgdb agrees with Kùzu 0.11.3, LadybugDB 0.21.2, DuckDB 1.4.4 (SQL and
+     DuckPGQ), Grafeo 0.5.44, Neo4j CE 2026.09, Memgraph 3.13 and FalkorDB
+     6.0.2 on 39/39 compared cells.
+   - Every disagreement found was another engine's: DuckPGQ's `{1,3}` reach
+     is off by one on all six graphs.
+2. **Slow.** Each CLI query re-opens and re-verifies every object file. A
+   point lookup on soc-Epinions1 (509K edges) costs about 3 s; on Kùzu and
+   DuckDB it costs 1–5 ms. Loads run at 5–16K rows/s, against 0.3–17M rows/s
+   for the others.
+3. **Walled.**
+   - `fgdb load` caps an input at 1M rows, and an edge may only name a vertex
+     from the same file (fgdb-nhwg0 and fgdb-ewc7i).
+   - web-Google, roadNet-CA, cit-Patents, soc-Pokec and soc-LiveJournal1 all
+     load into Memgraph in 7–35 s. None of them can be loaded into fgdb.
+
+### What landed (interleaved A/B in one invocation, byte-identical result digests)
+
+| Bead | Change | Real-data effect |
+|---|---|---|
+| fgdb-57col (`7392832d`) | Query and Txn contexts poll the lock-free published cancel bit on every call. They run asupersync's clock-reading full checkpoint once per 64 calls. | facebook SHORTEST{1,4}: user 7.12 → 1.77 s. `{1,3}` reach: 61.8 → 9.9 s. Triangles: wall 60.7 → 9.4 s. |
+| fgdb-mdkfb (`2420931a`) | A walk-first pattern filters its start vertex before `VarLengthExpand`. Before, it expanded from every vertex and filtered `{id:$s}` afterwards. | On top of 57col: SHORTEST 10×, reach 12.5×. epinions SHORTEST{1,9} went from no answer in 1,200 s to 2.5 s (9 hops = gold). cit-hepph SHORTEST went from TIMEOUT to 1.9 s; ca-hepth from 805 s to 0.44 s. |
+| fgdb-43k4t (`53ea2eef`) | Per-call exact vector search builds an exact-only segment with no HNSW links. hybrid.search's budget is the caller's remaining work units. | Before: Reddit 300-d vectors refused above 350 vectors, even with `--max-work-units 1e12`. After: 51,278 × 300-d exact l2 and dot kNN answer in 0.9 s per call and equal numpy (10/10 and 5/5, distance error 1e-14). ANN ef=64 runs (73 s, all of it the per-call build). |
+
+### Regression found and fixed: DIFFERENT EDGES (fgdb-ujaad, `fb18c95d`)
+
+- **Cause.** The clause-wide DIFFERENT EDGES default (`7d752d17`/`4c373391`/
+  `3648e7c9`, merged after `8d3ace1d`) sends every same-relation cycle to the
+  identified enumeration lane.
+- **Slowdown.** Directed triangles on facebook went from 0.80 s to 58.6 s of
+  user CPU (73×) between `8d3ace1d` and `13023505`.
+- **Refusals.** email-Enron and soc-Epinions1 refuse with
+  `ScratchEntries … 4000000001`. They answered that morning.
+- **The fix.**
+  - For fixed, single-typed atoms, two atoms can bind one relationship only
+    when their bound (source, relation, destination) keys are equal.
+  - A clause-complete constraint therefore has an exact per-binding weight:
+    the product of falling factorials m·(m−1)···(m−k+1) over equal-key groups.
+  - The factorized engine computes it on complete bindings (constraint
+    operators stripped; guarded intersection). Any other constraint shape keeps
+    the identified evaluator.
+  - Laws: on a multigraph with 1–3 parallel self-loops, parallel edges,
+    2-cycles and triangles, it equals the identified evaluator on 8 shapes ×
+    5 aggregates, and a brute-force distinct-relationship oracle on triangles.
+- **Effect** (interleaved A/B, identical digests).
+  - facebook triangles: user 9.51 → 0.55 s against `2420931a` (17×), and
+    0.86 → 0.55 s against the pre-regression `8d3ace1d` (1.56× faster than
+    before the regression).
+  - Gold-exact where `2420931a` refused: email-Enron 4,362,264 (31 s) and
+    soc-Epinions1 2,220,930 (27 s).
+- **Version message.** An older binary (`8d3ace1d`) reports a database
+  written by a newer one as `commit log entry at seq 1 is corrupt`. A version
+  mismatch should say so, not report corruption.
+
+### Ranked bridge (profile: `fgdb_gauntlet/runs/profile/PROFILE_REPORT.md`)
+
+Rank = recoverable wall time × breadth. The status is the bead's state.
+
+| # | Target | Evidence | Bead / owner |
+|---|---|---|---|
+| T1 | Var-length/SHORTEST expanded from every vertex | Sink-source control cost the same as the hub | fgdb-mdkfb — **landed** |
+| T2 | Every CLI query opens and verifies every object | epinions: 61K opens, 3 F_FULLFSYNC, 5.7–60 s depending on contention; road-ny 186 s | fgdb-2n2a2, fgdb-agp1o, fgdb-e8gr4 (open path); superseded by packing below |
+| T3 | One file + one F_FULLFSYNC per tiny object | road-ny load: 493,078 F_FULLFSYNC for 994K rows; average object 242 B; 17× space | fgdb-79kyi (NavyBrook), fgdb-gcm3 |
+| T4 | Clock read per metered event | 415M–1.44B `clock_gettime` per query | fgdb-57col — **landed** |
+| T5 | Compaction re-syncs every live object | A no-op compaction issues 3,717 F_FULLFSYNC | fgdb-l89gt |
+| T6 | fgdbd admits the whole table per request | epinions point lookup p50 55 ms; 1-hop refused at 100K records | fgdb-mu7jm, fgdb-er71y (NavyBrook) |
+| T7 | 256-way concurrent fsync burns sys CPU | load sys 96–823 s | folded into fgdb-79kyi |
+| T8 | 13 serial F_FULLFSYNC per commit | Single-row write ≥ 50 ms of flushes | fgdb-w2-group-commit-8zwd, fgdb-tier-d-drain-off-commit-path-tw7fo |
+| T9 | Cycles on the identified lane | See fgdb-ujaad | fgdb-ujaad — **landed** |
+| T10 | Per-query BTreeMap adjacency rebuild and heap sort | 24% of facebook count(edges); 52% of an fgdbd 1-hop request | fgdb-w3-tier-r-0tj (CSR once per generation) |
+| T11 | Load checkpoint rewrites the full key map | 3.15 GB written at `--rows-per-chunk 1000` | fgdb-28oee |
+| T12 | 4–6 blocking-pool hops per object read | 80–84% of open spent in `lock_slow` | fgdb-bmkk0 (asupersync) |
+| T13 | Prism projection rebuilt per CALL | Whole cost of resident analytics | fgdb-0tbrz |
+
+The finished but unwired code is about 103K lines in crates that no product
+crate depends on. The kernels that matter most cannot be reached under the
+default MATCH:
+- The Generic Join lane, the galloping intersection and the weighted
+  chain/cycle counts are blocked by `DifferentEdges` and by label `Select`.
+  fgdb-ujaad reopens the count side.
+- `MaintainedBeaconIndex`, standing triangles/k-core/components and the sealed
+  Prism kernels have no product caller. Each belongs behind `fgdbd`, gated to
+  full-scope capabilities: Beacon statistics must not leak to scoped tokens.
+
+### Correctness gaps the real data exposed (all filed)
+
+- **fgdb-x83z1.** One zero vector refuses every cosine search. One non-f32
+  decimal coordinate refuses every per-coordinate search.
+- **fgdb-euy8y.** CLI `search` cannot use a packed vector. hybrid.search rows
+  lose rank order without ORDER BY.
+- **fgdb-8erds.** Graphalytics conformance. BFS, SSSP, WCC and undirected LCC
+  match their references. PageRank has no exact-iteration mode, directed LCC
+  is refused, and CDLP is missing.
+- **fgdb-ewc7i.** There is no scalable way to add edges to an existing graph:
+  - load keys are file-scoped;
+  - write/import-csv MATCH costs |V| per record against a fixed 100K budget;
+  - an UNWIND-bound map field cannot be used in a MATCH property map;
+  - JSON parameters are capped near 2K values, against the 65,536 documented.
+- **fgdb-j72ep.** A `transaction` step refuses MERGE/SET … RETURN that `write`
+  accepts.
+- **fgdb-vuyw5.** An AS OF read reports the frontier as its `seq`.
+  `--certify-to` silently overwrites an existing certificate.
+
+### Environment findings
+
+- **fgdb-4xkuh.** Bare `cargo` and `rustc` fail on aarch64-darwin: the
+  `llvm-tools-preview` component collides with `libLLVM.dylib`. The
+  workaround is `RUSTUP_TOOLCHAIN=nightly-2026-08-31`.
+- **fgdb-jon4t.** Apple `ld` segfaults linking the `fgdb` lib test binary
+  (`__eh_frame` > 16 MB). The fgdb-gql lib test binary is at the edge too.
+- **rch.** It routes this repository to `ts1`, which refuses it
+  (`RCH_SYNC_LIVE_CHECKOUT_REFUSED`). `rch exec --worker <id>` works. The
+  gauntlet's `scripts/linux_lane.sh` (Docker) runs Linux-only laws locally.
+- **macOS durability cost.** On macOS `sync_all` is `F_FULLFSYNC`: 4–20 ms
+  each, up to 1 s under contention. `fgdb-bench gql-point-lookup` takes 640 s
+  on macOS and 14.6 s on Linux x86_64. Publish durable-write comparisons from
+  Linux.
+
+### Bridge, in order (the plan for the next pass)
+
+1. **Rerun the Tier-0 gauntlet at `53ea2eef`** with `--tag <commit>`, on a
+   quieter host. Check triangles against gold on all seven graphs and
+   `{1,3}` reach on epinions (30 s / 3.7 GB, all of it trail enumeration;
+   BFS reachability is the fix, below).
+2. **Ingest walls** (NavyBrook: fgdb-nhwg0, fgdb-mu7jm, fgdb-79kyi; plus
+   fgdb-ewc7i).
+   - When they land, run Tier 1: web-Google, roadNet-CA, cit-Patents with its
+     Graphalytics references, soc-Pokec and soc-LiveJournal1.
+   - This is the first point at which fgdb can be compared beyond toy scale.
+3. **Open cost (T2/T3/T12).** Packing (fgdb-79kyi/fgdb-gcm3) makes open a few
+   sequential reads. A hash-sealed snapshot image keyed by root makes repeat
+   opens O(1). Until then, every CLI number is open-dominated.
+4. **Resident execution (T6/T10/T13 plus the wiring above).** Build a CSR once
+   per generation in `fgdbd`. Run maintained Beacon and standing analytics
+   behind full-scope tokens. Add an fgdbd column to the gauntlet so
+   resident-vs-resident comparisons are possible: competitors are measured
+   warm and in-process today.
+5. **Parallelism.** Every query runs on one core of 36. Morsel-parallel scans
+   with a deterministic merge (fgdb-w5-executor-olp) come after the CSR.
+   Determinism holds because the canonical-order merge is part of the plan,
+   not because the thread count is fixed.
+6. **Gold suites as gates.** Graphalytics (fgdb-8erds), LSQB (blocked on
+   fgdb-ujaad for cycles) and LDBC SNB SF0.1/SF1 (blocked on step 2) run
+   through the gauntlet with their published references. A cell that
+   disagrees blocks publication.
+
+**Ambition tier** (pursue once the walls are down; each has a measurable
+gate):
+- **Decode once, map forever.** A content-addressed, hash-sealed CSR image per
+  root, verified lazily per page (BLAKE3 tree), so open is O(1).
+- **Fused kernels.** A fused scan→filter→aggregate kernel over CSR, with the
+  already ledgered `fgdb-unsafe-simd` lanes and bit-identical scalar
+  fallbacks. Today nothing depends on that crate.
+- **SIMD galloping intersection.** Make it real: the README claims it, and
+  only scalar `seek_ge` exists.
+- **Factorized counting for every DIFFERENT EDGES shape.** Inclusion–exclusion
+  over coincidence partitions, so contractions survive the constraint.
+- **Group commit.** F_BARRIERFSYNC at ordering points and one F_FULLFSYNC per
+  commit group on APFS.
+
+### Evidence boundary
+
+- Not run: the workspace-wide `cargo test`. `main` was not green at
+  `13023505` for pre-existing reasons: four `fgdb-gql` edge_stream aggregate
+  laws, plus the six fgdb-sim and three fgdb lib laws already attributed in
+  fgdb-vexfr.
+- Each landing above cites its targeted laws and a red-set diff (identical
+  before and after).
+- Competitor numbers are warm and in-process (embedded) or same-connection
+  (servers). fgdb numbers are one CLI process per query, so they include open.
+- These are not LDBC Benchmark Results.
+
+## Historical delta — 2026-10-04 (superseded by 2026-10-12)
 
 Measured at `5df67f66`, the `main` tip. No commit has landed since
 2026-09-30 21:02 −0400, and the tracker was last written 2026-10-01 20:33.
