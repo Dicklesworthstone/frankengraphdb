@@ -19,6 +19,8 @@ use fgdb_gql::{GqlQueryError, GraphMutationError};
 
 #[path = "edge_upsert.rs"]
 mod edge_upsert;
+#[path = "edge_upsert_program.rs"]
+mod edge_program;
 #[path = "write_query.rs"]
 mod query;
 #[path = "write_script.rs"]
@@ -64,8 +66,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// Relationship MERGE/upsert require ReadWrite and the requested relation
     /// during whole-program preflight, even for NoInput. Their existing native
     /// reducer sees only selected authorized directed pairs. Plain MERGE handles
-    /// every distinct pair; ON/trailing actions retain the singular contract.
-    /// Parallel EIds refuse; NoInput executes neither branch, allocates no identity and costs
+    /// every distinct pair; ON/SET preserves MATCH occurrences and parallel
+    /// matches, resolving each occurrence against preceding staged effects.
+    /// NoInput executes neither branch, allocates no identity and costs
     /// no result row. No privileged existence path is an authorization fallback.
     /// Relation coordinates can differ; native ordered composition remains the
     /// only writer. No caller-selected identity or allocator callback is exposed.
@@ -403,7 +406,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         (GraphWriteStepStats::EdgeMerge(stats), receipt)
                                     }
                                     GraphWriteStatement::EdgeUpsert(input) => {
-                                        let (stats, outcome) = edge_upsert::apply(
+                                        let (stats, step) = edge_program::apply_many(
                                             workspace.transaction(),
                                             self,
                                             query_cx,
@@ -414,10 +417,10 @@ impl<V: Vfs + Clone> Database<V> {
                                             returning,
                                         )
                                         .map_err(GraphWriteStepError::EdgeUpsert)?;
-                                        (
-                                            GraphWriteStepStats::EdgeUpsert(stats),
-                                            GraphWriteStepReceipt::EdgeUpsert { outcome },
-                                        )
+                                        if let Some(step) = step {
+                                            receipts.push(step);
+                                        }
+                                        return Ok(stats);
                                     }
                                 };
                                 if returning {

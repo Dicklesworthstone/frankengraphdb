@@ -313,6 +313,46 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
 ) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
+    apply_with_input(
+        transaction, database, cx, merge, policy, scope, execution, returning, None,
+    )
+}
+
+/// Resolve one already-masked MATCH occurrence through the SAME endpoint
+/// admission, existence scan and original-image staging as ordinary MERGE.
+/// The caller owns the frozen input and cumulative source/evaluator prefix.
+/// This crate-private seam grants no new permit and never re-runs MATCH.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_occurrence<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    merge: &PreparedGraphEdgeMerge,
+    policy: GraphEdgeMergePolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    selected: GqlQueryExecution<GraphValueRow>,
+    occurrence: usize,
+) -> Result<(GraphEdgeMergeStats, crate::write_txn::EdgeUpsertOccurrences), Fault> {
+    apply_with_input(
+        transaction, database, cx, merge, policy, scope, execution, false,
+        Some((selected, occurrence)),
+    )
+    .map(|(stats, outcomes, _)| (stats, outcomes))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    merge: &PreparedGraphEdgeMerge,
+    policy: GraphEdgeMergePolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+    selected: Option<(GqlQueryExecution<GraphValueRow>, usize)>,
+) -> Result<(GraphEdgeMergeStats, Output, Vec<GraphValueRow>), Fault> {
     if !scope.allows_relation(merge.relation()) {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
@@ -326,6 +366,7 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
     {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
+    let original_row = selected.as_ref().map(|(_, row)| *row);
     let proposal: super::super::EdgeMergeProposal<Output> = cx.with_restriction(|| {
         let database = RefCell::new(&mut *database);
         let controls = RefCell::new(&mut *execution);
@@ -333,6 +374,9 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
             merge,
             policy,
             |pattern, allowance| {
+                if let Some((selected, _)) = selected {
+                    return Ok(selected);
+                }
                 selection::select_overlay(
                     transaction,
                     &database.borrow(),
@@ -389,6 +433,7 @@ fn apply_with_output<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> 
                 Ok(admitted)
             },
             |row| {
+                let row = original_row.unwrap_or(row);
                 database
                     .borrow_mut()
                     .allocate_identity(cx, GraphInsertRequest::Edge { row, edge: 0 })
