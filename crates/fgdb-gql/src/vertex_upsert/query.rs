@@ -4,6 +4,8 @@
 //! hands them back here; nothing is re-matched. A WITH continues those owned
 //! values through the native relational pipeline under the same write budget.
 
+mod batch;
+
 use super::*;
 use crate::algebra::{GraphOrderError, GraphValue, GraphValueOrder, GraphValueRow};
 use crate::row_projection::{RowProjectionBuildError, RowProjectionSpec};
