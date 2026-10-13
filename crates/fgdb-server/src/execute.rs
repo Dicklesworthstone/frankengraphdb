@@ -2,6 +2,7 @@
 //! path every surface (FGP, HTTP and Bolt) shares, so adapters differ only in
 //! framing, never in authority, statement classes or error classes.
 
+mod edge_upsert_output;
 pub(crate) mod ordered;
 mod prepared;
 mod subscription;
@@ -668,6 +669,8 @@ async fn write_returning(
     // ceilings (including zero), and a read policy can be looser than a write
     // policy. Final signed row admission stays with the authorized collectors.
     let policy = db.write_policy;
+    let mut admitted_rows = None;
+    let mut output_refusal = None;
     let result = match &prepared {
         Returning::Insert(prepared) => guard
             .execute_graph_insert_query_authorized(
@@ -715,7 +718,7 @@ async fn write_returning(
             .map(|(_, rows, completion)| (rows, completion))
             .map_err(returning_refusal),
         Returning::EdgeUpsert(prepared) => guard
-            .execute_graph_edge_upserts_query_authorized(
+            .execute_graph_edge_upserts_query_authorized_checked(
                 &txn,
                 &query,
                 &commit,
@@ -725,6 +728,19 @@ async fn write_returning(
                 prepared,
                 policy.edge_upsert_policy(),
                 unix_millis,
+                |rows, work| match edge_upsert_output::collect(&columns, rows, work) {
+                    Ok(rows) => {
+                        admitted_rows = Some(rows);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        // Retain the exact output/meter error. Returning
+                        // Err here prevents native completion altogether;
+                        // it never substitutes a refusal for Unknown.
+                        output_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    }
+                },
             )
             .await
             .map(|(_, rows, completion)| (rows, completion))
@@ -746,12 +762,16 @@ async fn write_returning(
             .map_err(returning_refusal),
     };
     drop(guard);
-    let (execution, completion) = result?;
-    let rows = execution
-        .value
-        .iter()
-        .map(|row| row.values().iter().map(convert::graph).collect())
-        .collect();
+    let (execution, completion) = result.map_err(|error| output_refusal.unwrap_or(error))?;
+    // Bulk relationship RETURN is already converted and body-admitted inside
+    // its rollback boundary. Other write families retain their existing path.
+    let rows = admitted_rows.unwrap_or_else(|| {
+        execution
+            .value
+            .iter()
+            .map(|row| row.values().iter().map(convert::graph).collect())
+            .collect()
+    });
     let outcome = match completion {
         EmbeddedTxnCompletion::WriteCommitted { commit_seq } => {
             db.commits.committed();
