@@ -5,7 +5,9 @@
 use super::*;
 use crate::edge_upsert_text::PreparedGraphEdgeUpsertQueryText;
 use crate::mutation_text::WriteReturnGroupTemplate;
-use crate::set_text::{ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate};
+use crate::set_text::{
+    ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
+};
 use crate::{
     GraphEdgeReturnBinding, GraphSetColumnType, GraphSetProjection, GraphSetQuantifier,
     PreparedGraphEdgeUpsertQuery,
@@ -28,6 +30,7 @@ pub(super) struct ParsedEdgeReturn<'a> {
     offset: ReadPageNumber,
     count: Option<ReadPageNumber>,
     pub(super) at: usize,
+    tail: Option<Vec<ReadStageTemplate>>,
 }
 impl<'a> ReturnLeaves<'a> for ParsedEdgeReturn<'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
@@ -125,6 +128,7 @@ impl<'a> ParsedEdgeReturn<'a> {
             offset: self.offset,
             count: self.count,
             at: self.at,
+            tail: self.tail,
         })
     }
 }
@@ -134,7 +138,10 @@ impl<'a> Parser<'a> {
         variable: Name<'a>,
     ) -> Result<ParsedEdgeReturn<'a>, GraphEdgeUpsertTextError> {
         let at = self.current.at;
-        self.word("RETURN")?;
+        let head = self.take_word("WITH")?;
+        if !head {
+            self.word("RETURN")?;
+        }
         let quantifier = if self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
@@ -160,6 +167,7 @@ impl<'a> Parser<'a> {
             offset: ReadPageNumber::Literal(0),
             count: None,
             at,
+            tail: None,
         };
         let items = self.write_return_items(&mut returning)?;
         returning.projection = items.projection;
@@ -175,7 +183,51 @@ impl<'a> Parser<'a> {
             returning.offset = offset;
             returning.count = count;
         }
+        if head {
+            returning.tail = Some(self.edge_upsert_tail(&mut returning, items.output)?);
+        }
         Ok(returning)
+    }
+
+    /// Carry only the actual selected relationship, under any direct alias.
+    /// Its hidden property cells are read after all ON/SET actions by the
+    /// existing owner, with the same authority and rollback boundary.
+    fn edge_upsert_tail(
+        &mut self,
+        returning: &mut ParsedEdgeReturn<'a>,
+        mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
+    ) -> Result<Vec<ReadStageTemplate>, GraphEdgeUpsertTextError> {
+        let visible = schema.len();
+        let mut reads = Vec::new();
+        if returning.grouping.is_none() {
+            for (alias, key) in self.write_tail_reads(&schema)? {
+                let Some(at) = schema[..visible]
+                    .iter()
+                    .position(|(name, _)| name.text == alias.text)
+                else {
+                    continue;
+                };
+                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
+                    continue;
+                };
+                if !matches!(
+                    returning.bindings[binding],
+                    (EdgeBinding::Edge, GraphSetColumnType::Edge)
+                ) {
+                    continue;
+                }
+                let variable = returning.variable;
+                let column = returning.map_input(self, variable, ReturnMapInput::Property(key))?;
+                mutation_query::push_tail_read(
+                    &mut returning.projection,
+                    &mut schema,
+                    &mut reads,
+                    (alias, key),
+                    column,
+                )?;
+            }
+        }
+        Ok(self.finish_write_tail(schema, visible, reads)?)
     }
 }
 impl EdgeReturnTemplate {
@@ -213,12 +265,19 @@ impl EdgeReturnTemplate {
                     kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
                 })?;
         }
-        Ok(query.with_page(
+        let query = query.with_page(
             return_projection::pipeline::page_value(&self.offset, values),
             self.count
                 .as_ref()
                 .map(|count| return_projection::pipeline::page_value(count, values)),
-        ))
+        );
+        let Some(stages) = &self.tail else {
+            return Ok(query);
+        };
+        let owned =
+            crate::PreparedGraphSet::owned(query.columns().to_vec(), query.column_types().to_vec());
+        let tail = return_projection::bind_stages(owned, stages, values)?;
+        Ok(query.with_tail(tail))
     }
 }
 impl PreparedGraphEdgeUpsertQueryText {

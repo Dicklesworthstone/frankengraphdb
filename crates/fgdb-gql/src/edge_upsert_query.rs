@@ -3,6 +3,8 @@
 //! The write owner supplies final fields of the chosen edge, never a second
 //! MATCH. NoInput supplies no row, so even a constant projection stays empty.
 //! Aggregation, projection, DISTINCT and pagination use the shared kernels.
+//! WITH continues the final-state head through native row stages. It never
+//! reselects the relationship or refreshes the statement's execution budget.
 
 use crate::algebra::{GraphOrderError, GraphValue, GraphValueOrder, GraphValueRow};
 use crate::row_projection::{RowProjectionBuildError, RowProjectionSpec};
@@ -73,6 +75,7 @@ pub struct PreparedGraphEdgeUpsertQuery {
     order: Vec<GraphValueOrder>,
     offset: u64,
     count: Option<u64>,
+    tail: Option<crate::PreparedGraphSet>,
 }
 impl core::fmt::Debug for PreparedGraphEdgeUpsertQuery {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -134,6 +137,7 @@ impl PreparedGraphEdgeUpsertQuery {
             order: Vec::new(),
             offset: 0,
             count: None,
+            tail: None,
         })
     }
 
@@ -155,6 +159,10 @@ impl PreparedGraphEdgeUpsertQuery {
     }
 
     pub fn with_order_by(mut self, order: &[GraphValueOrder]) -> Result<Self, GraphOrderError> {
+        if let Some(tail) = self.tail.take() {
+            self.tail = Some(tail.with_order_by(order)?);
+            return Ok(self);
+        }
         if order.is_empty() {
             return Err(GraphOrderError::EmptyOrder);
         }
@@ -177,8 +185,20 @@ impl PreparedGraphEdgeUpsertQuery {
     }
     #[must_use]
     pub fn with_page(mut self, offset: u64, count: Option<u64>) -> Self {
-        self.offset = offset;
-        self.count = count;
+        if let Some(tail) = self.tail.take() {
+            self.tail = Some(tail.with_page(offset, count));
+        } else {
+            self.offset = offset;
+            self.count = count;
+        }
+        self
+    }
+
+    /// The tail's schema is public output; the WITH head remains private.
+    pub(crate) fn with_tail(mut self, tail: crate::PreparedGraphSet) -> Self {
+        self.columns = tail.columns().to_vec();
+        self.types = tail.column_types().to_vec();
+        self.tail = Some(tail);
         self
     }
 
@@ -241,15 +261,24 @@ impl PreparedGraphEdgeUpsertQuery {
                 &mut checkpoint,
             )?;
         }
-        crate::set_ops::finish_owned_projection(
+        let head = if self.tail.is_some() {
+            crate::set_ops::owned_head_policy(policy)
+        } else {
+            policy
+        };
+        let returning = crate::set_ops::finish_owned_projection(
             returning,
-            policy,
+            head,
             &self.projection,
             self.quantifier,
             &self.order,
             (self.offset, self.count),
-            checkpoint,
-        )
+            &mut checkpoint,
+        )?;
+        match &self.tail {
+            None => Ok(returning),
+            Some(tail) => crate::set_ops::finish_owned_tail(returning, tail, policy, checkpoint),
+        }
     }
 
     /// Definition identity, not a durable effect format.
@@ -287,6 +316,223 @@ impl PreparedGraphEdgeUpsertQuery {
         if let Some(grouping) = &self.grouping {
             grouping.append_canonical_bytes(&mut bytes);
         }
+        if let Some(tail) = &self.tail {
+            bytes.extend_from_slice(b"fgdb:write-tail:v1\0");
+            let tail = tail.canonical_bytes();
+            bytes.extend_from_slice(&(tail.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&tail);
+        }
         bytes
+    }
+}
+
+#[cfg(test)]
+mod with_tests {
+    use super::*;
+    use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphEdgeUpsertQueryText};
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::{CanonicalScalar, EId, VId};
+
+    const R: RelationId = RelationId(1);
+    const P: PropertyKeyId = PropertyKeyId(1);
+    const PREFIX: &str = "MATCH (a),(b) MERGE (a)-[r:R]->(b) \
+        ON CREATE SET r.p=2 ON MATCH SET r.p=r.p+1 SET r.p=r.p*2";
+    const EDGE: EId = EId((1_u128 << 100) + 7);
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            _ => None,
+        }
+    }
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+    fn prepare(tail: &str) -> PreparedGraphEdgeUpsertQuery {
+        PreparedGraphEdgeUpsertQueryText::prepare(&format!("{PREFIX} {tail}"), R, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    }
+    fn policy(rows: u64) -> GqlQueryPolicy {
+        GqlQueryPolicy::new(1_000, rows, 1_000_000, 100_000)
+    }
+    fn input(query: &PreparedGraphEdgeUpsertQuery, value: i64) -> Vec<GraphValue> {
+        query.bindings().iter().map(|binding| match binding {
+            GraphEdgeReturnBinding::Edge => GraphValue::Edge(EDGE),
+            GraphEdgeReturnBinding::Property(key) => {
+                assert_eq!(*key, P);
+                int(value)
+            }
+        }).collect()
+    }
+    fn finish(
+        query: &PreparedGraphEdgeUpsertQuery,
+        row: Option<Vec<GraphValue>>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<()>, ()>> {
+        query.project_governed(
+            row,
+            GqlExecutionStats::default(),
+            GlaExecutionStats::default(),
+            policy,
+            || Ok(()),
+        )
+    }
+    fn values(output: &GqlQueryExecution<GraphValueRow>) -> Vec<Vec<GraphValue>> {
+        output.value.iter().map(|row| row.values().to_vec()).collect()
+    }
+
+    #[test]
+    fn aliases_read_final_action_cells_without_losing_identity_or_leaking_hidden_columns() {
+        let query = prepare(
+            "WITH r AS edge, r AS again WHERE edge.p > 0 \
+             RETURN edge AS identity, edge.p AS p, again.p AS again",
+        );
+        assert_eq!(query.bindings(), &[GraphEdgeReturnBinding::Edge, GraphEdgeReturnBinding::Property(P)]);
+        assert_eq!(query.columns(), &["identity", "p", "again"]);
+        let output = finish(&query, Some(vec![GraphValue::Edge(EDGE), int(14)]), policy(1)).unwrap();
+        assert_eq!(values(&output), vec![vec![GraphValue::Edge(EDGE), int(14), int(14)]]);
+        let star = prepare("WITH r AS __fg_boundary_0 WHERE __fg_boundary_0.p > 0 RETURN *");
+        assert_eq!(star.columns(), &["__fg_boundary_0"]);
+        assert_eq!(values(&finish(&star, Some(input(&star, 14)), policy(1)).unwrap()),
+            vec![vec![GraphValue::Edge(EDGE)]]);
+    }
+
+    #[test]
+    fn only_final_rows_spend_the_result_grant_including_zero_and_empty_input() {
+        let query = prepare("WITH r WHERE r.p < 0 RETURN r");
+        let output = finish(&query, Some(input(&query, 14)), policy(0)).unwrap();
+        assert!(output.value.is_empty());
+        assert_eq!(output.rows.result_rows, 0);
+        let query = prepare("WITH r.p AS p UNWIND [p,p+1,p+1] AS x RETURN count(*) AS n");
+        let output = finish(&query, Some(input(&query, 14)), policy(1)).unwrap();
+        assert_eq!(values(&output), vec![vec![int(3)]]);
+        assert_eq!(output.rows.result_rows, 1);
+        assert!(finish(&query, Some(input(&query, 14)), policy(0)).is_err());
+        assert_eq!(values(&finish(&query, None, policy(1)).unwrap()), vec![vec![int(0)]]);
+        let constant = prepare("WITH r RETURN 42 AS n");
+        assert!(finish(&constant, None, policy(0)).unwrap().value.is_empty());
+        let grouped_head = prepare("WITH count(*) AS n RETURN n");
+        assert_eq!(values(&finish(&grouped_head, None, policy(1)).unwrap()), vec![vec![int(0)]]);
+    }
+
+    #[test]
+    fn final_api_order_and_page_do_not_replace_the_with_head_window() {
+        let query = prepare(
+            "WITH r.p AS p LIMIT 1 UNWIND [p,p+1,p+2] AS x \
+             RETURN x AS value, -x AS opposite",
+        );
+        let order = [GraphValueOrder { column: 1, descending: false, nulls_first: false }];
+        let query = query.with_order_by(&order).unwrap().with_page(1, Some(1));
+        let output = finish(&query, Some(input(&query, 4)), policy(1)).unwrap();
+        assert_eq!(values(&output), vec![vec![int(5), int(-5)]]);
+        let empty_head = prepare("WITH r LIMIT 0 RETURN count(*) AS n").with_page(0, Some(1));
+        assert_eq!(values(&finish(&empty_head, Some(input(&empty_head, 4)), policy(1)).unwrap()),
+            vec![vec![int(0)]]);
+    }
+
+    #[test]
+    fn rebind_tail_parameters_and_keep_plain_return_identity_unchanged() {
+        let text = format!("{PREFIX} WITH r.p AS p WHERE p >= $minimum RETURN p+$extra AS result");
+        let template = PreparedGraphEdgeUpsertQueryText::prepare(&text, R, symbols).unwrap();
+        assert_eq!(template.parameter_schema().len(), 2);
+        let arguments = |minimum| GqlParameters::new().with_int64("minimum", minimum).unwrap()
+            .with_int64("extra", 3).unwrap();
+        let visible = template.bind_parameters(&arguments(4)).unwrap();
+        let hidden = template.bind_parameters(&arguments(5)).unwrap();
+        assert_eq!(values(&finish(&visible, Some(input(&visible, 4)), policy(1)).unwrap()),
+            vec![vec![int(7)]]);
+        assert!(finish(&hidden, Some(input(&hidden, 4)), policy(0)).unwrap().value.is_empty());
+        assert_ne!(visible.canonical_bytes(), hidden.canonical_bytes());
+        assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+        let plain = prepare("RETURN r.p AS p");
+        let native = PreparedGraphEdgeUpsertQuery::prepare(
+            plain.upsert().clone(),
+            vec![GraphEdgeReturnBinding::Property(P)],
+            vec![GraphSetProjection::new("p", crate::GraphSetValue::Column(0))],
+            GraphSetQuantifier::All,
+        ).unwrap();
+        assert_eq!(plain.canonical_bytes(), native.canonical_bytes());
+        assert_ne!(plain.canonical_bytes(), prepare("WITH r.p AS p RETURN p").canonical_bytes());
+    }
+
+    #[test]
+    fn native_tail_errors_and_input_schema_errors_survive_limit_zero() {
+        for suffix in [
+            "WITH r.p AS p RETURN 10/(p-4) AS n LIMIT 0",
+            "WITH r.p AS p RETURN 10/(p-4) AS n",
+        ] {
+            let query = prepare(suffix).with_page(0, Some(0));
+            assert!(matches!(finish(&query, Some(input(&query, 4)), policy(0)),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection { .. }))));
+        }
+        let query = prepare("WITH r RETURN 1 AS n LIMIT 0");
+        for row in [vec![], vec![GraphValue::Vertex(VId(1))]] {
+            assert!(matches!(finish(&query, Some(row), policy(0)),
+                Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema { .. }))));
+        }
+    }
+
+    #[test]
+    fn work_scratch_and_each_cancellation_point_cover_head_and_tail() {
+        let query = prepare("WITH r.p AS p UNWIND [p,p+1,p+1] AS x RETURN DISTINCT x ORDER BY x");
+        let prefix = GlaExecutionStats { work_units: 17, scratch_entries: 11 };
+        let mut checkpoints = 0_usize;
+        let output = query.project_governed::<(), usize>(
+            Some(input(&query, 4)), GqlExecutionStats::default(), prefix, policy(2),
+            || { checkpoints += 1; Ok(()) },
+        ).unwrap();
+        assert_eq!(values(&output), vec![vec![int(4)], vec![int(5)]]);
+        assert!(output.evaluator.work_units > prefix.work_units);
+        assert!(output.evaluator.scratch_entries > prefix.scratch_entries);
+        let work = output.evaluator.work_units;
+        let scratch = output.evaluator.scratch_entries;
+        let exact = GqlQueryPolicy::new(1_000, 2, work, scratch);
+        let rerun = query.project_governed::<(), ()>(
+            Some(input(&query, 4)), GqlExecutionStats::default(), prefix, exact, || Ok(()),
+        ).unwrap();
+        assert_eq!(output.value, rerun.value);
+        for limits in [(work-1, scratch), (work, scratch-1)] {
+            let result = query.project_governed::<(), ()>(
+                Some(input(&query, 4)), GqlExecutionStats::default(), prefix,
+                GqlQueryPolicy::new(1_000, 2, limits.0, limits.1), || Ok(()),
+            );
+            assert!(matches!(result, Err(GqlQueryError::Evaluator(_))));
+        }
+        assert!(checkpoints > 1);
+        for fail_at in 0..checkpoints {
+            let mut at = 0;
+            let result = query.project_governed::<(), usize>(
+                Some(input(&query, 4)), GqlExecutionStats::default(), prefix, policy(2),
+                || { let current = at; at += 1; if current == fail_at { Err(current) } else { Ok(()) } },
+            );
+            assert!(matches!(result, Err(GqlQueryError::Interrupted(index)) if index == fail_at));
+        }
+    }
+
+    #[test]
+    fn malformed_or_unowned_tail_leaves_refuse_before_catalog_callbacks() {
+        for suffix in [
+            "WITH r AS edge RETURN missing.p",
+            "WITH r AS edge RETURN a",
+            "WITH r.p AS p RETURN r",
+            "WITH r RETURN r.p +",
+            "WITH * RETURN r",
+            "WITH r RETURN r; RETURN 1",
+        ] {
+            let mut calls = 0;
+            let result = PreparedGraphEdgeUpsertQueryText::prepare(
+                &format!("{PREFIX} {suffix}"), R,
+                |kind, name| { calls += 1; symbols(kind, name) },
+            );
+            assert!(result.is_err(), "{suffix}");
+            assert_eq!(calls, 0, "{suffix}");
+        }
+        let text = format!("{PREFIX} WITH r WHERE r.p > 0 RETURN r.p");
+        assert!(PreparedGraphEdgeUpsertQueryText::has_return_clause(&text).unwrap());
+        assert!(!crate::PreparedGraphEdgeMergeQueryText::has_return_clause(&text).unwrap());
+        assert!(!crate::PreparedGraphMutationQueryText::has_return_clause(&text).unwrap());
     }
 }

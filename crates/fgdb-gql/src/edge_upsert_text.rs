@@ -122,10 +122,13 @@ pub(crate) struct EdgeReturnTemplate {
     pub offset: crate::set_text::ReadPageNumber,
     pub count: Option<crate::set_text::ReadPageNumber>,
     pub at: usize,
+    /// Native row stages over the WITH head's own post-action bindings.
+    pub tail: Option<Vec<crate::set_text::ReadStageTemplate>>,
 }
 
 /// Parse once, bind repeatedly: MATCH-fed directed relationship MERGE, optional
-/// ON/SET clauses, then RETURN of the chosen edge and its final properties.
+/// ON/SET clauses, then RETURN or WITH over the chosen edge's final properties.
+/// WITH continues through the native row pipeline within the same statement.
 /// Scalar/collection expressions, grouped aggregates, DISTINCT and pagination
 /// use the ordinary RETURN compiler. This is the unique-endpoint-pair profile;
 /// endpoint RETURN, wildcard/property-map reads, undirected MERGE and MERGE
