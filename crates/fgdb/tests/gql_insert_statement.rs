@@ -17,6 +17,8 @@ use fgdb_types::{
 use std::collections::VecDeque;
 
 const R: RelationId = RelationId(1);
+/// A second relation type, so a chain writes more than one (Merge5 [4]).
+const T: RelationId = RelationId(2);
 const PERSON: LabelId = LabelId(1);
 const SOURCE: LabelId = LabelId(2);
 const COPY: LabelId = LabelId(3);
@@ -38,6 +40,7 @@ fn keys() -> DatabaseKeys {
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Relation, "R" | "KNOWS") => Some(GraphSymbol::Relation(R)),
+        (GraphSymbolKind::Relation, "T") => Some(GraphSymbol::Relation(T)),
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(PERSON)),
         (GraphSymbolKind::Label, "Source") => Some(GraphSymbol::Label(SOURCE)),
         (GraphSymbolKind::Label, "Copy") => Some(GraphSymbol::Label(COPY)),
@@ -1484,6 +1487,62 @@ fn merge_steps_take_a_with_head() {
             assert!(write(&mut db, refused).await.is_err(), "{refused}");
         }
         assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// TCK Merge5 [4], Merge9 [3], Create3 [12]: a chain may write relationships
+/// of several types in one statement, though the write names one relation:
+/// each step sees its predecessor's writes, whatever their type.
+#[test]
+fn chains_write_relationships_of_several_types() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a9, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, false).await;
+        let mut next = 100u128;
+        let rows = db
+            .query_write(
+                &txcx,
+                &cx,
+                &commit,
+                "CREATE (a:Person {p: 1}), (b:Person {p: 2}) MERGE (a)-[:T]->(b) \
+                 CREATE (b)-[:R]->(:Copy) RETURN count(*) AS c",
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .unwrap();
+        let QueryResult::Rows { rows, .. } = rows else {
+            unreachable!("a chain with RETURN answers rows")
+        };
+        assert_eq!(
+            rows,
+            [vec![QueryValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Int(1)
+            ))]]
+        );
+        let mut relations: Vec<_> = db
+            .edges()
+            .unwrap()
+            .iter()
+            .map(|edge| edge.entry.relation)
+            .collect();
+        relations.sort();
+        assert_eq!(relations, [R, T]);
+        assert_eq!(db.vertices().unwrap().len(), 3);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
