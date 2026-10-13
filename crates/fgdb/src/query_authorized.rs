@@ -316,9 +316,9 @@ impl<'a> Tables<'a> {
     /// masked ones the algebra evaluates, and each admitted record's charge is
     /// a function of the visible graph. Selection itself runs on `scan`
     /// (cancellation only) and admission charges what it keeps, as the full
-    /// scan does. A scoped capability, an unbound root, a vertex-rooted plan
-    /// that also reads edges, or a nested vertex scan returns `None`, leaving
-    /// the complete admission below.
+    /// scan does. A scoped capability, an unbound or unseekable root, a plan
+    /// whose steps the per-slot closure does not model, or a nested vertex
+    /// scan returns `None`, leaving the complete admission below.
     fn admit_bound<Row: GlaOutput>(
         snapshot: &'a Snapshot,
         plan: &GlaPlan<Row>,
@@ -332,10 +332,24 @@ impl<'a> Tables<'a> {
             return Ok(None);
         }
         let mut tables = Self::new();
-        if !plan.scans_edges() {
-            if plan.reads_edges() {
+        if !plan.scans_edges() && plan.reads_edges() {
+            // A bound vertex root followed by flat steps (a quantified reach)
+            // admits its per-slot closure: the rows its slots can bind, which
+            // contain both endpoints of every closure edge, then those edges.
+            let Some((edges, reached)) =
+                source::bound_vertex_closure(snapshot, plan, at, true, scan)?
+            else {
                 return Ok(None);
+            };
+            for vid in reached {
+                if let Some(row) = source::find_vertex(snapshot, vid, at, scan)? {
+                    tables.admit_vertex(row, predicates, node, control)?;
+                }
             }
+            for edge in edges {
+                tables.admit_edge(edge, predicates, control)?;
+            }
+        } else if !plan.scans_edges() {
             let Some((rows, _)) = source::bound_vertices(snapshot, plan, at, scan)? else {
                 return Ok(None);
             };

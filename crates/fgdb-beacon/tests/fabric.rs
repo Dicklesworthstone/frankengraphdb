@@ -544,3 +544,81 @@ fn derived_writer_fork_does_not_publish_into_the_original() {
         1
     );
 }
+
+/// fgdb-x83z1: a zero document vector is ineligible under cosine (never a
+/// candidate, exact or approximate, and no refusal of every other document)
+/// while its text lane stays indexed; l2 and dot still score it; a zero
+/// query vector still refuses.
+#[test]
+fn zero_document_vectors_are_ineligible_only_where_cosine_cannot_score_them() {
+    let index = |metric| {
+        let mut index = BeaconIndex::new(IndexConfig {
+            vector: Some(HnswConfig::new(2, metric)),
+            text: Some(Bm25Config::default()),
+            ..IndexConfig::default()
+        })
+        .unwrap();
+        let document = |id: u128, vector: [f32; 2], text: &str| {
+            IndexMutation::Upsert(IndexDocument {
+                id: VId(id),
+                vector: Some(vector.to_vec()),
+                text: Some(text.to_owned()),
+            })
+        };
+        index
+            .apply_batch(
+                [
+                    document(1, [0.0, 0.0], "zero"),
+                    document(2, [1.0, 0.0], "east"),
+                    document(3, [0.0, 2.0], "north"),
+                ],
+                &mut budget(),
+            )
+            .unwrap();
+        index.snapshot()
+    };
+    let ids = |hits: Vec<fgdb_beacon::Neighbor>| hits.iter().map(|hit| hit.id).collect::<Vec<_>>();
+    let cosine = index(DistanceMetric::Cosine);
+    for mode in [
+        VectorSearch::Exact,
+        VectorSearch::Approximate { ef_search: 8 },
+    ] {
+        let hits = cosine.knn(&[1.0, 1.0], 10, mode, |_| true, &mut budget());
+        assert_eq!(ids(hits.unwrap()), [VId(2), VId(3)], "{mode:?}");
+    }
+    assert_eq!(
+        cosine
+            .text_search("zero", 10, TextMatch::Any, |_| true, &mut budget())
+            .unwrap()[0]
+            .id,
+        VId(1)
+    );
+    assert!(matches!(
+        cosine.knn(
+            &[0.0, 0.0],
+            10,
+            VectorSearch::Exact,
+            |_| true,
+            &mut budget()
+        ),
+        Err(BeaconError::ZeroVector)
+    ));
+    for metric in [
+        DistanceMetric::SquaredEuclidean,
+        DistanceMetric::NegativeDotProduct,
+    ] {
+        let hits = index(metric)
+            .knn(
+                &[1.0, 1.0],
+                10,
+                VectorSearch::Exact,
+                |_| true,
+                &mut budget(),
+            )
+            .unwrap();
+        assert!(
+            ids(hits).contains(&VId(1)),
+            "{metric:?} scores the zero vector"
+        );
+    }
+}

@@ -419,6 +419,27 @@ pub(crate) struct AdjacencyIndex {
 }
 
 impl AdjacencyIndex {
+    /// Edge identities this generation has ever indexed, live or retired.
+    pub(crate) fn edge_count(&self) -> usize {
+        self.histories.len()
+    }
+
+    /// Incidences (live or retired) of `endpoint` along `direction`: an upper
+    /// bound on what a visit yields, at one tree descent per face.
+    pub(crate) fn degree(
+        &self,
+        endpoint: VId,
+        direction: fgdb_gql::algebra::GlaDirection,
+    ) -> usize {
+        use fgdb_gql::algebra::GlaDirection;
+        let face = |map: &IndexMap<VId, Incidence>| map.get(&endpoint).map_or(0, IndexMap::len);
+        match direction {
+            GlaDirection::Forward => face(&self.outgoing),
+            GlaDirection::Reverse => face(&self.incoming),
+            GlaDirection::Undirected => face(&self.outgoing) + face(&self.incoming),
+        }
+    }
+
     /// Build a generation from scratch: group rows in ordinary sorted maps,
     /// then assemble each persistent tree bottom-up. The contents equal
     /// folding every row through `apply_added`, without a path copy per row.
@@ -647,6 +668,11 @@ pub(crate) struct PropertyEqualityIndex {
 }
 
 impl PropertyEqualityIndex {
+    /// Vertex identities this generation has ever indexed, live or retired.
+    pub(crate) fn vertex_count(&self) -> usize {
+        self.histories.len()
+    }
+
     pub(crate) fn statement_histories(&self) -> StatementHistoryIndex<VId> {
         StatementHistoryIndex(self.histories.clone())
     }
@@ -1777,9 +1803,12 @@ pub(crate) fn bound_edges<'a, E, Row>(
         return Ok(None);
     };
     let prefix = &logical.operators()[1..];
-    let Some(hops) = bound_edge_hops(prefix) else {
+    // A single edge has no later step: its root adjacency below is exact.
+    let steps = bound_edge_steps(prefix, 2).filter(|steps| !steps.is_empty());
+    let hops = bound_edge_hops(prefix);
+    if steps.is_none() && hops.is_none() {
         return Ok(None);
-    };
+    }
     let predicate = prefix
         .iter()
         .take_while(|op| {
@@ -1812,45 +1841,18 @@ pub(crate) fn bound_edges<'a, E, Row>(
     };
     let mut selected = BTreeMap::<EId, BorrowedEdge<'a>>::new();
     let mut frontier = std::collections::BTreeSet::new();
-    // Roots come from the property index when a root predicate can seek it,
-    // so a bound hub costs its candidates, not a predicate test per vertex.
-    let roots = match indexed_roots(snapshot, predicates, as_of, control)? {
-        Some(roots) => roots,
-        None if indexed_only => return Ok(None),
-        None => {
-            let mut roots = Vec::new();
-            visit_vertices(&snapshot.patches, as_of, control, |row, control| {
-                control(SourceEvent::Work)?;
-                for predicate in predicates {
-                    for _ in 0..predicate.comparison_work_units() {
-                        control(SourceEvent::Work)?;
-                    }
-                }
-                if predicates
-                    .iter()
-                    .all(|p| p.matches(&row.labels, &row.props))
-                {
-                    roots.push(row.vid);
-                }
-                Ok(())
-            })?;
-            roots
-        }
+    let Some(roots) = root_candidates(snapshot, predicates, as_of, indexed_only, control)? else {
+        return Ok(None);
     };
-    // A single edge has no later step: its root adjacency below is exact.
-    if let Some(steps) = bound_edge_steps(prefix).filter(|steps| !steps.is_empty()) {
-        return slot_closure(
-            snapshot,
-            as_of,
-            relation,
-            lookup_direction,
-            usize::from(slot != 0),
-            roots,
-            &steps,
-            control,
-        )
-        .map(Some);
-    }
+    let hops = match (steps, hops) {
+        (Some(steps), _) => {
+            let root = Some((relation, lookup_direction, usize::from(slot != 0)));
+            return slot_closure(snapshot, as_of, root, roots, &steps, control)
+                .map(|closure| closure.map(|(edges, _)| edges));
+        }
+        (None, Some(hops)) => hops,
+        (None, None) => return Ok(None),
+    };
     for root in roots {
         snapshot.adjacency_index().visit(
             &snapshot.blocks,
@@ -1924,35 +1926,91 @@ pub(crate) fn bound_edges<'a, E, Row>(
     Ok(Some(selected.into_values().collect()))
 }
 
-/// One Expand of a flat, fixed-hop plan: the slot it extends, then the
-/// relation and direction it follows from that slot's vertex.
-type BoundStep<'p> = (
-    usize,
-    &'p fgdb_gql::algebra::EdgeRelation,
-    fgdb_gql::algebra::GlaDirection,
-);
+/// A bound closure's admitted edges and every vertex its slots can bind.
+type Closure<'a> = (Vec<BorrowedEdge<'a>>, std::collections::BTreeSet<VId>);
 
-/// The Expand steps after a root ScanEdges, when every slot is modeled.
-/// ScanEdges binds slots 0 and 1 and each Expand appends exactly one endpoint
-/// slot; every other flat operator here only filters, captures or projects
-/// the binding. Anything that could bind a slot another way (or an Expand
-/// after a projection) returns None, leaving the undirected superset.
-fn bound_edge_steps(operators: &[fgdb_gql::algebra::GlaOperator]) -> Option<Vec<BoundStep<'_>>> {
+/// The VIds a bound root can take: served from the property index when one
+/// root predicate can seek it, so a bound hub costs its candidates, not a
+/// predicate test per vertex. Otherwise every visible vertex is tested, or,
+/// with `indexed_only`, None leaves the caller's complete admission.
+fn root_candidates<E>(
+    snapshot: &Snapshot,
+    predicates: &[fgdb_gql::algebra::VertexPredicate],
+    as_of: CommitSeq,
+    indexed_only: bool,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<Vec<VId>>, E> {
+    if let Some(roots) = indexed_roots(snapshot, predicates, as_of, control)? {
+        return Ok(Some(roots));
+    }
+    if indexed_only {
+        return Ok(None);
+    }
+    let mut roots = Vec::new();
+    visit_vertices(&snapshot.patches, as_of, control, |row, control| {
+        control(SourceEvent::Work)?;
+        for predicate in predicates {
+            for _ in 0..predicate.comparison_work_units() {
+                control(SourceEvent::Work)?;
+            }
+        }
+        if predicates
+            .iter()
+            .all(|p| p.matches(&row.labels, &row.props))
+        {
+            roots.push(row.vid);
+        }
+        Ok(())
+    })?;
+    Ok(Some(roots))
+}
+
+/// One step of a flat bound plan: the slot it extends, then the relation and
+/// direction it follows from that slot's vertex. A quantified atom also
+/// carries its hop bound (`None` for one Expand) and whether zero hops may
+/// bind the endpoint to the source itself.
+#[derive(Clone, Copy)]
+struct BoundStep<'p> {
+    source: usize,
+    relation: &'p fgdb_gql::algebra::EdgeRelation,
+    direction: fgdb_gql::algebra::GlaDirection,
+    walk: Option<(bool, u32)>,
+}
+
+/// The steps after a plan's root that binds `width` slots (ScanEdges binds
+/// two, ScanVertices one), when every slot is modeled: each Expand or
+/// VarLengthExpand appends exactly one endpoint slot, and every other flat
+/// operator here only filters, captures or projects the binding. Anything
+/// that could bind a slot another way (or a step after a projection) returns
+/// None, leaving the caller's superset or complete admission.
+fn bound_edge_steps(
+    operators: &[fgdb_gql::algebra::GlaOperator],
+    width: usize,
+) -> Option<Vec<BoundStep<'_>>> {
     use fgdb_gql::algebra::GlaOperator;
     let mut steps = Vec::new();
     let mut projected = false;
     for operator in operators {
-        match operator {
+        let (source, relation, direction, walk) = match operator {
             GlaOperator::Expand {
                 source,
                 relation,
                 direction,
+            } => (source, relation, direction, None),
+            GlaOperator::VarLengthExpand {
+                source,
+                relation,
+                direction,
+                bounds,
+                ..
             } => {
-                let source = usize::try_from(source.ordinal()).ok()?;
-                if projected || source >= 2 + steps.len() {
-                    return None;
-                }
-                steps.push((source, relation, *direction));
+                let (minimum, maximum) = (bounds.minimum(), bounds.maximum());
+                let walk = if minimum > maximum {
+                    (false, 0)
+                } else {
+                    (minimum == 0, maximum)
+                };
+                (source, relation, direction, Some(walk))
             }
             GlaOperator::Empty
             | GlaOperator::Select { .. }
@@ -1962,7 +2020,7 @@ fn bound_edge_steps(operators: &[fgdb_gql::algebra::GlaOperator]) -> Option<Vec<
             | GlaOperator::SelectBoolean { .. }
             | GlaOperator::CapturePath { .. }
             | GlaOperator::SelectPathLength { .. }
-            | GlaOperator::SelectPathNull { .. } => {}
+            | GlaOperator::SelectPathNull { .. } => continue,
             GlaOperator::Project { .. }
             | GlaOperator::Distinct
             | GlaOperator::OrderByVertexId
@@ -1971,9 +2029,22 @@ fn bound_edge_steps(operators: &[fgdb_gql::algebra::GlaOperator]) -> Option<Vec<
             | GlaOperator::OrderByBindings
             | GlaOperator::ProjectValues { .. }
             | GlaOperator::OrderByValues
-            | GlaOperator::OrderByValueColumns { .. } => projected = true,
+            | GlaOperator::OrderByValueColumns { .. } => {
+                projected = true;
+                continue;
+            }
             _ => return None,
+        };
+        let source = usize::try_from(source.ordinal()).ok()?;
+        if projected || source >= width + steps.len() {
+            return None;
         }
+        steps.push(BoundStep {
+            source,
+            relation,
+            direction: *direction,
+            walk,
+        });
     }
     Some(steps)
 }
@@ -1993,32 +2064,98 @@ fn far_endpoint(
     }
 }
 
-/// A per-slot edge closure for a bound root. Each slot holds every vertex a
-/// binding can place there: the roots, the far ends of root edges along the
-/// root direction and relation, then for each Expand the far ends of its own
-/// relation and direction from its source slot. Every binding's edge at a
-/// step leaves a vertex of that step's source slot, so the closure contains
-/// it; a far end is recorded even when its edge was already admitted from
-/// another vertex. Predicates, identities and edge uniqueness only filter.
-#[allow(clippy::too_many_arguments)]
+/// The hops a step can take: one for an Expand, its maximum for a walk.
+fn step_hops(step: &BoundStep<'_>) -> u64 {
+    step.walk.map_or(1, |(_, maximum)| u64::from(maximum))
+}
+
+/// Whether a closure that is about to visit `incidences` edges, with
+/// `remaining` further hops after them, stays within `cap` admitted edges.
+/// Later hops are projected at the caller's growth degree, so a reach that
+/// would cover a large part of the graph stops at its frontier instead of
+/// paying a per-vertex walk that a sequential scan beats. The projection
+/// reads only incidence counts and is deterministic for one generation.
+fn closure_fits(
+    admitted: usize,
+    incidences: usize,
+    remaining: u64,
+    growth: usize,
+    cap: usize,
+) -> bool {
+    let mut total = admitted.saturating_add(incidences);
+    let mut level = incidences;
+    for _ in 0..remaining {
+        if total > cap {
+            return false;
+        }
+        level = level.saturating_mul(growth);
+        total = total.saturating_add(level);
+    }
+    total <= cap
+}
+
+/// A per-slot edge closure for a bound root, with every vertex any slot can
+/// bind. Each slot holds every vertex a binding can place there: the roots;
+/// for an edge root, the far ends of root edges along the root relation and
+/// direction; then for each Expand the far ends of its own relation and
+/// direction from its source slot. A quantified step walks breadth-first to
+/// its maximum along its relation and direction, admitting every edge it
+/// leaves, and its slot holds every vertex reached (and the sources when zero
+/// hops are allowed): every walk within the bound stays inside that walk.
+/// Every binding's edge at a step leaves a vertex of that step's source slot,
+/// so the closure contains it; a far end is recorded even when its edge was
+/// already admitted from another vertex. Predicates, identities, path
+/// restrictions and edge uniqueness only filter.
+///
+/// Before each level the projected closure (see [`closure_fits`]) must stay
+/// within half the snapshot's edges, about where a sequential scan becomes
+/// cheaper (fgdbd measurements: a closure costs 1.6-2.3x a scanned record);
+/// otherwise None leaves the caller's complete admission.
 fn slot_closure<'a, E>(
     snapshot: &'a Snapshot,
     as_of: CommitSeq,
-    relation: &fgdb_gql::algebra::EdgeRelation,
-    lookup_direction: fgdb_gql::algebra::GlaDirection,
-    root_slot: usize,
+    root: Option<(
+        &fgdb_gql::algebra::EdgeRelation,
+        fgdb_gql::algebra::GlaDirection,
+        usize,
+    )>,
     roots: Vec<VId>,
     steps: &[BoundStep<'_>],
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-) -> Result<Vec<BorrowedEdge<'a>>, E> {
+) -> Result<Option<Closure<'a>>, E> {
+    use std::collections::BTreeSet;
+    let index = snapshot.adjacency_index();
+    let edges = index.edge_count();
+    let mean = (edges / snapshot.property_index.vertex_count().max(1)).max(1);
+    let cap = (edges / 2).max(4096);
+    let later = |from: usize| steps[from..].iter().map(step_hops).sum::<u64>();
+    let probe = |frontier: &[VId],
+                 direction: fgdb_gql::algebra::GlaDirection,
+                 admitted: usize,
+                 remaining: u64,
+                 control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
+     -> Result<bool, E> {
+        let mut incidences = 0_usize;
+        for &vertex in frontier {
+            control(SourceEvent::Work)?;
+            incidences = incidences.saturating_add(index.degree(vertex, direction));
+        }
+        // Later levels grow at most at this frontier's own mean degree, and
+        // no faster than the snapshot's: a hub root projects at the snapshot
+        // mean, and an unrelated dense component never inflates a sparse walk.
+        let growth = (incidences / frontier.len().max(1)).clamp(1, mean);
+        Ok(closure_fits(admitted, incidences, remaining, growth, cap))
+    };
+    let width = if root.is_some() { 2 } else { 1 };
     let mut selected = BTreeMap::<EId, BorrowedEdge<'a>>::new();
-    let mut slots = vec![std::collections::BTreeSet::<VId>::new(); 2 + steps.len()];
-    let mut admit = |entry: &AdjacencyEntry,
-                     block: usize,
-                     row: usize,
-                     target: &mut std::collections::BTreeSet<VId>,
-                     far: VId,
-                     control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
+    let mut slots = vec![BTreeSet::<VId>::new(); width + steps.len()];
+    let admit = |entry: &AdjacencyEntry,
+                 block: usize,
+                 row: usize,
+                 selected: &mut BTreeMap<EId, BorrowedEdge<'a>>,
+                 target: &mut BTreeSet<VId>,
+                 far: VId,
+                 control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
      -> Result<(), E> {
         if let std::collections::btree_map::Entry::Vacant(slot) = selected.entry(entry.eid) {
             control(SourceEvent::SnapshotRecord)?;
@@ -2036,46 +2173,131 @@ fn slot_closure<'a, E>(
     };
     // The roots were found (and are held) by the caller, uncharged there as
     // in the superset closure; this copy only lets a step expand from them.
+    let root_slot = root.map_or(0, |(_, _, slot)| slot);
     slots[root_slot].extend(roots.iter().copied());
-    for root in roots {
-        let target = &mut slots[1 - root_slot];
-        snapshot.adjacency_index().visit(
-            &snapshot.blocks,
-            root,
-            lookup_direction,
-            as_of,
-            control,
-            |entry, block, row, control| {
-                if relation.matches(entry.relation) {
-                    let far = far_endpoint(entry, root, lookup_direction);
-                    admit(entry, block, row, target, far, control)?;
-                }
-                Ok(())
-            },
-        )?;
-    }
-    for (index, &(source, step_relation, direction)) in steps.iter().enumerate() {
-        let near = slots[source].iter().copied().collect::<Vec<_>>();
-        let target = &mut slots[2 + index];
-        for vertex in near {
-            control(SourceEvent::Work)?;
-            snapshot.adjacency_index().visit(
+    if let Some((relation, lookup_direction, root_slot)) = root {
+        if !probe(&roots, lookup_direction, 0, later(0), control)? {
+            return Ok(None);
+        }
+        for root in roots {
+            let target = &mut slots[1 - root_slot];
+            index.visit(
                 &snapshot.blocks,
-                vertex,
-                direction,
+                root,
+                lookup_direction,
                 as_of,
                 control,
                 |entry, block, row, control| {
-                    if step_relation.matches(entry.relation) {
-                        let far = far_endpoint(entry, vertex, direction);
-                        admit(entry, block, row, target, far, control)?;
+                    if relation.matches(entry.relation) {
+                        let far = far_endpoint(entry, root, lookup_direction);
+                        admit(entry, block, row, &mut selected, target, far, control)?;
                     }
                     Ok(())
                 },
             )?;
         }
     }
-    Ok(selected.into_values().collect())
+    for (at, step) in steps.iter().enumerate() {
+        let near = slots[step.source].iter().copied().collect::<Vec<_>>();
+        let (zero, maximum) = step.walk.unwrap_or((false, 1));
+        let mut target = BTreeSet::new();
+        // Vertices already expanded by this step: a walk that returns to one
+        // reuses edges this step admitted when it first left it.
+        let mut expanded = BTreeSet::new();
+        if step.walk.is_some() {
+            for &vertex in &near {
+                control(SourceEvent::ScratchEntry)?;
+                expanded.insert(vertex);
+                if zero && !target.contains(&vertex) {
+                    control(SourceEvent::ScratchEntry)?;
+                    target.insert(vertex);
+                }
+            }
+        }
+        let mut frontier = near;
+        let mut depth = 0;
+        while depth < maximum && !frontier.is_empty() {
+            depth += 1;
+            let remaining = u64::from(maximum - depth) + later(at + 1);
+            if !probe(
+                &frontier,
+                step.direction,
+                selected.len(),
+                remaining,
+                control,
+            )? {
+                return Ok(None);
+            }
+            let mut next = Vec::new();
+            for vertex in frontier {
+                control(SourceEvent::Work)?;
+                index.visit(
+                    &snapshot.blocks,
+                    vertex,
+                    step.direction,
+                    as_of,
+                    control,
+                    |entry, block, row, control| {
+                        if step.relation.matches(entry.relation) {
+                            let far = far_endpoint(entry, vertex, step.direction);
+                            admit(entry, block, row, &mut selected, &mut target, far, control)?;
+                            if step.walk.is_some() && !expanded.contains(&far) {
+                                control(SourceEvent::ScratchEntry)?;
+                                expanded.insert(far);
+                                next.push(far);
+                            }
+                        }
+                        Ok(())
+                    },
+                )?;
+            }
+            frontier = next;
+        }
+        slots[width + at] = target;
+    }
+    let reached = slots.into_iter().flatten().collect();
+    Ok(Some((selected.into_values().collect(), reached)))
+}
+
+/// The per-slot closure of a vertex-rooted flat plan (ScanVertices, root
+/// predicates on slot 0 before any step, then Expand and VarLengthExpand
+/// steps), with the vertices its slots can bind, so the caller hydrates only
+/// those rows. A plan with no step, no root Select, or (with `indexed_only`)
+/// an unseekable root returns None, leaving the caller's admission.
+pub(crate) fn bound_vertex_closure<'a, E, Row>(
+    snapshot: &'a Snapshot,
+    logical: &fgdb_gql::algebra::GlaPlan<Row>,
+    as_of: CommitSeq,
+    indexed_only: bool,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<Closure<'a>>, E> {
+    use fgdb_gql::algebra::GlaOperator;
+    let Some(GlaOperator::ScanVertices) = logical.operators().first() else {
+        return Ok(None);
+    };
+    let prefix = &logical.operators()[1..];
+    let Some(steps) = bound_edge_steps(prefix, 1).filter(|steps| !steps.is_empty()) else {
+        return Ok(None);
+    };
+    let predicates = prefix
+        .iter()
+        .take_while(|op| {
+            !matches!(
+                op,
+                GlaOperator::Expand { .. } | GlaOperator::VarLengthExpand { .. }
+            )
+        })
+        .find_map(|op| match op {
+            GlaOperator::Select { slot, predicates } if slot.ordinal() == 0 => Some(predicates),
+            _ => None,
+        });
+    let Some(predicates) = predicates else {
+        return Ok(None);
+    };
+    let Some(roots) = root_candidates(snapshot, predicates, as_of, indexed_only, control)? else {
+        return Ok(None);
+    };
+    slot_closure(snapshot, as_of, None, roots, &steps, control)
 }
 
 /// The VIds of the visible vertices satisfying every root predicate, served
@@ -2165,6 +2387,29 @@ pub(super) fn admit<'a, E, Row>(
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<BorrowedTables<'a>, E> {
     use fgdb_gql::algebra::GlaOperator;
+    if !logical.scans_edges() && logical.reads_edges() {
+        // A bound root followed by flat steps (a quantified reach from one
+        // vertex, a vertex-first chain) admits its per-slot closure and only
+        // the rows its slots can bind, not every vertex and edge.
+        if let Some((edges, reached)) =
+            bound_vertex_closure(snapshot, logical, as_of, false, control)?
+        {
+            // Each candidate row is an admitted vertex record, as in a scan.
+            let mut vertices = Vec::new();
+            for &vid in &reached {
+                control(SourceEvent::SnapshotRecord)?;
+                if let Some(row) = find_vertex(snapshot, vid, as_of, control)? {
+                    control(SourceEvent::ScratchEntry)?;
+                    vertices.push(row);
+                }
+            }
+            return Ok(BorrowedTables {
+                snapshot_records: reached.len() as u64 + edges.len() as u64,
+                vertices,
+                edges,
+            });
+        }
+    }
     if !logical.scans_edges() {
         // Equality-bound vertex scans serve from the per-generation index;
         // every other node shape keeps the O(|V|) scan verbatim.
