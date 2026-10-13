@@ -454,7 +454,8 @@ fn invalid_imported_script_scopes_refuse_before_any_statement_catalog_resolution
 /// allowance smaller than one table scan, which an unbound label scan exceeds.
 /// Staged effects still decide membership: inside one script,
 /// a vertex an earlier statement moved onto the key, one it created, one it
-/// moved away and one it deleted read as the transaction sees them.
+/// moved away and one it deleted read as the transaction sees them. Two
+/// independent roots, each bound by its key, admit only their candidates.
 #[test]
 fn an_equality_bound_write_match_admits_index_candidates_under_staged_effects() {
     let ((), report) = run_async_under_lab(0xb01c_0007, |root| async move {
@@ -554,6 +555,47 @@ fn an_equality_bound_write_match_admits_index_candidates_under_staged_effects() 
                 pair(2000, -2)
             ]
         );
+        // Two independent roots, each bound by its key, admit only their
+        // own candidates, for a read and for a write's MATCH alike.
+        let narrow = GqlQueryPolicy::new(100, 1_000, 5_000_000, 2_000_000);
+        let fgdb::QueryResult::Rows { rows, .. } = db
+            .query(
+                &cx,
+                "MATCH (a:Source {p: 5}), (b:Source {p: 77}) RETURN a.p AS a, b.p AS b",
+                &GqlParameters::new(),
+                symbols,
+                narrow,
+            )
+            .unwrap()
+        else {
+            unreachable!("a read answers rows")
+        };
+        assert_eq!(rows, [pair(5, 77)]);
+        db.execute_graph_write_program_autocommit_engine_governed(
+            &txcx,
+            &cx,
+            &commit,
+            &program(
+                "MATCH (a:Source {p: 5}), (b:Source {p: 77}) CREATE (a)-[:R]->(b)",
+                &GqlParameters::new(),
+            ),
+            tight,
+        )
+        .await
+        .unwrap();
+        let fgdb::QueryResult::Rows { rows, .. } = db
+            .query(
+                &cx,
+                "MATCH (a:Source)-[:R]->(b) RETURN a.p AS a, b.p AS b",
+                &GqlParameters::new(),
+                symbols,
+                policy(),
+            )
+            .unwrap()
+        else {
+            unreachable!("a read answers rows")
+        };
+        assert_eq!(rows, [pair(5, 77)]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

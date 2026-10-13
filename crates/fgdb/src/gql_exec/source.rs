@@ -1064,7 +1064,7 @@ pub(crate) fn bound_vertices<'a, E, Row>(
         | GlaOperator::Limit { .. } => true,
         _ => false,
     }) {
-        return Ok(None);
+        return bound_vertex_roots(snapshot, logical, as_of, control);
     }
     if let Some((key, text)) = prefix.iter().find_map(|operator| match operator {
         GlaOperator::SelectBoolean { expression } => expression.starts_with_conjunct(),
@@ -1173,6 +1173,98 @@ pub(crate) fn bound_vertices<'a, E, Row>(
         }
     }
     Ok(Some((rows, candidates.len() as u64)))
+}
+
+/// Several independent vertex roots, each bound by a predicate the index
+/// serves (`MATCH (a {id: 1}), (b {id: 2})`), admit the union of their
+/// candidates (fgdb-0s2pq). Each `ScanVertices` binds the next slot, every
+/// root's selection rechecks its own slot over the shared table, and no
+/// operator reads a vertex outside a root scan, so the union yields exactly
+/// the rows the complete table would. A root without such a predicate, an
+/// edge, an expansion or any other operator keeps the complete scan.
+fn bound_vertex_roots<'a, E, Row>(
+    snapshot: &'a Snapshot,
+    logical: &fgdb_gql::algebra::GlaPlan<Row>,
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<(Vec<&'a VertexRow>, u64)>, E> {
+    use fgdb_gql::algebra::{GlaOperator, IntegerComparison, VertexPredicate};
+    let mut roots: Vec<Vec<&VertexPredicate>> = Vec::new();
+    for operator in logical.operators() {
+        match operator {
+            GlaOperator::ScanVertices => roots.push(Vec::new()),
+            GlaOperator::Select { slot, predicates } => {
+                let Some(root) = roots.get_mut(slot.ordinal() as usize) else {
+                    return Ok(None);
+                };
+                root.extend(predicates);
+            }
+            GlaOperator::VertexIdentity { .. }
+            | GlaOperator::Project { .. }
+            | GlaOperator::Distinct
+            | GlaOperator::OrderByVertexId
+            | GlaOperator::ProjectBindings { .. }
+            | GlaOperator::OrderByBindings
+            | GlaOperator::ProjectValues { .. }
+            | GlaOperator::OrderByValues
+            | GlaOperator::OrderByValueColumns { .. }
+            | GlaOperator::Limit { .. } => {}
+            _ => return Ok(None),
+        }
+    }
+    // One root is the single-domain selection's, served by the caller.
+    if roots.len() < 2 {
+        return Ok(None);
+    }
+    let mut admitted = std::collections::BTreeMap::new();
+    let mut records = 0_u64;
+    for predicates in &roots {
+        let (rows, candidates) =
+            match numeric::bound_rows(snapshot, || predicates.iter().copied(), as_of, control)? {
+                Some(served) => served,
+                None => {
+                    // Equality on a non-numeric canonical scalar; a stored Null
+                    // is never an equality candidate.
+                    let Some((key, value)) =
+                        predicates.iter().find_map(|predicate| match predicate {
+                            VertexPredicate::ScalarProperty { key, predicate }
+                                if predicate.comparison() == IntegerComparison::Equal
+                                    && !matches!(predicate.value(), CanonicalScalar::Null) =>
+                            {
+                                Some((*key, predicate.value().clone()))
+                            }
+                            _ => None,
+                        })
+                    else {
+                        return Ok(None);
+                    };
+                    let candidates = snapshot.property_index.lookup(key, &value);
+                    let mut rows = Vec::new();
+                    for vid in candidates {
+                        control(SourceEvent::Work)?;
+                        control(SourceEvent::SnapshotRecord)?;
+                        if let Some(row) = snapshot.property_index.visible_row(
+                            &snapshot.patches,
+                            *vid,
+                            as_of,
+                            control,
+                        )? && predicates
+                            .iter()
+                            .all(|predicate| predicate.matches(&row.labels, &row.props))
+                        {
+                            control(SourceEvent::ScratchEntry)?;
+                            rows.push(row);
+                        }
+                    }
+                    (rows, candidates.len() as u64)
+                }
+            };
+        records += candidates;
+        for row in rows {
+            admitted.insert(row.vid, row);
+        }
+    }
+    Ok(Some((admitted.into_values().collect(), records)))
 }
 
 fn range_vertices<'a, E>(
