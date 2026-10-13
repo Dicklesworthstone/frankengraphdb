@@ -195,8 +195,15 @@ fn trailing_set_retains_its_own_clause_and_overwritten_on_actions() {
 /// same action count and duplicate-field law.
 #[test]
 fn a_literal_map_assignment_is_the_same_branch_assignments() {
-    let args = arguments();
+    // Each statement gets exactly the arguments it names: an unused argument
+    // refuses UnexpectedArguments.
     let bind = |text: &str| {
+        let mut args = GqlParameters::new();
+        for (name, value) in [("left", 1), ("right", 2), ("fresh", 200), ("seen", 100)] {
+            if text.contains(&format!("${name}")) {
+                args = args.with_int64(name, value).unwrap();
+            }
+        }
         PreparedGraphEdgeUpsertText::prepare(text, R, symbols)
             .and_then(|template| template.bind_parameters(&args))
             .map(|bound| bound.canonical_bytes())
@@ -239,7 +246,13 @@ fn a_literal_map_assignment_is_the_same_branch_assignments() {
         symbols,
     )
     .unwrap()
-    .bind_parameters(&args)
+    .bind_parameters(
+        &GqlParameters::new()
+            .with_int64("left", 1)
+            .unwrap()
+            .with_int64("right", 2)
+            .unwrap(),
+    )
     .unwrap_err();
     assert!(matches!(
         duplicate.kind,

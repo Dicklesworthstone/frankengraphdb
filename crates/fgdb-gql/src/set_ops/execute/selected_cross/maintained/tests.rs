@@ -106,7 +106,7 @@ fn keys_are_necessary_conditions_and_original_names_survive() {
             output.columns().collect::<Vec<_>>(),
             vec!["k", "p", "k", "p"]
         );
-        assert_eq!(output.input_types(), &[GraphSetColumnType::Scalar; 4]);
+        assert_eq!(output.input_types(), &[GraphSetColumnType::Stored; 4]);
         assert_eq!(query.canonical_bytes(), frozen);
     }
 }
@@ -284,8 +284,8 @@ fn dynamic_any_comparisons_are_residuals_not_a_schema_narrowing() {
         output.column_types(),
         &[
             GraphSetColumnType::Any,
-            GraphSetColumnType::Scalar,
-            GraphSetColumnType::Scalar
+            GraphSetColumnType::Stored,
+            GraphSetColumnType::Stored
         ]
     );
 }

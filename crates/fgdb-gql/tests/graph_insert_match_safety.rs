@@ -221,9 +221,9 @@ fn matched_edge_results_keep_edge_identity_and_property_domains_in_creation_and_
         query.column_types(),
         &[
             GraphSetColumnType::Edge,
-            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Stored,
             GraphSetColumnType::Vertex,
-            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Stored,
         ]
     );
     let value = CanonicalScalar::Int(2003);
