@@ -529,9 +529,13 @@ impl WriteTxn {
     /// selected row and relationship its pair resolved to, in selection
     /// order and then identity order. A relationship's properties and its
     /// endpoints' properties are read after the write, through governed point
-    /// reads that this transaction witnesses like any other read. A refusal
-    /// in RETURN rolls back nothing on its own: the caller owns the staged
-    /// effects, exactly as for a failing mutation RETURN.
+    /// reads that this transaction witnesses like any other read.
+    ///
+    /// MERGE and RETURN share one rollback boundary. A result expression,
+    /// budget, cancellation or unwind failure restores the prior staged prefix,
+    /// while retaining read witnesses and already-issued external identities.
+    /// Successful rows remain transaction-local; this never commits the caller's
+    /// transaction. LIMIT 0 suppresses output, not writes or RETURN failures.
     pub fn execute_graph_edge_merge_query_governed<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -540,38 +544,51 @@ impl WriteTxn {
         policy: fgdb_gql::GraphEdgeMergePolicy,
         mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> EdgeMergeQueryResult<A> {
-        use fgdb_gql::GraphEdgeMergeQueryError;
-        let (stats, resolved, selected) = self
-            .execute_graph_edge_merge_output_governed::<EdgeMergeRows, V, A>(
-                database,
-                cx,
-                query.merge(),
-                policy,
-                |row| allocate(fgdb_gql::insertion::GraphInsertRequest::Edge { row, edge: 0 }),
-            )
-            .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Merge))?;
-        let rows = edge_merge_query_rows(
-            query,
-            &selected,
-            &resolved,
-            || cx.checkpoint(),
-            |element, key| self.merge_return_property(database, element, key),
-        )
-        .map_err(|error| {
-            error.map_source(|error| {
-                GraphEdgeMergeQueryError::Merge(fgdb_gql::GraphEdgeMergeError::Source(error))
-            })
+        use fgdb_gql::{GqlQueryError, GraphEdgeMergeError, GraphEdgeMergeQueryError};
+        self.ensure_database(database).map_err(|error| {
+            GqlQueryError::Source(GraphEdgeMergeQueryError::Merge(
+                GraphEdgeMergeError::Source(error),
+            ))
         })?;
-        let returning = query
-            .finish_governed(
-                rows,
-                stats.match_selection,
-                stats.evaluator,
-                policy.query,
+        cx.with_restriction(|| {
+            let workspace = MutationProgramWorkspace::new(self);
+            let (stats, resolved, selected) = workspace
+                .txn
+                .execute_graph_edge_merge_output_governed::<EdgeMergeRows, V, A>(
+                    database,
+                    cx,
+                    query.merge(),
+                    policy,
+                    |row| allocate(fgdb_gql::insertion::GraphInsertRequest::Edge { row, edge: 0 }),
+                )
+                .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Merge))?;
+            let rows = edge_merge_query_rows(
+                query,
+                &selected,
+                &resolved,
                 || cx.checkpoint(),
+                |element, key| workspace.txn.merge_return_property(database, element, key),
             )
-            .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Returning))?;
-        Ok((stats, returning))
+            .map_err(|error| {
+                error.map_source(|error| {
+                    GraphEdgeMergeQueryError::Merge(GraphEdgeMergeError::Source(error))
+                })
+            })?;
+            let returning = query
+                .finish_governed(
+                    rows,
+                    stats.match_selection,
+                    stats.evaluator,
+                    policy.query,
+                    || cx.checkpoint(),
+                )
+                .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Returning))?;
+            // Keep the guard through projection, aggregation, ordering and the
+            // last governed checkpoint. No successful write prefix may escape
+            // merely because the relationship itself was staged successfully.
+            workspace.accept();
+            Ok((stats, returning))
+        })
     }
 
     /// Relationship MERGE RETURN with identities reserved by the owning
@@ -669,5 +686,120 @@ impl WriteTxn {
             }
             Ok((proposal.stats, proposal.outcome, proposal.selected))
         })
+    }
+}
+
+#[cfg(test)]
+mod edge_merge_return_atomic_tests {
+    use super::*;
+    use crate::DatabaseKeys;
+    use crate::query::{QueryResult, QueryWriteError};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
+    use fgdb_gql::{
+        GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeMergeQueryError, GraphSymbol,
+        GraphSymbolKind, GraphWriteIdentityRequest, GraphWriteProgramPolicy,
+    };
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn failed_merge_return_restores_prefix_and_success_can_still_commit() {
+        let ((), report) = run_async_under_lab(0xe6e0_0001, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let keys = DatabaseKeys::new(
+                [0x31; 32],
+                DatabaseSecurityNamespaceId([0x32; 32]),
+                [0x33; 32],
+            );
+            let mut db = Database::open_memory(&commit, keys).await.unwrap();
+            let before = db.frontier().unwrap();
+            let relation = RelationId(1);
+            let property = PropertyKeyId(1);
+            let symbols = |kind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(relation)),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(property)),
+                _ => None,
+            };
+            let policy = GraphWriteProgramPolicy::new(
+                GqlQueryPolicy::new(1_000, 100, 5_000_000, 2_000_000),
+                1_000,
+                0,
+                1,
+            );
+            let mut transaction = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(relation);
+            prefix.create_vertex(VId(1), vec![], vec![(property, CanonicalScalar::Int(1))]);
+            prefix.create_vertex(VId(2), vec![], vec![(property, CanonicalScalar::Int(2))]);
+            transaction.write(&mut db, prefix).unwrap();
+            let digest = transaction.staged_effect_digest().unwrap();
+            let next = AtomicU64::new(100);
+            let mut allocate = |request: GraphWriteIdentityRequest| -> Result<ElementId, ()> {
+                assert_eq!(request.statement, 0);
+                assert!(matches!(
+                    request.request,
+                    fgdb_gql::insertion::GraphInsertRequest::Edge { .. }
+                ));
+                Ok(ElementId::Edge(EId(u128::from(
+                    next.fetch_add(1, Ordering::Relaxed),
+                ))))
+            };
+            for suffix in ["", " LIMIT 0"] {
+                let text = format!(
+                    "MATCH (a),(b) WHERE a.p=1 AND b.p=2 \
+                     MERGE (a)-[r:R {{p:0}}]->(b) RETURN 10/r.p AS quotient{suffix}"
+                );
+                let result = transaction.query_write(
+                    &mut db,
+                    &cx,
+                    &text,
+                    &GqlParameters::new(),
+                    &symbols,
+                    relation,
+                    policy,
+                    &mut allocate,
+                );
+                assert!(matches!(
+                    result,
+                    Err(QueryWriteError::EdgeMerge(GqlQueryError::Source(
+                        GraphEdgeMergeQueryError::Returning(_)
+                    )))
+                ));
+                assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+                assert!(transaction.edges(&db).unwrap().is_empty());
+                assert_eq!(transaction.vertices(&db).unwrap().len(), 2);
+                assert_eq!(db.frontier().unwrap(), before);
+            }
+            assert_eq!(next.load(Ordering::Relaxed), 102);
+            let result = transaction
+                .query_write(
+                    &mut db,
+                    &cx,
+                    "MATCH (a),(b) WHERE a.p=1 AND b.p=2 \
+                     MERGE (a)-[r:R {p:7}]->(b) RETURN r,r.p AS p",
+                    &GqlParameters::new(),
+                    &symbols,
+                    relation,
+                    policy,
+                    &mut allocate,
+                )
+                .unwrap();
+            assert!(matches!(result, QueryResult::Rows { rows, .. } if rows.len() == 1));
+            assert_eq!(next.load(Ordering::Relaxed), 103);
+            assert!(db.edges().unwrap().is_empty());
+            transaction.finish(&mut db, &commit).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert!(db.edge(EId(100)).unwrap().is_none());
+            assert!(db.edge(EId(101)).unwrap().is_none());
+            assert_eq!(
+                db.edge(EId(102)).unwrap().unwrap().props,
+                vec![(property, CanonicalScalar::Int(7))]
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
