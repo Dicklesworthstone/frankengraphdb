@@ -727,11 +727,11 @@ impl<'a> Parser<'a> {
         Ok(returning)
     }
 
-    /// The stages after a write's WITH head. A carried element's property
-    /// read in the WITH's own WHERE, its pages, the terminal RETURN or the
-    /// first UNWIND expression becomes a hidden head column holding the
-    /// post-write value. The native row pipeline drops those hidden cells
-    /// immediately after UNWIND, retaining only visible items and its output.
+    /// The stages after a write's WITH head. A direct alias or identity key
+    /// carries its post-write properties through the WITH's WHERE/pages,
+    /// terminal RETURN or first UNWIND expression. Hidden grouping keys are
+    /// functions of kept identities; no summary becomes an element binding.
+    /// UNWIND drops hidden cells, retaining visible items and its own output.
     fn write_tail(
         &mut self,
         returning: &mut ParsedMutationReturn<'a>,
@@ -741,42 +741,46 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<ReadStageTemplate>, GraphMutationTextError> {
         let visible = schema.len();
         let mut reads = Vec::new();
-        // An aggregating WITH carries no element to read later.
-        if returning.grouping.is_none() {
-            for (alias, key) in self.write_tail_reads(&schema)? {
-                let Some(at) = schema[..visible]
-                    .iter()
-                    .position(|(name, _)| name.text == alias.text)
-                else {
-                    continue;
-                };
-                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
-                    continue;
-                };
-                let (
-                    Binding::Input(input),
-                    _,
-                    GraphSetColumnType::Vertex | GraphSetColumnType::Edge,
-                ) = returning.bindings[binding]
-                else {
-                    continue;
-                };
-                let variable = columns[input].variable;
-                let column = returning.map_input(
-                    self,
-                    columns,
-                    scope,
-                    variable,
-                    ReturnMapInput::Property(key),
-                )?;
-                push_tail_read(
-                    &mut returning.projection,
-                    &mut schema,
-                    &mut reads,
-                    (alias, key),
-                    column,
-                )?;
-            }
+        for (alias, key) in self.write_tail_reads(&schema)? {
+            let Some(at) = schema[..visible]
+                .iter()
+                .position(|(name, _)| name.text == alias.text)
+            else {
+                continue;
+            };
+            let Some(binding) = WriteReturnGroupTemplate::carried_binding(
+                returning.grouping.as_ref(),
+                &returning.projection[at].value,
+            ) else {
+                continue;
+            };
+            let (
+                Binding::Input(input),
+                _,
+                GraphSetColumnType::Vertex | GraphSetColumnType::Edge,
+            ) = returning.bindings[binding]
+            else {
+                continue;
+            };
+            let variable = columns[input].variable;
+            let column = returning.map_input(
+                self,
+                columns,
+                scope,
+                variable,
+                ReturnMapInput::Property(key),
+            )?;
+            let column = match &mut returning.grouping {
+                Some(group) => group.hoist_property(&mut returning.projection, column, key.at)?,
+                None => column,
+            };
+            push_tail_read(
+                &mut returning.projection,
+                &mut schema,
+                &mut reads,
+                (alias, key),
+                column,
+            )?;
         }
         Ok(self.finish_write_tail(schema, visible, reads)?)
     }
