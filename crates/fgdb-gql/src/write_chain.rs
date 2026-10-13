@@ -26,9 +26,9 @@ use crate::{
 #[derive(Clone)]
 pub(crate) enum ChainTextStep {
     /// CREATE, with its WITH head (every step but the last) or RETURN.
-    Insert(PreparedGraphInsertText, Option<InsertReturnTemplate>),
+    Insert(Box<(PreparedGraphInsertText, Option<InsertReturnTemplate>)>),
     /// A relationship MERGE over the previous write's rows (the last step).
-    EdgeMerge(PreparedGraphEdgeMergeText, Option<EdgeMergeReturnTemplate>),
+    EdgeMerge(Box<(PreparedGraphEdgeMergeText, Option<EdgeMergeReturnTemplate>)>),
 }
 
 /// A parsed chain: two or more writes, each but the last with a (written or
