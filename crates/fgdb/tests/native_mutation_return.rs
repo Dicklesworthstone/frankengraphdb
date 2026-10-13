@@ -86,6 +86,96 @@ fn seed() -> WriteBatch {
     batch
 }
 
+/// fgdb-sl4ym (TCK Delete6 [5]-[7], [12]-[14]): `MATCH ... WITH ... SET /
+/// REMOVE / DELETE` writes once per WITH row. Targets are the elements the
+/// row carries, values read the row, and RETURN or a WITH tail reads the
+/// row's values captured before the write.
+#[test]
+fn writes_after_with_target_the_row_and_return_its_captured_values() {
+    let ((), report) = run_async_under_lab(0xa071_0005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut write = async |db: &mut Database<_>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+        };
+        let set = write(
+            &mut db,
+            "MATCH (n:L) WITH n, n.p AS p SET n.id = p * 10 RETURN p ORDER BY p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(set, &["p"]), vec![vec![int(4)], vec![int(7)]]);
+        for (vid, id) in [(VId(1), 40), (VId(2), 70)] {
+            let vertex = db.vertex(vid).unwrap().unwrap();
+            assert!(
+                vertex
+                    .props
+                    .contains(&(ID, CanonicalScalar::Int(id).into())),
+                "{vertex:?}"
+            );
+        }
+        // A plain WITH may order and page the rows the write then reads.
+        assert!(matches!(
+            write(
+                &mut db,
+                "MATCH (n:L) WITH n ORDER BY n.p LIMIT 1 REMOVE n.id"
+            )
+            .await
+            .unwrap(),
+            QueryResult::Write { .. }
+        ));
+        let first = db.vertex(VId(1)).unwrap().unwrap();
+        assert!(first.props.iter().all(|(key, _)| *key != ID), "{first:?}");
+        let tail = write(
+            &mut db,
+            "MATCH (n:L) WITH n, n.p AS p WHERE p > 5 DELETE n WITH p WHERE p % 7 = 0 RETURN p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(tail, &["p"]), vec![vec![int(7)]]);
+        assert_eq!(db.vertex(VId(2)).unwrap(), None);
+        let frontier = db.frontier().unwrap();
+        for refused in [
+            "MATCH (n:L) WITH n.p AS x SET x.id = 1",
+            "MATCH (n:L) WITH n AS a SET n.id = 1",
+            "MATCH (n:L) WITH n SET n.id = 1 RETURN n.p",
+        ] {
+            assert!(write(&mut db, refused).await.is_err(), "{refused}");
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        let total = write(
+            &mut db,
+            "MATCH (n:L) WITH n, n.p AS p DELETE n RETURN sum(p) AS total",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(total, &["total"]), vec![vec![int(4)]]);
+        assert!(
+            db.vertices()
+                .unwrap()
+                .iter()
+                .all(|row| row.retired_at.is_some())
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn public_autocommit_returns_parameterized_mutation_rows_with_collection_types() {
     let ((), report) = run_async_under_lab(0xa071_0001, |root| async move {

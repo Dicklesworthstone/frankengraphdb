@@ -322,10 +322,15 @@ struct MutationLeaves<'r, 'a> {
     returning: &'r mut ParsedMutationReturn<'a>,
     columns: &'r mut Vec<Projection<'a>>,
     scope: ReturnScope,
+    /// The WITH row of a write after WITH (fgdb-sl4ym), the only scope.
+    row: Option<&'r [(Name<'a>, GraphSetColumnType)]>,
 }
 impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
-        self.returning.leaf(parser, self.columns, self.scope)
+        match self.row {
+            Some(row) => self.returning.row_leaf(parser, row),
+            None => self.returning.leaf(parser, self.columns, self.scope),
+        }
     }
     fn map_input(
         &mut self,
@@ -495,6 +500,40 @@ impl<'a> ParsedMutationReturn<'a> {
             .map(Some)
     }
 
+    /// A RETURN leaf after a write after WITH: a value of the WITH row. The
+    /// element it carries is the post-write element; its property would need
+    /// the pre-write value beside the write's proposal, which the row lacks.
+    fn row_leaf(
+        &mut self,
+        parser: &mut Parser<'a>,
+        row: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let TokenKind::Word(word) = parser.current.kind else {
+            return Ok(None);
+        };
+        if parser.elements.contains(&word)
+            || matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            return Ok(None);
+        }
+        let Some(index) = row.iter().position(|(name, _)| name.text == word) else {
+            return Ok(None);
+        };
+        let name = parser.name()?;
+        let kind = row[index].1;
+        if parser.is_punct(b'.')
+            && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+        {
+            return Err(error(
+                parser.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "a WITH row value; a carried element's property after the write",
+                ),
+            ));
+        }
+        self.column(Binding::Input(index), name, kind).map(Some)
+    }
+
     fn map_input(
         &mut self,
         parser: &mut Parser<'a>,
@@ -633,10 +672,13 @@ impl<'a> ParsedMutationReturn<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// `row` is the WITH row of a write after WITH (fgdb-sl4ym): RETURN then
+    /// reads its values, and `*` is every column it carries.
     pub(super) fn mutation_return(
         &mut self,
         columns: &mut Vec<Projection<'a>>,
         scope: ReturnScope,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<ParsedMutationReturn<'a>, GraphMutationTextError> {
         let at = self.current.at;
         // A WITH after the write is the head of a row pipeline whose rows
@@ -666,7 +708,18 @@ impl<'a> Parser<'a> {
         let mut output: Vec<(Name<'a>, GraphSetColumnType)> = Vec::new();
         // The source spelling of every non-star output, for ORDER BY.
         let mut spellings = Vec::new();
-        if self.take(b'*')? {
+        if let Some(row) = row
+            && self.take(b'*')?
+        {
+            for (index, &(name, kind)) in row.iter().enumerate() {
+                let column = returning.column(Binding::Input(index), name, kind)?;
+                returning.projection.push(ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                output.push((name, kind));
+            }
+        } else if self.take(b'*')? {
             let matched: Vec<_> = self
                 .syntax
                 .variables
@@ -705,6 +758,7 @@ impl<'a> Parser<'a> {
                 returning: &mut returning,
                 columns: &mut *columns,
                 scope,
+                row,
             })?;
             returning.projection = items.projection;
             returning.grouping = items.grouping;
@@ -1135,7 +1189,7 @@ impl PreparedGraphMutationQueryText {
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphMutationQuery, GraphMutationTextError> {
         let mutation = self.mutation.bind_parameters(arguments)?;
-        let values = self.mutation.selection.checked_arguments(arguments)?;
+        let values = self.mutation.checked_arguments(arguments)?;
         self.returning.bind(mutation, &values)
     }
 }

@@ -113,7 +113,7 @@ impl<'a> Parser<'a> {
     /// Resolve the combined row (imports, then projected MATCH fields) while
     /// using the ordinary scalar compiler. The graph child is evaluated once;
     /// these are projection slots, not deferred reads of the created graph.
-    fn insertion_source_value(
+    pub(super) fn insertion_source_value(
         &mut self,
         inputs: &mut Vec<Projection<'a>>,
         imports: &[(Name<'a>, GraphSetColumnType)],
