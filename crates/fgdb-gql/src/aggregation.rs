@@ -572,6 +572,28 @@ impl PreparedGraphAggregate {
         offset: u64,
         count: Option<u64>,
     ) -> Result<Self, GraphAggregateBuildError> {
+        // A plain graph aggregate reads its input only through the projected
+        // columns, so a named relationship none of them reads need not be
+        // captured (fgdb-61p1n): the definition is its unnamed spelling's.
+        // Only counts and extrema take that definition. Their answers do not
+        // depend on the order occurrences arrive in, which an identified and
+        // an unidentified plan need not share; COLLECT and the sums keep
+        // every capture.
+        let order_free = aggregates.iter().all(|aggregate| {
+            matches!(
+                aggregate.function,
+                GraphAggregateFunction::CountRows
+                    | GraphAggregateFunction::Count
+                    | GraphAggregateFunction::CountDistinct
+                    | GraphAggregateFunction::Min
+                    | GraphAggregateFunction::Max
+            )
+        });
+        let input = if order_free && computed_input.is_none() && relational_input.is_none() {
+            input.without_unread_captures()
+        } else {
+            input
+        };
         if relational_input.is_none()
             && (!input.preserves_duplicates()
                 || !matches!(

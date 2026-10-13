@@ -31,6 +31,64 @@ impl<Row> PreparedGraphPattern<Row> {
     }
 }
 
+impl PreparedGraphPattern<GraphValueRow> {
+    /// Drop the captures of named relationships that nothing reads.
+    ///
+    /// `MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN count(*)` names two
+    /// relationships and reads neither. A capture only assembles a value: it
+    /// constrains no binding, so without it the plan is the plan of the same
+    /// pattern with the relationships unnamed, with the same bindings and
+    /// multiplicities. With it the plan requires identified edges, and an
+    /// aggregate over it enumerates every binding where the unnamed spelling
+    /// is answered from topology (a 2-hop count over 508k edges: 30 s against
+    /// 0.5 s).
+    ///
+    /// Only a flat positive pattern is rewritten, and only when every capture
+    /// is one fixed relationship: any path predicate, Boolean program, nested
+    /// OPTIONAL or EXISTS scope, quantified atom or projected relationship
+    /// value keeps every capture, read or not.
+    #[must_use]
+    pub(crate) fn without_unread_captures(mut self) -> Self {
+        let mut captured = false;
+        for operator in &self.logical.operators {
+            match operator {
+                GlaOperator::CapturePath { segments, .. } if segments.len() == 1 => {
+                    captured = true;
+                }
+                GlaOperator::CapturePath { .. }
+                | GlaOperator::VarLengthExpand { .. }
+                | GlaOperator::SelectPathLength { .. }
+                | GlaOperator::SelectPathNull { .. }
+                | GlaOperator::SelectBoolean { .. }
+                | GlaOperator::Probe { .. }
+                | GlaOperator::ProbeEnd { .. }
+                | GlaOperator::Optional { .. }
+                | GlaOperator::OptionalEnd { .. } => return self,
+                GlaOperator::ProjectValues { columns }
+                    if !columns.iter().all(|column| {
+                        matches!(
+                            column,
+                            ValueProjection::Vertex { .. }
+                                | ValueProjection::Property { .. }
+                                | ValueProjection::Labels { .. }
+                                | ValueProjection::Properties { .. }
+                        )
+                    }) =>
+                {
+                    return self;
+                }
+                _ => {}
+            }
+        }
+        if captured {
+            self.logical
+                .operators
+                .retain(|operator| !matches!(operator, GlaOperator::CapturePath { .. }));
+        }
+        self
+    }
+}
+
 impl GraphPatternBuilder {
     /// Project correlated vertex identities and canonical vertex properties.
     /// Aliases are unique column names; one vertex/property may appear under

@@ -508,3 +508,97 @@ fn implicit_equalities_plus_maximum_explicit_identities_keep_a_valid_fallback() 
     assert_eq!(result.value[0].get(0).unwrap().as_count(), Some(1));
     assert_eq!(result.value[0].get(1).unwrap().as_count(), Some(1));
 }
+
+/// A named relationship that nothing reads is not captured (fgdb-61p1n): the
+/// definition is its unnamed spelling's, operator for operator, so the
+/// topology-only evaluator answers it with the same rows and the same work.
+/// It used to require identified edges and enumerate every binding. A
+/// relationship that IS read keeps its capture and still requires them.
+#[test]
+fn unread_relationship_names_leave_the_unnamed_definition() {
+    use fgdb_gql::algebra::GlaOperator;
+    let captures = |query: &PreparedGraphAggregate| {
+        query
+            .input_pattern()
+            .plan()
+            .operators()
+            .iter()
+            .filter(|operator| matches!(operator, GlaOperator::CapturePath { .. }))
+            .count()
+    };
+    // Parallel edges, a 2-cycle and a triangle: multiplicities and the
+    // DIFFERENT EDGES default both matter to the counts.
+    let edges = [
+        (VId(1), R, VId(2)),
+        (VId(1), R, VId(2)),
+        (VId(2), R, VId(1)),
+        (VId(2), R, VId(3)),
+        (VId(3), R, VId(1)),
+        (VId(3), S, VId(1)),
+    ];
+    let run = |query: &PreparedGraphAggregate| {
+        query.execute_governed(
+            9,
+            [VId(1), VId(2), VId(3)],
+            edges.iter().copied(),
+            |_, _| Ok::<bool, &str>(true),
+            |_, _| Ok::<Option<&CanonicalScalar>, &str>(None),
+            wide(),
+            || Ok::<_, ()>(()),
+        )
+    };
+    for (named, unnamed) in [
+        (
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+        ),
+        (
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS n",
+        ),
+        (
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c)-[t:R]->(a) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN COUNT(*) AS n",
+        ),
+        (
+            "MATCH (a)-[r:R]->(b)<-[s:S]-(c) RETURN a,COUNT(*) AS n,COUNT(DISTINCT c) AS d GROUP BY a",
+            "MATCH (a)-[:R]->(b)<-[:S]-(c) RETURN a,COUNT(*) AS n,COUNT(DISTINCT c) AS d GROUP BY a",
+        ),
+    ] {
+        let (named_query, unnamed_query) = (prepare(named), prepare(unnamed));
+        assert_eq!(captures(&named_query), 0, "{named}");
+        assert_eq!(
+            named_query.input_pattern().plan().operators(),
+            unnamed_query.input_pattern().plan().operators(),
+            "{named}"
+        );
+        let (answer, expected) = (run(&named_query).unwrap(), run(&unnamed_query).unwrap());
+        assert_eq!(answer.value, expected.value, "{named}");
+        assert_eq!(answer.evaluator, expected.evaluator, "{named}");
+        assert!(!answer.value.is_empty(), "{named}");
+    }
+    for read in [
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN SUM(r.n) AS n",
+        "MATCH (a)-[r:R]->(b) WHERE r.n = 1 RETURN COUNT(*) AS n",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN COUNT(s) AS n",
+    ] {
+        let query = prepare(read);
+        assert!(captures(&query) > 0, "{read}");
+        assert!(
+            matches!(run(&query), Err(GqlQueryError::IdentifiedEdgesRequired)),
+            "{read}"
+        );
+    }
+    // A collection or a sum can observe the order occurrences arrive in, so
+    // an unread name still keeps its identified plan there.
+    for ordered in [
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(b) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT b) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN SUM(a.n) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN a,AVG(b.n) AS n GROUP BY a",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS c,SUM(a.n) AS n",
+    ] {
+        assert!(captures(&prepare(ordered)) > 0, "{ordered}");
+    }
+}
