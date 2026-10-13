@@ -24,6 +24,7 @@ pub mod cx;
 pub mod ed25519;
 pub mod poly1305;
 pub mod sha512;
+pub mod signature;
 pub mod zeroize;
 
 pub use aead::{
@@ -56,6 +57,11 @@ pub use ed25519::{
 pub use cx::{
     CryptoCx, DeterministicEntropy, EntropyError, EntropySource, FreshObjectProtectionMaterial,
     ObjectProtectionMaterialRef, SystemEntropy,
+};
+pub use signature::{
+    ED25519_VERIFICATION_POLICY, REGISTERED_SIGNATURE_PROFILES,
+    SIGNATURE_PROFILE_ED25519_STRICT, SignatureError, SignatureProfile,
+    registered_signature_profile, verify_signature,
 };
 
 /// The §5.1 logical-identity domain string (plan L278).
