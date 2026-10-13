@@ -785,7 +785,7 @@ async fn write_returning(
             .map(|(_, rows, completion)| (rows, completion))
             .map_err(returning_refusal),
         Returning::EdgeMerge(prepared) => guard
-            .execute_graph_edge_merge_query_authorized(
+            .execute_graph_edge_merge_query_authorized_checked(
                 &txn,
                 &query,
                 &commit,
@@ -795,6 +795,16 @@ async fn write_returning(
                 prepared,
                 policy.edge_merge_policy(),
                 unix_millis,
+                |rows, work| match edge_upsert_output::collect(&columns, rows, work) {
+                    Ok(rows) => {
+                        admitted_rows = Some(rows);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        output_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    }
+                },
             )
             .await
             .map(|(_, rows, completion)| (rows, completion))
@@ -802,17 +812,10 @@ async fn write_returning(
     };
     drop(guard);
     let (execution, completion) = result.map_err(|error| output_refusal.unwrap_or(error))?;
-    // Insert, mutation, vertex MERGE and bulk relationship RETURN are already
-    // converted and body-admitted inside their rollback boundary. Plain edge
-    // MERGE retains its existing post-completion conversion until it exposes
-    // the same checked-admission seam.
-    let rows = admitted_rows.unwrap_or_else(|| {
-        execution
-            .value
-            .iter()
-            .map(|row| row.values().iter().map(convert::graph).collect())
-            .collect()
-    });
+    // Every write-RETURN family is converted and body-admitted while its
+    // rollback workspace is still private. A successful checked call must
+    // therefore have installed the exact rows before native completion.
+    let rows = admitted_rows.expect("checked write output admission ran before completion");
     let outcome = match completion {
         EmbeddedTxnCompletion::WriteCommitted { commit_seq } => {
             db.commits.committed();
