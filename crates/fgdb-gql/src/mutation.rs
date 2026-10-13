@@ -439,15 +439,27 @@ impl PreparedGraphMutation {
         let detaching = matches!(actions[0], GraphMutationAction::DetachDelete { .. });
         for (at, action) in actions.iter().enumerate() {
             let target = action.target();
+            // A path is a delete target: its elements (TCK Delete3).
             let valid_target = match action {
                 GraphMutationAction::SetProperty { .. }
                 | GraphMutationAction::RemoveProperty { .. }
-                | GraphMutationAction::ClearProperties { .. }
-                | GraphMutationAction::Delete { .. } => matches!(
+                | GraphMutationAction::ClearProperties { .. } => matches!(
                     columns.get(target),
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
                 ),
-                GraphMutationAction::SetLabel { .. } | GraphMutationAction::DetachDelete { .. } => {
+                GraphMutationAction::Delete { .. } => matches!(
+                    columns.get(target),
+                    Some(
+                        GraphSetColumnType::Vertex
+                            | GraphSetColumnType::Edge
+                            | GraphSetColumnType::Path
+                    )
+                ),
+                GraphMutationAction::DetachDelete { .. } => matches!(
+                    columns.get(target),
+                    Some(GraphSetColumnType::Vertex | GraphSetColumnType::Path)
+                ),
+                GraphMutationAction::SetLabel { .. } => {
                     columns.get(target) == Some(&GraphSetColumnType::Vertex)
                 }
             };

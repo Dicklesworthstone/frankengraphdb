@@ -49,6 +49,44 @@ struct Meter<F> {
     evaluator: GlaExecutionStats,
     checkpoint: F,
 }
+
+/// Record one element-field proposal: an equal repeat is one effect, a
+/// different value for the same field is a conflict, and every new field
+/// counts against the statement's effect limit.
+#[allow(clippy::too_many_arguments)]
+fn propose<'a, E, C, F: FnMut() -> Result<(), C>>(
+    proposals: &mut BTreeMap<(ElementId, Field), Proposal<'a>>,
+    meter: &mut Meter<F>,
+    target: ElementId,
+    field: Field,
+    value: Value<'a>,
+    row: usize,
+    action: usize,
+) -> ResultOf<(), E, C> {
+    if let Some(previous) = proposals.get(&(target, field)) {
+        if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
+            return Err(GqlQueryError::Source(
+                GraphMutationError::ConflictingAssignment {
+                    first_row: previous.row,
+                    first_action: previous.action,
+                    row,
+                    action,
+                },
+            ));
+        }
+        return Ok(());
+    }
+    let observed = proposals.len() as u128 + 1;
+    if observed > u128::from(meter.policy.max_effects) {
+        return Err(GqlQueryError::Source(GraphMutationError::EffectLimit {
+            limit: meter.policy.max_effects,
+            observed,
+        }));
+    }
+    meter.event(GlaExecutionEvent::ScratchEntry)?;
+    proposals.insert((target, field), Proposal { value, row, action });
+    Ok(())
+}
 impl<F> Meter<F> {
     fn event<E, C>(&mut self, event: GlaExecutionEvent) -> ResultOf<(), E, C>
     where
@@ -569,6 +607,30 @@ pub(super) fn execute<E, C>(
         }
         for (action_at, action) in mutation.actions.iter().enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
+            // DELETE p / DETACH DELETE p (TCK Delete3): every node of the
+            // path, and for a plain DELETE every relationship too, each its
+            // own delete proposal. DETACH removes the rest of their edges.
+            if let crate::algebra::GraphValue::Path(path) = &row.values()[action.target()] {
+                let detach = matches!(action, GraphMutationAction::DetachDelete { .. });
+                let edges = path
+                    .steps()
+                    .iter()
+                    .filter(|_| !detach)
+                    .map(|(edge, _)| ElementId::Edge(*edge));
+                for target in edges.chain(path.nodes().map(ElementId::Vertex)) {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    propose(
+                        &mut proposals,
+                        &mut meter,
+                        target,
+                        Field::Delete,
+                        Value::Delete(detach),
+                        row_at,
+                        action_at,
+                    )?;
+                }
+                continue;
+            }
             // Only canonical null can remain after the schema check. An
             // absent OPTIONAL target does not execute an assignment RHS.
             let Some(target) = element(&row.values()[action.target()]) else {
@@ -667,35 +729,15 @@ pub(super) fn execute<E, C>(
                 GraphMutationAction::Delete { .. } => Some((Field::Delete, Value::Delete(false))),
             };
             for (field, value) in proposed.into_iter().chain(single) {
-                if let Some(previous) = proposals.get(&(target, field)) {
-                    if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
-                        return Err(GqlQueryError::Source(
-                            GraphMutationError::ConflictingAssignment {
-                                first_row: previous.row,
-                                first_action: previous.action,
-                                row: row_at,
-                                action: action_at,
-                            },
-                        ));
-                    }
-                } else {
-                    let observed = proposals.len() as u128 + 1;
-                    if observed > u128::from(policy.max_effects) {
-                        return Err(GqlQueryError::Source(GraphMutationError::EffectLimit {
-                            limit: policy.max_effects,
-                            observed,
-                        }));
-                    }
-                    meter.event(GlaExecutionEvent::ScratchEntry)?;
-                    proposals.insert(
-                        (target, field),
-                        Proposal {
-                            value,
-                            row: row_at,
-                            action: action_at,
-                        },
-                    );
-                }
+                propose(
+                    &mut proposals,
+                    &mut meter,
+                    target,
+                    field,
+                    value,
+                    row_at,
+                    action_at,
+                )?;
             }
         }
     }
