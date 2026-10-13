@@ -434,7 +434,7 @@ impl PreparedGraphEdgeUpsertQueryText {
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphEdgeUpsertQuery, GraphEdgeUpsertTextError> {
         let upsert = self.upsert.bind_parameters(arguments)?;
-        let values = self.upsert.merge.selection.checked_arguments(arguments)?;
+        let values = self.upsert.merge.input.checked_arguments(arguments)?;
         self.returning.bind(upsert, &values)
     }
 }
