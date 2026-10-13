@@ -12,15 +12,11 @@ use crate::recovery::{Generation, Unavailable};
 use crate::{Served, TRUNK, convert, unix_millis};
 use asupersync::Cx;
 use fgdb::{QueryError, QueryResult};
-use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GqlQueryError, GraphEdgeMergePolicy, GraphEdgeUpsertPolicy, GraphMutationPolicy,
-    GraphVertexMergePolicy, GraphVertexUpsertPolicy, PreparedGraphEdgeMergeQuery,
-    PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeUpsertQuery,
-    PreparedGraphEdgeUpsertQueryText,
-    PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphMutationQuery,
-    PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
-    PreparedGraphVertexUpsertQueryText,
+    GqlQueryError, PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText,
+    PreparedGraphEdgeUpsertQuery, PreparedGraphEdgeUpsertQueryText, PreparedGraphInsertQuery,
+    PreparedGraphInsertQueryText, PreparedGraphMutationQuery, PreparedGraphMutationQueryText,
+    PreparedGraphVertexUpsertQuery, PreparedGraphVertexUpsertQueryText,
 };
 use fgdb_protocol::body::{ErrorCode, Execute, ExecuteBatch, Outcome, WireValue};
 use fgdb_types::{EmbeddedTxnCompletion, PurposeContexts};
@@ -547,9 +543,6 @@ async fn write_batch_inner(
         generation,
     })
 }
-/// Created elements one CREATE/INSERT ... RETURN statement may make.
-const MAX_CREATED: u64 = 100_000;
-
 /// Prepared write projections share the same capability and native completion
 /// boundary as their effects. Their collectors own RETURN semantics.
 enum Returning {
@@ -669,6 +662,12 @@ async fn write_returning(
     let columns = prepared.columns().to_vec();
     let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
     let generation = guard.generation();
+    // RETURN changes delivered rows, never the host's write authority. Derive
+    // each native policy from the SAME configured program policy as rowless
+    // writes. Reconstructing defaults here bypasses custom creation/effect
+    // ceilings (including zero), and a read policy can be looser than a write
+    // policy. Final signed row admission stays with the authorized collectors.
+    let policy = db.write_policy;
     let result = match &prepared {
         Returning::Insert(prepared) => guard
             .execute_graph_insert_query_authorized(
@@ -679,7 +678,7 @@ async fn write_returning(
                 token,
                 TRUNK,
                 prepared,
-                GraphInsertPolicy::new(db.query_policy, MAX_CREATED, MAX_CREATED),
+                policy.insertion_policy(),
                 unix_millis,
             )
             .await
@@ -694,7 +693,7 @@ async fn write_returning(
                 token,
                 TRUNK,
                 prepared,
-                GraphMutationPolicy::new(db.query_policy, MAX_CREATED),
+                policy.mutations,
                 unix_millis,
             )
             .await
@@ -709,7 +708,7 @@ async fn write_returning(
                 token,
                 TRUNK,
                 prepared,
-                GraphVertexUpsertPolicy::new(GraphVertexMergePolicy::new(db.query_policy), 1_000),
+                policy.vertex_upsert_policy(),
                 unix_millis,
             )
             .await
@@ -724,10 +723,7 @@ async fn write_returning(
                 token,
                 TRUNK,
                 prepared,
-                GraphEdgeUpsertPolicy::new(
-                    GraphEdgeMergePolicy::new(db.query_policy).with_creation_limit(MAX_CREATED),
-                    1_000,
-                ),
+                policy.edge_upsert_policy(),
                 unix_millis,
             )
             .await
@@ -742,7 +738,7 @@ async fn write_returning(
                 token,
                 TRUNK,
                 prepared,
-                GraphEdgeMergePolicy::new(db.query_policy).with_creation_limit(MAX_CREATED),
+                policy.edge_merge_policy(),
                 unix_millis,
             )
             .await
