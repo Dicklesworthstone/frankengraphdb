@@ -673,7 +673,7 @@ async fn write_returning(
     let mut output_refusal = None;
     let result = match &prepared {
         Returning::Insert(prepared) => guard
-            .execute_graph_insert_query_authorized(
+            .execute_graph_insert_query_authorized_checked(
                 &txn,
                 &query,
                 &commit,
@@ -683,12 +683,25 @@ async fn write_returning(
                 prepared,
                 policy.insertion_policy(),
                 unix_millis,
+                |rows, work| match edge_upsert_output::collect(&columns, rows, work) {
+                    Ok(rows) => {
+                        admitted_rows = Some(rows);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        // Retain the exact output/meter error. Returning
+                        // Err here prevents native completion altogether;
+                        // it never substitutes a refusal for Unknown.
+                        output_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    }
+                },
             )
             .await
             .map(|(_, rows, completion)| (rows, completion))
             .map_err(returning_refusal),
         Returning::Mutation(prepared) => guard
-            .execute_graph_mutation_query_authorized(
+            .execute_graph_mutation_query_authorized_checked(
                 &txn,
                 &query,
                 &commit,
@@ -698,12 +711,25 @@ async fn write_returning(
                 prepared,
                 policy.mutations,
                 unix_millis,
+                |rows, work| match edge_upsert_output::collect(&columns, rows, work) {
+                    Ok(rows) => {
+                        admitted_rows = Some(rows);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        // Retain the exact output/meter error. Returning
+                        // Err here prevents native completion altogether;
+                        // it never substitutes a refusal for Unknown.
+                        output_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    }
+                },
             )
             .await
             .map(|(_, rows, completion)| (rows, completion))
             .map_err(returning_refusal),
         Returning::Merge(prepared) => guard
-            .execute_graph_vertex_upserts_query_authorized(
+            .execute_graph_vertex_upserts_query_authorized_checked(
                 &txn,
                 &query,
                 &commit,
@@ -713,6 +739,19 @@ async fn write_returning(
                 prepared,
                 policy.vertex_upsert_policy(),
                 unix_millis,
+                |rows, work| match edge_upsert_output::collect(&columns, rows, work) {
+                    Ok(rows) => {
+                        admitted_rows = Some(rows);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        // Retain the exact output/meter error. Returning
+                        // Err here prevents native completion altogether;
+                        // it never substitutes a refusal for Unknown.
+                        output_refusal = Some(error);
+                        Err(fgdb::WriteTxnError::AuthorizedMutationRefused)
+                    }
+                },
             )
             .await
             .map(|(_, rows, completion)| (rows, completion))
@@ -763,8 +802,10 @@ async fn write_returning(
     };
     drop(guard);
     let (execution, completion) = result.map_err(|error| output_refusal.unwrap_or(error))?;
-    // Bulk relationship RETURN is already converted and body-admitted inside
-    // its rollback boundary. Other write families retain their existing path.
+    // Insert, mutation, vertex MERGE and bulk relationship RETURN are already
+    // converted and body-admitted inside their rollback boundary. Plain edge
+    // MERGE retains its existing post-completion conversion until it exposes
+    // the same checked-admission seam.
     let rows = admitted_rows.unwrap_or_else(|| {
         execution
             .value
