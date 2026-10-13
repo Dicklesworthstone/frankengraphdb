@@ -409,6 +409,19 @@ fn create_after_with_reads_the_with_row() {
             .map(|edge| edge.entry.src)
             .collect::<Vec<_>>();
         assert_eq!(since, [VId(20)]);
+        // RETURN * is the WITH row and the named creations, never a dropped
+        // MATCH binding.
+        let starred = write(
+            &mut db,
+            "MATCH (n:Source) WITH n AS a LIMIT 1 CREATE (b:Copy) RETURN *",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { columns, rows } = starred else {
+            unreachable!("CREATE ... RETURN * answers rows")
+        };
+        assert_eq!(columns, ["a", "b"]);
+        assert_eq!(rows.len(), 1);
         // `m` left scope at the WITH: CREATE declares a new vertex m.
         let vertices = db.vertices().unwrap().len();
         write(
