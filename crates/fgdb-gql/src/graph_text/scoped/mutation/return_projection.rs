@@ -297,12 +297,13 @@ fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
 
 /// Whether a value can statically hold a map, so `.key` may read it
 /// (fgdb-2jw3z). A row column qualifies only when its type is dynamic
-/// (`schema` is the row scope). A graph property-map projection is identified
-/// separately by the parser, without admitting an arbitrary graph identity.
+/// (`column_type` reads the row scope's, or a resolver's known row). A graph
+/// property-map projection is identified separately by the parser, without
+/// admitting an arbitrary graph identity.
 fn map_capable(
     value: &ReadValueTemplate,
     key: &str,
-    schema: Option<&[(Name<'_>, GraphSetColumnType)]>,
+    column_type: &dyn Fn(usize) -> Option<GraphSetColumnType>,
     parameters: &[GqlParameterSpec],
 ) -> bool {
     match value {
@@ -317,17 +318,13 @@ fn map_capable(
         // A scalar column (a stored property, say) may hold a temporal value,
         // so it reads that value's fields. Any other key could only be NULL
         // or an error, and stays refused here.
-        ReadValueTemplate::Column(at) => {
-            schema
-                .and_then(|schema| schema.get(*at))
-                .is_some_and(|(_, kind)| match kind {
-                    GraphSetColumnType::Any => true,
-                    GraphSetColumnType::Scalar | GraphSetColumnType::Stored => {
-                        crate::set_ops::temporal_field_name(key)
-                    }
-                    _ => false,
-                })
-        }
+        ReadValueTemplate::Column(at) => column_type(*at).is_some_and(|kind| match kind {
+            GraphSetColumnType::Any => true,
+            GraphSetColumnType::Scalar | GraphSetColumnType::Stored => {
+                crate::set_ops::temporal_field_name(key)
+            }
+            _ => false,
+        }),
         ReadValueTemplate::Parameter { index, .. } => {
             parameters[*index].parameter_type == GqlParameterType::Map
         }
@@ -2429,7 +2426,16 @@ impl<'a> Parser<'a> {
                     || map_capable(
                         &value,
                         key,
-                        (inputs.is_none() && resolve.is_none()).then_some(schema),
+                        &|at| {
+                            if inputs.is_none() && resolve.is_none() {
+                                schema.get(at).map(|(_, kind)| *kind)
+                            } else {
+                                // A resolver over a known row (a write's
+                                // WITH row) states its column types.
+                                (self.resolved_column_types.as_ref())
+                                    .and_then(|types| types.get(at).copied())
+                            }
+                        },
                         &self.syntax.parameters,
                     ))
             {

@@ -703,6 +703,10 @@ struct Parser<'a> {
     /// Enabled only while a multipart graph part can lower its WHERE to ON.
     /// Other read/write owners must not silently accept an unexecuted predicate.
     read_comparisons: Option<Vec<boolean::RowComparison<'a>>>,
+    /// The types of the leading columns a column resolver addresses, while
+    /// one runs over a known row (a write's WITH row), so a map column's
+    /// `m.key` reads its entry. `None` keeps resolved columns untyped.
+    resolved_column_types: Option<Vec<crate::GraphSetColumnType>>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// A resolved leaf followed by `.key` reads that entry (an imported
     /// map's `row.key` beside MATCH reads, fgdb-0s2pq). Read scopes enable it
@@ -829,6 +833,7 @@ impl<'a> Parser<'a> {
             read_correlations: Vec::new(),
             read_row_fields: Vec::new(),
             read_comparisons: None,
+            resolved_column_types: None,
             boundary_reads: None,
             resolved_entries: false,
             elements: Vec::new(),

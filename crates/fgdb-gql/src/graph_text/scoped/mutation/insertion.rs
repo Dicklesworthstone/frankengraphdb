@@ -227,6 +227,22 @@ impl<'a> Parser<'a> {
         inputs: &mut Vec<Projection<'a>>,
         imports: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ReadValueTemplate, crate::GraphSetTextError> {
+        // The imported row's columns keep their types, so a map column's
+        // `m.key` reads its entry (`WITH {key: n} AS m DELETE m.key`, TCK
+        // Delete5); MATCH projections after them stay untyped.
+        let previous = self
+            .resolved_column_types
+            .replace(imports.iter().map(|(_, kind)| *kind).collect());
+        let value = self.insertion_resolved_value(inputs, imports);
+        self.resolved_column_types = previous;
+        value
+    }
+
+    fn insertion_resolved_value(
+        &mut self,
+        inputs: &mut Vec<Projection<'a>>,
+        imports: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<ReadValueTemplate, crate::GraphSetTextError> {
         // A read scope: an imported map's `row.key` reads its entry.
         self.read_resolved_value(
             &mut |parser| {
