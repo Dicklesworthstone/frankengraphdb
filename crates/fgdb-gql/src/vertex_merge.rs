@@ -503,6 +503,13 @@ pub enum GraphVertexMergeRowsBinding {
     /// A property of that vertex after the statement. A missing field reads
     /// NULL.
     Property(fgdb_delta_types::PropertyKeyId),
+    /// A property, after the statement, of the vertex or relationship in a
+    /// row column: a carried element. A missing field or a NULL column reads
+    /// NULL.
+    InputProperty {
+        column: usize,
+        key: fgdb_delta_types::PropertyKeyId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -605,6 +612,18 @@ impl PreparedGraphVertexMergeRowsQuery {
                     .ok_or(GraphVertexMergeRowsQueryBuildError::Binding { binding: at })?,
                 GraphVertexMergeRowsBinding::Vertex => crate::GraphSetColumnType::Vertex,
                 GraphVertexMergeRowsBinding::Property(_) => crate::GraphSetColumnType::Stored,
+                GraphVertexMergeRowsBinding::InputProperty { column, .. } => {
+                    match input.get(column) {
+                        Some(
+                            crate::GraphSetColumnType::Vertex | crate::GraphSetColumnType::Edge,
+                        ) => crate::GraphSetColumnType::Stored,
+                        _ => {
+                            return Err(GraphVertexMergeRowsQueryBuildError::Binding {
+                                binding: at,
+                            });
+                        }
+                    }
+                }
             });
         }
         let grouping = grouping
@@ -726,7 +745,8 @@ impl PreparedGraphVertexMergeRowsQuery {
                 work()?;
                 let admitted = match binding {
                     GraphVertexMergeRowsBinding::Input(_)
-                    | GraphVertexMergeRowsBinding::Property(_) => kind.accepts(value),
+                    | GraphVertexMergeRowsBinding::Property(_)
+                    | GraphVertexMergeRowsBinding::InputProperty { .. } => kind.accepts(value),
                     GraphVertexMergeRowsBinding::Vertex => matches!(value, GraphValue::Vertex(_)),
                 };
                 if !admitted {

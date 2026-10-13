@@ -240,6 +240,13 @@ fn edge_merge_query_rows<E, C>(
                     GraphEdgeMergeBinding::EndpointProperty { start, key } => {
                         read(ElementId::Vertex(endpoint(start)), key)?
                     }
+                    // A carried element's property after the statement; a
+                    // NULL column (an absent element) reads NULL.
+                    GraphEdgeMergeBinding::InputProperty { column, key } => match &values[column] {
+                        GraphValue::Vertex(vertex) => read(ElementId::Vertex(*vertex), key)?,
+                        GraphValue::Edge(element) => read(ElementId::Edge(*element), key)?,
+                        _ => GraphValue::Scalar(CanonicalScalar::Null),
+                    },
                 });
             }
             rows.push(cells);
