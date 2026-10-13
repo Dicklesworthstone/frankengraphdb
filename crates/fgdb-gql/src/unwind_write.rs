@@ -636,6 +636,49 @@ mod tests {
         }
     }
 
+    /// An edge-only CREATE after a vertex-only MATCH runs row by row
+    /// (fgdb-0s2pq); a relationship read, a new or labelled vertex, OPTIONAL,
+    /// a pattern predicate or a RETURN keeps the native pipeline.
+    #[test]
+    fn only_an_edge_only_create_after_a_vertex_only_match_is_intercepted() {
+        for query in [
+            "UNWIND $rows AS row MATCH (a:Source {p: row.from}), (b:Source {p: row.to}) \
+             CREATE (a)-[:R {p: row.w}]->(b)",
+            "UNWIND $rows AS row MATCH (a {id: row.a}) MATCH (b {id: row.b}) \
+             CREATE (a)-[:R]->(b), (b)<-[:R]-(a)",
+            "UNWIND $rows AS row MATCH (a), (b) WHERE a.id = row.a AND b.id = row.b \
+             CREATE (a)-[:R]->(b)",
+        ] {
+            assert!(
+                GraphUnwindWriteText::parse_if_supported(query)
+                    .unwrap()
+                    .is_some(),
+                "{query}"
+            );
+        }
+        for query in [
+            "UNWIND $rows AS row MATCH (a)-[:R]->(b {id: row.b}) CREATE (a)-[:R]->(b)",
+            "UNWIND $rows AS row MATCH (a {id: row.a}) CREATE (a)-[:R]->(c)",
+            "UNWIND $rows AS row MATCH (a {id: row.a}) CREATE (a)-[:R]->(:N {id: row.b})",
+            "UNWIND $rows AS row MATCH (a {id: row.a}), (b {id: row.b}) \
+             CREATE (a)-[:R]->(b:N)",
+            "UNWIND $rows AS row MATCH (a {id: row.a}), (b {id: row.b}) \
+             CREATE (a)-[:R]->(b) RETURN a",
+            "UNWIND $rows AS row OPTIONAL MATCH (a {id: row.a}) MATCH (b {id: row.b}) \
+             CREATE (a)-[:R]->(b)",
+            "UNWIND $rows AS row MATCH (a {id: row.a}), (b {id: row.b}) \
+             WHERE NOT exists((a)-->(b)) CREATE (a)-[:R]->(b)",
+            "UNWIND $rows AS row MATCH p = (a {id: row.a}) CREATE (a)-[:R]->(a)",
+        ] {
+            assert!(
+                GraphUnwindWriteText::parse_if_supported(query)
+                    .unwrap()
+                    .is_none(),
+                "{query}"
+            );
+        }
+    }
+
     #[test]
     fn imported_row_cannot_be_rebound_or_used_as_an_identity() {
         for query in [
