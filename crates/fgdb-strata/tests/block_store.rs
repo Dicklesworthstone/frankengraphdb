@@ -1184,7 +1184,7 @@ fn a_prefetching_reopen_proves_hosted_patches_as_the_serial_walk_does() {
                 relation: REL,
                 dst: VId(1),
                 canonical_key: None,
-                props: vec![(PropertyKeyId(7), CanonicalScalar::Int(i as i64))],
+                props: vec![(PropertyKeyId(7), CanonicalScalar::Int(i as i64).into())],
                 valid_time: None,
             };
             writer

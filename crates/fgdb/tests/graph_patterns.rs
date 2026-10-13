@@ -126,7 +126,11 @@ impl Case {
                         if self.filtered
                             && (!a.labels.contains(&L) || !c.props.iter().any(|(key, scalar)| {
                                 *key == N
-                                    && matches!(scalar, CanonicalScalar::Int(value) if *value >= 3)
+                                    && matches!(
+                                        scalar,
+                                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))
+                                            if *value >= 3
+                                    )
                             }))
                         {
                             continue;
