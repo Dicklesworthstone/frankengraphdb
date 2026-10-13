@@ -300,8 +300,8 @@ fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() 
         "MATCH (a) SET a += {p: 1},",
         "MATCH (a) SET a += {p: 1, p: 1}",
         "MATCH (a) SET a += {p: 1, p: 2}",
+        // A list entry writes a stored List (fgdb-k3nub); a map never does.
         "MATCH (a) SET a += {p: {q: 1}}",
-        "MATCH (a) SET a += {p: [1, 2]}",
         "MATCH (a) SET a += {p: 1} RETURN a",
         "MATCH (a) SET a += {p: 1} DETACH DELETE a",
         "MATCH (a) SET missing += {p: 1}",
