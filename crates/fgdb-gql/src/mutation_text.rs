@@ -396,7 +396,7 @@ impl core::error::Error for GraphVertexMergeTextError {}
 #[derive(Clone)]
 pub(crate) enum EdgeMergeTextInput {
     /// `MATCH ... MERGE`: the MERGE's own MATCH prefix.
-    Match(PreparedGraphText),
+    Match(Box<PreparedGraphText>),
     /// `MATCH ... WITH ... MERGE`, or a chained write's owned rows: the row
     /// relation whose vertex columns are the endpoints.
     Row {

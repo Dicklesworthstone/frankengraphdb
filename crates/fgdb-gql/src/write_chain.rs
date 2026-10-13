@@ -37,7 +37,7 @@ impl core::fmt::Debug for PreparedGraphWriteChainText {
 pub enum GraphWriteChainStep {
     /// A write with a WITH head (every step but the last) or a RETURN (the
     /// last step): it returns rows.
-    Query(PreparedGraphInsertQuery),
+    Query(Box<PreparedGraphInsertQuery>),
     /// The last write when the statement has no RETURN.
     Insert(PreparedGraphInsert),
 }

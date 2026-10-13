@@ -518,7 +518,7 @@ impl PreparedGraphEdgeUpsertText {
         // binder checks nulls and resolved-key aliases before any execution;
         // its owner supplies the selected edge to the unchanged action engine.
         let merge = PreparedGraphEdgeMergeText {
-            input: crate::mutation_text::EdgeMergeTextInput::Match(selection),
+            input: crate::mutation_text::EdgeMergeTextInput::Match(Box::new(selection)),
             relation: found,
             source,
             destination,

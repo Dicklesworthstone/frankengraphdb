@@ -179,7 +179,7 @@ impl PreparedGraphWriteChainText {
                 Some(returning) => {
                     let query = returning.bind(bound, &values)?;
                     previous = Some(query.column_types().to_vec());
-                    GraphWriteChainStep::Query(query)
+                    GraphWriteChainStep::Query(Box::new(query))
                 }
                 None => {
                     previous = None;
