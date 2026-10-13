@@ -544,7 +544,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
     where
         F: FnMut() -> Result<(), C>,
     {
-        if !self.plan.aggregate.ordering().is_empty()
+        if self.plan.aggregate.has_streamed_ordering()
             || self.plan.aggregate.incremental_output_is_distinct()
         {
             let mut ranking = self.plan.aggregate.streamed_group_ranking(groups.len());

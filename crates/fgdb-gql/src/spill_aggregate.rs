@@ -237,6 +237,13 @@ impl SpillAggregateDefinition {
     }
 
     fn from_physical(aggregate: PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
+        // External sort keys currently encode complete evaluation columns,
+        // not stored post-group expression cells. Physical pull support does
+        // not authorize that different host to ignore a projected sort order.
+        // This single admission covers graph and relational spill definitions.
+        if !aggregate.projected_ordering().is_empty() {
+            return Err(SpillAggregateBuildError::Unsupported);
+        }
         // Relational owners derive their schema from the real completed input,
         // including zero-column Values. Graph admission metadata is irrelevant
         // to this branch and must never manufacture a source or input width.

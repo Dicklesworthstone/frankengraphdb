@@ -56,6 +56,8 @@ pub enum GraphEdgeUpsertTextErrorKind {
     UpsertBuild(GraphEdgeUpsertBuildError),
     Expression(GraphMutationTextErrorKind),
     DuplicateBranch,
+    Relation(crate::GraphSetTextErrorKind),
+    ReturnBuild(crate::GraphEdgeUpsertQueryBuildError),
 }
 impl From<GraphPatternTextError> for GraphEdgeUpsertTextError {
     fn from(error: GraphPatternTextError) -> Self {
@@ -92,5 +94,54 @@ impl PreparedGraphEdgeUpsertText {
     #[must_use]
     pub fn parameter_schema(&self) -> &[crate::GqlParameterSpec] {
         self.merge.parameter_schema()
+    }
+}
+
+impl From<crate::GraphSetTextError> for GraphEdgeUpsertTextError {
+    fn from(error: crate::GraphSetTextError) -> Self {
+        let kind = match error.kind {
+            crate::GraphSetTextErrorKind::Pattern(kind) => {
+                GraphEdgeUpsertTextErrorKind::Query(kind)
+            }
+            kind => GraphEdgeUpsertTextErrorKind::Relation(kind),
+        };
+        Self {
+            offset: error.offset,
+            kind,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct EdgeReturnTemplate {
+    pub bindings: Vec<crate::GraphEdgeReturnBinding>,
+    pub projection: Vec<crate::set_text::ReadProjectionTemplate>,
+    pub grouping: Option<crate::mutation_text::WriteReturnGroupTemplate>,
+    pub quantifier: crate::GraphSetQuantifier,
+    pub order: Vec<crate::algebra::GraphValueOrder>,
+    pub offset: crate::set_text::ReadPageNumber,
+    pub count: Option<crate::set_text::ReadPageNumber>,
+    pub at: usize,
+}
+
+/// Parse once, bind repeatedly: MATCH-fed directed relationship MERGE, optional
+/// ON/SET clauses, then RETURN of the chosen edge and its final properties.
+/// Scalar/collection expressions, grouped aggregates, DISTINCT and pagination
+/// use the ordinary RETURN compiler. This is the unique-endpoint-pair profile;
+/// endpoint RETURN, wildcard/property-map reads, undirected MERGE and MERGE
+/// identity property maps are not admitted here. No text or authority executes
+/// during preparation, and unsupported syntax is never discarded.
+#[derive(Clone)]
+pub struct PreparedGraphEdgeUpsertQueryText {
+    pub(crate) statement: String,
+    pub(crate) upsert: PreparedGraphEdgeUpsertText,
+    pub(crate) returning: EdgeReturnTemplate,
+}
+impl core::fmt::Debug for PreparedGraphEdgeUpsertQueryText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphEdgeUpsertQueryText")
+            .field("output_columns", &self.returning.projection.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }

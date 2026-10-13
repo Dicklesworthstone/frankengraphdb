@@ -17,9 +17,12 @@ pub(super) fn graph_at<Clock: FnMut() -> u64>(
     // sorted projected bag of a standalone pattern. COLLECT (including its
     // first-occurrence DISTINCT form) exposes that distinction. Computed and
     // relational inputs deliberately retain their own completed-row semantics.
+    // Identified-edge plans materialize unless the visitor answers them exactly
+    // from topology, as the owner path routes them (fgdb-xtsw3).
     if query.input_relation().is_none()
         && query.input_projection().is_none()
-        && !query.input_pattern().plan().requires_identified_edges()
+        && (!query.input_pattern().plan().requires_identified_edges()
+            || query.answers_identified_edges_from_topology())
         && query.input_pattern().value_columns().iter().all(|column| {
             matches!(
                 column,

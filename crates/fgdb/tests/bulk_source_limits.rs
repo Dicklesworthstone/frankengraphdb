@@ -229,8 +229,8 @@ fn row_bytes(row: &BulkRow) -> usize {
         BulkRow::Edge(e) => (
             1 + 24
                 + e.key.len()
-                + e.source.len()
-                + e.destination.len()
+                + e.source.key().unwrap().len()
+                + e.destination.key().unwrap().len()
                 + std::mem::size_of_val(&e.relation.0),
             &e.props,
         ),

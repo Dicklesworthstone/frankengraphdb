@@ -1390,3 +1390,150 @@ fn element_property_reads_apply_the_capability_property_scope() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A capability that hides nothing serves a seekable root from the property
+/// index, as the owner source does, so a point or fixed-hop read admits its
+/// root's closure instead of the whole graph (fgdbd answered every statement
+/// over a 500k-edge graph with a SnapshotRecords refusal). The answers equal
+/// the owner's under a snapshot budget far below the graph's size, an unbound
+/// scan under that budget still refuses, and a scoped capability keeps masking
+/// a bound predicate on a hidden property.
+#[test]
+fn unrestricted_capabilities_admit_only_an_index_bound_closure() {
+    let ((), report) = run_async_under_lab(0x5ec0_4012, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, DatabaseKeys::new([0x33; 32], NS, [0x68; 32]))
+            .await
+            .unwrap();
+        // A 300-vertex chain 0 -> 1 -> ... -> 299: 599 records in all.
+        let mut chain = WriteBatch::new(RelationId(1));
+        for at in 0..300_i64 {
+            chain.create_vertex(
+                VId(1000 + at as u128),
+                vec![LabelId(1)],
+                vec![
+                    (PropertyKeyId(1), CanonicalScalar::Int(at)),
+                    (PropertyKeyId(2), CanonicalScalar::Int(at * 10)),
+                ],
+            );
+        }
+        for at in 0..299_i64 {
+            chain.add_edge(
+                EId(5000 + at as u128),
+                VId(1000 + at as u128),
+                VId(1001 + at as u128),
+                vec![],
+            );
+        }
+        db.write(&commit, chain).await.unwrap();
+        let issuer = authority(412);
+        let limits = QueryLimits {
+            max_nodes: 1_000_000,
+            max_work: 100_000_000,
+            max_rows: 1000,
+        };
+        let mut open = Grant::read_only(BRANCH, 1000, limits);
+        open.labels = Scope::All;
+        open.relations = Scope::All;
+        open.properties = Scope::All;
+        let open = issuer.issue_at(&open, 100).unwrap();
+        let mut scoped = Grant::read_only(BRANCH, 1000, limits);
+        scoped.labels = Scope::All;
+        scoped.relations = Scope::All;
+        scoped.properties = Scope::only([PropertyKeyId(1)]);
+        let scoped = issuer.issue_at(&scoped, 100).unwrap();
+        let params = GqlParameters::new();
+        let small = GqlQueryPolicy::new(32, 1000, 1_000_000, 1_000_000);
+        let large = GqlQueryPolicy::new(10_000, 1000, 10_000_000, 10_000_000);
+        let read = |token: &CapabilityToken, text: &str, policy: GqlQueryPolicy| {
+            db.query_authorized(
+                &cx,
+                &issuer,
+                token,
+                BRANCH,
+                text,
+                &params,
+                symbols,
+                policy,
+                || 100,
+            )
+        };
+        for (text, expected) in [
+            ("MATCH (n:L {p: 7}) RETURN n.p AS p", vec![vec![value(7)]]),
+            (
+                "MATCH (n:L) WHERE n.p = 7 RETURN n.p AS p",
+                vec![vec![value(7)]],
+            ),
+            (
+                "MATCH (a:L {p: 7})-[:R]->(b) RETURN b.p AS p",
+                vec![vec![value(8)]],
+            ),
+            (
+                "MATCH (a:L {p: 7})<-[:R]-(b) RETURN b.p AS p",
+                vec![vec![value(6)]],
+            ),
+            (
+                "MATCH (a:L {p: 7})-[:R]->()-[:R]->(c) RETURN c.p AS p",
+                vec![vec![value(9)]],
+            ),
+            (
+                "MATCH (a:L {p: 7})-[:R]->(b) RETURN count(b) AS n",
+                vec![vec![QueryValue::Count(1)]],
+            ),
+        ] {
+            let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+            let QueryResult::Rows { columns, rows } =
+                prepared.execute(&db, &cx, &params, large).unwrap()
+            else {
+                panic!("a row query: {text}")
+            };
+            assert_eq!(rows, expected, "owner answer for {text}");
+            let owner = QueryResult::Rows { columns, rows };
+            assert_eq!(read(&open, text, small).unwrap(), owner, "{text}");
+            assert_eq!(read(&open, text, large).unwrap(), owner, "{text}");
+        }
+        // The small budget is real: an unbound scan under it still refuses.
+        let unbound = read(&open, "MATCH (n:L) RETURN n.p AS p", small);
+        assert!(
+            matches!(
+                &unbound,
+                Err(QueryError::Pattern(GqlQueryError::Rows(error)))
+                    if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+            ),
+            "{unbound:?}"
+        );
+        let unbound = read(&open, "MATCH (n:L) RETURN count(*) AS n", small);
+        assert!(unbound.is_err(), "{unbound:?}");
+        // A scoped capability cannot match through the property it cannot see,
+        // even where the owner's index holds the value; visible keys still bind.
+        let hidden = "MATCH (n:L {hidden: 70}) RETURN n.p AS p";
+        let QueryResult::Rows { rows, .. } = PreparedNativeRead::prepare(hidden, &params, symbols)
+            .unwrap()
+            .execute(&db, &cx, &params, large)
+            .unwrap()
+        else {
+            panic!("a row query")
+        };
+        assert_eq!(
+            rows,
+            vec![vec![value(7)]],
+            "the owner sees the hidden value"
+        );
+        assert_eq!(
+            read(&scoped, hidden, large).unwrap(),
+            native_rows(&["p"], vec![])
+        );
+        assert_eq!(
+            read(
+                &scoped,
+                "MATCH (a:L {p: 7})-[:R]->(b) RETURN b.p AS p",
+                large
+            )
+            .unwrap(),
+            native_rows(&["p"], vec![vec![value(8)]])
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

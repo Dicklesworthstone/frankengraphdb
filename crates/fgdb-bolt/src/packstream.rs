@@ -5,9 +5,42 @@
 //! strings must be UTF-8, map keys must be strings and appear once, and a
 //! value must consume its input exactly. The encoder always chooses the
 //! smallest representation, so equal values encode to equal bytes.
+//! A whole-value budget also bounds container slots and copied payloads;
+//! per-container byte checks alone do not bound nested allocation amplification.
 
 /// Deepest list/map/structure nesting a decoded value may have.
 pub const MAX_DEPTH: usize = 64;
+
+/// Shared limits for one complete value, not fresh limits per nested container.
+/// Value slots include the root, list/structure children, and BOTH keys and
+/// values of maps. Slots are reserved before allocating a container, including
+/// slots whose bytes have not yet been interpreted. Data bytes count copied
+/// UTF-8 string/key bytes and byte-array payloads, not wire headers.
+///
+/// These are deterministic logical limits, not an allocator/RSS measurement.
+/// Container and duplicate-key-index overhead is bounded by `max_values`;
+/// input storage remains the caller's responsibility. Zero is a real limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecodeLimits {
+    pub max_values: usize,
+    pub max_data_bytes: usize,
+}
+
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_values: 100_000,
+            max_data_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
+/// The shared resource that refused a decoded value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodeLimit {
+    Values,
+    DataBytes,
+}
 
 /// One PackStream value.
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +118,8 @@ pub enum DecodeError {
     TooDeep,
     /// Bytes after a complete value.
     TrailingBytes,
+    /// A whole-value budget was exceeded before its next allocation.
+    LimitExceeded { resource: DecodeLimit, limit: usize },
 }
 
 impl core::fmt::Display for DecodeError {
@@ -97,6 +132,9 @@ impl core::fmt::Display for DecodeError {
             Self::DuplicateKey => f.write_str("PackStream map repeats a key"),
             Self::TooDeep => f.write_str("PackStream value nests too deeply"),
             Self::TrailingBytes => f.write_str("bytes follow a complete PackStream value"),
+            Self::LimitExceeded { resource, limit } => {
+                write!(f, "PackStream {resource:?} limit {limit} exceeded")
+            }
         }
     }
 }
@@ -186,9 +224,17 @@ fn sized(out: &mut Vec<u8>, len: usize, tiny: Option<u8>, markers: [u8; 3]) {
     }
 }
 
-/// Decode exactly one value occupying all of `bytes`.
+/// Decode exactly one value using [`DecodeLimits::default`]. The same shared
+/// limits therefore protect every ordinary Bolt request, including HELLO.
 pub fn decode(bytes: &[u8]) -> Result<Value, DecodeError> {
-    let mut reader = Reader { bytes, at: 0 };
+    decode_with_limits(bytes, DecodeLimits::default())
+}
+
+/// Decode exactly one value with caller-selected whole-value limits. Depth,
+/// UTF-8, unique keys, wire length and exact-consumption checks still apply.
+pub fn decode_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Value, DecodeError> {
+    let mut reader = Reader::new(bytes, limits);
+    reader.reserve_values(1)?;
     let value = reader.value(0)?;
     if reader.at != bytes.len() {
         return Err(DecodeError::TrailingBytes);
@@ -199,9 +245,44 @@ pub fn decode(bytes: &[u8]) -> Result<Value, DecodeError> {
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
+    limits: DecodeLimits,
+    remaining_values: usize,
+    remaining_data_bytes: usize,
 }
 
 impl<'a> Reader<'a> {
+    fn new(bytes: &'a [u8], limits: DecodeLimits) -> Self {
+        Self {
+            bytes,
+            at: 0,
+            limits,
+            remaining_values: limits.max_values,
+            remaining_data_bytes: limits.max_data_bytes,
+        }
+    }
+
+    fn reserve_values(&mut self, count: usize) -> Result<(), DecodeError> {
+        self.remaining_values =
+            self.remaining_values
+                .checked_sub(count)
+                .ok_or(DecodeError::LimitExceeded {
+                    resource: DecodeLimit::Values,
+                    limit: self.limits.max_values,
+                })?;
+        Ok(())
+    }
+
+    fn reserve_data(&mut self, count: usize) -> Result<(), DecodeError> {
+        self.remaining_data_bytes =
+            self.remaining_data_bytes
+                .checked_sub(count)
+                .ok_or(DecodeError::LimitExceeded {
+                    resource: DecodeLimit::DataBytes,
+                    limit: self.limits.max_data_bytes,
+                })?;
+        Ok(())
+    }
+
     fn take(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
         let end = self.at.checked_add(len).ok_or(DecodeError::Truncated)?;
         let slice = self.bytes.get(self.at..end).ok_or(DecodeError::Truncated)?;
@@ -222,9 +303,9 @@ impl<'a> Reader<'a> {
 
     fn text(&mut self, len: usize) -> Result<String, DecodeError> {
         let raw = self.take(len)?;
-        core::str::from_utf8(raw)
-            .map(str::to_owned)
-            .map_err(|_| DecodeError::InvalidUtf8)
+        let text = core::str::from_utf8(raw).map_err(|_| DecodeError::InvalidUtf8)?;
+        self.reserve_data(len)?;
+        Ok(text.to_owned())
     }
 
     /// Every element takes at least one byte, so no count may exceed the
@@ -238,6 +319,10 @@ impl<'a> Reader<'a> {
 
     fn items(&mut self, len: usize, depth: usize) -> Result<Vec<Value>, DecodeError> {
         let len = self.count(len)?;
+        // Reserve every declared slot NOW, not when visiting its value. A
+        // chain of oversized nested lists must not allocate each ancestor's
+        // capacity against the same still-unspent budget.
+        self.reserve_values(len)?;
         let mut items = Vec::with_capacity(len);
         for _ in 0..len {
             items.push(self.value(depth + 1)?);
@@ -246,13 +331,23 @@ impl<'a> Reader<'a> {
     }
 
     fn entries(&mut self, len: usize, depth: usize) -> Result<Vec<(String, Value)>, DecodeError> {
-        let len = self.count(len)?;
+        // Even an empty string key plus a null value needs two wire bytes.
+        // This bound also makes the multiplication below overflow-safe.
+        if len > (self.bytes.len() - self.at) / 2 {
+            return Err(DecodeError::Truncated);
+        }
+        self.reserve_values(len * 2)?;
         let mut entries: Vec<(String, Value)> = Vec::with_capacity(len);
+        // Borrow decoded UTF-8 payload spans from the immutable wire input.
+        // No second owned key copy, quadratic prior-entry scan or hash-based
+        // collision assumption. Preserve the original wire order in entries.
+        let mut names = std::collections::BTreeSet::<&'a [u8]>::new();
         for _ in 0..len {
             let Value::String(key) = self.value(depth + 1)? else {
                 return Err(DecodeError::NonStringKey);
             };
-            if entries.iter().any(|(seen, _)| *seen == key) {
+            let key_bytes = &self.bytes[self.at - key.len()..self.at];
+            if !names.insert(key_bytes) {
                 return Err(DecodeError::DuplicateKey);
             }
             let value = self.value(depth + 1)?;
@@ -301,7 +396,9 @@ impl<'a> Reader<'a> {
             }
             0xCC..=0xCE => {
                 let len = self.length(1 << (marker - 0xCC))?;
-                Value::Bytes(self.take(len)?.to_vec())
+                let raw = self.take(len)?;
+                self.reserve_data(len)?;
+                Value::Bytes(raw.to_vec())
             }
             0xD0..=0xD2 => {
                 let len = self.length(1 << (marker - 0xD0))?;
@@ -328,6 +425,220 @@ mod tests {
         let mut out = Vec::new();
         encode(value, &mut out);
         out
+    }
+
+    #[test]
+    fn limits_are_shared_across_siblings_and_count_the_root() {
+        let value = Value::List(vec![
+            Value::Map(vec![("a".into(), Value::Bytes(vec![1, 2, 3]))]),
+            Value::List(vec![Value::Null, Value::Int(7)]),
+        ]);
+        // Root, map, key, bytes, list, null and integer: seven slots; four
+        // copied bytes. Neither nested branch receives a fresh budget.
+        let encoded = bytes(&value);
+        for max_values in 0..=9 {
+            for max_data_bytes in 0..=6 {
+                let result = decode_with_limits(
+                    &encoded,
+                    DecodeLimits {
+                        max_values,
+                        max_data_bytes,
+                    },
+                );
+                if max_values >= 7 && max_data_bytes >= 4 {
+                    assert_eq!(result, Ok(value.clone()));
+                } else {
+                    assert!(matches!(result, Err(DecodeError::LimitExceeded { .. })));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_forged_capacities_cannot_reuse_unspent_slots() {
+        // Each ancestor claims 100 children, but only the innermost has
+        // payload. Wire-length checks alone admit every capacity allocation.
+        let mut encoded = Vec::new();
+        for _ in 0..8 {
+            encoded.extend_from_slice(&[0xD4, 100]);
+        }
+        encoded.extend(core::iter::repeat_n(0xC0, 100));
+        let mut reader = Reader::new(
+            &encoded,
+            DecodeLimits {
+                max_values: 120,
+                max_data_bytes: 0,
+            },
+        );
+        reader.reserve_values(1).unwrap();
+        assert_eq!(
+            reader.value(0),
+            Err(DecodeError::LimitExceeded {
+                resource: DecodeLimit::Values,
+                limit: 120,
+            })
+        );
+        // Refused at the second header, before allocating its capacity or
+        // visiting its children, rather than at the eventual truncated tail.
+        assert_eq!(reader.at, 4);
+        assert_eq!(reader.remaining_values, 19);
+    }
+
+    #[test]
+    fn containers_reserve_all_children_before_visiting_payloads() {
+        let values = [
+            (Value::List(vec![Value::Null; 512]), 3),
+            (
+                Value::Map((0..256).map(|at| (format!("k{at}"), Value::Null)).collect()),
+                3,
+            ),
+            (
+                Value::Struct {
+                    tag: 0x10,
+                    fields: vec![Value::Null; 3],
+                },
+                2,
+            ),
+        ];
+        for (value, header_len) in values {
+            let encoded = bytes(&value);
+            let mut reader = Reader::new(
+                &encoded,
+                DecodeLimits {
+                    max_values: 2,
+                    max_data_bytes: 1024,
+                },
+            );
+            reader.reserve_values(1).unwrap();
+            assert_eq!(
+                reader.value(0),
+                Err(DecodeError::LimitExceeded {
+                    resource: DecodeLimit::Values,
+                    limit: 2,
+                })
+            );
+            assert_eq!(reader.at, header_len);
+        }
+    }
+
+    #[test]
+    fn data_budget_counts_utf8_keys_strings_and_byte_arrays_once() {
+        let value = Value::Map(vec![
+            ("é".into(), Value::Bytes(vec![1, 2, 3])),
+            ("a".into(), Value::string("🦀")),
+        ]);
+        let encoded = bytes(&value);
+        let exact = DecodeLimits {
+            max_values: 5,
+            max_data_bytes: 10,
+        };
+        assert_eq!(decode_with_limits(&encoded, exact), Ok(value));
+        assert_eq!(
+            decode_with_limits(
+                &encoded,
+                DecodeLimits {
+                    max_data_bytes: 9,
+                    ..exact
+                },
+            ),
+            Err(DecodeError::LimitExceeded {
+                resource: DecodeLimit::DataBytes,
+                limit: 9,
+            })
+        );
+    }
+
+    #[test]
+    fn zero_limits_do_not_mean_unlimited() {
+        assert_eq!(
+            decode_with_limits(
+                &[0xC0],
+                DecodeLimits {
+                    max_values: 0,
+                    max_data_bytes: 0,
+                },
+            ),
+            Err(DecodeError::LimitExceeded {
+                resource: DecodeLimit::Values,
+                limit: 0,
+            })
+        );
+        for value in [
+            Value::Null,
+            Value::List(vec![]),
+            Value::string(""),
+            Value::Bytes(vec![]),
+        ] {
+            assert_eq!(
+                decode_with_limits(
+                    &bytes(&value),
+                    DecodeLimits {
+                        max_values: 1,
+                        max_data_bytes: 0,
+                    },
+                ),
+                Ok(value)
+            );
+        }
+    }
+
+    #[test]
+    fn dictionary_index_preserves_wire_order_and_checks_payload_not_header() {
+        let value = Value::Map(
+            (0..4096)
+                .rev()
+                .map(|at| (format!("key-{at:04}"), Value::Int(at)))
+                .collect(),
+        );
+        assert_eq!(decode(&bytes(&value)), Ok(value.clone()));
+        let Value::Map(mut entries) = value else {
+            unreachable!()
+        };
+        entries.push(entries[0].clone());
+        assert_eq!(
+            decode(&bytes(&Value::Map(entries))),
+            Err(DecodeError::DuplicateKey)
+        );
+        // Equal keys encoded using different length headers still collide.
+        // The duplicate is refused before its deliberately invalid value.
+        assert_eq!(
+            decode(&[0xA2, 0xD0, 1, b'k', 0, 0x81, b'k', 0xE0]),
+            Err(DecodeError::DuplicateKey)
+        );
+        // Equal empty keys also collide, while map-local indexes stay separate.
+        assert_eq!(
+            decode(&[0xA2, 0x80, 0, 0x80, 1]),
+            Err(DecodeError::DuplicateKey)
+        );
+        let siblings = Value::List(vec![
+            Value::Map(vec![("k".into(), Value::Int(1))]),
+            Value::Map(vec![("k".into(), Value::Int(2))]),
+        ]);
+        assert_eq!(decode(&bytes(&siblings)), Ok(siblings));
+    }
+
+    #[test]
+    fn ordinary_decode_applies_the_shared_default_limit() {
+        let limits = DecodeLimits::default();
+        let value = Value::List(vec![Value::Null; limits.max_values]);
+        let encoded = bytes(&value);
+        assert_eq!(
+            decode(&encoded),
+            Err(DecodeError::LimitExceeded {
+                resource: DecodeLimit::Values,
+                limit: limits.max_values,
+            })
+        );
+        assert_eq!(
+            decode_with_limits(
+                &encoded,
+                DecodeLimits {
+                    max_values: limits.max_values + 1,
+                    ..limits
+                },
+            ),
+            Ok(value)
+        );
     }
 
     #[test]

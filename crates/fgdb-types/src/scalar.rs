@@ -1418,6 +1418,19 @@ mod tests {
         temporal::{TimestampArtifactError, TimestampConstructionError},
         text::{CollationResolverError, NonBinaryTextBinding, TextArtifactRole},
     };
+
+    /// Every stored property, delta row and query value carries one scalar,
+    /// so its width multiplies through the whole resident graph. The rare
+    /// non-binary text profile and timestamp zone are boxed; an inline arm
+    /// that widens the enum again (it was 192 bytes) fails here.
+    #[test]
+    fn a_canonical_scalar_stays_at_most_sixty_four_bytes() {
+        assert!(
+            core::mem::size_of::<CanonicalScalar>() <= 64,
+            "CanonicalScalar is {} bytes",
+            core::mem::size_of::<CanonicalScalar>()
+        );
+    }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 

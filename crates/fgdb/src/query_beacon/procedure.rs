@@ -595,17 +595,25 @@ impl HybridSearch {
             },
             index: IndexConfig {
                 vector: vector.as_ref().map(|(coordinates, _, _)| {
-                    HnswConfig::new(
+                    let config = HnswConfig::new(
                         coordinates.len(),
                         metric.unwrap_or(DistanceMetric::SquaredEuclidean),
-                    )
+                    );
+                    // This call's index serves only this call: an exact search
+                    // never reads HNSW links, so do not build them (fgdb-43k4t).
+                    if ann.is_some() {
+                        config
+                    } else {
+                        config.exact_only()
+                    }
                 }),
                 ..IndexConfig::default()
             },
             policy: ReadPolicy {
-                max_work_units: default
-                    .max_work_units
-                    .min(usize::try_from(remaining.evaluator.max_work_units).unwrap_or(usize::MAX)),
+                // The statement's remaining evaluator allowance is the bound:
+                // the caller's --max-work-units raises it as well as lowers it.
+                max_work_units: usize::try_from(remaining.evaluator.max_work_units)
+                    .unwrap_or(usize::MAX),
                 max_staging_rows: default.max_staging_rows.min(records),
                 ..default
             },

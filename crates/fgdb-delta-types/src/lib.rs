@@ -525,6 +525,17 @@ mod tests {
     use asupersync::lab::run_async_under_lab;
     use fgdb_types::{CommitSeq, PurposeContexts};
 
+    /// The delta index retains one row per change, two scalars wide for a
+    /// property change; it was 432 bytes while `CanonicalScalar` was 192.
+    #[test]
+    fn a_delta_row_stays_at_most_one_hundred_ninety_two_bytes() {
+        assert!(
+            core::mem::size_of::<DeltaRow>() <= 192,
+            "DeltaRow is {} bytes",
+            core::mem::size_of::<DeltaRow>()
+        );
+    }
+
     fn with_commit_cx<T, F>(seed: u64, run: F) -> T
     where
         T: Send + 'static,

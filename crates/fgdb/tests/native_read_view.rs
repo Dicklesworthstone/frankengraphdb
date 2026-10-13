@@ -874,3 +874,74 @@ fn a_read_only_views_lazy_adjacency_answers_like_a_full_open() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A read-only open beside a LIVE writer (fgdbd, or another process) takes no
+/// writer lease and writes nothing, so it succeeds where it used to refuse
+/// with "another commit coordinator already owns this database" (fgdb-xxxnb).
+/// While the writer's last commit is durable but its root is unpublished, the
+/// view reads the writer's last PUBLISHED generation, never a partial one;
+/// once no writer is live, the next read-only open heals as before.
+#[test]
+fn a_read_only_open_beside_a_live_writer_reads_its_last_published_generation() {
+    let ((), report) = run_async_under_lab(0x7669_650c, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = committed(&commit, &[4]).await;
+        let path = vfs.database_dir();
+        let params = GqlParameters::new();
+        let text = "MATCH (n) RETURN n.p AS p ORDER BY p";
+        let mut writer = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            writer.write(&commit, batch(2, 7)).await.unwrap(),
+            CommitSeq(2)
+        );
+
+        // The writer holds the lease; a reader opens beside it anyway.
+        let view = Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(view.frontier(), CommitSeq(2));
+        assert_eq!(
+            view.query(&cx, text, &params, symbols, policy()).unwrap(),
+            integers(&[4, 7])
+        );
+
+        // Commit 3 is durable, its root unpublished, and the writer still
+        // owns the stream: only it may heal, so the reader stays on seq 2.
+        let error = writer
+            .write_with_publication_failure(
+                &commit,
+                batch(3, 11),
+                DerivedPublicationStage::PublishPartitionRoot,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WriteError::CommittedNeedsRecovery { .. }));
+        let lagging = Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(lagging.frontier(), CommitSeq(2));
+        assert_eq!(lagging.partition_root(), view.partition_root());
+        assert_eq!(
+            lagging
+                .query(&cx, text, &params, symbols, policy())
+                .unwrap(),
+            integers(&[4, 7])
+        );
+
+        // With no live writer, the read-only open heals through a full open.
+        drop(writer);
+        let healed = Database::open_read_view_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(healed.frontier(), CommitSeq(3));
+        assert_eq!(
+            healed.query(&cx, text, &params, symbols, policy()).unwrap(),
+            integers(&[4, 7, 11])
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

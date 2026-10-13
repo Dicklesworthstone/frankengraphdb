@@ -288,6 +288,11 @@ impl<'a> Tables<'a> {
         scan: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
     ) -> Result<Self, Fault> {
+        if let Some(tables) =
+            Self::admit_bound(snapshot, plan, at, predicates, &mut node, scan, control)?
+        {
+            return Ok(tables);
+        }
         let mut tables = Self::new();
         source::visit_vertices(&snapshot.patches, at, scan, |row, _| {
             tables.admit_vertex(row, predicates, &mut node, control)
@@ -303,6 +308,62 @@ impl<'a> Tables<'a> {
         }
         tables.metadata(plan, predicates, control)?;
         Ok(tables)
+    }
+
+    /// The owner source's index-bound selection, for a capability that hides
+    /// nothing. Under such a scope every label, relation and property is
+    /// visible, so the unmasked predicates that pick candidates are exactly the
+    /// masked ones the algebra evaluates, and each admitted record's charge is
+    /// a function of the visible graph. Selection itself runs on `scan`
+    /// (cancellation only) and admission charges what it keeps, as the full
+    /// scan does. A scoped capability, an unbound root, a vertex-rooted plan
+    /// that also reads edges, or a nested vertex scan returns `None`, leaving
+    /// the complete admission below.
+    fn admit_bound<Row: GlaOutput>(
+        snapshot: &'a Snapshot,
+        plan: &GlaPlan<Row>,
+        at: CommitSeq,
+        predicates: &PlannerPredicates,
+        node: &mut impl FnMut() -> Result<(), Fault>,
+        scan: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+    ) -> Result<Option<Self>, Fault> {
+        if !predicates.sees_all_incidence() || !predicates.sees_all_fields() {
+            return Ok(None);
+        }
+        let mut tables = Self::new();
+        if !plan.scans_edges() {
+            if plan.reads_edges() {
+                return Ok(None);
+            }
+            let Some((rows, _)) = source::bound_vertices(snapshot, plan, at, scan)? else {
+                return Ok(None);
+            };
+            for row in rows {
+                tables.admit_vertex(row, predicates, node, control)?;
+            }
+        } else {
+            let Some(edges) = source::bound_edges(snapshot, plan, at, true, scan)? else {
+                return Ok(None);
+            };
+            // The owner source hydrates only the endpoint rows a plan reads;
+            // an authorized edge also needs both endpoints admitted.
+            for &((_, src, _, dst), _) in &edges {
+                for vid in [src, dst] {
+                    if tables.vertices.contains_key(&vid) {
+                        continue;
+                    }
+                    if let Some(row) = source::find_vertex(snapshot, vid, at, scan)? {
+                        tables.admit_vertex(row, predicates, node, control)?;
+                    }
+                }
+            }
+            for edge in edges {
+                tables.admit_edge(edge, predicates, control)?;
+            }
+        }
+        tables.metadata(plan, predicates, control)?;
+        Ok(Some(tables))
     }
 
     fn new() -> Self {

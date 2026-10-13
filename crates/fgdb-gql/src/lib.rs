@@ -55,6 +55,7 @@ mod shortest_walk;
 pub mod spill_aggregate;
 pub mod spill_set;
 pub mod stream;
+pub mod symbol_bindings;
 mod temporal_aggregate_text;
 mod temporal_set_text;
 mod temporal_text;
@@ -128,7 +129,8 @@ pub use edge_upsert_query::{
     PreparedGraphEdgeUpsertQuery,
 };
 pub use edge_upsert_text::{
-    GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertText,
+    GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertQueryText,
+    PreparedGraphEdgeUpsertText,
 };
 pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,

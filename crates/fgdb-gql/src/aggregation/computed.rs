@@ -242,7 +242,10 @@ impl PreparedGraphAggregate {
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
         let plan = self.input.plan();
-        if !plan.requires_identified_edges()
+        // A clause-complete DIFFERENT EDGES count (fgdb-ujaad) and a
+        // support-only quantified reach (fgdb-20vwx) are answered exactly
+        // without relationship identities.
+        if (!plan.requires_identified_edges() || super::weighted::answers_identified_exactly(self))
             && !plan.projects_labels()
             && !plan.projects_types()
             && !plan.projects_property_maps()

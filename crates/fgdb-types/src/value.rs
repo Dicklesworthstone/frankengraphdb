@@ -462,7 +462,7 @@ impl CanonicalScalarProfile {
         text: &CanonicalText,
         resolver: &R,
     ) -> Result<(), CanonicalScalarProfileError> {
-        if let TextBinding::NonBinary(binding) = *text.binding() {
+        if let TextBinding::NonBinary(binding) = text.binding() {
             for (role, expected, actual) in [
                 (
                     ScalarProfileArtifactRole::UnicodeData,

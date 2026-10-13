@@ -562,8 +562,8 @@ pub async fn shape_bulk_load(query_cx: &QueryCx, cx: &CommitCx) -> Result<(), St
     for index in 0..EDGES {
         rows.push(BulkRow::Edge(BulkEdge {
             key: format!("edge-{index}"),
-            source: vertex_keys[rng.below(VERTICES)].clone(),
-            destination: vertex_keys[rng.below(VERTICES)].clone(),
+            source: vertex_keys[rng.below(VERTICES)].clone().into(),
+            destination: vertex_keys[rng.below(VERTICES)].clone().into(),
             relation: if index % 2 == 0 { KNOWS } else { RelationId(2) },
             props: vec![(WEIGHT, CanonicalScalar::Int(index as i64).into())],
         }));
@@ -629,17 +629,14 @@ pub async fn shape_bulk_load(query_cx: &QueryCx, cx: &CommitCx) -> Result<(), St
                     .edges
                     .get(&expected.key)
                     .ok_or_else(|| format!("bulk-load missing edge key {}", expected.key))?;
-                let source = checkpoint
-                    .vertices
-                    .get(&expected.source)
-                    .ok_or_else(|| format!("bulk-load missing endpoint {}", expected.source))?;
-                let destination =
-                    checkpoint
-                        .vertices
-                        .get(&expected.destination)
-                        .ok_or_else(|| {
-                            format!("bulk-load missing endpoint {}", expected.destination)
-                        })?;
+                let endpoint = |endpoint: &fgdb::BulkEndpoint| {
+                    endpoint
+                        .key()
+                        .and_then(|key| checkpoint.vertices.get(key))
+                        .ok_or_else(|| format!("bulk-load missing endpoint {endpoint:?}"))
+                };
+                let source = endpoint(&expected.source)?;
+                let destination = endpoint(&expected.destination)?;
                 let actual = db
                     .edge(*eid)
                     .map_err(|error| format!("bulk-load edge read: {error}"))?
@@ -1051,8 +1048,8 @@ async fn load_gql_fixture(
     let edge_rows = model.edges.iter().map(|(eid, src, dst)| {
         BulkRow::Edge(BulkEdge {
             key: format!("edge-{}", eid.0),
-            source: src.0.to_string(),
-            destination: dst.0.to_string(),
+            source: src.0.to_string().into(),
+            destination: dst.0.to_string().into(),
             relation: KNOWS,
             props: Vec::new(),
         })

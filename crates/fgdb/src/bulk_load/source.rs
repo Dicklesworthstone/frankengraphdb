@@ -3,7 +3,7 @@
 //! Row framing preserves source order and every field; scalar bytes are owned
 //! by the existing canonical encoder. Only digests survive whole-source preflight.
 
-use super::{BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow};
+use super::{BulkEndpoint, BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow};
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::QueryCx;
 
@@ -37,8 +37,18 @@ pub(super) fn admit_keys(
     match value {
         BulkRow::Vertex(v) => limit(row, "key_bytes", policy.max_key_bytes, v.key.len())?,
         BulkRow::Edge(e) => {
-            for key in [&e.key, &e.source, &e.destination] {
-                limit(row, "key_bytes", policy.max_key_bytes, key.len())?;
+            limit(row, "key_bytes", policy.max_key_bytes, e.key.len())?;
+            for endpoint in [&e.source, &e.destination] {
+                // A match endpoint's encoded value is bounded like a key.
+                let len = match endpoint {
+                    BulkEndpoint::Key(key) => key.len(),
+                    BulkEndpoint::Match(matched) => matched
+                        .value
+                        .encode()
+                        .map_err(|source| BulkLoadErrorKind::SourceEncoding { row, source })?
+                        .len(),
+                };
+                limit(row, "key_bytes", policy.max_key_bytes, len)?;
             }
         }
     }
@@ -213,8 +223,32 @@ fn transcript_row(
         BulkRow::Edge(edge) => {
             emit(&[1])?;
             framed(emit, edge.key.as_bytes())?;
-            framed(emit, edge.source.as_bytes())?;
-            framed(emit, edge.destination.as_bytes())?;
+            for endpoint in [&edge.source, &edge.destination] {
+                match endpoint {
+                    // Byte-identical to the key-only framing.
+                    BulkEndpoint::Key(key) => framed(emit, key.as_bytes())?,
+                    // No key length is u64::MAX, so this sentinel cannot
+                    // collide with a framed key.
+                    BulkEndpoint::Match(matched) => {
+                        emit(&u64::MAX.to_be_bytes())?;
+                        match matched.label {
+                            None => emit(&[0])?,
+                            Some(label) => {
+                                emit(&[1])?;
+                                emit(&label.0.to_be_bytes())?;
+                            }
+                        }
+                        emit(&matched.key.0.to_be_bytes())?;
+                        let bytes = matched.value.encode().map_err(|source| {
+                            BulkLoadErrorKind::SourceEncoding {
+                                row: ordinal,
+                                source,
+                            }
+                        })?;
+                        framed(emit, &bytes)?;
+                    }
+                }
+            }
             emit(&edge.relation.0.to_be_bytes())?;
             &edge.props
         }

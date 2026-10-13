@@ -304,13 +304,16 @@ impl<V: Vfs + Clone> Database<V> {
         cursor::open(self, cx, handle, policy)
     }
 
-    /// Pull the latest signed changes for a native row circuit or relational
-    /// group circuit, retaining compressed exact multiplicities. `after` must
+    /// Pull the latest signed changes for a native row circuit, direct graph
+    /// aggregate or relational group, retaining exact multiplicities. `after` must
     /// be the immediate predecessor of the accepted frontier, even for an
     /// empty tick. A missed tick returns DeltaGap, never an incomplete delta.
     /// None is an initialization/rebuild baseline, not an unchanged successor.
-    /// Direct graph-source aggregate cursors remain unsupported; use
-    /// standing_native_delta for their consolidated final-result changes.
+    /// Aggregate frames describe final selected results, after HAVING, output
+    /// projection, DISTINCT and paging, not changes to private group support.
+    /// Opening borrows the retained derivative without collecting a native bag.
+    /// Native-slot images can collide; use standing_native_delta when a fully
+    /// consolidated native bag is required rather than incremental delivery.
     ///
     /// Stage changes privately and integrate only after cursor exhaustion;
     /// early close or failure is incomplete delivery. This reports bag changes,

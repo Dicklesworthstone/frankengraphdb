@@ -8,8 +8,8 @@ mod input;
 use super::{Failure, Options, emit, hex, parameter};
 use asupersync::fs::Vfs;
 use fgdb::{
-    BulkEdge, BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow, BulkVertex, ChunkFit,
-    Database,
+    BulkEdge, BulkEndpoint, BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow,
+    BulkVertex, ChunkFit, Database,
 };
 use fgdb_delta_types::{DeltaRow, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::GqlParameterValue;
@@ -40,6 +40,12 @@ pub(super) async fn run<V: Vfs + Clone>(
     let mut policy = BulkLoadPolicy::new(options.rows_per_chunk.unwrap_or(1), options.coordinate);
     if policy.rows_per_chunk == 0 || policy.rows_per_chunk > BulkLoadPolicy::MAX_ROWS_PER_CHUNK {
         return Err(Failure::usage("invalid rows-per-chunk"));
+    }
+    if let Some(rows) = options.max_source_rows {
+        policy.max_source_rows = rows;
+    }
+    if let Some(bytes) = options.max_total_key_bytes {
+        policy.max_total_key_bytes = bytes;
     }
     // Without --rows-per-chunk, fit chunks to the source. A chunk commits as
     // one capsule, whose container measured 1.29x its source transcript on a
@@ -103,7 +109,12 @@ pub(super) async fn run<V: Vfs + Clone>(
                     vertices.insert(v.key.clone());
                 }
                 BulkRow::Edge(e) => {
-                    for endpoint in [&e.source, &e.destination] {
+                    // A match endpoint names a committed vertex; the engine's
+                    // preflight resolves it before anything commits.
+                    for endpoint in [&e.source, &e.destination]
+                        .into_iter()
+                        .filter_map(|e| e.key())
+                    {
                         if endpoint.len() > policy.max_key_bytes {
                             return Err(line_error(index + 1, "SourceLimit", "key_bytes"));
                         }
@@ -276,6 +287,24 @@ pub(super) async fn run<V: Vfs + Clone>(
                     line_error(row.saturating_add(1), "Source", source)
                 }
             }
+            BulkLoadErrorKind::UnresolvedEndpoint {
+                row,
+                edge,
+                endpoint,
+            } => line_error(
+                row.saturating_add(1),
+                "UnresolvedEndpoint",
+                format!("edge {edge}: no committed vertex matches {endpoint:?}"),
+            ),
+            BulkLoadErrorKind::AmbiguousEndpoint {
+                row,
+                edge,
+                endpoint,
+            } => line_error(
+                row.saturating_add(1),
+                "AmbiguousEndpoint",
+                format!("edge {edge}: several committed vertices match {endpoint:?}"),
+            ),
             BulkLoadErrorKind::SourceChanged { row } => line_error(
                 row.saturating_add(1),
                 "SourceChanged",
@@ -535,8 +564,15 @@ fn reconcile(
             BulkRow::Edge(e) => {
                 let (id, (src, dst, relation, props)) =
                     es.next().ok_or_else(|| invalid("missing edge creation"))?;
-                if cp.vertices.get(&e.source) != Some(&src)
-                    || cp.vertices.get(&e.destination) != Some(&dst)
+                // A match endpoint is re-resolved and checked against this
+                // creation by the engine's resume preflight.
+                let keyed = |endpoint: &fgdb::BulkEndpoint, id| {
+                    endpoint
+                        .key()
+                        .is_none_or(|key| cp.vertices.get(key) == Some(&id))
+                };
+                if !keyed(&e.source, src)
+                    || !keyed(&e.destination, dst)
                     || relation != e.relation
                     || props != &e.props
                 {
@@ -631,6 +667,61 @@ impl Saved {
     }
 }
 
+/// One typed property value (`int:1`, `text:Ada`, ...) as a storable scalar.
+fn storable(value: &Json, resolver: Option<&fgdb::PinnedTzdb>) -> Result<CanonicalScalar, String> {
+    let value = parameter(string(value)?, resolver)
+        .map_err(|e| format!("InvalidProperty: {}", e.message))?;
+    match value {
+        GqlParameterValue::Int64(value) => Ok(CanonicalScalar::Int(value)),
+        GqlParameterValue::Scalar(value) => Ok(value.value().clone()),
+        GqlParameterValue::UInt64(_) | GqlParameterValue::List(_) | GqlParameterValue::Map(_) => {
+            Err("InvalidProperty: value is not a storable canonical scalar".into())
+        }
+    }
+}
+
+/// An edge endpoint: a caller key of this input, or
+/// `{"label": <name>?, "property": <name>, "value": "<type>:<value>"}` naming
+/// the one vertex committed before this load that carries that label and
+/// property value.
+fn endpoint(
+    json: &Json,
+    options: &Options,
+    resolver: Option<&fgdb::PinnedTzdb>,
+) -> Result<BulkEndpoint, String> {
+    if let Json::String(key) = json {
+        return Ok(BulkEndpoint::Key(key.clone()));
+    }
+    let fields =
+        object(json).map_err(|_| "an endpoint is a key or {label?, property, value}".to_owned())?;
+    reject_extra(fields, &["label", "property", "value"])?;
+    let label = match fields.get("label") {
+        None => None,
+        Some(name) => {
+            let name = string(name)?;
+            let id = options
+                .labels
+                .get(name)
+                .ok_or_else(|| format!("UnknownBinding: label {name}"))?;
+            Some(LabelId(u64::from(*id)))
+        }
+    };
+    let name = string(field(fields, "property")?)?;
+    let key = options
+        .properties
+        .get(name)
+        .ok_or_else(|| format!("UnknownBinding: property {name}"))?;
+    let value = storable(field(fields, "value")?, resolver)?;
+    if matches!(value, CanonicalScalar::Null) {
+        return Err("InvalidEndpoint: a null value matches no vertex".into());
+    }
+    Ok(BulkEndpoint::matching(
+        label,
+        PropertyKeyId(u64::from(*key)),
+        value,
+    ))
+}
+
 fn parse_row(
     text: &str,
     options: &Options,
@@ -649,18 +740,10 @@ fn parse_row(
                 .properties
                 .get(name)
                 .ok_or_else(|| format!("UnknownBinding: property {name}"))?;
-            let value = parameter(string(value)?, resolver)
-                .map_err(|e| format!("InvalidProperty: {}", e.message))?;
-            let value = match value {
-                GqlParameterValue::Int64(value) => CanonicalScalar::Int(value),
-                GqlParameterValue::Scalar(value) => value.value().clone(),
-                GqlParameterValue::UInt64(_)
-                | GqlParameterValue::List(_)
-                | GqlParameterValue::Map(_) => {
-                    return Err("InvalidProperty: value is not a storable canonical scalar".into());
-                }
-            };
-            props.push((PropertyKeyId(u64::from(*id)), value.into()));
+            props.push((
+                PropertyKeyId(u64::from(*id)),
+                storable(value, resolver)?.into(),
+            ));
         }
     }
     props.sort_by_key(|(id, _)| *id);
@@ -697,8 +780,8 @@ fn parse_row(
                 .ok_or_else(|| format!("UnknownBinding: relation {relation}"))?;
             Ok(BulkRow::Edge(BulkEdge {
                 key,
-                source: string(field(fields, "source")?)?.to_owned(),
-                destination: string(field(fields, "destination")?)?.to_owned(),
+                source: endpoint(field(fields, "source")?, options, resolver)?,
+                destination: endpoint(field(fields, "destination")?, options, resolver)?,
                 relation: RelationId(u64::from(*relation)),
                 props,
             }))

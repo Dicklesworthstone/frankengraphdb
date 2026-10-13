@@ -12,6 +12,11 @@
 //!   coordinate, in order, runs a nearest-neighbour search over those numeric
 //!   properties (`--metric l2|cosine|dot`, default l2; exact unless
 //!   `--ann <ef_search>` asks for the approximate HNSW walk);
+//! - `--vector-encoding packed --vector-property <embedding>` instead reads
+//!   one packed property, as written by `--param e=vector:<x,y,...>`. Its
+//!   bytes must contain exactly one finite little-endian f32 per query
+//!   coordinate. `--vector-encoding coordinates` is the default. The CLI
+//!   never guesses an encoding from dimensions or the first stored value;
 //! - both lanes together run the exact reciprocal-rank fusion of the two
 //!   candidate sets (`--candidates <n>` per lane, default `--k`), which is
 //!   NOT an exhaustive hybrid answer;
@@ -55,6 +60,7 @@ pub(super) struct SearchFlags {
     max_expansions: Option<usize>,
     vector: Option<Vec<f32>>,
     vector_properties: Vec<String>,
+    vector_encoding: Option<VectorEncoding>,
     metric: Option<DistanceMetric>,
     ann: Option<usize>,
     k: Option<usize>,
@@ -80,13 +86,14 @@ const DEFAULT_MAX_EXPANSIONS: usize = 64;
 const MAX_ELIGIBLE_IDS: usize = 100_000;
 
 impl SearchFlags {
-    pub(super) const FLAGS: [&str; 20] = [
+    pub(super) const FLAGS: [&str; 21] = [
         "--text",
         "--text-property",
         "--text-match",
         "--max-expansions",
         "--vector",
         "--vector-property",
+        "--vector-encoding",
         "--metric",
         "--ann",
         "--k",
@@ -164,6 +171,16 @@ impl SearchFlags {
                 }
                 self.vector_properties.push(value.to_owned());
                 Ok(())
+            }
+            "--vector-encoding" => {
+                let encoding = match value {
+                    "coordinates" => VectorEncoding::Coordinates,
+                    "packed" => VectorEncoding::PackedF32Le,
+                    _ => {
+                        return Err(Failure::usage("--vector-encoding is coordinates or packed"));
+                    }
+                };
+                once(&mut self.vector_encoding, encoding, flag)
             }
             "--metric" => {
                 let metric = match value {
@@ -313,6 +330,7 @@ fn property(name: &str, bindings: &BTreeMap<String, u32>) -> Result<PropertyKeyI
 pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     let flags = &options.search;
     let k = flags.k.unwrap_or(10);
+    let encoding = flags.vector_encoding.unwrap_or_default();
     let text = match (&flags.text, &flags.text_property) {
         (Some(query), Some(name)) => Some((query.clone(), property(name, &options.properties)?)),
         (None, None) => None,
@@ -324,10 +342,21 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     };
     let vector = match (&flags.vector, flags.vector_properties.is_empty()) {
         (Some(coordinates), false) => {
-            if coordinates.len() != flags.vector_properties.len() {
-                return Err(Failure::usage(
-                    "--vector needs exactly one --vector-property per coordinate",
-                ));
+            match encoding {
+                VectorEncoding::Coordinates
+                    if coordinates.len() != flags.vector_properties.len() =>
+                {
+                    return Err(Failure::usage(
+                        "--vector needs exactly one --vector-property per coordinate; \
+                         use --vector-encoding packed for one packed embedding property",
+                    ));
+                }
+                VectorEncoding::PackedF32Le if flags.vector_properties.len() != 1 => {
+                    return Err(Failure::usage(
+                        "--vector-encoding packed needs exactly one --vector-property",
+                    ));
+                }
+                _ => {}
             }
             let keys = flags
                 .vector_properties
@@ -348,6 +377,9 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     }
     if vector.is_none() && (flags.metric.is_some() || flags.ann.is_some()) {
         return Err(Failure::usage("--metric and --ann need --vector"));
+    }
+    if vector.is_none() && flags.vector_encoding.is_some() {
+        return Err(Failure::usage("--vector-encoding needs --vector"));
     }
     let graph = match (&flags.expand_from, flags.max_hops) {
         (Some(seeds), Some(max_hops)) => {
@@ -448,10 +480,17 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
             });
     let index = IndexConfig {
         vector: vector.as_ref().map(|(coordinates, _)| {
-            HnswConfig::new(
+            let config = HnswConfig::new(
                 coordinates.len(),
                 flags.metric.unwrap_or(DistanceMetric::SquaredEuclidean),
-            )
+            );
+            // The index lives for this one call: an exact search never reads
+            // HNSW links, so do not build them (fgdb-43k4t).
+            if flags.ann.is_some() {
+                config
+            } else {
+                config.exact_only()
+            }
         }),
         ..IndexConfig::default()
     };
@@ -464,7 +503,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
                 .as_ref()
                 .map(|(_, keys)| keys.clone())
                 .unwrap_or_default(),
-            encoding: VectorEncoding::Coordinates,
+            encoding,
         },
         index,
         policy: ReadPolicy::default(),
@@ -720,6 +759,328 @@ fn rank(value: Option<u32>, robot: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fgdb_beacon::{BeaconIndex, IndexDocument, WorkBudget};
+    use fgdb_types::{CanonicalScalar, bytes::BoundedBytes};
+
+    fn options(parts: &[&str]) -> Options {
+        let mut args = vec![
+            "--db",
+            "unused",
+            "--key-file",
+            "unused",
+            "--property",
+            "x=1",
+            "--property",
+            "y=2",
+            "--property",
+            "embedding=3",
+            "--property",
+            "bio=4",
+            "--label",
+            "Document=1",
+        ];
+        args.extend_from_slice(parts);
+        crate::parse(
+            &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            "search",
+        )
+        .expect("search arguments")
+    }
+
+    fn bytes(value: Vec<u8>) -> CanonicalScalar {
+        CanonicalScalar::Bytes(BoundedBytes::new(value).unwrap())
+    }
+
+    fn vector_request(encoding: &str, metric: &str) -> Prepared {
+        let properties: &[&str] = if encoding == "packed" {
+            &["--vector-property", "embedding"]
+        } else {
+            &["--vector-property", "x", "--vector-property", "y"]
+        };
+        let mut parts = vec![
+            "--vector",
+            "1,0",
+            "--vector-encoding",
+            encoding,
+            "--metric",
+            metric,
+            "--k",
+            "4",
+        ];
+        parts.extend_from_slice(properties);
+        prepare(&options(&parts)).expect("vector request")
+    }
+
+    #[test]
+    fn packed_flag_binds_one_property_without_changing_query_dimensions_or_mode() {
+        for ann in [false, true] {
+            let mut parts = vec![
+                "--vector",
+                "1,2,3",
+                "--vector-property",
+                "embedding",
+                "--vector-encoding",
+                "packed",
+                "--metric",
+                "cosine",
+                "--as-of",
+                "7",
+                "--eligible",
+                "2,1,2",
+                "--vertex-label",
+                "Document",
+            ];
+            if ann {
+                parts.extend_from_slice(&["--ann", "32"]);
+            }
+            let request = prepare(&options(&parts)).unwrap();
+            assert_eq!(
+                request.read.projection.encoding,
+                VectorEncoding::PackedF32Le
+            );
+            assert_eq!(request.read.projection.vector, [PropertyKeyId(3)]);
+            assert_eq!(request.read.index.vector.as_ref().unwrap().dimensions, 3);
+            assert_eq!(request.read.as_of, Some(CommitSeq(7)));
+            assert_eq!(request.read.vertex_label, Some(LabelId(1)));
+            assert_eq!(request.eligible, Some(vec![VId(1), VId(2)]));
+            let vector = match request.search() {
+                Search::Vector { query, mode, .. } => Some((query, mode)),
+                _ => None,
+            };
+            let (query, mode) = vector.expect("expected vector search");
+            assert_eq!(query, [1.0, 2.0, 3.0]);
+            assert_eq!(
+                matches!(mode, VectorSearch::Approximate { ef_search: 32 }),
+                ann
+            );
+            assert!(request.read.config_for(request.search()).is_ok());
+        }
+    }
+
+    #[test]
+    fn packed_encoding_is_explicit_and_invalid_projection_shapes_refuse() {
+        let default = prepare(&options(&["--vector", "1", "--vector-property", "x"])).unwrap();
+        assert_eq!(
+            default.read.projection.encoding,
+            VectorEncoding::Coordinates
+        );
+        for parts in [
+            vec!["--vector", "1,2", "--vector-property", "embedding"],
+            vec![
+                "--vector",
+                "1,2",
+                "--vector-property",
+                "x",
+                "--vector-property",
+                "y",
+                "--vector-encoding",
+                "packed",
+            ],
+            vec!["--vector", "1,2", "--vector-encoding", "packed"],
+            vec![
+                "--vector-property",
+                "embedding",
+                "--vector-encoding",
+                "packed",
+            ],
+            vec![
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector-encoding",
+                "packed",
+            ],
+            vec![
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector-encoding",
+                "coordinates",
+            ],
+            vec![
+                "--vector",
+                "1,2",
+                "--vector-property",
+                "unknown",
+                "--vector-encoding",
+                "packed",
+            ],
+        ] {
+            let error = prepare(&options(&parts))
+                .err()
+                .expect("invalid search must refuse");
+            assert_eq!(error.code, 2, "{}", error.message);
+        }
+        for invalid in ["auto", "f64", "PACKED", ""] {
+            assert!(
+                SearchFlags::default()
+                    .set("--vector-encoding", invalid)
+                    .is_err()
+            );
+        }
+        let mut flags = SearchFlags::default();
+        flags.set("--vector-encoding", "packed").unwrap();
+        assert!(flags.set("--vector-encoding", "coordinates").is_err());
+    }
+
+    #[test]
+    fn packed_projection_uses_native_finite_exact_length_admission() {
+        let request = vector_request("packed", "l2");
+        let config = request.read.config_for(request.search()).unwrap();
+        for value in [
+            CanonicalScalar::Int(1),
+            bytes(vec![]),
+            bytes(vec![0; 7]),
+            bytes(vec![0; 9]),
+            bytes([f32::NAN.to_le_bytes(), 0.0_f32.to_le_bytes()].concat()),
+            bytes([f32::INFINITY.to_le_bytes(), 0.0_f32.to_le_bytes()].concat()),
+        ] {
+            assert!(
+                request
+                    .read
+                    .projection
+                    .project(VId(1), &config, |_| Some(&value), &mut WorkBudget::new(100),)
+                    .is_err()
+            );
+        }
+        for value in [None, Some(CanonicalScalar::Null)] {
+            let document = request
+                .read
+                .projection
+                .project(
+                    VId(1),
+                    &config,
+                    |_| value.as_ref(),
+                    &mut WorkBudget::new(100),
+                )
+                .unwrap();
+            assert!(document.vector.is_none());
+        }
+        let value = bytes([2.0_f32.to_le_bytes(), (-3.0_f32).to_le_bytes()].concat());
+        let document = request
+            .read
+            .projection
+            .project(VId(1), &config, |_| Some(&value), &mut WorkBudget::new(100))
+            .unwrap();
+        assert_eq!(document.vector, Some(vec![2.0, -3.0]));
+        assert!(
+            request
+                .read
+                .projection
+                .project(VId(1), &config, |_| Some(&value), &mut WorkBudget::new(0),)
+                .is_err(),
+            "packed decoding must retain the native work budget"
+        );
+    }
+
+    fn native_hits(request: &Prepared) -> Rows {
+        let config = request.read.config_for(request.search()).unwrap();
+        let documents: Vec<IndexDocument> = [[6_i16, 0], [2, 0], [3, 2], [2, 0]]
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, coordinates)| {
+                let properties = BTreeMap::from([
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::Int(i64::from(coordinates[0])),
+                    ),
+                    (
+                        PropertyKeyId(2),
+                        CanonicalScalar::Int(i64::from(coordinates[1])),
+                    ),
+                    (
+                        PropertyKeyId(3),
+                        bytes(
+                            coordinates
+                                .into_iter()
+                                .flat_map(|value| f32::from(value).to_le_bytes())
+                                .collect(),
+                        ),
+                    ),
+                ]);
+                request
+                    .read
+                    .projection
+                    .project(
+                        VId(u128::try_from(ordinal).unwrap() + 1),
+                        &config,
+                        |key| properties.get(&key),
+                        &mut WorkBudget::new(1_000),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let snapshot = BeaconIndex::build(config, documents, &mut WorkBudget::new(100_000))
+            .unwrap()
+            .snapshot();
+        request
+            .search()
+            .execute(&snapshot, &mut WorkBudget::new(100_000))
+            .unwrap()
+    }
+
+    #[test]
+    fn packed_search_matches_coordinate_ids_order_and_scores_for_every_metric() {
+        for metric in ["l2", "cosine", "dot"] {
+            assert_eq!(
+                native_hits(&vector_request("packed", metric)),
+                native_hits(&vector_request("coordinates", metric)),
+                "metric={metric}",
+            );
+        }
+        let hits = match native_hits(&vector_request("packed", "l2")) {
+            Rows::Vector(hits) => Some(hits),
+            _ => None,
+        }
+        .expect("expected vector hits");
+        assert_eq!(
+            hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [VId(2), VId(4), VId(3), VId(1)]
+        );
+        assert_eq!(
+            hits.iter().map(|hit| hit.distance).collect::<Vec<_>>(),
+            [1.0, 1.0, 8.0, 25.0]
+        );
+    }
+
+    #[test]
+    fn packed_encoding_reaches_hybrid_and_graph_retrieval_without_changing_fusion() {
+        for graph in [false, true] {
+            let mut parts = vec![
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector",
+                "1,0",
+                "--vector-property",
+                "embedding",
+                "--vector-encoding",
+                "packed",
+                "--k",
+                "2",
+                "--candidates",
+                "4",
+            ];
+            if graph {
+                parts.extend_from_slice(&["--expand-from", "1", "--max-hops", "2"]);
+            }
+            let request = prepare(&options(&parts)).unwrap();
+            assert_eq!(
+                request.read.projection.encoding,
+                VectorEncoding::PackedF32Le
+            );
+            assert_eq!(request.graph.is_some(), graph);
+            assert!(request.read.config_for(request.search()).is_ok());
+            let query = request.retrieval().unwrap();
+            assert_eq!(query.vector, [1.0, 0.0]);
+            assert_eq!(query.text, "graph");
+            assert_eq!(query.k, 2);
+            assert_eq!((query.vector_candidates, query.text_candidates), (4, 4));
+        }
+    }
 
     #[test]
     fn eligibility_distinguishes_omission_empty_and_full_width_membership() {

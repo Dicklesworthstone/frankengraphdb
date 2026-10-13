@@ -27,6 +27,11 @@ pub struct HnswConfig {
     pub ef_construction: usize,
     pub seed: u64,
     pub max_vectors: usize,
+    /// Build the routing links. Exact search never reads them, so a segment
+    /// built without links stores the validated vectors in the same slot order
+    /// for O(n·d) instead of `ef_construction` neighbour searches per insert.
+    /// Such a segment refuses approximate search rather than answer it empty.
+    pub links: bool,
 }
 
 impl HnswConfig {
@@ -39,7 +44,16 @@ impl HnswConfig {
             ef_construction: 200,
             seed: 0x4245_4143_4f4e_0001,
             max_vectors: 1_000_000,
+            links: true,
         }
+    }
+
+    /// The same configuration for a segment that only answers exact search
+    /// (fgdb-43k4t).
+    #[must_use]
+    pub fn exact_only(mut self) -> Self {
+        self.links = false;
+        self
     }
 
     pub fn validate(&self) -> Result<(), BeaconError> {
@@ -174,7 +188,17 @@ impl Hnsw {
             top_level: 0,
         };
         for (id, (vector, norm)) in ordered {
-            graph.insert(id, vector, norm, work)?;
+            if graph.config.links {
+                graph.insert(id, vector, norm, work)?;
+            } else {
+                work.charge(1)?;
+                graph.nodes.push(Node {
+                    id,
+                    vector,
+                    norm,
+                    links: Vec::new(),
+                });
+            }
         }
         Ok(graph)
     }
@@ -209,6 +233,11 @@ impl Hnsw {
         let norm = self.config.validate_vector(query, work)?;
         if matches!(mode, VectorSearch::Approximate { ef_search: 0 }) {
             return Err(BeaconError::InvalidQuery("ef_search must be positive"));
+        }
+        if !self.config.links && matches!(mode, VectorSearch::Approximate { .. }) {
+            return Err(BeaconError::InvalidQuery(
+                "approximate search needs a segment built with HNSW links",
+            ));
         }
         let k = k.min(self.nodes.len());
         if k == 0 {
@@ -551,5 +580,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn rows(count: u64, dimensions: usize) -> Vec<(VId, Vec<f32>)> {
+        // Deterministic, non-degenerate coordinates with repeated distances so
+        // ties exercise the slot tie-break.
+        (0..count)
+            .map(|id| {
+                let vector = (0..dimensions)
+                    .map(|axis| ((id * 31 + axis as u64 * 17) % 23) as f32 - 11.0)
+                    .collect();
+                (VId(u128::from(id)), vector)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exact_only_segments_answer_exact_search_byte_identically() {
+        for metric in [
+            DistanceMetric::SquaredEuclidean,
+            DistanceMetric::Cosine,
+            DistanceMetric::NegativeDotProduct,
+        ] {
+            let data = rows(300, 8);
+            let linked = HnswConfig::new(8, metric);
+            let flat = linked.clone().exact_only();
+            let mut linked_work = WorkBudget::new(usize::MAX);
+            let mut flat_work = WorkBudget::new(usize::MAX);
+            let linked = Hnsw::build(linked, data.clone(), &mut linked_work).unwrap();
+            let flat = Hnsw::build(flat, data.clone(), &mut flat_work).unwrap();
+            // Skipping the links is the point: insertion's neighbour searches
+            // dominate the build.
+            assert!(
+                usize::MAX - flat_work.remaining() < (usize::MAX - linked_work.remaining()) / 10,
+                "{metric:?}"
+            );
+            for (_, query) in data.iter().step_by(37) {
+                for k in [1, 7, 300] {
+                    let hits = |segment: &Hnsw| -> Vec<(VId, u64)> {
+                        segment
+                            .search(
+                                query,
+                                k,
+                                VectorSearch::Exact,
+                                |_| true,
+                                &mut WorkBudget::new(usize::MAX),
+                            )
+                            .unwrap()
+                            .into_iter()
+                            .map(|hit| (hit.id, hit.distance.to_bits()))
+                            .collect()
+                    };
+                    assert_eq!(hits(&linked), hits(&flat), "{metric:?} k={k}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_only_segments_refuse_approximate_search() {
+        let flat = Hnsw::build(
+            HnswConfig::new(8, DistanceMetric::SquaredEuclidean).exact_only(),
+            rows(50, 8),
+            &mut WorkBudget::new(usize::MAX),
+        )
+        .unwrap();
+        let query = vec![0.0; 8];
+        assert_eq!(
+            flat.search(
+                &query,
+                5,
+                VectorSearch::Approximate { ef_search: 16 },
+                |_| true,
+                &mut WorkBudget::new(usize::MAX),
+            )
+            .map(|hits| hits.len()),
+            Err(BeaconError::InvalidQuery(
+                "approximate search needs a segment built with HNSW links"
+            ))
+        );
     }
 }
