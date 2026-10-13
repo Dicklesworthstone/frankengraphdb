@@ -369,6 +369,9 @@ impl PreparedGraphAggregate {
             }
             Projection::admit_output(value.value(), &types, column).map_err(failure)?;
         }
+        // Replacing a projection must not leave previously admitted sort
+        // indices dangling. The builder remains valid in either call order.
+        Self::validate_projected_ordering(&self.projected_ordering, projection.len())?;
         self.output_names = projection
             .iter()
             .map(|value| value.name().to_owned())
@@ -382,10 +385,67 @@ impl PreparedGraphAggregate {
         self.output_projection.as_deref()
     }
 
+    /// Rank by the already computed output tuple, after HAVING and before
+    /// output pagination. Indices address output_projection(), not grouping
+    /// keys or evaluation summaries. Exact COUNT/SUM/AVG cells are compared
+    /// without narrowing; all explicit ties use the complete ascending group
+    /// key. DISTINCT still operates on the visible tuple, never sort metadata.
+    ///
+    /// Nonempty ordering requires an output projection. An empty slice clears
+    /// ordering. This replaces evaluation-column ordering but leaves HAVING,
+    /// projection, DISTINCT and pagination unchanged. The bounded batch result
+    /// owner executes this profile; incremental and physical pull admission
+    /// refuse it until they can preserve projected ranking as well.
+    pub fn with_projected_order_by(
+        mut self,
+        ordering: &[crate::algebra::GraphValueOrder],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        let width = match &self.output_projection {
+            Some(projection) => projection.len(),
+            None if ordering.is_empty() => 0,
+            None => return Err(GraphAggregateBuildError::RequiresOutputProjection),
+        };
+        Self::validate_projected_ordering(ordering, width)?;
+        self.projected_ordering = ordering.to_vec();
+        self.ordering.clear();
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn projected_ordering(&self) -> &[crate::algebra::GraphValueOrder] {
+        &self.projected_ordering
+    }
+
+    fn validate_projected_ordering(
+        ordering: &[crate::algebra::GraphValueOrder],
+        width: usize,
+    ) -> Result<(), GraphAggregateBuildError> {
+        if ordering.len() > MAX_PATTERN_VERTICES {
+            return Err(GraphAggregateBuildError::TooManyColumns {
+                limit: MAX_PATTERN_VERTICES,
+                observed: ordering.len(),
+            });
+        }
+        for (at, order) in ordering.iter().enumerate() {
+            if order.column >= width {
+                return Err(GraphAggregateBuildError::UnknownProjectedOrderColumn {
+                    column: order.column,
+                });
+            }
+            if ordering[..at].iter().any(|prior| prior.column == order.column) {
+                return Err(GraphAggregateBuildError::DuplicateProjectedOrder {
+                    column: order.column,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Replace post-aggregate clauses after validating every referenced output.
     /// All filters are AND-conjoined; ORDER BY is lexicographic. The child,
     /// grouping, output schema and existing pagination remain unchanged.
-    /// This replaces any earlier Boolean HAVING expression as well.
+    /// This replaces any earlier Boolean HAVING expression and any projected
+    /// ordering as well; the most recent ordering setter owns the whole order.
     pub fn with_result_clauses(
         mut self,
         having: &[GraphAggregateFilter],
@@ -431,6 +491,7 @@ impl PreparedGraphAggregate {
         self.having = having.to_vec();
         self.having_expression = None;
         self.ordering = ordering.to_vec();
+        self.projected_ordering.clear();
         Ok(self)
     }
     #[must_use]

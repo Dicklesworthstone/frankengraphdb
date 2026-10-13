@@ -34,7 +34,9 @@ impl PreparedGraphAggregate {
     /// HAVING are unchanged. No runtime source is read by this split.
     #[must_use]
     pub fn incremental_source_definition(&self) -> Option<Self> {
-        if !self.supports_incremental_input() {
+        // The maintained rank owner compares evaluation cells only. Do not
+        // split away a projected ordering that it cannot execute downstream.
+        if !self.projected_ordering.is_empty() || !self.supports_incremental_input() {
             return None;
         }
         let mut source = self.clone();
@@ -67,7 +69,8 @@ impl PreparedGraphAggregate {
             control(event).map_err(GqlQueryError::<GraphAggregateError<Infallible>, C>::Interrupted)
         };
         govern(GlaExecutionEvent::Work)?;
-        if !self.supports_incremental_input()
+        if !self.projected_ordering.is_empty()
+            || !self.supports_incremental_input()
             || row.keys.len() != self.keys.len()
             || row.values.len() != self.aggregates.len()
         {

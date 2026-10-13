@@ -41,6 +41,11 @@ impl PreparedGraphAggregate {
     /// source and accumulator profile. Relational folding may reuse this result
     /// stage without widening vertex/edge pull-source admission above.
     pub(crate) fn prepare_complete_group_output(&self) -> Option<Self> {
+        // Pull/spill ranking compares complete evaluation groups. Refuse this
+        // profile before opening its input instead of dropping the new order.
+        if !self.projected_ordering.is_empty() {
+            return None;
+        }
         if self.supports_row_local_aggregate_stream() {
             return Some(self.clone());
         }

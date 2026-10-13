@@ -1,0 +1,254 @@
+//! Ordering projected aggregates must use result positions and exact cells.
+use fgdb_delta_types::PropertyKeyId;
+use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder, GraphValue, GraphValueOrder, IntegerComparison};
+use fgdb_gql::spill_aggregate::{AsyncSpillAggregatePlan, SpillAggregateBuildError, SpillAggregatePlan};
+use fgdb_gql::{
+    GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphAggregate, GraphAggregateBuildError,
+    GraphAggregateColumn, GraphAggregateError, GraphAggregateFilter, GraphAggregateOrder,
+    GraphAggregateRow, GraphAggregateTest, GraphSetProjection, GraphSetValue, PreparedGraphAggregate,
+};
+use fgdb_types::{CanonicalScalar, VId};
+
+fn policy() -> GqlQueryPolicy {
+    GqlQueryPolicy::new(100, 100, 1_000_000, 1_000_000)
+}
+
+fn data(values: &[(i64, Option<i64>)]) -> Vec<[CanonicalScalar; 2]> {
+    values.iter().map(|(group, value)| {
+        [CanonicalScalar::Int(*group), value.map_or(CanonicalScalar::Null, CanonicalScalar::Int)]
+    }).collect()
+}
+
+fn execute<C>(
+    query: &PreparedGraphAggregate,
+    values: &[[CanonicalScalar; 2]],
+    policy: GqlQueryPolicy,
+    checkpoint: impl FnMut() -> Result<(), C>,
+) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<()>, C>> {
+    query.execute_governed(
+        values.len() as u64,
+        (0..values.len()).map(|at| VId(at as u128 + 1)),
+        [],
+        |_, _| Ok::<_, ()>(true),
+        |vid, key| {
+            let row = &values[vid.0 as usize - 1];
+            Ok(match key {
+                PropertyKeyId(1) => Some(&row[0]),
+                PropertyKeyId(2) => Some(&row[1]),
+                _ => None,
+            })
+        },
+        policy,
+        checkpoint,
+    )
+}
+
+fn native(offset: u64, count: Option<u64>) -> PreparedGraphAggregate {
+    let mut builder = GraphPatternBuilder::new();
+    builder.vertex("n").unwrap();
+    let input = builder.prepare_values(
+        &[
+            GraphColumn::property("bucket", "n", PropertyKeyId(1)),
+            GraphColumn::property("amount", "n", PropertyKeyId(2)),
+        ],
+        0,
+        None,
+    ).unwrap().with_duplicates();
+    PreparedGraphAggregate::prepare(
+        input,
+        &[0],
+        &[
+            GraphAggregate::sum_int("sum", 1),
+            GraphAggregate::average_int("average", 1),
+            GraphAggregate::count_rows("count"),
+        ],
+        offset,
+        count,
+    ).unwrap()
+}
+
+fn projection(query: PreparedGraphAggregate) -> PreparedGraphAggregate {
+    query.with_output_projection(vec![
+        GraphSetProjection::new("score", GraphSetValue::Column(2)),
+        GraphSetProjection::new("bucket", GraphSetValue::Column(0)),
+        GraphSetProjection::new("total", GraphSetValue::Column(1)),
+    ]).unwrap()
+}
+
+fn order(column: usize, descending: bool, nulls_first: bool) -> GraphValueOrder {
+    GraphValueOrder { column, descending, nulls_first }
+}
+
+fn bucket(row: &GraphAggregateRow, column: usize) -> i64 {
+    match row.values()[column].as_value().and_then(GraphValue::as_scalar) {
+        Some(CanonicalScalar::Int(value)) => *value,
+        other => panic!("expected bucket, got {other:?}"),
+    }
+}
+
+#[test]
+fn native_projected_positions_are_not_evaluation_positions() {
+    // SUM ranks bucket 1 first, AVG ranks bucket 2 first. The projected score
+    // is at zero, unlike both evaluation summaries. No ordinary-row cast.
+    let values = data(&[(1, Some(10)), (1, Some(10)), (1, Some(10)), (2, Some(20))]);
+    let query = projection(native(0, None))
+        .with_projected_order_by(&[order(0, true, false)]).unwrap();
+    let rows = execute(&query, &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+    assert_eq!(rows.iter().map(|row| bucket(row, 1)).collect::<Vec<_>>(), [2, 1]);
+    assert!(rows.iter().all(|row| row.keys().is_empty() && row.values().len() == 3));
+    assert_eq!(rows[0].values()[2].as_integer(), Some(20));
+    assert_eq!(rows[1].values()[2].as_integer(), Some(30));
+    assert!(query.ordering().is_empty());
+    assert_eq!(query.projected_ordering(), &[order(0, true, false)]);
+}
+
+#[test]
+fn projected_order_retains_wide_sums_and_fractional_averages() {
+    let m = i64::MAX;
+    let values = data(&[
+        (1, Some(m)), (1, Some(m - 2)),
+        (2, Some(m)), (2, Some(m - 1)), (3, None),
+    ]);
+    let query = projection(native(0, None))
+        .with_projected_order_by(&[order(0, true, true)]).unwrap();
+    let rows = execute(&query, &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+    assert_eq!(rows.iter().map(|row| bucket(row, 1)).collect::<Vec<_>>(), [3, 2, 1]);
+    assert!(rows[0].values()[0].is_null());
+    let average = rows[1].values()[0].as_average().unwrap();
+    assert_eq!(average.numerator(), i128::from(m) * 2 - 1);
+    assert_eq!(average.denominator(), 2);
+    assert_eq!(rows[1].values()[2].as_integer(), Some(i128::from(m) * 2 - 1));
+    let average = rows[2].values()[0].as_average().unwrap();
+    assert_eq!((average.numerator(), average.denominator()), (i128::from(m) - 1, 1));
+}
+
+#[test]
+fn null_placement_is_independent_and_equal_scores_use_ascending_group_keys() {
+    let values = data(&[(2, Some(1)), (1, Some(1)), (3, None), (4, Some(2))]);
+    for (descending, nulls_first, expected) in [
+        (false, false, [1, 2, 4, 3]),
+        (false, true, [3, 1, 2, 4]),
+        (true, false, [4, 1, 2, 3]),
+        (true, true, [3, 4, 1, 2]),
+    ] {
+        let query = projection(native(0, None))
+            .with_projected_order_by(&[order(0, descending, nulls_first)]).unwrap();
+        let rows = execute(&query, &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+        assert_eq!(rows.iter().map(|row| bucket(row, 1)).collect::<Vec<_>>(), expected);
+    }
+}
+
+#[test]
+fn projected_distinct_precedes_page_without_deduplicating_matches() {
+    let values = data(&[
+        (3, Some(2)), (1, Some(2)), (1, Some(2)), (2, Some(4)), (4, Some(1)),
+    ]);
+    let query = native(1, Some(1)).with_output_projection(vec![
+        GraphSetProjection::new("score", GraphSetValue::Column(1)),
+    ]).unwrap().with_projected_order_by(&[order(0, true, false)]).unwrap();
+    let bag = execute(&query, &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+    assert_eq!(bag.len(), 1);
+    assert_eq!(bag[0].values()[0].as_integer(), Some(4));
+    let rows = execute(&query.with_distinct_output(true), &values, policy(), || Ok::<_, ()>(()))
+        .unwrap().value;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values()[0].as_integer(), Some(2));
+}
+
+#[test]
+fn projected_builder_preserves_having_and_validates_replacement_orders() {
+    let filter = GraphAggregateFilter {
+        column: GraphAggregateColumn::Aggregate(0),
+        test: GraphAggregateTest::Integer { comparison: IntegerComparison::Greater, value: 0 },
+    };
+    let raw = native(0, None).with_result_clauses(
+        &[filter], &[GraphAggregateOrder::descending(GraphAggregateColumn::GroupKey(0))],
+    ).unwrap();
+    assert_eq!(raw.clone().with_projected_order_by(&[order(0, false, false)]).unwrap_err(),
+        GraphAggregateBuildError::RequiresOutputProjection);
+    let query = projection(raw).with_projected_order_by(&[order(0, true, false)]).unwrap();
+    assert_eq!(query.having(), &[filter]);
+    let values = data(&[
+        (1, Some(10)), (1, Some(10)), (1, Some(10)), (2, Some(20)), (3, Some(-1)),
+    ]);
+    let rows = execute(&query, &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+    assert_eq!(rows.iter().map(|row| bucket(row, 1)).collect::<Vec<_>>(), [2, 1]);
+    assert_eq!(query.clone().with_projected_order_by(&[
+        order(0, false, false), order(3, false, false),
+    ]).unwrap_err(), GraphAggregateBuildError::UnknownProjectedOrderColumn { column: 3 });
+    assert_eq!(query.clone().with_projected_order_by(&[
+        order(0, false, false), order(0, true, true),
+    ]).unwrap_err(), GraphAggregateBuildError::DuplicateProjectedOrder { column: 0 });
+    let later = query.clone().with_projected_order_by(&[order(2, false, false)]).unwrap();
+    assert_eq!(later.with_output_projection(vec![
+        GraphSetProjection::new("only", GraphSetValue::Column(1)),
+    ]).unwrap_err(), GraphAggregateBuildError::UnknownProjectedOrderColumn { column: 2 });
+    let cleared = query.clone().with_projected_order_by(&[]).unwrap();
+    assert!(cleared.ordering().is_empty() && cleared.projected_ordering().is_empty());
+    assert_eq!(cleared.having(), &[filter]);
+    let replaced = query.with_result_clauses(
+        &[], &[GraphAggregateOrder::ascending(GraphAggregateColumn::GroupKey(0))],
+    ).unwrap();
+    assert!(replaced.projected_ordering().is_empty());
+    assert_eq!(replaced.ordering().len(), 1);
+}
+
+#[test]
+fn native_transcript_pins_projected_order_and_unaffected_profiles_are_unchanged() {
+    let raw = native(0, None);
+    assert_eq!(raw.canonical_bytes(),
+        raw.clone().with_projected_order_by(&[]).unwrap().canonical_bytes());
+    let base = projection(raw);
+    let asc = base.clone().with_projected_order_by(&[order(0, false, false)]).unwrap();
+    let desc = base.clone().with_projected_order_by(&[order(0, true, false)]).unwrap();
+    let nulls = base.clone().with_projected_order_by(&[order(0, false, true)]).unwrap();
+    let column = base.clone().with_projected_order_by(&[order(1, false, false)]).unwrap();
+    let identities = [base.canonical_bytes(), asc.canonical_bytes(), desc.canonical_bytes(),
+        nulls.canonical_bytes(), column.canonical_bytes()];
+    for i in 0..identities.len() {
+        for j in 0..i {
+            assert_ne!(identities[i], identities[j]);
+        }
+    }
+    assert_eq!(asc.canonical_bytes(), asc.clone().canonical_bytes());
+}
+
+#[test]
+fn every_checkpoint_failure_is_retryable_and_zero_work_remains_a_refusal() {
+    let query = projection(native(0, Some(1)))
+        .with_projected_order_by(&[order(0, true, false)]).unwrap();
+    let values = data(&[(1, Some(30)), (2, Some(20)), (3, Some(10))]);
+    let mut checkpoints = 0;
+    let expected = execute(&query, &values, policy(), || {
+        checkpoints += 1;
+        Ok::<_, usize>(())
+    }).unwrap().value;
+    assert_eq!(expected.len(), 1);
+    for stop in 0..checkpoints {
+        let mut seen = 0;
+        let result = execute(&query, &values, policy(), || {
+            let at = seen;
+            seen += 1;
+            if at == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+        assert_eq!(seen, stop + 1);
+    }
+    assert_eq!(execute(&query, &values, policy(), || Ok::<_, ()>(())).unwrap().value, expected);
+    assert!(matches!(execute(&query, &values,
+        GqlQueryPolicy::new(100, 100, 0, 1_000_000), || Ok::<_, ()>(())),
+        Err(GqlQueryError::Evaluator(_))));
+}
+
+#[test]
+fn consumers_that_cannot_preserve_projected_ranking_refuse_before_input() {
+    let query = projection(native(0, None))
+        .with_projected_order_by(&[order(0, true, false)]).unwrap();
+    assert!(query.has_incremental_ranking());
+    assert!(query.incremental_source_definition().is_none());
+    assert!(matches!(SpillAggregatePlan::compile(&query), Err(SpillAggregateBuildError::Unsupported)));
+    assert!(matches!(AsyncSpillAggregatePlan::compile(&query), Err(SpillAggregateBuildError::Unsupported)));
+    let values = data(&[(1, Some(5))]);
+    let raw = execute(&native(0, None), &values, policy(), || Ok::<_, ()>(())).unwrap().value;
+    assert!(query.project_incremental_output(&raw[0], &mut |_| Ok::<_, ()>(())).unwrap().is_none());
+}
