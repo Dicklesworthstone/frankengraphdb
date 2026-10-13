@@ -1208,7 +1208,17 @@ impl<'a> Parser<'a> {
         ),
         GraphSetTextError,
     > {
-        let head = self.implicit_with_head()?;
+        let mut head = self.implicit_with_head()?;
+        if head.outputs.is_empty()
+            && let Some(&variable) = self.syntax.variables.first()
+        {
+            // `MATCH () MERGE ...`: no binding has a name, yet the write runs
+            // once per MATCH row. Carry the anonymous vertex, which no name
+            // addresses.
+            let index = self.mutation_projection(&mut head.inputs, variable, None)?;
+            head.outputs
+                .push((variable, ReadValueTemplate::Column(index)));
+        }
         self.write_row_after_head(head)
     }
 
