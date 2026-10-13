@@ -231,15 +231,16 @@ impl<'a> ParsedReturn<'a> {
         // not create, so that read is also the value after it.
         if vertex.is_none() && edge.is_none() && input.is_some() {
             let mut lookahead = parser.lexer.clone();
-            if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.'))
-                && let key = lookahead.next()?
-                && let TokenKind::Word(text) = key.kind
-                && let Some(column) = parser.boundary_read(source.len())?
-            {
-                let name = Name { text, at: key.at };
-                return self
-                    .column(Binding::Input(column), name, GraphSetColumnType::Stored)
-                    .map(Some);
+            if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
+                let key = lookahead.next()?;
+                if let TokenKind::Word(text) = key.kind
+                    && let Some(column) = parser.boundary_read(source.len())?
+                {
+                    let name = Name { text, at: key.at };
+                    return self
+                        .column(Binding::Input(column), name, GraphSetColumnType::Stored)
+                        .map(Some);
+                }
             }
         }
         let name = parser.name()?;
