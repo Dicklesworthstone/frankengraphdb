@@ -208,6 +208,38 @@ fn paging_never_limits_the_writes_and_remove_reads_null() {
     });
 }
 
+/// openCypher Set1 [3], [4]: a parenthesized variable is the same property
+/// target, of a vertex or a relationship, in a statement that returns rows.
+#[test]
+fn a_parenthesized_set_target_returns_its_rows() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let mut txn = db.begin(txcx).unwrap();
+        let (_, result) = txn
+            .execute_graph_mutation_query_governed(
+                &mut db,
+                cx,
+                &prepare(
+                    "MATCH (n:Item {p: 1})-[e:R]->() SET (n).q = 7, (e).w = 8 \
+                     RETURN n.q AS q, e.w AS w",
+                ),
+                policy(),
+            )
+            .unwrap();
+        assert_eq!(result.value, rows(vec![vec![int(7), int(8)]]));
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(
+                &db,
+                cx,
+                "MATCH (n:Item {p: 1})-[e:R]->() RETURN n.q AS q, e.w AS w"
+            ),
+            vec![vec![int(7), int(8)]]
+        );
+    });
+}
+
 /// A failing statement stages nothing and returns no row: a conflicting
 /// pair of assignments, and a RETURN read of a vertex the statement deletes.
 #[test]
