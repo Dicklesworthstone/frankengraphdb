@@ -238,7 +238,8 @@ pub use temporal_text::{
 pub use trail::GraphTrailCursor;
 pub use vertex_merge::{
     GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
-    GraphVertexMergePolicy, GraphVertexMergeRowsBinding, GraphVertexMergeRowsQueryBuildError,
+    GraphVertexMergePolicy, GraphVertexMergeRowAction, GraphVertexMergeRowActions,
+    GraphVertexMergeRowInput, GraphVertexMergeRowsBinding, GraphVertexMergeRowsQueryBuildError,
     GraphVertexMergeRowsQueryError, GraphVertexMergeStats, PreparedGraphVertexMerge,
     PreparedGraphVertexMergeRows, PreparedGraphVertexMergeRowsQuery,
 };
