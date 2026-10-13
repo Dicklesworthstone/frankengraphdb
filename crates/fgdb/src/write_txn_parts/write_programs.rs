@@ -81,8 +81,9 @@ impl WriteTxn {
     /// branch observes the same remaining creation cap as ordinary insertion;
     /// existing matches and empty endpoint selections do not allocate identities.
     /// Plain relationship MERGE handles every distinct directed endpoint pair
-    /// in its frozen selection. ON/trailing actions retain the singular pair
-    /// contract. Multi-pair receipts preserve canonical pair order explicitly.
+    /// in its frozen selection. Relationship ON/trailing actions preserve every
+    /// MATCH occurrence and parallel match. Their receipts retain occurrence
+    /// order; target visits count distinct modified identities, not occurrences.
     ///
     /// Quotas sum source visits (including relationship existence scans),
     /// selected occurrences, work, scratch, mutation intents, created vertices
@@ -174,22 +175,22 @@ impl WriteTxn {
                         .map_err(GraphWriteStepError::EdgeMerge),
                     GraphWriteStatement::EdgeUpsert(input) => workspace
                         .txn
-                        .execute_graph_edge_upsert_governed(
+                        .execute_graph_edge_upserts_governed(
                             database,
                             cx,
                             input,
                             remaining.edge_upsert_policy(),
-                            |_| {
-                                allocate(GraphWriteIdentityRequest {
-                                    statement,
-                                    request: fgdb_gql::insertion::GraphInsertRequest::Edge {
-                                        row: 0,
-                                        edge: 0,
-                                    },
-                                })
-                            },
+                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
                         )
-                        .map(|(stats, _)| GraphWriteStepStats::EdgeUpsert(stats))
+                        .and_then(|execution| {
+                            edge_upsert_program_result(
+                                input,
+                                execution,
+                                remaining.edge_upsert_policy(),
+                                cx,
+                            )
+                        })
+                        .map(|(stats, _)| stats)
                         .map_err(GraphWriteStepError::EdgeUpsert),
                     GraphWriteStatement::Delete(input) => workspace
                         .txn
@@ -327,24 +328,24 @@ impl WriteTxn {
                         .map_err(GraphWriteStepError::EdgeMerge),
                     GraphWriteStatement::EdgeUpsert(input) => workspace
                         .txn
-                        .execute_graph_edge_upsert_governed(
+                        .execute_graph_edge_upserts_governed(
                             database,
                             cx,
                             input,
                             remaining.edge_upsert_policy(),
-                            |_| {
-                                allocate(GraphWriteIdentityRequest {
-                                    statement,
-                                    request: fgdb_gql::insertion::GraphInsertRequest::Edge {
-                                        row: 0,
-                                        edge: 0,
-                                    },
-                                })
-                            },
+                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
                         )
-                        .map(|(stats, outcome)| {
-                            receipts.push(GraphWriteStepReceipt::EdgeUpsert { outcome });
-                            GraphWriteStepStats::EdgeUpsert(stats)
+                        .and_then(|execution| {
+                            edge_upsert_program_result(
+                                input,
+                                execution,
+                                remaining.edge_upsert_policy(),
+                                cx,
+                            )
+                        })
+                        .map(|(stats, receipt)| {
+                            receipts.push(receipt);
+                            stats
                         })
                         .map_err(GraphWriteStepError::EdgeUpsert),
                     GraphWriteStatement::Delete(input) => workspace
@@ -371,4 +372,72 @@ impl WriteTxn {
             Ok(receipt)
         })
     }
+}
+
+// Receipt construction remains inside the caller's program workspace. A late
+// allocation/quota/cancellation failure therefore rolls back every step, not
+// just the already-accepted inner upsert. The occurrence bag is transferred,
+// never deduplicated; only the separate modified-target count is distinct.
+type EdgeUpsertProgramResult<A> = Result<
+    (fgdb_gql::GraphWriteStepStats, fgdb_gql::GraphWriteStepReceipt),
+    TxnGqlError<fgdb_gql::GraphEdgeUpsertError<WriteTxnError, A>>,
+>;
+
+fn edge_upsert_program_result<A>(
+    input: &fgdb_gql::PreparedGraphEdgeUpsert,
+    (mut stats, outcomes): (
+        fgdb_gql::GraphEdgeUpsertBatchStats,
+        Vec<fgdb_gql::GraphEdgeMergeOutcome>,
+    ),
+    policy: fgdb_gql::GraphEdgeUpsertPolicy,
+    cx: &fgdb_types::QueryCx,
+) -> EdgeUpsertProgramResult<A> {
+    use fgdb_gql::{
+        GlaExecutionEvent, GraphEdgeMergeOutcome, GraphEdgeUpsertBranch, GraphWriteStepReceipt,
+        GraphWriteStepStats,
+    };
+
+    let bulk = outcomes.len() > 1;
+    let mut created = Vec::new();
+    let mut targets = std::collections::BTreeSet::new();
+    let mut control = |event| {
+        edge_upsert_batch_event::<A>(cx, policy.merge.query, &mut stats.evaluator, event)
+    };
+    control(GlaExecutionEvent::Work)?;
+    for outcome in &outcomes {
+        control(GlaExecutionEvent::Work)?;
+        let (edge, branch) = match *outcome {
+            GraphEdgeMergeOutcome::Created(edge) => {
+                if bulk {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    created.push(edge);
+                }
+                (edge, GraphEdgeUpsertBranch::Create)
+            }
+            GraphEdgeMergeOutcome::Matched(edge) => (edge, GraphEdgeUpsertBranch::Match),
+            // The native batch represents NoInput by an empty bag, never a
+            // fabricated occurrence mixed with resolved relationships.
+            GraphEdgeMergeOutcome::NoInput => return Err(edge_upsert_batch_invalid()),
+        };
+        if input.action_count(branch) != 0 && !targets.contains(&edge) {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            targets.insert(edge);
+        }
+    }
+    control(GlaExecutionEvent::Work)?;
+    let target_edges =
+        u64::try_from(targets.len()).map_err(|_| edge_upsert_batch_invalid::<A>())?;
+    let receipt = match outcomes.len() {
+        0 => GraphWriteStepReceipt::EdgeUpsert {
+            outcome: GraphEdgeMergeOutcome::NoInput,
+        },
+        1 => GraphWriteStepReceipt::EdgeUpsert {
+            outcome: outcomes[0],
+        },
+        _ => GraphWriteStepReceipt::EdgeUpsertBatch { outcomes, created },
+    };
+    Ok((
+        GraphWriteStepStats::EdgeUpsertBatch { stats, target_edges },
+        receipt,
+    ))
 }
