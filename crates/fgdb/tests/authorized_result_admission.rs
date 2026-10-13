@@ -326,3 +326,231 @@ fn issuer_retirement_inside_result_admission_is_not_followed_by_commit() {
         }
     });
 }
+
+mod all_target_merge {
+    use super::*;
+
+    const SECOND: VId = VId((1_u128 << 96) | 1);
+    const HIDDEN: LabelId = LabelId(2);
+
+    async fn seed_more(db: &mut Database<MemVfs>, commit: &CommitCx) {
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(SECOND, vec![L], vec![
+            (K, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(20)),
+        ]);
+        batch.create_vertex(VId(3), vec![HIDDEN], vec![
+            (K, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(90)),
+        ]);
+        db.write(commit, batch).await.unwrap();
+    }
+
+    fn token(authority: &Authority, rows: u64, hide_value: bool) -> CapabilityToken {
+        authority.issue_at(&Grant {
+            branch: "main".into(),
+            labels: Scope::only([L]),
+            relations: Scope::All,
+            properties: if hide_value { Scope::only([K]) } else { Scope::All },
+            rights: Rights::ReadWrite,
+            limits: QueryLimits { max_nodes: 1_000_000, max_work: 100_000_000, max_rows: rows },
+            expires_at_ms: 1000,
+        }, NOW).unwrap()
+    }
+
+    fn prepare(text: &str) -> fgdb_gql::PreparedGraphVertexUpsertQuery {
+        PreparedGraphVertexUpsertQueryText::prepare(text, R, symbols).unwrap()
+            .bind_parameters(&GqlParameters::new()).unwrap()
+    }
+
+    fn upsert_policy(actions: u64) -> GraphVertexUpsertPolicy {
+        GraphVertexUpsertPolicy::new(GraphVertexMergePolicy::new(policy()), actions)
+    }
+
+    fn value(db: &Database<MemVfs>, id: VId) -> CanonicalScalar {
+        db.vertex(id).unwrap().unwrap().props.into_iter()
+            .find(|(key, _)| *key == P).unwrap().1
+    }
+
+    #[test]
+    fn all_visible_targets_update_before_one_final_aggregate_and_unique_api_stays_unique() {
+        run(async |commit, query, txn| {
+            let (mut db, authority, _) = fixture(commit).await;
+            seed_more(&mut db, commit).await;
+            let token = token(&authority, 1, false);
+            let prepared = prepare(
+                "MERGE (n {key:1}) ON MATCH SET n.value=n.value+1 RETURN max(n.value) AS value",
+            );
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            assert!(db.execute_graph_vertex_upsert_query_authorized(
+                txn, query, commit, &authority, &token, "main", &prepared, upsert_policy(2), || NOW,
+            ).await.is_err());
+            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            let (stats, result, completion) = db.execute_graph_vertex_upserts_query_authorized(
+                txn, query, commit, &authority, &token, "main", &prepared, upsert_policy(2), || NOW,
+            ).await.unwrap();
+            assert_eq!(stats.action_effects, 2);
+            assert_eq!(result.value.len(), 1);
+            assert_eq!(result.value[0].values(), &[GraphValue::Scalar(CanonicalScalar::Int(21))]);
+            assert_eq!(value(&db, VId(1)), CanonicalScalar::Int(11));
+            assert_eq!(value(&db, SECOND), CanonicalScalar::Int(21));
+            assert_eq!(value(&db, VId(3)), CanonicalScalar::Int(90));
+            assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }));
+            assert_eq!(db.frontier().unwrap().0, (before.0).0 + 1);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        });
+    }
+
+    #[test]
+    fn limit_zero_and_with_filters_do_not_suppress_actions_or_rematch_changed_keys() {
+        run(async |commit, query, txn| {
+            for tail in ["RETURN n.value AS value LIMIT 0", "WITH n.value AS v WHERE v>11 RETURN v"] {
+                let (mut db, authority, _) = fixture(commit).await;
+                seed_more(&mut db, commit).await;
+                let zero = tail.ends_with("LIMIT 0");
+                let token = token(&authority, u64::from(!zero), false);
+                let prepared = prepare(&format!(
+                    "MERGE (n:Item {{key:1}}) ON MATCH SET n.value=n.value+1 SET n.key=2 {tail}",
+                ));
+                let (_, result, _) = db.execute_graph_vertex_upserts_query_authorized(
+                    txn, query, commit, &authority, &token, "main", &prepared, upsert_policy(4), || NOW,
+                ).await.unwrap();
+                assert_eq!(result.value.len(), usize::from(!zero));
+                if !zero {
+                    assert_eq!(result.value[0].values(), &[GraphValue::Scalar(CanonicalScalar::Int(21))]);
+                }
+                for (id, expected) in [(VId(1), 11), (SECOND, 21)] {
+                    let row = db.vertex(id).unwrap().unwrap();
+                    assert!(row.props.contains(&(K, CanonicalScalar::Int(2))));
+                    assert!(row.props.contains(&(P, CanonicalScalar::Int(expected))));
+                }
+                assert_eq!(value(&db, VId(3)), CanonicalScalar::Int(90));
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn whole_statement_action_cap_refuses_without_partial_effects_and_can_be_retried() {
+        run(async |commit, query, txn| {
+            let (mut db, authority, _) = fixture(commit).await;
+            seed_more(&mut db, commit).await;
+            let token = token(&authority, 2, false);
+            let prepared = prepare("MERGE (n:Item {key:1}) SET n.value=n.value+1 RETURN n.value AS value");
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            assert!(db.execute_graph_vertex_upserts_query_authorized(
+                txn, query, commit, &authority, &token, "main", &prepared, upsert_policy(1), || NOW,
+            ).await.is_err());
+            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            let (_, result, _) = db.execute_graph_vertex_upserts_query_authorized(
+                txn, query, commit, &authority, &token, "main", &prepared, upsert_policy(2), || NOW,
+            ).await.unwrap();
+            assert_eq!(result.value.len(), 2);
+            assert_eq!(value(&db, VId(1)), CanonicalScalar::Int(11));
+            assert_eq!(value(&db, SECOND), CanonicalScalar::Int(21));
+            assert_eq!(txn.outstanding_obligations(), 0);
+        });
+    }
+
+    #[test]
+    fn later_projection_and_signed_row_refusals_rollback_every_target() {
+        run(async |commit, query, txn| {
+            for (tail, rows) in [
+                ("RETURN 1/(n.value-21) AS value", 2),
+                ("RETURN n.value AS value", 1),
+            ] {
+                let (mut db, authority, _) = fixture(commit).await;
+                seed_more(&mut db, commit).await;
+                let token = token(&authority, rows, false);
+                let prepared = prepare(&format!("MERGE (n:Item {{key:1}}) SET n.value=n.value+1 {tail}"));
+                let before = (db.frontier().unwrap(), db.vertices().unwrap());
+                assert!(db.execute_graph_vertex_upserts_query_authorized(
+                    txn, query, commit, &authority, &token, "main", &prepared, upsert_policy(2), || NOW,
+                ).await.is_err());
+                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn hidden_fields_are_null_and_attempted_hidden_noop_writes_refuse() {
+        run(async |commit, query, txn| {
+            let (mut db, authority, _) = fixture(commit).await;
+            seed_more(&mut db, commit).await;
+            let token = token(&authority, 2, true);
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            let prepared = prepare("MERGE (n {key:1}) RETURN n.value AS value");
+            let (_, result, _) = db.execute_graph_vertex_upserts_query_authorized(
+                txn, query, commit, &authority, &token, "main", &prepared, upsert_policy(0), || NOW,
+            ).await.unwrap();
+            assert_eq!(result.value.len(), 2);
+            for row in &result.value {
+                assert_eq!(row.values(), &[GraphValue::Scalar(CanonicalScalar::Null)]);
+            }
+            for assignment in ["n.value=n.value", "n.value=10"] {
+                // The literal assignment is already the first target's value.
+                // Original-intent authorization must still reject that no-op.
+                let prepared = prepare(&format!(
+                    "MERGE (n {{key:1}}) SET {assignment} RETURN n.value AS value",
+                ));
+                assert!(db.execute_graph_vertex_upserts_query_authorized(
+                    txn, query, commit, &authority, &token, "main", &prepared, upsert_policy(2), || NOW,
+                ).await.is_err());
+                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn final_admission_owns_the_whole_result_and_retirement_prevents_publication() {
+        run(async |commit, query, txn| {
+            let (mut db, authority, _) = fixture(commit).await;
+            seed_more(&mut db, commit).await;
+            let token = token(&authority, 2, false);
+            let prepared = prepare(
+                "MERGE (n:Item {key:1}) SET n.value=n.value+1 RETURN n.value AS value ORDER BY value",
+            );
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            let mut calls = 0;
+            assert!(db.execute_graph_vertex_upserts_query_authorized_checked(
+                txn, query, commit, &authority, &token, "main", &prepared, upsert_policy(2), || NOW,
+                |rows, work| {
+                    calls += 1;
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0].values(), &[GraphValue::Scalar(CanonicalScalar::Int(11))]);
+                    assert_eq!(rows[1].values(), &[GraphValue::Scalar(CanonicalScalar::Int(21))]);
+                    authority.retire();
+                    work(0)
+                },
+            ).await.is_err());
+            assert_eq!(calls, 1);
+            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        });
+    }
+
+    #[test]
+    fn an_empty_visible_match_creates_once_and_the_next_call_matches_it() {
+        run(async |commit, query, txn| {
+            let (mut db, authority, _) = fixture(commit).await;
+            let mut hidden = WriteBatch::new(R);
+            hidden.create_vertex(VId(3), vec![HIDDEN], vec![(K, CanonicalScalar::Int(2))]);
+            db.write(commit, hidden).await.unwrap();
+            let token = token(&authority, 1, false);
+            let prepared = prepare(
+                "MERGE (n:Item {key:2}) ON CREATE SET n.value=30 RETURN n.value AS value",
+            );
+            let before = db.frontier().unwrap();
+            for iteration in 0..2 {
+                let (_, result, _) = db.execute_graph_vertex_upserts_query_authorized(
+                    txn, query, commit, &authority, &token, "main", &prepared, upsert_policy(1), || NOW,
+                ).await.unwrap();
+                assert_eq!(result.value.len(), 1);
+                assert_eq!(result.value[0].values(), &[GraphValue::Scalar(CanonicalScalar::Int(30))]);
+                assert_eq!(db.vertices().unwrap().len(), 3, "iteration {iteration}");
+                assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+}
