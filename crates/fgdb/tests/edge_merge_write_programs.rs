@@ -1183,7 +1183,11 @@ fn relationship_merge_clauses_then_return_read_the_final_relationship() {
         )
         .await
         .unwrap();
-        assert_eq!(rows(created), [vec![GraphAggregateValue::Count(1)]]);
+        // A write RETURN's count is an Int value, as main's edge upsert
+        // RETURN laws pin it.
+        let int =
+            |value| GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        assert_eq!(rows(created), [vec![int(1)]]);
         assert_eq!(
             edges(&db),
             [(
