@@ -294,6 +294,10 @@ fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() 
         "MATCH (a) SET a.p=1,a += {}",
         "MATCH (a) SET a += $map",
         "MATCH (a) SET a += a.p",
+        // SET a = {...} replaces (fgdb-6vm3o); a malformed replace map still
+        // refuses before any catalog access.
+        "MATCH (a) SET a = {p: 1, p: 2}",
+        "MATCH (a) SET a = {p 1}",
         "MATCH (a) REMOVE a += {p: 1}",
         "MATCH (a) SET a + {p: 1}",
         "MATCH (a) SET a += {p 1}",
