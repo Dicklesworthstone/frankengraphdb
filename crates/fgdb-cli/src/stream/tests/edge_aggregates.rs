@@ -211,17 +211,27 @@ fn edge_shape_refusals_precede_headers_and_late_data_refusals_emit_no_success() 
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, fixture()).await.unwrap();
-        for text in [
-            "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values",
-            "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COUNT(*) AS total",
-        ] {
-            let mut output = Vec::new();
-            assert!(
-                run(&db, &cx, &edge_options(text), true, &mut output).is_err(),
-                "{text}"
-            );
-            assert!(output.is_empty());
-        }
+        let text = "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COUNT(*) AS total";
+        let mut output = Vec::new();
+        assert!(
+            run(&db, &cx, &edge_options(text), true, &mut output).is_err(),
+            "{text}"
+        );
+        assert!(output.is_empty());
+        // COLLECT over a relationship property is a streamed edge aggregate
+        // now (canonical collections, fgdb-7xqxb), no longer a shape refusal:
+        // it answers its one grouped row with a result event.
+        let mut output = Vec::new();
+        okay(run(
+            &db,
+            &cx,
+            &edge_options("MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values"),
+            true,
+            &mut output,
+        ));
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(row_lines(&output).len(), 1, "{output}");
+        assert!(output.contains("\"event\":\"result\""), "{output}");
         let mut edit = WriteBatch::new(RelationId(1));
         edit.set_edge_property(
             EId(3),
