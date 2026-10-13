@@ -249,3 +249,72 @@ fn per_eid_chains_decide_exactly_as_the_global_statement_map() {
         "{accepted} accepted, {refused} refused"
     );
 }
+
+/// Thousands of EIds through every growth of the hashed chain index, a
+/// quarter of them built so their bits fold to one bucket (the worst probe
+/// cluster the fixed mix allows), each restated retired later and then
+/// contiguously succeeded: both validators accept, collapse identically,
+/// and refuse the same final conflicting birth.
+#[test]
+fn the_chain_index_finds_every_eid_through_growth_and_a_full_collision_cluster() {
+    let mut rng = Rng(0x2a2_1dea_c011_1de5);
+    let eids: Vec<u64> = (0..6_000u64)
+        .map(|at| if at % 4 == 0 { at } else { rng.next() >> 2 })
+        .collect();
+    let eid = |at: usize| {
+        let raw = eids[at];
+        // Every 4th EId repeats its low half in its high half, so the folded
+        // hash input is zero for all of them.
+        if at % 4 == 0 {
+            EId((u128::from(raw) << 64) | u128::from(raw))
+        } else {
+            EId(u128::from(raw))
+        }
+    };
+    let statement = |at: usize, created: u64, retired: Option<u64>| AdjacencyEntry {
+        eid: eid(at),
+        ..entry(0, 1 + (at as u64 % 2), 3, created, retired)
+    };
+    let published = |rows: Vec<AdjacencyEntry>| -> Vec<Vec<AdjacencyEntry>> {
+        let mut rows = rows;
+        rows.sort_by_key(|e| (e.src, e.relation, e.dst, e.eid, e.created_at));
+        rows.chunks(200).map(<[AdjacencyEntry]>::to_vec).collect()
+    };
+    let mut blocks = published((0..eids.len()).map(|at| statement(at, 1, None)).collect());
+    blocks.extend(published(
+        (0..eids.len())
+            .step_by(3)
+            .map(|at| statement(at, 1, Some(4)))
+            .collect(),
+    ));
+    blocks.extend(published(
+        (0..eids.len())
+            .step_by(3)
+            .map(|at| statement(at, 4, None))
+            .collect(),
+    ));
+    // A colliding EId (index 8, in the cluster) restated with another source:
+    // an identity conflict both validators must refuse.
+    let mut conflict = statement(8, 1, None);
+    conflict.src = VId(7);
+    blocks.push(vec![conflict]);
+
+    let (mut chains, mut global) = (
+        EdgeHistoryValidator::default(),
+        GlobalMapValidator::default(),
+    );
+    for (at, block) in blocks.iter().enumerate() {
+        let expected = global.observe_block(at, block);
+        assert_eq!(chains.observe_block(at, block), expected, "block {at}");
+        if at + 1 < blocks.len() {
+            assert_eq!(expected, Ok(()), "block {at} is lawful");
+        } else {
+            assert!(
+                matches!(expected, Err(RootError::EdgeIdentityMismatch { .. })),
+                "{expected:?}"
+            );
+        }
+    }
+    assert_eq!(chains.statements(), global.statements);
+    assert_eq!(global.statements.len(), 6_000 + 2_000);
+}

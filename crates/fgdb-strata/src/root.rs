@@ -1840,13 +1840,81 @@ pub(crate) type CollapsedEdgeHistory = (
 pub(crate) struct EdgeHistoryValidator {
     /// One chain of content STATEMENTS per EId — the FGSV V2 chain model
     /// applied to edges (fgdb-ls5b). Birth fields are immutable across an
-    /// EId's whole chain; `created_at` advances only at contiguity. Keyed by
-    /// EId alone because every question admission asks is about one EId's
-    /// chain: an entry costs one descent, not one to find its chain and
-    /// another to insert (fgdb-2n2a2, half of an open's main-task time).
-    chains: std::collections::BTreeMap<EId, EdgeChain>,
+    /// EId's whole chain; `created_at` advances only at contiguity. Kept in
+    /// first-admission order and found through `index`, because every
+    /// question admission asks is about one EId's chain: an entry costs one
+    /// hashed probe instead of a descent through millions of ordered keys
+    /// (fgdb-2n2a2, half of an open's main-task time). Only
+    /// [`Self::statements`] needs EId order, and sorts once.
+    chains: Vec<EdgeChain>,
+    index: EIdIndex,
     statements: usize,
     seen: usize,
+}
+
+/// Open-addressed (linear probing) positions into the validator's chains.
+/// The hash is a fixed mix of the EId's bits, not seeded from ambient
+/// randomness: admission stays deterministic, and EIds are already
+/// keyed-permutation values, so they spread without help.
+#[derive(Debug, Default)]
+struct EIdIndex {
+    /// `EMPTY` or a position in `chains`; the length is zero or a power of
+    /// two, at most three-quarters full.
+    slots: Vec<u32>,
+}
+
+impl EIdIndex {
+    const EMPTY: u32 = u32::MAX;
+
+    fn bucket(eid: EId, slots: usize) -> usize {
+        let folded = (eid.0 as u64) ^ ((eid.0 >> 64) as u64);
+        let mixed = folded.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        // `slots` is a power of two: keep the best-mixed high bits.
+        (mixed >> (64 - slots.trailing_zeros())) as usize
+    }
+
+    /// The position of `eid`'s chain, if it has one.
+    fn find(&self, eid: EId, chains: &[EdgeChain]) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut at = Self::bucket(eid, self.slots.len());
+        loop {
+            match self.slots[at] {
+                Self::EMPTY => return None,
+                position if chains[position as usize].eid() == eid => {
+                    return Some(position as usize);
+                }
+                _ => at = (at + 1) & mask,
+            }
+        }
+    }
+
+    /// Record that `eid`, absent until now, has its chain at `position`.
+    fn insert(&mut self, eid: EId, position: usize, chains: &[EdgeChain]) {
+        if (position + 1) * 4 > self.slots.len() * 3 {
+            let grown = (self.slots.len() * 2).max(16);
+            self.slots = vec![Self::EMPTY; grown];
+            for (at, known) in chains.iter().enumerate().take(position) {
+                self.place(known.eid(), at);
+            }
+        }
+        self.place(eid, position);
+    }
+
+    fn place(&mut self, eid: EId, position: usize) {
+        let position = u32::try_from(position)
+            .ok()
+            .filter(|position| *position != Self::EMPTY)
+            .expect("a root names at most 2^28 entries");
+        let mask = self.slots.len() - 1;
+        let mut at = Self::bucket(eid, self.slots.len());
+        while self.slots[at] != Self::EMPTY {
+            at = (at + 1) & mask;
+        }
+        self.slots[at] = position;
+    }
 }
 
 /// One EId's content statements, ascending by `created_at`. Almost every EId
@@ -1858,6 +1926,11 @@ enum EdgeChain {
 }
 
 impl EdgeChain {
+    /// The chain's EId; a chain is never empty.
+    fn eid(&self) -> EId {
+        self.statements()[0].eid
+    }
+
     fn statements(&self) -> &[crate::AdjacencyEntry] {
         match self {
             Self::One(statement) => std::slice::from_ref(statement),
@@ -1929,14 +2002,14 @@ impl EdgeHistoryValidator {
             // Most EIds carry one statement: an unknown EId has no
             // restatement, predecessor or successor to check, and costs only
             // its insert.
-            let chain = match self.chains.entry(entry.eid) {
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(EdgeChain::One(*entry));
-                    self.statements += 1;
-                    continue;
-                }
-                std::collections::btree_map::Entry::Occupied(slot) => slot.into_mut(),
+            let Some(position) = self.index.find(entry.eid, &self.chains) else {
+                let position = self.chains.len();
+                self.chains.push(EdgeChain::One(*entry));
+                self.index.insert(entry.eid, position, &self.chains);
+                self.statements += 1;
+                continue;
             };
+            let chain = &mut self.chains[position];
             let statements = chain.statements();
             match statements.binary_search_by_key(&entry.created_at, |known| known.created_at) {
                 Ok(at) => {
@@ -2010,11 +2083,14 @@ impl EdgeHistoryValidator {
     pub(crate) fn statements(
         &self,
     ) -> std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry> {
-        // Chains iterate in EId order and each is ascending by created_at,
-        // so the pairs arrive sorted and the map is bulk-built.
-        self.chains
-            .values()
-            .flat_map(EdgeChain::statements)
+        // Chains are in admission order: sort them by EId once. Each chain is
+        // ascending by created_at, so the pairs then arrive sorted and the
+        // map is bulk-built.
+        let mut chains: Vec<&EdgeChain> = self.chains.iter().collect();
+        chains.sort_unstable_by_key(|chain| chain.eid());
+        chains
+            .into_iter()
+            .flat_map(|chain| chain.statements())
             .map(|statement| ((statement.eid, statement.created_at), *statement))
             .collect()
     }
