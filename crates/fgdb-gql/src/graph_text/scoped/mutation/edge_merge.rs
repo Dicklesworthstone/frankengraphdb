@@ -66,7 +66,7 @@ impl<'a> Parser<'a> {
             Some(relationship)
         };
         self.punct(b':', ":")?;
-        let relation = self.name()?;
+        let relation = self.schema_name()?;
         let properties = self.merge_property_map().map_err(|refusal| match refusal {
             super::merge::MergeMapError::Pattern(error) => error.into(),
             super::merge::MergeMapError::TooManyFields { at, observed } => build_error(
@@ -891,7 +891,7 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
                 parser.name()?;
                 parser.punct(b')', ")")?;
                 if parser.take(b'.')? {
-                    let key = parser.name()?;
+                    let key = parser.schema_name()?;
                     return self
                         .returning
                         .column(
@@ -914,7 +914,7 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
         if !call && self.returning.is_relationship(word) {
             let name = parser.name()?;
             if parser.take(b'.')? {
-                let key = parser.name()?;
+                let key = parser.schema_name()?;
                 return self
                     .returning
                     .column(EdgeBinding::Property(key), key, GraphSetColumnType::Stored)
@@ -941,7 +941,7 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
                 }) {
                     parser.name()?;
                     parser.punct(b'.', ".")?;
-                    let key = parser.name()?;
+                    let key = parser.schema_name()?;
                     return self
                         .returning
                         .column(
@@ -1015,7 +1015,7 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
                 .map(Some);
         }
         // MERGE changes no MATCH element, so a frozen property is final.
-        let key = parser.name()?;
+        let key = parser.schema_name()?;
         let column = parser.mutation_projection(self.columns, name, Some(key))?;
         self.returning
             .column(EdgeBinding::Input(column), key, GraphSetColumnType::Stored)

@@ -825,7 +825,7 @@ impl<'a> Parser<'a> {
                         None
                     };
                     let relation = if self.take(b':')? {
-                        Some(self.name()?)
+                        Some(self.schema_name()?)
                     } else {
                         None
                     };
@@ -841,7 +841,7 @@ impl<'a> Parser<'a> {
                             ));
                         }
                         self.take(b':')?;
-                        alternatives.push(self.name()?);
+                        alternatives.push(self.schema_name()?);
                     }
                     let walk = self.pattern_walk_bounds()?;
                     // openCypher `-[r:T {k: v}]->` filters that one captured
@@ -1151,7 +1151,7 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_PREDICATES,
                 PatternLimitDimension::Predicates,
             )?;
-            let key = self.name()?;
+            let key = self.schema_name()?;
             let filter = self.property_filter(left, key)?;
             self.syntax.filters.push(filter);
             self.predicates += 1;

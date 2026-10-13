@@ -191,6 +191,90 @@ fn comments_double_quotes_and_delimited_identifiers_prepare_the_plain_plan() {
     assert_eq!(quoted("\"say \\\"hi\\\"\""), vec![VId(1)]);
 }
 
+/// openCypher's SchemaName (fgdb-7jja3): a label, relationship type or
+/// property key may spell any reserved word, plain or delimited. `:Order`,
+/// `-[:LIMIT]->`, `n.order` and `{limit: v}` name catalog entries exactly as
+/// `:L`, `-[:R]->`, `n.p` and `{p: v}` do, and no clause scan reads them as
+/// ORDER, LIMIT or MATCH. A variable or an alias still refuses the word.
+#[test]
+fn reserved_words_name_labels_types_and_property_keys() {
+    let reserved = |kind: GraphSymbolKind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Property, "order" | "limit" | "MATCH" | "type") => {
+            Some(GraphSymbol::Property(P))
+        }
+        (GraphSymbolKind::Relation, "LIMIT" | "ORDER") => {
+            Some(GraphSymbol::Relation(RelationId(1)))
+        }
+        (GraphSymbolKind::Label, "Order" | "Match") => Some(GraphSymbol::Label(LabelId(1))),
+        _ => symbols(kind, name),
+    };
+    let plan = |statement: &str| {
+        PreparedGraphText::prepare(statement, reserved)
+            .expect(statement)
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    };
+    let plain = plan("MATCH (n:L)-[:R]->(m) WHERE n.p = 'a' RETURN n, m.p AS v ORDER BY m.p");
+    for spelling in [
+        "MATCH (n:Order)-[:LIMIT]->(m) WHERE n.order = 'a' RETURN n, m.limit AS v ORDER BY m.limit",
+        "MATCH (n:Match)-[:ORDER]->(m) WHERE n.MATCH = 'a' RETURN n, m.order AS v ORDER BY m.order",
+        "MATCH (n:`Order`)-[:`LIMIT`]->(m) WHERE n.`type` = 'a' \
+         RETURN n, m.`order` AS v ORDER BY m.`order`",
+        "MATCH (n : Order)-[ : LIMIT]->(m) WHERE n . limit = 'a' \
+         RETURN n, m . order AS v ORDER BY m . order",
+    ] {
+        assert_eq!(plan(spelling), plain, "{spelling}");
+    }
+    let mapped = plan("MATCH (n:L {p: 'a'})-[:R]->(m) RETURN n, m");
+    for spelling in [
+        "MATCH (n:Order {limit: 'a'})-[:LIMIT]->(m) RETURN n, m",
+        "MATCH (n:Order {`order`: 'a'})-[:ORDER]->(m) RETURN n, m",
+    ] {
+        assert_eq!(plan(spelling), mapped, "{spelling}");
+    }
+    // The projection and write grammars read a plain reserved spelling as
+    // the same name its delimited spelling is.
+    let set = |statement: &str| {
+        PreparedGraphSetText::prepare(statement, reserved)
+            .expect(statement)
+            .canonical_template_bytes()
+    };
+    assert_eq!(
+        set("MATCH (n:Order) RETURN n.limit AS x, {order: n.order} AS m"),
+        set("MATCH (n:`Order`) RETURN n.`limit` AS x, {`order`: n.`order`} AS m")
+    );
+    let args = GqlParameters::new();
+    let script = |text: &str| {
+        PreparedGraphWriteScript::prepare(text, RelationId(1), reserved)
+            .expect(text)
+            .bind_parameters(&args)
+            .expect(text)
+    };
+    for (plain, delimited) in [
+        (
+            "CREATE (n:Order {limit: 'a'})-[:ORDER]->(:Match {order: 'b'})",
+            "CREATE (n:`Order` {`limit`: 'a'})-[:`ORDER`]->(:`Match` {`order`: 'b'})",
+        ),
+        (
+            "MATCH (n:Order) WHERE n.order = 'a' SET n.limit = 'b'",
+            "MATCH (n:`Order`) WHERE n.`order` = 'a' SET n.`limit` = 'b'",
+        ),
+    ] {
+        assert_eq!(script(plain), script(delimited), "{plain}");
+    }
+    for refused in [
+        "MATCH (order) RETURN order",
+        "MATCH (n) RETURN n AS limit",
+        "MATCH (`limit`) RETURN n",
+    ] {
+        assert!(
+            PreparedGraphText::prepare(refused, reserved).is_err(),
+            "{refused}"
+        );
+    }
+}
+
 /// The openCypher and ISO GQL backslash escapes decode in text literals.
 /// Expectations come from the openCypher grammar's EscapedChar and the TCK
 /// (Literals6 [10] `'\u01FF'`, String8/9/10 [5] `'\n'`). An unknown escape,

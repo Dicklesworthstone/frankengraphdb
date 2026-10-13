@@ -32,7 +32,7 @@ impl Parser<'_> {
                 None
             };
             let property = if function.is_none() && self.take(b'.')? {
-                Some(self.name()?)
+                Some(self.schema_name()?)
             } else {
                 None
             };

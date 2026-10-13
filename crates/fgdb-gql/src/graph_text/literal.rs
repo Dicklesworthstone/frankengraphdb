@@ -517,7 +517,7 @@ impl<'a> Parser<'a> {
         {
             let right = self.property_variable()?;
             self.punct(b'.', ".")?;
-            let right_key = self.name()?;
+            let right_key = self.schema_name()?;
             return Ok(Filter::Properties {
                 left: variable,
                 left_key: key,

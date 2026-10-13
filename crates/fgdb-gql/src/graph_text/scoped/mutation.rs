@@ -318,7 +318,7 @@ impl<'a> Parser<'a> {
         if matches!(self.current.kind, TokenKind::Word(_)) && self.property_dot_follows()? {
             let variable = self.property_variable()?;
             self.punct(b'.', ".")?;
-            let key = self.name()?;
+            let key = self.schema_name()?;
             return self
                 .mutation_projection(columns, variable, Some(key))
                 .map(Operand::Column);
@@ -565,7 +565,7 @@ impl<'a> Parser<'a> {
                     // `n:A:B` sets or removes each label, one action apiece
                     // in the statement's action allowance (openCypher Set3,
                     // Remove2).
-                    let mut label = self.name()?;
+                    let mut label = self.schema_name()?;
                     while self.take(b':')? {
                         actions.push(Action {
                             target,
@@ -575,7 +575,7 @@ impl<'a> Parser<'a> {
                             },
                         });
                         self.mutation_action_capacity(actions.len())?;
-                        label = self.name()?;
+                        label = self.schema_name()?;
                     }
                     ActionKind::Label {
                         label,
@@ -583,7 +583,7 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     self.punct(b'.', "property or label mutation")?;
-                    let key = self.name()?;
+                    let key = self.schema_name()?;
                     match row {
                         Some(row) if setting => {
                             self.punct(b'=', "=")?;
@@ -684,7 +684,7 @@ impl<'a> Parser<'a> {
         if !self.take(b'}')? {
             loop {
                 self.mutation_action_capacity(actions.len())?;
-                let key = self.name()?;
+                let key = self.schema_name()?;
                 if keep.iter().any(|old| old.text == key.text) {
                     return Err(error(
                         key.at,
@@ -763,7 +763,7 @@ impl<'a> Parser<'a> {
         let mut keys = std::collections::BTreeSet::new();
         loop {
             self.mutation_action_capacity(actions.len())?;
-            let key = self.name()?;
+            let key = self.schema_name()?;
             if !keys.insert(key.text) {
                 return Err(error(
                     key.at,

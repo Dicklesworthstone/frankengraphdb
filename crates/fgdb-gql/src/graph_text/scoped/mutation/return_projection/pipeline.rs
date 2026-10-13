@@ -596,7 +596,7 @@ impl<'a> Parser<'a> {
                         ));
                     }
                 }
-                TokenKind::Word(property) if after_dot => {
+                TokenKind::Word(property) | TokenKind::DelimitedKeyword(property) if after_dot => {
                     let chained = matches!(window[0], Some(TokenKind::Punct(b'.')));
                     if let (Some(TokenKind::Word(alias)), false) = (window[1], chained)
                         && carried.as_ref().is_none_or(|kept| kept.contains(&alias))
@@ -713,7 +713,9 @@ impl<'a> Parser<'a> {
             self.advance()?;
             return Ok(Some(column));
         }
-        let TokenKind::Word(property) = lookahead.next()?.kind else {
+        let (TokenKind::Word(property) | TokenKind::DelimitedKeyword(property)) =
+            lookahead.next()?.kind
+        else {
             return Ok(None);
         };
         let Some(column) = (boundary.reads.iter())
@@ -1505,7 +1507,9 @@ impl<'a> Parser<'a> {
         if !matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
             return Ok(None);
         }
-        let TokenKind::Word(property) = lookahead.next()?.kind else {
+        let (TokenKind::Word(property) | TokenKind::DelimitedKeyword(property)) =
+            lookahead.next()?.kind
+        else {
             return Ok(None);
         };
         let Some(column) = sources.iter().position(|source| {

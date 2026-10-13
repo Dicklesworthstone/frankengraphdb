@@ -496,7 +496,7 @@ impl<'a> ParsedMutationReturn<'a> {
             let column = parser.mutation_projection(columns, name, None)?;
             return self.column(Binding::Input(column), name, kind).map(Some);
         }
-        let key = parser.name()?;
+        let key = parser.schema_name()?;
         self.map_input(parser, columns, scope, name, ReturnMapInput::Property(key))
             .map(Some)
     }
@@ -526,7 +526,7 @@ impl<'a> ParsedMutationReturn<'a> {
             let mut lookahead = parser.lexer.clone();
             if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
                 let token = lookahead.next()?;
-                if let TokenKind::Word(text) = token.kind
+                if let TokenKind::Word(text) | TokenKind::DelimitedKeyword(text) = token.kind
                     && let Some(current) = parser.boundary_read(row.len())?
                 {
                     let key = Name { text, at: token.at };
@@ -937,7 +937,7 @@ impl<'a> Parser<'a> {
                 {
                     break;
                 }
-                TokenKind::Word(key) if after_dot => {
+                TokenKind::Word(key) | TokenKind::DelimitedKeyword(key) if after_dot => {
                     if let Some(Token {
                         kind: TokenKind::Word(alias),
                         at,
