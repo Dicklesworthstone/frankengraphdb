@@ -348,3 +348,82 @@ fn list_functions_slices_ranges_and_reduce_follow_opencypher() {
         }
     });
 }
+
+/// fgdb-7nwox (TCK Pattern2, List6 [7]-[10]): a pattern comprehension is,
+/// per outer row, the list of its projection over every witness of its
+/// pattern, which correlates on the row's bindings. No witness is the empty
+/// list, never NULL; an inner WHERE filters; duplicate outer rows each keep
+/// their own list. Edges 1->2, 1->3, 2->3 over the Person fixture.
+#[test]
+fn pattern_comprehensions_collect_each_rows_witnesses() {
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut batch = graph();
+        for (eid, from, to) in [(10, 1, 2), (11, 1, 3), (12, 2, 3)] {
+            batch.add_edge(fgdb_types::EId(eid), VId(from), VId(to), vec![]);
+        }
+        db.write(commit, batch).await.unwrap();
+        let params = GqlParameters::new();
+        let rows = |text: &str| cells(db.query(cx, text, &params, symbols, policy()).expect(text));
+        assert_eq!(
+            rows("MATCH (n:Person) RETURN n.p AS p, [(n)-[:R]->(m) | m.p] AS out ORDER BY p"),
+            vec![
+                vec![int(10), ints(&[20, 30])],
+                vec![int(20), ints(&[30])],
+                vec![int(30), ints(&[])],
+                vec![int(40), ints(&[])],
+            ]
+        );
+        // A literal projection collects one value per witness: the degree.
+        assert_eq!(
+            rows("MATCH (n:Person) RETURN n.p AS p, size([(n)-[:R]->() | 1]) AS d ORDER BY p"),
+            vec![
+                vec![int(10), int(2)],
+                vec![int(20), int(1)],
+                vec![int(30), int(0)],
+                vec![int(40), int(0)],
+            ]
+        );
+        for (text, expected) in [
+            // An inner WHERE filters the witnesses.
+            (
+                "MATCH (n:Person {p: 10}) RETURN [(n)-[:R]->(m) WHERE m.p > 25 | m.p] AS v",
+                ints(&[30]),
+            ),
+            // The path and the relationship are elements too.
+            (
+                "MATCH (n:Person {p: 10}) RETURN size([q = (n)-[:R]->() | q]) AS v",
+                int(2),
+            ),
+            (
+                "MATCH (n:Person {p: 10}) RETURN size([(n)-[r:R]->() | r]) AS v",
+                int(2),
+            ),
+            // The projection may also read the outer row.
+            (
+                "MATCH (n:Person {p: 20}) RETURN [(n)-[:R]->(m) | m.p - n.p] AS v",
+                ints(&[10]),
+            ),
+        ] {
+            assert_eq!(rows(text), vec![vec![expected]], "{text}");
+        }
+        // Each of the two outer rows per vertex keeps its own list.
+        assert_eq!(
+            rows(
+                "MATCH (n:Person), (k:Person) WHERE n.p = 20 AND k.p <= 20 \
+                 RETURN k.p AS k, [(n)-[:R]->(m) | m.p] AS out ORDER BY k"
+            ),
+            vec![vec![int(10), ints(&[30])], vec![int(20), ints(&[30])],]
+        );
+        // Two pattern locals in one projection, an aggregate argument and a
+        // row scope refuse typed.
+        for text in [
+            "MATCH (n:Person) RETURN [(n)-[:R]->(m)-[:R]->(o) | m.p + o.p] AS v",
+            "MATCH (n:Person) RETURN count([(n)-[:R]->() | 1]) AS v",
+            "WITH 1 AS x RETURN [(x)-[:R]->() | 1] AS v",
+        ] {
+            let result = db.query(cx, text, &params, symbols, policy());
+            assert!(result.is_err(), "{text}: {result:?}");
+        }
+    });
+}
