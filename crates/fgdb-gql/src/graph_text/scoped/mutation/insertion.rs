@@ -1155,7 +1155,7 @@ impl PreparedGraphInsertText {
             leading: Vec::new(),
             correlations: Vec::new(),
             row_fields: Vec::new(),
-            owned: Some((columns, types)),
+            owned: Some(Box::new((columns, types))),
         };
         let (template, returning) = Self::finish_over_row(
             statement,
