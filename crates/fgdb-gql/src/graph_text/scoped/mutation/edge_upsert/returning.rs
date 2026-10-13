@@ -42,7 +42,7 @@ impl<'a> ReturnLeaves<'a> for ParsedEdgeReturn<'a> {
         }
         let source = parser.name()?;
         let input = if parser.take(b'.')? {
-            ReturnMapInput::Property(parser.name()?)
+            ReturnMapInput::Property(parser.schema_name()?)
         } else {
             ReturnMapInput::Identity
         };

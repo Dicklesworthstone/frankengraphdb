@@ -257,7 +257,7 @@ impl<'a> Parser<'a> {
                 if parser.insertion_match_kind(word).is_some() {
                     let name = parser.any_variable()?;
                     let property = if parser.take(b'.')? {
-                        Some(parser.name()?)
+                        Some(parser.schema_name()?)
                     } else {
                         None
                     };
@@ -391,7 +391,7 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_VERTICES,
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
-            let key = self.name()?;
+            let key = self.schema_name()?;
             if properties.iter().any(|(old, _)| old.text == key.text) {
                 return Err(expected(key.at, "unique CREATE property key"));
             }
@@ -544,7 +544,7 @@ impl<'a> Parser<'a> {
         let mut labels: Vec<Name<'a>> = Vec::new();
         while self.take(b':')? {
             self.insertion_field_capacity(fields)?;
-            let label = self.name()?;
+            let label = self.schema_name()?;
             if labels.iter().any(|old| old.text == label.text) {
                 return Err(expected(label.at, "unique CREATE label"));
             }
@@ -606,7 +606,7 @@ impl<'a> Parser<'a> {
                     None
                 };
                 self.punct(b':', ":")?;
-                let relation = self.name()?;
+                let relation = self.schema_name()?;
                 let properties =
                     self.insertion_properties(&mut parsed.projections, &mut fields, row_schema)?;
                 self.punct(b']', "]")?;

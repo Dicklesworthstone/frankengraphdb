@@ -301,8 +301,10 @@ struct Name<'a> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TokenKind<'a> {
     Word(&'a str),
-    // Keep reserved delimited map keys distinct from grammar words. Other
-    // identifier/operand positions retain their existing explicit refusal.
+    // A name that is never a grammar word: a delimited keyword spelling, or
+    // a reserved word where only a schema name can stand (`n.order`,
+    // `:Order`, `{limit: 1}`). Schema-name positions admit it; variable,
+    // alias and operand positions retain their explicit refusal.
     DelimitedKeyword(&'a str),
     Digits(&'a str),
     Parameter(&'a str),
@@ -470,6 +472,8 @@ impl<'a> Lexer<'a> {
             return Ok(Token {
                 kind: if parameter {
                     TokenKind::Parameter(name)
+                } else if self.names_schema(at, name) {
+                    TokenKind::DelimitedKeyword(name)
                 } else {
                     TokenKind::Word(name)
                 },
@@ -511,7 +515,42 @@ impl<'a> Lexer<'a> {
         }
         Err(error(at, GraphPatternTextErrorKind::InvalidToken))
     }
+
+    /// Whether the reserved word `word` at `at` (the lexer just past it)
+    /// stands where openCypher reads any SchemaName: directly after `.` or
+    /// `:` unless it opens a call (`{k: all(...)}`), or directly before a map
+    /// entry's `:`. No grammar word follows `.` or `:` or precedes `:`, so
+    /// such a spelling is a property key, label or type, and its delimited
+    /// token keeps every clause lookahead from reading `n.limit` as LIMIT.
+    fn names_schema(&self, at: usize, word: &str) -> bool {
+        if !RESERVED_NAMES
+            .iter()
+            .any(|reserved| word.eq_ignore_ascii_case(reserved))
+        {
+            return false;
+        }
+        let bytes = self.text.as_bytes();
+        let before = bytes[..at]
+            .iter()
+            .rev()
+            .find(|byte| !byte.is_ascii_whitespace());
+        let after = bytes[self.at..]
+            .iter()
+            .find(|byte| !byte.is_ascii_whitespace());
+        match before {
+            Some(b'.') => true,
+            Some(b':') => after != Some(&b'('),
+            _ => after == Some(&b':'),
+        }
+    }
 }
+
+/// The words no variable, alias or function name may spell undelimited:
+/// each starts or continues a clause wherever an operand may end.
+const RESERVED_NAMES: &[&str] = &[
+    "MATCH", "WHERE", "RETURN", "ALL", "DISTINCT", "AS", "AND", "OR", "SKIP", "LIMIT", "OPTIONAL",
+    "ORDER", "BY",
+];
 
 #[derive(Clone)]
 pub(crate) enum Number {
@@ -971,12 +1010,9 @@ impl<'a> Parser<'a> {
                 GraphPatternTextErrorKind::Expected("identifier"),
             ));
         };
-        if [
-            "MATCH", "WHERE", "RETURN", "ALL", "DISTINCT", "AS", "AND", "OR", "SKIP", "LIMIT",
-            "OPTIONAL", "ORDER", "BY",
-        ]
-        .iter()
-        .any(|word| text.eq_ignore_ascii_case(word))
+        if RESERVED_NAMES
+            .iter()
+            .any(|word| text.eq_ignore_ascii_case(word))
         {
             return Err(error(
                 self.current.at,
@@ -1007,10 +1043,11 @@ impl<'a> Parser<'a> {
         }
         Ok(())
     }
-    /// A map key is an identifier position without clause/function dispatch.
-    /// Admit a reserved spelling only when its original token was delimited;
-    /// plain names still follow the existing identifier and namespace checks.
-    fn map_key(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+    /// A label, relationship type, property key or map key: openCypher's
+    /// SchemaName, which any keyword may spell (`:Order`, `n.limit`,
+    /// ``{`match`: 1}``). It has no clause or function dispatch, so it admits
+    /// the delimited token; plain names follow the identifier checks.
+    fn schema_name(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let TokenKind::DelimitedKeyword(text) = self.current.kind else {
             return self.name();
         };
@@ -1228,7 +1265,7 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_PREDICATES,
                 PatternLimitDimension::Predicates,
             )?;
-            let label = self.name()?;
+            let label = self.schema_name()?;
             self.syntax.labels.push((name, label));
             self.predicates += 1;
         }
@@ -1257,7 +1294,7 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_PREDICATES,
                 crate::algebra::PatternLimitDimension::Predicates,
             )?;
-            let key = self.name()?;
+            let key = self.schema_name()?;
             if keys.contains(&key.text) {
                 return Err(error(
                     key.at,
@@ -1514,7 +1551,7 @@ impl<'a> Parser<'a> {
                 } else if self.syntax.visible_edge(expression.text).is_some() {
                     let property = if self.take(b'.')? {
                         self.require_property_variable(expression)?;
-                        Some(self.name()?)
+                        Some(self.schema_name()?)
                     } else {
                         None
                     };
@@ -1532,7 +1569,7 @@ impl<'a> Parser<'a> {
                         ));
                     }
                     let property = if self.take(b'.')? {
-                        Some(self.name()?)
+                        Some(self.schema_name()?)
                     } else {
                         None
                     };

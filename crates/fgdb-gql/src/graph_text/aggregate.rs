@@ -1403,7 +1403,7 @@ impl<'a> Parser<'a> {
                     {
                         let variable = parser.variable()?;
                         let property = if parser.take(b'.')? {
-                            Some(parser.name()?)
+                            Some(parser.schema_name()?)
                         } else {
                             None
                         };

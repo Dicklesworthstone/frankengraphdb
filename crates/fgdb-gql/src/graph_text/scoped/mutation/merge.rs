@@ -123,7 +123,7 @@ impl<'a> Parser<'a> {
         let variable = self.name()?;
         let mut labels = Vec::new();
         while self.take(b':')? {
-            let label = self.name()?;
+            let label = self.schema_name()?;
             if labels
                 .iter()
                 .any(|previous: &Name<'a>| previous.text == label.text)
@@ -173,7 +173,7 @@ impl<'a> Parser<'a> {
                         observed: properties.len() + 1,
                     });
                 }
-                let key = self.name()?;
+                let key = self.schema_name()?;
                 if properties
                     .iter()
                     .any(|previous: &MergeProperty<'a>| previous.key.text == key.text)
@@ -350,11 +350,11 @@ impl<'a> Parser<'a> {
             }
             let action = if self.take(b':')? {
                 ParsedUpsertAction::Label {
-                    label: self.name()?,
+                    label: self.schema_name()?,
                 }
             } else {
                 self.punct(b'.', "property or label assignment")?;
-                let key = self.name()?;
+                let key = self.schema_name()?;
                 self.punct(b'=', "=")?;
                 let at = self.current.at;
                 // A vertex MERGE step's right-hand side that reads its row
@@ -420,7 +420,7 @@ impl<'a> Parser<'a> {
                                 ));
                             }
                             parser.punct(b'.', ".")?;
-                            UpsertInput::Property(parser.name()?)
+                            UpsertInput::Property(parser.schema_name()?)
                         };
                         if let Some(column) = inputs.iter().position(|known| match (known, input) {
                             (UpsertInput::Property(old), UpsertInput::Property(new)) => {
@@ -1125,7 +1125,7 @@ impl<'a> mutation_query::ReturnLeaves<'a> for ParsedVertexReturn<'a> {
         }
         let name = parser.name()?;
         let input = if parser.take(b'.')? {
-            ReturnMapInput::Property(parser.name()?)
+            ReturnMapInput::Property(parser.schema_name()?)
         } else {
             ReturnMapInput::Identity
         };
@@ -1524,7 +1524,7 @@ impl<'a> Parser<'a> {
         };
         let mut labels: Vec<Name<'a>> = Vec::new();
         while self.take(b':')? {
-            let label = self.name()?;
+            let label = self.schema_name()?;
             if labels.iter().any(|previous| previous.text == label.text) {
                 return Err(insert_error(
                     label.at,
@@ -1545,7 +1545,7 @@ impl<'a> Parser<'a> {
                         },
                     ));
                 }
-                let key = self.name()?;
+                let key = self.schema_name()?;
                 if properties
                     .iter()
                     .any(|(previous, _)| previous.text == key.text)
@@ -1857,7 +1857,7 @@ impl<'a> ReturnLeaves<'a> for ParsedVertexRowsReturn<'_, 'a> {
         if self.variable.is_some_and(|variable| variable.text == word) {
             parser.advance()?;
             if parser.take(b'.')? {
-                let key = parser.name()?;
+                let key = parser.schema_name()?;
                 return self
                     .column(RowsBinding::Property(key), GraphSetColumnType::Stored, at)
                     .map(Some);
@@ -1877,7 +1877,7 @@ impl<'a> ReturnLeaves<'a> for ParsedVertexRowsReturn<'_, 'a> {
             }) {
                 parser.advance()?;
                 parser.punct(b'.', ".")?;
-                let key = parser.name()?;
+                let key = parser.schema_name()?;
                 return self
                     .column(
                         RowsBinding::InputProperty(column, key),

@@ -296,7 +296,7 @@ impl<'a> Parser<'a> {
                     MAX_PATTERN_PREDICATES,
                     crate::algebra::PatternLimitDimension::Predicates,
                 )?;
-                parsed.labels.push((variable, self.name()?));
+                parsed.labels.push((variable, self.schema_name()?));
                 self.predicates += 1;
             }
             return Ok(());
@@ -408,7 +408,7 @@ impl<'a> Parser<'a> {
             [
                 TokenKind::Word(_),
                 TokenKind::Punct(b'.'),
-                TokenKind::Word(_),
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_),
                 TokenKind::Punct(b'='),
                 TokenKind::Word(name),
             ] => (row(name), true),
@@ -417,7 +417,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b'='),
                 TokenKind::Word(_),
                 TokenKind::Punct(b'.'),
-                TokenKind::Word(_),
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_),
             ] => (row(name), false),
             _ => (None, false),
         };
@@ -435,7 +435,7 @@ impl<'a> Parser<'a> {
         }
         let variable = self.property_variable()?;
         self.punct(b'.', ".")?;
-        let key = self.name()?;
+        let key = self.schema_name()?;
         if property_first {
             self.punct(b'=', "=")?;
             self.advance()?;
@@ -558,6 +558,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Digits(_)
                 | TokenKind::Parameter(_)
                 | TokenKind::Quoted(_)
+                | TokenKind::DelimitedKeyword(_)
                 | TokenKind::Punct(b')' | b']') => true,
                 TokenKind::Word(word) => {
                     after_dot
@@ -583,7 +584,10 @@ impl<'a> Parser<'a> {
         }
         let mut lexer = self.lexer.clone();
         if !matches!(lexer.next()?.kind, TokenKind::Punct(b'.'))
-            || !matches!(lexer.next()?.kind, TokenKind::Word(_))
+            || !matches!(
+                lexer.next()?.kind,
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+            )
         {
             return Ok(false);
         }
@@ -634,7 +638,7 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         let variable = self.property_variable()?;
         self.punct(b'.', ".")?;
-        let key = self.name()?;
+        let key = self.schema_name()?;
         let negate = self.take_word("NOT")?;
         parsed.extended = true;
         if self.take_word("IN")? {

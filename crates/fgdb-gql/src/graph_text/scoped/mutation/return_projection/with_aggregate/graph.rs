@@ -168,7 +168,9 @@ impl<'a> Parser<'a> {
                     let mut lookahead = lexer.clone();
                     if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
                         let property = lookahead.next()?;
-                        if let TokenKind::Word(key) = property.kind {
+                        if let TokenKind::Word(key) | TokenKind::DelimitedKeyword(key) =
+                            property.kind
+                        {
                             if optional && incoming.iter().any(|(name, _)| name.text == word) {
                                 return Err(expected(
                                     token.at,
@@ -473,7 +475,8 @@ impl<'a> Parser<'a> {
                         && matches!(lookahead.next()?.kind, TokenKind::Punct(b'.'))
                     {
                         let property = lookahead.next()?;
-                        if let TokenKind::Word(key) = property.kind
+                        if let TokenKind::Word(key) | TokenKind::DelimitedKeyword(key) =
+                            property.kind
                             && !grouped
                                 .iter()
                                 .any(|&(owner, _, read, _)| owner == alias && read.text == key)

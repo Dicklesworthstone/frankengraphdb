@@ -101,7 +101,7 @@ impl<'a> Parser<'a> {
                 let first = target.len();
                 loop {
                     capacity(self, target.len())?;
-                    let key = self.name()?;
+                    let key = self.schema_name()?;
                     if target[first..]
                         .iter()
                         .any(|action| action.key.text == key.text)
@@ -124,7 +124,7 @@ impl<'a> Parser<'a> {
                 }
             } else {
                 self.punct(b'.', "relationship property assignment")?;
-                let key = self.name()?;
+                let key = self.schema_name()?;
                 self.punct(b'=', "=")?;
                 let action = self.edge_upsert_value(relationship, key)?;
                 target.push(action);
@@ -181,7 +181,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             parser.punct(b'.', ".")?;
-            let property = parser.name()?;
+            let property = parser.schema_name()?;
             if let Some(column) = properties.iter().position(|p| p.text == property.text) {
                 return Ok(Some(column));
             }
@@ -224,7 +224,7 @@ impl<'a> Parser<'a> {
             .into());
         }
         self.punct(b':', ":")?;
-        let relation = self.name()?;
+        let relation = self.schema_name()?;
         // Share literal/parameter, duplicate-key and field-count admission
         // with plain MERGE. The map is part of the match identity, not SET.
         let properties = self.merge_property_map().map_err(|refusal| match refusal {

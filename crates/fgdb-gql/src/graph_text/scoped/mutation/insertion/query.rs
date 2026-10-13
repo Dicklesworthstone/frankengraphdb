@@ -238,7 +238,7 @@ impl<'a> ParsedReturn<'a> {
             let mut lookahead = parser.lexer.clone();
             if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
                 let key = lookahead.next()?;
-                if let TokenKind::Word(text) = key.kind
+                if let TokenKind::Word(text) | TokenKind::DelimitedKeyword(text) = key.kind
                     && let Some(column) = parser.boundary_read(source.len())?
                 {
                     let name = Name { text, at: key.at };
@@ -260,7 +260,7 @@ impl<'a> ParsedReturn<'a> {
         }
         let name = parser.name()?;
         let input = if parser.take(b'.')? {
-            ReturnMapInput::Property(parser.name()?)
+            ReturnMapInput::Property(parser.schema_name()?)
         } else {
             ReturnMapInput::Identity
         };

@@ -791,7 +791,7 @@ impl<'a> Parser<'a> {
                     let variable = parser.any_variable()?;
                     let property = if parser.take(b'.')? {
                         parser.require_property_variable(variable)?;
-                        Some(parser.name()?)
+                        Some(parser.schema_name()?)
                     } else { None };
                     let column = parser.mutation_projection(&mut inputs, variable, property)?;
                     Ok(Some(width + column))

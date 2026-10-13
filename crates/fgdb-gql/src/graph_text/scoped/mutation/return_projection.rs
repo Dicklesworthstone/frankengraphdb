@@ -1016,7 +1016,7 @@ impl<'a> Parser<'a> {
                     if graph {
                         let variable = parser.any_variable()?;
                         let property = if parser.take(b'.')? {
-                            Some(parser.name()?)
+                            Some(parser.schema_name()?)
                         } else {
                             None
                         };
@@ -1450,7 +1450,7 @@ impl<'a> Parser<'a> {
                         self.punct(b',', ", or }")?;
                         continue;
                     }
-                    let key = self.map_key()?;
+                    let key = self.schema_name()?;
                     let value = if let Some(columns) = columns.as_deref_mut() {
                         ReadValueTemplate::Column(self.mutation_projection(
                             columns,
@@ -1471,7 +1471,7 @@ impl<'a> Parser<'a> {
                     };
                     (key.text.into(), value)
                 } else {
-                    let key = self.map_key()?;
+                    let key = self.schema_name()?;
                     if self.take(b':')? {
                         let value = self.read_recursive_value(
                             columns.as_deref_mut(),
@@ -2083,7 +2083,7 @@ impl<'a> Parser<'a> {
                         crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
                         crate::algebra::PatternLimitDimension::Columns,
                     )?;
-                    let key = self.map_key()?;
+                    let key = self.schema_name()?;
                     self.punct(b':', ":")?;
                     let value = self.read_recursive_value(
                         inputs.as_deref_mut(),
@@ -2440,7 +2440,7 @@ impl<'a> Parser<'a> {
                     ))
             {
                 self.advance()?;
-                let key = self.map_key()?;
+                let key = self.schema_name()?;
                 value = self.map_get(value, key.text);
                 graph_map = false;
                 continue;
