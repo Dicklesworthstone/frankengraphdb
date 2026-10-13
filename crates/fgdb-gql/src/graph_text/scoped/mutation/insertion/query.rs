@@ -736,7 +736,7 @@ impl PreparedGraphInsertQueryText {
             tokens: 0,
         };
         let first = script::next_script_token(&mut lexer)?;
-        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "MATCH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
+        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "WITH", "MATCH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
         {
             return Ok(false);
         }
@@ -850,6 +850,9 @@ mod write_clause_framing_tests {
             "MATCH (n) WHERE n.CREATE = 1 RETURN n",
             "MATCH (n) WHERE n.INSERT = 1 RETURN n",
             "UNWIND [1] AS CREATE RETURN CREATE",
+            "WITH 1 AS CREATE RETURN CREATE",
+            "WITH {INSERT: 1} AS row RETURN row.INSERT",
+            "WITH 'CREATE (n) RETURN n' AS text RETURN text",
             "CREATE (n); MATCH (CREATE) WHERE CREATE.p = 1 RETURN CREATE",
         ] {
             assert!(
@@ -865,6 +868,8 @@ mod write_clause_framing_tests {
             "MATCH (CREATE) WHERE CREATE.p = 1 CREATE (copy) RETURN CREATE,copy",
             "MATCH (INSERT) INSERT (copy) RETURN INSERT,copy",
             "UNWIND [1] AS CREATE CREATE (n {p:CREATE}) RETURN n",
+            "WITH 1 AS CREATE CREATE (n {p:CREATE}) RETURN n",
+            "WITH [1, 2] AS rows UNWIND rows AS row INSERT (n {p:row}) RETURN n",
             "CREATE (n) RETURN n",
             "INSERT (n) RETURN n",
             "CREATE (n); MATCH (CREATE) CREATE (copy) RETURN copy",

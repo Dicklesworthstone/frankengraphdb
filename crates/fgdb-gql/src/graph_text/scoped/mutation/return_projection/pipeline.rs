@@ -12,7 +12,7 @@ use crate::set_text::{ReadFilterOp, ReadFilterOperand, ReadPageNumber};
 use crate::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp, GraphSetQuantifier};
 
 const MAX_FILTER_NESTING: usize = 64;
-pub(super) type RowSchema<'a> = Vec<(Name<'a>, GraphSetColumnType)>;
+pub(in crate::graph_text) type RowSchema<'a> = Vec<(Name<'a>, GraphSetColumnType)>;
 
 /// Private output names for hidden boundary reads. A fixed set lets each name
 /// borrow for the statement's lifetime; a user alias that matches one is
@@ -707,10 +707,10 @@ impl<'a> Parser<'a> {
         Ok(stages)
     }
 
-    /// Parse complete WITH stages but leave their terminal RETURN to its typed
-    /// owner. Ordinary value projection and exact aggregation share this path;
-    /// neither has to rewrite or reparse a prefix as a different statement.
-    pub(super) fn row_pipeline_prefix(
+    /// Parse complete row stages but leave the next clause to its typed owner.
+    /// Reads and CREATE/INSERT share this WITH/UNWIND grammar, including exact
+    /// aggregation; no caller rewrites a prefix into a synthetic RETURN query.
+    pub(in crate::graph_text) fn row_pipeline_prefix(
         &mut self,
         mut schema: RowSchema<'a>,
     ) -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, usize), GraphSetTextError> {

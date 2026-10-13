@@ -45,7 +45,7 @@ fn expected(at: usize, message: &'static str) -> GraphInsertTextError {
     error(at, GraphPatternTextErrorKind::Expected(message)).into()
 }
 
-/// Parsed source-free UNWIND stages and the column schema they bind.
+/// Parsed source-free WITH/UNWIND stages and their final imported schema.
 type UnwindPrefix<'a> = (Vec<ReadStageTemplate>, Vec<(Name<'a>, GraphSetColumnType)>);
 
 impl<'a> Parser<'a> {
@@ -68,18 +68,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse the ordinary source-free UNWIND stages without evaluating them.
-    /// Script dispatch uses this same native grammar to find CREATE/INSERT.
+    /// Parse source-free WITH/UNWIND through the ordinary relational grammar.
+    /// The prefix ends at CREATE/INSERT or its MATCH source, without inventing
+    /// a RETURN or evaluating expressions. Script preflight uses this same
+    /// scope, including projection, filtering, grouping, DISTINCT and pages.
     pub(super) fn insertion_unwind_prefix(
         &mut self,
     ) -> Result<UnwindPrefix<'a>, crate::GraphSetTextError> {
-        let mut stages = Vec::new();
-        let mut schema = Vec::new();
-        while self.is_word("UNWIND") {
-            let at = self.current.at;
-            self.advance()?;
-            stages.push(self.unwind_stage(&mut schema, at)?);
+        if !self.is_word("UNWIND") && !self.is_word("WITH") {
+            return Ok((Vec::new(), Vec::new()));
         }
+        let (stages, schema, _) = self.row_pipeline_prefix(Vec::new())?;
         Ok((stages, schema))
     }
 
@@ -100,7 +99,7 @@ impl<'a> Parser<'a> {
                 return Err(error(
                     name.at,
                     GraphPatternTextErrorKind::Expected(
-                        "MATCH bindings distinct from imported UNWIND aliases",
+                        "MATCH bindings distinct from imported row aliases",
                     ),
                 ));
             }
@@ -343,7 +342,7 @@ impl<'a> Parser<'a> {
             {
                 return Err(expected(
                     name.at,
-                    "new CREATE vertex name, not a UNWIND row alias",
+                    "new CREATE vertex name, not an imported row alias",
                 ));
             }
             if self
