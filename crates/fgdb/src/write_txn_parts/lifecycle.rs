@@ -134,7 +134,12 @@ impl WriteTxn {
         database: &mut Database<V>,
         batches: Vec<WriteBatch>,
     ) -> Result<(), WriteTxnError> {
-        self.stage_composed_writes(database, batches, false)
+        // A mixed write program or chain promises that each step sees its
+        // predecessor, as `write` does: a later step's vertices follow an
+        // earlier step's edge group, outside any shared vertex prefix, so
+        // independent groups would refuse its new edge's endpoint
+        // (`CREATE (a)-[:T]->(b); CREATE (c)-[:T]->(d)`, TCK Create3 [8]).
+        self.stage_composed_writes(database, batches, self.program_multi_relation)
     }
 
     /// Stage source-ordered, dependent writes spanning edge relations.
