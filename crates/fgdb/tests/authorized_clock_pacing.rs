@@ -195,3 +195,54 @@ fn delivery_samples_afresh_however_few_charges_share_the_interval() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// Run `text` through an authorized read session (fgdbd's path) under `cx`,
+/// counting the host clock samples the statement itself takes.
+fn session_samples(db: &Database<MemVfs>, cx: &QueryCx, issuer: &Authority, text: &str) -> usize {
+    let token = issuer.issue_at(&grant(), LIVE).unwrap();
+    let samples = std::cell::Cell::new(0_usize);
+    let symbols = |kind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        _ => None,
+    };
+    let mut session = db
+        .authorized_read_session(cx, issuer, &token, BRANCH, symbols, policy(), || {
+            samples.set(samples.get() + 1);
+            LIVE
+        })
+        .unwrap();
+    let opened = samples.get();
+    session.query(cx, text, &GqlParameters::new()).unwrap();
+    samples.get() - opened
+}
+
+#[test]
+fn session_statements_share_paced_samples() {
+    let ((), report) = run_async_under_lab(0x5ec0_e703, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = chain(&contexts.commit(), 400).await;
+        let issuer = authority(703);
+        const K: u32 = 16;
+        let paced_cx = cx.with_host_clock_interval(interval(K));
+        for text in [
+            "MATCH (a:L)-[:R]->(b) RETURN count(*) AS n",
+            "MATCH (a:L)-[:R]->(b) RETURN a.p AS p",
+            "CALL fnx.weakly_connected_components() YIELD vertex, component RETURN count(DISTINCT component) AS c",
+        ] {
+            let per_charge = session_samples(&db, &cx, &issuer, text);
+            let paced = session_samples(&db, &paced_cx, &issuer, text);
+            assert!(
+                per_charge > 40 * K as usize,
+                "{text}: {per_charge} samples per charge"
+            );
+            assert!(
+                paced <= per_charge.div_ceil(K as usize) + 3,
+                "{text}: {paced} paced samples for {per_charge} charges at K = {K}"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
