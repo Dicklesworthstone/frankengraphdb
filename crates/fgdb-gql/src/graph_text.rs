@@ -33,14 +33,32 @@ pub const MAX_GRAPH_TEXT_TOKENS: usize = 8_192;
 /// CHAR_LENGTH (fgdb-xakp1): a scalar is never a list, so SIZE of one is its
 /// character count. A leading SIZE(...) row value keeps the list-or-text
 /// Size node instead. The Boolean lowering lookahead and the compiler read
-/// this one table, so a name cannot be known to one and not the other.
-const SCALAR_FUNCTIONS: [&str; 19] = [
+/// this one table, so a name cannot be known to one and not the other. PI()
+/// and E() take no argument; ATAN2 takes two.
+const SCALAR_FUNCTIONS: [&str; 36] = [
     "ABS",
     "TOFLOAT",
     "FLOOR",
     "CEIL",
     "ROUND",
     "SQRT",
+    "EXP",
+    "LOG",
+    "LOG10",
+    "SIN",
+    "COS",
+    "TAN",
+    "COT",
+    "ASIN",
+    "ACOS",
+    "ATAN",
+    "ATAN2",
+    "DEGREES",
+    "RADIANS",
+    "HAVERSIN",
+    "SIGN",
+    "PI",
+    "E",
     "COALESCE",
     "NULLIF",
     "UPPER",
