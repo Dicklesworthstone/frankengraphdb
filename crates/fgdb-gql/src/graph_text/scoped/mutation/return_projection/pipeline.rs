@@ -126,7 +126,9 @@ pub(super) fn property_map_source<'a>(
 
 /// A complete native metadata call over one named graph binding. Map
 /// functions are deliberately excluded: their arguments may be ordinary
-/// map-valued rows, and must not be inferred to be vertices.
+/// map-valued rows, and must not be inferred to be vertices. A literal NULL
+/// argument is no binding: the scalar compiler answers `labels(null)` and
+/// its siblings with NULL (TCK Graph3 [7], Graph4 [3]).
 pub(super) fn metadata_source<'a>(
     word: &'a str,
     at: usize,
@@ -151,6 +153,7 @@ pub(super) fn metadata_source<'a>(
     }
     let argument = lookahead.next()?;
     if let TokenKind::Word(text) = argument.kind
+        && !text.eq_ignore_ascii_case("NULL")
         && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
     {
         return Ok(Some((

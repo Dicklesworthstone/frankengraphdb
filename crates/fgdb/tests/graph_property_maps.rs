@@ -242,6 +242,22 @@ fn graph_maps_cover_vertices_relationships_optional_scopes_and_row_composition()
                 "RETURN properties({b:2,a:1}) AS m, properties(NULL) AS absent, keys(NULL) AS keys",
                 vec![vec![map(&[("a", int(1)), ("b", int(2))]), null(), null()]],
             ),
+            // A literal NULL argument to a metadata function is NULL, beside
+            // the same function of an unmatched optional binding (TCK Graph3
+            // [7], Graph4 [3]).
+            (
+                "RETURN labels(NULL) AS l, type(null) AS t, length(NULL) AS n",
+                vec![vec![null(), null(), null()]],
+            ),
+            (
+                "OPTIONAL MATCH (n:Foo) RETURN labels(n) AS l, labels(null) AS absent",
+                vec![vec![null(), null()]],
+            ),
+            (
+                "MATCH (a:Thing) OPTIONAL MATCH (a)-[r:R]->(b:Foo) \
+                 RETURN type(r) AS t, type(null) AS absent",
+                vec![vec![null(), null()], vec![null(), null()]],
+            ),
         ] {
             assert_eq!(
                 cells(
