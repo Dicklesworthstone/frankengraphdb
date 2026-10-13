@@ -862,6 +862,42 @@ impl<V: Vfs> BlockStore<V> {
         })
     }
 
+    /// Open an EXISTING block store to read already-published objects. Unlike
+    /// [`Self::open_with_vfs`], it creates no directory or publication-lock
+    /// file and issues no sync: a read-only view costs no durability barrier
+    /// (on Apple platforms each one is an `F_FULLFSYNC`) and leaves the
+    /// database directory untouched. Only the database's own read paths
+    /// construct it, and they never publish through it.
+    pub async fn open_existing_for_read_with_vfs(
+        cx: &CommitCx,
+        vfs: V,
+        database_dir: impl AsRef<Path>,
+        k_oid: impl Into<SharedSecret<32>>,
+        namespace: DatabaseSecurityNamespaceId,
+    ) -> Result<Self, StoreError> {
+        let dir = database_dir.as_ref().join(BLOCK_DIR);
+        if !cx
+            .with_restriction_async(vfs.symlink_metadata(&dir))
+            .await?
+            .file_type()
+            .is_dir()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "strata block path exists but is not a directory",
+            )
+            .into());
+        }
+        Ok(Self {
+            vfs,
+            publication_lock_path: dir.join(PUBLICATION_LOCK_FILE),
+            dir,
+            k_oid: k_oid.into(),
+            namespace,
+            scalar_resolver: None,
+        })
+    }
+
     /// Where a block of this identity lives.
     ///
     /// Hex rather than any shorter encoding, because a filename is read by humans

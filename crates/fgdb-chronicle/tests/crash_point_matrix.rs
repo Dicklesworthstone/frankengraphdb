@@ -2114,3 +2114,64 @@ mod incomplete_capsule_tests {
         });
     }
 }
+
+/// A read-only observer scans the committed chain WITHOUT the writer lease and
+/// without repairing anything (fgdb-xxxnb): beside a live coordinator, and
+/// over a torn tail that is an append still in flight, it returns exactly the
+/// complete entries and leaves every log byte in place. Only the next lease
+/// holder repairs the tail, exactly as before.
+#[test]
+fn a_lease_free_scan_reads_committed_entries_and_never_repairs_a_torn_tail() {
+    let dir = scratch_dir("lease-free-scan");
+    under_lab(26, move |cx| async move {
+        let cx = &cx;
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("open");
+        commit_ok(&mut coordinator, cx, 1).await;
+        commit_ok(&mut coordinator, cx, 2).await;
+        let committed = log_bytes(&dir);
+        // The live coordinator still holds the lease.
+        let scanned = CommitCoordinator::scan_committed_chain(cx, &UnixVfs::new(), &dir)
+            .await
+            .expect("scan beside a live writer");
+        assert_eq!(scanned.entries(), coordinator.chain().entries());
+
+        let chain_snapshot = coordinator.chain().clone();
+        let crashed = coordinator
+            .commit_with_crash(
+                cx,
+                &capsule_bytes(3),
+                |seq, oid| marker_for(seq, oid, &chain_snapshot),
+                Some(CrashPoint::AfterMarkerBeforeD2),
+            )
+            .await;
+        assert!(crashed.is_err());
+        let written = log_bytes(&dir).len();
+        CommitCoordinator::<UnixVfs>::tear_log_tail_for_test(
+            &dir,
+            (written - committed.len()) as u64 - 4,
+        )
+        .expect("tear");
+        let torn = log_bytes(&dir);
+        assert_eq!(torn.len(), committed.len() + 4);
+
+        let scanned = CommitCoordinator::scan_committed_chain(cx, &UnixVfs::new(), &dir)
+            .await
+            .expect("scan over a torn tail");
+        let sequences: Vec<u64> = scanned
+            .entries()
+            .iter()
+            .map(|entry| entry.marker.commit_seq)
+            .collect();
+        assert_eq!(sequences, vec![1, 2]);
+        assert_eq!(log_bytes(&dir), torn, "a read-only scan repairs nothing");
+
+        drop(coordinator);
+        let recovered = CommitCoordinator::open(cx, &dir, keys())
+            .await
+            .expect("the next lease holder repairs");
+        assert_eq!(recovered.discarded_tail_bytes(), 4);
+        assert_eq!(log_bytes(&dir), committed);
+    });
+}

@@ -2773,21 +2773,36 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<EmbeddedReadView, OpenError> {
         let path = path.as_ref();
         require_database_dir(cx, &vfs, path).await?;
-        if let Some(view) = Self::read_current_generation(cx, &vfs, path, &keys).await? {
-            return Ok(view);
-        }
+        let lagging = match Self::read_current_generation(cx, &vfs, path, &keys).await? {
+            ReadGeneration::Current(view) => return Ok(view),
+            ReadGeneration::Lagging(view) => Some(view),
+            ReadGeneration::Unselected => None,
+        };
         // The durable state needs healing first, and healing writes: open
-        // fully, then keep only the generation that open published.
-        let database = Self::bind_with_vfs(cx, vfs, path, keys, false).await?;
-        Ok(EmbeddedReadView {
-            snapshot: Arc::clone(&database.snapshot),
-        })
+        // fully, then keep only the generation that open published. While a
+        // live writer owns the stream (fgdbd, another process), healing is
+        // that writer's, and its last published generation is a consistent
+        // read view in the meantime (fgdb-xxxnb).
+        match Self::bind_with_vfs(cx, vfs, path, keys, false).await {
+            Ok(database) => Ok(EmbeddedReadView {
+                snapshot: Arc::clone(&database.snapshot),
+            }),
+            Err(OpenError::Commit(CommitError::WriterAlreadyOpen)) if lagging.is_some() => {
+                Ok(lagging.expect("guarded"))
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    /// The read-only open's fast path: `None` unless the slot selects a root
-    /// published at the recovered chain's frontier, in which case nothing is
-    /// left to fold or heal. The coordinator, and with it the writer lease,
-    /// drops before this returns, so a fallback open can take it.
+    /// The read-only open's fast path, which takes no writer lease and writes
+    /// nothing: it reads the root slot, then scans the committed marker chain
+    /// WITHOUT repairing a torn tail, and binds the slot's root to that chain.
+    /// The slot is read first because a writer appends a marker before it
+    /// publishes the root that names it, so a chain scanned afterwards always
+    /// reaches the slot's frontier. `Current` when the root was published at
+    /// the chain's frontier: nothing is left to fold or heal. `Lagging` when
+    /// the chain is ahead of the last published root (a live writer mid-commit,
+    /// or a crash that needs healing): the caller decides which it is.
     ///
     /// Type-erased like `bind_with_vfs`: a caller's `Send` proof
     /// stops at `dyn Future + Send` instead of descending through the
@@ -2799,7 +2814,7 @@ impl<V: Vfs + Clone> Database<V> {
         vfs: &'a V,
         path: &'a Path,
         keys: &'a DatabaseKeys,
-    ) -> SendFuture<'a, Result<Option<EmbeddedReadView>, OpenError>>
+    ) -> SendFuture<'a, Result<ReadGeneration, OpenError>>
     where
         V: 'a,
     {
@@ -2811,28 +2826,33 @@ impl<V: Vfs + Clone> Database<V> {
         vfs: &V,
         path: &Path,
         keys: &DatabaseKeys,
-    ) -> Result<Option<EmbeddedReadView>, OpenError> {
-        let coordinator =
-            CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
-        let store = open_block_store(cx, vfs, path, keys).await?;
-        let probe = RootStore::with_vfs(vfs.clone(), path);
-        let Some(checkpoint) =
-            select_checkpoint(cx, &coordinator, &store, &probe, keys, path).await?
-        else {
-            return Ok(None);
+    ) -> Result<ReadGeneration, OpenError> {
+        let store = BlockStore::open_existing_for_read_with_vfs(
+            cx,
+            vfs.clone(),
+            path,
+            keys.k_oid.clone(),
+            keys.namespace,
+        )
+        .await?;
+        let store = match &keys.scalar_resolver {
+            Some(resolver) => store.with_scalar_resolver(resolver.clone()),
+            None => store,
         };
-        let chain_frontier = coordinator
-            .chain()
+        let probe = RootStore::with_vfs(vfs.clone(), path);
+        let Some((claimed, resolved)) = read_slot(cx, &store, &probe, keys, path).await? else {
+            return Ok(ReadGeneration::Unselected);
+        };
+        let chain = CommitCoordinator::scan_committed_chain(cx, vfs, path).await?;
+        let checkpoint = checkpoint_from_manifest(&chain, claimed, &resolved, path)?;
+        let chain_frontier = chain
             .entries()
             .last()
             .map_or(0, |entry| entry.marker.commit_seq);
-        if chain_frontier != checkpoint.published_at.0 {
-            return Ok(None);
-        }
         let (root, blocks, block_props, patches) = store.reopen(cx, checkpoint.root_id).await?;
         let mut snapshot = current_generation(
             keys,
-            coordinator.chain(),
+            &chain,
             checkpoint.root_id,
             root,
             blocks,
@@ -2840,9 +2860,14 @@ impl<V: Vfs + Clone> Database<V> {
             patches,
         );
         snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
-        Ok(Some(EmbeddedReadView {
+        let view = EmbeddedReadView {
             snapshot: Arc::new(snapshot),
-        }))
+        };
+        Ok(if chain_frontier == checkpoint.published_at.0 {
+            ReadGeneration::Current(view)
+        } else {
+            ReadGeneration::Lagging(view)
+        })
     }
 
     /// The derived element-version heads, exposed for the fast-open
@@ -2946,7 +2971,7 @@ impl<V: Vfs + Clone> Database<V> {
         let selected = if force_rebuild {
             None
         } else {
-            select_checkpoint(cx, &coordinator, &store, &probe, &keys, path).await?
+            select_checkpoint(cx, coordinator.chain(), &store, &probe, &keys, path).await?
         };
         let checkpoint_selected = selected.is_some();
         let (mut snapshot, writer, heads, receipts) = match selected {
@@ -5729,6 +5754,17 @@ async fn open_block_store<V: Vfs + Clone>(
     })
 }
 
+/// What the read-only open's lease-free fast path found.
+enum ReadGeneration {
+    /// The slot's root was published at the committed chain's frontier.
+    Current(EmbeddedReadView),
+    /// The committed chain is ahead of the last published root: a live
+    /// writer mid-commit, or a crash that needs healing.
+    Lagging(EmbeddedReadView),
+    /// No root slot yet (an interrupted create): only a full open can heal it.
+    Unselected,
+}
+
 /// The checkpoint a root slot selects, once verified (fgdb-ge6a).
 struct SelectedCheckpoint {
     root_id: PartitionRootVersion,
@@ -5744,12 +5780,34 @@ struct SelectedCheckpoint {
 /// neither accepts a root the other refuses.
 async fn select_checkpoint<V: Vfs>(
     cx: &CommitCx,
-    coordinator: &CommitCoordinator<V>,
+    chain: &fgdb_chronicle::MarkerChain,
     store: &BlockStore<V>,
     probe: &RootStore<V>,
     keys: &DatabaseKeys,
     path: &Path,
 ) -> Result<Option<SelectedCheckpoint>, OpenError> {
+    let Some((claimed, resolved)) = read_slot(cx, store, probe, keys, path).await? else {
+        return Ok(None);
+    };
+    checkpoint_from_manifest(chain, claimed, &resolved, path).map(Some)
+}
+
+/// The manifest the root slot names, resolved through the block store. `None`
+/// when there is no slot file (an interrupted create). Binding it to a chain
+/// is [`checkpoint_from_manifest`]'s separate step.
+async fn read_slot<V: Vfs>(
+    cx: &CommitCx,
+    store: &BlockStore<V>,
+    probe: &RootStore<V>,
+    keys: &DatabaseKeys,
+    path: &Path,
+) -> Result<
+    Option<(
+        ManifestVersion,
+        Vec<(ManifestRecord, fgdb_strata::root::PartitionRoot)>,
+    )>,
+    OpenError,
+> {
     let slot = match probe.current(cx).await {
         Ok(slot) => slot,
         Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -5758,16 +5816,14 @@ async fn select_checkpoint<V: Vfs>(
         Err(error) => return Err(OpenError::Slot(error)),
     };
     validate_plain_slot(&slot, keys, path)?;
-    let disagrees = || OpenError::SlotDisagreesWithStream {
-        path: path.to_path_buf(),
-        slot_manifest: ObjectId(slot.root_manifest_oid),
-    };
     let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
-    let resolved = match store.resolve_manifest(cx, claimed).await {
-        Ok(resolved) if resolved.len() == 1 => resolved,
-        _ => return Err(disagrees()),
-    };
-    checkpoint_from_manifest(coordinator.chain(), claimed, &resolved, path).map(Some)
+    match store.resolve_manifest(cx, claimed).await {
+        Ok(resolved) if resolved.len() == 1 => Ok(Some((claimed, resolved))),
+        _ => Err(OpenError::SlotDisagreesWithStream {
+            path: path.to_path_buf(),
+            slot_manifest: claimed.0,
+        }),
+    }
 }
 
 /// The checkpoint's coordinate and Chronicle ancestry have one admission law
