@@ -226,16 +226,27 @@ impl RowPredicate {
                         GraphSetColumnType::Path
                             | GraphSetColumnType::Vertices
                             | GraphSetColumnType::Edges
-                            | GraphSetColumnType::Edge
                             | GraphSetColumnType::List
                     ) || matches!(
                         right,
                         GraphSetColumnType::Path
                             | GraphSetColumnType::Vertices
                             | GraphSetColumnType::Edges
-                            | GraphSetColumnType::Edge
                             | GraphSetColumnType::List
                     ) {
+                        return Err(Error::InvalidValueComparison { instruction });
+                    }
+                    // Relationships compare by EId, never endpoints or the
+                    // total row order. Any may carry a relationship after
+                    // UNWIND; its actual domain is checked by compare().
+                    if (left == GraphSetColumnType::Edge || right == GraphSetColumnType::Edge)
+                        && (!matches!(
+                            comparison,
+                            IntegerComparison::Equal | IntegerComparison::NotEqual
+                        ) || !(left == right
+                            || left == GraphSetColumnType::Any
+                            || right == GraphSetColumnType::Any))
+                    {
                         return Err(Error::InvalidValueComparison { instruction });
                     }
                     if (left == GraphSetColumnType::Vertex || right == GraphSetColumnType::Vertex)
@@ -330,6 +341,7 @@ impl RowPredicate {
 enum Cell<'a> {
     Scalar(&'a CanonicalScalar),
     Vertex(fgdb_types::VId),
+    Edge(fgdb_types::EId),
     Incompatible,
 }
 impl Cell<'_> {
@@ -355,11 +367,11 @@ fn resolve<'a, E>(
             };
             match value {
                 GraphValue::Vertex(value) => Cell::Vertex(*value),
+                GraphValue::Edge(value) => Cell::Edge(*value),
                 GraphValue::Scalar(value) => Cell::Scalar(value),
                 GraphValue::Path(_)
                 | GraphValue::Vertices(_)
                 | GraphValue::Edges(_)
-                | GraphValue::Edge(_)
                 | GraphValue::List(_)
                 | GraphValue::Map { .. } => Cell::Incompatible,
             }
@@ -373,6 +385,11 @@ fn compare(left: Cell<'_>, right: Cell<'_>, comparison: IntegerComparison) -> Op
     }
     match (left, right) {
         (Cell::Vertex(left), Cell::Vertex(right)) => Some(match comparison {
+            IntegerComparison::Equal => left == right,
+            IntegerComparison::NotEqual => left != right,
+            _ => return None,
+        }),
+        (Cell::Edge(left), Cell::Edge(right)) => Some(match comparison {
             IntegerComparison::Equal => left == right,
             IntegerComparison::NotEqual => left != right,
             _ => return None,
@@ -460,8 +477,9 @@ impl PreparedGraphSet {
     /// Filter the completed input, preserving its duplicates and order. The
     /// child's DISTINCT/order/page runs BEFORE this predicate; this new scope's
     /// own order/page runs AFTER it. Only TRUE survives. NULL and incompatible
-    /// scalar kinds produce UNKNOWN, including beneath NOT. Vertex comparisons
-    /// require two vertex columns and equality/inequality; IS NULL is explicit.
+    /// scalar kinds produce UNKNOWN, including beneath NOT. Vertex and edge
+    /// comparisons use equality/inequality within their own identity domain;
+    /// an Any column is checked at execution. IS NULL is explicit.
     ///
     /// No source is reopened and no payload is cloned. The materialized set
     /// executor charges each retained row and every predicate operation under
