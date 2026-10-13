@@ -2928,6 +2928,25 @@ impl<'a> Parser<'a> {
         self.advance()?;
         let scope = self.syntax.scopes.len();
         self.scope(ScopeKind::Collect, ScopeForm::Comprehension)?;
+        // The comprehension is gathered once per row, but a list
+        // comprehension, quantifier or reduce local varies within the row:
+        // `[x IN nodes(p) | size([(x)-->() | 1])]` would read the row's x
+        // for every element. Refuse it typed (TCK Pattern2 [7]).
+        let body = &self.syntax.scopes[scope].body;
+        if let Some(local) = (body.variables.iter())
+            .chain(&body.captures)
+            .chain(body.edges.iter().filter_map(|edge| edge.variable.as_ref()))
+            .find(|name| {
+                (self.elements.iter()).any(|element| !element.is_empty() && *element == name.text)
+            })
+        {
+            return Err(GraphSetTextError {
+                offset: local.at,
+                kind: GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
+                    "a pattern comprehension that reads no enclosing comprehension local",
+                )),
+            });
+        }
         let element = self.comprehension_element(scope)?;
         self.syntax.scopes[scope].element = element;
         let column = self.projection_slot(
