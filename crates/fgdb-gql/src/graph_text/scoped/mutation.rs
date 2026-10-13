@@ -66,6 +66,13 @@ enum ActionKind<'a> {
     Delete {
         detach: bool,
     },
+    /// DELETE after WITH of a value the row computes (TCK Delete5): its
+    /// action has no target column.
+    RowDelete {
+        value: crate::set_text::ReadValueTemplate,
+        detach: bool,
+        at: usize,
+    },
 }
 struct Action<'a> {
     target: usize,
@@ -87,6 +94,9 @@ fn action_templates<'a>(
             }
             ActionKind::Delete { detach: false } => {
                 MutationActionTemplate::Bound(GraphMutationAction::Delete { target })
+            }
+            ActionKind::RowDelete { value, detach, at } => {
+                MutationActionTemplate::DeleteValue { value, detach, at }
             }
             ActionKind::Label { label, present } => {
                 let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)? else {
@@ -221,6 +231,29 @@ fn scalar(
 }
 
 impl<'a> Parser<'a> {
+    /// Whether a DELETE target after WITH names, bare, a carried vertex or,
+    /// without DETACH, a carried relationship (fgdb-sl4ym). Anything else is
+    /// a value of the row (TCK Delete5).
+    fn row_element_target(
+        &self,
+        row: &[(Name<'a>, crate::GraphSetColumnType)],
+        detach: bool,
+    ) -> Result<bool, GraphPatternTextError> {
+        use crate::GraphSetColumnType::{Edge, Vertex};
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        if matches!(
+            self.lexer.clone().next()?.kind,
+            TokenKind::Punct(b'.' | b'[' | b'(')
+        ) {
+            return Ok(false);
+        }
+        Ok(row.iter().any(|(name, kind)| {
+            name.text == word && (*kind == Vertex || (!detach && *kind == Edge))
+        }))
+    }
+
     fn mutation_projection(
         &self,
         columns: &mut Vec<Projection<'a>>,
@@ -443,6 +476,25 @@ impl<'a> Parser<'a> {
             deletion_mode = Some((deleting, detach));
             loop {
                 self.mutation_action_capacity(actions.len())?;
+                // After WITH, a DELETE of anything but a carried vertex, or
+                // without DETACH a carried relationship, named bare deletes a
+                // value of the row: `friends[$i]`, `map.key`, a carried path
+                // (TCK Delete5).
+                if deleting
+                    && let Some(row) = row
+                    && !self.row_element_target(row, detach)?
+                {
+                    let at = self.current.at;
+                    let value = self.insertion_source_value(&mut columns, row)?;
+                    actions.push(Action {
+                        target: 0,
+                        kind: ActionKind::RowDelete { value, detach, at },
+                    });
+                    if !self.take(b',')? {
+                        break;
+                    }
+                    continue;
+                }
                 // DETACH DELETE names a vertex. A plain DELETE, like SET and
                 // REMOVE, names a vertex or one fixed-length relationship.
                 // openCypher's property target is an atom, so `SET (n).name`
@@ -1208,6 +1260,17 @@ impl PreparedGraphMutationText {
                         })?,
                     ),
                 },
+                MutationActionTemplate::DeleteValue { value, detach, at } => {
+                    GraphMutationAction::DeleteValue {
+                        value: return_projection::bind_read_value(value, &values).map_err(
+                            |error| GraphMutationTextError {
+                                offset: *at,
+                                ..GraphMutationTextError::from(error)
+                            },
+                        )?,
+                        detach: *detach,
+                    }
+                }
             });
         }
         if let Some(row) = &self.row {

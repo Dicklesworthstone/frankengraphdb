@@ -92,21 +92,44 @@ pub enum GraphMutationAction {
     Delete {
         target: usize,
     },
+    /// DELETE or DETACH DELETE of a value each input row computes (TCK
+    /// Delete5): `friends[$i]`, `map.key`, `m.key.key[0]` after a WITH. The
+    /// value is a vertex, a relationship, a path (each of its elements, as for
+    /// a path column) or NULL, which deletes nothing; any other value refuses
+    /// when it runs. DETACH takes a vertex's remaining relationships with it
+    /// and deletes a relationship as a plain DELETE does. No target column:
+    /// the value reads the row.
+    DeleteValue {
+        value: crate::GraphSetValue,
+        detach: bool,
+    },
 }
 impl GraphMutationAction {
-    fn target(&self) -> usize {
+    /// The element column an action targets; a computed delete has none.
+    fn target(&self) -> Option<usize> {
         match self {
             Self::SetProperty { target, .. }
             | Self::RemoveProperty { target, .. }
             | Self::ClearProperties { target, .. }
             | Self::SetLabel { target, .. }
             | Self::DetachDelete { target }
-            | Self::Delete { target } => *target,
+            | Self::Delete { target } => Some(*target),
+            Self::DeleteValue { .. } => None,
         }
     }
 
     const fn deletes(&self) -> bool {
-        matches!(self, Self::DetachDelete { .. } | Self::Delete { .. })
+        matches!(
+            self,
+            Self::DetachDelete { .. } | Self::Delete { .. } | Self::DeleteValue { .. }
+        )
+    }
+
+    const fn detaches(&self) -> bool {
+        matches!(
+            self,
+            Self::DetachDelete { .. } | Self::DeleteValue { detach: true, .. }
+        )
     }
 }
 /// One private column of a mutation RETURN input row (`SET ... RETURN`).
@@ -205,6 +228,12 @@ pub enum GraphMutationError<E> {
         row: usize,
         action: usize,
     },
+    /// A computed DELETE target is not a vertex, relationship, path or NULL
+    /// (TCK Delete5).
+    NonElementDelete {
+        row: usize,
+        action: usize,
+    },
     ConflictingAssignment {
         first_row: usize,
         first_action: usize,
@@ -260,6 +289,10 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
                     "mutation row {row} action {action}: not a scalar property value"
                 )
             }
+            Self::NonElementDelete { row, action } => write!(
+                f,
+                "mutation row {row} action {action}: DELETE of a value that is not a node, relationship or path"
+            ),
             Self::ConflictingAssignment {
                 first_row,
                 first_action,
@@ -444,37 +477,57 @@ impl PreparedGraphMutation {
                 .collect(),
         };
         let deleting = actions[0].deletes();
-        let detaching = matches!(actions[0], GraphMutationAction::DetachDelete { .. });
+        let detaching = actions[0].detaches();
         for (at, action) in actions.iter().enumerate() {
-            let target = action.target();
+            // A computed delete's value may be an element, a path or NULL;
+            // which one is known only when it runs (TCK Delete5).
+            if let GraphMutationAction::DeleteValue { value, .. } = action {
+                let refused = |kind| GraphMutationBuildError::ValueExpression { action: at, kind };
+                let kind = crate::GraphSetProjection::admit_output(value, &columns, at)
+                    .map_err(|kind| refused(Some(kind)))?;
+                if !matches!(
+                    kind,
+                    GraphSetColumnType::Vertex
+                        | GraphSetColumnType::Edge
+                        | GraphSetColumnType::Path
+                        | GraphSetColumnType::Any
+                ) {
+                    return Err(refused(None));
+                }
+            }
             // A path is a delete target: its elements (TCK Delete3).
-            let valid_target = match action {
-                GraphMutationAction::SetProperty { .. }
-                | GraphMutationAction::RemoveProperty { .. }
-                | GraphMutationAction::ClearProperties { .. } => matches!(
-                    columns.get(target),
+            let valid_target = match (action, action.target().map(|target| columns.get(target))) {
+                (GraphMutationAction::DeleteValue { .. }, _) => true,
+                (
+                    GraphMutationAction::SetProperty { .. }
+                    | GraphMutationAction::RemoveProperty { .. }
+                    | GraphMutationAction::ClearProperties { .. },
+                    Some(kind),
+                ) => matches!(
+                    kind,
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
                 ),
-                GraphMutationAction::Delete { .. } => matches!(
-                    columns.get(target),
+                (GraphMutationAction::Delete { .. }, Some(kind)) => matches!(
+                    kind,
                     Some(
                         GraphSetColumnType::Vertex
                             | GraphSetColumnType::Edge
                             | GraphSetColumnType::Path
                     )
                 ),
-                GraphMutationAction::DetachDelete { .. } => matches!(
-                    columns.get(target),
+                (GraphMutationAction::DetachDelete { .. }, Some(kind)) => matches!(
+                    kind,
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Path)
                 ),
-                GraphMutationAction::SetLabel { .. } => {
-                    columns.get(target) == Some(&GraphSetColumnType::Vertex)
+                (GraphMutationAction::SetLabel { .. }, Some(kind)) => {
+                    kind == Some(&GraphSetColumnType::Vertex)
                 }
+                (_, None) => false,
             };
             if !valid_target {
                 return Err(GraphMutationBuildError::TargetColumn {
                     action: at,
-                    column: target,
+                    column: action.target().unwrap_or(usize::MAX),
                 });
             }
             if let GraphMutationAction::ClearProperties { current, .. } = action {
@@ -533,7 +586,7 @@ impl PreparedGraphMutation {
             if deleting != action.deletes() {
                 return Err(GraphMutationBuildError::MixedDeletionAndUpdates);
             }
-            if deleting && detaching != matches!(action, GraphMutationAction::DetachDelete { .. }) {
+            if deleting && detaching != action.detaches() {
                 return Err(GraphMutationBuildError::MixedDeleteModes);
             }
         }
@@ -561,13 +614,16 @@ impl PreparedGraphMutation {
     }
 
     /// The most effects one selected row proposes: one per action, except a
-    /// path delete, which proposes one per element of its path.
+    /// path delete, which proposes one per element of its path, and a
+    /// computed delete, whose value may be a path.
     pub(crate) fn row_effect_bound(&self) -> u128 {
         self.actions
             .iter()
             .map(|action| match action {
+                GraphMutationAction::DeleteValue { .. } => MAX_GRAPH_PATH_ELEMENTS,
                 GraphMutationAction::Delete { .. } | GraphMutationAction::DetachDelete { .. }
-                    if self.columns.get(action.target()) == Some(&GraphSetColumnType::Path) =>
+                    if action.target().and_then(|target| self.columns.get(target))
+                        == Some(&GraphSetColumnType::Path) =>
                 {
                     MAX_GRAPH_PATH_ELEMENTS
                 }
@@ -603,7 +659,8 @@ impl PreparedGraphMutation {
         bytes.extend_from_slice(&input);
         bytes.extend_from_slice(&(self.actions.len() as u64).to_be_bytes());
         for action in &self.actions {
-            bytes.extend_from_slice(&(action.target() as u64).to_be_bytes());
+            let target = action.target().map_or(u64::MAX, |target| target as u64);
+            bytes.extend_from_slice(&target.to_be_bytes());
             match action {
                 GraphMutationAction::SetProperty { key, value, .. } => {
                     bytes.push(0);
@@ -654,6 +711,14 @@ impl PreparedGraphMutation {
                 }
                 GraphMutationAction::DetachDelete { .. } => bytes.push(3),
                 GraphMutationAction::Delete { .. } => bytes.push(4),
+                GraphMutationAction::DeleteValue { value, detach } => {
+                    bytes.push(6);
+                    bytes.push(u8::from(*detach));
+                    let mut encoded = Vec::new();
+                    value.append_canonical_bytes(&mut encoded);
+                    bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(&encoded);
+                }
             }
         }
         if let Some(relation) = &self.input_relation {

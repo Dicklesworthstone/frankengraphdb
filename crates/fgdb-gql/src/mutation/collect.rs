@@ -90,6 +90,29 @@ fn propose<'a, E, C, F: FnMut() -> Result<(), C>>(
     proposals.insert((target, field), Proposal { value, row, action });
     Ok(())
 }
+
+/// A composite read value over one input row: a SET right-hand side or a
+/// computed DELETE target (TCK Delete5).
+fn evaluate_composite<E, C, F: FnMut() -> Result<(), C>>(
+    value: &crate::GraphSetValue,
+    row: &GraphValueRow,
+    row_at: usize,
+    action_at: usize,
+    meter: &mut Meter<F>,
+) -> ResultOf<crate::algebra::GraphValue, E, C> {
+    crate::set_ops::evaluate_value(value, row, action_at, &mut |event| meter.event(event)).map_err(
+        |failure| match failure {
+            crate::set_ops::ProjectionFailure::Control(error) => error,
+            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                GqlQueryError::Source(GraphMutationError::Arithmetic {
+                    row: row_at,
+                    action: action_at,
+                    error,
+                })
+            }
+        },
+    )
+}
 impl<F> Meter<F> {
     fn event<E, C>(&mut self, event: GlaExecutionEvent) -> ResultOf<(), E, C>
     where
@@ -698,11 +721,33 @@ fn execute_erased<E, C>(
         }
         for (action_at, action) in mutation.actions.iter().enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
+            // A computed delete (TCK Delete5) deletes the element, or each
+            // element of the path, its value is; NULL deletes nothing.
+            let computed;
+            let target_value = match (action, action.target()) {
+                (GraphMutationAction::DeleteValue { value, .. }, _) => {
+                    computed = evaluate_composite(value, row, row_at, action_at, &mut meter)?;
+                    if !(computed.is_null()
+                        || element(&computed).is_some()
+                        || matches!(computed, crate::algebra::GraphValue::Path(_)))
+                    {
+                        return Err(GqlQueryError::Source(
+                            GraphMutationError::NonElementDelete {
+                                row: row_at,
+                                action: action_at,
+                            },
+                        ));
+                    }
+                    &computed
+                }
+                (_, Some(column)) => &row.values()[column],
+                (_, None) => continue,
+            };
             // DELETE p / DETACH DELETE p (TCK Delete3): every node of the
             // path, and for a plain DELETE every relationship too, each its
             // own delete proposal. DETACH removes the rest of their edges.
-            if let crate::algebra::GraphValue::Path(path) = &row.values()[action.target()] {
-                let detach = matches!(action, GraphMutationAction::DetachDelete { .. });
+            if let crate::algebra::GraphValue::Path(path) = target_value {
+                let detach = action.detaches();
                 let edges = path
                     .steps()
                     .iter()
@@ -724,7 +769,7 @@ fn execute_erased<E, C>(
             }
             // Only canonical null can remain after the schema check. An
             // absent OPTIONAL target does not execute an assignment RHS.
-            let Some(target) = element(&row.values()[action.target()]) else {
+            let Some(target) = element(target_value) else {
                 continue;
             };
             let proposed = match action {
@@ -775,22 +820,8 @@ fn execute_erased<E, C>(
                             Value::Computed(value)
                         }
                         GraphMutationValue::Composite(value) => {
-                            let value = crate::set_ops::evaluate_value(
-                                value,
-                                row,
-                                action_at,
-                                &mut |event| meter.event(event),
-                            )
-                            .map_err(|failure| match failure {
-                                crate::set_ops::ProjectionFailure::Control(error) => error,
-                                crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
-                                    GqlQueryError::Source(GraphMutationError::Arithmetic {
-                                        row: row_at,
-                                        action: action_at,
-                                        error,
-                                    })
-                                }
-                            })?;
+                            let value =
+                                evaluate_composite(value, row, row_at, action_at, &mut meter)?;
                             // Computed values already own their charged payload.
                             match value {
                                 crate::algebra::GraphValue::Scalar(value) => Value::Computed(value),
@@ -810,6 +841,11 @@ fn execute_erased<E, C>(
                     Some((Field::Delete, Value::Delete(true)))
                 }
                 GraphMutationAction::Delete { .. } => Some((Field::Delete, Value::Delete(false))),
+                // DETACH deletes a relationship as a plain DELETE does.
+                GraphMutationAction::DeleteValue { detach, .. } => Some((
+                    Field::Delete,
+                    Value::Delete(*detach && matches!(target, ElementId::Vertex(_))),
+                )),
             };
             for (field, value) in proposed.into_iter().chain(single) {
                 propose(
