@@ -2264,6 +2264,7 @@ impl PreparedGraphVertexMergeRowsText {
                     singleton: true,
                     leading,
                     correlations: Vec::new(),
+                    row_fields: Vec::new(),
                     owned: None,
                 }))
             }

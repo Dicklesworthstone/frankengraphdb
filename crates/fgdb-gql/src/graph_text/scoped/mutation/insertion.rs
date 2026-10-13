@@ -792,6 +792,12 @@ impl PreparedGraphInsertText {
             let column = parser.mutation_projection(&mut parsed.projections, variable, key)?;
             correlations.push((row, column));
         }
+        // `MATCH (n {id: row.id})` after the leading UNWIND: the row's map
+        // fields its correlations read.
+        let row_fields: Vec<(usize, Box<str>)> = core::mem::take(&mut parser.read_row_fields)
+            .into_iter()
+            .map(|(row, key)| (row, key.into()))
+            .collect();
         let input_types = parser.insertion_input_types(&row_schema, &parsed.projections);
         if !leading.is_empty() && input_types.len() > MAX_PATTERN_VERTICES {
             return Err(error(
@@ -822,6 +828,7 @@ impl PreparedGraphInsertText {
                 singleton: true,
                 leading,
                 correlations: Vec::new(),
+                row_fields: Vec::new(),
                 owned: None,
             };
             // Compile all source and property expression shapes before any
@@ -829,8 +836,12 @@ impl PreparedGraphInsertText {
             let values = shape_arguments(&syntax.parameters);
             let shape = input.bind_values(&values)?;
             // A matched child adds a cross product and, when correlated, a
-            // filter. Admit those ancestors BEFORE any catalog callback.
-            let ancestors = 1 + usize::from(matched) + usize::from(!correlations.is_empty());
+            // filter; row fields add the projections that derive and drop
+            // them. Admit those ancestors BEFORE any catalog callback.
+            let ancestors = 1
+                + usize::from(matched)
+                + usize::from(!correlations.is_empty())
+                + 2 * usize::from(!row_fields.is_empty());
             shape.check_ancestor_depth(ancestors).map_err(|kind| {
                 insertion_build(at, GraphInsertBuildError::RelationalInput(kind))
             })?;
@@ -973,6 +984,7 @@ impl PreparedGraphInsertText {
             if let Some(mut input) = relational {
                 input.selection = Some(selection);
                 input.correlations = correlations;
+                input.row_fields = row_fields;
                 (
                     InsertTextInput::Relation {
                         statement: statement.to_owned(),
@@ -1126,6 +1138,7 @@ impl PreparedGraphInsertText {
             singleton: false,
             leading: Vec::new(),
             correlations: Vec::new(),
+            row_fields: Vec::new(),
             owned: Some((columns, types)),
         };
         let (template, returning) = Self::finish_over_row(

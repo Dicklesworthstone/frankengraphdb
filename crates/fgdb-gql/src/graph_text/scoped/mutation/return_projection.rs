@@ -634,6 +634,7 @@ impl<'a> Parser<'a> {
             leading: Vec::new(),
             leading_types: Vec::new(),
             correlations: Vec::new(),
+            row_fields: Vec::new(),
         })
     }
 
@@ -853,6 +854,10 @@ impl<'a> Parser<'a> {
                 leading,
                 leading_types: vec![GraphSetColumnType::Any; width],
                 correlations: bound_correlations,
+                row_fields: core::mem::take(&mut self.read_row_fields)
+                    .into_iter()
+                    .map(|(row, key)| (row, key.into()))
+                    .collect(),
             },
             tail,
         ))
@@ -1313,6 +1318,7 @@ impl<'a> Parser<'a> {
                 leading: Vec::new(),
                 leading_types: Vec::new(),
                 correlations: Vec::new(),
+                row_fields: Vec::new(),
             });
         }
         if inputs.is_empty() {
@@ -1345,6 +1351,7 @@ impl<'a> Parser<'a> {
             leading: Vec::new(),
             leading_types: Vec::new(),
             correlations: Vec::new(),
+            row_fields: Vec::new(),
         })
     }
 
@@ -3009,7 +3016,43 @@ impl BoundSetTextInput {
         } else {
             let mut leading = bind_stages(PreparedGraphSet::singleton(), &self.leading, values)?;
             if let Some(selection) = &self.selection {
+                let projection = |kind| GraphSetTextError {
+                    offset: self.return_at,
+                    kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                };
                 let width = leading.column_types().len();
+                // The map fields the correlations read are derived columns
+                // after the leading ones (`MATCH (n {id: row.id})`).
+                if !self.row_fields.is_empty() {
+                    let mut items: Vec<_> = (leading.columns().iter().enumerate())
+                        .map(|(column, name)| {
+                            GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
+                        })
+                        .collect();
+                    for (column, key) in &self.row_fields {
+                        let mut ordinal = items.len();
+                        let name = loop {
+                            let name = format!("__fg_row_field_{ordinal}");
+                            if items.iter().all(|item| item.name() != name) {
+                                break name;
+                            }
+                            ordinal += 1;
+                        };
+                        let field = ReadValueTemplate::MapGet {
+                            map: Box::new(ReadValueTemplate::Column(*column)),
+                            key: key.clone(),
+                            property: crate::set_text::ElementKeySlot::default(),
+                        };
+                        items.push(GraphSetProjection::new(
+                            name,
+                            bind_read_value(&field, values)?,
+                        ));
+                    }
+                    leading = leading
+                        .project(items, crate::GraphSetQuantifier::All)
+                        .map_err(projection)?;
+                }
+                let derived = leading.column_types().len();
                 leading = leading
                     .cross_join(selection.bind_values(values)?.into())
                     .map_err(|kind| GraphSetTextError {
@@ -3021,7 +3064,7 @@ impl BoundSetTextInput {
                     code.push(crate::GraphSetPredicateOp::Compare {
                         left: crate::GraphSetOperand::Column(left),
                         comparison: IntegerComparison::Equal,
-                        right: crate::GraphSetOperand::Column(width + right),
+                        right: crate::GraphSetOperand::Column(derived + right),
                     });
                     if code.len() > 1 {
                         code.push(crate::GraphSetPredicateOp::And);
@@ -3032,6 +3075,19 @@ impl BoundSetTextInput {
                         offset: self.return_at,
                         kind: GraphSetTextErrorKind::FilterBuild(kind),
                     })?;
+                }
+                // Drop the derived fields: every later slot addresses the
+                // leading columns, then the graph's.
+                if derived != width {
+                    let items = (leading.columns().iter().enumerate())
+                        .filter(|&(column, _)| column < width || column >= derived)
+                        .map(|(column, name)| {
+                            GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
+                        })
+                        .collect();
+                    leading = leading
+                        .project(items, crate::GraphSetQuantifier::All)
+                        .map_err(projection)?;
                 }
             }
             leading

@@ -734,6 +734,17 @@ impl BoundSetTextInput {
         for stage in &self.leading {
             stage.append_template_transcript(bytes);
         }
+        // Row fields extend the transcript only when present, so every
+        // existing definition keeps its bytes.
+        if !self.row_fields.is_empty() {
+            bytes.extend_from_slice(b"fgdb:gql:row-fields:v1\0");
+            ordinal(bytes, self.row_fields.len());
+            for (column, key) in &self.row_fields {
+                ordinal(bytes, *column);
+                ordinal(bytes, key.len());
+                bytes.extend_from_slice(key.as_bytes());
+            }
+        }
         ordinal(bytes, self.correlations.len());
         for (from, to) in &self.correlations {
             ordinal(bytes, *from);
@@ -872,6 +883,12 @@ pub(crate) struct BoundSetTextInput {
     pub(crate) singleton: bool,
     pub(crate) leading: Vec<ReadStageTemplate>,
     pub(crate) correlations: Vec<(usize, usize)>,
+    /// Map fields of leading row columns (`UNWIND $rows AS row MATCH (n {id:
+    /// row.id})`), as (leading column, key). A correlation's left column
+    /// `width + k`, past the leading relation's width, is field `k`. Binding
+    /// derives these columns before the MATCH join and drops them after its
+    /// filter, so every later column keeps its position.
+    pub(crate) row_fields: Vec<(usize, Box<str>)>,
     /// A chained write's input (`CREATE (a) WITH a CREATE (b)`): the previous
     /// write's output columns, read through one owned leaf (`SetNode::Owned`)
     /// that the executing host fills with that write's rows. No graph source.

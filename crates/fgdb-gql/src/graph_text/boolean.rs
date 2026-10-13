@@ -392,6 +392,71 @@ impl<'a> Parser<'a> {
                 return Ok(Some((variable, None, row, at)));
             }
         }
+        // `n.p = row.f` or `row.f = n.p`: a field of a leading row's map
+        // value (`UNWIND $rows AS row MATCH (n) WHERE n.id = row.id`), the
+        // same key `MATCH (n {id: row.id})` makes. The atom ends at its
+        // seventh token.
+        let mut ahead = lexer.clone();
+        let tail = [ahead.next()?.kind, ahead.next()?.kind, ahead.next()?.kind];
+        let field = match (tokens, tail) {
+            (
+                [
+                    TokenKind::Word(element),
+                    TokenKind::Punct(b'.'),
+                    TokenKind::Word(_),
+                    TokenKind::Punct(b'='),
+                    TokenKind::Word(name),
+                ],
+                [TokenKind::Punct(b'.'), TokenKind::Word(_), last],
+            ) => Some((name, element, true, last)),
+            (
+                [
+                    TokenKind::Word(name),
+                    TokenKind::Punct(b'.'),
+                    TokenKind::Word(_),
+                    TokenKind::Punct(b'='),
+                    TokenKind::Word(element),
+                ],
+                [TokenKind::Punct(b'.'), TokenKind::Word(_), last],
+            ) => Some((name, element, false, last)),
+            _ => None,
+        };
+        let bound =
+            |word: &str| (self.read_row_bindings.iter()).position(|binding| binding.text == word);
+        if let Some((name, element, property_first, last)) = field
+            && matches!(
+                last,
+                TokenKind::End | TokenKind::Word(_) | TokenKind::Punct(b')')
+            )
+            && bound(element).is_none()
+            && let Some(row) = bound(name)
+        {
+            self.capacity(
+                self.predicates,
+                MAX_PATTERN_PREDICATES,
+                crate::algebra::PatternLimitDimension::Predicates,
+            )?;
+            let (variable, key, field) = if property_first {
+                let variable = self.property_variable()?;
+                self.punct(b'.', ".")?;
+                let key = self.name()?;
+                self.punct(b'=', "=")?;
+                self.advance()?;
+                self.punct(b'.', ".")?;
+                (variable, key, self.name()?)
+            } else {
+                self.advance()?;
+                self.punct(b'.', ".")?;
+                let field = self.name()?;
+                self.punct(b'=', "=")?;
+                let variable = self.property_variable()?;
+                self.punct(b'.', ".")?;
+                (variable, self.name()?, field)
+            };
+            let row = self.read_row_field(row, field)?;
+            self.predicates += 1;
+            return Ok(Some((variable, Some(key), row, at)));
+        }
         // The atom must end at its fifth token.
         if !matches!(
             lexer.next()?.kind,

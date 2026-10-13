@@ -297,6 +297,7 @@ impl<'a> Parser<'a> {
                 leading: Vec::new(),
                 leading_types: Vec::new(),
                 correlations: Vec::new(),
+                row_fields: Vec::new(),
             }
         };
         let mut result = UnresolvedReadInput {
@@ -380,6 +381,14 @@ impl<'a> Parser<'a> {
             return Err(expected(
                 at,
                 "WITH between an OPTIONAL continuation and scoped clauses",
+            ));
+        }
+        // A carried row's map field correlates only after a leading UNWIND,
+        // whose row the MATCH filters; a join on WITH rows reads columns.
+        if !self.read_row_fields.is_empty() {
+            return Err(expected(
+                at,
+                "a carried column, not its map field, in a later MATCH's correlation",
             ));
         }
         let mut inputs = Vec::new();
@@ -590,6 +599,7 @@ impl<'a> Parser<'a> {
                 leading: Vec::new(),
                 leading_types: incoming.iter().map(|(_, kind)| *kind).collect(),
                 correlations: keys,
+                row_fields: Vec::new(),
             },
             next,
             terminal,

@@ -699,6 +699,10 @@ struct Parser<'a> {
     /// Enabled only while a multipart graph part can lower its WHERE to ON.
     /// Other read/write owners must not silently accept an unexecuted predicate.
     read_comparisons: Option<Vec<boolean::RowComparison<'a>>>,
+    /// Map fields of leading row columns a MATCH correlates with
+    /// (`UNWIND $rows AS row MATCH (n {id: row.id})`), as (row column, key).
+    /// A correlation addresses field `k` as row `read_row_bindings.len() + k`.
+    read_row_fields: Vec<(usize, &'a str)>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
@@ -814,6 +818,7 @@ impl<'a> Parser<'a> {
             read_row_bindings: Vec::new(),
             read_correlations: Vec::new(),
             read_comparisons: None,
+            read_row_fields: Vec::new(),
             boundary_reads: None,
             elements: Vec::new(),
             lets: None,
@@ -859,6 +864,28 @@ impl<'a> Parser<'a> {
         self.current = self.lexer.next()?;
         Ok(())
     }
+    /// The correlation row of field `key` of leading row column `row`: one
+    /// derived row per distinct field, however often the MATCH reads it.
+    fn read_row_field(
+        &mut self,
+        row: usize,
+        key: Name<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        let width = self.read_row_bindings.len();
+        if let Some(at) = (self.read_row_fields.iter())
+            .position(|&(column, field)| column == row && field == key.text)
+        {
+            return Ok(width + at);
+        }
+        self.capacity(
+            self.read_row_fields.len(),
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        self.read_row_fields.push((row, key.text));
+        Ok(width + self.read_row_fields.len() - 1)
+    }
+
     /// A `map.key` read, with its key recorded for this part's preparation to
     /// bind against a vertex or edge operand (fgdb-xnd7x).
     fn map_get(
@@ -1256,6 +1283,16 @@ impl<'a> Parser<'a> {
             };
             if let Some(row) = row {
                 self.advance()?;
+                // `{id: row.id}`: a field of the leading row's map value.
+                let row = if self.is_punct(b'.')
+                    && matches!(self.lexer.clone().next()?.kind, TokenKind::Word(_))
+                {
+                    self.advance()?;
+                    let field = self.name()?;
+                    self.read_row_field(row, field)?
+                } else {
+                    row
+                };
                 self.read_correlations.push((variable, Some(key), row));
             } else {
                 let at = self.current.at;
