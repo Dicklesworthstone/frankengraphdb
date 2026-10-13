@@ -3439,6 +3439,12 @@ mod durability_tests {
         });
     }
 
+    /// Each metadata family refuses one byte past its ceiling before identity
+    /// or decode. The read never materializes more than ceiling + 1 bytes; a
+    /// family whose ceiling is at least one read op (manifest, root) refuses
+    /// from the inode's length before reading any, while a smaller ceiling
+    /// (segment, index) is read to ceiling + 1 and refused from that count
+    /// (fgdb-2n2a2: the length probe would cost the op it saves).
     #[test]
     fn metadata_reads_refuse_each_family_ceiling_before_materializing_sparse_bytes() {
         let dir = scratch_dir("oversized-metadata-inodes");
