@@ -217,7 +217,7 @@ fn open_columns_compose_with_graph_scalars_without_changing_typed_bag_equality()
             }
         }
     }
-    assert_eq!(concrete.column_types(), &[GraphSetColumnType::Scalar]);
+    assert_eq!(concrete.column_types(), &[GraphSetColumnType::Stored]);
     assert_eq!(open.column_types(), &[GraphSetColumnType::Any]);
 }
 

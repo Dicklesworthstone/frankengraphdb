@@ -515,7 +515,7 @@ fn unproved_sequences_refuse_but_complete_definition_and_other_aggregate_profile
     )
     .unwrap();
     assert!(matches!(
-        Operator::new(query, &[GraphSetColumnType::Scalar; 6]),
+        Operator::new(query, &[GraphSetColumnType::Stored; 6]),
         Err(GroupBuildError::UnsupportedAggregate { aggregate: 0 })
     ));
     let definition = definition(false, true, false);

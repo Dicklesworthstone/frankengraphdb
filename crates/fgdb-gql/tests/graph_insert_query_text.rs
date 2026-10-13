@@ -549,8 +549,8 @@ fn match_return_only_columns_and_star_do_not_use_creation_column_positions() {
         edge_query.column_types(),
         &[
             GraphSetColumnType::Edge,
-            GraphSetColumnType::Scalar,
-            GraphSetColumnType::Scalar
+            GraphSetColumnType::Stored,
+            GraphSetColumnType::Stored
         ]
     );
 }

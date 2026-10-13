@@ -68,7 +68,7 @@ fn z(values: impl IntoIterator<Item = (CanonicalScalar, i128)>) -> ZSet<GraphVal
     .unwrap()
 }
 fn seed(input: &ZSet<GraphValueRow>) -> Operator {
-    let mut state = Operator::new(definition(), &[GraphSetColumnType::Scalar]).unwrap();
+    let mut state = Operator::new(definition(), &[GraphSetColumnType::Stored]).unwrap();
     state
         .prepare(input, LIMBS, None, &mut allow)
         .unwrap()
@@ -229,7 +229,7 @@ fn multiplicities_are_weighted_and_ceiling_replacements_remove_before_adding() {
         None,
     )
     .unwrap();
-    let mut distinct = Operator::new(definition, &[GraphSetColumnType::Scalar]).unwrap();
+    let mut distinct = Operator::new(definition, &[GraphSetColumnType::Stored]).unwrap();
     apply(&mut distinct, [(float(0.5), i128::MAX)]);
     assert_eq!(values(&distinct), vec![f(0.5); 2]);
 }

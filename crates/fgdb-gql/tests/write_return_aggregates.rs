@@ -102,7 +102,7 @@ fn create_groups_actual_frozen_identities_and_null_keys() {
     assert_eq!(
         query.column_types(),
         &[
-            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Stored,
             GraphSetColumnType::Scalar,
             GraphSetColumnType::Scalar,
             GraphSetColumnType::Scalar,
