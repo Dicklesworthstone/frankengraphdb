@@ -494,7 +494,8 @@ impl<V: Vfs + Clone> BlockStore<V> {
             observe(RootReadEvent::ObjectStart)?;
             // Keep decoding in this future: the ordinary open's optional
             // blocking-pool decode could outlive a dropped admission future
-            // and thus outlive this affine workspace charge.
+            // and thus outlive this affine workspace charge. For the same
+            // reason no hosted patch is prefetched: admission reads it.
             let bytes = self
                 .get_bytes(cx, crate::DeltaBlockVersion(reference.block_id))
                 .await?;
@@ -505,7 +506,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
                     at,
                     root.partition,
                     reference,
-                    Ok((bytes, decoded)),
+                    Ok(((bytes, decoded), None)),
                     &mut observe,
                 )
                 .await?;

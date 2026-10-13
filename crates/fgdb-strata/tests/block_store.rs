@@ -1147,6 +1147,145 @@ fn a_prefetching_reopen_reports_the_first_damaged_block_in_root_order() {
     });
 }
 
+/// **A root walk that reads each block's hosted property patch ahead of
+/// admission, and proves it off the async task, accepts and refuses exactly as
+/// the one-object-at-a-time walk (fgdb-2n2a2).** Forty propertied blocks, so
+/// the window reaches past the first damage. The bounded reopen (window 1: the
+/// patch is read at admission) and both prefetching reopen faces return the
+/// same rows, then report the same first refusal: the early block's patch
+/// replaced by a later block's lawful patch (an identity refusal naming both),
+/// then the early patch over the object ceiling (a read refusal at its
+/// position). Meanwhile a patch inside the window is garbage, so a walk that
+/// reported whichever proof failed first, or trusted a prefetched proof it
+/// never ran, is caught.
+#[test]
+fn a_prefetching_reopen_proves_hosted_patches_as_the_serial_walk_does() {
+    use fgdb_delta_types::{DeltaRow, PropertyKeyId};
+    use fgdb_strata::edge_props::EdgePropertyPatchError;
+    use fgdb_strata::store::{OPEN_READS_IN_FLIGHT, RootReadError, RootReadLimits};
+    use fgdb_types::CanonicalScalar;
+    let dir = scratch_dir("reopen-prefetch-patches");
+    let ((), report) = run_async_under_lab(0x2a_6e, move |runtime| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+        let (cx, query) = (contexts.commit(), contexts.query());
+        let keys: (&[u8; 32], DatabaseSecurityNamespaceId) = (&K_OID, NAMESPACE);
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        seed_triangle(&mut writer, keys);
+        // One source vertex per edge, so every edge is its own block family,
+        // and every edge carries a property, so every block hosts a patch.
+        for i in 0..40u128 {
+            writer
+                .apply(keys, CommitSeq(1), &create_vertex(1_000 + i))
+                .expect("creates a source");
+            let row = DeltaRow::CreateEdge {
+                eid: EId(100 + i),
+                birth_ordinal: 100 + i as u64,
+                src: VId(1_000 + i),
+                relation: REL,
+                dst: VId(1),
+                canonical_key: None,
+                props: vec![(PropertyKeyId(7), CanonicalScalar::Int(i as i64))],
+                valid_time: None,
+            };
+            writer
+                .apply(keys, CommitSeq(1), &row)
+                .expect("creates a propertied edge");
+        }
+        writer.seal(keys).expect("seals");
+        let (root, blocks, patches) = writer.publish(keys, CommitSeq(1)).expect("publishes");
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        for block in &blocks {
+            let hosted = block
+                .property_patch
+                .as_ref()
+                .expect("every block hosts a patch");
+            store
+                .put_edge_property_patch(&cx, &hosted.bytes)
+                .await
+                .expect("stores the hosted patch");
+            store.put(&cx, &block.bytes).await.expect("stores block");
+        }
+        for patch in &patches {
+            store
+                .put_patch(&cx, &patch.bytes)
+                .await
+                .expect("stores a vertex patch");
+        }
+        let root_id = store.put_root(&cx, &root).await.expect("stores root");
+
+        let (early, late) = (3, 3 + OPEN_READS_IN_FLIGHT / 2);
+        assert!(
+            root.blocks.len() > late,
+            "the window reaches the later damage"
+        );
+        let hosted_at = |at: usize| {
+            let id = root.blocks[at].block_id;
+            let block = blocks.iter().find(|block| block.block_id == id);
+            block
+                .and_then(|block| block.property_patch.clone())
+                .expect("a root-named propertied block")
+        };
+        let (early_patch, late_patch) = (hosted_at(early), hosted_at(late));
+
+        let bounded = store
+            .reopen_adjacency_bounded(&query, root_id, CommitSeq(1), RootReadLimits::default())
+            .await
+            .expect("the serial walk reopens");
+        let prefetched = store.reopen(&cx, root_id).await.expect("reopens");
+        let sealed = store.reopen_sealed(&cx, root_id).await.expect("reopens");
+        assert_eq!(bounded.2.len(), 40);
+        assert!(
+            bounded
+                .2
+                .iter()
+                .all(|props| props.as_ref().is_some_and(|props| props.rows.len() == 1))
+        );
+        assert_eq!(prefetched.1, bounded.1, "the same entries");
+        assert_eq!(prefetched.2, bounded.2, "the same proven rows");
+        assert_eq!(sealed.block_props, bounded.2, "the same proven rows");
+
+        std::fs::write(store.path(late_patch.patch_id), b"damaged").expect("plants garbage");
+        std::fs::write(store.path(early_patch.patch_id), &late_patch.bytes)
+            .expect("plants a lawful foreign patch");
+        let foreign = |error: &StoreError| {
+            matches!(error, StoreError::MalformedEdgePropertyPatch(
+                EdgePropertyPatchError::IdentityMismatch { expected, actual }
+            ) if *expected == early_patch.patch_id && *actual == late_patch.patch_id)
+        };
+        let oversized = |error: &StoreError| {
+            matches!(error, StoreError::BlockPatchLoad { at, error }
+                if *at == early && matches!(**error, StoreError::ObjectTooLarge { .. }))
+        };
+        for (damage, refusal) in [
+            (None, &foreign as &(dyn Fn(&StoreError) -> bool + Sync)),
+            (Some(vec![0u8; 64 * 256 + 1]), &oversized),
+        ] {
+            if let Some(bytes) = damage {
+                std::fs::write(store.path(early_patch.patch_id), bytes).expect("plants");
+            }
+            match store
+                .reopen_adjacency_bounded(&query, root_id, CommitSeq(1), RootReadLimits::default())
+                .await
+            {
+                Err(RootReadError::Store(error)) => assert!(refusal(&error), "{error:?}"),
+                other => panic!("the serial walk must refuse: {:?}", other.map(|_| ())),
+            }
+            let error = store.reopen(&cx, root_id).await.expect_err("refuses");
+            assert!(refusal(&error), "{error:?}");
+            match store.reopen_sealed(&cx, root_id).await {
+                Err(error) => assert!(refusal(&error), "{error:?}"),
+                Ok(_) => panic!("the sealed reopen must refuse"),
+            }
+        }
+    });
+    assert!(
+        report.invariant_violations.is_empty(),
+        "lab invariant violation: {report:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The receipted publish path (fgdb-gieu)
 // ---------------------------------------------------------------------------
