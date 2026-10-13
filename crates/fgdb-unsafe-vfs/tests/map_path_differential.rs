@@ -16,7 +16,7 @@
 //! that unmapped the wrong range, or unmapped twice, would be visible as
 //! garbage or a fault in the views that remain.
 
-use fgdb_unsafe_vfs::{COMPILED_MAP_PATHS, FileView, MapPath, open_view};
+use fgdb_unsafe_vfs::{COMPILED_MAP_PATHS, FileView, open_view};
 use std::fs::File;
 
 const CORPUS_BYTES: usize = 5 * 4096 + 1237;
@@ -172,7 +172,7 @@ fn the_last_byte_of_the_file_is_readable_on_every_path() {
 #[test]
 fn the_ledgered_path_is_actually_in_this_build() {
     assert!(
-        COMPILED_MAP_PATHS.contains(&MapPath::Mapped),
+        COMPILED_MAP_PATHS.contains(&fgdb_unsafe_vfs::MapPath::Mapped),
         "on x86-64 Linux the mapped path must be compiled, or this harness is \
          comparing the fallback against itself and would pass with the syscall \
          removed"
