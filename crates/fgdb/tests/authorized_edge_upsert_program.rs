@@ -396,3 +396,6 @@ fn prepared_parameter_batches_rebind_without_refreshing_the_program_or_permit() 
         }
     });
 }
+
+#[path = "authorized_edge_upsert_program/returning.rs"]
+mod returning;

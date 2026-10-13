@@ -715,7 +715,7 @@ async fn write_returning(
             .map(|(_, rows, completion)| (rows, completion))
             .map_err(returning_refusal),
         Returning::EdgeUpsert(prepared) => guard
-            .execute_graph_edge_upsert_query_authorized(
+            .execute_graph_edge_upserts_query_authorized(
                 &txn,
                 &query,
                 &commit,
@@ -727,7 +727,7 @@ async fn write_returning(
                 unix_millis,
             )
             .await
-            .map(|(_, _, rows, completion)| (rows, completion))
+            .map(|(_, rows, completion)| (rows, completion))
             .map_err(returning_refusal),
         Returning::EdgeMerge(prepared) => guard
             .execute_graph_edge_merge_query_authorized(
@@ -942,3 +942,6 @@ pub(crate) fn schema(db: &Served, token: &CapabilityToken) -> Result<Schema, Ref
 
 #[cfg(test)]
 mod all_target_merge_tests;
+
+#[cfg(test)]
+mod occurrence_upsert_tests;
