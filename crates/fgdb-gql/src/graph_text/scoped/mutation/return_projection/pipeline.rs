@@ -40,7 +40,8 @@ pub(in crate::graph_text) const BOUNDARY_READ_NAMES: [&str; 16] = [
 /// WITH's hidden reads can resolve. The scope ends at a later WITH or UNWIND
 /// stage, another MATCH, a CALL, or a set operator. The WITH's own WHERE, its
 /// pages and a terminal RETURN are inside the scope. `WITH` after STARTS/ENDS
-/// is a text predicate, not a new clause.
+/// is a text predicate, not a new clause, and `MATCH` after ON is a MERGE's
+/// ON MATCH SET clause, whose right-hand sides read the row (fgdb-cpny9).
 pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
     word: &str,
     previous: Option<TokenKind<'_>>,
@@ -48,6 +49,11 @@ pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
     if word.eq_ignore_ascii_case("WITH") {
         return !matches!(previous, Some(TokenKind::Word(previous))
             if previous.eq_ignore_ascii_case("STARTS") || previous.eq_ignore_ascii_case("ENDS"));
+    }
+    if word.eq_ignore_ascii_case("MATCH")
+        && matches!(previous, Some(TokenKind::Word(previous)) if previous.eq_ignore_ascii_case("ON"))
+    {
+        return false;
     }
     [
         "MATCH",
