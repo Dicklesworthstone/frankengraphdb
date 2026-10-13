@@ -104,7 +104,10 @@ impl PreparedGraphWriteChainText {
             next = after;
         }
         if steps.len() < 2 {
-            return Err(expected(body.len(), "WITH and another CREATE after the CREATE"));
+            return Err(expected(
+                body.len(),
+                "WITH and another CREATE after the CREATE",
+            ));
         }
         Ok(Self {
             statement: statement.to_owned(),
@@ -196,5 +199,42 @@ impl PreparedGraphWriteChainText {
             .into());
         }
         Ok(PreparedGraphWriteChain { steps })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PreparedGraphWriteChainText;
+
+    #[test]
+    fn a_chain_is_a_create_then_with_then_another_create_at_top_level() {
+        for text in [
+            "CREATE (a) WITH a CREATE (b)",
+            "CREATE (a) WITH a WITH * CREATE (b) CREATE (a)<-[:T]-(b)",
+            "MATCH (n) WITH n AS a CREATE (a)-[:T]->() WITH a AS x CREATE (x)-[:T]->() RETURN x",
+            "CREATE (a) WITH a UNWIND [0] AS i CREATE (b)",
+            "create (a) with a create (b);",
+        ] {
+            assert!(
+                PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+        }
+        for text in [
+            "CREATE (a) WITH a RETURN a",
+            "CREATE (a) CREATE (b)",
+            "MATCH (n) WITH n AS a CREATE (a)-[:T]->()",
+            "MATCH (create) WITH create CREATE (b)",
+            "MATCH (n) WHERE n.name STARTS WITH 'x' CREATE (m) RETURN m",
+            "CREATE (n {p: 'WITH CREATE (x)'}) WITH n RETURN n",
+            "MERGE (a) ON CREATE SET a.p = 1 WITH a MATCH (b) RETURN b",
+            "CREATE (a); MATCH (n) WITH n CREATE (b)",
+            "RETURN 1",
+        ] {
+            assert!(
+                !PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+        }
     }
 }

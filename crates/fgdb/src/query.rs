@@ -299,6 +299,24 @@ fn prepare_insert_return(
     .bind_parameters(params)
 }
 
+/// `CREATE ... WITH ... CREATE ... [RETURN ...]` (fgdb-cpny9): every step is
+/// prepared and bound before any executes.
+fn prepare_write_chain(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    relation: RelationId,
+) -> Result<PreparedGraphWriteChain, GraphInsertTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphWriteChainText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
 fn prepare_mutation_return(
     text: &str,
     params: &GqlParameters,
@@ -471,6 +489,37 @@ impl<V: Vfs + Clone> Database<V> {
         budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
+        // A chain claims its text before CREATE RETURN, whose classifier
+        // would otherwise see the final RETURN of a multi-write statement.
+        if PreparedGraphWriteChainText::is_chain(text).map_err(QueryWriteError::InsertText)? {
+            let chain = prepare_write_chain(text, params, resolver, relation)
+                .map_err(QueryWriteError::InsertText)?;
+            let columns = chain.columns().to_vec();
+            let (_, rows, receipt, completion) = self
+                .execute_graph_write_chain_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &chain,
+                    budget.insertion_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .await
+                .map_err(QueryWriteError::Insert)?;
+            return Ok(if chain.returns_rows() {
+                values(columns, rows.value)
+            } else {
+                QueryResult::Write {
+                    receipt,
+                    completion: Some(completion),
+                }
+            });
+        }
         if PreparedGraphInsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::InsertText)?
         {
@@ -633,6 +682,33 @@ impl WriteTxn {
         budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
+        if PreparedGraphWriteChainText::is_chain(text).map_err(QueryWriteError::InsertText)? {
+            let chain = prepare_write_chain(text, params, resolver, relation)
+                .map_err(QueryWriteError::InsertText)?;
+            let columns = chain.columns().to_vec();
+            let (_, rows, receipt) = self
+                .execute_graph_write_chain_governed(
+                    database,
+                    cx,
+                    &chain,
+                    budget.insertion_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .map_err(QueryWriteError::Insert)?;
+            return Ok(if chain.returns_rows() {
+                values(columns, rows.value)
+            } else {
+                QueryResult::Write {
+                    receipt,
+                    completion: None,
+                }
+            });
+        }
         if PreparedGraphInsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::InsertText)?
         {

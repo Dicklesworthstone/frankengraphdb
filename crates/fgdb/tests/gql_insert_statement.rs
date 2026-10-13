@@ -473,6 +473,160 @@ fn create_after_with_reads_the_with_row() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-cpny9 (TCK Create3 [2], [7]-[10]): in one statement, a CREATE after
+/// a CREATE's WITH runs once per row that WITH returned and sees the earlier
+/// write. All writes publish together or not at all; each step binds exactly
+/// the parameters it names.
+#[test]
+fn chained_creates_read_the_previous_writes_rows() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a1, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, true).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str, params: GqlParameters| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &params,
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let labelled = |db: &Database<MemVfs>, label: LabelId| {
+            db.vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == vec![label])
+                .collect::<Vec<_>>()
+        };
+        // Two WITH rows: each runs both CREATEs, and the second reads the
+        // copy the first made for that row.
+        let edges = db.edges().unwrap().len();
+        let returned = write(
+            &mut db,
+            "MATCH (n:Source) WITH n AS a CREATE (a)-[:R]->(b:Copy) \
+             WITH a AS x, b AS y CREATE (x)-[:R]->(y) RETURN x, y",
+            GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { columns, rows } = returned else {
+            unreachable!("a chain with RETURN answers rows")
+        };
+        assert_eq!(columns, ["x", "y"]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(labelled(&db, COPY).len(), 2);
+        assert_eq!(db.edges().unwrap().len(), edges + 4);
+        // Every copy now has two edges from its own source.
+        for copy in labelled(&db, COPY) {
+            let into = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.dst == copy.vid)
+                .map(|edge| edge.entry.src)
+                .collect::<Vec<_>>();
+            assert_eq!(into.len(), 2, "{into:?}");
+            assert_eq!(into[0], into[1]);
+            assert!([VId(10), VId(20)].contains(&into[0]));
+        }
+        // A carried vertex's property, as the earlier CREATE wrote it, feeds
+        // the next one; without RETURN the chain answers a write receipt.
+        let person = write(
+            &mut db,
+            "CREATE (a:Person {p: 7}) WITH a CREATE (b:Person {p: a.p + 1}) \
+             CREATE (a)<-[:R]-(b)",
+            GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        let QueryResult::Write { receipt, .. } = person else {
+            unreachable!("a chain without RETURN answers a write receipt")
+        };
+        assert_eq!(receipt.stats().created_vertices, 2);
+        assert_eq!(receipt.stats().created_edges, 1);
+        assert_eq!(receipt.steps().len(), 2);
+        let written = labelled(&db, PERSON)
+            .into_iter()
+            .flat_map(|vertex| vertex.props)
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        assert_eq!(written.len(), 2, "{written:?}");
+        for value in [7, 8] {
+            assert!(
+                written.contains(&CanonicalScalar::Int(value).into()),
+                "{written:?}"
+            );
+        }
+        // UNWIND between the writes multiplies the rows the next one reads.
+        let counted = write(
+            &mut db,
+            "CREATE (a:Person) WITH a UNWIND [1, 2, 3] AS i \
+             CREATE (:Copy {p: i})-[:R]->(a) RETURN count(*) AS c",
+            GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = counted else {
+            unreachable!("a chain with RETURN answers rows")
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(labelled(&db, COPY).len(), 5);
+        // Each step binds exactly the parameters it names.
+        let params = GqlParameters::new()
+            .with_int64("first", 40)
+            .unwrap()
+            .with_int64("second", 41)
+            .unwrap();
+        write(
+            &mut db,
+            "CREATE (a:Person {p: $first}) WITH a CREATE (:Copy {p: $second})",
+            params.clone(),
+        )
+        .await
+        .unwrap();
+        let frontier = db.frontier().unwrap();
+        let extra = params.clone().with_int64("unused", 0).unwrap();
+        assert!(
+            write(
+                &mut db,
+                "CREATE (a:Person {p: $first}) WITH a CREATE (:Copy {p: $second})",
+                extra,
+            )
+            .await
+            .is_err()
+        );
+        // A failing later step publishes none of the earlier ones.
+        assert!(
+            write(
+                &mut db,
+                "CREATE (a:Person {p: 0}) WITH a CREATE (:Copy {p: 1 / a.p})",
+                GqlParameters::new(),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn readme_insert_example_runs_through_database_query_write() {
     let ((), report) = run_async_under_lab(0x1a5e_adaa, |root| async move {

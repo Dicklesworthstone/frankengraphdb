@@ -1268,8 +1268,15 @@ impl PreparedGraphInsertText {
         let (parsed, returning, continuation) = parser.insertion_over_row(&schema, returning)?;
         let read = parser.finish_write_row_prefix(statement, head, stages)?;
         let input = read.resolve(crate::graph_text::LentResolver(&mut resolve))?;
-        let (template, returning) =
-            Self::finish_over_row(statement, relation, &mut resolve, at, parsed, returning, input)?;
+        let (template, returning) = Self::finish_over_row(
+            statement,
+            relation,
+            &mut resolve,
+            at,
+            parsed,
+            returning,
+            input,
+        )?;
         Ok((template, returning, continuation))
     }
 
@@ -1311,8 +1318,15 @@ impl PreparedGraphInsertText {
             correlations: Vec::new(),
             owned: Some((columns, types)),
         };
-        let (template, returning) =
-            Self::finish_over_row(statement, relation, &mut resolve, at, parsed, returning, input)?;
+        let (template, returning) = Self::finish_over_row(
+            statement,
+            relation,
+            &mut resolve,
+            at,
+            parsed,
+            returning,
+            input,
+        )?;
         Ok((template, returning, continuation))
     }
 
@@ -1407,8 +1421,10 @@ impl PreparedGraphInsertText {
             })
         });
         if created_maps || source_metadata {
-            let catalog =
-                std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(&mut *resolve, statement));
+            let catalog = std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(
+                &mut *resolve,
+                statement,
+            ));
             if let Some(selection) = input.selection.as_mut() {
                 selection.reverse_catalog = Some(std::sync::Arc::clone(&catalog));
             }

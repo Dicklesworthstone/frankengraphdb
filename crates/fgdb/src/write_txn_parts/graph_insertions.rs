@@ -133,6 +133,232 @@ impl WriteTxn {
         self.execute_graph_insert_query_governed(database, cx, query, policy, allocate)
     }
 
+    /// Stage a chained write (`CREATE (a) WITH a CREATE (b) [RETURN ...]`,
+    /// fgdb-cpny9) as one atomic operation. Each step stages its creation
+    /// before the next step reads the rows it returned, so a later write sees
+    /// the earlier ones; every step runs in this one workspace. The steps share
+    /// `policy` cumulatively: source records, work, scratch and created
+    /// vertices/edges count across the whole statement, and only the last
+    /// step's RETURN rows meet the result-row allowance (earlier rows are the
+    /// statement's private input to the next write).
+    ///
+    /// Failure, cancellation and unwinding restore the staged prefix the
+    /// statement found, as for every write program. Issued identities are not
+    /// reclaimed. A chain without RETURN returns zero rows.
+    pub fn execute_graph_write_chain_governed<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        chain: &fgdb_gql::PreparedGraphWriteChain,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+        mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> WriteChainResult<A> {
+        use fgdb_gql::insertion::{GraphInsertError, GraphInsertPolicy, GraphInsertStats};
+        use fgdb_gql::{
+            GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+            GraphInsertQueryError, GraphWriteChainStep, GraphWriteProgramReceipt,
+            GraphWriteProgramStats, GraphWriteStepReceipt,
+        };
+        let source = |error| {
+            GqlQueryError::Source(GraphInsertQueryError::Insertion(GraphInsertError::Source(
+                error,
+            )))
+        };
+        self.ensure_database(database).map_err(source)?;
+        let live = database
+            .frontier()
+            .map_err(WriteTxnError::from)
+            .map_err(source)?;
+        if live != self.basis {
+            return Err(source(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            }));
+        }
+        // What the statement has left after the steps so far.
+        let remaining = |used: &GraphInsertStats, last: bool| {
+            let records = policy
+                .query
+                .rows
+                .max_snapshot_records()
+                .map_or(u64::MAX, |limit| {
+                    limit.saturating_sub(used.selection.snapshot_records)
+                });
+            let rows = if last {
+                policy.query.rows.max_result_rows().unwrap_or(u64::MAX)
+            } else {
+                u64::MAX
+            };
+            GraphInsertPolicy::new(
+                GqlQueryPolicy::new(
+                    records,
+                    rows,
+                    policy
+                        .query
+                        .evaluator
+                        .max_work_units
+                        .saturating_sub(used.evaluator.work_units),
+                    policy
+                        .query
+                        .evaluator
+                        .max_scratch_entries
+                        .saturating_sub(used.evaluator.scratch_entries),
+                ),
+                policy.max_vertices.saturating_sub(used.created_vertices),
+                policy.max_edges.saturating_sub(used.created_edges),
+            )
+        };
+        let add = |used: &mut GraphInsertStats, step: &GraphInsertStats| {
+            used.selection.snapshot_records = used
+                .selection
+                .snapshot_records
+                .saturating_add(step.selection.snapshot_records);
+            used.evaluator.work_units = used
+                .evaluator
+                .work_units
+                .saturating_add(step.evaluator.work_units);
+            used.evaluator.scratch_entries = used
+                .evaluator
+                .scratch_entries
+                .saturating_add(step.evaluator.scratch_entries);
+            used.created_vertices = used.created_vertices.saturating_add(step.created_vertices);
+            used.created_edges = used.created_edges.saturating_add(step.created_edges);
+        };
+        cx.with_restriction(|| {
+            let workspace = MutationProgramWorkspace::new(self);
+            let mut used = GraphInsertStats {
+                selection: GqlExecutionStats {
+                    snapshot_records: 0,
+                    result_rows: 0,
+                },
+                evaluator: GlaExecutionStats::default(),
+                created_vertices: 0,
+                created_edges: 0,
+            };
+            let mut rows = None;
+            let mut result = None;
+            let mut receipts = Vec::with_capacity(chain.steps().len());
+            let last = chain.steps().len().saturating_sub(1);
+            for (at, step) in chain.steps().iter().enumerate() {
+                let allowance = remaining(&used, at == last);
+                let (stats, returning) = match step {
+                    GraphWriteChainStep::Query(query) => {
+                        let proposal = query.execute_governed_over(
+                            rows.take(),
+                            allowance,
+                            |pattern, allowance| {
+                                workspace.txn.execute_graph_pattern_governed(
+                                    database, cx, pattern, allowance,
+                                )
+                            },
+                            &mut allocate,
+                            || cx.checkpoint(),
+                        )?;
+                        let (insertion, returning) = proposal.into_parts();
+                        let (stats, vertices, edges) = workspace
+                            .txn
+                            .stage_graph_insert_batch(
+                                database,
+                                cx,
+                                query.insertion().relation(),
+                                insertion,
+                                true,
+                            )
+                            .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
+                        receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
+                        (stats, returning)
+                    }
+                    GraphWriteChainStep::Insert(insertion) => {
+                        let proposal = insertion
+                            .execute_governed_over(
+                                rows.take(),
+                                allowance,
+                                |pattern, allowance| {
+                                    workspace.txn.execute_graph_pattern_governed(
+                                        database, cx, pattern, allowance,
+                                    )
+                                },
+                                &mut allocate,
+                                || cx.checkpoint(),
+                            )
+                            .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
+                        let (stats, vertices, edges) = workspace
+                            .txn
+                            .stage_graph_insert_batch(
+                                database,
+                                cx,
+                                insertion.relation(),
+                                proposal,
+                                true,
+                            )
+                            .map_err(|error| error.map_source(GraphInsertQueryError::Insertion))?;
+                        receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
+                        let returning = GqlQueryExecution {
+                            value: Vec::new(),
+                            rows: GqlExecutionStats {
+                                snapshot_records: stats.selection.snapshot_records,
+                                result_rows: 0,
+                            },
+                            evaluator: stats.evaluator,
+                        };
+                        (stats, returning)
+                    }
+                };
+                add(&mut used, &stats);
+                if at == last {
+                    result = Some(returning);
+                } else {
+                    rows = Some(returning.value);
+                }
+            }
+            // Only the gql compiler builds a chain, always with two or more
+            // steps; an empty one would have nothing to stage.
+            let Some(mut returning) = result else {
+                return Err(source(WriteTxnError::NoPreparedWrite));
+            };
+            // Whole-statement counters, as every write RETURN reports them.
+            returning.rows.snapshot_records = used.selection.snapshot_records;
+            returning.evaluator = used.evaluator;
+            used.selection.result_rows = returning.rows.result_rows;
+            let receipt = GraphWriteProgramReceipt::new(
+                GraphWriteProgramStats {
+                    completed_statements: 1,
+                    selection: used.selection,
+                    evaluator: used.evaluator,
+                    target_vertex_visits: 0,
+                    target_edge_visits: 0,
+                    mutation_effects: 0,
+                    created_vertices: used.created_vertices,
+                    created_edges: used.created_edges,
+                },
+                receipts,
+            );
+            // Every step's work and cancellation check precedes acceptance.
+            workspace.accept();
+            Ok((used, returning, receipt))
+        })
+    }
+
+    /// A chained write with identities reserved by the owning database.
+    pub fn execute_graph_write_chain_engine_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        chain: &fgdb_gql::PreparedGraphWriteChain,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+    ) -> WriteChainResult<WriteTxnError> {
+        use fgdb_gql::insertion::GraphInsertError;
+        use fgdb_gql::{GqlQueryError, GraphInsertQueryError};
+        let source = |error| {
+            GqlQueryError::Source(GraphInsertQueryError::Insertion(GraphInsertError::Source(
+                error,
+            )))
+        };
+        self.ensure_database(database).map_err(source)?;
+        let allocate = database.engine_allocator(cx).map_err(source)?;
+        self.execute_graph_write_chain_governed(database, cx, chain, policy, allocate)
+    }
+
     /// INSERT/CREATE with identities reserved by the owning database.
     pub fn execute_graph_insert_engine_governed<V: Vfs + Clone>(
         &mut self,

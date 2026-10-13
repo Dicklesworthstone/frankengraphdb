@@ -26,6 +26,7 @@ pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub(crate) use procedure::{BorrowedSource, DynPatterns, DynProcedures, PatternSource};
+pub(crate) use procedure::WithOwnedRows;
 pub use procedure::{
     GraphPatternFactorExecution, GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection,
     ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
@@ -37,7 +38,6 @@ pub(crate) use projection::{
     slice_bounds, temporal_arithmetic, temporal_field, temporal_field_name,
     temporal_field_scratch_entries, timestamp_text, value_function,
 };
-pub(crate) use procedure::WithOwnedRows;
 pub use projection::{
     GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetProjection,
     GraphSetProjectionError, GraphSetValue, GraphTemporalFunction, GraphValueFunction,
