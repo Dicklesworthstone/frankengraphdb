@@ -335,6 +335,12 @@ impl<'a> Parser<'a> {
                     self.insertion_source_value(inputs, schema)?
                 };
                 self.scalar_property_value(value, at, schema, inputs)?
+            } else if self.list_chain_follows(None)? {
+                // A `+` chain with a list operand (`[1] + [2]`, `n.p + [3]`)
+                // reads whole through the list sum over the MATCH columns,
+                // as a SET list value does (fgdb-k3nub).
+                let value = self.read_graph_value(inputs, 0)?;
+                self.scalar_property_value(value, at, &[], inputs)?
             } else if self.starts_let_operand()? || self.is_punct(b'[') {
                 // A temporal constructor, a quantifier, a list function,
                 // keys() or size() is a value-language operand that the

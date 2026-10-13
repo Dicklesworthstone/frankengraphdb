@@ -333,7 +333,7 @@ impl<'a> Parser<'a> {
                     // (fgdb-k3nub), evaluated once when the statement binds.
                     // One built from the MERGE vertex's own fields is not yet.
                     let mut inputs = Vec::new();
-                    let value = self.insertion_source_value(&mut inputs, &[])?;
+                    let value = self.read_graph_value(&mut inputs, 0)?;
                     if !inputs.is_empty() {
                         return Err(GraphVertexUpsertTextError {
                             offset: at,

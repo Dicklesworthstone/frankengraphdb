@@ -150,7 +150,7 @@ impl<'a> Parser<'a> {
             // from the relationship's own fields is not yet.
             let mut inputs = Vec::new();
             let value = self
-                .insertion_source_value(&mut inputs, &[])
+                .read_graph_value(&mut inputs, 0)
                 .map_err(crate::GraphMutationTextError::from)?;
             if !inputs.is_empty() {
                 return Err(error(
