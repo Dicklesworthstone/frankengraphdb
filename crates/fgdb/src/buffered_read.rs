@@ -18,8 +18,10 @@ pub enum BufferedOpenError {
     Open(OpenError),
     Read(BufferedReadError),
     Memory(MemoryError),
-    /// The recovered chain has no current published checkpoint. Healing uses
-    /// the ordinary writable open and is never an implicit unbounded fallback.
+    /// The committed chain has no current published checkpoint: none yet, or
+    /// a root behind it (a live writer mid-publication, or a crash). Healing
+    /// is the writer's or the ordinary writable open's, never an implicit
+    /// unbounded fallback.
     RecoveryRequired,
 }
 
@@ -30,7 +32,7 @@ impl core::fmt::Display for BufferedOpenError {
             Self::Read(error) => error.fmt(f),
             Self::Memory(error) => error.fmt(f),
             Self::RecoveryRequired => f.write_str(
-                "buffered open needs a current authenticated checkpoint; recover through Database::open first",
+                "buffered open needs a current authenticated checkpoint, and the published root is missing or behind the commit log (a live writer publishes it; otherwise recover through Database::open first)",
             ),
         }
     }
@@ -186,10 +188,10 @@ impl Database<UnixVfs> {
     ///
     /// This authenticates the same slot, manifest coordinate and Chronicle
     /// chain binding as open_read_view. It admits graph objects under explicit
-    /// bounds and releases the writer lease before returning. A missing or
-    /// lagging checkpoint yields RecoveryRequired; it does not allocate a full
-    /// resident database as a fallback. The caller owns the pool and chooses
-    /// both metadata and graph read limits.
+    /// bounds, takes no writer lease and writes nothing, so it reads beside a
+    /// live writer. A missing or lagging checkpoint yields RecoveryRequired;
+    /// it does not allocate a full resident database as a fallback. The
+    /// caller owns the pool and chooses both metadata and graph read limits.
     pub async fn open_buffered_read_view(
         cx: &CommitCx,
         path: impl AsRef<Path>,
@@ -214,12 +216,14 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<BufferedReadView<V>, BufferedOpenError> {
         let path = path.as_ref();
         require_database_dir(cx, &vfs, path).await?;
-        let coordinator =
-            CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys())
-                .await
-                .map_err(OpenError::Commit)?;
-        let store = open_block_store(cx, &vfs, path, &keys).await?;
-        let probe = RootStore::with_vfs(vfs, path);
+        // Like the resident read view's fast path, this takes no writer lease
+        // and writes nothing (fgdb-xxxnb): the committed chain is scanned
+        // without repairing a torn tail, and the store is opened only to read.
+        // A lagging root refuses below, so nothing here ever needs to heal.
+        let Some(store) = open_block_store_for_read(cx, &vfs, path, &keys).await? else {
+            return Err(BufferedOpenError::RecoveryRequired);
+        };
+        let probe = RootStore::with_vfs(vfs.clone(), path);
         let slot = match probe.current(cx).await {
             Ok(slot) => slot,
             Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -235,14 +239,16 @@ impl<V: Vfs + Clone> Database<V> {
         let resolved = store
             .resolve_manifest_bounded(cx, manifest, &limits)
             .await?;
-        let checkpoint = checkpoint_from_manifest(coordinator.chain(), manifest, &resolved, path)?;
-        let chain_frontier = coordinator
-            .chain()
-            .entries()
-            .last()
-            .map_or(CommitSeq::ORIGIN, |entry| {
-                CommitSeq(entry.marker.commit_seq)
-            });
+        // Scanned after the slot was read: a writer appends a marker before
+        // it publishes the root that names it, so this chain reaches the
+        // slot's frontier.
+        let chain = CommitCoordinator::scan_committed_chain(cx, &vfs, path)
+            .await
+            .map_err(OpenError::Commit)?;
+        let checkpoint = checkpoint_from_manifest(&chain, manifest, &resolved, path)?;
+        let chain_frontier = chain.entries().last().map_or(CommitSeq::ORIGIN, |entry| {
+            CommitSeq(entry.marker.commit_seq)
+        });
         if checkpoint.published_at != chain_frontier {
             return Err(BufferedOpenError::RecoveryRequired);
         }
@@ -251,8 +257,7 @@ impl<V: Vfs + Clone> Database<V> {
         let partition = store
             .open_buffered_root(cx, checkpoint.root_id, pool, limits)
             .await?;
-        // The owned reader contains the authenticated immutable root and store,
-        // not the coordinator. Returning drops its exclusive writer lease.
+        // The owned reader contains the authenticated immutable root and store.
         Ok(BufferedReadView {
             partition,
             manifest,

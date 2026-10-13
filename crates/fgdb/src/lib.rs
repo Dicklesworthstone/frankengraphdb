@@ -2520,22 +2520,26 @@ impl Database<UnixVfs> {
     /// Open `path` for reads only, returning a view of its published
     /// generation.
     ///
-    /// Before trusting a root, this authenticates exactly what
-    /// [`Database::open`] does: Chronicle recovery under the writer lease, the
-    /// root slot, and the selected manifest's chain binding (one shared
-    /// selection), then the same verified reopen of every block and patch the
-    /// root names, with the same root admission. What it skips is the state
-    /// only a writer needs: the retained fold, the element-version heads, the
-    /// birth-ordinal allocator, and the delta history. The view's delta window
-    /// is empty at its frontier, so a change cursor older than the frontier is
-    /// refused as retired, never answered from a partial window.
+    /// Before trusting a root, this authenticates what [`Database::open`]
+    /// does: the committed Chronicle chain, the root slot, and the selected
+    /// manifest's chain binding (one shared selection), then the same verified
+    /// reopen of every block and patch the root names, with the same root
+    /// admission. What it skips is the state only a writer needs: the
+    /// retained fold, the element-version heads, the birth-ordinal allocator,
+    /// and the delta history. The view's delta window is empty at its
+    /// frontier, so a change cursor older than the frontier is refused as
+    /// retired, never answered from a partial window.
     ///
-    /// The fast path needs durable state that is already current: a slot that
-    /// names a root published at the recovered chain's frontier. Anything else
-    /// (no slot yet, or commits past the root after a crash or lag) needs the
-    /// writes a full open performs to heal it. In that case this opens fully
-    /// and keeps that handle's generation. Either way the writer lease is
-    /// released before this returns: the view owns no lease and cannot write.
+    /// The fast path takes no writer lease and writes nothing (fgdb-xxxnb):
+    /// it scans the committed chain without repairing a torn tail, and serves
+    /// the slot's root when that root was published at the chain's frontier.
+    /// Otherwise (no slot yet, or commits past the root) the durable state
+    /// needs the writes a full open performs to heal it, and this opens fully
+    /// and keeps that handle's generation, releasing the lease before it
+    /// returns. If a live writer holds the lease (fgdbd, another process),
+    /// healing is that writer's: the view is its last PUBLISHED generation,
+    /// which can be behind the commits it has acknowledged. The view owns no
+    /// lease and cannot write.
     pub async fn open_read_view(
         cx: &CommitCx,
         path: impl AsRef<Path>,
@@ -2774,21 +2778,24 @@ impl<V: Vfs + Clone> Database<V> {
         let path = path.as_ref();
         require_database_dir(cx, &vfs, path).await?;
         let lagging = match Self::read_current_generation(cx, &vfs, path, &keys).await? {
-            ReadGeneration::Current(view) => return Ok(view),
-            ReadGeneration::Lagging(view) => Some(view),
+            ReadGeneration::Current(published) => {
+                return Self::read_published(cx, &keys, published).await;
+            }
+            ReadGeneration::Lagging(published) => Some(published),
             ReadGeneration::Unselected => None,
         };
         // The durable state needs healing first, and healing writes: open
         // fully, then keep only the generation that open published. While a
         // live writer owns the stream (fgdbd, another process), healing is
         // that writer's, and its last published generation is a consistent
-        // read view in the meantime (fgdb-xxxnb).
-        match Self::bind_with_vfs(cx, vfs, path, keys, false).await {
+        // read view in the meantime (fgdb-xxxnb). That generation is read only
+        // then, so a crash that heals here decodes the partition once.
+        match Self::bind_with_vfs(cx, vfs, path, keys.clone(), false).await {
             Ok(database) => Ok(EmbeddedReadView {
                 snapshot: Arc::clone(&database.snapshot),
             }),
             Err(OpenError::Commit(CommitError::WriterAlreadyOpen)) if lagging.is_some() => {
-                Ok(lagging.expect("guarded"))
+                Self::read_published(cx, &keys, lagging.expect("guarded")).await
             }
             Err(error) => Err(error),
         }
@@ -2802,7 +2809,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// reaches the slot's frontier. `Current` when the root was published at
     /// the chain's frontier: nothing is left to fold or heal. `Lagging` when
     /// the chain is ahead of the last published root (a live writer mid-commit,
-    /// or a crash that needs healing): the caller decides which it is.
+    /// or a crash that needs healing): the caller decides which it is. Either
+    /// way the root is selected here and read by [`Self::read_published`].
     ///
     /// Type-erased like `bind_with_vfs`: a caller's `Send` proof
     /// stops at `dyn Future + Send` instead of descending through the
@@ -2814,7 +2822,7 @@ impl<V: Vfs + Clone> Database<V> {
         vfs: &'a V,
         path: &'a Path,
         keys: &'a DatabaseKeys,
-    ) -> SendFuture<'a, Result<ReadGeneration, OpenError>>
+    ) -> SendFuture<'a, Result<ReadGeneration<V>, OpenError>>
     where
         V: 'a,
     {
@@ -2826,18 +2834,9 @@ impl<V: Vfs + Clone> Database<V> {
         vfs: &V,
         path: &Path,
         keys: &DatabaseKeys,
-    ) -> Result<ReadGeneration, OpenError> {
-        let store = BlockStore::open_existing_for_read_with_vfs(
-            cx,
-            vfs.clone(),
-            path,
-            keys.k_oid.clone(),
-            keys.namespace,
-        )
-        .await?;
-        let store = match &keys.scalar_resolver {
-            Some(resolver) => store.with_scalar_resolver(resolver.clone()),
-            None => store,
+    ) -> Result<ReadGeneration<V>, OpenError> {
+        let Some(store) = open_block_store_for_read(cx, vfs, path, keys).await? else {
+            return Ok(ReadGeneration::Unselected);
         };
         let probe = RootStore::with_vfs(vfs.clone(), path);
         let Some((claimed, resolved)) = read_slot(cx, &store, &probe, keys, path).await? else {
@@ -2849,24 +2848,44 @@ impl<V: Vfs + Clone> Database<V> {
             .entries()
             .last()
             .map_or(0, |entry| entry.marker.commit_seq);
-        let (root, blocks, block_props, patches) = store.reopen(cx, checkpoint.root_id).await?;
-        let mut snapshot = current_generation(
-            keys,
-            &chain,
-            checkpoint.root_id,
-            root,
-            blocks,
-            block_props,
-            patches,
-        );
-        snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
-        let view = EmbeddedReadView {
-            snapshot: Arc::new(snapshot),
+        let published = PublishedRead {
+            store,
+            chain,
+            root_id: checkpoint.root_id,
         };
         Ok(if chain_frontier == checkpoint.published_at.0 {
-            ReadGeneration::Current(view)
+            ReadGeneration::Current(published)
         } else {
-            ReadGeneration::Lagging(view)
+            ReadGeneration::Lagging(published)
+        })
+    }
+
+    /// Read a selected published root into a read view: the same verified
+    /// reopen of every block and patch the root names as a full open, bound to
+    /// the chain it was selected against. Its root is content-addressed and
+    /// never removed, so a writer publishing meanwhile cannot change it.
+    /// Type-erased for the same reason as [`Self::read_current_generation`].
+    fn read_published<'a>(
+        cx: &'a CommitCx,
+        keys: &'a DatabaseKeys,
+        published: PublishedRead<V>,
+    ) -> SendFuture<'a, Result<EmbeddedReadView, OpenError>>
+    where
+        V: 'a,
+    {
+        Box::pin(async move {
+            let PublishedRead {
+                store,
+                chain,
+                root_id,
+            } = published;
+            let (root, blocks, block_props, patches) = store.reopen(cx, root_id).await?;
+            let mut snapshot =
+                current_generation(keys, &chain, root_id, root, blocks, block_props, patches);
+            snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
+            Ok(EmbeddedReadView {
+                snapshot: Arc::new(snapshot),
+            })
         })
     }
 
@@ -5770,15 +5789,54 @@ async fn open_block_store<V: Vfs + Clone>(
     })
 }
 
+/// [`open_block_store`] for a reader that holds no writer lease: it creates,
+/// locks and syncs nothing. `None` when the block directory does not exist:
+/// a create interrupted before it, which has no root slot either, so only a
+/// full open can heal it.
+async fn open_block_store_for_read<V: Vfs + Clone>(
+    cx: &CommitCx,
+    vfs: &V,
+    path: &Path,
+    keys: &DatabaseKeys,
+) -> Result<Option<BlockStore<V>>, OpenError> {
+    let store = match BlockStore::open_existing_for_read_with_vfs(
+        cx,
+        vfs.clone(),
+        path,
+        keys.k_oid.clone(),
+        keys.namespace,
+    )
+    .await
+    {
+        Ok(store) => store,
+        Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Some(match &keys.scalar_resolver {
+        Some(resolver) => store.with_scalar_resolver(resolver.clone()),
+        None => store,
+    }))
+}
+
 /// What the read-only open's lease-free fast path found.
-enum ReadGeneration {
+enum ReadGeneration<V: Vfs> {
     /// The slot's root was published at the committed chain's frontier.
-    Current(EmbeddedReadView),
+    Current(PublishedRead<V>),
     /// The committed chain is ahead of the last published root: a live
     /// writer mid-commit, or a crash that needs healing.
-    Lagging(EmbeddedReadView),
+    Lagging(PublishedRead<V>),
     /// No root slot yet (an interrupted create): only a full open can heal it.
     Unselected,
+}
+
+/// A published root the lease-free path selected and bound to the chain it
+/// scanned, not yet read.
+struct PublishedRead<V: Vfs> {
+    store: BlockStore<V>,
+    chain: fgdb_chronicle::MarkerChain,
+    root_id: PartitionRootVersion,
 }
 
 /// The checkpoint a root slot selects, once verified (fgdb-ge6a).
