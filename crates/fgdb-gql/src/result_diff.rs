@@ -96,6 +96,41 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphDiffError<E> {
 type Row = Box<[GraphAggregateValue]>;
 type Error<E, C> = GqlQueryError<GraphDiffError<E>, C>;
 
+/// Completed result changes without source or evaluator diagnostics. A host
+/// may release these after its own final authorization/delivery admission.
+/// This value grants no authority and does not claim physical noninterference.
+/// Equality and Debug cannot expose discarded work or source cardinalities.
+#[derive(PartialEq, Eq)]
+pub struct GraphResultChanges {
+    before: CommitSeq,
+    after: CommitSeq,
+    columns: Box<[String]>,
+    changes: ZSet<Row>,
+}
+impl GraphResultChanges {
+    pub fn before(&self) -> CommitSeq {
+        self.before
+    }
+    pub fn after(&self) -> CommitSeq {
+        self.after
+    }
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn changes(&self) -> &ZSet<Row> {
+        &self.changes
+    }
+}
+impl core::fmt::Debug for GraphResultChanges {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphResultChanges")
+            .field("before", &self.before)
+            .field("after", &self.after)
+            .field("data", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// The existing source engine's result and measured usage, not a new evaluator.
 /// Aggregate slots borrow frozen RETURN metadata and preserve repeated aliases.
 /// Constructors do not clone rows, payloads, or layout metadata.
@@ -161,6 +196,18 @@ pub struct GraphResultDiff {
     evaluator: GlaExecutionStats,
 }
 impl GraphResultDiff {
+    /// Move only the completed logical result out of the host's execution.
+    /// Payloads, columns and exact weights are transferred, never cloned.
+    /// Measured usage is discarded, not rewritten as fictitious zero usage.
+    pub fn into_changes(self) -> GraphResultChanges {
+        GraphResultChanges {
+            before: self.before,
+            after: self.after,
+            columns: self.columns,
+            changes: self.changes,
+        }
+    }
+
     pub fn before(&self) -> CommitSeq {
         self.before
     }
@@ -465,3 +512,43 @@ impl<C> Meter<'_, C> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+
+    fn result(work: u64) -> GraphResultDiff {
+        GraphResultDiff {
+            before: CommitSeq(1),
+            after: CommitSeq(2),
+            columns: vec!["private-name".to_owned()].into_boxed_slice(),
+            changes: ZSet::from_updates(
+                [(vec![GraphAggregateValue::Integer(37)].into_boxed_slice(), ZWeight::ONE)],
+                LimbLimit::new(4),
+                &mut |_| Ok::<_, ()>(()),
+            ).unwrap(),
+            rows: GqlExecutionStats { snapshot_records: work, result_rows: 1 },
+            evaluator: GlaExecutionStats { work_units: work, scratch_entries: work },
+        }
+    }
+
+    #[test]
+    fn logical_release_moves_payloads_and_equality_cannot_observe_source_diagnostics() {
+        let result = result(100);
+        let column = result.columns.as_ptr();
+        let row = result.changes.iter().next().unwrap().0.as_ptr();
+        let released = result.into_changes();
+        assert_eq!(released.columns().as_ptr(), column);
+        assert_eq!(released.changes().iter().next().unwrap().0.as_ptr(), row);
+        assert_eq!(released.before(), CommitSeq(1));
+        assert_eq!(released.after(), CommitSeq(2));
+        assert_eq!(released.columns(), ["private-name"]);
+        let other = self::result(9999).into_changes();
+        assert_eq!(released, other);
+        let debug = format!("{released:?}");
+        assert_eq!(debug, format!("{other:?}"));
+        for private in ["private-name", "37", "snapshot_records", "work_units", "scratch_entries"] {
+            assert!(!debug.contains(private));
+        }
+    }
+}

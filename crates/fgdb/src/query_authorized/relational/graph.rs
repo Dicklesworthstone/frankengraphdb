@@ -13,6 +13,22 @@ pub(super) fn graph_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphAggregateRow>, QueryError> {
+    graph_execution_at(snapshot, at, query, scope, execution, policy)
+        .map(|result| result.value)
+        .map_err(aggregate_error)
+}
+
+pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    query: &PreparedGraphAggregate,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    policy: GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
+    GqlQueryError<GraphAggregateError<ReadError>, QueryError>,
+> {
     // Plain, uncaptured aggregate inputs consume binding VISIT order, not the
     // sorted projected bag of a standalone pattern. COLLECT (including its
     // first-occurrence DISTINCT form) exposes that distinction. Computed and
@@ -38,8 +54,6 @@ pub(super) fn graph_at<Clock: FnMut() -> u64>(
             |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
             || execution.borrow_mut().checkpoint(),
         )
-        .map(|result| result.value)
-        .map_err(aggregate_error)
 }
 
 // Reuse the SAME source admission and masking as pattern_at, then the ordinary
@@ -52,7 +66,10 @@ fn visit_at<Clock: FnMut() -> u64>(
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
-) -> Result<Vec<GraphAggregateRow>, QueryError> {
+) -> Result<
+    fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
+    GqlQueryError<GraphAggregateError<ReadError>, QueryError>,
+> {
     let mut usage = AdmissionUsage::default();
     let tables = Tables::admit(
         snapshot,
@@ -79,7 +96,7 @@ fn visit_at<Clock: FnMut() -> u64>(
             usage.observe::<ReadError, QueryError>(policy, event)
         },
     )
-    .map_err(|error| aggregate_error(error.map_source(GraphAggregateError::Source)))?;
+    .map_err(|error| error.map_source(GraphAggregateError::Source))?;
     let result = query.execute_governed(
         tables.records,
         tables.vertices.iter().map(|&(vid, _)| vid),
@@ -92,10 +109,7 @@ fn visit_at<Clock: FnMut() -> u64>(
         usage.remaining(policy),
         || execution.borrow_mut().checkpoint(),
     );
-    usage
-        .finish(policy, result)
-        .map(|result| result.value)
-        .map_err(aggregate_error)
+    usage.finish(policy, result)
 }
 
 impl<V: Vfs + Clone> Database<V> {

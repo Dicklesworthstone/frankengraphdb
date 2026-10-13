@@ -62,6 +62,24 @@ fn set_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphValueRow>, QueryError> {
+    set_execution_at(snapshot, at, query, scope, execution, policy)
+        .map(|result| result.value)
+        .map_err(set_error)
+}
+
+// Keep measured usage inside the authorized host for multi-endpoint execution.
+// Ordinary reads discard it at their existing delivery boundary, as before.
+fn set_execution_at<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    query: &PreparedGraphSet,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    policy: GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<GraphValueRow>,
+    GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>,
+> {
     query
         .execute_governed_with_elements(
             policy,
@@ -90,8 +108,6 @@ fn set_at<Clock: FnMut() -> u64>(
             },
             || execution.borrow_mut().checkpoint(),
         )
-        .map(|result| result.value)
-        .map_err(set_error)
 }
 
 /// A CALL stage under the capability (fgdb-7qznp). It binds exactly as every
@@ -156,6 +172,22 @@ fn aggregate_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphAggregateRow>, QueryError> {
+    aggregate_execution_at(snapshot, at, query, scope, execution, policy)
+        .map(|result| result.value)
+        .map_err(aggregate_gql_error)
+}
+
+fn aggregate_execution_at<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    query: &PreparedGraphSetAggregate,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    policy: GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
+    GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
+> {
     query
         .execute_governed_with_procedures(
             policy,
@@ -168,8 +200,6 @@ fn aggregate_at<Clock: FnMut() -> u64>(
             },
             || execution.borrow_mut().checkpoint(),
         )
-        .map(|result| result.value)
-        .map_err(aggregate_gql_error)
 }
 
 impl<V: Vfs + Clone> Database<V> {

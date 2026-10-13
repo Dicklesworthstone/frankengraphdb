@@ -26,6 +26,8 @@ mod batch;
 #[path = "session/beacon.rs"]
 mod beacon;
 pub use beacon::AuthorizedBeaconIndex;
+#[path = "session/diff.rs"]
+mod diff;
 
 struct State<'a, Resolver, Clock> {
     view: Option<EmbeddedReadView>,
@@ -173,13 +175,33 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             &Live<'_, '_, '_>,
         ) -> Result<(T, usize), QueryError>,
     ) -> Result<T, QueryError> {
-        let mut state = self.state.take().ok_or(QueryError::Authorization(
-            AuthorizationError::ExecutionStopped,
-        ))?;
+        self.run_scoped(cx, action, |error| error, terminal)
+    }
+
+    // Typed composition errors retain the SAME permit, lifecycle, post-error
+    // validity check and delivery boundary. The mapper changes only the error
+    // envelope; it cannot replace authority or supply an execution policy.
+    fn run_scoped<T, E>(
+        &mut self,
+        cx: &QueryCx,
+        action: impl FnOnce(
+            &EmbeddedReadView,
+            &str,
+            &PlannerPredicates,
+            &mut R,
+            GqlQueryPolicy,
+            &Live<'_, '_, '_>,
+        ) -> Result<(T, usize), E>,
+        map_error: impl Fn(QueryError) -> E,
+        terminal: impl FnOnce(&Result<T, E>) -> bool,
+    ) -> Result<T, E> {
+        let mut state = self.state.take().ok_or_else(|| {
+            map_error(QueryError::Authorization(AuthorizationError::ExecutionStopped))
+        })?;
         if state.view.is_none() {
-            return Err(QueryError::Authorization(
+            return Err(map_error(QueryError::Authorization(
                 AuthorizationError::ExecutionStopped,
-            ));
+            )));
         }
         let result = (|| {
             let State {
@@ -193,14 +215,15 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             } = &mut state;
             let now = clock();
             if now < *last_now_ms {
-                return Err(QueryError::Authorization(
+                return Err(map_error(QueryError::Authorization(
                     AuthorizationError::ClockWentBackwards,
-                ));
+                )));
             }
             *last_now_ms = now;
             let permit = capability
                 .begin_read_at(branch, now)
-                .map_err(QueryError::Authorization)?;
+                .map_err(QueryError::Authorization)
+                .map_err(&map_error)?;
             let mut tracked_clock = || {
                 let now = clock();
                 *last_now_ms = (*last_now_ms).max(now);
@@ -211,10 +234,10 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 permit,
                 &mut tracked_clock as &mut dyn FnMut() -> u64,
             ));
-            execution.borrow_mut().checkpoint()?;
-            let view = view.as_ref().ok_or(QueryError::Authorization(
-                AuthorizationError::ExecutionStopped,
-            ))?;
+            execution.borrow_mut().checkpoint().map_err(&map_error)?;
+            let view = view.as_ref().ok_or_else(|| {
+                map_error(QueryError::Authorization(AuthorizationError::ExecutionStopped))
+            })?;
             let result = cx.with_restriction(|| {
                 action(
                     view,
@@ -227,12 +250,15 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             });
             // Also check after a resolver/parser/binder failed. Such a callback
             // cannot hide expiry/retirement by returning its own error first.
-            execution.borrow_mut().checkpoint()?;
+            execution.borrow_mut().checkpoint().map_err(&map_error)?;
             // The action reports final rows not yet reserved. A read batch
             // reserves each completed result on this SAME permit before
             // retaining it, then reports zero here; no result is double charged.
             let (value, unreserved_rows) = result?;
-            execution.borrow_mut().deliver(unreserved_rows)?;
+            execution
+                .borrow_mut()
+                .deliver(unreserved_rows)
+                .map_err(&map_error)?;
             Ok(value)
         })();
         if !terminal(&result) {
