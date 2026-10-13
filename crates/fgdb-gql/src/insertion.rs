@@ -615,15 +615,34 @@ impl PreparedGraphInsert {
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
-        collect::execute(self, policy, None, None, source, allocate, checkpoint)
+        self.execute_governed_over(None, policy, source, allocate, checkpoint)
+    }
+
+    /// The last write of a chain when it has no RETURN (`CREATE (a) WITH a
+    /// CREATE (b)`): `rows` are the rows the previous write of the statement
+    /// returned, read by this relational input's one owned leaf. `None` is
+    /// [`Self::execute_governed_with_source`].
+    pub fn execute_governed_over<E, A, C>(
+        &self,
+        rows: Option<Vec<GraphValueRow>>,
+        policy: GraphInsertPolicy,
+        source: impl GraphSetSource<E, C>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
+        collect::execute(self, policy, None, None, rows, source, allocate, checkpoint)
             .map(|(batch, _)| batch)
     }
 
+    /// `owned` is the previous write's rows for a chained CREATE, read by the
+    /// relational input's one owned leaf; `None` for every other statement.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_returning<E, A, C>(
         &self,
         policy: GraphInsertPolicy,
         bindings: &[crate::insertion_query::GraphInsertBinding],
         property_catalog: Option<&crate::ReverseSymbolCatalog>,
+        owned: Option<Vec<GraphValueRow>>,
         source: impl GraphSetSource<E, C>,
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
@@ -633,6 +652,7 @@ impl PreparedGraphInsert {
             policy,
             Some(bindings),
             property_catalog,
+            owned,
             source,
             allocate,
             checkpoint,

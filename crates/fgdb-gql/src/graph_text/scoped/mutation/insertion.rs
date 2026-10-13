@@ -2,6 +2,7 @@
 //! This module only prepares templates. Storage and identity allocation are
 //! absent from parsing/binding; the ordinary insertion/write paths own both.
 
+mod chain;
 mod query;
 
 use super::*;
@@ -67,6 +68,95 @@ impl<R: GraphSymbolResolver> GraphSymbolResolver for InsertionResolver<R> {
 
     fn reverse_relation(&self, id: RelationId) -> Option<String> {
         self.inner.reverse_relation(id)
+    }
+}
+
+/// One prepared write of a statement, its RETURN or WITH head, and the next
+/// write of a chain when its WITH tail ended at one.
+pub(crate) type InsertStep<'a> = (
+    PreparedGraphInsertText,
+    Option<crate::insertion_query_text::InsertReturnTemplate>,
+    Option<ChainContinuation<'a>>,
+);
+
+/// Where the next write of a chain starts, and the row it reads: the previous
+/// write's WITH tail output, whose hidden boundary reads stay resolvable.
+/// `parameters` are the types the statement gave its parameters so far, so a
+/// parameter keeps one type across the chain.
+pub(crate) struct ChainContinuation<'a> {
+    at: usize,
+    row: Vec<(Name<'a>, GraphSetColumnType)>,
+    boundary: Option<BoundaryReads<'a>>,
+    parameters: Vec<GqlParameterSpec>,
+}
+
+impl<'a> Parser<'a> {
+    /// The continuation a chained WITH tail left, at the next write.
+    fn continuation(&mut self) -> Option<ChainContinuation<'a>> {
+        let row = self.chained_row.take()?;
+        Some(ChainContinuation {
+            at: self.current.at,
+            row,
+            boundary: self.boundary_reads.take(),
+            parameters: self.syntax.parameters.clone(),
+        })
+    }
+
+    /// Start a later write of a chain at its own clause, in the scope the
+    /// previous write's tail left: its hidden reads and parameter types.
+    fn resume_after(
+        mut self,
+        boundary: Option<BoundaryReads<'a>>,
+        parameters: &[GqlParameterSpec],
+        at: usize,
+    ) -> Result<Self, GraphPatternTextError> {
+        for spec in parameters {
+            self.parameter_types
+                .entry(spec.name.clone())
+                .or_insert(spec.parameter_type);
+        }
+        self.lexer.at = at;
+        self.lexer.tokens = 0;
+        self.current = self.lexer.next()?;
+        self.boundary_reads = boundary;
+        Ok(self)
+    }
+
+    /// CREATE clauses over a WITH row, then its RETURN or WITH head. A
+    /// chained tail stops at the next write, which is the continuation;
+    /// otherwise the statement must end here.
+    fn insertion_over_row(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        returning: bool,
+    ) -> Result<
+        (
+            InsertionSyntax<'a>,
+            Option<query::ParsedReturn<'a>>,
+            Option<ChainContinuation<'a>>,
+        ),
+        GraphInsertTextError,
+    > {
+        let at = self.current.at;
+        self.write_row_scope = true;
+        let mut parsed = self.insertion_clauses(Some(schema))?;
+        let returning = if returning {
+            Some(self.insertion_return(&mut parsed, schema)?)
+        } else {
+            None
+        };
+        let continuation = self.continuation();
+        if continuation.is_none() {
+            self.end()?;
+        }
+        self.write_row_scope = false;
+        if !parsed.projections.is_empty() {
+            return Err(expected(at, "a CREATE that reads only the WITH row"));
+        }
+        if let Some(returning) = &returning {
+            returning.admit(&self.syntax.parameters)?;
+        }
+        Ok((parsed, returning, continuation))
     }
 }
 
@@ -760,12 +850,27 @@ impl PreparedGraphInsertText {
         ),
         GraphInsertTextError,
     > {
+        Self::prepare_step(statement, relation, declarations, resolve, returning, false)
+            .map(|(insertion, returning, _)| (insertion, returning))
+    }
+
+    /// The first write of a statement. With `chain`, a WITH tail may end at
+    /// the next CREATE instead of a RETURN: that write is the continuation.
+    pub(crate) fn prepare_step<'a>(
+        statement: &'a str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: impl GraphSymbolResolver,
+        returning: bool,
+        chain: bool,
+    ) -> Result<InsertStep<'a>, GraphInsertTextError> {
         let mut resolve = InsertionResolver {
             inner: resolve,
             symbols: BTreeMap::new(),
         };
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
+        parser.chain_write = chain;
         let (leading, mut row_schema) = parser.insertion_unwind_prefix()?;
         let mut matched = parser.insertion_match_prefix(&row_schema)?;
         // MATCH ... WITH ... CREATE reads the WITH row through the write-row
@@ -790,7 +895,10 @@ impl PreparedGraphInsertText {
         } else {
             None
         };
-        parser.end()?;
+        let continuation = parser.continuation();
+        if continuation.is_none() {
+            parser.end()?;
+        }
         // Join keys may be absent from CREATE and RETURN. Append their hidden
         // fields without shifting any previously compiled expression slot.
         let mut correlations = Vec::new();
@@ -886,6 +994,7 @@ impl PreparedGraphInsertText {
                 leading,
                 correlations: Vec::new(),
                 row_fields,
+                owned: None,
             };
             // Compile all source and property expression shapes before any
             // catalog callback, including statically unreachable empty lists.
@@ -1139,7 +1248,7 @@ impl PreparedGraphInsertText {
             // as a singleton here would lose its columns and occurrence bag.
             returning.bind(prepared, &shape_arguments(template.parameter_schema()))?;
         }
-        Ok((template, returning))
+        Ok((template, returning, continuation))
     }
 
     /// `MATCH ... WITH ... CREATE ... [RETURN ...]` (fgdb-sl4ym): CREATE
@@ -1153,6 +1262,70 @@ impl PreparedGraphInsertText {
         relation: RelationId,
         mut resolve: impl GraphSymbolResolver,
         returning: bool,
+    ) -> Result<InsertStep<'a>, GraphInsertTextError> {
+        let (head, stages, schema) = parser.write_row_prefix()?;
+        let at = parser.current.at;
+        let (parsed, returning, continuation) = parser.insertion_over_row(&schema, returning)?;
+        let read = parser.finish_write_row_prefix(statement, head, stages)?;
+        let input = read.resolve(crate::graph_text::LentResolver(&mut resolve))?;
+        let (template, returning) =
+            Self::finish_over_row(statement, relation, &mut resolve, at, parsed, returning, input)?;
+        Ok((template, returning, continuation))
+    }
+
+    /// A later write of a chain (`CREATE (a) WITH a CREATE (b)`): CREATE runs
+    /// once per row the previous write's WITH tail returned. As after `MATCH
+    /// ... WITH`, that row is the whole scope, its hidden reads included; the
+    /// input is the previous write's owned rows, never a second graph read.
+    pub(crate) fn prepare_chained<'a>(
+        statement: &'a str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        mut resolve: impl GraphSymbolResolver,
+        from: ChainContinuation<'a>,
+    ) -> Result<InsertStep<'a>, GraphInsertTextError> {
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones())
+            .resume_after(from.boundary, &from.parameters, from.at)?;
+        parser.chain_write = true;
+        let at = parser.current.at;
+        let schema = from.row;
+        // A chained write without RETURN ends the statement; with a WITH head
+        // or RETURN it is a query step.
+        let returning = parser.is_word("WITH") || parser.is_word("RETURN");
+        let (parsed, returning, continuation) = parser.insertion_over_row(&schema, returning)?;
+        let (columns, types) = schema
+            .iter()
+            .map(|(name, kind)| (name.text.to_owned(), *kind))
+            .unzip();
+        let input = BoundSetTextInput {
+            selection: None,
+            parameters: parser.syntax.parameters.clone(),
+            parameter_offsets: parser.syntax.parameter_offsets.clone(),
+            return_at: statement.len(),
+            projection: None,
+            quantifier: crate::GraphSetQuantifier::All,
+            pipeline: Vec::new(),
+            singleton: false,
+            leading: Vec::new(),
+            correlations: Vec::new(),
+            owned: Some((columns, types)),
+        };
+        let (template, returning) =
+            Self::finish_over_row(statement, relation, &mut resolve, at, parsed, returning, input)?;
+        Ok((template, returning, continuation))
+    }
+
+    /// Symbols, templates and RETURN of a CREATE over a row relation: `MATCH
+    /// ... WITH ... CREATE` and every later write of a chain.
+    fn finish_over_row(
+        statement: &str,
+        relation: RelationId,
+        resolve: &mut impl GraphSymbolResolver,
+        at: usize,
+        parsed: InsertionSyntax<'_>,
+        returning: Option<query::ParsedReturn<'_>>,
+        mut input: BoundSetTextInput,
     ) -> Result<
         (
             Self,
@@ -1160,25 +1333,6 @@ impl PreparedGraphInsertText {
         ),
         GraphInsertTextError,
     > {
-        let (head, stages, schema) = parser.write_row_prefix()?;
-        let at = parser.current.at;
-        parser.write_row_scope = true;
-        let mut parsed = parser.insertion_clauses(Some(&schema))?;
-        let returning = if returning {
-            Some(parser.insertion_return(&mut parsed, &schema)?)
-        } else {
-            None
-        };
-        parser.end()?;
-        parser.write_row_scope = false;
-        if !parsed.projections.is_empty() {
-            return Err(expected(at, "a CREATE that reads only the WITH row"));
-        }
-        if let Some(returning) = &returning {
-            returning.admit(&parser.syntax.parameters)?;
-        }
-        let read = parser.finish_write_row_prefix(statement, head, stages)?;
-        let mut input = read.resolve(crate::graph_text::LentResolver(&mut resolve))?;
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
@@ -1254,7 +1408,7 @@ impl PreparedGraphInsertText {
         });
         if created_maps || source_metadata {
             let catalog =
-                std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(&mut resolve, statement));
+                std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(&mut *resolve, statement));
             if let Some(selection) = input.selection.as_mut() {
                 selection.reverse_catalog = Some(std::sync::Arc::clone(&catalog));
             }

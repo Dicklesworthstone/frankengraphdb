@@ -731,7 +731,7 @@ impl InsertReturnTemplate {
 /// Single-statement framing uses the script lexer, so separators inside quoted
 /// strings are values. One terminal semicolon is accepted, further statements
 /// refuse before catalog resolution or parameter binding.
-fn statement_body(statement: &str) -> Result<&str, GraphInsertTextError> {
+pub(super) fn statement_body(statement: &str) -> Result<&str, GraphInsertTextError> {
     if statement.len() > MAX_GRAPH_TEXT_BYTES {
         return Err(error(
             MAX_GRAPH_TEXT_BYTES,

@@ -37,6 +37,7 @@ pub(crate) use projection::{
     slice_bounds, temporal_arithmetic, temporal_field, temporal_field_name,
     temporal_field_scratch_entries, timestamp_text, value_function,
 };
+pub(crate) use procedure::WithOwnedRows;
 pub use projection::{
     GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetProjection,
     GraphSetProjectionError, GraphSetValue, GraphTemporalFunction, GraphValueFunction,

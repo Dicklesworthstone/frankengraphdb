@@ -741,6 +741,11 @@ struct Parser<'a> {
     /// The WITH stages before a write are being read: the hidden reads of
     /// the elements the row carries stay in it, for the write and RETURN.
     write_prefix: bool,
+    /// A write's WITH tail may end at the next write of a chained statement
+    /// (`CREATE (a) WITH a CREATE (b)`) instead of a RETURN.
+    chain_write: bool,
+    /// The row such a tail ended with, for the next write to read.
+    chained_row: Option<Vec<(Name<'a>, crate::GraphSetColumnType)>>,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -825,6 +830,8 @@ impl<'a> Parser<'a> {
             deferred_where: None,
             write_row_scope: false,
             write_prefix: false,
+            chain_write: false,
+            chained_row: None,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),

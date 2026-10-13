@@ -752,6 +752,16 @@ impl BoundSetTextInput {
             ordinal(bytes, *from);
             ordinal(bytes, *to);
         }
+        // Only an owned input appends: every other transcript keeps its bytes.
+        if let Some((columns, types)) = &self.owned {
+            bytes.push(0xff);
+            ordinal(bytes, columns.len());
+            for (name, kind) in columns.iter().zip(types) {
+                ordinal(bytes, name.len());
+                bytes.extend_from_slice(name.as_bytes());
+                bytes.push(set_column_type_tag(*kind));
+            }
+        }
     }
 }
 
@@ -876,6 +886,10 @@ pub(crate) struct BoundSetTextInput {
     pub(crate) leading: Vec<ReadStageTemplate>,
     pub(crate) correlations: Vec<(usize, usize)>,
     pub(crate) row_fields: Vec<ReadValueTemplate>,
+    /// A chained write's input (`CREATE (a) WITH a CREATE (b)`): the previous
+    /// write's output columns, read through one owned leaf (`SetNode::Owned`)
+    /// that the executing host fills with that write's rows. No graph source.
+    pub(crate) owned: Option<(Vec<String>, Vec<GraphSetColumnType>)>,
 }
 
 // A token view, not a lexer. Only graph_text's existing Lexer constructs these.

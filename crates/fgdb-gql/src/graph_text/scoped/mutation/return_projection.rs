@@ -2793,7 +2793,11 @@ impl BoundSetTextInput {
         &self,
         values: &[GqlParameterValue],
     ) -> Result<PreparedGraphSet, GraphSetTextError> {
-        let mut input = if self.leading.is_empty() && !self.singleton {
+        let mut input = if let Some((columns, types)) = &self.owned {
+            // A chained write reads the previous write's rows, filled by the
+            // executing host; there is no graph source to bind.
+            PreparedGraphSet::owned(columns.clone(), types.clone())
+        } else if self.leading.is_empty() && !self.singleton {
             self.selection
                 .as_ref()
                 .expect("graph source")
