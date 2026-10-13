@@ -244,6 +244,10 @@ impl WriteTxn {
         };
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
+            // A chain is an ordered program whose steps may write different
+            // relation types (`MERGE (a)-[:X]->(b) CREATE (b)-[:Y]->(c)`), each
+            // seeing its predecessor, as a mixed write program's do.
+            workspace.txn.program_multi_relation = true;
             let mut used = GraphInsertStats {
                 selection: GqlExecutionStats {
                     snapshot_records: 0,
