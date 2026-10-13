@@ -1762,9 +1762,12 @@ impl<'a> Parser<'a> {
                 return Ok(true);
             }
         }
+        // An element subscript `n['p']` reads in the scalar compiler when an
+        // operator follows it, as it does on an operator's right (Graph7).
+        let subscript = self.element_subscript_follows()?;
         let size = self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
-        if !size && !self.starts_let_operand()? {
+        if !subscript && !size && !self.starts_let_operand()? {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();
