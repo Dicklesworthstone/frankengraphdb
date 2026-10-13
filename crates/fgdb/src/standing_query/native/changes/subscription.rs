@@ -10,6 +10,7 @@
 use super::*;
 
 mod coalesced;
+mod owned;
 
 /// An opaque, subscription-specific receipt. It acknowledges a complete frame,
 /// not an arbitrary caller-selected commit frontier. Cloning a receipt permits
@@ -69,6 +70,8 @@ pub enum SubscriptionError {
     Unacknowledged,
     ReceiptExhausted,
     ReplayAlreadyEnabled,
+    NotPrivate,
+    SharedRegistration,
 }
 impl core::fmt::Display for SubscriptionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -79,6 +82,8 @@ impl core::fmt::Display for SubscriptionError {
             Self::Unacknowledged => f.write_str("subscription already has an unacknowledged frame"),
             Self::ReceiptExhausted => f.write_str("subscription receipt sequence exhausted"),
             Self::ReplayAlreadyEnabled => f.write_str("subscription already has a replay sink"),
+            Self::NotPrivate => f.write_str("subscription does not own a private registration"),
+            Self::SharedRegistration => f.write_str("subscription registration was shared and cannot be reclaimed"),
         }
     }
 }
@@ -115,6 +120,7 @@ pub struct NativeSubscription {
     serial: u64,
     pending: Option<Arc<SubscriptionBatch>>,
     closed: bool,
+    ownership: Option<owned::Ownership>,
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -138,6 +144,7 @@ impl<V: Vfs + Clone> Database<V> {
             serial: 0,
             pending: None,
             closed: false,
+            ownership: None,
         })
     }
 }
@@ -145,7 +152,10 @@ impl<V: Vfs + Clone> Database<V> {
 impl NativeSubscription {
     /// The underlying registration remains available for explicit repair and
     /// ordinary maintained reads. Consumers over the same handle are isolated.
+    /// Requesting this handle permanently shares a scoped registration: its
+    /// producer can then outlive this consumer, so close_and_release refuses.
     pub fn handle(&self) -> &StandingQueryHandle {
+        self.share_registration();
         &self.handle
     }
     pub fn acknowledged_frontier(&self) -> Option<CommitSeq> {
@@ -156,7 +166,12 @@ impl NativeSubscription {
     }
     /// The shared replay sink for window inspection or explicit rebuild.
     /// Rebuilding this sink alone never repairs an unavailable source view.
+    /// Requesting a handle permanently opts a scoped registration into shared
+    /// ownership, even when the caller does not clone the returned reference.
     pub fn replay_handle(&self) -> Option<&StandingQueryHandle> {
+        if self.replay.is_some() {
+            self.share_registration();
+        }
         self.replay.as_ref()
     }
 
@@ -231,6 +246,9 @@ impl NativeSubscription {
         }
         let mut consumer = database.open_standing_subscription(cx, &self.handle)?;
         consumer.replay = self.replay.clone();
+        // Only a successful fork escapes ownership; a refused fork leaves the
+        // original private registration releasable.
+        self.share_registration();
         Ok(consumer)
     }
 
@@ -408,6 +426,7 @@ mod tests {
             serial: 0,
             pending: None,
             closed: false,
+            ownership: None,
         }
     }
 

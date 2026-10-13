@@ -273,6 +273,9 @@ impl<Row: Ord> StandingQueryView<'_, Row> {
 }
 
 pub(crate) enum StandingQuery {
+    /// An explicitly released PRIVATE registration slot. No handle escaped
+    /// its owner. Keep later indices stable; release trims a vacant suffix.
+    Released,
     Aggregate(Box<aggregate::StandingQuery>),
     /// The same complete-group producer with a prepared downstream result stage.
     ProjectedAggregate {
@@ -309,6 +312,11 @@ pub(crate) enum StandingQuery {
 impl StandingQuery {
     fn status(&self) -> (GqlQueryPolicy, CommitSeq, Option<StandingQueryFailure>) {
         match self {
+            Self::Released => (
+                GqlQueryPolicy::new(0, 0, 0, 0),
+                CommitSeq::ORIGIN,
+                Some(StandingQueryFailure::DependencyUnavailable),
+            ),
             Self::Aggregate(query)
             | Self::ProjectedAggregate { source: query, .. }
             | Self::Rows { source: query, .. } => (query.policy, query.frontier, query.failure),
@@ -336,6 +344,7 @@ impl StandingQuery {
         stats: StandingQueryStats,
     ) {
         let (frontier, failure, observed) = match self {
+            Self::Released => return,
             Self::Aggregate(query)
             | Self::ProjectedAggregate { source: query, .. }
             | Self::Rows { source: query, .. } => {
@@ -601,6 +610,7 @@ impl<V: Vfs + Clone> Database<V> {
             .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
         let replacement = match current {
+            StandingQuery::Released => return Err(StandingQueryError::UnknownHandle),
             StandingQuery::Replay(query) => StandingQuery::Replay(Box::new(
                 self.prepare_standing_replay(cx, &query.source, query.limits, policy)?,
             )),
@@ -720,6 +730,9 @@ impl<V: Vfs + Clone> Database<V> {
             .standing_queries
             .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
+        if matches!(query, StandingQuery::Released) {
+            return Err(StandingQueryError::UnknownHandle);
+        }
         let (_, frontier, failure) = query.status();
         if let Some(reason) = failure {
             return Err(StandingQueryError::Unavailable { frontier, reason });
@@ -768,6 +781,7 @@ impl<V: Vfs + Clone> Database<V> {
             | StandingQuery::Filter(_)
             | StandingQuery::Reduction(_)
             | StandingQuery::Replay(_)
+            | StandingQuery::Released
             | StandingQuery::Window(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
@@ -836,6 +850,9 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
         // operands and one exclusive consumer; no cursor can skip a tick.
         let (prior, remaining) = queries.split_at_mut(index);
         let query = &mut remaining[0];
+        if matches!(query, StandingQuery::Released) {
+            continue;
+        }
         let (policy, _, failure) = query.status();
         if failure.is_some() {
             continue;
@@ -850,6 +867,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             checkpoint: &mut checkpoint,
         };
         let result = match query {
+            StandingQuery::Released => continue,
             StandingQuery::Aggregate(query) => query.maintain(batch, &mut meter),
             StandingQuery::ProjectedAggregate { source, output } => {
                 source.maintain_with_output(batch, &mut meter, Some(output.as_mut()))
