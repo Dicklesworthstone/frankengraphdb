@@ -25,7 +25,7 @@ impl<Value> core::fmt::Debug for GraphEdgeUpsertAction<Value> {
     }
 }
 
-/// A checked scalar or bytecode over explicit properties of the chosen edge.
+/// A checked value expression over explicit properties of the chosen edge.
 /// Input positions address `properties`, never an ambient MATCH binding. Each
 /// action evaluates against its clause's frozen native overlay. No graph row,
 /// parameter map or execution authority is retained by this definition.
@@ -35,6 +35,13 @@ pub enum GraphEdgeUpsertValue {
     Expression {
         properties: Vec<PropertyKeyId>,
         value: GraphIntegerExpression,
+    },
+    /// The shared read-value algebra, including temporal constructors, map
+    /// access, list indexing, comprehensions and reduce. Only a scalar result
+    /// may be stored; collection-valued results refuse in the action owner.
+    Composite {
+        properties: Vec<PropertyKeyId>,
+        value: crate::GraphSetValue,
     },
 }
 impl core::fmt::Debug for GraphEdgeUpsertValue {
@@ -47,8 +54,49 @@ impl GraphEdgeUpsertValue {
     pub fn literal(&self) -> Option<&GqlScalarParameter> {
         match self {
             Self::Literal(value) => Some(value),
-            Self::Expression { .. } => None,
+            Self::Expression { .. } | Self::Composite { .. } => None,
         }
+    }
+
+    /// Evaluate an already charged, owned property row without copying its
+    /// payload. The caller supplies the selected edge's admitted properties in
+    /// declaration order and retains its existing control and rollback owner.
+    /// This performs no graph access. Dynamic collection results are returned
+    /// intact so the action owner can refuse them, never flatten or truncate.
+    pub fn evaluate_with_control<E>(
+        &self,
+        inputs: Vec<crate::algebra::GraphValue>,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<crate::algebra::GraphValue, crate::GraphIntegerEvaluationError<E>> {
+        use crate::algebra::{GraphValue, GraphValueRow};
+        use crate::{GraphIntegerEvaluationError, GraphSetValue};
+        if let Self::Expression { value, .. } = self {
+            return value
+                .evaluate_scalar_with_control(&inputs, control)
+                .map(GraphValue::Scalar);
+        }
+        control(crate::GlaExecutionEvent::ScratchEntry)
+            .map_err(GraphIntegerEvaluationError::Control)?;
+        let row = GraphValueRow::from_owned_values(inputs);
+        let literal;
+        let value = match self {
+            Self::Literal(value) => {
+                // GqlScalarParameter clones share their checked storage. The
+                // value evaluator reserves the returned scalar's payload.
+                literal = GraphSetValue::Literal(value.clone());
+                &literal
+            }
+            Self::Composite { value, .. } => value,
+            Self::Expression { .. } => unreachable!("bytecode returned above"),
+        };
+        crate::set_ops::evaluate_value(value, &row, 0, control).map_err(|error| match error {
+            crate::set_ops::ProjectionFailure::Control(error) => {
+                GraphIntegerEvaluationError::Control(error)
+            }
+            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                GraphIntegerEvaluationError::Value(error)
+            }
+        })
     }
 }
 
@@ -124,6 +172,10 @@ pub enum GraphEdgeUpsertError<E, A> {
         action: usize,
         source: crate::GraphIntegerError,
     },
+    NonScalarValue {
+        clause: usize,
+        action: usize,
+    },
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphEdgeUpsertError<E, A>
@@ -136,6 +188,10 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
                 "relationship MERGE branch action limit exceeded: {observed} > {limit}"
             ),
             Self::Staging(error) => error.fmt(f),
+            Self::NonScalarValue { clause, action } => write!(
+                f,
+                "relationship MERGE clause {clause} action {action} produced a non-scalar property"
+            ),
             Self::Expression {
                 clause,
                 action,
@@ -157,7 +213,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::Merge(error) => Some(error),
             Self::Staging(error) => Some(error),
             Self::Expression { source, .. } => Some(source),
-            Self::ActionLimit { .. } => None,
+            Self::ActionLimit { .. } | Self::NonScalarValue { .. } => None,
         }
     }
 }
@@ -195,7 +251,12 @@ fn validate(
         if !keys.insert(action.key) {
             return Err(GraphEdgeUpsertBuildError::DuplicateProperty { branch });
         }
-        if let GraphEdgeUpsertValue::Expression { properties, value } = &action.value {
+        let properties = match &action.value {
+            GraphEdgeUpsertValue::Literal(_) => continue,
+            GraphEdgeUpsertValue::Expression { properties, .. }
+            | GraphEdgeUpsertValue::Composite { properties, .. } => properties,
+        };
+        {
             if properties.len() > MAX_GRAPH_EDGE_UPSERT_ACTIONS {
                 return Err(GraphEdgeUpsertBuildError::TooManyInputs {
                     branch,
@@ -204,11 +265,22 @@ fn validate(
                     observed: properties.len(),
                 });
             }
-            if value
-                .referenced_columns()
-                .any(|column| column >= properties.len())
-                || value.referenced_locals().next().is_some()
-            {
+            let valid = match &action.value {
+                GraphEdgeUpsertValue::Expression { value, .. } => {
+                    !value.referenced_columns().any(|column| column >= properties.len())
+                        && value.referenced_locals().next().is_none()
+                }
+                GraphEdgeUpsertValue::Composite { value, .. } => matches!(
+                    crate::GraphSetProjection::admit_output(
+                        value,
+                        &vec![crate::GraphSetColumnType::Scalar; properties.len()],
+                        index,
+                    ),
+                    Ok(crate::GraphSetColumnType::Scalar | crate::GraphSetColumnType::Any)
+                ),
+                GraphEdgeUpsertValue::Literal(_) => unreachable!("literal skipped above"),
+            };
+            if !valid {
                 return Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {
                     branch,
                     action: index,
@@ -360,9 +432,108 @@ impl PreparedGraphEdgeUpsert {
                         bytes.extend_from_slice(&(expression.len() as u64).to_be_bytes());
                         bytes.extend_from_slice(&expression);
                     }
+                    GraphEdgeUpsertValue::Composite { properties, value } => {
+                        bytes.push(2);
+                        bytes.extend_from_slice(&(properties.len() as u64).to_be_bytes());
+                        for key in properties {
+                            bytes.extend_from_slice(&key.0.to_be_bytes());
+                        }
+                        let mut expression = Vec::new();
+                        value.append_canonical_bytes(&mut expression);
+                        bytes.extend_from_slice(&(expression.len() as u64).to_be_bytes());
+                        bytes.extend_from_slice(&expression);
+                    }
                 }
             }
         }
         bytes
+    }
+}
+
+#[cfg(test)]
+mod composite_tests {
+    use super::*;
+    use crate::algebra::GraphValue;
+    use crate::{GlaExecutionEvent, GraphIntegerEvaluationError, GraphSetValue};
+    use fgdb_types::CanonicalScalar;
+
+    fn integer(value: i64) -> GraphSetValue {
+        GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))
+    }
+
+    fn indexed(value: GraphSetValue) -> GraphSetValue {
+        GraphSetValue::Index {
+            list: Box::new(GraphSetValue::List(vec![value])),
+            index: Box::new(integer(0)),
+        }
+    }
+
+    fn action(value: GraphSetValue) -> GraphEdgeUpsertAction<GraphEdgeUpsertValue> {
+        GraphEdgeUpsertAction {
+            key: PropertyKeyId(2),
+            value: GraphEdgeUpsertValue::Composite {
+                properties: vec![PropertyKeyId(1)],
+                value,
+            },
+        }
+    }
+
+    #[test]
+    fn composite_admission_checks_nested_columns_locals_and_scalar_domain() {
+        for branch in [GraphEdgeUpsertBranch::Match, GraphEdgeUpsertBranch::Create] {
+            assert!(validate(branch, &[action(indexed(GraphSetValue::Column(0)))]).is_ok());
+            for value in [
+                indexed(GraphSetValue::Column(1)),
+                indexed(GraphSetValue::Local(0)),
+                GraphSetValue::List(vec![integer(1)]),
+            ] {
+                assert_eq!(
+                    validate(branch, &[action(value)]),
+                    Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {
+                        branch,
+                        action: 0,
+                    }),
+                );
+            }
+            let mut wide = action(integer(1));
+            let GraphEdgeUpsertValue::Composite { properties, .. } = &mut wide.value else {
+                unreachable!()
+            };
+            properties.resize(MAX_GRAPH_EDGE_UPSERT_ACTIONS + 1, PropertyKeyId(1));
+            assert!(matches!(
+                validate(branch, &[wide]),
+                Err(GraphEdgeUpsertBuildError::TooManyInputs { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn composite_evaluation_moves_scalar_values_and_retains_every_control_failure() {
+        let value = action(indexed(GraphSetValue::Column(0))).value;
+        let input = || vec![GraphValue::Scalar(CanonicalScalar::Int(42))];
+        let mut events = Vec::new();
+        let result = value.evaluate_with_control(input(), &mut |event| {
+            events.push(event);
+            Ok::<_, usize>(())
+        }).unwrap();
+        assert_eq!(result, GraphValue::Scalar(CanonicalScalar::Int(42)));
+        assert!(events.contains(&GlaExecutionEvent::Work));
+        assert!(events.contains(&GlaExecutionEvent::ScratchEntry));
+        for stop in 0..events.len() {
+            let mut at = 0;
+            let result = value.evaluate_with_control(input(), &mut |_| {
+                let current = at;
+                at += 1;
+                if current == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(GraphIntegerEvaluationError::Control(found)) if found == stop));
+            assert_eq!(at, stop + 1);
+        }
+        // Index has an open result domain. Do not silently flatten a list
+        // returned at run time: the native action owner must reject it.
+        let dynamic = action(indexed(GraphSetValue::List(vec![integer(7)])));
+        assert!(validate(GraphEdgeUpsertBranch::Match, &[dynamic.clone()]).is_ok());
+        let result = dynamic.value.evaluate_with_control(input(), &mut |_| Ok::<_, ()>(())).unwrap();
+        assert!(matches!(result, GraphValue::List(_)));
     }
 }

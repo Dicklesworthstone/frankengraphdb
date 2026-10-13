@@ -86,7 +86,8 @@ fn edge_upsert_actions<E, A, C>(
                         })?;
                         value.value().clone()
                     }
-                    GraphEdgeUpsertValue::Expression { properties, value } => {
+                    GraphEdgeUpsertValue::Expression { properties, .. }
+                    | GraphEdgeUpsertValue::Composite { properties, .. } => {
                         for _ in properties {
                             control(GlaExecutionEvent::ScratchEntry)?;
                         }
@@ -98,8 +99,8 @@ fn edge_upsert_actions<E, A, C>(
                                 &mut control,
                             )?));
                         }
-                        value
-                            .evaluate_scalar_with_control(&inputs, &mut control)
+                        let value = definition.value
+                            .evaluate_with_control(inputs, &mut control)
                             .map_err(|error| match error {
                                 GraphIntegerEvaluationError::Control(error) => error,
                                 GraphIntegerEvaluationError::Value(source) => {
@@ -109,7 +110,13 @@ fn edge_upsert_actions<E, A, C>(
                                         source,
                                     })
                                 }
-                            })?
+                            })?;
+                        let fgdb_gql::algebra::GraphValue::Scalar(value) = value else {
+                            return Err(GqlQueryError::Source(
+                                GraphEdgeUpsertError::NonScalarValue { clause, action },
+                            ));
+                        };
+                        value
                     }
                 };
                 batch.set_edge_property(edge, definition.key, Some(value));
@@ -397,6 +404,118 @@ mod native_edge_upsert_return_tests {
             assert!(rows.value.is_empty());
             assert_eq!(next.load(Ordering::Relaxed), 103);
             empty.abort();
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
+#[cfg(test)]
+mod native_edge_upsert_composite_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{
+        GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeMergePolicy,
+        GraphEdgeUpsertAction, GraphEdgeUpsertError, GraphEdgeUpsertPolicy,
+        GraphEdgeUpsertValue, GraphSetValue, GraphSymbol, GraphSymbolKind,
+        PreparedGraphEdgeUpsert, PreparedGraphEdgeUpsertText,
+    };
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+
+    const R: RelationId = RelationId(1);
+    const P: PropertyKeyId = PropertyKeyId(1);
+    const Q: PropertyKeyId = PropertyKeyId(2);
+    const AFTER: PropertyKeyId = PropertyKeyId(3);
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+            _ => None,
+        }
+    }
+
+    fn action(target: PropertyKeyId, input: PropertyKeyId, nested: bool)
+    -> GraphEdgeUpsertAction<GraphEdgeUpsertValue> {
+        let value = if nested {
+            GraphSetValue::List(vec![GraphSetValue::Column(0)])
+        } else {
+            GraphSetValue::Column(0)
+        };
+        GraphEdgeUpsertAction {
+            key: target,
+            value: GraphEdgeUpsertValue::Composite {
+                properties: vec![input],
+                value: GraphSetValue::Index {
+                    list: Box::new(GraphSetValue::List(vec![value])),
+                    index: Box::new(GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Int(0)))),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn composite_parallel_upserts_are_simultaneous_and_late_refusal_restores_prefix() {
+        let ((), report) = run_async_under_lab(0xe6e0_0003, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let txcx = contexts.txn();
+            let keys = crate::DatabaseKeys::new(
+                [0x51; 32], DatabaseSecurityNamespaceId([0x52; 32]), [0x53; 32],
+            );
+            let mut db = Database::open_memory(&commit, keys).await.unwrap();
+            let mut tx = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
+            prefix.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(2))]);
+            for (edge, p, q) in [(10, 7, 4), (11, 9, 6)] {
+                prefix.create_edge(EId(edge), VId(1), VId(2), vec![
+                    (P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(q)),
+                ]);
+            }
+            tx.write(&mut db, prefix).unwrap();
+            let parsed = PreparedGraphEdgeUpsertText::prepare(
+                "MATCH (a),(b) WHERE a.p=1 AND b.p=2 MERGE (a)-[r:R]->(b) ON MATCH SET r.q=0",
+                R, symbols,
+            ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+            let make = |bad| PreparedGraphEdgeUpsert::prepare_with_clauses(
+                parsed.merge().clone(),
+                vec![action(P, Q, false), action(Q, P, false)],
+                vec![],
+                vec![action(AFTER, P, bad)],
+            ).unwrap();
+            let policy = GraphEdgeUpsertPolicy::new(
+                GraphEdgeMergePolicy::new(GqlQueryPolicy::new(1_000, 100, 5_000_000, 2_000_000)),
+                100,
+            );
+            let before = tx.staged_effect_digest().unwrap();
+            let mut allocate = |_| -> Result<ElementId, ()> { panic!("parallel matches must not create") };
+            let error = tx.execute_graph_edge_upserts_governed(
+                &mut db, &cx, &make(true), policy, &mut allocate,
+            );
+            assert!(matches!(error, Err(GqlQueryError::Source(
+                GraphEdgeUpsertError::NonScalarValue { clause: 1, action: 0 }
+            ))));
+            assert_eq!(tx.staged_effect_digest().unwrap(), before);
+            let (stats, outcomes) = tx.execute_graph_edge_upserts_governed(
+                &mut db, &cx, &make(false), policy, &mut allocate,
+            ).unwrap();
+            assert_eq!(stats.created_edges, 0);
+            assert_eq!(stats.matched_occurrences, 2);
+            assert_eq!(stats.action_effects, 6);
+            assert_eq!(outcomes.iter().map(|outcome| outcome.edge()).collect::<Vec<_>>(),
+                vec![Some(EId(10)), Some(EId(11))]);
+            tx.finish(&mut db, &commit).await.unwrap();
+            for (edge, p, q) in [(10, 4, 7), (11, 6, 9)] {
+                assert_eq!(db.edge(EId(edge)).unwrap().unwrap().props, vec![
+                    (P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(q)),
+                    (AFTER, CanonicalScalar::Int(p)),
+                ]);
+            }
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
