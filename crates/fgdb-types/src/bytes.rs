@@ -97,6 +97,11 @@ impl<const MAX: usize> BoundedBytes<MAX> {
         self.data.len()
     }
 
+    /// Owned backing storage, including capacity beyond the admitted length.
+    pub(crate) fn owned_heap_bytes(&self) -> usize {
+        self.data.capacity()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
