@@ -145,6 +145,50 @@ fn parameter_documents_select_native_identities_lists_and_maps_without_coercion(
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// A parenthesized value that a map read or subscript follows is read whole
+/// (TCK Graph6 [4], [8], Map1 [3]), and a function argument is a whole
+/// expression, comparisons and Boolean operators included (TypeConversion4
+/// [3]). Grouping parentheses before an operator keep their meaning.
+#[test]
+fn parenthesized_values_take_postfix_reads_and_arguments_take_predicates() {
+    let ((), report) = run_async_under_lab(0x6d61_7005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let text =
+            |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+        let boolean = |value| GraphValue::Scalar(CanonicalScalar::Bool(value));
+        for (statement, columns, row) in [
+            (
+                "WITH [123, {existing: 42, notMissing: null}] AS list \
+                 RETURN (list[1]).missing AS a, (list[1]).notMissing AS b, \
+                 (list[1]).existing AS c",
+                vec!["a", "b", "c"],
+                vec![null(), null(), int(42)],
+            ),
+            ("RETURN ([1, 2])[0] AS x", vec!["x"], vec![int(1)]),
+            ("RETURN (1 + 2) * 3 AS x", vec!["x"], vec![int(9)]),
+            (
+                "RETURN toString(1 < 0) AS a, coalesce(1 = 2, true) AS b, \
+                 toString(true AND false) AS c",
+                vec!["a", "b", "c"],
+                vec![text("false"), boolean(false), text("false")],
+            ),
+        ] {
+            assert_eq!(
+                db.query(&cx, statement, &GqlParameters::new(), symbols, policy())
+                    .map_err(|error| format!("{statement}: {error}"))
+                    .unwrap(),
+                expected(&columns, vec![row]),
+                "{statement}"
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// openCypher dynamic property access (Graph7; the Merge6/Merge7 control
 /// queries): `n[key]` of a MATCH vertex or relationship reads the property
 /// named by `key`, NULL when absent, alone, in arithmetic and in a

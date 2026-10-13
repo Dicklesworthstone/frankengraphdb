@@ -423,6 +423,31 @@ impl<'a> Parser<'a> {
     /// How many parentheses wrap a lone name here, as in `((n))`, when no
     /// operator, subscript or entry read follows the last one; `None` for
     /// anything else, which keeps its scalar reading (`(x) + 1`, `(n.p)`).
+    /// A parenthesized group that is not a lone name (parenthesized_name owns
+    /// those), directly followed by `.key` or `[`. Lookahead only.
+    fn parenthesized_postfix_value(&self) -> Result<bool, GraphPatternTextError> {
+        if !self.is_punct(b'(') {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        let mut lone = lexer.clone();
+        if matches!(lone.next()?.kind, TokenKind::Word(_))
+            && matches!(lone.next()?.kind, TokenKind::Punct(b')'))
+        {
+            return Ok(false);
+        }
+        skip_group(&mut lexer)?;
+        let mut after = lexer.clone();
+        Ok(match after.next()?.kind {
+            TokenKind::Punct(b'[') => true,
+            TokenKind::Punct(b'.') => matches!(
+                after.next()?.kind,
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+            ),
+            _ => false,
+        })
+    }
+
     fn parenthesized_name(&self) -> Result<Option<usize>, GraphPatternTextError> {
         if !self.is_punct(b'(') {
             return Ok(None);
@@ -2145,6 +2170,15 @@ impl<'a> Parser<'a> {
             for _ in 0..parentheses {
                 self.punct(b')', ")")?;
             }
+            inner
+        } else if self.parenthesized_postfix_value()? {
+            // `(list[1]).key`, `([1, 2])[0]`: a parenthesized value that a
+            // map read or subscript follows is one value, read whole; the
+            // postfix loop below applies (TCK Graph6 [4], [8], Map1 [3]).
+            self.advance()?;
+            let inner =
+                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            self.punct(b')', ")")?;
             inner
         } else if matches!(self.current.kind, TokenKind::Word(word)
                 if !self.elements.contains(&word)
