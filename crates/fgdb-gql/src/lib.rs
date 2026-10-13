@@ -125,8 +125,8 @@ pub use edge_upsert::{
     MAX_GRAPH_EDGE_UPSERT_ACTIONS, PreparedGraphEdgeUpsert,
 };
 pub use edge_upsert_query::{
-    GraphEdgeReturnBinding, GraphEdgeUpsertQueryBuildError, GraphEdgeUpsertQueryError,
-    PreparedGraphEdgeUpsertQuery,
+    GraphEdgeReturnBinding, GraphEdgeUpsertBatchStats, GraphEdgeUpsertQueryBuildError,
+    GraphEdgeUpsertQueryError, PreparedGraphEdgeUpsertQuery,
 };
 pub use edge_upsert_text::{
     GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertQueryText,

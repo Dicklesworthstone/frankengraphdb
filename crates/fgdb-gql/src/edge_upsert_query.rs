@@ -1,6 +1,6 @@
-//! Native RETURN over the single relationship selected by MERGE.
+//! Native RETURN over the relationships selected by MERGE.
 //!
-//! The write owner supplies final fields of the chosen edge, never a second
+//! The write owner supplies final fields of the chosen edges, never a second
 //! MATCH. NoInput supplies no row, so even a constant projection stays empty.
 //! Aggregation, projection, DISTINCT and pagination use the shared kernels.
 //! WITH continues the final-state head through native row stages. It never
@@ -14,6 +14,26 @@ use crate::{
     GraphSetQuantifier, PreparedGraphEdgeUpsert,
 };
 use fgdb_delta_types::PropertyKeyId;
+
+/// Cumulative usage of an occurrence-preserving relationship upsert.
+///
+/// MATCH is executed once. Each selected occurrence resolves against the
+/// preceding occurrence's staged graph and runs its own ON/SET clauses.
+/// A matched relationship can therefore contribute more than once. These
+/// counters describe execution, not distinct identities or a durable commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphEdgeUpsertBatchStats {
+    pub match_selection: GqlExecutionStats,
+    /// Every relationship record examined by the native existence probes.
+    pub overlay_edges: u64,
+    pub created_edges: u64,
+    pub matched_occurrences: u64,
+    /// All selected ON and trailing SET proposals, including overwrites.
+    pub action_effects: u64,
+    /// MATCH, all probes, actions and receipt ownership share this allowance.
+    /// RETURN's additional usage is in the returned GqlQueryExecution.
+    pub evaluator: GlaExecutionStats,
+}
 
 /// One private input column, read after all of the selected edge's SET clauses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +229,25 @@ impl PreparedGraphEdgeUpsertQuery {
         &self,
         row: Option<Vec<GraphValue>>,
         selection: GqlExecutionStats,
+        evaluator: GlaExecutionStats,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
+        self.project_rows_governed(
+            row.into_iter().collect(), selection, evaluator, policy, checkpoint,
+        )
+    }
+
+    /// Finalize the complete ordered occurrence bag, not one projection per
+    /// relationship. The write host must have admitted all input ownership and
+    /// read each field from the final staged graph. Duplicate identities remain
+    /// duplicate rows until explicit DISTINCT or grouping removes them.
+    /// Aggregates and WITH stages see the whole bag; only the final page spends
+    /// ResultRows. Errors beyond LIMIT still refuse the complete statement.
+    pub fn project_rows_governed<E, C>(
+        &self,
+        rows: Vec<Vec<GraphValue>>,
+        selection: GqlExecutionStats,
         mut evaluator: GlaExecutionStats,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
@@ -227,7 +266,12 @@ impl PreparedGraphEdgeUpsertQuery {
             Ok(())
         };
         work()?;
-        if let Some(row) = &row {
+        for (at, row) in rows.iter().enumerate() {
+            // Keep the singular path's charge while accounting for additional
+            // occurrences even when RETURN has no field/identity bindings.
+            if at != 0 {
+                work()?;
+            }
             let invalid =
                 || GqlQueryError::Source(GraphSetExecutionError::InputSchema { operand: 0 });
             if row.len() != self.bindings.len() {
@@ -246,26 +290,23 @@ impl PreparedGraphEdgeUpsertQuery {
         }
         drop(work);
         let mut returning = GqlQueryExecution {
-            value: row
-                .into_iter()
-                .map(GraphValueRow::from_owned_values)
-                .collect(),
+            value: rows.into_iter().map(GraphValueRow::from_owned_values).collect(),
             rows: selection,
             evaluator,
         };
-        if let Some(grouping) = &self.grouping {
-            returning = crate::set_ops::finish_owned_aggregate(
-                returning,
-                policy,
-                grouping,
-                &mut checkpoint,
-            )?;
-        }
         let head = if self.tail.is_some() {
             crate::set_ops::owned_head_policy(policy)
         } else {
             policy
         };
+        if let Some(grouping) = &self.grouping {
+            returning = crate::set_ops::finish_owned_aggregate(
+                returning,
+                head,
+                grouping,
+                &mut checkpoint,
+            )?;
+        }
         let returning = crate::set_ops::finish_owned_projection(
             returning,
             head,
@@ -534,5 +575,37 @@ mod with_tests {
         assert!(PreparedGraphEdgeUpsertQueryText::has_return_clause(&text).unwrap());
         assert!(!crate::PreparedGraphEdgeMergeQueryText::has_return_clause(&text).unwrap());
         assert!(!crate::PreparedGraphMutationQueryText::has_return_clause(&text).unwrap());
+    }
+
+    #[test]
+    fn batch_with_groups_and_tail_consume_only_the_final_result_grant() {
+        let query = prepare("WITH r.p AS p,count(*) AS n WHERE p > 100 RETURN p");
+        let result = query.project_rows_governed::<(), ()>(
+            vec![input(&query, 4), input(&query, 5)],
+            GqlExecutionStats { snapshot_records: 0, result_rows: 2 },
+            GlaExecutionStats::default(),
+            policy(0),
+            || Ok(()),
+        ).unwrap();
+        assert!(result.value.is_empty());
+        assert_eq!(result.rows.result_rows, 0);
+        let query = prepare("WITH r.p AS p UNWIND [p,p+1] AS x RETURN count(*) AS n");
+        let result = query.project_rows_governed::<(), ()>(
+            vec![input(&query, 4), input(&query, 5)],
+            GqlExecutionStats { snapshot_records: 0, result_rows: 2 },
+            GlaExecutionStats::default(),
+            policy(1),
+            || Ok(()),
+        ).unwrap();
+        assert_eq!(values(&result), vec![vec![int(4)]]);
+        let query = prepare("WITH r.p AS p RETURN 10/p AS n LIMIT 0");
+        let result = query.project_rows_governed::<(), ()>(
+            vec![input(&query, 4), input(&query, 0)],
+            GqlExecutionStats { snapshot_records: 0, result_rows: 2 },
+            GlaExecutionStats::default(),
+            policy(0),
+            || Ok(()),
+        );
+        assert!(matches!(result, Err(GqlQueryError::Source(GraphSetExecutionError::Projection { .. }))));
     }
 }

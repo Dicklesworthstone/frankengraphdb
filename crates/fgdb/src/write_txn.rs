@@ -46,6 +46,7 @@ include!("write_txn_parts/vertex_upsert.rs");
 include!("write_txn_parts/edge_merge.rs");
 include!("write_txn_parts/edge_upsert.rs");
 include!("write_txn_parts/edge_upsert_returning.rs");
+include!("write_txn_parts/edge_upsert_batch.rs");
 include!("write_txn_parts/mutation_programs.rs");
 include!("write_txn_parts/write_programs.rs");
 include!("write_txn_parts/write_scripts.rs");
