@@ -113,6 +113,59 @@ impl Case {
         b.prepare(NAMES[projected], offset, count).unwrap()
     }
 
+    /// Every edge that serves some atom of some complete binding: a bound
+    /// source must admit at least these, and never more than the snapshot.
+    fn witnesses(&self, vertices: &[VertexRow], edges: &[EdgeRecord]) -> BTreeSet<EId> {
+        let mut used = BTreeSet::new();
+        for a in vertices {
+            for b in vertices {
+                for c in vertices {
+                    for d in vertices {
+                        let bound = [a, b, c, d];
+                        if self.filtered
+                            && (!a.labels.contains(&L) || !c.props.iter().any(|(key, scalar)| {
+                                *key == N
+                                    && matches!(scalar, CanonicalScalar::Int(value) if *value >= 3)
+                            }))
+                        {
+                            continue;
+                        }
+                        if self.unequal && a.vid == d.vid {
+                            continue;
+                        }
+                        let serving = |&Atom(s, r, direction, d): &Atom| {
+                            edges
+                                .iter()
+                                .filter(move |row| {
+                                    let edge = row.entry;
+                                    let (left, right) = (bound[s].vid, bound[d].vid);
+                                    edge.relation == r
+                                        && match direction {
+                                            GlaDirection::Forward => {
+                                                edge.src == left && edge.dst == right
+                                            }
+                                            GlaDirection::Reverse => {
+                                                edge.dst == left && edge.src == right
+                                            }
+                                            GlaDirection::Undirected => {
+                                                (edge.src == left && edge.dst == right)
+                                                    || (edge.dst == left && edge.src == right)
+                                            }
+                                        }
+                                })
+                                .map(|row| row.entry.eid)
+                                .collect::<Vec<_>>()
+                        };
+                        let per_atom: Vec<_> = self.atoms.iter().map(serving).collect();
+                        if per_atom.iter().all(|eids| !eids.is_empty()) {
+                            used.extend(per_atom.into_iter().flatten());
+                        }
+                    }
+                }
+            }
+        }
+        used
+    }
     fn expected(&self, vertices: &[VertexRow], edges: &[EdgeRecord], projected: usize) -> Vec<VId> {
         let mut out = BTreeSet::new();
         for a in vertices {
@@ -224,7 +277,20 @@ fn connected_patterns_match_independent_assignments_on_live_pinned_and_transacti
                     .execute_graph_pattern_governed(&query_cx, &pattern, generous())
                     .unwrap();
                 assert_eq!(live.value, expected);
-                assert_eq!(live.rows.snapshot_records, edges.len() as u64);
+                // An unbound root scans every edge. A label-bound root admits
+                // its per-step closure (and the endpoint rows it reads): every
+                // witness edge, at most the whole snapshot.
+                if case.filtered {
+                    let witnesses = case.witnesses(&vertices, &edges).len() as u64;
+                    let snapshot = (vertices.len() + edges.len()) as u64;
+                    assert!(
+                        (witnesses..=snapshot).contains(&live.rows.snapshot_records),
+                        "{witnesses} <= {} <= {snapshot}",
+                        live.rows.snapshot_records,
+                    );
+                } else {
+                    assert_eq!(live.rows.snapshot_records, edges.len() as u64);
+                }
                 assert_eq!(live.rows.result_rows, expected.len() as u64);
                 assert_eq!(
                     db.execute_graph_pattern_governed_at(&query_cx, &pattern, basis, generous())
@@ -241,7 +307,15 @@ fn connected_patterns_match_independent_assignments_on_live_pinned_and_transacti
                     .execute_graph_pattern_governed(&db, &query_cx, &pattern, generous())
                     .unwrap();
                 assert_eq!(overlay.value, expected);
-                assert_eq!(overlay.rows, live.rows);
+                // The transaction overlay keeps its conservative edge scan; only
+                // the owner source narrows a bound root to its closure.
+                if case.filtered {
+                    assert_eq!(overlay.rows.snapshot_records, edges.len() as u64);
+                    assert_eq!(overlay.rows.result_rows, live.rows.result_rows);
+                    assert!(live.rows.snapshot_records <= overlay.rows.snapshot_records);
+                } else {
+                    assert_eq!(overlay.rows, live.rows);
+                }
                 let paged = case.prepare(projection, 1, Some(1));
                 assert_eq!(
                     db.execute_graph_pattern_governed(&query_cx, &paged, generous())

@@ -1826,6 +1826,20 @@ pub(crate) fn bound_edges<'a, E, Row>(
             roots
         }
     };
+    // A single edge has no later step: its root adjacency below is exact.
+    if let Some(steps) = bound_edge_steps(prefix).filter(|steps| !steps.is_empty()) {
+        return slot_closure(
+            snapshot,
+            as_of,
+            relation,
+            lookup_direction,
+            usize::from(slot != 0),
+            roots,
+            &steps,
+            control,
+        )
+        .map(Some);
+    }
     for root in roots {
         snapshot.adjacency_index().visit(
             &snapshot.blocks,
@@ -1897,6 +1911,160 @@ pub(crate) fn bound_edges<'a, E, Row>(
         }
     }
     Ok(Some(selected.into_values().collect()))
+}
+
+/// One Expand of a flat, fixed-hop plan: the slot it extends, then the
+/// relation and direction it follows from that slot's vertex.
+type BoundStep<'p> = (
+    usize,
+    &'p fgdb_gql::algebra::EdgeRelation,
+    fgdb_gql::algebra::GlaDirection,
+);
+
+/// The Expand steps after a root ScanEdges, when every slot is modeled.
+/// ScanEdges binds slots 0 and 1 and each Expand appends exactly one endpoint
+/// slot; every other flat operator here only filters, captures or projects
+/// the binding. Anything that could bind a slot another way (or an Expand
+/// after a projection) returns None, leaving the undirected superset.
+fn bound_edge_steps(operators: &[fgdb_gql::algebra::GlaOperator]) -> Option<Vec<BoundStep<'_>>> {
+    use fgdb_gql::algebra::GlaOperator;
+    let mut steps = Vec::new();
+    let mut projected = false;
+    for operator in operators {
+        match operator {
+            GlaOperator::Expand {
+                source,
+                relation,
+                direction,
+            } => {
+                let source = usize::try_from(source.ordinal()).ok()?;
+                if projected || source >= 2 + steps.len() {
+                    return None;
+                }
+                steps.push((source, relation, *direction));
+            }
+            GlaOperator::Empty
+            | GlaOperator::Select { .. }
+            | GlaOperator::VertexIdentity { .. }
+            | GlaOperator::DifferentEdges { .. }
+            | GlaOperator::CompareProperties { .. }
+            | GlaOperator::SelectBoolean { .. }
+            | GlaOperator::CapturePath { .. }
+            | GlaOperator::SelectPathLength { .. }
+            | GlaOperator::SelectPathNull { .. } => {}
+            GlaOperator::Project { .. }
+            | GlaOperator::Distinct
+            | GlaOperator::OrderByVertexId
+            | GlaOperator::Limit { .. }
+            | GlaOperator::ProjectBindings { .. }
+            | GlaOperator::OrderByBindings
+            | GlaOperator::ProjectValues { .. }
+            | GlaOperator::OrderByValues
+            | GlaOperator::OrderByValueColumns { .. } => projected = true,
+            _ => return None,
+        }
+    }
+    Some(steps)
+}
+
+/// The endpoint an adjacency entry reaches from `near` along `direction`.
+fn far_endpoint(
+    entry: &AdjacencyEntry,
+    near: VId,
+    direction: fgdb_gql::algebra::GlaDirection,
+) -> VId {
+    use fgdb_gql::algebra::GlaDirection;
+    match direction {
+        GlaDirection::Forward => entry.dst,
+        GlaDirection::Reverse => entry.src,
+        GlaDirection::Undirected if entry.src == near => entry.dst,
+        GlaDirection::Undirected => entry.src,
+    }
+}
+
+/// A per-slot edge closure for a bound root. Each slot holds every vertex a
+/// binding can place there: the roots, the far ends of root edges along the
+/// root direction and relation, then for each Expand the far ends of its own
+/// relation and direction from its source slot. Every binding's edge at a
+/// step leaves a vertex of that step's source slot, so the closure contains
+/// it; a far end is recorded even when its edge was already admitted from
+/// another vertex. Predicates, identities and edge uniqueness only filter.
+#[allow(clippy::too_many_arguments)]
+fn slot_closure<'a, E>(
+    snapshot: &'a Snapshot,
+    as_of: CommitSeq,
+    relation: &fgdb_gql::algebra::EdgeRelation,
+    lookup_direction: fgdb_gql::algebra::GlaDirection,
+    root_slot: usize,
+    roots: Vec<VId>,
+    steps: &[BoundStep<'_>],
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Vec<BorrowedEdge<'a>>, E> {
+    let mut selected = BTreeMap::<EId, BorrowedEdge<'a>>::new();
+    let mut slots = vec![std::collections::BTreeSet::<VId>::new(); 2 + steps.len()];
+    let mut admit = |entry: &AdjacencyEntry,
+                     block: usize,
+                     row: usize,
+                     target: &mut std::collections::BTreeSet<VId>,
+                     far: VId,
+                     control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
+     -> Result<(), E> {
+        if let std::collections::btree_map::Entry::Vacant(slot) = selected.entry(entry.eid) {
+            control(SourceEvent::SnapshotRecord)?;
+            control(SourceEvent::ScratchEntry)?;
+            slot.insert((
+                (entry.eid, entry.src, entry.relation, entry.dst),
+                edge_properties_at(&snapshot.block_props, block, row),
+            ));
+        }
+        if !target.contains(&far) {
+            control(SourceEvent::ScratchEntry)?;
+            target.insert(far);
+        }
+        Ok(())
+    };
+    // The roots were found (and are held) by the caller, uncharged there as
+    // in the superset closure; this copy only lets a step expand from them.
+    slots[root_slot].extend(roots.iter().copied());
+    for root in roots {
+        let target = &mut slots[1 - root_slot];
+        snapshot.adjacency_index().visit(
+            &snapshot.blocks,
+            root,
+            lookup_direction,
+            as_of,
+            control,
+            |entry, block, row, control| {
+                if relation.matches(entry.relation) {
+                    let far = far_endpoint(entry, root, lookup_direction);
+                    admit(entry, block, row, target, far, control)?;
+                }
+                Ok(())
+            },
+        )?;
+    }
+    for (index, &(source, step_relation, direction)) in steps.iter().enumerate() {
+        let near = slots[source].iter().copied().collect::<Vec<_>>();
+        let target = &mut slots[2 + index];
+        for vertex in near {
+            control(SourceEvent::Work)?;
+            snapshot.adjacency_index().visit(
+                &snapshot.blocks,
+                vertex,
+                direction,
+                as_of,
+                control,
+                |entry, block, row, control| {
+                    if step_relation.matches(entry.relation) {
+                        let far = far_endpoint(entry, vertex, direction);
+                        admit(entry, block, row, target, far, control)?;
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+    }
+    Ok(selected.into_values().collect())
 }
 
 /// The VIds of the visible vertices satisfying every root predicate, served
