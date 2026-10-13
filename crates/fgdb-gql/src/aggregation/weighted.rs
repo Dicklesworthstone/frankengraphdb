@@ -201,9 +201,12 @@ pub(super) fn counts_distinct_edges(aggregate: &PreparedGraphAggregate) -> bool 
 
 /// Whether this evaluator answers the identified plan exactly, so routing may
 /// skip relationship identities: a clause-complete DIFFERENT EDGES count
-/// (fgdb-ujaad) or a support-only quantified reach (fgdb-20vwx).
+/// (fgdb-ujaad), a support-only quantified reach (fgdb-20vwx) or a
+/// support-only short chain (fgdb-h3gf6).
 pub(super) fn answers_identified_exactly(aggregate: &PreparedGraphAggregate) -> bool {
-    counts_distinct_edges(aggregate) || reach_shape(aggregate).is_some()
+    counts_distinct_edges(aggregate)
+        || reach_shape(aggregate).is_some()
+        || chain_shape(aggregate).is_some()
 }
 
 /// One directed, single-typed quantified atom whose aggregates read only the
@@ -466,6 +469,399 @@ where
     Ok(())
 }
 
+/// A directed chain of at most three hops, all in one orientation, whose
+/// aggregates read only the SUPPORT of its (source, endpoint) bindings
+/// (fgdb-h3gf6): a fixed chain of two or three single-typed atoms, or one
+/// quantified atom with a lower bound of at least two (reach_shape owns lower
+/// bounds of at most one) and an upper bound of at most three.
+///
+/// Walk counts per endpoint propagate level by level over relation
+/// multiplicities, never enumerating paths. Under DIFFERENT EDGES (or TRAIL
+/// search) an endpoint is in the support exactly when some walk to it is a
+/// trail, i.e. when its trail count is positive. For two hops the only walks
+/// reusing an edge stay on one self-loop; for three hops inclusion-exclusion
+/// over the edge coincidences e1=e2 (a loop at the source), e2=e3 (a loop at
+/// the endpoint) and e1=e3 (an edge out and back over another edge), whose
+/// pairwise intersections all equal e1=e2=e3, gives
+/// trails = walks - N12 - N23 - N13 + 2 N123. Coincidences need equal
+/// relations. Multiple sources sum non-negative per-source trail counts.
+struct Chain<'a> {
+    relations: Vec<RelationId>,
+    lengths: Vec<usize>,
+    /// The endpoint's binding slot (the source is slot 0).
+    last: usize,
+    forward: bool,
+    trail: bool,
+    source_predicates: Vec<&'a [VertexPredicate]>,
+    target_predicates: Vec<&'a [VertexPredicate]>,
+    columns: &'a [ValueProjection],
+    reads_source: bool,
+}
+
+fn support_only(aggregate: &PreparedGraphAggregate) -> bool {
+    aggregate.relational_input.is_none()
+        && aggregate.computed_input.is_none()
+        && aggregate.aggregates.iter().all(|a| {
+            matches!(
+                a.function,
+                GraphAggregateFunction::CountDistinct
+                    | GraphAggregateFunction::Min
+                    | GraphAggregateFunction::Max
+            )
+        })
+}
+
+fn oriented(direction: GlaDirection) -> Option<bool> {
+    match direction {
+        GlaDirection::Forward => Some(true),
+        GlaDirection::Reverse => Some(false),
+        GlaDirection::Undirected => None,
+    }
+}
+
+fn chain_shape(aggregate: &PreparedGraphAggregate) -> Option<Chain<'_>> {
+    if !support_only(aggregate) {
+        return None;
+    }
+    let operators = aggregate.input.plan().operators();
+    let mut relations = Vec::new();
+    let mut forward = None;
+    let mut lengths = Vec::new();
+    let mut trail = false;
+    let mut selects = Vec::new();
+    let mut columns = None;
+    let mut last = 0;
+    let mut rest = operators.iter();
+    match rest.next()? {
+        GlaOperator::ScanEdges {
+            relation,
+            direction,
+        } => {
+            relations.push(relation.one()?);
+            forward = Some(oriented(*direction)?);
+            last = 1;
+        }
+        GlaOperator::ScanVertices => {}
+        _ => return None,
+    }
+    let quantified = relations.is_empty();
+    for operator in rest {
+        match operator {
+            GlaOperator::Expand {
+                source,
+                relation,
+                direction,
+            } if !quantified && columns.is_none() && source.ordinal() == last => {
+                relations.push(relation.one()?);
+                if forward != Some(oriented(*direction)?) {
+                    return None;
+                }
+                last += 1;
+            }
+            GlaOperator::VarLengthExpand {
+                source,
+                relation,
+                direction,
+                bounds,
+                search,
+            } if quantified && last == 0 && source.ordinal() == 0 => {
+                let (minimum, maximum) = (bounds.minimum(), bounds.maximum());
+                if !(2..=3).contains(&minimum) || !(minimum..=3).contains(&maximum) {
+                    return None;
+                }
+                match search {
+                    crate::algebra::GraphWalkSearch::All => {}
+                    crate::algebra::GraphWalkSearch::Trail => trail = true,
+                    _ => return None,
+                }
+                let relation = relation.one()?;
+                relations = vec![relation; maximum as usize];
+                lengths = (minimum as usize..=maximum as usize).collect();
+                forward = Some(oriented(*direction)?);
+                last = 1;
+            }
+            GlaOperator::DifferentEdges { segments } => {
+                // Fixed chains need the clause-complete constraint; a walk's
+                // own uniqueness makes it a trail.
+                if quantified && !(segments.len() == 1 && segments[0].ordinal() == 1) {
+                    return None;
+                }
+                trail = true;
+            }
+            GlaOperator::Select { slot, predicates } => {
+                selects.push((slot.ordinal(), predicates.as_slice()))
+            }
+            GlaOperator::ProjectValues { columns: projected } if columns.is_none() => {
+                columns = Some(projected.as_slice())
+            }
+            GlaOperator::OrderByValues
+            | GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            } if columns.is_some() => {}
+            _ => return None,
+        }
+    }
+    if relations.is_empty() {
+        return None;
+    }
+    if !quantified {
+        if !(2..=3).contains(&relations.len()) {
+            return None;
+        }
+        if trail && !distinct_edges_are_complete(operators) {
+            return None;
+        }
+        lengths = vec![relations.len()];
+    }
+    let columns = columns?;
+    let mut source_predicates = Vec::new();
+    let mut target_predicates = Vec::new();
+    for (slot, predicates) in selects {
+        match slot {
+            0 => source_predicates.push(predicates),
+            slot if slot == last => target_predicates.push(predicates),
+            _ => return None,
+        }
+    }
+    let mut reads_source = false;
+    for column in columns {
+        let slot = match column {
+            ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
+                slot.ordinal()
+            }
+            _ => return None,
+        };
+        match slot {
+            0 => reads_source = true,
+            slot if slot == last => {}
+            _ => return None,
+        }
+    }
+    Some(Chain {
+        relations,
+        lengths,
+        last: usize::try_from(last).ok()?,
+        forward: forward?,
+        trail,
+        source_predicates,
+        target_predicates,
+        columns,
+        reads_source,
+    })
+}
+
+/// Relation multiplicities oriented along the chain, and self-loop counts.
+#[derive(Default)]
+struct Hops {
+    out: BTreeMap<VId, BTreeMap<VId, u128>>,
+    loops: BTreeMap<VId, u128>,
+}
+
+impl Hops {
+    fn multiplicity(&self, from: VId, to: VId) -> u128 {
+        self.out
+            .get(&from)
+            .and_then(|out| out.get(&to))
+            .copied()
+            .unwrap_or(0)
+    }
+    fn loops(&self, vertex: VId) -> u128 {
+        self.loops.get(&vertex).copied().unwrap_or(0)
+    }
+}
+
+fn overflow<E, C>() -> VisitError<E, C> {
+    GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate: 0 })
+}
+
+/// Endpoints with a positive trail (or walk) count from `sources`.
+fn chain_support<E, C>(
+    chain: &Chain<'_>,
+    hops: &BTreeMap<RelationId, Hops>,
+    sources: &[VId],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+) -> Result<BTreeSet<VId>, VisitError<E, C>> {
+    let empty = Hops::default();
+    let hop = |at: usize| hops.get(&chain.relations[at]).unwrap_or(&empty);
+    let mut levels: Vec<BTreeMap<VId, u128>> = vec![sources.iter().map(|&a| (a, 1)).collect()];
+    for at in 0..chain.relations.len() {
+        let mut next = BTreeMap::<VId, u128>::new();
+        for (&vertex, &walks) in &levels[at] {
+            for (&far, &multiplicity) in hop(at).out.get(&vertex).into_iter().flatten() {
+                control(GlaExecutionEvent::Work)?;
+                let slot = next.entry(far).or_insert(0);
+                *slot = walks
+                    .checked_mul(multiplicity)
+                    .and_then(|w| slot.checked_add(w))
+                    .ok_or_else(overflow)?;
+            }
+        }
+        for _ in &next {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        levels.push(next);
+    }
+    let same = |i: usize, j: usize| chain.relations[i] == chain.relations[j];
+    let mut support = BTreeSet::new();
+    for &length in &chain.lengths {
+        for (&end, &walks) in &levels[length] {
+            control(GlaExecutionEvent::Work)?;
+            let mut trails = walks;
+            if chain.trail && length == 2 && same(0, 1) && sources.binary_search(&end).is_ok() {
+                trails = trails.saturating_sub(hop(0).loops(end));
+            }
+            if chain.trail && length == 3 {
+                // Signed inclusion-exclusion; every term is a count of walks.
+                let mut reused: u128 = 0;
+                let mut add = |value: u128| {
+                    reused
+                        .checked_add(value)
+                        .map(|sum| reused = sum)
+                        .ok_or_else(overflow)
+                };
+                if same(0, 1) {
+                    for &a in sources {
+                        let loops = hop(0).loops(a);
+                        if loops > 0 {
+                            add(loops
+                                .checked_mul(hop(2).multiplicity(a, end))
+                                .ok_or_else(overflow)?)?;
+                        }
+                    }
+                }
+                if same(1, 2) {
+                    let into = levels[1].get(&end).copied().unwrap_or(0);
+                    add(hop(1).loops(end).checked_mul(into).ok_or_else(overflow)?)?;
+                }
+                if same(0, 2) {
+                    for &a in sources {
+                        let out = hop(0).multiplicity(a, end);
+                        if out > 0 {
+                            add(out
+                                .checked_mul(hop(1).multiplicity(end, a))
+                                .ok_or_else(overflow)?)?;
+                        }
+                    }
+                }
+                let triple = if same(0, 1) && same(1, 2) && sources.binary_search(&end).is_ok() {
+                    hop(0).loops(end).checked_mul(2).ok_or_else(overflow)?
+                } else {
+                    0
+                };
+                trails = trails
+                    .checked_add(triple)
+                    .ok_or_else(overflow)?
+                    .saturating_sub(reused);
+            }
+            if trails > 0 && support.insert(end) {
+                control(GlaExecutionEvent::ScratchEntry)?;
+            }
+        }
+    }
+    Ok(support)
+}
+
+/// Feed the aggregate the deduplicated (source, endpoint) support bindings of
+/// a short chain, like visit_reach_bindings: one multi-source pass unless a
+/// column reads the source, then one pass per admitted source.
+#[allow(clippy::too_many_arguments)]
+fn visit_chain_bindings<'a, E, C, F, R, M, P>(
+    chain: &Chain<'_>,
+    vertices: impl IntoIterator<Item = VId>,
+    edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+    mut test_vertex: F,
+    mut property: R,
+    mut control: M,
+    mut visit: P,
+) -> Result<(), VisitError<E, C>>
+where
+    F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+    P: FnMut(
+        &[ValueProjection],
+        &[Option<VId>],
+        &mut R,
+        &mut M,
+        Multiplicity,
+    ) -> Result<(), VisitError<E, C>>,
+{
+    let mut admitted = BTreeSet::new();
+    for vertex in vertices {
+        control(GlaExecutionEvent::Work)?;
+        control(GlaExecutionEvent::ScratchEntry)?;
+        admitted.insert(vertex);
+    }
+    let mut sources = Vec::new();
+    for &vertex in &admitted {
+        let mut selected = true;
+        for predicates in &chain.source_predicates {
+            if !test_vertex(vertex, predicates)? {
+                selected = false;
+                break;
+            }
+        }
+        if selected {
+            sources.push(vertex);
+        }
+    }
+    let mut hops = BTreeMap::<RelationId, Hops>::new();
+    for (source, relation, destination) in edges {
+        control(GlaExecutionEvent::Work)?;
+        if !chain.relations.contains(&relation) {
+            continue;
+        }
+        let (from, to) = if chain.forward {
+            (source, destination)
+        } else {
+            (destination, source)
+        };
+        control(GlaExecutionEvent::ScratchEntry)?;
+        let hop = hops.entry(relation).or_default();
+        let slot = hop.out.entry(from).or_default().entry(to).or_insert(0);
+        *slot = slot.checked_add(1).ok_or_else(overflow)?;
+        if from == to {
+            let loops = hop.loops.entry(from).or_insert(0);
+            *loops = loops.checked_add(1).ok_or_else(overflow)?;
+        }
+    }
+    let mut emit = |source: VId,
+                    target: VId,
+                    property: &mut R,
+                    control: &mut M|
+     -> Result<(), VisitError<E, C>> {
+        for predicates in &chain.target_predicates {
+            if !test_vertex(target, predicates)? {
+                return Ok(());
+            }
+        }
+        // Only the source and endpoint slots are projected; transit slots stay unbound.
+        let mut bindings = vec![None; chain.last + 1];
+        bindings[0] = Some(source);
+        bindings[chain.last] = Some(target);
+        visit(
+            chain.columns,
+            &bindings,
+            property,
+            control,
+            Multiplicity::ONE,
+        )
+    };
+    if chain.reads_source {
+        for &source in &sources {
+            for target in chain_support(chain, &hops, &[source], &mut control)? {
+                emit(source, target, &mut property, &mut control)?;
+            }
+        }
+    } else if let Some(&witness) = sources.first() {
+        for target in chain_support(chain, &hops, &sources, &mut control)? {
+            emit(witness, target, &mut property, &mut control)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn needs_original_bindings<R>(plan: &crate::algebra::GlaPlan<R>) -> bool {
     plan.operators().iter().any(|operator| match operator {
         GlaOperator::Select { .. }
@@ -599,6 +995,17 @@ where
     if let Some(reach) = reach_shape(aggregate) {
         return visit_reach_bindings(
             &reach,
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            control,
+            visit,
+        );
+    }
+    if let Some(chain) = chain_shape(aggregate) {
+        return visit_chain_bindings(
+            &chain,
             vertices,
             edges,
             test_vertex,
@@ -1291,5 +1698,161 @@ mod tests {
             }
         }
         assert_eq!(checked, 72);
+    }
+
+    #[test]
+    fn support_only_chains_equal_trail_and_walk_enumeration() {
+        let two = |text: &str| {
+            PreparedGraphAggregateText::prepare(text, |kind, name| match (kind, name) {
+                (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+                (GraphSymbolKind::Relation, _) => Some(GraphSymbol::Relation(RelationId(1))),
+                (GraphSymbolKind::Property, _) => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                (GraphSymbolKind::Label, _) => {
+                    Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1)))
+                }
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+        };
+        let mut edges = distinct_edge_graph();
+        // S: loops (single and parallel), a reciprocal pair and a tail.
+        for (eid, (src, dst)) in [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (2, 2),
+            (1, 3),
+            (3, 1),
+            (4, 4),
+            (4, 4),
+            (3, 5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            edges.push((EId(200 + eid as u128), VId(src), RelationId(2), VId(dst)));
+        }
+        edges.push((EId(300), VId(4), RelationId(1), VId(5)));
+        let properties = BTreeMap::from([
+            (VId(0), CanonicalScalar::Int(7)),
+            (VId(1), CanonicalScalar::Null),
+            (VId(2), CanonicalScalar::Int(7)),
+            (VId(3), CanonicalScalar::Int(-2)),
+            (VId(5), CanonicalScalar::Int(9)),
+        ]);
+        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        let mut checked = 0;
+        // Trail and walk answers per (shape, filter, grouping): the trail
+        // corrections must change some answers, or this law is vacuous.
+        let mut answers = BTreeMap::<String, Vec<GraphAggregateRow>>::new();
+        let mut differing = 0;
+        for mode in ["", "REPEATABLE ELEMENTS "] {
+            for (pattern, end) in [
+                ("(a)-[:R]->(b)-[:R]->(e)", "e"),
+                ("(a)-[:R]->(b)-[:R]->(c)-[:R]->(e)", "e"),
+                ("(a)<-[:R]-(b)<-[:R]-(e)", "e"),
+                ("(a)<-[:R]-(b)<-[:R]-(c)<-[:R]-(e)", "e"),
+                ("(a)-[:R]->(b)-[:S]->(c)-[:R]->(e)", "e"),
+                ("(a)-[:S]->(b)-[:S]->(c)-[:S]->(e)", "e"),
+                ("(a)-[:S]->(b)-[:R]->(c)-[:R]->(e)", "e"),
+                ("(a)-[:R]->{2,2}(e)", "e"),
+                ("(a)-[:R]->{3,3}(e)", "e"),
+                ("(a)-[:S]->{2,3}(e)", "e"),
+                ("(a)<-[:R]-{2,3}(e)", "e"),
+            ] {
+                for tail in ["", " WHERE a.n=7", " WHERE e.n IS NOT NULL"] {
+                    for (returns, grouped) in [
+                        (
+                            format!(
+                                "COUNT(DISTINCT {end}) AS n,MIN({end}.n) AS lo,MAX({end}.n) AS hi"
+                            ),
+                            false,
+                        ),
+                        (
+                            format!(
+                                "a,COUNT(DISTINCT {end}) AS n,MIN({end}.n) AS lo,MAX({end}.n) AS hi"
+                            ),
+                            true,
+                        ),
+                    ] {
+                        let prefix = format!("MATCH {mode}{pattern}{tail} RETURN {returns}");
+                        let group = if grouped { " GROUP BY a" } else { "" };
+                        let factored = two(&format!("{prefix}{group}"));
+                        // A hidden COLLECT keeps the same aggregates on the
+                        // enumerating evaluators (trails, or walks when repeatable).
+                        let enumerated = two(&format!("{prefix},COLLECT({end}.n) AS bag{group}"))
+                            .with_aggregate_output_prefix(3)
+                            .unwrap();
+                        assert!(chain_shape(&factored).is_some(), "{prefix}{group}");
+                        assert!(chain_shape(&enumerated).is_none(), "{prefix}{group}");
+                        let run = |aggregate: &PreparedGraphAggregate| {
+                            aggregate
+                                .execute_governed_with_element_maps(
+                                    edges.len() as u64,
+                                    (0..7).map(VId),
+                                    edges.iter().copied(),
+                                    |vid, predicates| {
+                                        Ok::<_, ()>(predicates.iter().all(|predicate| {
+                                            predicate.matches_borrowed(
+                                                None,
+                                                properties
+                                                    .get(&vid)
+                                                    .map(|value| (PropertyKeyId(1), value)),
+                                            )
+                                        }))
+                                    },
+                                    |vid, _| Ok(properties.get(&vid)),
+                                    |_, _| Ok(None),
+                                    |_| Ok(None),
+                                    |_| Ok(None),
+                                    |_| Ok(None),
+                                    |_| Ok(None),
+                                    policy,
+                                    || Ok::<_, ()>(()),
+                                )
+                                .unwrap()
+                        };
+                        let actual = run(&factored);
+                        let expected = run(&enumerated);
+                        assert_eq!(actual.value, expected.value, "{prefix}{group}");
+                        assert_eq!(actual.rows, expected.rows, "{prefix}{group}");
+                        let key = format!("{pattern}{tail}{group}");
+                        match answers.get(&key) {
+                            Some(trails) => differing += usize::from(*trails != actual.value),
+                            None => {
+                                answers.insert(key, actual.value);
+                            }
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 132);
+        assert!(
+            differing >= 10,
+            "only {differing} shapes separate trails from walks"
+        );
+    }
+
+    #[test]
+    fn chain_support_leaves_reach_occurrences_and_branches_to_other_evaluators() {
+        for text in [
+            // reach_shape owns lower bounds of at most one.
+            "MATCH (a)-[:R]->{1,3}(b) RETURN COUNT(DISTINCT b) AS n",
+            // Occurrence-sensitive aggregates count walks or trails.
+            "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS n",
+            // A transit predicate, a mixed orientation, an undirected hop,
+            // a cycle closure and four hops are not this shape.
+            "MATCH (a)-[:R]->(b)-[:R]->(c) WHERE b.n=7 RETURN COUNT(DISTINCT c) AS n",
+            "MATCH (a)-[:R]->(b)<-[:R]-(c) RETURN COUNT(DISTINCT c) AS n",
+            "MATCH (a)-[:R]-(b)-[:R]-(c) RETURN COUNT(DISTINCT c) AS n",
+            "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN COUNT(DISTINCT b) AS n",
+            "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(d)-[:R]->(e) RETURN COUNT(DISTINCT e) AS n",
+            "MATCH (a)-[:R]->{2,4}(b) RETURN COUNT(DISTINCT b) AS n",
+        ] {
+            assert!(chain_shape(&query(text)).is_none(), "{text}");
+        }
     }
 }
