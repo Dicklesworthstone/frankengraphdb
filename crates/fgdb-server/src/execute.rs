@@ -14,8 +14,10 @@ use asupersync::Cx;
 use fgdb::{QueryError, QueryResult};
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GqlQueryError, GraphEdgeMergePolicy, GraphMutationPolicy, GraphVertexMergePolicy,
-    GraphVertexUpsertPolicy, PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText,
+    GqlQueryError, GraphEdgeMergePolicy, GraphEdgeUpsertPolicy, GraphMutationPolicy,
+    GraphVertexMergePolicy, GraphVertexUpsertPolicy, PreparedGraphEdgeMergeQuery,
+    PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeUpsertQuery,
+    PreparedGraphEdgeUpsertQueryText,
     PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphMutationQuery,
     PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
     PreparedGraphVertexUpsertQueryText,
@@ -555,6 +557,7 @@ enum Returning {
     Mutation(Box<PreparedGraphMutationQuery>),
     Merge(Box<PreparedGraphVertexUpsertQuery>),
     EdgeMerge(Box<PreparedGraphEdgeMergeQuery>),
+    EdgeUpsert(Box<PreparedGraphEdgeUpsertQuery>),
 }
 
 impl Returning {
@@ -606,6 +609,21 @@ impl Returning {
                 .map(|query| Some(Self::Merge(Box::new(query))))
                 .map_err(|e| refusal(&e));
         }
+        // ON/SET relationship upserts have their own native classifier. A
+        // binding failure stays terminal, never retried as plain MERGE.
+        if PreparedGraphEdgeUpsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
+            let template = PreparedGraphEdgeUpsertQueryText::prepare_with_parameter_types(
+                text,
+                db.write_relation,
+                &declarations,
+                db.symbols.clone(),
+            )
+            .map_err(|e| refusal(&e))?;
+            return template
+                .bind_parameters(parameters)
+                .map(|query| Some(Self::EdgeUpsert(Box::new(query))))
+                .map_err(|e| refusal(&e));
+        }
         if PreparedGraphEdgeMergeQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
             let template = PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
                 text,
@@ -628,6 +646,7 @@ impl Returning {
             Self::Mutation(query) => query.columns(),
             Self::Merge(query) => query.columns(),
             Self::EdgeMerge(query) => query.columns(),
+            Self::EdgeUpsert(query) => query.columns(),
         }
     }
 }
@@ -695,6 +714,24 @@ async fn write_returning(
             )
             .await
             .map(|(_, rows, completion)| (rows, completion))
+            .map_err(returning_refusal),
+        Returning::EdgeUpsert(prepared) => guard
+            .execute_graph_edge_upsert_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &db.authority,
+                token,
+                TRUNK,
+                prepared,
+                GraphEdgeUpsertPolicy::new(
+                    GraphEdgeMergePolicy::new(db.query_policy).with_creation_limit(MAX_CREATED),
+                    1_000,
+                ),
+                unix_millis,
+            )
+            .await
+            .map(|(_, _, rows, completion)| (rows, completion))
             .map_err(returning_refusal),
         Returning::EdgeMerge(prepared) => guard
             .execute_graph_edge_merge_query_authorized(
