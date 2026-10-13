@@ -62,7 +62,7 @@ fn graph() -> WriteBatch {
 
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected.
-const CALLS: [(&str, &str, &str, bool); 14] = [
+const CALLS: [(&str, &str, &str, bool); 15] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -78,6 +78,7 @@ const CALLS: [(&str, &str, &str, bool); 14] = [
     ("betweenness_centrality", "", "score", true),
     ("eigenvector_centrality", "", "score", true),
     ("core_number", "", "core", true),
+    ("load_centrality", "", "score", true),
 ];
 
 /// The whole graph spelled out field by field, independent of

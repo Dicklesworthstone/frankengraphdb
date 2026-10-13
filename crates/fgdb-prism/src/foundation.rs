@@ -35,7 +35,8 @@ pub(crate) fn estimated_work(
         FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::CoreNumber => Some(step),
         FoundationAlgorithm::ClosenessCentrality
         | FoundationAlgorithm::HarmonicCentrality
-        | FoundationAlgorithm::BetweennessCentrality => n.checked_mul(step),
+        | FoundationAlgorithm::BetweennessCentrality
+        | FoundationAlgorithm::LoadCentrality => n.checked_mul(step),
         FoundationAlgorithm::EigenvectorCentrality => {
             step.checked_mul(EIGENVECTOR_MAX_ITERATIONS + 1)
         }
@@ -98,6 +99,10 @@ pub(crate) fn run<C>(
         }
         FoundationAlgorithm::BetweennessCentrality => {
             let result = fnx_algorithms::betweenness_centrality(&copy);
+            scores(graph, result.scores, result.witness)?
+        }
+        FoundationAlgorithm::LoadCentrality => {
+            let result = fnx_algorithms::load_centrality(&copy);
             scores(graph, result.scores, result.witness)?
         }
         FoundationAlgorithm::EigenvectorCentrality => {

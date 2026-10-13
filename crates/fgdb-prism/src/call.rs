@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 4;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 5;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -294,6 +294,13 @@ const SIGNATURES: &[FnxSignature] = &[
         "O(|V| + |E|)",
         "fnx-algorithms/core_number",
     ),
+    foundation(
+        "fnx.load_centrality",
+        FnxOutput::Score,
+        "explicit undirected simple projection; unweighted; self-loops refused; Newman load over ordered pairs, each node's load split equally among its shortest-path predecessors, normalized by (|V|-1)(|V|-2)",
+        "O(|V| * |E|)",
+        "fnx-algorithms/load_centrality",
+    ),
 ];
 
 /// A foundation row: one undirected, unweighted, parameter-free graph input
@@ -505,6 +512,7 @@ pub enum FoundationAlgorithm {
     BetweennessCentrality = 3,
     EigenvectorCentrality = 4,
     CoreNumber = 5,
+    LoadCentrality = 6,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnxOutputColumn {
@@ -801,6 +809,7 @@ impl FnxCallSpec {
                 FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
             }
             "fnx.core_number" => FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber),
+            "fnx.load_centrality" => FnxAlgorithm::Foundation(FoundationAlgorithm::LoadCentrality),
             _ => {
                 return Err(error(
                     FnxCallSite::Procedure,

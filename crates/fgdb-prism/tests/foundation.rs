@@ -130,6 +130,14 @@ fn centralities_and_cores_match_independently_computed_values() {
         &path,
         &[(a, 0.0), (b, 2.0 / 3.0), (c, 2.0 / 3.0), (d, 0.0)],
     );
+    // Newman load counts ordered pairs: each inner vertex carries the 4
+    // ordered pairs whose unique shortest path crosses it, normalized by
+    // 1 / ((n-1)(n-2)) = 1/6. On a tree it equals betweenness.
+    assert_values(
+        "load_centrality",
+        &path,
+        &[(a, 0.0), (b, 4.0 / 6.0), (c, 4.0 / 6.0), (d, 0.0)],
+    );
     // (n - 1) / sum of distances on a connected graph.
     assert_values(
         "closeness_centrality",
