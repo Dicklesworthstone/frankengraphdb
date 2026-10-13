@@ -78,14 +78,14 @@ impl Returning {
             }
             Self::Merge(query) => {
                 transaction
-                    .execute_graph_vertex_upsert_query_engine_governed(
+                    .execute_graph_vertex_upserts_query_engine_governed(
                         database,
                         cx,
                         query,
                         GraphVertexUpsertPolicy::new(GraphVertexMergePolicy::new(allowance), 1_000),
                     )
                     .map_err(execution_failure)?
-                    .2
+                    .1
             }
             Self::EdgeMerge(query) => {
                 transaction
@@ -302,6 +302,10 @@ pub(super) async fn run<V: Vfs + Clone>(
         emit(out, &format!("{count} row(s), completed at seq {seq}"))
     }
 }
+
+#[cfg(test)]
+#[path = "write_returning_vertex_tests.rs"]
+mod vertex_upsert_tests;
 
 #[cfg(test)]
 mod edge_upsert_tests {
