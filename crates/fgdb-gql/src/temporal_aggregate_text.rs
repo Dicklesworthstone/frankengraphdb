@@ -283,8 +283,8 @@ fn locate(statement: &str) -> Result<(usize, usize, SequenceSelector), GraphTemp
 
 #[derive(Clone)]
 enum AggregateTemplate {
-    Direct(PreparedGraphAggregateText),
-    // Boxed: the pipeline's relational input outgrew the direct variant.
+    // Both boxed: the two templates differ by hundreds of bytes.
+    Direct(Box<PreparedGraphAggregateText>),
     Pipeline(Box<PreparedGraphPipelineAggregateText>),
 }
 
@@ -420,13 +420,13 @@ impl PreparedTemporalGraphAggregateText {
                 )?,
             ))
         } else {
-            AggregateTemplate::Direct(
+            AggregateTemplate::Direct(Box::new(
                 PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
                     &blanked,
                     &inner_declarations,
                     resolve,
                 )?,
-            )
+            ))
         };
         let mut parameters = inner.parameter_schema().to_vec();
         if let Some(name) = temporal_name {
