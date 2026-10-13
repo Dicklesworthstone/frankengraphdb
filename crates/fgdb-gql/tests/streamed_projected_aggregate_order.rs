@@ -19,8 +19,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 use std::rc::Rc;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 const G: PropertyKeyId = PropertyKeyId(1);
 const P: PropertyKeyId = PropertyKeyId(2);
@@ -46,13 +45,17 @@ fn query(statement: &str) -> PreparedGraphAggregate {
 }
 
 fn records(values: &[(i64, Option<i64>)]) -> Vec<Record> {
-    values.iter().enumerate().map(|(at, (group, value))| {
-        let mut properties = vec![(G, CanonicalScalar::Int(*group))];
-        if let Some(value) = value {
-            properties.push((P, CanonicalScalar::Int(*value)));
-        }
-        (VId(at as u128 + 1), properties)
-    }).collect()
+    values
+        .iter()
+        .enumerate()
+        .map(|(at, (group, value))| {
+            let mut properties = vec![(G, CanonicalScalar::Int(*group))];
+            if let Some(value) = value {
+                properties.push((P, CanonicalScalar::Int(*value)));
+            }
+            (VId(at as u128 + 1), properties)
+        })
+        .collect()
 }
 
 struct Vertices {
@@ -106,7 +109,10 @@ impl VertexScanSource for Vertices {
         self.reads.set(self.reads.get() + 1);
         let row = &self.rows[self.at - 1];
         assert_eq!(row.0, id);
-        Ok(Some(VertexScanRow { labels: &[], properties: &row.1 }))
+        Ok(Some(VertexScanRow {
+            labels: &[],
+            properties: &row.1,
+        }))
     }
 }
 
@@ -116,11 +122,19 @@ fn batch_vertices(q: &PreparedGraphAggregate, rows: &[Record]) -> Vec<GraphAggre
         rows.iter().map(|row| row.0),
         [],
         |_, _| Ok::<_, ()>(true),
-        |id, key| Ok(rows.iter().find(|row| row.0 == id)
-            .and_then(|row| row.1.iter().find(|(k, _)| *k == key).map(|(_, value)| value))),
+        |id, key| {
+            Ok(rows.iter().find(|row| row.0 == id).and_then(|row| {
+                row.1
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, value)| value)
+            }))
+        },
         policy(10_000),
         || Ok::<_, ()>(()),
-    ).unwrap().value
+    )
+    .unwrap()
+    .value
 }
 
 fn bucket(row: &GraphAggregateRow) -> i64 {
@@ -133,7 +147,11 @@ fn bucket(row: &GraphAggregateRow) -> i64 {
 #[test]
 fn vertex_stream_orders_computed_aliases_and_preserves_exact_aggregate_outputs() {
     let rows = records(&[
-        (1, Some(10)), (1, Some(10)), (1, Some(10)), (2, Some(20)), (3, None),
+        (1, Some(10)),
+        (1, Some(10)),
+        (1, Some(10)),
+        (2, Some(20)),
+        (3, None),
     ]);
     for (direction, nulls, expected) in [
         ("DESC", "LAST", [2, 1, 3]),
@@ -151,13 +169,20 @@ fn vertex_stream_orders_computed_aliases_and_preserves_exact_aggregate_outputs()
         let reads = source.reads.clone();
         let dropped = source.dropped.clone();
         let mut cursor = VertexAggregateCursor::new(
-            source, VertexAggregatePlan::compile(&q).unwrap(), policy(3), || Ok::<_, ()>(()),
+            source,
+            VertexAggregatePlan::compile(&q).unwrap(),
+            policy(3),
+            || Ok::<_, ()>(()),
         );
         assert_eq!(cursor.snapshot_seq(), CommitSeq(17));
         let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(actual.iter().map(bucket).collect::<Vec<_>>(), expected);
         assert_eq!(actual, batch_vertices(&q, &rows));
-        assert!(actual.iter().all(|row| row.keys().is_empty() && row.values().len() == 3));
+        assert!(
+            actual
+                .iter()
+                .all(|row| row.keys().is_empty() && row.values().len() == 3)
+        );
         assert_eq!(reads.get(), rows.len());
         assert!(dropped.get());
         assert_eq!(cursor.row_stats().result_rows, 3);
@@ -167,24 +192,23 @@ fn vertex_stream_orders_computed_aliases_and_preserves_exact_aggregate_outputs()
     }
 }
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 #[test]
 fn cooperative_vertex_polling_keeps_projected_distinct_window_and_quotas() {
     let values: Vec<_> = (0..130).map(|at| (at % 5, Some(at % 5 + 1))).collect();
     let rows = records(&values);
-    let q = query("MATCH (n) RETURN DISTINCT -SUM(n.p) AS score GROUP BY n.g \
-        ORDER BY score DESC SKIP 1 LIMIT 2");
+    let q = query(
+        "MATCH (n) RETURN DISTINCT -SUM(n.p) AS score GROUP BY n.g \
+        ORDER BY score DESC SKIP 1 LIMIT 2",
+    );
     let source = Vertices::new(rows.clone());
     let dropped = source.dropped.clone();
     let mut cursor = VertexAggregateCursor::new(
-        source, VertexAggregatePlan::compile(&q).unwrap(), policy(2), || Ok::<_, ()>(()),
+        source,
+        VertexAggregatePlan::compile(&q).unwrap(),
+        policy(2),
+        || Ok::<_, ()>(()),
     );
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     assert!(matches!(cursor.poll_next(&mut context), Poll::Pending));
     assert_eq!(cursor.row_stats().result_rows, 0);
     assert!(!dropped.get());
@@ -202,8 +226,13 @@ fn cooperative_vertex_polling_keeps_projected_distinct_window_and_quotas() {
     }
     assert!(complete);
     assert_eq!(actual, batch_vertices(&q, &rows));
-    assert_eq!(actual.iter().map(|row| row.values()[0].as_integer().unwrap()).collect::<Vec<_>>(),
-        [-52, -78]);
+    assert_eq!(
+        actual
+            .iter()
+            .map(|row| row.values()[0].as_integer().unwrap())
+            .collect::<Vec<_>>(),
+        [-52, -78]
+    );
     assert_eq!(cursor.row_stats().result_rows, 2);
     assert!(dropped.get());
     assert!(matches!(cursor.poll_next(&mut context), Poll::Ready(None)));
@@ -213,16 +242,24 @@ fn cooperative_vertex_polling_keeps_projected_distinct_window_and_quotas() {
 fn vertex_projected_order_keeps_late_errors_cancellation_and_budget_failures_terminal() {
     let rows = records(&[(1, Some(5)), (1, Some(5)), (2, Some(7))]);
     for count in [0, 1] {
-        let q = query(&format!("MATCH (n) RETURN n.g AS bucket,1/(COUNT(*)-1) AS score \
-            ORDER BY score LIMIT {count}"));
+        let q = query(&format!(
+            "MATCH (n) RETURN n.g AS bucket,1/(COUNT(*)-1) AS score \
+            ORDER BY score LIMIT {count}"
+        ));
         let source = Vertices::new(rows.clone());
         let dropped = source.dropped.clone();
         let mut cursor = VertexAggregateCursor::new(
-            source, VertexAggregatePlan::compile(&q).unwrap(), policy(10), || Ok::<_, ()>(()),
+            source,
+            VertexAggregatePlan::compile(&q).unwrap(),
+            policy(10),
+            || Ok::<_, ()>(()),
         );
-        assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Source(
-            GraphAggregateError::OutputExpression { .. }
-        )))));
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(
+                GraphAggregateError::OutputExpression { .. }
+            )))
+        ));
         assert_eq!(cursor.state(), VertexScanState::Failed);
         assert_eq!(cursor.row_stats().result_rows, 0);
         assert!(dropped.get());
@@ -233,26 +270,44 @@ fn vertex_projected_order_keeps_late_errors_cancellation_and_budget_failures_ter
     source.fail_at = Some(2);
     let dropped = source.dropped.clone();
     let mut cursor = VertexAggregateCursor::new(
-        source, VertexAggregatePlan::compile(&q).unwrap(), policy(10), || Ok::<_, ()>(()),
+        source,
+        VertexAggregatePlan::compile(&q).unwrap(),
+        policy(10),
+        || Ok::<_, ()>(()),
     );
-    assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Source(GraphAggregateError::Source(_))))));
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Source(GraphAggregateError::Source(_))))
+    ));
     assert_eq!(cursor.state(), VertexScanState::Failed);
     assert_eq!(cursor.row_stats().result_rows, 0);
     assert!(dropped.get() && cursor.next().is_none());
     let source = Vertices::new(rows.clone());
     let dropped = source.dropped.clone();
     let mut cancelled = VertexAggregateCursor::new(
-        source, VertexAggregatePlan::compile(&q).unwrap(), policy(10), || Err::<(), _>("cancel"),
+        source,
+        VertexAggregatePlan::compile(&q).unwrap(),
+        policy(10),
+        || Err::<(), _>("cancel"),
     );
-    assert!(matches!(cancelled.next(), Some(Err(GqlQueryError::Interrupted("cancel")))));
+    assert!(matches!(
+        cancelled.next(),
+        Some(Err(GqlQueryError::Interrupted("cancel")))
+    ));
     assert!(dropped.get() && cancelled.next().is_none());
     for p in [policy(0), GqlQueryPolicy::new(100, 10, 0, 1_000_000)] {
         let source = Vertices::new(rows.clone());
         let dropped = source.dropped.clone();
         let mut limited = VertexAggregateCursor::new(
-            source, VertexAggregatePlan::compile(&q).unwrap(), p, || Ok::<_, ()>(()),
+            source,
+            VertexAggregatePlan::compile(&q).unwrap(),
+            p,
+            || Ok::<_, ()>(()),
         );
-        assert!(matches!(limited.next(), Some(Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)))));
+        assert!(matches!(
+            limited.next(),
+            Some(Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)))
+        ));
         assert_eq!(limited.row_stats().result_rows, 0);
         assert_eq!(limited.state(), VertexScanState::Failed);
         assert!(dropped.get() && limited.next().is_none());
@@ -270,7 +325,10 @@ impl Edges {
     fn new() -> Self {
         let owners = [VId(1), VId(2), VId(u128::MAX)];
         let mut edges = BTreeMap::new();
-        for (at, owner) in [owners[0], owners[0], owners[0], owners[1], owners[2]].into_iter().enumerate() {
+        for (at, owner) in [owners[0], owners[0], owners[0], owners[1], owners[2]]
+            .into_iter()
+            .enumerate()
+        {
             edges.insert(EId(at as u128 + 1), (owner, R, VId(0)));
         }
         edges.insert(EId(6), (VId(0), S, VId(3)));
@@ -299,8 +357,11 @@ impl EdgeScanSource for Edges {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-        let next = self.edges.range((self.after.map_or(Unbounded, Excluded), Unbounded))
-            .next().map(|(&id, _)| id);
+        let next = self
+            .edges
+            .range((self.after.map_or(Unbounded, Excluded), Unbounded))
+            .next()
+            .map(|(&id, _)| id);
         if let Some(id) = next {
             self.after = Some(id);
         }
@@ -315,9 +376,15 @@ impl EdgeScanSource for Edges {
         if self.fail == Some(id) {
             return Err(EdgeScanSourceError::Source("late edge source"));
         }
-        Ok(self.edges.get(&id).map(|&(source, relation, target)| EdgeScanRow {
-            source, relation, target, properties: &[],
-        }))
+        Ok(self
+            .edges
+            .get(&id)
+            .map(|&(source, relation, target)| EdgeScanRow {
+                source,
+                relation,
+                target,
+                properties: &[],
+            }))
     }
     fn vertex<C>(
         &self,
@@ -325,7 +392,10 @@ impl EdgeScanSource for Edges {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'_>>, EdgeScanSourceError<Self::Error, C>> {
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-        Ok(self.vertices.contains(&id).then_some(VertexScanRow { labels: &[], properties: &[] }))
+        Ok(self.vertices.contains(&id).then_some(VertexScanRow {
+            labels: &[],
+            properties: &[],
+        }))
     }
     fn next_incident_edge<C>(
         &self,
@@ -334,9 +404,13 @@ impl EdgeScanSource for Edges {
         after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
-        for (&id, &(source, _, target)) in self.edges.range((after.map_or(Unbounded, Excluded), Unbounded)) {
-            control(GlaExecutionEvent::Work)
-                .map_err(|error| EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error)))?;
+        for (&id, &(source, _, target)) in self
+            .edges
+            .range((after.map_or(Unbounded, Excluded), Unbounded))
+        {
+            control(GlaExecutionEvent::Work).map_err(|error| {
+                EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error))
+            })?;
             let matches = match direction {
                 GlaDirection::Forward => source == endpoint,
                 GlaDirection::Reverse => target == endpoint,
@@ -360,29 +434,44 @@ fn batch_edges(q: &PreparedGraphAggregate, source: &Edges) -> Vec<GraphAggregate
         |_, _| Ok(None),
         policy(10_000),
         || Ok::<_, ()>(()),
-    ).unwrap().value
+    )
+    .unwrap()
+    .value
 }
 
 #[test]
 fn fixed_edge_and_join_streams_rank_computed_counts_and_full_width_identities() {
-    for (pattern, score) in [
-        ("(a)-[e:R]->(b)", -1),
-        ("(a)-[e:R]->(b)-[f:S]->(c)", -2),
-    ] {
-        let q = query(&format!("MATCH {pattern} RETURN a AS owner,-COUNT(*) AS score \
-            GROUP BY a ORDER BY score DESC,owner DESC LIMIT 2"));
+    for (pattern, score) in [("(a)-[e:R]->(b)", -1), ("(a)-[e:R]->(b)-[f:S]->(c)", -2)] {
+        let q = query(&format!(
+            "MATCH {pattern} RETURN a AS owner,-COUNT(*) AS score \
+            GROUP BY a ORDER BY score DESC,owner DESC LIMIT 2"
+        ));
         let source = Edges::new();
         let expected = batch_edges(&q, &source);
         let dropped = source.dropped.clone();
         let mut cursor = EdgeAggregateCursor::new(
-            source, EdgeAggregatePlan::compile(&q).unwrap(), policy(2), || Ok::<_, ()>(()),
+            source,
+            EdgeAggregatePlan::compile(&q).unwrap(),
+            policy(2),
+            || Ok::<_, ()>(()),
         );
         let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(rows, expected);
-        assert_eq!(rows.iter().map(|row| {
-            row.values()[0].as_value().and_then(GraphValue::as_vertex).unwrap()
-        }).collect::<Vec<_>>(), [VId(u128::MAX), VId(2)]);
-        assert!(rows.iter().all(|row| row.keys().is_empty() && row.values()[1].as_integer() == Some(score)));
+        assert_eq!(
+            rows.iter()
+                .map(|row| {
+                    row.values()[0]
+                        .as_value()
+                        .and_then(GraphValue::as_vertex)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>(),
+            [VId(u128::MAX), VId(2)]
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.keys().is_empty() && row.values()[1].as_integer() == Some(score))
+        );
         assert_eq!(cursor.row_stats().result_rows, 2);
         assert_eq!(cursor.state(), EdgeScanState::Exhausted);
         assert!(dropped.get() && cursor.next().is_none());
@@ -391,27 +480,45 @@ fn fixed_edge_and_join_streams_rank_computed_counts_and_full_width_identities() 
 
 #[test]
 fn edge_projected_order_preserves_late_source_expression_and_result_quota_failures() {
-    let q = query("MATCH (a)-[e:R]->(b) RETURN a AS owner,-COUNT(*) AS score \
-        GROUP BY a ORDER BY score DESC LIMIT 1");
+    let q = query(
+        "MATCH (a)-[e:R]->(b) RETURN a AS owner,-COUNT(*) AS score \
+        GROUP BY a ORDER BY score DESC LIMIT 1",
+    );
     let mut source = Edges::new();
     source.fail = Some(EId(5));
     let dropped = source.dropped.clone();
     let mut cursor = EdgeAggregateCursor::new(
-        source, EdgeAggregatePlan::compile(&q).unwrap(), policy(10), || Ok::<_, ()>(()),
+        source,
+        EdgeAggregatePlan::compile(&q).unwrap(),
+        policy(10),
+        || Ok::<_, ()>(()),
     );
-    assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Source(GraphAggregateError::Source(_))))));
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Source(GraphAggregateError::Source(_))))
+    ));
     assert_eq!(cursor.row_stats().result_rows, 0);
     assert_eq!(cursor.state(), EdgeScanState::Failed);
     assert!(dropped.get() && cursor.next().is_none());
     for count in [0, 1] {
-        let q = query(&format!("MATCH (a)-[e:R]->(b) RETURN a AS owner,1/(COUNT(*)-1) AS score \
-            GROUP BY a ORDER BY score LIMIT {count}"));
+        let q = query(&format!(
+            "MATCH (a)-[e:R]->(b) RETURN a AS owner,1/(COUNT(*)-1) AS score \
+            GROUP BY a ORDER BY score LIMIT {count}"
+        ));
         let source = Edges::new();
         let dropped = source.dropped.clone();
         let mut cursor = EdgeAggregateCursor::new(
-            source, EdgeAggregatePlan::compile(&q).unwrap(), policy(10), || Ok::<_, ()>(()),
+            source,
+            EdgeAggregatePlan::compile(&q).unwrap(),
+            policy(10),
+            || Ok::<_, ()>(()),
         );
-        assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Source(GraphAggregateError::OutputExpression { .. })))));
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Source(
+                GraphAggregateError::OutputExpression { .. }
+            )))
+        ));
         assert_eq!(cursor.state(), EdgeScanState::Failed);
         assert_eq!(cursor.row_stats().result_rows, 0);
         assert!(dropped.get() && cursor.next().is_none());
@@ -419,7 +526,10 @@ fn edge_projected_order_preserves_late_source_expression_and_result_quota_failur
     let source = Edges::new();
     let dropped = source.dropped.clone();
     let mut limited = EdgeAggregateCursor::new(
-        source, EdgeAggregatePlan::compile(&q).unwrap(), policy(0), || Ok::<_, ()>(()),
+        source,
+        EdgeAggregatePlan::compile(&q).unwrap(),
+        policy(0),
+        || Ok::<_, ()>(()),
     );
     assert!(matches!(limited.next(), Some(Err(GqlQueryError::Rows(_)))));
     assert_eq!(limited.state(), EdgeScanState::Failed);

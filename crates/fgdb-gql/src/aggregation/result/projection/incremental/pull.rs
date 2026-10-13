@@ -471,7 +471,11 @@ mod tests {
                         let expected: Vec<_> = expected
                             .into_iter()
                             .skip(usize::try_from(offset).unwrap_or(usize::MAX))
-                            .take(count.and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::MAX))
+                            .take(
+                                count
+                                    .and_then(|n| usize::try_from(n).ok())
+                                    .unwrap_or(usize::MAX),
+                            )
                             .map(projected_row)
                             .collect();
                         for reverse in [false, true] {
@@ -521,14 +525,18 @@ mod tests {
         rank.push(&q, a, &mut control).unwrap();
         rank.push(&q, b.clone(), &mut control).unwrap();
         assert_eq!(rank.heap.len(), 1);
-        assert_eq!(rank.finish(&q, &mut control).unwrap(), vec![projected_row(b)]);
+        assert_eq!(
+            rank.finish(&q, &mut control).unwrap(),
+            vec![projected_row(b)]
+        );
     }
 
     #[test]
     fn projected_distinct_refills_best_classes_before_skipping_and_limiting() {
         let q = definition(1, Some(2), false, GraphNullPlacement::Last)
             .with_output_projection(vec![GraphSetProjection::new(
-                "score", GraphSetValue::Column(2),
+                "score",
+                GraphSetValue::Column(2),
             )])
             .unwrap()
             .with_projected_order_by(&[crate::algebra::GraphValueOrder {
@@ -540,15 +548,19 @@ mod tests {
             .with_distinct_output(true);
         let scores = [1, 1, 3, 2, 4, 4, 2, 3, 5, 5, 1];
         for reverse in [false, true] {
-            let mut input: Vec<_> = scores.iter().enumerate().map(|(key, &score)| {
-                GraphAggregateRow::from_group_values(
-                    vec![GraphValue::Scalar(CanonicalScalar::Int(key as i64))],
-                    vec![
-                        GraphAggregateValue::Count(1),
-                        GraphAggregateValue::Average(GraphExactAverage::new(score, 1).unwrap()),
-                    ],
-                )
-            }).collect();
+            let mut input: Vec<_> = scores
+                .iter()
+                .enumerate()
+                .map(|(key, &score)| {
+                    GraphAggregateRow::from_group_values(
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(key as i64))],
+                        vec![
+                            GraphAggregateValue::Count(1),
+                            GraphAggregateValue::Average(GraphExactAverage::new(score, 1).unwrap()),
+                        ],
+                    )
+                })
+                .collect();
             if reverse {
                 input.reverse();
             }
@@ -559,11 +571,17 @@ mod tests {
                 assert!(rank.heap.len() <= 3);
             }
             let actual = rank.finish(&q, &mut control).unwrap();
-            let expected: Vec<_> = [4, 3].into_iter().map(|score| {
-                GraphAggregateRow::from_group_values(vec![], vec![
-                    GraphAggregateValue::Average(GraphExactAverage::new(score, 1).unwrap()),
-                ])
-            }).collect();
+            let expected: Vec<_> = [4, 3]
+                .into_iter()
+                .map(|score| {
+                    GraphAggregateRow::from_group_values(
+                        vec![],
+                        vec![GraphAggregateValue::Average(
+                            GraphExactAverage::new(score, 1).unwrap(),
+                        )],
+                    )
+                })
+                .collect();
             assert_eq!(actual, expected);
         }
     }
@@ -592,33 +610,44 @@ mod tests {
             let q = definition(offset, count, true, GraphNullPlacement::Last)
                 .with_output_projection(vec![GraphSetProjection::new(
                     "score",
-                    GraphSetValue::Integer(GraphIntegerExpression::prepare(&[
-                        GraphIntegerOp::Literal(Some(1)),
-                        GraphIntegerOp::Column(1),
-                        GraphIntegerOp::Literal(Some(1)),
-                        GraphIntegerOp::Binary(GraphIntegerBinary::Subtract),
-                        GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
-                    ]).unwrap()),
+                    GraphSetValue::Integer(
+                        GraphIntegerExpression::prepare(&[
+                            GraphIntegerOp::Literal(Some(1)),
+                            GraphIntegerOp::Column(1),
+                            GraphIntegerOp::Literal(Some(1)),
+                            GraphIntegerOp::Binary(GraphIntegerBinary::Subtract),
+                            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+                        ])
+                        .unwrap(),
+                    ),
                 )])
                 .unwrap()
                 .with_projected_order_by(&[crate::algebra::GraphValueOrder {
-                    column: 0, descending: true, nulls_first: false,
+                    column: 0,
+                    descending: true,
+                    nulls_first: false,
                 }])
                 .unwrap()
                 .prepare_streamed_output()
                 .unwrap();
-            let make = |key, count| GraphAggregateRow::from_group_values(
-                vec![GraphValue::Scalar(CanonicalScalar::Int(key))],
-                vec![GraphAggregateValue::Count(count), GraphAggregateValue::Average(
-                    GraphExactAverage::new(2, 1).unwrap(),
-                )],
-            );
+            let make = |key, count| {
+                GraphAggregateRow::from_group_values(
+                    vec![GraphValue::Scalar(CanonicalScalar::Int(key))],
+                    vec![
+                        GraphAggregateValue::Count(count),
+                        GraphAggregateValue::Average(GraphExactAverage::new(2, 1).unwrap()),
+                    ],
+                )
+            };
             let mut rank = q.streamed_group_ranking(2);
             let mut control = |_| Ok::<_, QueryError<(), ()>>(());
             rank.push(&q, make(0, 2), &mut control).unwrap();
-            assert!(matches!(rank.push(&q, make(1, 1), &mut control), Err(
-                GqlQueryError::Source(GraphAggregateError::OutputExpression { column: 0, .. })
-            )));
+            assert!(matches!(
+                rank.push(&q, make(1, 1), &mut control),
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression { column: 0, .. }
+                ))
+            ));
         }
     }
 

@@ -1036,9 +1036,7 @@ impl PreparedGraphAggregate {
             }
             rows.truncate(unique);
         }
-        if self.output_distinct
-            || !self.ordering.is_empty()
-            || !self.projected_ordering.is_empty()
+        if self.output_distinct || !self.ordering.is_empty() || !self.projected_ordering.is_empty()
         {
             self.sort_projected(&mut rows, false, control)?;
         }
