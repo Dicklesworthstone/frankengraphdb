@@ -447,7 +447,10 @@ impl PreparedGraphMutation {
             }
             if let GraphMutationAction::SetProperty { value, .. } = action {
                 let check = |column: usize| {
-                    if columns.get(column) == Some(&GraphSetColumnType::Scalar) {
+                    if columns
+                        .get(column)
+                        .is_some_and(|kind| kind.is_scalar_like())
+                    {
                         Ok(())
                     } else {
                         Err(GraphMutationBuildError::ValueColumn { action: at, column })
@@ -466,7 +469,7 @@ impl PreparedGraphMutation {
                             |kind| GraphMutationBuildError::ValueExpression { action: at, kind };
                         let kind = crate::GraphSetProjection::admit_output(value, &columns, at)
                             .map_err(|kind| refused(Some(kind)))?;
-                        if !matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any) {
+                        if !(kind.is_scalar_like() || kind == GraphSetColumnType::Any) {
                             return Err(refused(None));
                         }
                     }

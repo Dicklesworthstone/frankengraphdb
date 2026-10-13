@@ -118,7 +118,7 @@ impl PreparedGraphVertexUpsertQuery {
             .iter()
             .map(|binding| match binding {
                 GraphVertexReturnBinding::Vertex => GraphSetColumnType::Vertex,
-                GraphVertexReturnBinding::Property(_) => GraphSetColumnType::Scalar,
+                GraphVertexReturnBinding::Property(_) => GraphSetColumnType::Stored,
                 GraphVertexReturnBinding::Properties => GraphSetColumnType::Any,
                 GraphVertexReturnBinding::Labels => GraphSetColumnType::List,
             })

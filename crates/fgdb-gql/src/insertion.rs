@@ -660,14 +660,10 @@ impl Properties {
             // A list column is a stored list field (fgdb-k3nub); execution
             // still refuses a list holding a map or a graph element.
             let check = |column| {
-                if matches!(
-                    columns.get(column),
-                    Some(
-                        GraphSetColumnType::Scalar
-                            | GraphSetColumnType::List
-                            | GraphSetColumnType::Any
-                    )
-                ) {
+                if columns.get(column).is_some_and(|kind| {
+                    kind.is_scalar_like()
+                        || matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any)
+                }) {
                     Ok(())
                 } else {
                     Err(GraphInsertBuildError::ValueColumn {
@@ -696,12 +692,9 @@ impl Properties {
                     };
                     let kind = crate::GraphSetProjection::admit_output(&value, columns, at)
                         .map_err(|kind| refused(Some(kind)))?;
-                    if !matches!(
-                        kind,
-                        GraphSetColumnType::Scalar
-                            | GraphSetColumnType::List
-                            | GraphSetColumnType::Any
-                    ) {
+                    if !kind.is_scalar_like()
+                        && !matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any)
+                    {
                         return Err(refused(None));
                     }
                     value

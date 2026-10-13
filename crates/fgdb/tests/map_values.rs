@@ -671,6 +671,24 @@ fn map_rows_drive_create_properties() {
         ];
         wanted.sort();
         assert_eq!(listed, wanted);
+        // fgdb-kr8j1: a set operand's property column carries the stored
+        // Lists, and UNION deduplicates them by canonical value. Paired with
+        // a list literal column it widens, and keeps every stored List.
+        let mut union = query(
+            &db,
+            "MATCH (n:Listed) RETURN n.name AS name UNION MATCH (m:Listed) RETURN m.name AS name",
+        );
+        union.sort();
+        assert_eq!(union, wanted);
+        let mut widened = query(
+            &db,
+            "MATCH (n:Listed) RETURN n.name AS name UNION MATCH (m:Listed) RETURN ['z'] AS name",
+        );
+        widened.sort();
+        let mut wanted_widened = wanted.clone();
+        wanted_widened.push(vec![list([text("z")])]);
+        wanted_widened.sort();
+        assert_eq!(widened, wanted_widened);
     });
 }
 

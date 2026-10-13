@@ -151,7 +151,7 @@ impl<'a> Parser<'a> {
             .map(|(_, kind)| *kind)
             .chain(inputs.iter().map(|input| {
                 if input.property.is_some() {
-                    GraphSetColumnType::Scalar
+                    GraphSetColumnType::Stored
                 } else {
                     match input.path {
                         Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
@@ -216,7 +216,10 @@ impl<'a> Parser<'a> {
             }
             _ => matches!(
                 kind,
-                GraphSetColumnType::Scalar | GraphSetColumnType::List | GraphSetColumnType::Any
+                GraphSetColumnType::Scalar
+                    | GraphSetColumnType::Stored
+                    | GraphSetColumnType::List
+                    | GraphSetColumnType::Any
             ),
         };
         if !admitted {

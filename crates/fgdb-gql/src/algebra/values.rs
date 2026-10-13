@@ -613,6 +613,31 @@ impl GraphValue {
         })
     }
 
+    /// Whether a property could hold this value (fgdb-k3nub): a scalar, or a
+    /// List or Map whose members are such values within the depth bound. A
+    /// graph element at any depth is not one. This allocates nothing; use
+    /// [`Self::to_property_value`] for the stored value itself.
+    #[must_use]
+    pub(crate) fn is_stored_value(&self) -> bool {
+        fn visit(value: &GraphValue, depth: usize) -> bool {
+            if depth > GraphValue::MAX_LIST_DEPTH {
+                return false;
+            }
+            match value {
+                GraphValue::Scalar(_) => true,
+                GraphValue::List(values) | GraphValue::Map { values, .. } => {
+                    values.iter().all(|value| visit(value, depth + 1))
+                }
+                GraphValue::Vertex(_)
+                | GraphValue::Path(_)
+                | GraphValue::Vertices(_)
+                | GraphValue::Edges(_)
+                | GraphValue::Edge(_) => false,
+            }
+        }
+        visit(self, 0)
+    }
+
     /// This value as a stored property value (fgdb-k3nub). `None` for a value
     /// no property can hold: a vertex, edge, path or element list at any depth,
     /// a map key that is not UCS_BASIC text, or a collection beyond the stored
