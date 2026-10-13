@@ -620,6 +620,9 @@ struct Syntax<'a> {
     /// p = (a)-->(b)`), in clause order. Each is exported like the clause's
     /// vertices, and is NULL where an OPTIONAL clause has no witness.
     scope_paths: Vec<Name<'a>>,
+    /// The `scope_paths` a clause captured for its only variable-length
+    /// relationship (`MATCH (a)-[r*2]->()`): a bare name is the edge list.
+    scope_edge_paths: Vec<&'a str>,
     root_variables: usize,
     labels: Vec<(Name<'a>, Name<'a>)>,
     edges: Vec<Edge<'a>>,
@@ -651,7 +654,11 @@ impl<'a> Syntax<'a> {
                 GraphPathFunction::Value
             })
         } else if self.scope_paths.iter().any(|path| path.text == name) {
-            Some(GraphPathFunction::Value)
+            Some(if self.scope_edge_paths.contains(&name) {
+                GraphPathFunction::Edges
+            } else {
+                GraphPathFunction::Value
+            })
         } else if self.visible_edge(name).is_some() {
             Some(GraphPathFunction::Edge)
         } else {
@@ -846,6 +853,7 @@ impl<'a> Parser<'a> {
                 path: None,
                 path_edges: false,
                 scope_paths: Vec::new(),
+                scope_edge_paths: Vec::new(),
                 root_variables: 0,
                 labels: Vec::new(),
                 edges: Vec::new(),

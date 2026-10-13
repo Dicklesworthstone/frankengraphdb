@@ -1271,6 +1271,23 @@ impl<'a> Parser<'a> {
                 None
             };
             self.positive_pattern()?;
+            // As at the root, a named variable-length relationship that is a
+            // required or OPTIONAL clause's only edge, with no path named,
+            // captures that edge's path under its name, and a bare name reads
+            // the path's edge list (openCypher Match4, Match9).
+            let mut edges = false;
+            let path = match path {
+                None if clause && kind.exports_bindings() => {
+                    match self.syntax.edges.as_mut_slice() {
+                        [edge] if edge.walk.is_some() => {
+                            edges = edge.variable.is_some();
+                            edge.variable.take()
+                        }
+                        _ => None,
+                    }
+                }
+                path => path,
+            };
             if let Some(path) = path {
                 self.syntax.filters.push(Filter::PathCapture(path));
             }
@@ -1316,10 +1333,10 @@ impl<'a> Parser<'a> {
             let mut body = self.take_pattern();
             body.variables.truncate(matched_variables);
             body.captures = predicate_captures(&mut body.variables, &body.filters, &body.edges)?;
-            Ok::<_, GraphPatternTextError>((body, path))
+            Ok::<_, GraphPatternTextError>((body, path, edges))
         })();
         self.read_row_bindings = row_bindings;
-        let (body, path) = match parsed {
+        let (body, path, edges) = match parsed {
             Ok(parsed) => parsed,
             Err(error) => {
                 self.restore_pattern(outer);
@@ -1344,6 +1361,9 @@ impl<'a> Parser<'a> {
             // A comprehension's path is its own local, never exported.
             if !comprehension {
                 self.syntax.scope_paths.push(path);
+                if edges {
+                    self.syntax.scope_edge_paths.push(path.text);
+                }
             }
         }
         // Captures already name visible values. Only actual new matched names
