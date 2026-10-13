@@ -36,6 +36,32 @@ impl Parser<'_> {
             } else {
                 None
             };
+            // `RETURN n AS m ORDER BY m.p`: a property of an alias that
+            // projects an element bare is that element's property. A name
+            // that is itself a binding keeps meaning the binding.
+            let name = match property {
+                Some(_)
+                    if function.is_none()
+                        && self.syntax.bare_path_function(name.text).is_none()
+                        && !self
+                            .syntax
+                            .variables
+                            .iter()
+                            .any(|variable| variable.text == name.text) =>
+                {
+                    self.syntax
+                        .columns
+                        .iter()
+                        .find(|column| {
+                            column.alias.text == name.text
+                                && column.property.is_none()
+                                && column.collect.is_none()
+                                && matches!(column.path, None | Some(GraphPathFunction::Edge))
+                        })
+                        .map_or(name, |column| column.variable)
+                }
+                _ => name,
+            };
             let resolved = if let Some((variable, function)) = function {
                 self.syntax.columns.iter().position(|column| {
                     column.variable.text == variable.text && column.path == Some(function)
