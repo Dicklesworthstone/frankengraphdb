@@ -45,7 +45,10 @@ pub(super) fn admit_keys(
                     BulkEndpoint::Match(matched) => matched
                         .value
                         .encode()
-                        .map_err(|source| BulkLoadErrorKind::SourceEncoding { row, source })?
+                        .map_err(|source| BulkLoadErrorKind::SourceEncoding {
+                            row,
+                            source: fgdb_types::CanonicalPropertyValueError::ScalarEncode(source),
+                        })?
                         .len(),
                 };
                 limit(row, "key_bytes", policy.max_key_bytes, len)?;
@@ -242,7 +245,9 @@ fn transcript_row(
                         let bytes = matched.value.encode().map_err(|source| {
                             BulkLoadErrorKind::SourceEncoding {
                                 row: ordinal,
-                                source,
+                                source: fgdb_types::CanonicalPropertyValueError::ScalarEncode(
+                                    source,
+                                ),
                             }
                         })?;
                         framed(emit, &bytes)?;
