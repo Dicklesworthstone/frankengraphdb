@@ -437,18 +437,28 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
         collect_edge_merge_output(
             merge,
             policy,
-            |pattern, allowance| {
+            |allowance| {
                 if let Some((selected, _)) = selected {
                     return Ok(selected);
                 }
-                selection::select_overlay(
-                    transaction,
-                    &database.borrow(),
-                    cx,
-                    pattern,
-                    scope,
+                merge.select_governed(
+                    None,
                     allowance,
-                    &controls,
+                    |pattern, allowance| {
+                        selection::select_overlay(
+                            transaction,
+                            &database.borrow(),
+                            cx,
+                            pattern,
+                            scope,
+                            allowance,
+                            &controls,
+                        )
+                    },
+                    || {
+                        cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        controls.borrow_mut().checkpoint()
+                    },
                 )
             },
             |src, dst| {

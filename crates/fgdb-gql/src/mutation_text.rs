@@ -392,13 +392,26 @@ impl core::fmt::Display for GraphVertexMergeTextError {
 }
 impl core::error::Error for GraphVertexMergeTextError {}
 
+/// Where a relationship MERGE's endpoint rows come from (fgdb-cpny9).
+#[derive(Clone)]
+pub(crate) enum EdgeMergeTextInput {
+    /// `MATCH ... MERGE`: the MERGE's own MATCH prefix.
+    Match(PreparedGraphText),
+    /// `MATCH ... WITH ... MERGE`, or a chained write's owned rows: the row
+    /// relation whose vertex columns are the endpoints.
+    Row {
+        statement: String,
+        input: crate::set_text::BoundSetTextInput,
+    },
+}
+
 /// Native `MATCH ... MERGE (a)-[r:R {k: v}]->(b)` over already-bound
 /// endpoint variables, its reverse arrow, or an undirected `-[:R]-`. The
 /// property map's values are the MERGE's exact-equality predicates and its
 /// creation fields (fgdb-at06q).
 #[derive(Clone)]
 pub struct PreparedGraphEdgeMergeText {
-    pub(crate) selection: PreparedGraphText,
+    pub(crate) input: EdgeMergeTextInput,
     pub(crate) relation: RelationId,
     pub(crate) source: usize,
     pub(crate) destination: usize,

@@ -518,7 +518,7 @@ impl PreparedGraphEdgeUpsertText {
         // binder checks nulls and resolved-key aliases before any execution;
         // its owner supplies the selected edge to the unchanged action engine.
         let merge = PreparedGraphEdgeMergeText {
-            selection,
+            input: crate::mutation_text::EdgeMergeTextInput::Match(selection),
             relation: found,
             source,
             destination,
@@ -540,7 +540,7 @@ impl PreparedGraphEdgeUpsertText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphEdgeUpsert, GraphEdgeUpsertTextError> {
-        let values = self.merge.selection.checked_arguments(arguments)?;
+        let values = self.merge.input.checked_arguments(arguments)?;
         let merge = self.merge.bind_parameters(arguments).map_err(merge_error)?;
         let bind = |templates: &[EdgeUpsertActionTemplate]| -> Result<
             Vec<GraphEdgeUpsertAction<GraphEdgeUpsertValue>>,
@@ -600,7 +600,7 @@ impl PreparedGraphEdgeUpsertText {
         let after = bind(&self.after)?;
         PreparedGraphEdgeUpsert::prepare_with_clauses(merge, on_match, on_create, after).map_err(
             |source| GraphEdgeUpsertTextError {
-                offset: self.merge.selection.return_at,
+                offset: self.merge.input.return_at(),
                 kind: GraphEdgeUpsertTextErrorKind::UpsertBuild(source),
             },
         )

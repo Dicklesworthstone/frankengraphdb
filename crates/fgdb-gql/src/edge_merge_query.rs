@@ -129,13 +129,13 @@ impl PreparedGraphEdgeMergeQuery {
                 observed: bindings.len(),
             });
         }
-        let selection = merge.selection().value_columns();
+        let selection = merge.input_column_types();
         let mut input_types = Vec::with_capacity(bindings.len());
         for (at, binding) in bindings.iter().enumerate() {
             input_types.push(match *binding {
                 GraphEdgeMergeBinding::Input(column) => selection
                     .get(column)
-                    .map(GraphSetColumnType::from)
+                    .copied()
                     .ok_or(GraphEdgeMergeQueryBuildError::Binding { binding: at })?,
                 GraphEdgeMergeBinding::Edge => GraphSetColumnType::Edge,
                 GraphEdgeMergeBinding::Endpoint { .. } => GraphSetColumnType::Vertex,

@@ -256,6 +256,13 @@ fn classify(
             };
             error(source.offset, kind)
         })?;
+        // A relationship MERGE over the row (fgdb-cpny9) has no branch clause
+        // here: ON MATCH/ON CREATE or SET after it keep their refusal.
+        let merge_at = statement.span.start + parser.current.at;
+        let plain_merge = parser.is_word("MERGE")
+            && !statement.last_on.is_some_and(|at| at > merge_at)
+            && !statement.last_set.is_some_and(|at| at > merge_at)
+            && merges_relationship(&parser)?;
         return if parser.is_word("CREATE") || parser.is_word("INSERT") {
             Ok(Kind::Insert)
         } else if ["SET", "REMOVE", "DETACH", "DELETE"]
@@ -263,11 +270,13 @@ fn classify(
             .any(|word| parser.is_word(word))
         {
             Ok(Kind::Mutation)
+        } else if plain_merge {
+            Ok(Kind::EdgeMerge)
         } else {
             Err(error(
                 parser.current.at,
                 GraphPatternTextErrorKind::Expected(
-                    "CREATE, SET, REMOVE or DELETE after MATCH ... WITH",
+                    "CREATE, SET, REMOVE, DELETE or a relationship MERGE after MATCH ... WITH",
                 ),
             ))
         };
@@ -308,6 +317,16 @@ fn classify(
         parser.current.at,
         GraphPatternTextErrorKind::Expected("a supported graph write statement"),
     ))
+}
+
+/// At `MERGE`: whether its pattern is a relationship, `(a)-` or `(a)<-`,
+/// read with native tokens and without consuming the parser's own.
+fn merges_relationship(parser: &Parser<'_>) -> Result<bool, GraphPatternTextError> {
+    let mut lexer = parser.lexer.clone();
+    Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
+        && matches!(lexer.next()?.kind, TokenKind::Word(_))
+        && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
+        && matches!(lexer.next()?.kind, TokenKind::Punct(b'-' | b'<')))
 }
 
 /// The one cached catalog every statement of a script resolves through. It

@@ -109,7 +109,10 @@ fn relationship_variables_property_maps_and_undirected_merges_compile() {
     let null = fgdb_gql::GqlScalarParameter::new(CanonicalScalar::Null).unwrap();
     assert_eq!(
         fgdb_gql::PreparedGraphEdgeMerge::prepare(
-            anonymous.selection().clone(),
+            anonymous
+                .selection()
+                .expect("a MATCH-prefixed MERGE")
+                .clone(),
             R,
             0,
             1,
@@ -214,8 +217,13 @@ fn only_a_match_merge_with_a_later_top_level_return_routes_to_merge_return() {
         ("CREATE (a) RETURN a", false),
         // A vertex MERGE after MATCH is not a relationship pattern.
         ("MATCH (a) MERGE (b:L) RETURN b", false),
-        // Clauses the MATCH prefix cannot carry before the MERGE.
-        ("MATCH (n) WITH n AS a MERGE (a)-[:R]->(a) RETURN a", false),
+        // A WITH row may precede the MERGE (fgdb-cpny9); other clauses the
+        // MATCH prefix cannot carry before it.
+        ("MATCH (n) WITH n AS a MERGE (a)-[:R]->(a) RETURN a", true),
+        (
+            "MATCH (n) WITH n AS a CREATE (b) MERGE (a)-[:R]->(b) RETURN a",
+            false,
+        ),
         (
             "MATCH (a)-[t:R]->(b) DELETE t MERGE (a)-[:R]->(b) RETURN a",
             false,

@@ -40,6 +40,8 @@ pub enum GraphEdgeMergeBuildError {
     NullProperty {
         key: PropertyKeyId,
     },
+    /// A row relation input exceeds the parent depth a write admits.
+    RelationalInput(crate::GraphSetBuildError),
 }
 impl core::fmt::Display for GraphEdgeMergeBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -124,13 +126,29 @@ pub struct GraphEdgeMergeRequest;
 #[derive(Debug)]
 pub enum GraphEdgeMergeError<E, A> {
     Source(E),
+    /// A row relation input (`MATCH ... WITH ... MERGE`, or a chained write's
+    /// owned rows) failed before any existence scan or identity allocation.
+    InputRelation(crate::GraphSetExecutionError<E>),
     IdentitySource(A),
     InvalidSourceStatistics,
-    InputSchema { row: usize, column: usize },
-    NullEndpoint { row: usize, column: usize },
-    AmbiguousEndpointPairs { observed: u64 },
-    AmbiguousRelationships { observed: u64 },
-    CreationLimit { limit: u64, observed: u128 },
+    InputSchema {
+        row: usize,
+        column: usize,
+    },
+    NullEndpoint {
+        row: usize,
+        column: usize,
+    },
+    AmbiguousEndpointPairs {
+        observed: u64,
+    },
+    AmbiguousRelationships {
+        observed: u64,
+    },
+    CreationLimit {
+        limit: u64,
+        observed: u128,
+    },
     IdentityKind,
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
@@ -139,6 +157,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(error) => error.fmt(f),
+            Self::InputRelation(error) => write!(f, "relationship MERGE input relation: {error}"),
             Self::IdentitySource(error) => {
                 write!(f, "relationship MERGE identity allocation: {error}")
             }
@@ -177,15 +196,26 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Source(error) => Some(error),
+            Self::InputRelation(error) => Some(error),
             Self::IdentitySource(error) => Some(error),
             _ => None,
         }
     }
 }
 
+/// Where the endpoint rows come from.
+#[derive(Clone, PartialEq, Eq)]
+enum Input {
+    /// The MERGE's own MATCH prefix.
+    Pattern(PreparedGraphPattern<GraphValueRow>),
+    /// A row relation: the rows a `MATCH ... WITH` pipeline returns, or the
+    /// previous write's owned rows in a chain (`SetNode::Owned`).
+    Relation(Box<crate::PreparedGraphSet>),
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphEdgeMerge {
-    selection: PreparedGraphPattern<GraphValueRow>,
+    input: Input,
     relation: RelationId,
     source: usize,
     destination: usize,
@@ -206,7 +236,7 @@ impl PreparedGraphEdgeMerge {
         relation: RelationId,
         source: usize,
         destination: usize,
-        mut properties: Vec<(PropertyKeyId, GqlScalarParameter)>,
+        properties: Vec<(PropertyKeyId, GqlScalarParameter)>,
     ) -> Result<Self, GraphEdgeMergeBuildError> {
         let columns = selection.value_columns();
         if !matches!(columns.get(source), Some(ValueProjection::Vertex { .. })) {
@@ -220,6 +250,54 @@ impl PreparedGraphEdgeMerge {
                 column: destination,
             });
         }
+        Self::with_input(
+            Input::Pattern(selection),
+            relation,
+            source,
+            destination,
+            properties,
+        )
+    }
+
+    /// MERGE over a row relation: `MATCH ... WITH ... MERGE (a)-[:R]->(b)`,
+    /// or a chained write's owned rows (`CREATE (a), (b) WITH * MERGE ...`).
+    /// The endpoints are vertex columns of that row; every row's pair
+    /// resolves as a MATCH-selected one does.
+    pub fn prepare_relation(
+        input: crate::PreparedGraphSet,
+        relation: RelationId,
+        source: usize,
+        destination: usize,
+        properties: Vec<(PropertyKeyId, GqlScalarParameter)>,
+    ) -> Result<Self, GraphEdgeMergeBuildError> {
+        let types = input.column_types();
+        if types.get(source) != Some(&crate::GraphSetColumnType::Vertex) {
+            return Err(GraphEdgeMergeBuildError::SourceColumn { column: source });
+        }
+        if types.get(destination) != Some(&crate::GraphSetColumnType::Vertex) {
+            return Err(GraphEdgeMergeBuildError::DestinationColumn {
+                column: destination,
+            });
+        }
+        input
+            .check_parent_depth()
+            .map_err(GraphEdgeMergeBuildError::RelationalInput)?;
+        Self::with_input(
+            Input::Relation(Box::new(input)),
+            relation,
+            source,
+            destination,
+            properties,
+        )
+    }
+
+    fn with_input(
+        input: Input,
+        relation: RelationId,
+        source: usize,
+        destination: usize,
+        mut properties: Vec<(PropertyKeyId, GqlScalarParameter)>,
+    ) -> Result<Self, GraphEdgeMergeBuildError> {
         if properties.len() > MAX_GRAPH_EDGE_MERGE_PROPERTIES {
             return Err(GraphEdgeMergeBuildError::TooManyProperties {
                 limit: MAX_GRAPH_EDGE_MERGE_PROPERTIES,
@@ -237,7 +315,7 @@ impl PreparedGraphEdgeMerge {
             return Err(GraphEdgeMergeBuildError::NullProperty { key: *key });
         }
         Ok(Self {
-            selection,
+            input,
             relation,
             source,
             destination,
@@ -287,9 +365,81 @@ impl PreparedGraphEdgeMerge {
         })
     }
 
+    /// The MERGE's own MATCH prefix; `None` over a row relation.
     #[must_use]
-    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> {
-        &self.selection
+    pub fn selection(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
+        match &self.input {
+            Input::Pattern(pattern) => Some(pattern),
+            Input::Relation(_) => None,
+        }
+    }
+
+    /// The row relation input; `None` with a MATCH prefix.
+    #[must_use]
+    pub fn input_relation(&self) -> Option<&crate::PreparedGraphSet> {
+        match &self.input {
+            Input::Pattern(_) => None,
+            Input::Relation(relation) => Some(relation),
+        }
+    }
+
+    /// The domain of each input row column, endpoints included.
+    #[must_use]
+    pub fn input_column_types(&self) -> Vec<crate::GraphSetColumnType> {
+        match &self.input {
+            Input::Pattern(pattern) => pattern
+                .value_columns()
+                .iter()
+                .map(crate::GraphSetColumnType::from)
+                .collect(),
+            Input::Relation(relation) => relation.column_types().to_vec(),
+        }
+    }
+
+    /// The endpoint rows: the MATCH prefix through `patterns`, or the row
+    /// relation, whose owned leaf (a chain) reads `owned`. Rows a pattern or
+    /// a leafless relation cannot read refuse rather than vanish.
+    pub fn select_governed<E, A, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GqlQueryPolicy,
+        mut patterns: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<
+            crate::GqlQueryExecution<GraphValueRow>,
+            crate::GqlQueryError<E, C>,
+        >,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<
+        crate::GqlQueryExecution<GraphValueRow>,
+        crate::GqlQueryError<GraphEdgeMergeError<E, A>, C>,
+    > {
+        match &self.input {
+            Input::Pattern(pattern) => {
+                if owned.is_some() {
+                    return Err(crate::GqlQueryError::Source(
+                        GraphEdgeMergeError::InputRelation(
+                            crate::GraphSetExecutionError::OwnedRowsUnavailable,
+                        ),
+                    ));
+                }
+                patterns(pattern, policy)
+                    .map_err(|error| error.map_source(GraphEdgeMergeError::Source))
+            }
+            Input::Relation(relation) => match owned {
+                None => relation.execute_governed(policy, patterns, checkpoint),
+                Some(rows) => relation.execute_with_source(
+                    policy,
+                    &mut crate::set_ops::WithOwnedRows {
+                        source: patterns,
+                        rows: Some(rows),
+                    },
+                    checkpoint,
+                ),
+            }
+            .map_err(|error| error.map_source(GraphEdgeMergeError::InputRelation)),
+        }
     }
     #[must_use]
     pub const fn relation(&self) -> RelationId {
@@ -310,16 +460,21 @@ impl PreparedGraphEdgeMerge {
 
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        // A directed definition keeps its original transcript.
-        let mut bytes = if self.undirected {
-            b"fgdb:undirected-edge-merge:v1\0".to_vec()
-        } else {
-            b"fgdb:directed-edge-merge:v1\0".to_vec()
+        // A directed definition keeps its original transcript; a row
+        // relation input has its own domain.
+        let mut bytes = match (&self.input, self.undirected) {
+            (Input::Relation(_), false) => b"fgdb:relational-directed-edge-merge:v1\0".to_vec(),
+            (Input::Relation(_), true) => b"fgdb:relational-undirected-edge-merge:v1\0".to_vec(),
+            (Input::Pattern(_), true) => b"fgdb:undirected-edge-merge:v1\0".to_vec(),
+            (Input::Pattern(_), false) => b"fgdb:directed-edge-merge:v1\0".to_vec(),
         };
         bytes.extend_from_slice(&self.relation.0.to_be_bytes());
         bytes.extend_from_slice(&(self.source as u64).to_be_bytes());
         bytes.extend_from_slice(&(self.destination as u64).to_be_bytes());
-        let selection = self.selection.canonical_bytes();
+        let selection = match &self.input {
+            Input::Pattern(pattern) => pattern.canonical_bytes(),
+            Input::Relation(relation) => relation.canonical_bytes(),
+        };
         bytes.extend_from_slice(&(selection.len() as u64).to_be_bytes());
         bytes.extend_from_slice(&selection);
         bytes.extend_from_slice(&(self.properties.len() as u64).to_be_bytes());
