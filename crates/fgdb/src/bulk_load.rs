@@ -267,7 +267,8 @@ pub enum BulkLoadErrorKind {
         source: EdgePropertyPatchError,
     },
     Write(WriteTxnError),
-    /// The chunk is durable, but the caller could not persist/announce it.
+    /// A validated baseline or durable chunk could not be persisted/announced.
+    /// No pending write is implied; inspect `BulkLoadError::committed`.
     Checkpoint(std::io::Error),
 }
 #[derive(Debug)]
@@ -466,15 +467,56 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         commit_cx: &CommitCx,
         source: I,
-        mut policy: BulkLoadPolicy,
+        policy: BulkLoadPolicy,
         crash: Option<(usize, CrashPoint)>,
-        mut acknowledged: F,
+        acknowledged: F,
     ) -> Result<BulkLoadCheckpoint, BulkLoadError>
     where
         I: IntoIterator<Item = Result<BulkRow, E>>,
         I::IntoIter: Clone,
         E: core::error::Error + Send + Sync + 'static,
         F: FnMut(&BulkLoadCheckpoint) -> Result<(), std::io::Error>,
+    {
+        self.try_bulk_load_with_admission(cx, commit_cx, source, policy, crash, |_| {
+            Ok(acknowledged)
+        })
+        .await
+    }
+
+    /// Validate the complete source and any resumed prefix before invoking
+    /// `admitted` exactly once. The callback receives the checked baseline and
+    /// returns the ordinary per-durable-chunk checkpoint callback. This lets a
+    /// host publish its import origin or reconstructed recovery progress only
+    /// AFTER endpoint resolution, chunk admission and graph-prefix validation,
+    /// but BEFORE any new identity allocation or write in this invocation.
+    ///
+    /// Existing checkpoint-only entrypoints retain their original callback
+    /// sequence: one call per new durable chunk, never one for admission. An
+    /// empty load or completed resume still invokes `admitted`, but performs
+    /// no new commit. Admission callback failure returns Checkpoint with the
+    /// checked baseline and no pending write; its own external side effects
+    /// are not rolled back. Preflight failure invokes neither callback.
+    ///
+    /// The returned callback may own the same output state used by admission;
+    /// no interior mutability or second source-validation pass is required.
+    /// Each later source chunk is still replay-verified before it can commit.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)] // once-per-load resume report
+    pub async fn try_bulk_load_with_admission<I, E, F, A>(
+        &mut self,
+        cx: &QueryCx,
+        commit_cx: &CommitCx,
+        source: I,
+        mut policy: BulkLoadPolicy,
+        crash: Option<(usize, CrashPoint)>,
+        admitted: A,
+    ) -> Result<BulkLoadCheckpoint, BulkLoadError>
+    where
+        I: IntoIterator<Item = Result<BulkRow, E>>,
+        I::IntoIter: Clone,
+        E: core::error::Error + Send + Sync + 'static,
+        F: FnMut(&BulkLoadCheckpoint) -> Result<(), std::io::Error>,
+        A: FnOnce(&BulkLoadCheckpoint) -> Result<F, std::io::Error>,
     {
         let resuming = policy.resume.is_some();
         // Move, do not duplicate, caller-owned checkpoint maps before admission.
@@ -659,6 +701,22 @@ impl<V: Vfs + Clone> Database<V> {
                 pending: None,
             });
         }
+        // Nothing externally acknowledges a caller-supplied/reconstructed
+        // prefix until the SAME engine preflight has validated all of it.
+        // In particular BulkEndpoint::Match must resolve at the load basis,
+        // and a previously committed edge must have those exact endpoints.
+        let mut acknowledged = match source::checkpoint(cx).and_then(|()| {
+            admitted(&committed).map_err(BulkLoadErrorKind::Checkpoint)
+        }) {
+            Ok(acknowledged) => acknowledged,
+            Err(kind) => {
+                return Err(BulkLoadError {
+                    kind,
+                    committed,
+                    pending: None,
+                });
+            }
+        };
         for (index, seal) in seals.iter().enumerate() {
             let skip = seal.end() <= committed.next_row;
             let chunk = match source::read_verified(
