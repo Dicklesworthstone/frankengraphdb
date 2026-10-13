@@ -636,9 +636,13 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
     let starved = fixture.robot("query", &["--max-work-units", "1", text]);
     refused(&starved, 3, "query");
     assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
+    assert!(String::from_utf8_lossy(&starved.stdout).contains("(raise with --max-work-units)"));
     let starved = fixture.robot("query", &["--max-snapshot-records", "1", text]);
     refused(&starved, 3, "query");
     assert!(String::from_utf8_lossy(&starved.stdout).contains("SnapshotRecords"));
+    assert!(
+        String::from_utf8_lossy(&starved.stdout).contains("(raise with --max-snapshot-records)")
+    );
 
     // A sufficient explicit limit answers exactly as the defaults do.
     let raised = fixture.robot("query", &["--max-work-units", "100000000", text]);
@@ -659,6 +663,7 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
     let starved = fixture.robot("replay", &starved);
     refused(&starved, 3, "query");
     assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
+    assert!(String::from_utf8_lossy(&starved.stdout).contains("(raise with --max-work-units)"));
 
     // A repeated or malformed limit is a usage error; write takes none.
     let twice = ["--max-work-units", "1", "--max-work-units", "2", text];
@@ -670,4 +675,83 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
     );
     let write = ["--max-work-units", "1", "INSERT (:Person {id: 9})"];
     refused(&fixture.robot("write", &write), 2, "usage");
+}
+
+/// `--bindings-file` adds its bindings to the flags' (the fixture binds
+/// Person and id by flag), a name or ID repeated across the two is a usage
+/// error, and a FIFO is refused without being opened (opening one blocks).
+#[test]
+fn a_bindings_file_adds_to_the_flag_bindings() {
+    let fixture = Fixture::new("bindings-file");
+    let file = fixture.dir.join("bindings");
+    std::fs::write(
+        &file,
+        "# robots\nlabel Robot=2\nproperty serial=2\n\nrelation BUILT=3\n",
+    )
+    .unwrap();
+    let file = file.to_str().unwrap();
+    succeeded(&fixture.robot("create", &[]), "created");
+    let write = "INSERT (:Person {id: 1})-[:BUILT]->(:Robot {serial: 7})";
+    succeeded(
+        &fixture.robot("write", &["--bindings-file", file, write]),
+        "written",
+    );
+    let read = "MATCH (:Person {id: 1})-[:BUILT]->(r:Robot) RETURN r.serial AS serial";
+    let answer = fixture.robot("query", &["--bindings-file", file, read]);
+    succeeded(&answer, "rows");
+    assert_eq!(
+        rows(&answer),
+        [r#"{"v":1,"event":"row","cells":[{"type":"int","value":"7"}]}"#]
+    );
+    // Without the file, Robot is unbound.
+    refused(&fixture.robot("query", &[read]), 3, "query");
+
+    for (name, text) in [
+        ("same-name", "label Person=9\n"),
+        ("same-id", "property other=1\n"),
+    ] {
+        let repeated = fixture.dir.join(name);
+        std::fs::write(&repeated, text).unwrap();
+        let output = fixture.robot(
+            "query",
+            &["--bindings-file", repeated.to_str().unwrap(), read],
+        );
+        refused(&output, 2, "usage");
+    }
+
+    #[cfg(unix)]
+    {
+        let fifo = fixture.dir.join("bindings-fifo");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+            .current_dir(&fixture.dir)
+            .args(["--robot", "query", "--db"])
+            .arg(fixture.db())
+            .args([
+                "--key-file",
+                "keys",
+                "--bindings-file",
+                "bindings-fifo",
+                read,
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() > deadline {
+                child.kill().unwrap();
+                panic!("a FIFO bindings file must be refused, not opened and read");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        refused(&child.wait_with_output().unwrap(), 2, "usage");
+    }
 }

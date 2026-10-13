@@ -291,11 +291,19 @@ impl Failure {
         Self::new(2, "usage", message)
     }
     fn query(message: impl ToString) -> Self {
-        let mut message = message.to_string();
-        if let Some(flag) = budget_flag(&message) {
-            message.push_str(&format!(" (raise with {flag})"));
-        }
         Self::new(3, "query", message)
+    }
+    /// Name the flag that raises an execution-limit refusal. Only for a
+    /// command that accepts those flags (`query`, `replay`, `diff`): the
+    /// others run under fixed limits, and a `remote` refusal may be the
+    /// server's limit or the capability's, neither a client flag.
+    fn with_budget_hint(mut self) -> Self {
+        if self.class == "query"
+            && let Some(flag) = budget_flag(&self.message)
+        {
+            self.message.push_str(&format!(" (raise with {flag})"));
+        }
+        self
     }
     fn open(message: impl ToString) -> Self {
         Self::new(4, "open", message)
@@ -492,6 +500,27 @@ fn bind_symbol(map: &mut BTreeMap<String, u32>, name: &str, id: u32) -> Result<(
     Ok(())
 }
 
+/// A bindings file's bytes, at most one past the parser's ceiling, so a
+/// mistaken path to a huge file is refused without reading it whole. A FIFO
+/// or device is refused BEFORE it is opened: opening a FIFO blocks until a
+/// writer appears.
+async fn read_bindings_bytes(path: &std::path::Path) -> Result<Vec<u8>, Failure> {
+    use asupersync::io::AsyncReadExt as _;
+    let named = asupersync::fs::metadata(path).await.map_err(Failure::io)?;
+    if !named.is_file() {
+        return Err(Failure::usage("bindings file must be a regular file"));
+    }
+    let file = asupersync::fs::File::open(path)
+        .await
+        .map_err(Failure::io)?;
+    let mut bytes = Vec::new();
+    file.take(fgdb_gql::symbol_bindings::MAX_SYMBOL_BINDINGS_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(Failure::io)?;
+    Ok(bytes)
+}
+
 /// Merge `--bindings-file` into the flag bindings under the same uniqueness rule.
 async fn read_bindings_file(
     options: &mut Options,
@@ -501,7 +530,7 @@ async fn read_bindings_file(
         return Ok(());
     };
     cx.checkpoint().map_err(Failure::io)?;
-    let bytes = asupersync::fs::read(&path).await.map_err(Failure::io)?;
+    let bytes = read_bindings_bytes(&path).await?;
     let bindings = fgdb_gql::symbol_bindings::parse_symbol_bindings(&bytes)
         .map_err(|error| Failure::usage(error.to_string()))?;
     for binding in bindings {
@@ -628,14 +657,10 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                     rows_per_chunk = Some(rows);
                 }
                 "--max-source-rows" if command == "load" && max_source_rows.is_none() => {
-                    max_source_rows = Some(value.parse().map_err(|_| {
-                        Failure::usage("max-source-rows must be a decimal integer")
-                    })?);
+                    max_source_rows = Some(decimal_usize(arg, value)?);
                 }
                 "--max-total-key-bytes" if command == "load" && max_total_key_bytes.is_none() => {
-                    max_total_key_bytes = Some(value.parse().map_err(|_| {
-                        Failure::usage("max-total-key-bytes must be a decimal integer")
-                    })?);
+                    max_total_key_bytes = Some(decimal_usize(arg, value)?);
                 }
                 "--rows" if command == "write" && rows.is_none() => {
                     rows = Some(value.clone());
@@ -1325,6 +1350,14 @@ fn set_decimal(target: &mut Option<u64>, flag: &str, raw: &str) -> Result<(), Fa
     );
     Ok(())
 }
+/// A decimal `usize` bound: ASCII digits only, as every decimal flag.
+fn decimal_usize(flag: &str, raw: &str) -> Result<usize, Failure> {
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Failure::usage(format!("{flag} requires a decimal integer")));
+    }
+    raw.parse()
+        .map_err(|_| Failure::usage(format!("{flag} exceeds this platform's usize")))
+}
 fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Failure> {
     match args.first().map(String::as_str) {
         Some("help") if args.len() == 1 => {
@@ -1352,7 +1385,8 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             let runtime = fgdb::runtime_builder().build().map_err(Failure::io)?;
             let root = runtime.request_cx_with_budget(Budget::INFINITE);
             let contexts = PurposeContexts::narrow_runtime_root(&root);
-            runtime.block_on(async {
+            let tunable = matches!(command, "query" | "replay" | "diff");
+            let outcome = runtime.block_on(async {
                 read_bindings_file(&mut options, &contexts.query()).await?;
                 let mut keys = read_keys(&contexts.query(), &options.key).await?;
                 let artifact = if let Some(path) = &options.tzdb_file {
@@ -1512,6 +1546,13 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 out.flush().map_err(Failure::io)?;
                 contexts.query().checkpoint().map_err(Failure::io)?;
                 asupersync::fs::write(path, certificate.canonical_bytes()).await.map_err(Failure::io)
+            });
+            outcome.map_err(|failure| {
+                if tunable {
+                    failure.with_budget_hint()
+                } else {
+                    failure
+                }
             })
         }
         _ => Err(Failure::usage(
@@ -1934,15 +1975,25 @@ mod budget_hint_tests {
         ];
         for (message, flag) in refusals {
             assert_eq!(budget_flag(&message), Some(flag), "{message}");
-            let rendered = super::Failure::query(&message).message;
+            let rendered = super::Failure::query(&message).with_budget_hint().message;
             assert!(
                 rendered.ends_with(&format!(" (raise with {flag})")),
                 "{rendered}"
             );
+            // A command without the flag (write, remote, ...) is not told to
+            // raise it.
+            assert_eq!(super::Failure::query(&message).message, message);
+            // Nor is a failure that is not a query refusal.
+            assert_eq!(
+                super::Failure::io(&message).with_budget_hint().message,
+                message
+            );
         }
         assert_eq!(budget_flag("unknown label Person"), None);
         assert_eq!(
-            super::Failure::query("unknown label Person").message,
+            super::Failure::query("unknown label Person")
+                .with_budget_hint()
+                .message,
             "unknown label Person"
         );
     }

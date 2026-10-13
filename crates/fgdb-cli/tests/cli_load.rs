@@ -852,6 +852,7 @@ fn source_row_and_key_byte_bounds_are_caller_selected() {
     for flags in [
         ["--max-source-rows", "1", "--max-source-rows", "2"].as_slice(),
         ["--max-source-rows", "-1"].as_slice(),
+        ["--max-source-rows", "+5"].as_slice(),
         ["--max-total-key-bytes", "many"].as_slice(),
     ] {
         let output = fixture.load_command(None).args(flags).output().unwrap();
@@ -904,6 +905,12 @@ fn edges_in_a_later_load_name_committed_vertices_by_property() {
         .concat(),
     );
     refused.refusal("UnresolvedEndpoint", Some(3));
+    // The refusal names the endpoint as the input did, not by internal IDs.
+    let diagnostics = format!("{:?}", refused.terminal().get("diagnostics"));
+    assert!(
+        diagnostics.contains("label Person, property k, value Int(99)"),
+        "{diagnostics}"
+    );
     assert!(refused.progress().is_empty());
     let malformed = load(
         "malformed.ndjson",

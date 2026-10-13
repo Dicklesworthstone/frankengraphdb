@@ -369,7 +369,8 @@ fgdbd serve --listen 127.0.0.1:7687 --database social=mydb.fgdbdir --key-file fg
   --issuer-key-file issuer.key --label Person=1 --relation KNOWS=1 --property name=1
 #   per-database query limits default to the CLI's (100,000 records): raise them for
 #   larger graphs with --max-snapshot-records/--max-result-rows/--max-work-units/
-#   --max-scratch-entries; --bindings-file replaces the --label/... flags
+#   --max-scratch-entries; --bindings-file adds to the --label/... flags (no name or
+#   ID may repeat)
 fgdbd token --key-file fgdb.keys --issuer-key-file issuer.key --rights read-write > token && chmod 600 token
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social query "MATCH (p:Person) RETURN p.name"
 

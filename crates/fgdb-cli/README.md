@@ -87,7 +87,7 @@ files, `edges.csv` after `nodes.csv`). The match is resolved through the
 property index as of the load's start, so a vertex the same load creates never
 changes it, and a resumed load resolves identically. A match that names no
 committed vertex (`UnresolvedEndpoint`) or several (`AmbiguousEndpoint`) refuses
-at its line before anything commits; a null value matches nothing.
+at its line before anything commits; a null match value is a malformed row.
 
 ### Parameters: typed, never interpolated
 

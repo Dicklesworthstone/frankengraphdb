@@ -1543,6 +1543,39 @@ fn unrestricted_capabilities_admit_only_an_index_bound_closure() {
             .unwrap(),
             native_rows(&["p"], vec![vec![value(8)]])
         );
+        // Every scoped capability, whatever its scope hides, keeps the complete
+        // admission: its charge is the visible graph's, never a function of
+        // which hidden values the index selects. A label or relation scope
+        // that hides nothing in this graph still decides by the capability
+        // alone. Under the small budget each refuses where the bound path
+        // would answer.
+        let mut by_label = Grant::read_only(BRANCH, 1000, limits);
+        by_label.labels = Scope::only([LabelId(1)]);
+        by_label.relations = Scope::All;
+        by_label.properties = Scope::All;
+        let by_label = issuer.issue_at(&by_label, 100).unwrap();
+        let mut by_relation = Grant::read_only(BRANCH, 1000, limits);
+        by_relation.labels = Scope::All;
+        by_relation.relations = Scope::only([RelationId(1)]);
+        by_relation.properties = Scope::All;
+        let by_relation = issuer.issue_at(&by_relation, 100).unwrap();
+        for (token, name) in [
+            (&scoped, "property-scoped"),
+            (&by_label, "label-scoped"),
+            (&by_relation, "relation-scoped"),
+        ] {
+            for text in [hidden, "MATCH (a:L {p: 7})-[:R]->(b) RETURN b.p AS p"] {
+                let refused = read(token, text, small);
+                assert!(
+                    matches!(
+                        &refused,
+                        Err(QueryError::Pattern(GqlQueryError::Rows(error)))
+                            if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                    ),
+                    "{name} {text}: {refused:?}"
+                );
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -366,6 +366,27 @@ impl ServeOptions {
     }
 }
 
+/// A bindings file's bytes, at most one past the parser's ceiling, so a
+/// mistaken path to a huge file is refused without reading it whole. A FIFO
+/// or device is refused BEFORE it is opened: opening a FIFO blocks until a
+/// writer appears.
+async fn read_bindings_bytes(path: &std::path::Path) -> Result<Vec<u8>, Failure> {
+    use asupersync::io::AsyncReadExt as _;
+    let named = asupersync::fs::metadata(path).await.map_err(Failure::io)?;
+    if !named.is_file() {
+        return Err(Failure::usage("bindings file must be a regular file"));
+    }
+    let file = asupersync::fs::File::open(path)
+        .await
+        .map_err(Failure::io)?;
+    let mut bytes = Vec::new();
+    file.take(fgdb_gql::symbol_bindings::MAX_SYMBOL_BINDINGS_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(Failure::io)?;
+    Ok(bytes)
+}
+
 async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
     let mut limits = ServerLimits::default();
     if let Some(max) = options.max_connections {
@@ -381,7 +402,8 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
     }
     for mut db in options.databases {
         if let Some(path) = &db.bindings_file {
-            let bytes = asupersync::fs::read(path).await.map_err(Failure::io)?;
+            cx.checkpoint().map_err(Failure::io)?;
+            let bytes = read_bindings_bytes(path).await?;
             let bindings =
                 fgdb_gql::symbol_bindings::parse_symbol_bindings(&bytes).map_err(Failure::usage)?;
             for binding in bindings {

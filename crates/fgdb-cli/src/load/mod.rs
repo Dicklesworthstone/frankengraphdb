@@ -28,6 +28,31 @@ fn line_error(line: usize, kind: &str, message: impl std::fmt::Display) -> Failu
     Failure::query(format!("line {line}: {kind}: {message}"))
 }
 
+/// An endpoint in the input's terms: its label and property by binding name,
+/// not by internal ID.
+fn spelled(endpoint: &BulkEndpoint, options: &Options) -> String {
+    let named = |bindings: &BTreeMap<String, u32>, id: u64| {
+        bindings
+            .iter()
+            .find(|(_, bound)| u64::from(**bound) == id)
+            .map_or_else(|| format!("#{id}"), |(name, _)| name.clone())
+    };
+    match endpoint {
+        BulkEndpoint::Key(key) => format!("key {key:?}"),
+        BulkEndpoint::Match(found) => {
+            let label = found
+                .label
+                .map(|label| format!("label {}, ", named(&options.labels, label.0)))
+                .unwrap_or_default();
+            format!(
+                "{{{label}property {}, value {:?}}}",
+                named(&options.properties, found.key.0),
+                found.value
+            )
+        }
+    }
+}
+
 pub(super) async fn run<V: Vfs + Clone>(
     db: &mut Database<V>,
     contexts: &PurposeContexts,
@@ -294,7 +319,10 @@ pub(super) async fn run<V: Vfs + Clone>(
             } => line_error(
                 row.saturating_add(1),
                 "UnresolvedEndpoint",
-                format!("edge {edge}: no committed vertex matches {endpoint:?}"),
+                format!(
+                    "edge {edge}: no committed vertex matches {}",
+                    spelled(&endpoint, options)
+                ),
             ),
             BulkLoadErrorKind::AmbiguousEndpoint {
                 row,
@@ -303,7 +331,10 @@ pub(super) async fn run<V: Vfs + Clone>(
             } => line_error(
                 row.saturating_add(1),
                 "AmbiguousEndpoint",
-                format!("edge {edge}: several committed vertices match {endpoint:?}"),
+                format!(
+                    "edge {edge}: several committed vertices match {}",
+                    spelled(&endpoint, options)
+                ),
             ),
             BulkLoadErrorKind::SourceChanged { row } => line_error(
                 row.saturating_add(1),
