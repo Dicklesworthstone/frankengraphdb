@@ -648,7 +648,7 @@ impl<'s> Connection<'s> {
         }
         let parameters = arguments;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let query_cx = contexts.query();
+        let query_cx = crate::query_cx(&contexts);
         // An autocommit statement pins its own generation; one inside a
         // transaction reads the transaction's.
         let mut autocommit = None;

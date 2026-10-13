@@ -50,7 +50,7 @@ pub(crate) async fn prepare_read(
         .charge_work_at(now, request.statement.len() as u64)
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let query = contexts.query();
+    let query = crate::query_cx(&contexts);
     query
         .checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
@@ -102,7 +102,7 @@ pub(crate) async fn read_prepared_session<'a>(
 ) -> Result<(ReadSession<'a>, fgdb::AuthorizedPreparedRead), Refusal> {
     let _operation = prepared.generation.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let query = contexts.query();
+    let query = crate::query_cx(&contexts);
     let guard = db.db.read(cx).await.map_err(Refusal::from)?;
     prepared.generation.check().map_err(Refusal::from)?;
     let generation = guard.generation();
@@ -163,7 +163,7 @@ async fn read_prepared_inner(
         .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
     let result = prepared.native.execute_authorized(
         &guard,
-        &contexts.query(),
+        &crate::query_cx(&contexts),
         &db.authority,
         token,
         TRUNK,

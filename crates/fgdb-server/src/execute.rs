@@ -308,7 +308,7 @@ pub(crate) async fn read_session<'a>(
 ) -> Result<(ReadSession<'a>, fgdb_types::CommitSeq), Refusal> {
     let _operation = db.db.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let query = contexts.query();
+    let query = crate::query_cx(&contexts);
     let guard = db.db.read(cx).await.map_err(Refusal::from)?;
     let generation = guard.generation();
     // Under the read lock no write can land between these two reads, so
@@ -343,7 +343,7 @@ async fn read_inner(
     statement: &Execute,
 ) -> Result<Answer, Refusal> {
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let query = contexts.query();
+    let query = crate::query_cx(&contexts);
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
     let (mut session, _) = read_session(cx, db, token).await?;
@@ -393,7 +393,11 @@ async fn write_inner(
     }
     .map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let (txn, commit, query) = (contexts.txn(), contexts.commit(), contexts.query());
+    let (txn, commit, query) = (
+        contexts.txn(),
+        contexts.commit(),
+        crate::query_cx(&contexts),
+    );
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
     if deferred.is_none()
@@ -470,7 +474,11 @@ async fn write_batch_inner(
 ) -> Result<Answer, Refusal> {
     let _operation = db.db.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let (txn, commit, query) = (contexts.txn(), contexts.commit(), contexts.query());
+    let (txn, commit, query) = (
+        contexts.txn(),
+        contexts.commit(),
+        crate::query_cx(&contexts),
+    );
     let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
     let generation = guard.generation();
     let mut session = guard
@@ -630,7 +638,11 @@ async fn write_returning(
 ) -> Result<Answer, Refusal> {
     let _operation = db.db.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let (txn, commit, query) = (contexts.txn(), contexts.commit(), contexts.query());
+    let (txn, commit, query) = (
+        contexts.txn(),
+        contexts.commit(),
+        crate::query_cx(&contexts),
+    );
     let columns = prepared.columns().to_vec();
     let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
     let generation = guard.generation();

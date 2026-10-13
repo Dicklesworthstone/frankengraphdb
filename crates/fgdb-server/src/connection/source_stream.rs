@@ -160,7 +160,7 @@ impl Lane {
             }
         };
         let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let query = contexts.query();
+        let query = crate::query_cx(&contexts);
         let opened = match statement {
             SourceStatement::Text(text) => match read_session(cx, db, token).await {
                 Ok((mut session, _)) => {

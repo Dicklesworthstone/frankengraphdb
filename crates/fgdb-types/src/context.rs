@@ -16,7 +16,7 @@
 
 use std::future::Future;
 use std::marker::PhantomData;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -214,6 +214,7 @@ impl PurposeContexts {
                 inner: root.restrict::<LocalDatabaseCaps>(),
                 tracker: Arc::clone(&tracker),
                 pacer: CheckpointPacer::due(),
+                host_clock_interval: NonZeroU32::MIN,
                 #[cfg(feature = "simulation-checkpoints")]
                 checkpoint_probe: None,
             },
@@ -421,6 +422,7 @@ pub struct QueryCx {
     inner: Cx<LocalDatabaseCaps>,
     tracker: Arc<ObligationTracker>,
     pacer: CheckpointPacer,
+    host_clock_interval: NonZeroU32,
     #[cfg(feature = "simulation-checkpoints")]
     checkpoint_probe: Option<Arc<SimulationCheckpointProbe>>,
 }
@@ -445,6 +447,29 @@ impl QueryCx {
             }
         }
         Ok(())
+    }
+
+    /// How many charges of an authorized execution may share one sample of
+    /// the host clock its capability is judged against (fgdb-er71y). One, the
+    /// default, samples the host clock on every charge.
+    #[must_use]
+    pub const fn host_clock_interval(&self) -> NonZeroU32 {
+        self.host_clock_interval
+    }
+
+    /// Clones this context so an authorized execution samples its host clock
+    /// at most once per `interval` charges. The host chooses this beside the
+    /// clock it supplies: its wall clock can cost more than the charge it
+    /// times (fgdbd's measured 22-55% of busy CPU). Each execution still
+    /// samples afresh on its first charge and on every delivery, so nothing
+    /// is delivered against a stale reading, and expiry is observed within
+    /// `interval` charges. Retirement, limits and cancellation stay exact on
+    /// every charge.
+    #[must_use]
+    pub fn with_host_clock_interval(&self, interval: NonZeroU32) -> Self {
+        let mut context = self.clone();
+        context.host_clock_interval = interval;
+        context
     }
 
     /// Clones this context with a simulation-only checkpoint probe attached.

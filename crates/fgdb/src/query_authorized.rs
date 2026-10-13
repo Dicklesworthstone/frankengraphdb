@@ -67,6 +67,10 @@ struct Execution<'cx, 'permit, Clock> {
     // The pull root most recently admitted and charged its node. Its own
     // record, field and incidence reads do not charge that node again.
     pull_root: Option<VId>,
+    // The newest host clock sample and how many more charges may share it
+    // (QueryCx::host_clock_interval, fgdb-er71y). None until the first charge.
+    sampled: Option<u64>,
+    until_sample: u32,
 }
 impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
     fn new(cx: &'cx QueryCx, permit: ExecutionPermit<'permit, ReadAccess>, clock: Clock) -> Self {
@@ -77,6 +81,8 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             clock_floor: None,
             failure: None,
             pull_root: None,
+            sampled: None,
+            until_sample: 0,
         }
     }
     fn tracking(
@@ -90,11 +96,25 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             ..Self::new(cx, permit, clock)
         }
     }
+    /// The time a charge is judged at: the newest sample while the host's
+    /// interval allows it to be shared, else a fresh one.
     fn now(&mut self) -> u64 {
+        match self.sampled {
+            Some(now) if self.until_sample > 0 => {
+                self.until_sample -= 1;
+                now
+            }
+            _ => self.sample(),
+        }
+    }
+    /// A fresh host clock sample, which the next interval's charges share.
+    fn sample(&mut self) -> u64 {
         let now = (self.clock)();
         if let Some(floor) = &mut self.clock_floor {
             **floor = (**floor).max(now);
         }
+        self.sampled = Some(now);
+        self.until_sample = self.cx.host_clock_interval().get() - 1;
         now
     }
     fn refusal(&mut self, error: fgdb_warden::Error) -> QueryError {
@@ -145,7 +165,9 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
     fn deliver(&mut self, rows: usize) -> Result<(), QueryError> {
         self.checkpoint()?;
         let rows = u64::try_from(rows).map_err(|_| self.refusal(fgdb_warden::Error::TooLarge))?;
-        let now = self.now();
+        // Delivery is never judged on a shared sample: nothing is released
+        // after expiry, however the host paces its clock.
+        let now = self.sample();
         let charged = self.permit.charge_rows_at(now, rows);
         charged.map_err(|error| self.refusal(error))?;
         self.checkpoint()

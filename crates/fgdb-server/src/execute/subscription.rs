@@ -415,7 +415,7 @@ pub(crate) async fn subscribe(
         .charge_work_at(now, registration_work)
         .map_err(authorization)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let query = contexts.query();
+    let query = crate::query_cx(&contexts);
     let mut preparation = Work {
         cx: &query,
         remaining: registration_work,
@@ -541,7 +541,7 @@ pub(crate) async fn poll(
         max_rows: current.max_rows.min(subscription.admitted.max_rows),
     };
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let query = contexts.query();
+    let query = crate::query_cx(&contexts);
     if let Some(initial) = &subscription.initial {
         // Initial rendering happened inside registration's rollback boundary.
         // Attenuation cannot make a cached pending batch skip its original

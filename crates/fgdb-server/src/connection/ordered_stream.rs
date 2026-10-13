@@ -177,7 +177,7 @@ impl Lane {
         };
         self.send_generation = Some(session.generation());
         let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let query = contexts.query();
+        let query = crate::query_cx(&contexts);
         let prepared = match statement {
             SourceStatement::Text(text) => session.prepare(&query, text, &parameters),
             SourceStatement::Prepared(_) => {

@@ -79,7 +79,7 @@ pub(crate) async fn read_ordered_session<'a>(
     generation: Generation,
 ) -> Result<(OrderedSession<'a>, Option<fgdb::AuthorizedPreparedRead>), Refusal> {
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let query = contexts.query();
+    let query = crate::query_cx(&contexts);
     // Authentication wins over disabled host configuration, scratch capacity,
     // filesystem details and stale prepared definitions.
     let now = unix_millis();

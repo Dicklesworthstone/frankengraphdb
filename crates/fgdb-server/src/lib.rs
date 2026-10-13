@@ -675,3 +675,21 @@ pub(crate) fn unix_millis() -> u64 {
         });
     LAST.fetch_max(now, Ordering::AcqRel).max(now)
 }
+
+/// Warden charges that may share one [`unix_millis`] sample (fgdb-er71y).
+/// Authorized execution charges several times per admitted record, and
+/// reading the wall clock on every charge was 22-55% of fgdbd's busy CPU on
+/// real graphs. A few hundred charges are microseconds of work; each
+/// execution still samples on its first charge and on every delivery.
+const HOST_CLOCK_INTERVAL: core::num::NonZeroU32 = match core::num::NonZeroU32::new(256) {
+    Some(interval) => interval,
+    None => panic!("a nonzero interval"),
+};
+
+/// The query context every served statement runs under: the request's own,
+/// sampling [`unix_millis`] once per [`HOST_CLOCK_INTERVAL`] charges.
+pub(crate) fn query_cx(contexts: &PurposeContexts) -> fgdb_types::QueryCx {
+    contexts
+        .query()
+        .with_host_clock_interval(HOST_CLOCK_INTERVAL)
+}
