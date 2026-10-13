@@ -173,6 +173,9 @@ pub enum GraphAggregateBuildError {
     UnknownOutputColumn { column: GraphAggregateColumn },
     TooManyFilters { limit: usize, observed: usize },
     DuplicateOrder { column: GraphAggregateColumn },
+    RequiresOutputProjection,
+    UnknownProjectedOrderColumn { column: usize },
+    DuplicateProjectedOrder { column: usize },
     InputProjection(crate::GraphSetProjectionError),
     InputRows(crate::row_projection::RowProjectionBuildError),
     OutputProjection(crate::GraphSetProjectionError),
@@ -205,6 +208,15 @@ impl core::fmt::Display for GraphAggregateBuildError {
             ),
             Self::DuplicateOrder { column } => {
                 write!(f, "aggregate ORDER BY repeats column {column:?}")
+            }
+            Self::RequiresOutputProjection => {
+                f.write_str("projected aggregate ordering requires an output projection")
+            }
+            Self::UnknownProjectedOrderColumn { column } => {
+                write!(f, "unknown projected aggregate ORDER BY column {column}")
+            }
+            Self::DuplicateProjectedOrder { column } => {
+                write!(f, "projected aggregate ORDER BY repeats column {column}")
             }
             Self::InputProjection(error) | Self::OutputProjection(error) => error.fmt(f),
             Self::InputRows(error) => error.fmt(f),
@@ -522,6 +534,9 @@ pub struct PreparedGraphAggregate {
     having: Vec<GraphAggregateFilter>,
     having_expression: Option<GraphHavingExpression>,
     ordering: Vec<GraphAggregateOrder>,
+    // Positions in output_projection, never in the evaluation group schema.
+    // The two ordering setters make these mutually exclusive with ordering.
+    projected_ordering: Vec<crate::algebra::GraphValueOrder>,
 }
 impl core::fmt::Debug for PreparedGraphAggregate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -665,6 +680,7 @@ impl PreparedGraphAggregate {
             having: Vec::new(),
             having_expression: None,
             ordering: Vec::new(),
+            projected_ordering: Vec::new(),
         })
     }
 
@@ -925,6 +941,17 @@ impl PreparedGraphAggregate {
             bytes.extend_from_slice(&(projection.len() as u64).to_be_bytes());
             for expression in projection {
                 expression.value().append_canonical_bytes(&mut bytes);
+            }
+        }
+        if !self.projected_ordering.is_empty() {
+            // Only the new result-order profile extends the transcript.
+            // Projection expressions above retain their exact numeric domains.
+            bytes.extend_from_slice(b"fgdb:aggregate-projected-order:v1\0");
+            bytes.extend_from_slice(&(self.projected_ordering.len() as u64).to_be_bytes());
+            for order in &self.projected_ordering {
+                bytes.extend_from_slice(&(order.column as u64).to_be_bytes());
+                bytes.push(u8::from(order.descending));
+                bytes.push(u8::from(order.nulls_first));
             }
         }
         self.append_input_projection(&mut bytes);

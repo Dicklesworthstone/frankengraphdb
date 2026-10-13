@@ -877,6 +877,26 @@ impl PreparedGraphAggregate {
                 }
             }
         }
+        // These cells were evaluated once for every qualified group before
+        // selection. Reuse the exact result cells, not a scalar conversion or
+        // a second execution of their expressions inside the comparator.
+        for order in &self.projected_ordering {
+            let result = compare_cell(
+                left.values[order.column].cell(),
+                right.values[order.column].cell(),
+                order.descending,
+                if order.nulls_first {
+                    GraphNullPlacement::First
+                } else {
+                    GraphNullPlacement::Last
+                },
+                true,
+                control,
+            )?;
+            if result != Ordering::Equal {
+                return Ok(result);
+            }
+        }
         for order in &self.ordering {
             let result = compare_cell(
                 left.group.cell(order.column),
@@ -1016,7 +1036,10 @@ impl PreparedGraphAggregate {
             }
             rows.truncate(unique);
         }
-        if self.output_distinct || !self.ordering.is_empty() {
+        if self.output_distinct
+            || !self.ordering.is_empty()
+            || !self.projected_ordering.is_empty()
+        {
             self.sort_projected(&mut rows, false, control)?;
         }
         let offset = usize::try_from(self.offset).unwrap_or(usize::MAX);
