@@ -11,8 +11,8 @@ use fgdb_gql::{
     PreparedGraphWriteScript,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
-    PurposeContexts, QueryCx, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId,
+    EmbeddedTxnCompletion, PurposeContexts, QueryCx, VId,
 };
 use std::collections::VecDeque;
 
@@ -906,12 +906,13 @@ fn vertex_merge_steps_bind_or_create_per_row() {
             .filter(|vertex| vertex.props == vec![(P, CanonicalScalar::Int(8).into())])
             .count();
         assert_eq!(eights, 2);
-        // ON/SET on a chained MERGE, a NULL map value and a MERGE of a row
-        // vertex refuse and publish nothing. (RETURN after chained MERGEs is
-        // vertex_merge_steps_run_over_a_leading_unwind_and_return_rows.)
+        // An ON/SET target other than the MERGE vertex, a NULL map value and
+        // a MERGE of a row vertex refuse and publish nothing. (RETURN after
+        // chained MERGEs is vertex_merge_steps_run_over_a_leading_unwind_and_return_rows;
+        // ON/SET on them is vertex_merge_steps_apply_on_and_set_clauses_per_row.)
         let frontier = db.frontier().unwrap();
         for refused in [
-            "CREATE (a) MERGE (b:Copy) ON CREATE SET b.p = 1",
+            "CREATE (a) MERGE (b:Copy) ON CREATE SET a.p = 1",
             "CREATE (a:Person) MERGE (b:Copy {p: a.q}) CREATE (a)-[:R]->(b)",
             "CREATE (a:Person) WITH a MERGE (a) CREATE (b)",
         ] {
@@ -1177,13 +1178,167 @@ fn vertex_merge_steps_run_over_a_leading_match() {
             assert!(born(edge.entry.src, BORN).is_some());
             assert_eq!(born(edge.entry.src, BORN), born(edge.entry.dst, P));
         }
-        // A MERGE of a MATCH vertex, a NULL map value and ON/SET on the
-        // MERGE refuse and publish nothing.
+        // A MERGE of a MATCH vertex, a NULL map value and a SET of a MATCH
+        // vertex after the MERGE refuse and publish nothing.
         let frontier = db.frontier().unwrap();
         for refused in [
             "MATCH (person:Person) MERGE (person)",
             "MATCH (person:Person) MERGE (c:Copy {p: person.q})",
-            "MATCH (person:Person) MERGE (c:Copy {p: 1}) ON CREATE SET c.q = 1",
+            "MATCH (person:Person) MERGE (c:Copy {p: 1}) ON CREATE SET person.q = 1",
+        ] {
+            assert!(write(&mut db, refused).await.is_err(), "{refused}");
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-cpny9 (TCK Merge4 [1], [2]): ON MATCH SET, ON CREATE SET and SET on
+/// a MERGE step run per row. Each row runs its own MERGE against the state
+/// earlier rows left, so a vertex row 1 created is MATCHED by row 2 and gets
+/// the ON MATCH clause. Right-hand sides read the vertex's properties before
+/// the clause and the row.
+#[test]
+fn vertex_merge_steps_apply_on_and_set_clauses_per_row() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a6, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, false).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let rows = |result: QueryResult| {
+            let QueryResult::Rows { rows, .. } = result else {
+                unreachable!("a MERGE with RETURN answers rows")
+            };
+            rows
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let stored = |value| CanonicalPropertyValue::from(CanonicalScalar::Int(value));
+        // The one vertex whose `p` is `value`: its labels and properties.
+        let merged = |db: &Database<MemVfs>, value: i64| {
+            let matching: Vec<_> = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| {
+                    vertex
+                        .props
+                        .iter()
+                        .any(|(k, v)| *k == P && *v == stored(value))
+                })
+                .collect();
+            assert_eq!(matching.len(), 1, "one vertex with p = {value}");
+            let vertex = matching.into_iter().next().expect("one vertex");
+            (vertex.labels, vertex.props)
+        };
+        write(
+            &mut db,
+            "CREATE (:Person {born: 1}), (:Person {born: 2}), (:Person {born: 5}), \
+             (:Person {born: 5})",
+        )
+        .await
+        .unwrap();
+        // Merge4 [1]: row 1 creates (ON CREATE), row 2 matches (ON MATCH).
+        write(
+            &mut db,
+            "MATCH (person:Person {born: 5}) MERGE (a:Copy {p: 2}) \
+             ON MATCH SET a:Source ON CREATE SET a.q = 7",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            merged(&db, 2),
+            (vec![SOURCE, COPY], vec![(P, stored(2)), (Q, stored(7))])
+        );
+        // Merge4 [2]: both clauses read the row; RETURN reads it too.
+        let returned = write(
+            &mut db,
+            "MATCH (person:Person) WHERE person.born < 3 MERGE (c:Copy {p: 3}) \
+             ON MATCH SET c.name = person.born ON CREATE SET c.name = person.born \
+             RETURN person.born AS b ORDER BY b",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(returned), [vec![int(1)], vec![int(2)]]);
+        let (_, props) = merged(&db, 3);
+        assert!(
+            props == vec![(P, stored(3)), (NAME, stored(1))]
+                || props == vec![(P, stored(3)), (NAME, stored(2))],
+            "{props:?}"
+        );
+        // An expression over the vertex's own property and the row, then a
+        // trailing SET every row runs.
+        write(
+            &mut db,
+            "MATCH (person:Person {born: 5}) MERGE (c:Copy {p: 4}) \
+             ON CREATE SET c.q = 0 ON MATCH SET c.q = c.q + person.born SET c.name = 1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            merged(&db, 4),
+            (
+                vec![COPY],
+                vec![(P, stored(4)), (Q, stored(5)), (NAME, stored(1))]
+            )
+        );
+        // Over a leading UNWIND: equal values match the earlier row's vertex.
+        write(
+            &mut db,
+            "UNWIND [11, 11, 12] AS x MERGE (n:Source {p: x}) \
+             ON CREATE SET n.q = 0 SET n.q = n.q + 1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(merged(&db, 11).1, vec![(P, stored(11)), (Q, stored(2))]);
+        assert_eq!(merged(&db, 12).1, vec![(P, stored(12)), (Q, stored(1))]);
+        // A first MERGE with ON CREATE heads a chain; a rerun matches all.
+        for _ in 0..2 {
+            write(
+                &mut db,
+                "MERGE (a:Source {p: 20}) ON CREATE SET a.q = 1 \
+                 MERGE (b:Source {p: 21}) ON CREATE SET b.q = 2 MERGE (a)-[:R]->(b)",
+            )
+            .await
+            .unwrap();
+            assert_eq!(merged(&db, 20).1, vec![(P, stored(20)), (Q, stored(1))]);
+            assert_eq!(merged(&db, 21).1, vec![(P, stored(21)), (Q, stored(2))]);
+            assert_eq!(db.edges().unwrap().len(), 1);
+        }
+        // RETURN of a key the clauses write through a carried element, or of
+        // its metadata, an anonymous MERGE with clauses, and a SET of a row
+        // element refuse and publish nothing.
+        let frontier = db.frontier().unwrap();
+        for refused in [
+            "MATCH (person:Person {born: 5}) MERGE (c:Copy {p: 4}) SET c.born = 9 \
+             RETURN person.born AS b",
+            "MATCH (person:Person {born: 5}) MERGE (c:Copy {p: 4}) SET c.q = 9 \
+             RETURN labels(person) AS l",
+            "MATCH (person:Person) MERGE (:Copy {p: 4}) ON CREATE SET person.q = 1",
+            "MATCH (person:Person) MERGE (c:Copy {p: 4}) SET person.q = 1",
         ] {
             assert!(write(&mut db, refused).await.is_err(), "{refused}");
         }

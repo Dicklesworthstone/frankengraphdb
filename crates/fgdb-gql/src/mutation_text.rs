@@ -385,9 +385,33 @@ pub(crate) struct PreparedGraphVertexMergeRowsText {
     pub(crate) keep: usize,
     /// The RETURN of the statement's last write, if any.
     pub(crate) returning: Option<VertexMergeRowsReturnTemplate>,
+    /// ON MATCH, ON CREATE and trailing SET clauses, if any.
+    pub(crate) actions: Option<Box<VertexMergeRowActionTemplates>>,
     pub(crate) parameters: Vec<crate::GqlParameterSpec>,
     pub(crate) parameter_offsets: Vec<usize>,
     pub(crate) end: usize,
+}
+
+/// One ON/SET assignment of a vertex MERGE step, resolved (fgdb-cpny9).
+#[derive(Clone)]
+pub(crate) enum VertexMergeRowActionTemplate {
+    /// A constant property, constant List or label assignment.
+    Vertex(crate::vertex_upsert_text::VertexUpsertActionTemplate),
+    /// `v.key = expression` over the merged vertex's properties and the row.
+    Expression {
+        key: PropertyKeyId,
+        inputs: Vec<crate::GraphVertexMergeRowInput>,
+        program: Vec<MutationIntegerTemplateOp>,
+        at: usize,
+    },
+}
+
+/// The ON/SET clauses of a vertex MERGE step, resolved (fgdb-cpny9).
+#[derive(Clone, Default)]
+pub(crate) struct VertexMergeRowActionTemplates {
+    pub(crate) on_match: Vec<VertexMergeRowActionTemplate>,
+    pub(crate) on_create: Vec<VertexMergeRowActionTemplate>,
+    pub(crate) after: Vec<VertexMergeRowActionTemplate>,
 }
 
 /// Native bounded `MERGE (n[:Label...] {key:value,...})`. The same property
@@ -425,6 +449,23 @@ pub enum GraphVertexMergeTextErrorKind {
     /// a vertex MERGE step (fgdb-cpny9).
     Relation(crate::GraphSetTextErrorKind),
     ReturnBuild(crate::GraphVertexMergeRowsQueryBuildError),
+    /// An ON/SET clause of a vertex MERGE step (fgdb-cpny9).
+    Action(Box<crate::GraphVertexUpsertTextErrorKind>),
+}
+impl From<crate::GraphVertexUpsertTextError> for GraphVertexMergeTextError {
+    fn from(error: crate::GraphVertexUpsertTextError) -> Self {
+        let kind = match error.kind {
+            crate::GraphVertexUpsertTextErrorKind::Query(kind) => {
+                GraphVertexMergeTextErrorKind::Query(kind)
+            }
+            crate::GraphVertexUpsertTextErrorKind::Merge(kind) => kind,
+            kind => GraphVertexMergeTextErrorKind::Action(Box::new(kind)),
+        };
+        Self {
+            offset: error.offset,
+            kind,
+        }
+    }
 }
 impl From<GraphPatternTextError> for GraphVertexMergeTextError {
     fn from(error: GraphPatternTextError) -> Self {

@@ -119,13 +119,10 @@ impl PreparedGraphWriteChainText {
                             }
                             merged = vertex;
                         }
-                    } else if clause
-                        && merged
-                        && !written
-                        && (word.eq_ignore_ascii_case("ON") || word.eq_ignore_ascii_case("SET"))
-                    {
-                        return Ok(false);
                     }
+                    // A first MERGE's ON/SET clauses stay with it: a lone
+                    // MERGE with them is the unique upsert's statement, and
+                    // one another write follows heads a chain.
                 }
                 _ => {}
             }
@@ -483,6 +480,13 @@ mod tests {
             "MATCH (person:Person) MERGE (city:City {name: person.bornIn})",
             "MATCH (foo) WITH foo.x AS x, foo.y AS y MERGE (:N {x: x, y: y}) RETURN x, y",
             "MATCH (a) UNWIND [1, 2] AS i MERGE (b {i: i})",
+            // ON/SET clauses on a MERGE step (TCK Merge4 [1], [2]), and on a
+            // first MERGE another write follows.
+            "MATCH () MERGE (a:L) ON MATCH SET a:M1 ON CREATE SET a:M2",
+            "MATCH (person:Person) MERGE (city:City) ON MATCH SET city.name = person.bornIn \
+             ON CREATE SET city.name = person.bornIn RETURN person.bornIn",
+            "MERGE (a:A) ON CREATE SET a.p = 1 MERGE (b:B)",
+            "MERGE (a:A) SET a.p = 1 CREATE (a)-[:R]->(b)",
         ] {
             assert!(
                 PreparedGraphWriteChainText::is_chain(text).unwrap(),
@@ -510,7 +514,8 @@ mod tests {
             // An UNWIND of a parameter before MERGE is the batch writer's.
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id})",
             "UNWIND [1] AS x MERGE (a)-[:R]->(b)",
-            "MERGE (a:A) ON CREATE SET a.p = 1 MERGE (b:B)",
+            "MERGE (a:A) ON CREATE SET a.p = 1",
+            "MERGE (a:A) ON CREATE SET a.p = 1 ON MATCH SET a.q = 2 RETURN a",
             "MERGE (n:L) SET n.p = 1",
             "MERGE (n:L) RETURN n",
         ] {

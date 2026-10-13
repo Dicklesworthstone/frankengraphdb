@@ -126,6 +126,14 @@ pub enum GraphVertexMergeError<E, A> {
     },
     /// The leading UNWIND relation of a MERGE over input rows refused.
     InputRelation(crate::GraphSetExecutionError<E>),
+    /// An ON/SET expression of a MERGE over input rows refused. Clause 0 is
+    /// the selected ON clause; clause 1 is the trailing SET.
+    RowAction {
+        row: usize,
+        clause: usize,
+        action: usize,
+        source: crate::GraphIntegerError,
+    },
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphVertexMergeError<E, A>
@@ -153,6 +161,15 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             ),
             Self::RowMerge { row, source } => write!(f, "MERGE row {row}: {source}"),
             Self::InputRelation(error) => write!(f, "MERGE input rows: {error}"),
+            Self::RowAction {
+                row,
+                clause,
+                action,
+                source,
+            } => write!(
+                f,
+                "MERGE row {row} clause {clause} action {action}: {source}"
+            ),
         }
     }
 }
@@ -165,6 +182,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::Creation(error) => Some(error),
             Self::RowMerge { source, .. } => Some(&**source),
             Self::InputRelation(error) => Some(error),
+            Self::RowAction { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -284,6 +302,58 @@ pub struct PreparedGraphVertexMergeRows {
     /// Leading input columns the output keeps. Hidden reads after them are
     /// the MERGE's own inputs, read by no later write.
     pub(crate) keep: usize,
+    /// ON MATCH, ON CREATE and trailing SET clauses, if any.
+    pub(crate) actions: Option<Box<GraphVertexMergeRowActions>>,
+}
+
+/// The ON/SET clauses of a vertex MERGE over input rows (fgdb-cpny9). Each
+/// row runs its own MERGE against the state earlier rows left, so a vertex
+/// an earlier row created is MATCHED by a later row with the same values,
+/// as openCypher's row-by-row MERGE does. The selected ON clause applies to
+/// every vertex the row merged, then the trailing SET. Each clause reads all
+/// of its right-hand sides before staging any of them.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct GraphVertexMergeRowActions {
+    pub on_match: Vec<GraphVertexMergeRowAction>,
+    pub on_create: Vec<GraphVertexMergeRowAction>,
+    pub after: Vec<GraphVertexMergeRowAction>,
+}
+
+/// One assignment of a vertex MERGE over input rows.
+#[derive(Clone, PartialEq, Eq)]
+pub enum GraphVertexMergeRowAction {
+    /// A constant property, constant List or label assignment, exactly as a
+    /// unique MERGE's (never its vertex-only SetExpression).
+    Vertex(crate::GraphVertexUpsertAction),
+    /// `v.key = expression`. The expression's columns address `inputs` in
+    /// order: the merged vertex's properties before this clause, and columns
+    /// of the row.
+    Expression {
+        key: fgdb_delta_types::PropertyKeyId,
+        inputs: Vec<GraphVertexMergeRowInput>,
+        value: crate::GraphIntegerExpression,
+    },
+}
+impl core::fmt::Debug for GraphVertexMergeRowAction {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Vertex(action) => core::fmt::Debug::fmt(action, f),
+            Self::Expression { inputs, .. } => f
+                .debug_struct("Expression")
+                .field("inputs", &inputs.len())
+                .field("definition", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+/// One input of a row action's expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphVertexMergeRowInput {
+    /// A property of the merged vertex; missing reads NULL.
+    Property(fgdb_delta_types::PropertyKeyId),
+    /// A column of the row the MERGE read.
+    Column(usize),
 }
 
 /// The rows a vertex MERGE step runs over (fgdb-cpny9).
@@ -404,6 +474,13 @@ impl PreparedGraphVertexMergeRows {
                     }),
             })
             .collect()
+    }
+
+    /// The ON/SET clauses, if any. With clauses, every row runs its own
+    /// MERGE; without, rows with equal tuples share one.
+    #[must_use]
+    pub fn actions(&self) -> Option<&GraphVertexMergeRowActions> {
+        self.actions.as_deref()
     }
 
     /// One output row: the input row's kept columns, then the vertex.
