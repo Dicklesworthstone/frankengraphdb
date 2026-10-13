@@ -344,6 +344,8 @@ pub(crate) struct EdgeMergeReturnTemplate {
     pub offset: crate::set_text::ReadPageNumber,
     pub count: Option<crate::set_text::ReadPageNumber>,
     pub at: usize,
+    /// Native row stages following a WITH over the MERGE's own occurrences.
+    pub tail: Option<Vec<crate::set_text::ReadStageTemplate>>,
 }
 impl core::fmt::Debug for PreparedGraphEdgeMergeText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

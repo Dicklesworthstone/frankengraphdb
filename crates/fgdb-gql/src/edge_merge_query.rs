@@ -4,7 +4,8 @@
 //! resolved to: each matching edge, or the one created edge. The write owner
 //! builds those rows after staging and supplies their final fields; no second
 //! MATCH runs. Aggregation, projection, DISTINCT, ORDER BY and pagination use
-//! the shared write-RETURN kernels.
+//! the shared write-RETURN kernels. A WITH continues those owned rows through
+//! the native relational pipeline, under the same statement budget.
 
 use crate::algebra::{GraphOrderError, GraphValue, GraphValueOrder, GraphValueRow};
 use crate::row_projection::{RowProjectionBuildError, RowProjectionSpec};
@@ -93,6 +94,8 @@ pub struct PreparedGraphEdgeMergeQuery {
     order: Vec<GraphValueOrder>,
     offset: u64,
     count: Option<u64>,
+    /// A WITH head supplies private rows, not a second graph selection.
+    tail: Option<crate::PreparedGraphSet>,
 }
 impl core::fmt::Debug for PreparedGraphEdgeMergeQuery {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -162,6 +165,7 @@ impl PreparedGraphEdgeMergeQuery {
             order: Vec::new(),
             offset: 0,
             count: None,
+            tail: None,
         })
     }
 
@@ -207,6 +211,14 @@ impl PreparedGraphEdgeMergeQuery {
     pub fn with_page(mut self, offset: u64, count: Option<u64>) -> Self {
         self.offset = offset;
         self.count = count;
+        self
+    }
+
+    /// Continue the WITH head over its own rows. Only the tail is public output.
+    pub(crate) fn with_tail(mut self, tail: crate::PreparedGraphSet) -> Self {
+        self.columns = tail.columns().to_vec();
+        self.types = tail.column_types().to_vec();
+        self.tail = Some(tail);
         self
     }
 
@@ -277,15 +289,24 @@ impl PreparedGraphEdgeMergeQuery {
                 &mut checkpoint,
             )?;
         }
-        crate::set_ops::finish_owned_projection(
+        let head = if self.tail.is_some() {
+            crate::set_ops::owned_head_policy(policy)
+        } else {
+            policy
+        };
+        let returning = crate::set_ops::finish_owned_projection(
             returning,
-            policy,
+            head,
             &self.projection,
             self.quantifier,
             &self.order,
             (self.offset, self.count),
-            checkpoint,
-        )
+            &mut checkpoint,
+        )?;
+        match &self.tail {
+            None => Ok(returning),
+            Some(tail) => crate::set_ops::finish_owned_tail(returning, tail, policy, checkpoint),
+        }
     }
 
     /// Definition identity, not a durable effect format.
@@ -336,6 +357,340 @@ impl PreparedGraphEdgeMergeQuery {
         if let Some(grouping) = &self.grouping {
             grouping.append_canonical_bytes(&mut bytes);
         }
+        if let Some(tail) = &self.tail {
+            bytes.extend_from_slice(b"fgdb:write-tail:v1\0");
+            let tail = tail.canonical_bytes();
+            bytes.extend_from_slice(&(tail.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&tail);
+        }
         bytes
+    }
+}
+
+#[cfg(test)]
+mod with_tests {
+    use super::*;
+    use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphEdgeMergeQueryText};
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::{CanonicalScalar, EId, VId};
+
+    const R: RelationId = RelationId(1);
+    const P: PropertyKeyId = PropertyKeyId(1);
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            _ => None,
+        }
+    }
+
+    fn prepare(text: &str) -> PreparedGraphEdgeMergeQuery {
+        PreparedGraphEdgeMergeQueryText::prepare(text, R, symbols)
+            .expect(text)
+            .bind_parameters(&GqlParameters::new())
+            .expect(text)
+    }
+
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+
+    fn policy(rows: u64) -> GqlQueryPolicy {
+        GqlQueryPolicy::new(100, rows, 100_000, 100_000)
+    }
+
+    fn values(result: GqlQueryExecution<GraphValueRow>) -> Vec<Vec<GraphValue>> {
+        result
+            .value
+            .into_iter()
+            .map(|row| row.values().to_vec())
+            .collect()
+    }
+
+    fn finish(
+        query: &PreparedGraphEdgeMergeQuery,
+        rows: Vec<Vec<GraphValue>>,
+        limit: u64,
+    ) -> GqlQueryExecution<GraphValueRow> {
+        query
+            .finish_governed::<(), ()>(
+                rows,
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(limit),
+                || Ok(()),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn with_dispatch_keeps_unrelated_write_owners_and_quoted_words() {
+        for text in [
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) WITH r RETURN r",
+            "MATCH (a),(b) MERGE (a)<-[r:R]-(b) WITH r AS edge RETURN edge",
+            "MATCH (a),(b) MERGE (a)-[:R]-(b) WITH a RETURN a;",
+        ] {
+            assert!(PreparedGraphEdgeMergeQueryText::has_return_clause(text).unwrap());
+            prepare(text);
+        }
+        for text in [
+            "MATCH (a),(b) MERGE (a)-[:R {p: 'WITH'}]->(b)",
+            "MATCH (a),(b) WITH a,b MERGE (a)-[:R]->(b) RETURN a",
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p=1 WITH r RETURN r",
+            "MATCH (a),(b) MERGE (a)-[:R]->(b) MERGE (b)-[:R]->(a) RETURN a",
+            "MERGE (n) WITH n RETURN n",
+        ] {
+            assert!(
+                !PreparedGraphEdgeMergeQueryText::has_return_clause(text).unwrap(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_occurrences_reach_aggregate_without_spending_final_row_quota() {
+        let query = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) \
+             WITH r AS edge RETURN count(edge) AS occurrences",
+        );
+        let edge = GraphValue::Edge(EId((1_u128 << 100) + 1));
+        let rows = vec![vec![edge.clone()], vec![edge.clone()], vec![edge]];
+        assert_eq!(query.columns(), &["occurrences"]);
+        assert_eq!(query.column_types(), &[GraphSetColumnType::Scalar]);
+        assert_eq!(values(finish(&query, rows, 1)), vec![vec![int(3)]]);
+
+        let distinct = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) \
+             WITH DISTINCT r AS edge RETURN count(edge) AS occurrences",
+        );
+        let edge = GraphValue::Edge(EId(1));
+        assert_eq!(
+            values(finish(&distinct, vec![vec![edge.clone()], vec![edge]], 1)),
+            vec![vec![int(1)]]
+        );
+    }
+
+    #[test]
+    fn aliased_merged_edges_and_actual_endpoints_hoist_owned_property_bindings() {
+        let query = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]-(b) \
+             WITH r AS edge, startNode(r) AS source, a AS matched \
+             WHERE edge.p > 0 RETURN edge.p AS ep, source.p AS sp, matched.p AS mp",
+        );
+        assert_eq!(query.columns(), &["ep", "sp", "mp"]);
+        assert_eq!(
+            query.bindings(),
+            &[
+                GraphEdgeMergeBinding::Edge,
+                GraphEdgeMergeBinding::Endpoint { start: true },
+                GraphEdgeMergeBinding::Input(0),
+                GraphEdgeMergeBinding::Property(P),
+                GraphEdgeMergeBinding::EndpointProperty {
+                    start: true,
+                    key: P,
+                },
+                GraphEdgeMergeBinding::Input(2),
+            ]
+        );
+        // The undirected relationship's actual source differs from MATCH a.
+        let rows = vec![vec![
+            GraphValue::Edge(EId((1_u128 << 100) + 1)),
+            GraphValue::Vertex(VId(2)),
+            GraphValue::Vertex(VId(1)),
+            int(7),
+            int(20),
+            int(10),
+        ]];
+        assert_eq!(
+            values(finish(&query, rows, 1)),
+            vec![vec![int(7), int(20), int(10)]]
+        );
+    }
+
+    #[test]
+    fn filtering_unwind_grouping_and_rebinding_use_one_native_tail() {
+        let text = "MATCH (a),(b) MERGE (a)-[r:R]->(b) \
+                    WITH r.p AS p WHERE p > $minimum \
+                    UNWIND [p, p + 1] AS x WITH sum(x) AS total RETURN total";
+        let calls = std::cell::Cell::new(0);
+        let template = PreparedGraphEdgeMergeQueryText::prepare(text, R, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap();
+        let prepared_calls = calls.get();
+        let first = template
+            .bind_parameters(&GqlParameters::new().with_int64("minimum", 1).unwrap())
+            .unwrap();
+        let second = template
+            .bind_parameters(&GqlParameters::new().with_int64("minimum", 2).unwrap())
+            .unwrap();
+        assert_eq!(calls.get(), prepared_calls);
+        assert_ne!(first.canonical_bytes(), second.canonical_bytes());
+        let rows = vec![vec![int(1)], vec![int(2)], vec![int(2)]];
+        assert_eq!(values(finish(&first, rows.clone(), 1)), vec![vec![int(10)]]);
+        assert_eq!(values(finish(&second, rows, 1)), vec![vec![int(0)]]);
+        assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+    }
+
+    #[test]
+    fn with_and_return_windows_are_distinct_and_only_final_rows_are_charged() {
+        let query = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) \
+             WITH r.p AS p ORDER BY p DESC LIMIT 2 \
+             RETURN p AS selected ORDER BY selected LIMIT 1",
+        );
+        let rows = vec![vec![int(1)], vec![int(2)], vec![int(3)]];
+        assert_eq!(values(finish(&query, rows, 1)), vec![vec![int(2)]]);
+        let empty = prepare("MATCH (a),(b) MERGE (a)-[r:R]->(b) WITH r RETURN r LIMIT 0");
+        assert!(
+            finish(&empty, vec![vec![GraphValue::Edge(EId(1))]], 0)
+                .value
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn native_tail_identity_retains_semantics_and_leaves_plain_return_unchanged() {
+        let plain = prepare("MATCH (a),(b) MERGE (a)-[r:R]->(b) RETURN r AS edge");
+        let piped = prepare("MATCH (a),(b) MERGE (a)-[r:R]->(b) WITH r AS edge RETURN edge");
+        let sorted = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) WITH r AS edge RETURN edge ORDER BY edge DESC",
+        );
+        assert!(plain.tail.is_none());
+        assert!(piped.tail.is_some());
+        assert_ne!(plain.canonical_bytes(), piped.canonical_bytes());
+        assert_ne!(piped.canonical_bytes(), sorted.canonical_bytes());
+        let tail = piped.tail.as_ref().unwrap().canonical_bytes();
+        let mut expected = plain.canonical_bytes();
+        expected.extend_from_slice(b"fgdb:write-tail:v1\0");
+        expected.extend_from_slice(&(tail.len() as u64).to_be_bytes());
+        expected.extend_from_slice(&tail);
+        assert_eq!(piped.canonical_bytes(), expected);
+    }
+
+    #[test]
+    fn malformed_tail_and_out_of_scope_names_refuse_before_catalog() {
+        for tail in [
+            "WITH r AS edge RETURN missing",
+            "WITH r AS edge RETURN r",
+            "WITH r AS edge RETURN edge; CREATE (n)",
+            "WITH r AS edge WHERE RETURN edge",
+            "WITH r AS edge SET edge.p = 1 RETURN edge",
+        ] {
+            let text = format!("MATCH (a),(b) MERGE (a)-[r:R]->(b) {tail}");
+            let calls = std::cell::Cell::new(0);
+            assert!(
+                PreparedGraphEdgeMergeQueryText::prepare(&text, R, |kind, name| {
+                    calls.set(calls.get() + 1);
+                    symbols(kind, name)
+                })
+                .is_err(),
+                "{text}"
+            );
+            assert_eq!(calls.get(), 0, "{text}");
+        }
+    }
+
+    #[test]
+    fn late_expressions_and_bad_cells_are_not_hidden_by_limit_zero() {
+        let query = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) \
+             WITH r.p AS p RETURN 10 / (p - 2) AS x LIMIT 0",
+        );
+        assert!(
+            query
+                .finish_governed::<(), ()>(
+                    vec![vec![int(1)], vec![int(2)]],
+                    GqlExecutionStats::default(),
+                    GlaExecutionStats::default(),
+                    policy(0),
+                    || Ok(()),
+                )
+                .is_err()
+        );
+        assert!(
+            query
+                .finish_governed::<(), ()>(
+                    vec![vec![GraphValue::Vertex(VId(1))]],
+                    GqlExecutionStats::default(),
+                    GlaExecutionStats::default(),
+                    policy(0),
+                    || Ok(()),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cancellation_and_work_limits_cover_the_whole_owned_pipeline() {
+        let query = prepare(
+            "MATCH (a),(b) MERGE (a)-[r:R]->(b) \
+             WITH r.p AS p RETURN sum(p + 1) AS total",
+        );
+        let rows = vec![vec![int(1)], vec![int(2)], vec![int(3)]];
+        let prefix = GlaExecutionStats {
+            work_units: 17,
+            ..GlaExecutionStats::default()
+        };
+        let mut checkpoints = 0;
+        let result = query
+            .finish_governed::<(), ()>(
+                rows.clone(),
+                GqlExecutionStats::default(),
+                prefix,
+                policy(1),
+                || {
+                    checkpoints += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(result.value[0].values(), &[int(9)]);
+        assert!(result.evaluator.work_units > 17);
+        assert!(checkpoints > 1);
+        let exact = GqlQueryPolicy::new(100, 1, result.evaluator.work_units, 100_000);
+        assert!(
+            query
+                .finish_governed::<(), ()>(
+                    rows.clone(),
+                    GqlExecutionStats::default(),
+                    prefix,
+                    exact,
+                    || Ok(()),
+                )
+                .is_ok()
+        );
+        let low = GqlQueryPolicy::new(100, 1, result.evaluator.work_units - 1, 100_000);
+        assert!(matches!(
+            query.finish_governed::<(), ()>(
+                rows.clone(),
+                GqlExecutionStats::default(),
+                prefix,
+                low,
+                || Ok(()),
+            ),
+            Err(GqlQueryError::Evaluator(_))
+        ));
+        for stop in [0, checkpoints / 2, checkpoints - 1] {
+            let mut visited = 0;
+            assert!(matches!(
+                query.finish_governed::<(), ()>(
+                    rows.clone(),
+                    GqlExecutionStats::default(),
+                    prefix,
+                    policy(1),
+                    || {
+                        if visited == stop {
+                            return Err(());
+                        }
+                        visited += 1;
+                        Ok(())
+                    },
+                ),
+                Err(GqlQueryError::Interrupted(()))
+            ));
+        }
     }
 }

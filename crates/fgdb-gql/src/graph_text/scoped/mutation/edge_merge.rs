@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::mutation_text::EdgeMergeReturnTemplate;
-use crate::set_text::{ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate};
+use crate::set_text::{
+    ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
+};
 use crate::{
     GraphEdgeMergeBinding, GraphEdgeMergeTextError, GraphEdgeMergeTextErrorKind,
     GraphSetColumnType, GraphSetProjection, GraphSetQuantifier, PreparedGraphEdgeMerge,
@@ -386,6 +388,7 @@ struct ParsedEdgeReturn<'a> {
     offset: ReadPageNumber,
     count: Option<ReadPageNumber>,
     at: usize,
+    tail: Option<Vec<ReadStageTemplate>>,
 }
 
 impl<'a> ParsedEdgeReturn<'a> {
@@ -458,6 +461,7 @@ impl<'a> ParsedEdgeReturn<'a> {
             offset: self.offset,
             count: self.count,
             at: self.at,
+            tail: self.tail,
         })
     }
 }
@@ -586,7 +590,10 @@ impl<'a> Parser<'a> {
         columns: &mut Vec<Projection<'a>>,
     ) -> Result<ParsedEdgeReturn<'a>, GraphEdgeMergeTextError> {
         let at = self.current.at;
-        self.word("RETURN")?;
+        let head = self.take_word("WITH")?;
+        if !head {
+            self.word("RETURN")?;
+        }
         let quantifier = if self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
@@ -610,10 +617,11 @@ impl<'a> Parser<'a> {
             offset: ReadPageNumber::Literal(0),
             count: None,
             at,
+            tail: None,
         };
         let items = self.write_return_items(&mut EdgeMergeLeaves {
             returning: &mut returning,
-            columns,
+            columns: &mut *columns,
         })?;
         returning.projection = items.projection;
         returning.grouping = items.grouping;
@@ -628,7 +636,60 @@ impl<'a> Parser<'a> {
             returning.offset = offset;
             returning.count = count;
         }
+        if head {
+            returning.tail = Some(self.edge_merge_tail(&mut returning, columns, items.output)?);
+        }
         Ok(returning)
+    }
+
+    /// A carried edge, MATCH element or actual MERGE endpoint has one frozen
+    /// post-write property binding. Hoist it into the WITH head; never resolve
+    /// a property by scanning the graph again from the tail.
+    fn edge_merge_tail(
+        &mut self,
+        returning: &mut ParsedEdgeReturn<'a>,
+        columns: &mut Vec<Projection<'a>>,
+        mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
+    ) -> Result<Vec<ReadStageTemplate>, GraphEdgeMergeTextError> {
+        let visible = schema.len();
+        let mut reads = Vec::new();
+        if returning.grouping.is_none() {
+            for (alias, key) in self.write_tail_reads(&schema)? {
+                let Some(at) = schema[..visible]
+                    .iter()
+                    .position(|(name, _)| name.text == alias.text)
+                else {
+                    continue;
+                };
+                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
+                    continue;
+                };
+                let (binding, _, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) =
+                    returning.bindings[binding]
+                else {
+                    continue;
+                };
+                let property = match binding {
+                    EdgeBinding::Edge => EdgeBinding::Property(key),
+                    EdgeBinding::Endpoint { start } => EdgeBinding::EndpointProperty { start, key },
+                    EdgeBinding::Input(input) => {
+                        let variable = columns[input].variable;
+                        let column = self.mutation_projection(columns, variable, Some(key))?;
+                        EdgeBinding::Input(column)
+                    }
+                    EdgeBinding::Property(_) | EdgeBinding::EndpointProperty { .. } => continue,
+                };
+                let column = returning.column(property, key, GraphSetColumnType::Scalar)?;
+                mutation_query::push_tail_read(
+                    &mut returning.projection,
+                    &mut schema,
+                    &mut reads,
+                    (alias, key),
+                    column,
+                )?;
+            }
+        }
+        Ok(self.finish_write_tail(schema, visible, reads)?)
     }
 }
 
@@ -667,19 +728,26 @@ impl EdgeMergeReturnTemplate {
                     kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
                 })?;
         }
-        Ok(query.with_page(
+        let query = query.with_page(
             return_projection::pipeline::page_value(&self.offset, values),
             self.count
                 .as_ref()
                 .map(|count| return_projection::pipeline::page_value(count, values)),
-        ))
+        );
+        let Some(stages) = &self.tail else {
+            return Ok(query);
+        };
+        let owned =
+            crate::PreparedGraphSet::owned(query.columns().to_vec(), query.column_types().to_vec());
+        let tail = return_projection::bind_stages(owned, stages, values)?;
+        Ok(query.with_tail(tail))
     }
 }
 
 impl PreparedGraphEdgeMergeQueryText {
     /// Classify write text with native token framing (fgdb-at06q): a MATCH
     /// prefix with no other clause, then `MERGE (x)` followed by a
-    /// relationship arrow, and RETURN directly after the pattern's second
+    /// relationship arrow, and RETURN or WITH directly after the pattern's second
     /// node. A vertex MERGE, a WITH/DELETE/SET before the MERGE, ON branches
     /// or a second MERGE keep their own owners and diagnostics. Quoted values,
     /// property keys and aliases never become clause words. This validates
@@ -743,7 +811,7 @@ impl PreparedGraphEdgeMergeQueryText {
     }
 
     /// After `MERGE`: the pattern's first node group must be followed by a
-    /// relationship arrow, and RETURN must directly follow its second.
+    /// relationship arrow, and RETURN or WITH must directly follow its second.
     fn relationship_then_return(lexer: &mut Lexer<'_>) -> Result<bool, GraphEdgeMergeTextError> {
         let mut depth = 0_usize;
         let mut nodes = 0_u8;
@@ -759,7 +827,8 @@ impl PreparedGraphEdgeMergeQueryText {
                         let next = script::next_script_token(&mut lexer.clone())?.kind;
                         if nodes > 1 {
                             return Ok(matches!(next, TokenKind::Word(word)
-                                if word.eq_ignore_ascii_case("RETURN")));
+                                if word.eq_ignore_ascii_case("RETURN")
+                                    || word.eq_ignore_ascii_case("WITH")));
                         }
                         if !matches!(next, TokenKind::Punct(b'-' | b'<')) {
                             return Ok(false);
