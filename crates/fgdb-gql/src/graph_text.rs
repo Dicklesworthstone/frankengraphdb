@@ -1676,6 +1676,11 @@ impl<'a> Parser<'a> {
                 GraphPatternTextErrorKind::Expected("end of statement"),
             ));
         }
+        // A chain step parses with the statement's declarations, which other
+        // steps may read; the chain checks them once, over every step.
+        if self.chain_write {
+            return Ok(());
+        }
         self.check_parameter_declarations()
     }
 }

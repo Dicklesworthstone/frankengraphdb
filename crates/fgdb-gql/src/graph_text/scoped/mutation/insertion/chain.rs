@@ -340,10 +340,25 @@ impl PreparedGraphWriteChainText {
         if steps.len() < 2 && !unwound_merge {
             return Err(expected(body.len(), "another write after the first").into());
         }
-        Ok(Self {
+        let chain = Self {
             statement: statement.to_owned(),
             steps,
-        })
+        };
+        // Each step skipped the unused-declaration check, since another step
+        // may read a declaration; every one must name a parameter some step
+        // reads.
+        let schema = chain.parameter_schema();
+        if declarations
+            .iter()
+            .any(|(name, _)| !schema.iter().any(|spec| spec.name == *name))
+        {
+            return Err(error(
+                body.len(),
+                GraphPatternTextErrorKind::UnusedParameterDeclaration,
+            )
+            .into());
+        }
+        Ok(chain)
     }
 
     #[must_use]
@@ -490,17 +505,16 @@ impl PreparedGraphWriteChainText {
                 ChainTextStep::EdgeMergeRows(step) => {
                     let (merge, keep) = &**step;
                     let own = own(merge.parameter_schema())?;
-                    let mut output = Vec::new();
                     if let crate::mutation_text::EdgeMergeTextInput::Row { input, .. } =
                         &merge.input
                     {
                         reads_previous(&input.owned, &previous, merge.input.return_at())?;
-                        if let Some((_, types)) = &input.owned {
-                            output = types.clone();
-                        }
                     }
                     let bound = merge.bind_parameters(&own)?;
-                    // Its rows: the row's visible columns, then the edge.
+                    // Its rows: the row's visible columns, then the edge. The
+                    // row is the previous write's, or a MATCH-led first step's
+                    // own read row, which no owned leaf carries.
+                    let mut output = bound.input_column_types();
                     output.truncate(*keep);
                     output.push(GraphSetColumnType::Edge);
                     previous = Some(output);
