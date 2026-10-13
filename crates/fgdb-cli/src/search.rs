@@ -448,10 +448,17 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
             });
     let index = IndexConfig {
         vector: vector.as_ref().map(|(coordinates, _)| {
-            HnswConfig::new(
+            let config = HnswConfig::new(
                 coordinates.len(),
                 flags.metric.unwrap_or(DistanceMetric::SquaredEuclidean),
-            )
+            );
+            // The index lives for this one call: an exact search never reads
+            // HNSW links, so do not build them (fgdb-43k4t).
+            if flags.ann.is_some() {
+                config
+            } else {
+                config.exact_only()
+            }
         }),
         ..IndexConfig::default()
     };
