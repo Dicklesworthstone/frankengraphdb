@@ -1,5 +1,6 @@
-// Unique vertex MERGE has one source-parameterized collector. Native overlays
-// and capability-masked sources share uniqueness, creation and accounting.
+// Vertex MERGE has one source-parameterized collector. Native overlays and
+// capability-masked sources share target reduction, creation and accounting.
+// The output owner chooses singular or all-target cardinality, not a matcher.
 
 fn merge_remaining_budget(
     original: fgdb_gql::GqlExecutionBudget,
@@ -26,14 +27,36 @@ fn merge_remaining_budget(
 // A proposal is private until its owner has staged and completed it. It is not
 // a second evaluator: the supplied GLA source and ordinary insertion collector
 // still own all expression, matching and allocation semantics.
-struct VertexMergeProposal {
+struct VertexMergeProposal<O = fgdb_gql::GraphVertexMergeOutcome> {
     stats: fgdb_gql::GraphVertexMergeStats,
-    outcome: fgdb_gql::GraphVertexMergeOutcome,
+    outcome: O,
     creation: Option<fgdb_gql::insertion::GraphInsertBatch>,
 }
 
+// Ownership transfer only. The collector has already admitted and charged
+// every retained identity. A bulk owner can retain this very set, without
+// allocating a second result bag or changing the singular primitive's meter.
+trait VertexMergeOutput {
+    const UNIQUE: bool;
+    fn matched(matches: std::collections::BTreeSet<VId>) -> Self;
+    fn created(vertex: VId) -> Self;
+}
+
+impl VertexMergeOutput for fgdb_gql::GraphVertexMergeOutcome {
+    const UNIQUE: bool = true;
+
+    fn matched(matches: std::collections::BTreeSet<VId>) -> Self {
+        Self::Matched(matches.into_iter().next().expect("one admitted MERGE target"))
+    }
+
+    fn created(vertex: VId) -> Self {
+        Self::Created(vertex)
+    }
+}
+
 type VertexMergeFault<E, A, C> = fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexMergeError<E, A>, C>;
-type VertexMergeCollection<E, A, C> = Result<VertexMergeProposal, VertexMergeFault<E, A, C>>;
+type VertexMergeCollection<E, A, C, O = fgdb_gql::GraphVertexMergeOutcome> =
+    Result<VertexMergeProposal<O>, VertexMergeFault<E, A, C>>;
 type VertexMergeSelection<E, C> = Result<
     fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
     fgdb_gql::GqlQueryError<E, C>,
@@ -47,12 +70,25 @@ fn collect_vertex_merge<E, A, C>(
         fgdb_gql::GqlQueryPolicy,
     ) -> VertexMergeSelection<E, C>,
     allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
-    mut checkpoint: impl FnMut() -> Result<(), C>,
+    checkpoint: impl FnMut() -> Result<(), C>,
 ) -> VertexMergeCollection<E, A, C> {
+    collect_vertex_merge_output(merge, policy, source, allocate, checkpoint)
+}
+
+fn collect_vertex_merge_output<O: VertexMergeOutput, E, A, C>(
+    merge: &fgdb_gql::PreparedGraphVertexMerge,
+    policy: fgdb_gql::GraphVertexMergePolicy,
+    source: impl FnOnce(
+        &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryPolicy,
+    ) -> VertexMergeSelection<E, C>,
+    allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    mut checkpoint: impl FnMut() -> Result<(), C>,
+) -> VertexMergeCollection<E, A, C, O> {
     use fgdb_gql::insertion::{GraphInsertIntent, GraphInsertPolicy};
     use fgdb_gql::{
         GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlQueryError,
-        GraphVertexMergeError, GraphVertexMergeOutcome, GraphVertexMergeStats,
+        GraphVertexMergeError, GraphVertexMergeStats,
     };
     let selected = source(merge.selection(), policy.query)
         .map_err(|error| error.map_source(GraphVertexMergeError::Source))?;
@@ -119,21 +155,21 @@ fn collect_vertex_merge<E, A, C>(
         }
     }
     checkpoint().map_err(GqlQueryError::Interrupted)?;
-    if matches.len() > 1 {
+    if O::UNIQUE && matches.len() > 1 {
         return Err(GqlQueryError::Source(
             GraphVertexMergeError::AmbiguousMatches {
                 observed: matches.len() as u64,
             },
         ));
     }
-    if let Some(vertex) = matches.into_iter().next() {
+    if !matches.is_empty() {
         return Ok(VertexMergeProposal {
             stats: GraphVertexMergeStats {
                 match_selection: selected.rows,
                 evaluator,
                 created_vertices: 0,
             },
-            outcome: GraphVertexMergeOutcome::Matched(vertex),
+            outcome: O::matched(matches),
             creation: None,
         });
     }
@@ -209,7 +245,7 @@ fn collect_vertex_merge<E, A, C>(
     let [GraphInsertIntent::Vertex { vertex, .. }] = creation.intents() else {
         unreachable!("validated MERGE creation produces exactly one vertex")
     };
-    let outcome = GraphVertexMergeOutcome::Created(*vertex);
+    let outcome = O::created(*vertex);
     let inserted = creation.stats();
     let stats = GraphVertexMergeStats {
         match_selection: selected.rows,
@@ -257,7 +293,6 @@ impl WriteTxn {
         ),
         TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>,
     > {
-        use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
         use fgdb_gql::{GqlQueryError, GraphVertexMergeError};
         let infrastructure = |error| GqlQueryError::Source(GraphVertexMergeError::Source(error));
         self.ensure_database(database).map_err(infrastructure)?;
@@ -295,38 +330,46 @@ impl WriteTxn {
                 || cx.checkpoint(),
             )?;
             if let Some(creation) = proposal.creation {
-                let mut batch = WriteBatch::new(merge.relation());
-                for intent in creation.into_intents() {
-                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                    let GraphInsertIntent::Vertex {
-                        vertex,
-                        labels,
-                        properties,
-                    } = intent
-                    else {
-                        unreachable!("validated vertex MERGE contains no edge creation")
-                    };
-                    batch.create_vertex(vertex, labels, properties);
-                }
-                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                // Preserve the insertion adapter's original composition choice.
-                let staged = if self
-                    .staged
-                    .iter()
-                    .all(|batch| batch.relation == merge.relation())
-                {
-                    self.write(database, batch)
-                } else {
-                    self.write_atomic(database, vec![batch])
-                };
-                staged.map_err(|error| {
-                    GqlQueryError::Source(GraphVertexMergeError::Creation(
-                        GraphInsertError::Source(error),
-                    ))
-                })?;
+                stage_vertex_merge_creation(self, database, cx, merge.relation(), creation)?;
             }
             // No fallible work follows atomic staging.
             Ok((proposal.stats, proposal.outcome))
         })
     }
+}
+
+// Both cardinality owners stage the collector's ordinary insertion proposal
+// through this same path. No new identity, durable format or commit is minted.
+fn stage_vertex_merge_creation<V: Vfs + Clone, A>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &fgdb_types::QueryCx,
+    relation: fgdb_delta_types::RelationId,
+    creation: fgdb_gql::insertion::GraphInsertBatch,
+) -> Result<(), TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>> {
+    use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
+    use fgdb_gql::{GqlQueryError, GraphVertexMergeError};
+
+    let mut batch = WriteBatch::new(relation);
+    for intent in creation.into_intents() {
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        let GraphInsertIntent::Vertex {
+            vertex,
+            labels,
+            properties,
+        } = intent
+        else {
+            unreachable!("validated vertex MERGE contains no edge creation")
+        };
+        batch.create_vertex(vertex, labels, properties);
+    }
+    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+    let staged = if transaction.staged.iter().all(|batch| batch.relation == relation) {
+        transaction.write(database, batch)
+    } else {
+        transaction.write_atomic(database, vec![batch])
+    };
+    staged.map(|_| ()).map_err(|error| {
+        GqlQueryError::Source(GraphVertexMergeError::Creation(GraphInsertError::Source(error)))
+    })
 }

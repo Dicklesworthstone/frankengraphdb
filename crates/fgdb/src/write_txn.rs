@@ -43,6 +43,7 @@ include!("write_txn_parts/graph_insertions.rs");
 include!("write_txn_parts/graph_deletions.rs");
 include!("write_txn_parts/vertex_merge.rs");
 include!("write_txn_parts/vertex_upsert.rs");
+include!("write_txn_parts/vertex_upsert_batch.rs");
 include!("write_txn_parts/edge_merge.rs");
 include!("write_txn_parts/edge_upsert.rs");
 include!("write_txn_parts/edge_upsert_returning.rs");
