@@ -612,3 +612,193 @@ fn signed_rows_and_late_expression_refusals_still_precede_commit() {
         fixture.finish(cx, &after).await;
     });
 }
+
+#[test]
+fn relationship_upsert_returning_obeys_creation_and_combined_action_limits() {
+    run(async |cx| {
+        // An ON CREATE statement still obeys the independent edge ceiling.
+        threshold_case(
+            cx,
+            "upsert-create-edge",
+            policy(1, 0, 0),
+            policy(1, 0, 1),
+            "MATCH (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) \
+             MERGE (b)-[r:KNOWS]->(a) ON CREATE SET r.age=8 RETURN r.age AS age",
+            2,
+            2,
+        )
+        .await;
+        // Here creation fits, but a refused action must roll that new edge back.
+        threshold_case(
+            cx,
+            "upsert-create-action",
+            policy(0, 0, 1),
+            policy(1, 0, 1),
+            "MATCH (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) \
+             MERGE (b)-[r:KNOWS]->(a) ON CREATE SET r.age=8 RETURN r.age AS age",
+            2,
+            2,
+        )
+        .await;
+        // Branch and trailing assignments share ONE action allowance, even
+        // when both write the same property and only one final value is stored.
+        let text = "MATCH (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) \
+                    MERGE (a)-[r:KNOWS]->(b) ON MATCH SET r.age=r.age+1 \
+                    SET r.age=r.age+1 RETURN r.age AS age";
+        let fixture = Fixture::start(cx, "upsert-two-actions")
+            .await
+            .reopen(cx, policy(1, 0, 0))
+            .await;
+        let mut writer = fixture.client(cx, Rights::ReadWrite, 100).await;
+        let before = state(cx, &mut writer).await;
+        for statement in [text.to_owned(), format!("{text} LIMIT 0")] {
+            limit_refusal(cx, &mut writer, &statement).await;
+            assert_eq!(state(cx, &mut writer).await, before);
+        }
+        writer.close(cx).await.unwrap();
+        let fixture = fixture.reopen(cx, policy(2, 0, 0)).await;
+        let mut writer = fixture.client(cx, Rights::ReadWrite, 100).await;
+        assert_eq!(state(cx, &mut writer).await, before);
+        let updated = write(cx, &mut writer, text).await;
+        assert_eq!(updated.rows, vec![vec![WireValue::Int(9)]]);
+        assert_eq!(
+            updated.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1,
+            }
+        );
+        let after = state(cx, &mut writer).await;
+        assert_eq!(after.1.rows.len(), 1);
+        assert_eq!(after.1.rows[0][3], WireValue::Int(9));
+        writer.close(cx).await.unwrap();
+        fixture.finish(cx, &after).await;
+    });
+}
+
+#[test]
+fn relationship_upsert_zero_effects_admit_only_unchosen_branches_and_no_input() {
+    run(async |cx| {
+        let fixture = Fixture::start(cx, "upsert-zero-effects")
+            .await
+            .reopen(cx, policy(0, 0, 0))
+            .await;
+        let mut writer = fixture.client(cx, Rights::ReadWrite, 100).await;
+        let before = state(cx, &mut writer).await;
+        // Matching the existing edge never runs or bills ON CREATE.
+        let matched = write(
+            cx,
+            &mut writer,
+            "MATCH (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) \
+             MERGE (a)-[r:KNOWS]->(b) ON CREATE SET r.age=99 RETURN r.age AS age",
+        )
+        .await;
+        assert_eq!(matched.rows, vec![vec![WireValue::Int(7)]]);
+        assert_eq!(
+            matched.outcome,
+            Outcome::ReadClosed {
+                seq: 1,
+                statements: 1,
+            }
+        );
+        assert_eq!(state(cx, &mut writer).await, before);
+        // An empty MATCH executes neither ON branch nor the trailing SET.
+        let empty = write(
+            cx,
+            &mut writer,
+            "MATCH (a:Person {name:'absent'}),(b:Person {name:'Bob'}) \
+             MERGE (a)-[r:KNOWS]->(b) ON CREATE SET r.age=99 \
+             ON MATCH SET r.age=99 SET r.age=99 RETURN r.age AS age",
+        )
+        .await;
+        assert!(empty.rows.is_empty());
+        assert_eq!(
+            empty.outcome,
+            Outcome::ReadClosed {
+                seq: 1,
+                statements: 1,
+            }
+        );
+        assert_eq!(state(cx, &mut writer).await, before);
+        writer.close(cx).await.unwrap();
+        fixture.finish(cx, &before).await;
+    });
+}
+
+#[test]
+fn relationship_upsert_uses_write_query_limits_and_final_row_admission() {
+    run(async |cx| {
+        let text = "MATCH (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) \
+                    MERGE (a)-[r:KNOWS]->(b) ON MATCH SET r.age=8 RETURN r.age AS age";
+        for dimension in [0, 2, 3] {
+            let mut limits = [100_000, 100_000, 10_000_000, 10_000_000];
+            limits[dimension] = 0;
+            let [records, rows, work, scratch] = limits;
+            threshold_case(
+                cx,
+                &format!("upsert-write-query-{dimension}"),
+                GraphWriteProgramPolicy::new(
+                    GqlQueryPolicy::new(records, rows, work, scratch),
+                    1,
+                    0,
+                    0,
+                ),
+                policy(1, 0, 0),
+                text,
+                2,
+                1,
+            )
+            .await;
+        }
+        let no_rows = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(100_000, 0, 10_000_000, 10_000_000),
+            1,
+            0,
+            0,
+        );
+        let fixture = Fixture::start(cx, "upsert-no-result-rows")
+            .await
+            .reopen(cx, no_rows)
+            .await;
+        // This grant is permissive: the refusal must come from the HOST's
+        // write result limit, not an accidentally narrow capability.
+        let mut writer = fixture.client(cx, Rights::ReadWrite, 100).await;
+        let before = state(cx, &mut writer).await;
+        limit_refusal(cx, &mut writer, text).await;
+        assert_eq!(state(cx, &mut writer).await, before);
+        let empty = write(cx, &mut writer, &format!("{text} LIMIT 0")).await;
+        assert!(empty.rows.is_empty());
+        assert_eq!(
+            empty.outcome,
+            Outcome::WriteCommitted {
+                seq: 2,
+                statements: 1,
+            }
+        );
+        let after = state(cx, &mut writer).await;
+        assert_eq!(after.1.rows.len(), 1);
+        assert_eq!(after.1.rows[0][3], WireValue::Int(8));
+        // LIMIT 0 only changes output admission, not RETURN evaluation. The
+        // native executor must discard the tentative zero property on failure.
+        let failure = writer
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) \
+                 MERGE (a)-[r:KNOWS]->(b) ON MATCH SET r.age=0 \
+                 RETURN 10/r.age AS bad LIMIT 0",
+                vec![],
+            )
+            .await;
+        match failure {
+            Err(ClientError::Server { message, .. }) => assert!(
+                message.contains("DivisionByZero") || message.contains("division by zero"),
+                "not the expected late value failure: {message}"
+            ),
+            other => panic!("LIMIT 0 must not suppress evaluation: {other:?}"),
+        }
+        assert_eq!(state(cx, &mut writer).await, after);
+        writer.close(cx).await.unwrap();
+        fixture.finish(cx, &after).await;
+    });
+}
