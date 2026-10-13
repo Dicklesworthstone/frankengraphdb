@@ -415,16 +415,18 @@ impl<'a> Parser<'a> {
     }
 
     /// The list operand of `IN`. openCypher binds IN tighter than comparisons,
-    /// AND, OR and XOR, so the operand ends at the concatenation level: in
-    /// `'L' IN labels(a) AND 'M' IN labels(a)` the first list is `labels(a)`,
-    /// not the conjunction after it (fgdb-klah2). A list column or list CASE
-    /// is already one operand.
+    /// AND, OR and XOR, but looser than additive list concatenation. Consume a
+    /// complete list-valued +/- chain before bounding an ordinary value at the
+    /// concatenation level (fgdb-klah2).
     fn membership_list(
         &mut self,
         columns: &mut ExpressionColumns<'_, 'a>,
         nesting: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
+        if self.sum_has_list(columns)? {
+            return self.list_sum_value(columns, nesting, at);
+        }
         let row = match columns {
             ExpressionColumns::Row(schema) => Some(*schema),
             _ => None,
@@ -510,6 +512,18 @@ impl<'a> Parser<'a> {
     ) -> Result<(), GraphMutationTextError> {
         let at = self.current.at;
         let nesting = self.let_base + depth + 1;
+        let value = self.list_sum_value(columns, nesting, at)?;
+        self.let_slot(program, value, at)
+    }
+
+    /// Value form of list_sum. Membership uses the same additive operand
+    /// without first materializing it as a scalar let slot.
+    fn list_sum_value(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        nesting: usize,
+        at: usize,
+    ) -> Result<ReadValueTemplate, GraphMutationTextError> {
         let mut value = self.sum_operand(columns, nesting, at)?;
         loop {
             let function = if self.take(b'+')? {
@@ -525,7 +539,7 @@ impl<'a> Parser<'a> {
                 argument: Box::new(ReadValueTemplate::List(vec![value, right])),
             };
         }
-        self.let_slot(program, value, at)
+        Ok(value)
     }
 
     /// One operand of a list sum: a list value with its postfix reads, or a
@@ -1200,7 +1214,40 @@ impl<'a> Parser<'a> {
         depth: usize,
         program: &mut Vec<ParsedOp>,
     ) -> Result<(), GraphMutationTextError> {
-        if !self.operand_membership(columns, depth, program)? {
+        if self.lets.is_some() && self.sum_has_list(columns)? {
+            // IN binds below additive list concatenation (Precedence3):
+            // parse the complete left list sum before deciding membership.
+            let at = self.current.at;
+            let nesting = self.let_base + depth + 1;
+            let left = self.list_sum_value(columns, nesting, at)?;
+            let membership = self.is_word("IN")
+                || (self.is_word("NOT")
+                    && matches!(
+                        self.lexer.clone().next()?.kind,
+                        TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")
+                    ));
+            if membership {
+                let negate = self.take_word("NOT")?;
+                self.word("IN")?;
+                let list = self.membership_list(columns, nesting, at)?;
+                self.let_slot(
+                    program,
+                    ReadValueTemplate::In {
+                        value: Box::new(left),
+                        list: Box::new(list),
+                    },
+                    at,
+                )?;
+                if negate {
+                    emit(program, ParsedOp::Bound(GraphIntegerOp::Not), at)?;
+                }
+            } else {
+                self.let_slot(program, left, at)?;
+                if self.is_punct(b'|') {
+                    self.concat_tail(columns, depth, program)?;
+                }
+            }
+        } else if !self.operand_membership(columns, depth, program)? {
             self.scalar_concat(columns, depth, program)?;
         }
         if matches!(

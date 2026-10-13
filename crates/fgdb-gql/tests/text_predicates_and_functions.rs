@@ -648,6 +648,11 @@ fn composite_literals_compare_three_valued() {
         ("[1, 2] <> [1]", truth(true)),
         ("[1, 2] != [1, 2]", truth(false)),
         ("{k: null} <> {k: null}", null.clone()),
+        // Precedence3 [4]/[5]: additive list expressions bind inside IN.
+        ("2 IN [1] + 2", truth(true)),
+        ("[1] + 2 IN [[0], [1, 2]]", truth(true)),
+        ("[1] + 2 IN [[0]] + [[1, 2]]", truth(true)),
+        ("[1] + 2 NOT IN [[0]] + [[9]]", truth(true)),
         // List5: a composite left operand of IN.
         ("[1] IN [1, 2, [1]]", truth(true)),
         ("[[1, 2], [3, 4]] IN [5, [[1, 2], [3, 4]]]", truth(true)),
