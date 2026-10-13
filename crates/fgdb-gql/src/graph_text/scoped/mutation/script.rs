@@ -276,7 +276,18 @@ fn classify(
         return Ok(Kind::Insert);
     }
     if matched && parser.is_word("DELETE") {
-        return Ok(Kind::Delete);
+        // DELETE p of a matched path is the mutation compiler's, which
+        // expands each path into its elements (TCK Delete3).
+        let mut lexer = parser.lexer.clone();
+        loop {
+            match lexer.next()?.kind {
+                TokenKind::Word(word) if parser.syntax.names_path(word) => {
+                    return Ok(Kind::Mutation);
+                }
+                TokenKind::End => return Ok(Kind::Delete),
+                _ => {}
+            }
+        }
     }
     if matched && (parser.is_word("SET") || parser.is_word("REMOVE") || parser.is_word("DETACH")) {
         return Ok(Kind::Mutation);

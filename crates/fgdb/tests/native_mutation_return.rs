@@ -228,11 +228,12 @@ fn deleting_a_path_deletes_its_elements() {
         };
         let path = "p = (a:L {id: 1})-[:R]->()-[:R]->(c:L {id: 3})";
         let frontier = db.frontier().unwrap();
-        // Node 2 keeps edge 12, so a plain DELETE of the path is refused.
+        // Node 2 keeps edge 12, so a plain DELETE of the path is refused when
+        // it executes, not as a name the statement does not know.
+        let refused = write(&mut db, &format!("MATCH {path} DELETE p")).await;
         assert!(
-            write(&mut db, &format!("MATCH {path} DELETE p"))
-                .await
-                .is_err()
+            matches!(refused, Err(QueryWriteError::Execute(_))),
+            "{refused:?}"
         );
         assert_eq!(db.frontier().unwrap(), frontier);
         write(
@@ -252,6 +253,12 @@ fn deleting_a_path_deletes_its_elements() {
             db.edges().unwrap().is_empty(),
             "every edge left with node 2"
         );
+        // Node 4 lost its only edge with node 2, so a plain DELETE of its
+        // one-node path deletes it.
+        write(&mut db, "MATCH p = (:L {id: 4}) DELETE p")
+            .await
+            .unwrap();
+        assert_eq!(db.vertex(VId(4)).unwrap(), None);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

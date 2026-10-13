@@ -25,6 +25,12 @@ use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
 pub const MAX_GRAPH_MUTATION_ACTIONS: usize = 256;
 
+/// The most elements one matched path holds (TCK Delete3): each pattern edge
+/// is at most one walk of the longest admitted hop count, and every hop adds
+/// one relationship and one node to the start node.
+const MAX_GRAPH_PATH_ELEMENTS: u128 =
+    2 * crate::algebra::MAX_PATTERN_EDGES as u128 * crate::MAX_GRAPH_WALK_HOPS as u128 + 1;
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphMutationValue {
     /// Position of a scalar property in the selection's immutable output schema.
@@ -552,6 +558,22 @@ impl PreparedGraphMutation {
     #[must_use]
     pub fn actions(&self) -> &[GraphMutationAction] {
         &self.actions
+    }
+
+    /// The most effects one selected row proposes: one per action, except a
+    /// path delete, which proposes one per element of its path.
+    pub(crate) fn row_effect_bound(&self) -> u128 {
+        self.actions
+            .iter()
+            .map(|action| match action {
+                GraphMutationAction::Delete { .. } | GraphMutationAction::DetachDelete { .. }
+                    if self.columns.get(action.target()) == Some(&GraphSetColumnType::Path) =>
+                {
+                    MAX_GRAPH_PATH_ELEMENTS
+                }
+                _ => 1,
+            })
+            .sum()
     }
 
     /// Freeze the complete selection once, then reduce simultaneous assignments.
