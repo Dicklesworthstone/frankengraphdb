@@ -236,3 +236,6 @@ fn plain_merge_source_and_evaluator_limits_accumulate_across_steps() {
         }
     });
 }
+
+#[path = "authorized_vertex_merge_program/upserts.rs"]
+mod upserts;

@@ -166,3 +166,118 @@ pub(super) fn merge<V: Vfs + Clone, Clock: FnMut() -> u64>(
         Ok((stats, receipt))
     })
 }
+
+type UpsertFault = GqlQueryError<
+    fgdb_gql::GraphVertexUpsertError<WriteTxnError, WriteTxnError>, WriteTxnError,
+>;
+
+fn upsert_staging(error: WriteTxnError) -> UpsertFault {
+    GqlQueryError::Source(fgdb_gql::GraphVertexUpsertError::Staging(error))
+}
+
+// ON/SET shares the very same frozen target owner as plain MERGE. All reads
+// and staging still use the established native evaluator and authorized host.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    upsert: &fgdb_gql::PreparedGraphVertexUpsert,
+    policy: fgdb_gql::GraphVertexUpsertPolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+    returning: bool,
+) -> Result<
+    (fgdb_gql::GraphWriteStepStats, Option<GraphWriteStepReceipt>),
+    UpsertFault,
+> {
+    use crate::write_txn::{vertex_upsert_actions, vertex_upsert_property};
+    use fgdb_gql::{GraphVertexUpsertBranch, GraphVertexUpsertError, GraphVertexUpsertStats};
+    cx.with_restriction(|| {
+        let proposal = select(transaction, database, cx, upsert.merge(), policy.merge, scope, execution)
+            .map_err(|error| error.map_source(GraphVertexUpsertError::Merge))?;
+        let targets = proposal.outcome;
+        let target_vertices = u64::try_from(targets.len()).map_err(|_| {
+            GqlQueryError::Source(GraphVertexUpsertError::Merge(
+                GraphVertexMergeError::AccountingOverflow,
+            ))
+        })?;
+        let (branch, selected) = if targets.created.is_some() {
+            (GraphVertexUpsertBranch::Create, upsert.on_create())
+        } else {
+            (GraphVertexUpsertBranch::Match, upsert.on_match())
+        };
+        // Pre-admit EVERY original action before any target's effects, even if
+        // a later clause overwrites it or it is equal to the stored value.
+        let observed = u128::from(target_vertices)
+            .checked_mul(selected.len() as u128 + upsert.after().len() as u128)
+            .ok_or_else(|| {
+                GqlQueryError::Source(GraphVertexUpsertError::Merge(
+                    GraphVertexMergeError::AccountingOverflow,
+                ))
+            })?;
+        if observed > u128::from(policy.max_actions) {
+            return Err(GqlQueryError::Source(GraphVertexUpsertError::ActionLimit {
+                limit: policy.max_actions,
+                observed,
+            }));
+        }
+        stage_creation(
+            transaction, database, cx, upsert.merge().relation(), proposal.creation, execution,
+        ).map_err(upsert_staging)?;
+        let mut stats = GraphVertexUpsertStats {
+            merge: proposal.stats,
+            branch,
+            action_effects: observed as u64,
+        };
+        for outcome in targets.outcomes() {
+            event(
+                cx, execution, policy.merge.query, &mut stats.merge.evaluator,
+                GlaExecutionEvent::Work,
+            )?;
+            let state = RefCell::new((&mut *transaction, &mut *database));
+            let controls = RefCell::new(&mut *execution);
+            let completed = vertex_upsert_actions::<WriteTxnError, WriteTxnError, WriteTxnError>(
+                upsert, policy, stats.merge, outcome,
+                || {
+                    cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                    controls.borrow_mut().checkpoint()
+                },
+                |key, control| {
+                    // Hidden input is NULL before lookup, payload inspection,
+                    // logical charges or field witnesses; writes are NOT masked.
+                    if !scope.allows_property(key) {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        return Ok(fgdb_types::CanonicalScalar::Null);
+                    }
+                    let state = state.borrow();
+                    vertex_upsert_property(state.0, state.1, outcome.vertex(), key, control)
+                },
+                |batch| {
+                    let mut state = state.borrow_mut();
+                    let (transaction, database) = &mut *state;
+                    let mut execution = controls.borrow_mut();
+                    for row in batch.rows {
+                        cx.checkpoint().map_err(WriteTxnError::Interrupted).map_err(upsert_staging)?;
+                        execution.checkpoint().map_err(upsert_staging)?;
+                        stage(transaction, database, batch.relation, row, &mut execution)
+                            .map_err(upsert_staging)?;
+                    }
+                    Ok(())
+                },
+            )?;
+            // The action evaluator starts with the previous target's usage;
+            // never reset native work/scratch or the live signed allowance.
+            stats.merge.evaluator = completed.merge.evaluator;
+        }
+        let receipt = outcomes(
+            targets, cx, execution, policy.merge.query, &mut stats.merge.evaluator, returning,
+        )?.map(|outcomes| match outcomes.as_slice() {
+            [outcome] => GraphWriteStepReceipt::VertexUpsert { outcome: *outcome },
+            _ => GraphWriteStepReceipt::VertexUpsertBatch { outcomes },
+        });
+        // The shared bulk meter validates branch, real selection, complete
+        // actions and distinct modified targets before installing any counters.
+        Ok((fgdb_gql::GraphWriteStepStats::VertexUpsertBatch { stats, target_vertices }, receipt))
+    })
+}

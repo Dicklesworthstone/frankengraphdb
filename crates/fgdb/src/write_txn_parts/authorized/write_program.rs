@@ -53,9 +53,9 @@ impl<V: Vfs + Clone> Database<V> {
     ///
     /// An insert-only program with no MATCH requires Write rights. Any selected
     /// creation, update or deletion requires ReadWrite, even when no rows match.
-    /// Vertex MERGE always requires ReadWrite. Plain MERGE retains every
-    /// distinct visible match; hidden vertices never suppress creation or enter
-    /// the receipt. ON/SET currently retains its explicit singular contract.
+    /// Vertex MERGE always requires ReadWrite. Plain MERGE and ON/SET retain
+    /// every distinct visible match; hidden vertices never suppress creation
+    /// or enter receipts. All targets are frozen before the first action.
     /// This is visible get-or-create, NOT a global
     /// uniqueness constraint or a disclosure contract for hidden constraints.
     /// The ordinary native reducer decides the branch once; only the chosen
@@ -372,7 +372,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         return Ok(GraphWriteStepStats::VertexMerge(stats));
                                     }
                                     GraphWriteStatement::VertexUpsert(input) => {
-                                        let (stats, outcome) = vertex::upsert(
+                                        let (stats, step) = vertex_program::upsert(
                                             workspace.transaction(),
                                             self,
                                             query_cx,
@@ -383,10 +383,10 @@ impl<V: Vfs + Clone> Database<V> {
                                             returning,
                                         )
                                         .map_err(GraphWriteStepError::VertexUpsert)?;
-                                        (
-                                            GraphWriteStepStats::VertexUpsert(stats),
-                                            GraphWriteStepReceipt::VertexUpsert { outcome },
-                                        )
+                                        if let Some(step) = step {
+                                            receipts.push(step);
+                                        }
+                                        return Ok(stats);
                                     }
                                     GraphWriteStatement::EdgeMerge(input) => {
                                         let (stats, receipt) = edge_merge::apply_many(
