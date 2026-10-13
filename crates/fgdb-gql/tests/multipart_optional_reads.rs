@@ -682,6 +682,37 @@ fn a_carried_relationship_matches_itself_again() {
     }
 }
 
+/// After WITH, a property of an alias that returns a graph element of the
+/// last part bare is that element's property, as in a single-part RETURN
+/// (TCK With3 [1], WithOrderBy4 [15]: `RETURN r AS rel ORDER BY rel.id`). The
+/// element may be new in this part or carried and matched again. An alias of
+/// a value has no properties.
+#[test]
+fn a_later_part_orders_by_a_property_of_an_element_alias() {
+    for (aliased, direct) in [
+        (
+            "MATCH (a)-[r:R]->(b) WITH r, a MATCH (a)-[r:R]->(c) \
+             RETURN c AS d ORDER BY d.score DESC",
+            "MATCH (a)-[r:R]->(b) WITH r, a MATCH (a)-[r:R]->(c) \
+             RETURN c AS d ORDER BY c.score DESC",
+        ),
+        (
+            "MATCH (a)-[:R]->(b) WITH a MATCH (a)-[:R]->(c) RETURN a AS x, c ORDER BY x.score DESC",
+            "MATCH (a)-[:R]->(b) WITH a MATCH (a)-[:R]->(c) RETURN a AS x, c ORDER BY a.score DESC",
+        ),
+    ] {
+        let found = identified_rows(aliased);
+        assert!(!found.is_empty(), "{aliased}");
+        assert_eq!(found, identified_rows(direct), "{aliased}");
+    }
+    let text =
+        "MATCH (a)-[:R]->(b) WITH a MATCH (a)-[:R]->(c) RETURN c.score AS d ORDER BY d.score";
+    assert!(
+        PreparedGraphSetText::prepare(text, symbols).is_err(),
+        "{text}"
+    );
+}
+
 /// A RETURN item after a leading OPTIONAL MATCH is a whole expression, as it
 /// is after a required MATCH: a comparison, IS [NOT] NULL or Boolean connector
 /// over the optional binding is the item's three-valued Boolean (openCypher,
