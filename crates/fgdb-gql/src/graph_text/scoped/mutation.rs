@@ -52,6 +52,12 @@ enum ActionKind<'a> {
         value: crate::set_text::ReadValueTemplate,
         at: usize,
     },
+    /// `SET n = {...}`: unset every property of n the map does not name.
+    /// `current` is n's property-map column.
+    Clear {
+        keep: Vec<Name<'a>>,
+        current: usize,
+    },
     Label {
         label: Name<'a>,
         present: bool,
@@ -98,6 +104,17 @@ fn action_templates<'a>(
                 value,
                 at,
             },
+            ActionKind::Clear { keep, current } => {
+                let mut keys = Vec::with_capacity(keep.len());
+                for key in keep {
+                    keys.push(property_key(symbol, key)?);
+                }
+                MutationActionTemplate::Bound(GraphMutationAction::ClearProperties {
+                    target,
+                    current,
+                    keep: keys,
+                })
+            }
             ActionKind::Property { key, value } => {
                 let key = property_key(symbol, key)?;
                 match value {
@@ -437,6 +454,14 @@ impl<'a> Parser<'a> {
                     }
                     continue;
                 }
+                // openCypher `SET n = {...}` replaces n's properties (Set4).
+                if setting && row.is_none() && self.is_punct(b'=') {
+                    self.mutation_replace_map(&mut columns, &mut actions, target, variable)?;
+                    if !self.take(b',')? {
+                        break;
+                    }
+                    continue;
+                }
                 let kind = if deleting {
                     ActionKind::Delete { detach }
                 } else if self.take(b':')? {
@@ -494,6 +519,62 @@ impl<'a> Parser<'a> {
             }
         }
         Ok((columns, actions))
+    }
+
+    /// `SET n = {k: v, ...}` (openCypher replace, Set4): the listed
+    /// assignments, plus one action unsetting every other property n carries,
+    /// read from n's frozen property map. `{}` unsets them all.
+    fn mutation_replace_map(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+        actions: &mut Vec<Action<'a>>,
+        target: usize,
+        variable: Name<'a>,
+    ) -> Result<(), GraphMutationTextError> {
+        self.punct(b'=', "=")?;
+        self.punct(b'{', "literal property map after =")?;
+        let current = self.projection_slot(
+            columns,
+            Projection {
+                variable,
+                property: None,
+                path: Some(GraphPathFunction::Properties),
+            },
+        )?;
+        let mut keep: Vec<Name<'a>> = Vec::new();
+        if !self.take(b'}')? {
+            loop {
+                self.mutation_action_capacity(actions.len())?;
+                let key = self.name()?;
+                if keep.iter().any(|old| old.text == key.text) {
+                    return Err(error(
+                        key.at,
+                        GraphPatternTextErrorKind::Expected("distinct property keys in SET = map"),
+                    )
+                    .into());
+                }
+                self.punct(b':', ":")?;
+                let value = self.mutation_expression(columns)?;
+                actions.push(Action {
+                    target,
+                    kind: ActionKind::Property {
+                        key,
+                        value: Some(value),
+                    },
+                });
+                keep.push(key);
+                if self.take(b'}')? {
+                    break;
+                }
+                self.punct(b',', ", or }")?;
+            }
+        }
+        self.mutation_action_capacity(actions.len())?;
+        actions.push(Action {
+            target,
+            kind: ActionKind::Clear { keep, current },
+        });
+        Ok(())
     }
 
     /// `( name ) .` opens a property target; consumes only the parenthesis.
@@ -644,7 +725,9 @@ impl PreparedGraphMutationText {
                 labels_changed: parsed_actions.iter().any(|action| {
                     !matches!(
                         action.kind,
-                        ActionKind::Property { .. } | ActionKind::RowProperty { .. }
+                        ActionKind::Property { .. }
+                            | ActionKind::RowProperty { .. }
+                            | ActionKind::Clear { .. }
                     )
                 }),
                 // Only DETACH DELETE can retire an edge the statement does

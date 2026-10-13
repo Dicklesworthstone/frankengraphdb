@@ -58,6 +58,16 @@ pub enum GraphMutationAction {
         target: usize,
         key: PropertyKeyId,
     },
+    /// openCypher `SET n = {...}`: unset every property `target` carries
+    /// that `keep` does not name. `current` is the target's frozen property
+    /// map (a Properties column), whose names resolve through the selection's
+    /// reverse catalog; its property names must be injective. The kept keys'
+    /// values are ordinary SetProperty actions of the same statement.
+    ClearProperties {
+        target: usize,
+        current: usize,
+        keep: Vec<PropertyKeyId>,
+    },
     SetLabel {
         target: usize,
         label: LabelId,
@@ -82,6 +92,7 @@ impl GraphMutationAction {
         match self {
             Self::SetProperty { target, .. }
             | Self::RemoveProperty { target, .. }
+            | Self::ClearProperties { target, .. }
             | Self::SetLabel { target, .. }
             | Self::DetachDelete { target }
             | Self::Delete { target } => *target,
@@ -431,6 +442,7 @@ impl PreparedGraphMutation {
             let valid_target = match action {
                 GraphMutationAction::SetProperty { .. }
                 | GraphMutationAction::RemoveProperty { .. }
+                | GraphMutationAction::ClearProperties { .. }
                 | GraphMutationAction::Delete { .. } => matches!(
                     columns.get(target),
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
@@ -444,6 +456,25 @@ impl PreparedGraphMutation {
                     action: at,
                     column: target,
                 });
+            }
+            if let GraphMutationAction::ClearProperties { current, .. } = action {
+                // The frozen property map, read by name through the reverse
+                // catalog: one name per property identity, or a removal could
+                // land on the wrong key.
+                let injective = selection
+                    .plan()
+                    .reverse_catalog
+                    .as_ref()
+                    .is_some_and(|catalog| {
+                        let mut names = std::collections::BTreeSet::new();
+                        catalog.properties.values().all(|name| names.insert(name))
+                    });
+                if columns.get(*current) != Some(&GraphSetColumnType::Any) || !injective {
+                    return Err(GraphMutationBuildError::ValueColumn {
+                        action: at,
+                        column: *current,
+                    });
+                }
             }
             if let GraphMutationAction::SetProperty { value, .. } = action {
                 let check = |column: usize| {
@@ -567,6 +598,14 @@ impl PreparedGraphMutation {
                 GraphMutationAction::RemoveProperty { key, .. } => {
                     bytes.push(1);
                     bytes.extend_from_slice(&key.0.to_be_bytes());
+                }
+                GraphMutationAction::ClearProperties { current, keep, .. } => {
+                    bytes.push(5);
+                    bytes.extend_from_slice(&(*current as u64).to_be_bytes());
+                    bytes.extend_from_slice(&(keep.len() as u64).to_be_bytes());
+                    for key in keep {
+                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                    }
                 }
                 GraphMutationAction::SetLabel { label, present, .. } => {
                     bytes.push(2);
