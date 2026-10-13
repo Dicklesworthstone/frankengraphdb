@@ -1040,6 +1040,159 @@ fn vertex_merge_steps_run_over_a_leading_unwind_and_return_rows() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-cpny9 (TCK Merge1 [11]): a vertex MERGE runs over a leading MATCH,
+/// alone or heading a chain. Directly after the MATCH its row is every MATCH
+/// binding, as `WITH *` carries them; after a WITH (or UNWIND) it is that
+/// stage's row. Each distinct value tuple merges once, and RETURN reads the
+/// row and the vertex.
+#[test]
+fn vertex_merge_steps_run_over_a_leading_match() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4a5, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, false).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let rows = |result: QueryResult| {
+            let QueryResult::Rows { rows, .. } = result else {
+                unreachable!("a MERGE with RETURN answers rows")
+            };
+            rows
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let count = |db: &Database<MemVfs>, label: LabelId| {
+            db.vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == vec![label])
+                .count()
+        };
+        // Six people born in three places.
+        write(
+            &mut db,
+            "CREATE (:Person {born: 1}), (:Person {born: 2}), (:Person {born: 3}), \
+             (:Person {born: 1}), (:Person {born: 2}), (:Person {born: 3})",
+        )
+        .await
+        .unwrap();
+        // Merge1 [11]: three distinct values, three vertices; a rerun
+        // matches them.
+        for _ in 0..2 {
+            write(
+                &mut db,
+                "MATCH (person:Person) MERGE (city:Copy {p: person.born})",
+            )
+            .await
+            .unwrap();
+            assert_eq!(count(&db, COPY), 3);
+            assert_eq!(count(&db, PERSON), 6);
+        }
+        // RETURN groups over the MATCH row and the merged vertex.
+        let grouped = write(
+            &mut db,
+            "MATCH (person:Person) MERGE (city:Copy {p: person.born}) \
+             RETURN city.p AS p, count(*) AS n ORDER BY p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(grouped),
+            [
+                vec![int(1), QueryValue::Count(2)],
+                vec![int(2), QueryValue::Count(2)],
+                vec![int(3), QueryValue::Count(2)]
+            ]
+        );
+        assert_eq!(count(&db, COPY), 3);
+        // After a WITH, the WITH row is the scope.
+        let projected = write(
+            &mut db,
+            "MATCH (person:Person) WITH person.born AS b MERGE (s:Source {p: b}) \
+             RETURN b, s.p AS p ORDER BY b",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(projected),
+            [
+                vec![int(1), int(1)],
+                vec![int(1), int(1)],
+                vec![int(2), int(2)],
+                vec![int(2), int(2)],
+                vec![int(3), int(3)],
+                vec![int(3), int(3)]
+            ]
+        );
+        assert_eq!(count(&db, SOURCE), 3);
+        // An UNWIND after the MATCH: twelve rows, two distinct values.
+        write(
+            &mut db,
+            "MATCH (person:Person) UNWIND [10, 11] AS i MERGE (:Source {q: i})",
+        )
+        .await
+        .unwrap();
+        assert_eq!(count(&db, SOURCE), 5);
+        // Heading a chain: the next write reads each MATCH row and its vertex.
+        write(
+            &mut db,
+            "MATCH (person:Person) MERGE (city:Copy {p: person.born}) \
+             CREATE (person)-[:R]->(city)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(count(&db, COPY), 3);
+        let vertices = db.vertices().unwrap();
+        let born = |vid: VId, key: PropertyKeyId| {
+            vertices
+                .iter()
+                .find(|vertex| vertex.vid == vid)
+                .and_then(|vertex| vertex.props.iter().find(|(k, _)| *k == key))
+                .map(|(_, value)| value.clone())
+        };
+        let edges = db.edges().unwrap();
+        assert_eq!(edges.len(), 6);
+        for edge in &edges {
+            assert!(born(edge.entry.src, BORN).is_some());
+            assert_eq!(born(edge.entry.src, BORN), born(edge.entry.dst, P));
+        }
+        // A MERGE of a MATCH vertex, a NULL map value and ON/SET on the
+        // MERGE refuse and publish nothing.
+        let frontier = db.frontier().unwrap();
+        for refused in [
+            "MATCH (person:Person) MERGE (person)",
+            "MATCH (person:Person) MERGE (c:Copy {p: person.q})",
+            "MATCH (person:Person) MERGE (c:Copy {p: 1}) ON CREATE SET c.q = 1",
+        ] {
+            assert!(write(&mut db, refused).await.is_err(), "{refused}");
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-cpny9 (TCK Merge9 [3], Create3 [12]): a relationship MERGE another
 /// write follows hands that write each row once per relationship its pair
 /// resolved to, the relationship beside the row.

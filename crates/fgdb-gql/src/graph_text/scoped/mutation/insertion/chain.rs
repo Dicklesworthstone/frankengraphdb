@@ -43,11 +43,11 @@ impl PreparedGraphWriteChainText {
         }
         // `written`: a CREATE was seen; `merged`: the first clause is a
         // vertex MERGE; `headed`: a WITH followed the CREATE; `unwound`: the
-        // first clause is an UNWIND of a non-parameter source. An UNWIND of a
-        // `$param` before MERGE is the parameter batch writer's
-        // (unwind_write).
+        // first clause is an UNWIND of a non-parameter source; `matched`: the
+        // first clause is a MATCH. An UNWIND of a `$param` before MERGE is
+        // the parameter batch writer's (unwind_write).
         let (mut written, mut merged, mut headed) = (false, false, false);
-        let mut unwound = false;
+        let (mut unwound, mut matched) = (false, false);
         let mut depth = 0_usize;
         let mut previous: Option<TokenKind<'_>> = None;
         loop {
@@ -84,14 +84,16 @@ impl PreparedGraphWriteChainText {
                             script::next_script_token(&mut lexer.clone())?.kind,
                             TokenKind::Parameter(_)
                         );
+                    } else if previous.is_none() && word.eq_ignore_ascii_case("MATCH") {
+                        matched = true;
                     } else if clause && word.eq_ignore_ascii_case("MERGE") && pattern()? {
                         if written || merged {
                             return Ok(true);
                         }
                         // A first-clause vertex MERGE heads a chain, and one
-                        // after a leading UNWIND is one; a relationship MERGE
-                        // there is its own statement.
-                        if previous.is_none() || unwound {
+                        // after a leading UNWIND or MATCH is one; a
+                        // relationship MERGE there is its own statement.
+                        if previous.is_none() || unwound || matched {
                             let mut lookahead = lexer.clone();
                             let mut nested = 0_usize;
                             loop {
@@ -112,7 +114,7 @@ impl PreparedGraphWriteChainText {
                                 TokenKind::Punct(b'-' | b'<')
                             );
                             if previous.is_some() {
-                                // After the leading UNWIND.
+                                // After the leading UNWIND or MATCH.
                                 return Ok(vertex);
                             }
                             merged = vertex;
@@ -147,7 +149,8 @@ impl PreparedGraphWriteChainText {
     ) -> Result<Self, GraphWriteChainTextError> {
         let body = query::statement_body(statement)?;
         // The first write is a vertex MERGE when it is the first clause or
-        // follows only a leading UNWIND; otherwise it is a CREATE.
+        // follows only a leading UNWIND, or a leading MATCH and its read
+        // stages; otherwise it is a CREATE.
         let starts_merge = {
             let mut lexer = Lexer {
                 text: body,
@@ -155,6 +158,7 @@ impl PreparedGraphWriteChainText {
                 tokens: 0,
             };
             let (mut depth, mut first, mut unwound) = (0_usize, true, false);
+            let mut matched = false;
             loop {
                 let token = script::next_script_token(&mut lexer)?;
                 match token.kind {
@@ -163,13 +167,19 @@ impl PreparedGraphWriteChainText {
                     TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
                     TokenKind::Word(word) if depth == 0 => {
                         if word.eq_ignore_ascii_case("MERGE") {
-                            break first || unwound;
+                            break first || unwound || matched;
                         }
                         if word.eq_ignore_ascii_case("UNWIND") {
                             unwound |= first;
-                        } else if ["CREATE", "INSERT", "MATCH", "OPTIONAL", "WITH"]
+                        } else if first && word.eq_ignore_ascii_case("MATCH") {
+                            matched = true;
+                        } else if ["CREATE", "INSERT"]
                             .iter()
                             .any(|clause| word.eq_ignore_ascii_case(clause))
+                            || (!matched
+                                && ["MATCH", "OPTIONAL", "WITH"]
+                                    .iter()
+                                    .any(|clause| word.eq_ignore_ascii_case(clause)))
                         {
                             break false;
                         }
@@ -256,7 +266,8 @@ impl PreparedGraphWriteChainText {
             }
         }
         // One write is a chain only as a vertex MERGE over a leading UNWIND
-        // (`UNWIND [1, 2] AS x MERGE (n {id: x}) RETURN n`).
+        // or MATCH (`UNWIND [1, 2] AS x MERGE (n {id: x}) RETURN n`, `MATCH
+        // (p:Person) MERGE (c:City {name: p.bornIn})`).
         let unwound_merge = matches!(steps.as_slice(), [ChainTextStep::VertexMerge(merge)]
             if matches!(merge.input, crate::mutation_text::VertexMergeRowsTextInput::Relation(_)));
         if steps.len() < 2 && !unwound_merge {
@@ -466,6 +477,12 @@ mod tests {
             "UNWIND [1, 2, 3, 4] AS int MERGE (n {id: int}) RETURN count(*)",
             "UNWIND ['a', 'b'] AS actor MERGE (m:Movie {name: 'M'}) MERGE (p:Person {name: actor}) \
              MERGE (p)-[:ACTED_IN]->(m)",
+            // A vertex MERGE over a leading MATCH, directly or after its
+            // read stages (TCK Merge1 [9], [11]).
+            "MATCH (a) MERGE (b) RETURN b",
+            "MATCH (person:Person) MERGE (city:City {name: person.bornIn})",
+            "MATCH (foo) WITH foo.x AS x, foo.y AS y MERGE (:N {x: x, y: y}) RETURN x, y",
+            "MATCH (a) UNWIND [1, 2] AS i MERGE (b {i: i})",
         ] {
             assert!(
                 PreparedGraphWriteChainText::is_chain(text).unwrap(),
@@ -482,12 +499,14 @@ mod tests {
             "MERGE (a) ON CREATE SET a.p = 1 WITH a MATCH (b) RETURN b",
             "CREATE (a); MATCH (n) WITH n CREATE (b)",
             "RETURN 1",
-            // MATCH- and UNWIND-led MERGE, a first relationship MERGE, and a
-            // first MERGE with ON or SET clauses keep their own families.
+            // MATCH- and UNWIND-led relationship MERGE, a first relationship
+            // MERGE, and a first MERGE with ON or SET clauses keep their own
+            // families.
             "MERGE (a)-[:X]->(b)",
             "MERGE (a)-[:X]->(b) MERGE (c)",
             "MATCH (a), (b) WITH a, b MERGE (a)-[:X]->(b)",
-            "MATCH (a) MERGE (b) RETURN b",
+            "MATCH (a), (b) MERGE (a)-[:X]->(b) MERGE (c)",
+            "OPTIONAL MATCH (a) MERGE (b)",
             // An UNWIND of a parameter before MERGE is the batch writer's.
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id})",
             "UNWIND [1] AS x MERGE (a)-[:R]->(b)",
