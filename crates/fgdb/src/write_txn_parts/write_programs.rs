@@ -84,6 +84,9 @@ impl WriteTxn {
     /// in its frozen selection. Relationship ON/trailing actions preserve every
     /// MATCH occurrence and parallel match. Their receipts retain occurrence
     /// order; target visits count distinct modified identities, not occurrences.
+    /// Vertex MERGE and ON/SET handle all distinct frozen targets, or create
+    /// one vertex for an empty match. Adding RETURN is not required for this
+    /// cardinality. Explicit unique and authorized primitives stay separate.
     ///
     /// Quotas sum source visits (including relationship existence scans),
     /// selected occurrences, work, scratch, mutation intents, created vertices
@@ -142,7 +145,7 @@ impl WriteTxn {
                         .map_err(GraphWriteStepError::Insert),
                     GraphWriteStatement::VertexMerge(input) => workspace
                         .txn
-                        .execute_graph_vertex_merge_governed(
+                        .execute_graph_vertex_merges_governed(
                             database,
                             cx,
                             input,
@@ -153,14 +156,15 @@ impl WriteTxn {
                         .map_err(GraphWriteStepError::VertexMerge),
                     GraphWriteStatement::VertexUpsert(input) => workspace
                         .txn
-                        .execute_graph_vertex_upsert_governed(
+                        .execute_graph_vertex_upserts_governed(
                             database,
                             cx,
                             input,
                             remaining.vertex_upsert_policy(),
                             |request| allocate(GraphWriteIdentityRequest { statement, request }),
                         )
-                        .map(|(stats, _)| GraphWriteStepStats::VertexUpsert(stats))
+                        .and_then(vertex_upsert_program_result)
+                        .map(|(stats, _)| stats)
                         .map_err(GraphWriteStepError::VertexUpsert),
                     GraphWriteStatement::EdgeMerge(input) => workspace
                         .txn
@@ -286,30 +290,32 @@ impl WriteTxn {
                         .map_err(GraphWriteStepError::Insert),
                     GraphWriteStatement::VertexMerge(input) => workspace
                         .txn
-                        .execute_graph_vertex_merge_governed(
+                        .execute_graph_vertex_merges_governed(
                             database,
                             cx,
                             input,
                             remaining.vertex_merge_policy(),
                             |request| allocate(GraphWriteIdentityRequest { statement, request }),
                         )
-                        .map(|(stats, outcome)| {
-                            receipts.push(GraphWriteStepReceipt::VertexMerge { outcome });
+                        .and_then(vertex_merge_program_result)
+                        .map(|(stats, receipt)| {
+                            receipts.push(receipt);
                             GraphWriteStepStats::VertexMerge(stats)
                         })
                         .map_err(GraphWriteStepError::VertexMerge),
                     GraphWriteStatement::VertexUpsert(input) => workspace
                         .txn
-                        .execute_graph_vertex_upsert_governed(
+                        .execute_graph_vertex_upserts_governed(
                             database,
                             cx,
                             input,
                             remaining.vertex_upsert_policy(),
                             |request| allocate(GraphWriteIdentityRequest { statement, request }),
                         )
-                        .map(|(stats, outcome)| {
-                            receipts.push(GraphWriteStepReceipt::VertexUpsert { outcome });
-                            GraphWriteStepStats::VertexUpsert(stats)
+                        .and_then(vertex_upsert_program_result)
+                        .map(|(stats, receipt)| {
+                            receipts.push(receipt);
+                            stats
                         })
                         .map_err(GraphWriteStepError::VertexUpsert),
                     GraphWriteStatement::EdgeMerge(input) => workspace
@@ -440,4 +446,54 @@ fn edge_upsert_program_result<A>(
         GraphWriteStepStats::EdgeUpsertBatch { stats, target_edges },
         receipt,
     ))
+}
+
+// Native vertex collectors already own a distinct ordered bag and charge its
+// retention before returning. Transfer it without another collection or graph
+// access. Empty bags are impossible for a vertex get-or-create and refuse.
+type VertexMergeProgramResult<A> = Result<
+    (fgdb_gql::GraphVertexMergeStats, fgdb_gql::GraphWriteStepReceipt),
+    TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>,
+>;
+
+fn vertex_merge_program_result<A>(
+    (stats, outcomes): (
+        fgdb_gql::GraphVertexMergeStats,
+        Vec<fgdb_gql::GraphVertexMergeOutcome>,
+    ),
+) -> VertexMergeProgramResult<A> {
+    use fgdb_gql::{GqlQueryError, GraphVertexMergeError, GraphWriteStepReceipt};
+    let receipt = match outcomes.len() {
+        0 => return Err(GqlQueryError::Source(GraphVertexMergeError::InvalidSourceStatistics)),
+        1 => GraphWriteStepReceipt::VertexMerge { outcome: outcomes[0] },
+        _ => GraphWriteStepReceipt::VertexMergeBatch { outcomes },
+    };
+    Ok((stats, receipt))
+}
+
+type VertexUpsertProgramResult<A> = Result<
+    (fgdb_gql::GraphWriteStepStats, fgdb_gql::GraphWriteStepReceipt),
+    TxnGqlError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>>,
+>;
+
+fn vertex_upsert_program_result<A>(
+    (stats, outcomes): (
+        fgdb_gql::GraphVertexUpsertStats,
+        Vec<fgdb_gql::GraphVertexMergeOutcome>,
+    ),
+) -> VertexUpsertProgramResult<A> {
+    use fgdb_gql::{
+        GqlQueryError, GraphVertexMergeError, GraphVertexUpsertError,
+        GraphWriteStepReceipt, GraphWriteStepStats,
+    };
+    let invalid = || GqlQueryError::Source(GraphVertexUpsertError::Merge(
+        GraphVertexMergeError::InvalidSourceStatistics,
+    ));
+    let target_vertices = u64::try_from(outcomes.len()).map_err(|_| invalid())?;
+    let receipt = match outcomes.len() {
+        0 => return Err(invalid()),
+        1 => GraphWriteStepReceipt::VertexUpsert { outcome: outcomes[0] },
+        _ => GraphWriteStepReceipt::VertexUpsertBatch { outcomes },
+    };
+    Ok((GraphWriteStepStats::VertexUpsertBatch { stats, target_vertices }, receipt))
 }

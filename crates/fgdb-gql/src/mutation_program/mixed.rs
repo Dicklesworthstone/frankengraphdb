@@ -4,6 +4,7 @@
 
 mod edge_upsert_batch;
 mod merges;
+mod vertex_upsert_batch;
 
 use super::*;
 use crate::insertion::{
@@ -157,6 +158,13 @@ pub enum GraphWriteStepStats {
     Insert(GraphInsertStats),
     VertexMerge(GraphVertexMergeStats),
     VertexUpsert(GraphVertexUpsertStats),
+    /// All distinct resolved vertex targets, including an actionless branch.
+    /// The meter separately derives modified-target visits and checks the
+    /// complete per-target action product. A creation is not a MATCH row.
+    VertexUpsertBatch {
+        stats: GraphVertexUpsertStats,
+        target_vertices: u64,
+    },
     EdgeMerge(GraphEdgeMergeStats),
     EdgeUpsert(GraphEdgeUpsertStats),
     /// Occurrence-preserving ON/SET execution. The host separately counts the
@@ -321,7 +329,7 @@ pub struct GraphWriteProgramStats {
     pub selection: GqlExecutionStats,
     pub evaluator: GlaExecutionStats,
     /// Distinct updated/deleted vertex visits summed over statements, including
-    /// one visit for each nonempty selected vertex-upsert action branch.
+    /// one visit per distinct target of a nonempty vertex-upsert action branch.
     /// Relationship-property actions do not count as vertex visits.
     pub target_vertex_visits: u64,
     /// Distinct updated/deleted edge visits summed over statements.
@@ -486,6 +494,15 @@ impl PreparedGraphWriteProgram {
                     GraphWriteStepStats::VertexUpsert(stats),
                 ) => {
                     meter.absorb_vertex_upsert(statement, input, stats)?;
+                }
+                (
+                    GraphWriteStatement::VertexUpsert(input),
+                    GraphWriteStepStats::VertexUpsertBatch {
+                        stats,
+                        target_vertices,
+                    },
+                ) => {
+                    meter.absorb_vertex_upsert_batch(statement, input, stats, target_vertices)?;
                 }
                 (GraphWriteStatement::EdgeMerge(_), GraphWriteStepStats::EdgeMerge(stats)) => {
                     meter.absorb_edge_merge(statement, stats)?;

@@ -26,6 +26,17 @@ pub enum GraphWriteStepReceipt {
     VertexUpsert {
         outcome: GraphVertexMergeOutcome,
     },
+    /// Multiple existing vertex matches in full identity order. Native
+    /// execution uses the singular arm for one match or the one creation;
+    /// every outcome in this arm is Matched, never an invented creation.
+    VertexMergeBatch {
+        outcomes: Vec<GraphVertexMergeOutcome>,
+    },
+    /// The same frozen distinct target order, after ON/SET on every vertex.
+    /// Non-authoritative like all receipts; not a fresh snapshot of the IDs.
+    VertexUpsertBatch {
+        outcomes: Vec<GraphVertexMergeOutcome>,
+    },
     EdgeMerge {
         outcome: GraphEdgeMergeOutcome,
     },
@@ -63,6 +74,8 @@ impl GraphWriteStepReceipt {
             Self::Insert { .. }
             | Self::VertexMerge { .. }
             | Self::VertexUpsert { .. }
+            | Self::VertexMergeBatch { .. }
+            | Self::VertexUpsertBatch { .. }
             | Self::EdgeMerge { .. }
             | Self::EdgeMergeBatch { .. }
             | Self::EdgeUpsert { .. }
@@ -113,7 +126,9 @@ impl GraphWriteStepReceipt {
             }
             | Self::VertexUpsert {
                 outcome: GraphVertexMergeOutcome::Matched(_),
-            } => Some(&[]),
+            }
+            | Self::VertexMergeBatch { .. }
+            | Self::VertexUpsertBatch { .. } => Some(&[]),
             Self::Mutation { .. }
             | Self::EdgeMerge { .. }
             | Self::EdgeMergeBatch { .. }
@@ -140,6 +155,8 @@ impl GraphWriteStepReceipt {
             Self::Mutation { .. }
             | Self::VertexMerge { .. }
             | Self::VertexUpsert { .. }
+            | Self::VertexMergeBatch { .. }
+            | Self::VertexUpsertBatch { .. }
             | Self::Delete { .. } => None,
         }
     }
@@ -150,11 +167,26 @@ impl GraphWriteStepReceipt {
             Self::VertexMerge { outcome } | Self::VertexUpsert { outcome } => Some(*outcome),
             Self::Mutation { .. }
             | Self::Insert { .. }
+            | Self::VertexMergeBatch { .. }
+            | Self::VertexUpsertBatch { .. }
             | Self::EdgeMerge { .. }
             | Self::EdgeMergeBatch { .. }
             | Self::EdgeUpsert { .. }
             | Self::EdgeUpsertBatch { .. }
             | Self::Delete { .. } => None,
+        }
+    }
+
+    /// Complete bulk vertex results; a multiple-match receipt never silently
+    /// selects one identity through `merged_vertex`. Singular receipts keep
+    /// that accessor, including their one possible creation.
+    #[must_use]
+    pub fn merged_vertices(&self) -> Option<&[GraphVertexMergeOutcome]> {
+        match self {
+            Self::VertexMergeBatch { outcomes } | Self::VertexUpsertBatch { outcomes } => {
+                Some(outcomes)
+            }
+            _ => None,
         }
     }
 
@@ -169,6 +201,8 @@ impl GraphWriteStepReceipt {
             | Self::Insert { .. }
             | Self::VertexMerge { .. }
             | Self::VertexUpsert { .. }
+            | Self::VertexMergeBatch { .. }
+            | Self::VertexUpsertBatch { .. }
             | Self::EdgeMergeBatch { .. }
             | Self::EdgeUpsertBatch { .. }
             | Self::Delete { .. } => None,
@@ -211,6 +245,16 @@ impl core::fmt::Debug for GraphWriteStepReceipt {
             Self::VertexUpsert { outcome } => f
                 .debug_struct("VertexUpsert")
                 .field("outcome", outcome)
+                .finish(),
+            Self::VertexMergeBatch { outcomes } => f
+                .debug_struct("VertexMergeBatch")
+                .field("targets", &outcomes.len())
+                .field("identities", &"[REDACTED]")
+                .finish(),
+            Self::VertexUpsertBatch { outcomes } => f
+                .debug_struct("VertexUpsertBatch")
+                .field("targets", &outcomes.len())
+                .field("identities", &"[REDACTED]")
                 .finish(),
             Self::EdgeMerge { outcome } => f
                 .debug_struct("EdgeMerge")
@@ -283,6 +327,29 @@ impl core::fmt::Debug for GraphWriteProgramReceipt {
 mod tests {
     use super::*;
     use crate::{GlaExecutionStats, GqlExecutionStats};
+
+    #[test]
+    fn bulk_vertex_receipts_keep_all_matches_without_claiming_creations() {
+        let outcomes = vec![
+            GraphVertexMergeOutcome::Matched(VId(1_u128 << 96)),
+            GraphVertexMergeOutcome::Matched(VId(u128::MAX)),
+        ];
+        for receipt in [
+            GraphWriteStepReceipt::VertexMergeBatch { outcomes: outcomes.clone() },
+            GraphWriteStepReceipt::VertexUpsertBatch { outcomes: outcomes.clone() },
+        ] {
+            assert_eq!(receipt.merged_vertices(), Some(outcomes.as_slice()));
+            assert_eq!(receipt.merged_vertex(), None);
+            assert_eq!(receipt.created_vertices(), Some(&[][..]));
+            assert_eq!(receipt.created_edges(), None);
+            assert_eq!(receipt.mutation_targets(), None);
+            assert_eq!(receipt.merged_edge(), None);
+            let debug = format!("{receipt:?}");
+            assert!(debug.contains("targets: 2"));
+            assert!(debug.contains("[REDACTED]"));
+            assert!(!debug.contains(&u128::MAX.to_string()));
+        }
+    }
 
     #[test]
     fn batch_relationship_receipt_preserves_order_and_separates_created_ids() {
