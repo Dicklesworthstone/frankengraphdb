@@ -251,10 +251,10 @@ fn per_eid_chains_decide_exactly_as_the_global_statement_map() {
 }
 
 /// Thousands of EIds through every growth of the hashed chain index, a
-/// quarter of them built so their bits fold to one bucket (the worst probe
-/// cluster the fixed mix allows), each restated retired later and then
-/// contiguously succeeded: both validators accept, collapse identically,
-/// and refuse the same final conflicting birth.
+/// quarter of them built to land in one bucket (so all but a probe run take
+/// the ordered overflow), each restated retired later and then contiguously
+/// succeeded: both validators accept, collapse identically, and refuse the
+/// same final conflicting birth.
 #[test]
 fn the_chain_index_finds_every_eid_through_growth_and_a_full_collision_cluster() {
     let mut rng = Rng(0x2a2_1dea_c011_1de5);
@@ -269,10 +269,10 @@ fn the_chain_index_finds_every_eid_through_growth_and_a_full_collision_cluster()
         .collect();
     let eid = |at: usize| {
         let raw = eids[at];
-        // Every 4th EId repeats its low half in its high half, so the folded
-        // hash input is zero for all of them.
+        // Every 4th EId has the high half that zeroes the mixed product
+        // whatever its low half is: one bucket for all of them.
         if at.is_multiple_of(4) {
-            EId((u128::from(raw) << 64) | u128::from(raw))
+            EId((0xc2b2_ae3d_27d4_eb4f_u128 << 64) | u128::from(raw))
         } else {
             EId(u128::from(raw))
         }
@@ -321,6 +321,39 @@ fn the_chain_index_finds_every_eid_through_growth_and_a_full_collision_cluster()
             );
         }
     }
+    assert!(
+        chains.index.overflow.len() > 1_000,
+        "the cluster overflowed"
+    );
     assert_eq!(chains.statements(), global.statements);
     assert_eq!(global.statements.len(), 6_000 + 2_000);
+}
+
+/// Identities a host might assign, `(a, a + 1)` and small counters, spread:
+/// none needs the ordered overflow. Under an xor of the halves the first
+/// family shares a few dozen buckets and admission is quadratic (fgdb-yzt2b).
+#[test]
+fn structured_identities_spread_without_overflow() {
+    for structured in [true, false] {
+        let rows: Vec<AdjacencyEntry> = (0..200_000u128)
+            .map(|at| AdjacencyEntry {
+                eid: if structured {
+                    EId((at << 64) | (at + 1))
+                } else {
+                    EId(at)
+                },
+                ..entry(0, 1, 3, 1, None)
+            })
+            .collect();
+        let mut chains = EdgeHistoryValidator::default();
+        for (at, block) in rows.chunks(200).enumerate() {
+            assert_eq!(chains.observe_block(at, block), Ok(()), "block {at}");
+        }
+        assert!(
+            chains.index.overflow.is_empty(),
+            "{} overflowed",
+            chains.index.overflow.len()
+        );
+        assert_eq!(chains.statements().len(), rows.len());
+    }
 }

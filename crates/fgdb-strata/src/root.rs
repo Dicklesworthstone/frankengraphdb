@@ -1853,23 +1853,38 @@ pub(crate) struct EdgeHistoryValidator {
 }
 
 /// Open-addressed (linear probing) positions into the validator's chains.
-/// The hash is a fixed mix of the EId's bits, not seeded from ambient
-/// randomness: admission stays deterministic, and EIds are already
-/// keyed-permutation values, so they spread without help.
+///
+/// The hash is a fixed mix, not seeded from ambient randomness: admission
+/// stays deterministic. Engine-issued EIds are keyed-permutation values and
+/// spread without help, but a host may also write EIds of its own choosing
+/// (fgdb-yzt2b). Both halves are therefore mixed, so a structured `(a, b)`
+/// identity does not fold into a few buckets, and a probe run is bounded: an
+/// EId that cannot be placed within `PROBE_LIMIT` slots goes to an ordered
+/// overflow. The worst EId distribution costs what the global ordered map
+/// this replaced did, never a quadratic scan.
 #[derive(Debug, Default)]
 struct EIdIndex {
     /// `EMPTY` or a position in `chains`; the length is zero or a power of
     /// two, at most three-quarters full.
     slots: Vec<u32>,
+    /// Positions of the EIds whose probe run was full when they arrived. A
+    /// slot never empties between rebuilds, so such an EId is never found,
+    /// and never shadowed, within its run.
+    overflow: std::collections::BTreeMap<EId, u32>,
 }
 
 impl EIdIndex {
     const EMPTY: u32 = u32::MAX;
+    const PROBE_LIMIT: usize = 32;
 
     fn bucket(eid: EId, slots: usize) -> usize {
-        let folded = (eid.0 as u64) ^ ((eid.0 >> 64) as u64);
-        let mixed = folded.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        // `slots` is a power of two: keep the best-mixed high bits.
+        // A folded 64x64 multiply of the two halves, each offset by an odd
+        // constant so a zero half does not zero the product.
+        let low = (eid.0 as u64) ^ 0x9e37_79b9_7f4a_7c15;
+        let high = ((eid.0 >> 64) as u64) ^ 0xc2b2_ae3d_27d4_eb4f;
+        let product = u128::from(low) * u128::from(high);
+        let mixed = (product as u64) ^ ((product >> 64) as u64);
+        // `slots` is a power of two: keep the high bits.
         (mixed >> (64 - slots.trailing_zeros())) as usize
     }
 
@@ -1880,7 +1895,7 @@ impl EIdIndex {
         }
         let mask = self.slots.len() - 1;
         let mut at = Self::bucket(eid, self.slots.len());
-        loop {
+        for _ in 0..Self::PROBE_LIMIT {
             match self.slots[at] {
                 Self::EMPTY => return None,
                 position if chains[position as usize].eid() == eid => {
@@ -1889,13 +1904,15 @@ impl EIdIndex {
                 _ => at = (at + 1) & mask,
             }
         }
+        self.overflow.get(&eid).map(|position| *position as usize)
     }
 
     /// Record that `eid`, absent until now, has its chain at `position`.
     fn insert(&mut self, eid: EId, position: usize, chains: &[EdgeChain]) {
         if (position + 1) * 4 > self.slots.len() * 3 {
-            let grown = (self.slots.len() * 2).max(16);
+            let grown = (self.slots.len() * 2).max(64);
             self.slots = vec![Self::EMPTY; grown];
+            self.overflow.clear();
             for (at, known) in chains.iter().enumerate().take(position) {
                 self.place(known.eid(), at);
             }
@@ -1910,10 +1927,14 @@ impl EIdIndex {
             .expect("a root names at most 2^28 entries");
         let mask = self.slots.len() - 1;
         let mut at = Self::bucket(eid, self.slots.len());
-        while self.slots[at] != Self::EMPTY {
+        for _ in 0..Self::PROBE_LIMIT {
+            if self.slots[at] == Self::EMPTY {
+                self.slots[at] = position;
+                return;
+            }
             at = (at + 1) & mask;
         }
-        self.slots[at] = position;
+        self.overflow.insert(eid, position);
     }
 }
 
