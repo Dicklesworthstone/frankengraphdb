@@ -349,6 +349,39 @@ fn list_functions_slices_ranges_and_reduce_follow_opencypher() {
     });
 }
 
+/// fgdb-1c29d / fgdb-klah2: a MATCH WHERE over list values before an
+/// aggregating RETURN is the implicit `WITH *` then that WHERE, as before a
+/// plain RETURN, so it filters the rows the aggregates read.
+#[test]
+fn a_where_over_values_filters_before_an_aggregating_return() {
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let params = GqlParameters::new();
+        for (text, expected) in [
+            (
+                "MATCH (n:Person) WHERE any(x IN [n.p] WHERE x > 15) RETURN count(*) AS v",
+                QueryValue::Count(3),
+            ),
+            (
+                "MATCH (n:Person) WHERE any(x IN [n.p] WHERE x > 15) RETURN sum(n.p) AS v",
+                QueryValue::Integer(90),
+            ),
+            (
+                "MATCH (n:Person) WITH * WHERE any(x IN [n.p] WHERE x > 15) \
+                 RETURN sum(n.p) AS v",
+                QueryValue::Integer(90),
+            ),
+        ] {
+            let result = db.query(cx, text, &params, symbols, policy()).expect(text);
+            let QueryResult::Rows { rows, .. } = result else {
+                unreachable!("an aggregating RETURN answers rows")
+            };
+            assert_eq!(rows, vec![vec![expected]], "{text}");
+        }
+    });
+}
+
 /// fgdb-7nwox (TCK Pattern2, List6 [7]-[10]): a pattern comprehension is,
 /// per outer row, the list of its projection over every witness of its
 /// pattern, which correlates on the row's bindings. No witness is the empty
