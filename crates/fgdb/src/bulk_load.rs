@@ -22,7 +22,7 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_strata::{edge_props::EdgePropertyPatchError, vertex::VertexPatchError};
-use fgdb_types::{CanonicalPropertyValue, CommitCx, CommitSeq, EId, QueryCx, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, EId, QueryCx, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod source;
