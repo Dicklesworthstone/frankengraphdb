@@ -284,7 +284,9 @@ fn malformed_complete_map_inputs_refuse_before_grouping_or_limit_zero() {
                 keys: vec!["p".into(), "p".into()].into_boxed_slice(),
                 values: vec![int(1), int(2)].into_boxed_slice(),
             },
-            map(vec![("p", list(vec![int(1)]))]),
+            // A graph element is no stored property value. (A List is one
+            // since fgdb-k3nub; it projects below.)
+            map(vec![("p", GraphValue::Vertex(VId(1)))]),
         ] {
             assert!(matches!(
                 query.project_governed::<(), ()>(
@@ -300,6 +302,11 @@ fn malformed_complete_map_inputs_refuse_before_grouping_or_limit_zero() {
             ));
         }
         assert!(project(query, vec![map(vec![])]).value.is_empty());
+        assert!(
+            project(query, vec![map(vec![("p", list(vec![int(1)]))])])
+                .value
+                .is_empty()
+        );
         assert!(matches!(
             query.project_governed::<(), ()>(
                 vec![],
