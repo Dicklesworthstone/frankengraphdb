@@ -481,19 +481,24 @@ impl<'a> Parser<'a> {
                 });
                 output.push((name, kind));
             }
-            let matched: Vec<_> = self
-                .syntax
-                .variables
-                .iter()
-                .copied()
-                .chain(
-                    self.syntax
-                        .visible_edges()
-                        .filter_map(|(edge, _)| edge.variable),
-                )
-                .chain(self.syntax.path)
-                .chain(self.syntax.scope_paths.iter().copied())
-                .collect();
+            // After WITH the row is the whole scope (fgdb-sl4ym): the MATCH
+            // bindings it dropped are not RETURN * columns.
+            let matched: Vec<_> = if self.write_row_scope {
+                Vec::new()
+            } else {
+                self.syntax
+                    .variables
+                    .iter()
+                    .copied()
+                    .chain(
+                        self.syntax
+                            .visible_edges()
+                            .filter_map(|(edge, _)| edge.variable),
+                    )
+                    .chain(self.syntax.path)
+                    .chain(self.syntax.scope_paths.iter().copied())
+                    .collect()
+            };
             for name in matched {
                 if name.text.starts_with(Self::ANONYMOUS_PREFIX) {
                     continue;
