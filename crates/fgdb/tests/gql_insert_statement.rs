@@ -409,6 +409,33 @@ fn create_after_with_reads_the_with_row() {
             .map(|edge| edge.entry.src)
             .collect::<Vec<_>>();
         assert_eq!(since, [VId(20)]);
+        // A carried vertex's property feeds a created one and RETURN reads it.
+        let carried = write(
+            &mut db,
+            "MATCH (n:Source) WITH n AS a CREATE (:Person {p: a.p + 1}) RETURN a.p AS p",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = carried else {
+            unreachable!("CREATE ... RETURN answers rows")
+        };
+        assert_eq!(rows.len(), 2);
+        let written = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| vertex.labels == vec![PERSON])
+            .flat_map(|vertex| vertex.props)
+            .filter(|(key, _)| *key == P)
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        assert_eq!(written.len(), 2);
+        for value in [11, 21] {
+            assert!(
+                written.contains(&CanonicalScalar::Int(value).into()),
+                "{written:?}"
+            );
+        }
         // RETURN * is the WITH row and the named creations, never a dropped
         // MATCH binding.
         let starred = write(

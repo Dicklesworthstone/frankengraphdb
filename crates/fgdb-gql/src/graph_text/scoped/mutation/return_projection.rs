@@ -1158,7 +1158,12 @@ impl<'a> Parser<'a> {
         }
         self.hoist_boundary_reads(&mut head, 0)?;
         let schema = head.schema(&self.syntax.parameters);
-        let (stages, schema, _) = self.row_pipeline_prefix(schema)?;
+        // A carried element's hidden reads stay in the row: the write's
+        // values and RETURN read them as the boundary does.
+        self.write_prefix = true;
+        let prefix = self.row_pipeline_prefix(schema);
+        self.write_prefix = false;
+        let (stages, schema, _) = prefix?;
         Ok((head, stages, schema))
     }
 

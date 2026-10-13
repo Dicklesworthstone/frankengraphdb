@@ -226,6 +226,22 @@ impl<'a> ParsedReturn<'a> {
         if vertex.is_none() && edge.is_none() && input.is_none() && matched.is_none() {
             return Ok(None);
         }
+        // After WITH, `a.key` of an element the row carries is the row's
+        // hidden read (fgdb-sl4ym); CREATE never changes an element it did
+        // not create, so that read is also the value after it.
+        if vertex.is_none() && edge.is_none() && input.is_some() {
+            let mut lookahead = parser.lexer.clone();
+            if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.'))
+                && let key = lookahead.next()?
+                && let TokenKind::Word(text) = key.kind
+                && let Some(column) = parser.boundary_read(source.len())?
+            {
+                let name = Name { text, at: key.at };
+                return self
+                    .column(Binding::Input(column), name, GraphSetColumnType::Stored)
+                    .map(Some);
+            }
+        }
         let name = parser.name()?;
         let input = if parser.take(b'.')? {
             ReturnMapInput::Property(parser.name()?)
@@ -473,7 +489,9 @@ impl<'a> Parser<'a> {
         // The source spelling of every non-star output, for ORDER BY.
         let mut spellings = Vec::new();
         if self.take(b'*')? {
-            for (index, &(name, kind)) in source.iter().enumerate() {
+            // A WITH row's hidden reads are never columns of `*`.
+            let visible = self.visible_width(source);
+            for (index, &(name, kind)) in source[..visible].iter().enumerate() {
                 let column = returning.column(Binding::Input(index), name, kind)?;
                 returning.projection.push(ReadProjectionTemplate {
                     name: name.text.to_owned(),

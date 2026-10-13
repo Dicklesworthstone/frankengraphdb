@@ -706,6 +706,9 @@ struct Parser<'a> {
     /// A write clause after WITH is being read (fgdb-sl4ym): its scope is
     /// the WITH row alone, so the MATCH bindings WITH dropped stay hidden.
     write_row_scope: bool,
+    /// The WITH stages before a write are being read: the hidden reads of
+    /// the elements the row carries stay in it, for the write and RETURN.
+    write_prefix: bool,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -786,6 +789,7 @@ impl<'a> Parser<'a> {
             defer_where: false,
             deferred_where: None,
             write_row_scope: false,
+            write_prefix: false,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),

@@ -129,6 +129,18 @@ fn writes_after_with_target_the_row_and_return_its_captured_values() {
                 "{vertex:?}"
             );
         }
+        // A carried element's property reads its value before the write in
+        // SET, and after it in RETURN.
+        let carried = write(
+            &mut db,
+            "MATCH (n:L) WITH n SET n.id = n.p + 100 RETURN n.id AS id, n.p AS p ORDER BY p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(carried, &["id", "p"]),
+            vec![vec![int(104), int(4)], vec![int(107), int(7)]]
+        );
         // A plain WITH may order and page the rows the write then reads.
         assert!(matches!(
             write(
@@ -153,7 +165,7 @@ fn writes_after_with_target_the_row_and_return_its_captured_values() {
         for refused in [
             "MATCH (n:L) WITH n.p AS x SET x.id = 1",
             "MATCH (n:L) WITH n AS a SET n.id = 1",
-            "MATCH (n:L) WITH n SET n.id = 1 RETURN n.p",
+            "MATCH (n:L) WITH collect(n) AS ns SET ns.id = 1",
         ] {
             assert!(write(&mut db, refused).await.is_err(), "{refused}");
         }

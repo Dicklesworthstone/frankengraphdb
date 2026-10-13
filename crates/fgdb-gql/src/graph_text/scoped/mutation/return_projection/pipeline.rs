@@ -823,7 +823,8 @@ impl<'a> Parser<'a> {
             if !self.is_word("WITH") {
                 // A terminal RETURN, plain or aggregate, resolves the hidden
                 // reads; the next MATCH part or the end must not see them.
-                if !self.is_word("RETURN") {
+                // A write after WITH reads them too (fgdb-sl4ym).
+                if !self.is_word("RETURN") && !self.write_prefix {
                     self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
                 }
                 break;
