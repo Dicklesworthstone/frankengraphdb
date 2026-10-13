@@ -1060,9 +1060,10 @@ impl<'a> Parser<'a> {
         Ok(returning)
     }
 
-    /// A carried MERGE vertex reads its final staged properties through the
-    /// write owner's existing bindings. Aliases never become a new MATCH and
-    /// the native row pipeline owns all subsequent expression execution.
+    /// A directly carried MERGE vertex, including a grouping key, reads its
+    /// final staged fields through the existing write owner. Hidden property
+    /// keys do not change identity grouping or aggregate argument slots.
+    /// A MIN/MAX/COLLECT representative never acquires a new graph read.
     fn vertex_return_tail(
         &mut self,
         returning: &mut ParsedVertexReturn<'a>,
@@ -1070,36 +1071,41 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<ReadStageTemplate>, GraphVertexUpsertTextError> {
         let visible = schema.len();
         let mut reads = Vec::new();
-        if returning.grouping.is_none() {
-            for (alias, key) in self.write_tail_reads(&schema)? {
-                let Some(at) = schema[..visible]
-                    .iter()
-                    .position(|(name, _)| name.text == alias.text)
-                else {
-                    continue;
-                };
-                let ReadValueTemplate::Column(binding) = returning.projection[at].value else {
-                    continue;
-                };
-                if !matches!(
-                    returning.bindings[binding],
-                    (VertexBinding::Vertex, _, GraphSetColumnType::Vertex)
-                ) {
-                    continue;
-                }
-                let column = returning.column(
-                    VertexBinding::Property(key),
-                    key,
-                    GraphSetColumnType::Scalar,
-                )?;
-                mutation_query::push_tail_read(
-                    &mut returning.projection,
-                    &mut schema,
-                    &mut reads,
-                    (alias, key),
-                    column,
-                )?;
+        for (alias, key) in self.write_tail_reads(&schema)? {
+            let Some(at) = schema[..visible]
+                .iter()
+                .position(|(name, _)| name.text == alias.text)
+            else {
+                continue;
+            };
+            let Some(binding) = WriteReturnGroupTemplate::carried_binding(
+                returning.grouping.as_ref(),
+                &returning.projection[at].value,
+            ) else {
+                continue;
+            };
+            if !matches!(
+                returning.bindings[binding],
+                (VertexBinding::Vertex, _, GraphSetColumnType::Vertex)
+            ) {
+                continue;
             }
+            let column = returning.column(
+                VertexBinding::Property(key),
+                key,
+                GraphSetColumnType::Scalar,
+            )?;
+            let column = match &mut returning.grouping {
+                Some(group) => group.hoist_property(&mut returning.projection, column, key.at)?,
+                None => column,
+            };
+            mutation_query::push_tail_read(
+                &mut returning.projection,
+                &mut schema,
+                &mut reads,
+                (alias, key),
+                column,
+            )?;
         }
         Ok(self.finish_write_tail(schema, visible, reads)?)
     }
