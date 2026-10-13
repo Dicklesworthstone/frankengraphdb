@@ -6,13 +6,13 @@ use fgdb::{Database, DatabaseKeys, PinnedTzdb, QueryResult, QueryValue, TzdbZone
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GqlTimeZones, GraphSymbol, GraphSymbolKind,
-    GraphSymbolResolver, GraphWriteProgramPolicy, PreparedGraphMutationText,
+    GqlParameters, GqlQueryPolicy, GqlTimeZones, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
+    GraphWriteProgramPolicy, PreparedGraphMutationText,
 };
 use fgdb_types::{
     CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar,
-    CanonicalTime, CanonicalTimestamp, CommitCx, DatabaseSecurityNamespaceId, EId,
-    PurposeContexts, QueryCx, TxnCx, VId,
+    CanonicalTime, CanonicalTimestamp, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts,
+    QueryCx, TxnCx, VId,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,7 +67,10 @@ fn fixture() -> WriteBatch {
         batch.create_vertex(
             VId(id as u128),
             vec![PERSON],
-            vec![(P, CanonicalScalar::Int(id)), (Q, CanonicalScalar::Int(id * 10))],
+            vec![
+                (P, CanonicalScalar::Int(id)),
+                (Q, CanonicalScalar::Int(id * 10)),
+            ],
         );
     }
     batch.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(7))]);
@@ -132,9 +135,14 @@ fn simultaneous_vertex_and_edge_set_results_survive_reopen() {
         assert_eq!(updated, expected);
         let edge = db
             .query_write(
-                txn, query, commit,
+                txn,
+                query,
+                commit,
                 "MATCH ()-[r:R]->() SET r += {p: head([r.p]) + 3} RETURN r.p AS p",
-                &params, symbols, R, write_policy(),
+                &params,
+                symbols,
+                R,
+                write_policy(),
                 |_| Err::<ElementId, _>("SET must not allocate identities"),
             )
             .await
@@ -146,14 +154,22 @@ fn simultaneous_vertex_and_edge_set_results_survive_reopen() {
             db.query(
                 query,
                 "MATCH (n:Person) RETURN n.p AS p, n.q AS q, toString(n.d) AS d ORDER BY p",
-                &params, symbols, policy(),
+                &params,
+                symbols,
+                policy(),
             )
             .unwrap(),
             expected
         );
         assert_eq!(
-            db.query(query, "MATCH ()-[r:R]->() RETURN r.p AS p", &params, symbols, policy())
-                .unwrap(),
+            db.query(
+                query,
+                "MATCH ()-[r:R]->() RETURN r.p AS p",
+                &params,
+                symbols,
+                policy()
+            )
+            .unwrap(),
             edge
         );
     });
@@ -173,14 +189,22 @@ fn a_late_temporal_error_rolls_back_the_complete_write_script() {
                       MATCH (n:Person) SET n.d = date({year: 2024, month: 2, day: $day})";
         let error = db
             .query_write(
-                txn, query, commit, script,
+                txn,
+                query,
+                commit,
+                script,
                 &GqlParameters::new().with_int64("day", 30).unwrap(),
-                symbols, R, write_policy(),
+                symbols,
+                R,
+                write_policy(),
                 |_| Err::<ElementId, _>("SET must not allocate identities"),
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("TemporalConstruction"), "{error}");
+        assert!(
+            error.to_string().contains("TemporalConstruction"),
+            "{error}"
+        );
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(
             [
@@ -192,19 +216,33 @@ fn a_late_temporal_error_rolls_back_the_complete_write_script() {
         // Same compiled shape, valid data: it must commit, not refuse both cases.
         let result = db
             .query_write(
-                txn, query, commit, script,
+                txn,
+                query,
+                commit,
+                script,
                 &GqlParameters::new().with_int64("day", 29).unwrap(),
-                symbols, R, write_policy(),
+                symbols,
+                R,
+                write_policy(),
                 |_| Err::<ElementId, _>("SET must not allocate identities"),
             )
             .await
             .unwrap();
-        assert!(matches!(result, QueryResult::Write { completion: Some(_), .. }));
+        assert!(matches!(
+            result,
+            QueryResult::Write {
+                completion: Some(_),
+                ..
+            }
+        ));
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(
             db.query(
-                query, "MATCH (n:Person) RETURN n.p AS p ORDER BY p",
-                &GqlParameters::new(), symbols, policy(),
+                query,
+                "MATCH (n:Person) RETURN n.p AS p ORDER BY p",
+                &GqlParameters::new(),
+                symbols,
+                policy(),
             )
             .unwrap(),
             rows(&["p"], vec![vec![int(101)], vec![int(102)]])
@@ -224,14 +262,22 @@ fn limit_zero_cannot_hide_a_non_scalar_assignment_or_publish_its_prefix() {
         ];
         let error = db
             .query_write(
-                txn, query, commit,
+                txn,
+                query,
+                commit,
                 "MATCH (n:Person) SET n.q = 999, n.d = [[n.p]][0] RETURN n.q AS q LIMIT 0",
-                &GqlParameters::new(), symbols, R, write_policy(),
+                &GqlParameters::new(),
+                symbols,
+                R,
+                write_policy(),
                 |_| Err::<ElementId, _>("SET must not allocate identities"),
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("not a scalar property value"), "{error}");
+        assert!(
+            error.to_string().contains("not a scalar property value"),
+            "{error}"
+        );
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(
             [
@@ -250,15 +296,23 @@ fn absent_optional_targets_do_not_evaluate_composite_assignments() {
         db.write(commit, fixture()).await.unwrap();
         let result = db
             .query_write(
-                txn, query, commit,
+                txn,
+                query,
+                commit,
                 "OPTIONAL MATCH (n:Missing) SET n.d = date({year: 2024, month: 2, day: 30}) \
                  RETURN n.d AS d",
-                &GqlParameters::new(), symbols, R, write_policy(),
+                &GqlParameters::new(),
+                symbols,
+                R,
+                write_policy(),
                 |_| Err::<ElementId, _>("SET must not allocate identities"),
             )
             .await
             .unwrap();
-        assert_eq!(result, rows(&["d"], vec![vec![scalar(CanonicalScalar::Null)]]));
+        assert_eq!(
+            result,
+            rows(&["d"], vec![vec![scalar(CanonicalScalar::Null)]])
+        );
     });
 }
 
@@ -308,14 +362,21 @@ fn every_version_two_temporal_kind_is_stored_without_text_coercion() {
                 result,
                 rows(
                     &["d"],
-                    vec![vec![scalar(expected.clone())], vec![scalar(expected.clone())]],
+                    vec![
+                        vec![scalar(expected.clone())],
+                        vec![scalar(expected.clone())]
+                    ],
                 ),
                 "{expression}"
             );
             for id in [VId(1), VId(2)] {
                 let vertex = db.vertex(id).unwrap().unwrap();
                 let stored = vertex.props.iter().find(|(key, _)| *key == D);
-                assert_eq!(stored.map(|(_, value)| value), Some(&expected), "{expression}");
+                assert_eq!(
+                    stored.map(|(_, value)| value),
+                    Some(&expected),
+                    "{expression}"
+                );
             }
         }
     });
@@ -370,18 +431,33 @@ fn named_zone_set_requires_and_retains_the_exact_pinned_artifact() {
         let returned = format!("{statement} RETURN n.d AS d");
         let error = db
             .query_write(
-                txn, query, commit, &returned, &GqlParameters::new(),
-                symbols, R, write_policy(),
+                txn,
+                query,
+                commit,
+                &returned,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                write_policy(),
                 |_| Err::<ElementId, _>("SET must not allocate identities"),
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("TemporalConstruction"), "{error}");
+        assert!(
+            error.to_string().contains("TemporalConstruction"),
+            "{error}"
+        );
         assert_eq!(db.frontier().unwrap(), before);
         let result = db
             .query_write(
-                txn, query, commit, &returned, &GqlParameters::new(),
-                resolver(pinned.clone()), R, write_policy(),
+                txn,
+                query,
+                commit,
+                &returned,
+                &GqlParameters::new(),
+                resolver(pinned.clone()),
+                R,
+                write_policy(),
                 |_| Err::<ElementId, _>("SET must not allocate identities"),
             )
             .await
@@ -397,6 +473,9 @@ fn named_zone_set_requires_and_retains_the_exact_pinned_artifact() {
             )
             .unwrap(),
         ));
-        assert_eq!(result, rows(&["d"], vec![vec![expected.clone()], vec![expected]]));
+        assert_eq!(
+            result,
+            rows(&["d"], vec![vec![expected.clone()], vec![expected]])
+        );
     });
 }

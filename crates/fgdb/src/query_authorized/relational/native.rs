@@ -373,12 +373,10 @@ mod identity_tests {
         }
     }
     async fn database(cx: &fgdb_types::CommitCx) -> Database<crate::MemVfs> {
-        let mut db = Database::open_memory(
-            cx,
-            crate::DatabaseKeys::new([0x37; 32], NS, [0x95; 32]),
-        )
-        .await
-        .unwrap();
+        let mut db =
+            Database::open_memory(cx, crate::DatabaseKeys::new([0x37; 32], NS, [0x95; 32]))
+                .await
+                .unwrap();
         let mut batch = crate::WriteBatch::new(RelationId(1));
         for (id, label, value) in [(1, 1, 10), (2, 99, 20), (3, 1, 30)] {
             batch.create_vertex(
@@ -398,8 +396,7 @@ mod identity_tests {
             let cx = contexts.query();
             let db = database(&contexts.commit()).await;
             let authority =
-                Authority::new(AuthKey::from_seed(901), NS, "graph", SchemaEpoch(0), 1)
-                    .unwrap();
+                Authority::new(AuthKey::from_seed(901), NS, "graph", SchemaEpoch(0), 1).unwrap();
             let token = authority.issue_at(&grant(0), 100).unwrap();
             let params = GqlParameters::new();
             let invalid = GqlParameters::new().with_int64("unexpected", 1).unwrap();
@@ -415,10 +412,20 @@ mod identity_tests {
                 let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
                 for arguments in [&params, &invalid] {
                     let result = prepared.execute_authorized(
-                        &db, &cx, &authority, &token, BRANCH, arguments, policy(), || 100,
+                        &db,
+                        &cx,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        arguments,
+                        policy(),
+                        || 100,
                     );
                     assert!(
-                        matches!(result, Err(QueryError::Authorization(AuthorizationError::ScopeDenied))),
+                        matches!(
+                            result,
+                            Err(QueryError::Authorization(AuthorizationError::ScopeDenied))
+                        ),
                         "identity template reached binding/source admission: {text}: {result:?}"
                     );
                 }
@@ -434,8 +441,7 @@ mod identity_tests {
             let cx = contexts.query();
             let db = database(&contexts.commit()).await;
             let authority =
-                Authority::new(AuthKey::from_seed(902), NS, "graph", SchemaEpoch(0), 1)
-                    .unwrap();
+                Authority::new(AuthKey::from_seed(902), NS, "graph", SchemaEpoch(0), 1).unwrap();
             let token = authority.issue_at(&grant(1000), 100).unwrap();
             let params = GqlParameters::new();
             for text in [
@@ -446,13 +452,28 @@ mod identity_tests {
                 let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
                 let expected = db
                     .query_authorized(
-                        &cx, &authority, &token, BRANCH, text, &params, symbols, policy(), || 100,
+                        &cx,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        text,
+                        &params,
+                        symbols,
+                        policy(),
+                        || 100,
                     )
                     .unwrap();
                 assert_eq!(
                     prepared
                         .execute_authorized(
-                            &db, &cx, &authority, &token, BRANCH, &params, policy(), || 100,
+                            &db,
+                            &cx,
+                            &authority,
+                            &token,
+                            BRANCH,
+                            &params,
+                            policy(),
+                            || 100,
                         )
                         .unwrap(),
                     expected
@@ -463,16 +484,32 @@ mod identity_tests {
                     .unwrap();
             assert!(matches!(
                 prepared.execute_authorized(
-                    &db, &cx, &authority, &token, BRANCH, &params, policy(), || 1000,
+                    &db,
+                    &cx,
+                    &authority,
+                    &token,
+                    BRANCH,
+                    &params,
+                    policy(),
+                    || 1000,
                 ),
                 Err(QueryError::Authorization(AuthorizationError::Expired))
             ));
             assert!(authority.retire());
             assert!(matches!(
                 prepared.execute_authorized(
-                    &db, &cx, &authority, &token, BRANCH, &params, policy(), || 100,
+                    &db,
+                    &cx,
+                    &authority,
+                    &token,
+                    BRANCH,
+                    &params,
+                    policy(),
+                    || 100,
                 ),
-                Err(QueryError::Authorization(AuthorizationError::AuthorityRetired))
+                Err(QueryError::Authorization(
+                    AuthorizationError::AuthorityRetired
+                ))
             ));
         });
         assert!(report.lab_test_passed(), "{report:?}");

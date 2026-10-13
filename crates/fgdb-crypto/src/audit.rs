@@ -221,7 +221,12 @@ pub fn registered_crypto_profile_set_digest() -> [u8; 32] {
     hasher.update(&SYMBOL_AUTH_TAG_BYTES.to_le_bytes());
 
     for profile in REGISTERED_SIGNATURE_PROFILES {
-        update_profile_header(&mut hasher, 4, profile.id(), profile.algorithm_name().as_bytes());
+        update_profile_header(
+            &mut hasher,
+            4,
+            profile.id(),
+            profile.algorithm_name().as_bytes(),
+        );
         hasher.update(&profile.seed_len().to_le_bytes());
         hasher.update(&profile.public_key_len().to_le_bytes());
         hasher.update(&profile.signature_len().to_le_bytes());

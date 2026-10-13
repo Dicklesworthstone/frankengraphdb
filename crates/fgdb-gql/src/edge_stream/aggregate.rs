@@ -296,10 +296,13 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
                     .meter
                     .event(GlaExecutionEvent::ScratchEntry)
                     .map_err(lift)?;
-                groups.insert(Vec::new(), Group {
-                    states: states(&self.aggregate, &mut self.input.meter)?,
-                    collections: ordered_collection::State::default(),
-                });
+                groups.insert(
+                    Vec::new(),
+                    Group {
+                        states: states(&self.aggregate, &mut self.input.meter)?,
+                        collections: ordered_collection::State::default(),
+                    },
+                );
             }
             self.accumulating = Some(Accumulation {
                 groups,
@@ -389,8 +392,12 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
                     }
                 }
             };
-            for (at, (spec, cell)) in self.aggregate.aggregates().iter()
-                .zip(&mut state.states).enumerate()
+            for (at, (spec, cell)) in self
+                .aggregate
+                .aggregates()
+                .iter()
+                .zip(&mut state.states)
+                .enumerate()
             {
                 meter.event(GlaExecutionEvent::Work).map_err(lift)?;
                 if self.ordered_collections.is_some() && NumericState::collects(spec.function()) {
@@ -404,7 +411,9 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
                 })?;
             }
             if let Some(layout) = &self.ordered_collections {
-                state.collections.push(layout, row, &mut |event| meter.event(event).map_err(lift))?;
+                state
+                    .collections
+                    .push(layout, row, &mut |event| meter.event(event).map_err(lift))?;
             }
         }
         self.input
@@ -477,9 +486,14 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
         F: FnMut() -> Result<(), C>,
     {
         let meter = &mut self.input.meter;
-        let Group { mut states, collections } = group;
+        let Group {
+            mut states,
+            collections,
+        } = group;
         if let Some(layout) = &self.ordered_collections {
-            collections.finish(layout, &mut states, &mut |event| meter.event(event).map_err(lift))?;
+            collections.finish(layout, &mut states, &mut |event| {
+                meter.event(event).map_err(lift)
+            })?;
         }
         let mut values = Vec::new();
         for state in states {

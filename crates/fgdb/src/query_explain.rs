@@ -1008,12 +1008,12 @@ mod temporal_aggregate_resolver_tests {
     fn historical_aggregate_dispatch_pins_tzdb_in_plan_certificates() {
         let params = GqlParameters::new().with_uint64("at", 7).unwrap();
         for text in QUERIES {
-            let first = PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(3600)))
-                .unwrap();
-            let same = PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(3600)))
-                .unwrap();
-            let changed = PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(7200)))
-                .unwrap();
+            let first =
+                PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(3600))).unwrap();
+            let same =
+                PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(3600))).unwrap();
+            let changed =
+                PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(7200))).unwrap();
             assert_eq!(first.facade_class(), NativeReadClass::TemporalAggregate);
             assert_eq!(
                 first.bound_snapshot_seq(&params, CommitSeq(99)).unwrap(),
@@ -1034,17 +1034,17 @@ mod temporal_aggregate_resolver_tests {
     fn explain_temporal_aggregates_retains_artifact_and_snapshot_identity() {
         let params = GqlParameters::new().with_uint64("at", 7).unwrap();
         for text in QUERIES {
-            let (rows, certificate) = explain_at(
-                text,
-                &params,
-                ZonedResolver(zones(3600)),
-                true,
-                || Ok(CommitSeq(7)),
-            )
-            .unwrap();
-            assert!(rows.iter().any(|row| row.operator == "TemporalSnapshotSelect"));
-            let prepared = PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(3600)))
+            let (rows, certificate) =
+                explain_at(text, &params, ZonedResolver(zones(3600)), true, || {
+                    Ok(CommitSeq(7))
+                })
                 .unwrap();
+            assert!(
+                rows.iter()
+                    .any(|row| row.operator == "TemporalSnapshotSelect")
+            );
+            let prepared =
+                PreparedNativeRead::prepare(text, &params, ZonedResolver(zones(3600))).unwrap();
             assert!(certificate.unwrap().verifies_at(&prepared, CommitSeq(7)));
         }
     }

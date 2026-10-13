@@ -17,8 +17,8 @@
 //! timing safety or substitute for executing the Rust tests and external audit.
 
 use fgdb_crypto::{
-    Ed25519Error, Ed25519VerifyingKey, SIGNATURE_PROFILE_ED25519_STRICT,
-    SignatureError, verify_signature,
+    Ed25519Error, Ed25519VerifyingKey, SIGNATURE_PROFILE_ED25519_STRICT, SignatureError,
+    verify_signature,
 };
 
 const PUBLIC: &str = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8";
@@ -50,9 +50,17 @@ fn registered_profile_refuses_genuine_cofactor_only_equations() {
     ];
     for &(message, signature) in cases {
         let signature = unhex::<64>(signature);
-        assert_eq!(key.verify(message, &signature), Err(Ed25519Error::InvalidSignature));
         assert_eq!(
-            verify_signature(SIGNATURE_PROFILE_ED25519_STRICT, &public, message, &signature),
+            key.verify(message, &signature),
+            Err(Ed25519Error::InvalidSignature)
+        );
+        assert_eq!(
+            verify_signature(
+                SIGNATURE_PROFILE_ED25519_STRICT,
+                &public,
+                message,
+                &signature
+            ),
             Err(SignatureError::Primitive(Ed25519Error::InvalidSignature)),
         );
     }
@@ -60,9 +68,7 @@ fn registered_profile_refuses_genuine_cofactor_only_equations() {
 
 #[test]
 fn valid_uncofactored_equation_does_not_admit_a_mixed_order_key() {
-    let public = unhex::<32>(
-        "ea5ef8400c31ef41e28f22e718b43f66981b29cf645af2a0e223799bedaace47",
-    );
+    let public = unhex::<32>("ea5ef8400c31ef41e28f22e718b43f66981b29cf645af2a0e223799bedaace47");
     let message = b"fgdb:signature-policy:v1:mixed-A:1";
     let signature = unhex::<64>(
         "7b0f068bdde1d396d95b97579ed07cc9cabc5af128b7fa3338f7aca485dc170b55eada46eb7413ae6fe7ca77e420530013e9d514c6fc8cfa59a4a86b1a7d8008",
@@ -74,7 +80,12 @@ fn valid_uncofactored_equation_does_not_admit_a_mixed_order_key() {
         Err(Ed25519Error::InvalidPublicKey),
     );
     assert_eq!(
-        verify_signature(SIGNATURE_PROFILE_ED25519_STRICT, &public, message, &signature),
+        verify_signature(
+            SIGNATURE_PROFILE_ED25519_STRICT,
+            &public,
+            message,
+            &signature
+        ),
         Err(SignatureError::Primitive(Ed25519Error::InvalidPublicKey)),
     );
 }
@@ -87,7 +98,10 @@ fn a_strong_key_and_valid_response_may_have_identity_r() {
     assert_eq!(key.verify(IDENTITY_R_MESSAGE, &signature), Ok(()));
     assert_eq!(
         verify_signature(
-            SIGNATURE_PROFILE_ED25519_STRICT, &public, IDENTITY_R_MESSAGE, &signature,
+            SIGNATURE_PROFILE_ED25519_STRICT,
+            &public,
+            IDENTITY_R_MESSAGE,
+            &signature,
         ),
         Ok(()),
     );
@@ -97,9 +111,7 @@ fn a_strong_key_and_valid_response_may_have_identity_r() {
 fn adding_the_group_order_to_a_valid_response_is_not_silently_reduced() {
     let public = unhex::<32>(PUBLIC);
     let mut signature = unhex::<64>(IDENTITY_R_SIGNATURE);
-    let order = unhex::<32>(
-        "edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010",
-    );
+    let order = unhex::<32>("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010");
     let mut carry = 0_u16;
     for (byte, order_byte) in signature[32..].iter_mut().zip(order) {
         let sum = u16::from(*byte) + u16::from(order_byte) + carry;
@@ -108,10 +120,16 @@ fn adding_the_group_order_to_a_valid_response_is_not_silently_reduced() {
     }
     assert_eq!(carry, 0);
     let key = Ed25519VerifyingKey::from_bytes(public).unwrap();
-    assert_eq!(key.verify(IDENTITY_R_MESSAGE, &signature), Err(Ed25519Error::InvalidSignature));
+    assert_eq!(
+        key.verify(IDENTITY_R_MESSAGE, &signature),
+        Err(Ed25519Error::InvalidSignature)
+    );
     assert_eq!(
         verify_signature(
-            SIGNATURE_PROFILE_ED25519_STRICT, &public, IDENTITY_R_MESSAGE, &signature,
+            SIGNATURE_PROFILE_ED25519_STRICT,
+            &public,
+            IDENTITY_R_MESSAGE,
+            &signature,
         ),
         Err(SignatureError::Primitive(Ed25519Error::InvalidSignature)),
     );

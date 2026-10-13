@@ -83,7 +83,9 @@ impl core::fmt::Display for SubscriptionError {
             Self::ReceiptExhausted => f.write_str("subscription receipt sequence exhausted"),
             Self::ReplayAlreadyEnabled => f.write_str("subscription already has a replay sink"),
             Self::NotPrivate => f.write_str("subscription does not own a private registration"),
-            Self::SharedRegistration => f.write_str("subscription registration was shared and cannot be reclaimed"),
+            Self::SharedRegistration => {
+                f.write_str("subscription registration was shared and cannot be reclaimed")
+            }
         }
     }
 }

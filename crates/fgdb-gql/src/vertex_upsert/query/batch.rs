@@ -64,7 +64,10 @@ impl PreparedGraphVertexUpsertQuery {
                         }
                         for label in labels {
                             work()?;
-                            if !matches!(label, GraphValue::Scalar(fgdb_types::CanonicalScalar::Text(_))) {
+                            if !matches!(
+                                label,
+                                GraphValue::Scalar(fgdb_types::CanonicalScalar::Text(_))
+                            ) {
                                 return Err(invalid());
                             }
                         }
@@ -88,13 +91,19 @@ impl PreparedGraphVertexUpsertQuery {
         }
         drop(work);
         let mut returning = GqlQueryExecution {
-            value: rows.into_iter().map(GraphValueRow::from_owned_values).collect(),
+            value: rows
+                .into_iter()
+                .map(GraphValueRow::from_owned_values)
+                .collect(),
             rows: selection,
             evaluator,
         };
         if let Some(grouping) = &self.grouping {
             returning = crate::set_ops::finish_owned_aggregate(
-                returning, policy, grouping, &mut checkpoint,
+                returning,
+                policy,
+                grouping,
+                &mut checkpoint,
             )?;
         }
         let head_policy = if self.tail.is_some() {
@@ -103,8 +112,13 @@ impl PreparedGraphVertexUpsertQuery {
             policy
         };
         let returning = crate::set_ops::finish_owned_projection(
-            returning, head_policy, &self.projection, self.quantifier, &self.order,
-            (self.offset, self.count), &mut checkpoint,
+            returning,
+            head_policy,
+            &self.projection,
+            self.quantifier,
+            &self.order,
+            (self.offset, self.count),
+            &mut checkpoint,
         )?;
         match &self.tail {
             None => Ok(returning),
@@ -129,7 +143,9 @@ mod tests {
     }
     fn prepare(text: &str) -> PreparedGraphVertexUpsertQuery {
         PreparedGraphVertexUpsertQueryText::prepare(text, RelationId(1), symbols)
-            .expect(text).bind_parameters(&GqlParameters::new()).expect(text)
+            .expect(text)
+            .bind_parameters(&GqlParameters::new())
+            .expect(text)
     }
     fn int(value: i64) -> GraphValue {
         GraphValue::Scalar(CanonicalScalar::Int(value))
@@ -137,25 +153,46 @@ mod tests {
     fn policy(rows: u64) -> GqlQueryPolicy {
         GqlQueryPolicy::new(1_000, rows, 1_000_000, 1_000_000)
     }
-    fn output(query: &PreparedGraphVertexUpsertQuery, rows: Vec<Vec<GraphValue>>) -> Vec<Vec<GraphValue>> {
-        query.project_rows_governed::<(), ()>(
-            rows, GqlExecutionStats::default(), GlaExecutionStats::default(), policy(100), || Ok(()),
-        ).unwrap().value.into_iter().map(|row| row.values().to_vec()).collect()
+    fn output(
+        query: &PreparedGraphVertexUpsertQuery,
+        rows: Vec<Vec<GraphValue>>,
+    ) -> Vec<Vec<GraphValue>> {
+        query
+            .project_rows_governed::<(), ()>(
+                rows,
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(100),
+                || Ok(()),
+            )
+            .unwrap()
+            .value
+            .into_iter()
+            .map(|row| row.values().to_vec())
+            .collect()
     }
 
     #[test]
     fn whole_bag_grouping_counts_every_target_before_one_page() {
         let query = prepare("MERGE (n:Item) RETURN n.p AS p, count(*) AS copies ORDER BY p");
-        assert_eq!(query.bindings(), &[GraphVertexReturnBinding::Property(PropertyKeyId(1))]);
+        assert_eq!(
+            query.bindings(),
+            &[GraphVertexReturnBinding::Property(PropertyKeyId(1))]
+        );
         assert_eq!(
             output(&query, vec![vec![int(2)], vec![int(1)], vec![int(1)]]),
             vec![vec![int(1), int(2)], vec![int(2), int(1)]],
         );
         let query = prepare("MERGE (n:Item) RETURN count(*) AS n, sum(n.p) AS total");
-        let result = query.project_rows_governed::<(), ()>(
-            vec![vec![int(1)], vec![int(2)], vec![int(3)]],
-            GqlExecutionStats::default(), GlaExecutionStats::default(), policy(1), || Ok(()),
-        ).unwrap();
+        let result = query
+            .project_rows_governed::<(), ()>(
+                vec![vec![int(1)], vec![int(2)], vec![int(3)]],
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(1),
+                || Ok(()),
+            )
+            .unwrap();
         assert_eq!(result.value[0].values(), &[int(3), int(6)]);
         assert_eq!(result.rows.result_rows, 1);
     }
@@ -166,15 +203,24 @@ mod tests {
             "MERGE (n:Item) WITH n AS node WHERE node.p > 0 \
              RETURN node.p AS p ORDER BY p DESC SKIP 1 LIMIT 1",
         );
-        assert_eq!(query.bindings(), &[
-            GraphVertexReturnBinding::Vertex,
-            GraphVertexReturnBinding::Property(PropertyKeyId(1)),
-        ]);
-        assert_eq!(output(&query, vec![
-            vec![GraphValue::Vertex(VId(1)), int(1)],
-            vec![GraphValue::Vertex(VId((1_u128 << 100) + 1)), int(3)],
-            vec![GraphValue::Vertex(VId(2)), int(2)],
-        ]), vec![vec![int(2)]]);
+        assert_eq!(
+            query.bindings(),
+            &[
+                GraphVertexReturnBinding::Vertex,
+                GraphVertexReturnBinding::Property(PropertyKeyId(1)),
+            ]
+        );
+        assert_eq!(
+            output(
+                &query,
+                vec![
+                    vec![GraphValue::Vertex(VId(1)), int(1)],
+                    vec![GraphValue::Vertex(VId((1_u128 << 100) + 1)), int(3)],
+                    vec![GraphValue::Vertex(VId(2)), int(2)],
+                ]
+            ),
+            vec![vec![int(2)]]
+        );
     }
 
     #[test]
@@ -191,10 +237,15 @@ mod tests {
         let query = prepare("MERGE (n:Item) RETURN count(*) AS n");
         assert_eq!(output(&query, Vec::new()), vec![vec![int(0)]]);
         let query = prepare("MERGE (n:Item) WITH n.p AS p WHERE p < 0 RETURN p");
-        let result = query.project_rows_governed::<(), ()>(
-            vec![vec![int(1)], vec![int(2)]], GqlExecutionStats::default(),
-            GlaExecutionStats::default(), policy(0), || Ok(()),
-        ).unwrap();
+        let result = query
+            .project_rows_governed::<(), ()>(
+                vec![vec![int(1)], vec![int(2)]],
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(0),
+                || Ok(()),
+            )
+            .unwrap();
         assert!(result.value.is_empty());
         assert_eq!(result.rows.result_rows, 0);
     }
@@ -205,59 +256,106 @@ mod tests {
         for row in [
             vec![GraphValue::Vertex(VId(1))],
             vec![int(1), int(2)],
-            vec![GraphValue::Vertex(VId(1)), GraphValue::List(vec![int(2)])],
+            vec![
+                GraphValue::Vertex(VId(1)),
+                GraphValue::List(vec![int(2)].into()),
+            ],
         ] {
             assert!(matches!(
                 query.project_rows_governed::<(), ()>(
-                    vec![row], GqlExecutionStats::default(), GlaExecutionStats::default(),
-                    policy(0), || Ok(()),
+                    vec![row],
+                    GqlExecutionStats::default(),
+                    GlaExecutionStats::default(),
+                    policy(0),
+                    || Ok(()),
                 ),
-                Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema { .. })),
+                Err(GqlQueryError::Source(
+                    GraphSetExecutionError::InputSchema { .. }
+                )),
             ));
         }
         let query = prepare("MERGE (n:Item) WITH n.p AS p RETURN 10 / p AS value LIMIT 0");
         assert!(matches!(
             query.project_rows_governed::<(), ()>(
-                vec![vec![int(2)], vec![int(0)]], GqlExecutionStats::default(),
-                GlaExecutionStats::default(), policy(0), || Ok(()),
+                vec![vec![int(2)], vec![int(0)]],
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(0),
+                || Ok(()),
             ),
-            Err(GqlQueryError::Source(GraphSetExecutionError::Projection { .. })),
+            Err(GqlQueryError::Source(
+                GraphSetExecutionError::Projection { .. }
+            )),
         ));
     }
 
     #[test]
     fn all_rows_and_tail_share_prefix_quotas_and_every_interruption_is_terminal() {
-        let query = prepare(
-            "MERGE (n:Item) WITH n.p AS p UNWIND [p, p + 1] AS x RETURN sum(x) AS total",
-        );
+        let query =
+            prepare("MERGE (n:Item) WITH n.p AS p UNWIND [p, p + 1] AS x RETURN sum(x) AS total");
         let rows = vec![vec![int(1)], vec![int(3)]];
-        let prefix = GlaExecutionStats { work_units: 37, scratch_entries: 11 };
-        let selection = GqlExecutionStats { snapshot_records: 7, result_rows: 2 };
+        let prefix = GlaExecutionStats {
+            work_units: 37,
+            scratch_entries: 11,
+        };
+        let selection = GqlExecutionStats {
+            snapshot_records: 7,
+            result_rows: 2,
+        };
         let mut checkpoints = 0;
-        let result = query.project_rows_governed::<(), ()>(
-            rows.clone(), selection, prefix, policy(1), || { checkpoints += 1; Ok(()) },
-        ).unwrap();
+        let result = query
+            .project_rows_governed::<(), ()>(rows.clone(), selection, prefix, policy(1), || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(result.value[0].values(), &[int(10)]);
         assert_eq!(result.rows.snapshot_records, 7);
         let exact = GqlQueryPolicy::new(
-            7, 1, result.evaluator.work_units, result.evaluator.scratch_entries,
+            7,
+            1,
+            result.evaluator.work_units,
+            result.evaluator.scratch_entries,
         );
-        assert!(query.project_rows_governed::<(), ()>(
-            rows.clone(), selection, prefix, exact, || Ok(()),
-        ).is_ok());
+        assert!(
+            query
+                .project_rows_governed::<(), ()>(rows.clone(), selection, prefix, exact, || Ok(()),)
+                .is_ok()
+        );
         for allowance in [
-            GqlQueryPolicy::new(7, 1, result.evaluator.work_units - 1, result.evaluator.scratch_entries),
-            GqlQueryPolicy::new(7, 1, result.evaluator.work_units, result.evaluator.scratch_entries - 1),
+            GqlQueryPolicy::new(
+                7,
+                1,
+                result.evaluator.work_units - 1,
+                result.evaluator.scratch_entries,
+            ),
+            GqlQueryPolicy::new(
+                7,
+                1,
+                result.evaluator.work_units,
+                result.evaluator.scratch_entries - 1,
+            ),
         ] {
-            assert!(matches!(query.project_rows_governed::<(), ()>(
-                rows.clone(), selection, prefix, allowance, || Ok(()),
-            ), Err(GqlQueryError::Evaluator(_))));
+            assert!(matches!(
+                query.project_rows_governed::<(), ()>(
+                    rows.clone(),
+                    selection,
+                    prefix,
+                    allowance,
+                    || Ok(()),
+                ),
+                Err(GqlQueryError::Evaluator(_))
+            ));
         }
         assert!(checkpoints > 1);
         for stop in 1..=checkpoints {
             let mut seen = 0;
             let result = query.project_rows_governed::<(), usize>(
-                rows.clone(), selection, prefix, policy(1), || {
+                rows.clone(),
+                selection,
+                prefix,
+                policy(1),
+                || {
                     seen += 1;
                     if seen == stop { Err(stop) } else { Ok(()) }
                 },

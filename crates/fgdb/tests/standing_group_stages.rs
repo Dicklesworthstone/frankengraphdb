@@ -19,7 +19,11 @@ use fgdb_types::{
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x41; 32], DatabaseSecurityNamespaceId([0x42; 32]), [0x43; 32])
+    DatabaseKeys::new(
+        [0x41; 32],
+        DatabaseSecurityNamespaceId([0x42; 32]),
+        [0x43; 32],
+    )
 }
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(10_000, 10_000, 50_000_000, 50_000_000)
@@ -76,7 +80,10 @@ fn assert_native(
     };
     let mut cursor = db.standing_native_cursor(cx, handle, delivery()).unwrap();
     assert_eq!(cursor.columns(), columns);
-    assert_eq!(cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), rows);
+    assert_eq!(
+        cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        rows
+    );
     assert_eq!(cursor.row_stats().snapshot_records, 0);
     assert!(cursor.next().is_none());
 }
@@ -104,7 +111,9 @@ fn grouped_with_filters_top_k_unwind_and_regrouping_follow_committed_changes() {
                 let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
                 let (nodes, width) = prepared.subscription_footprint(&cx, &args).unwrap();
                 assert!(nodes >= 2 && width > 0, "{text}");
-                prepared.register_standing(&mut db, &cx, &args, policy()).unwrap()
+                prepared
+                    .register_standing(&mut db, &cx, &args, policy())
+                    .unwrap()
             })
             .collect();
         for tick in 0..4 {
@@ -147,8 +156,12 @@ fn grouped_top_k_refills_after_deletions_and_preserves_independent_parameters() 
         let positive = GqlParameters::new().with_int64("scale", 1).unwrap();
         let negative = GqlParameters::new().with_int64("scale", -1).unwrap();
         let template = PreparedNativeRead::prepare(text, &positive, symbols).unwrap();
-        let a = template.register_standing(&mut db, &cx, &positive, policy()).unwrap();
-        let b = template.register_standing(&mut db, &cx, &negative, policy()).unwrap();
+        let a = template
+            .register_standing(&mut db, &cx, &positive, policy())
+            .unwrap();
+        let b = template
+            .register_standing(&mut db, &cx, &negative, policy())
+            .unwrap();
         drop(template);
         assert_native(&db, &cx, &a, text, &positive);
         assert_native(&db, &cx, &b, text, &negative);
@@ -157,8 +170,14 @@ fn grouped_top_k_refills_after_deletions_and_preserves_independent_parameters() 
         else {
             panic!("rows");
         };
-        assert_eq!(rows[0][0], QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2))));
-        assert_eq!(rows[1][0], QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(3))));
+        assert_eq!(
+            rows[0][0],
+            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2)))
+        );
+        assert_eq!(
+            rows[1][0],
+            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(3)))
+        );
         let mut change = WriteBatch::new(RelationId(1));
         change.delete_edge(EId(103));
         change.delete_edge(EId(104));
@@ -172,8 +191,14 @@ fn grouped_top_k_refills_after_deletions_and_preserves_independent_parameters() 
         else {
             panic!("rows");
         };
-        assert_eq!(rows[0][0], QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(3))));
-        assert_eq!(rows[1][0], QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1))));
+        assert_eq!(
+            rows[0][0],
+            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(3)))
+        );
+        assert_eq!(
+            rows[1][0],
+            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1)))
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -199,15 +224,22 @@ fn intermediate_root_group_rebuild_keeps_row_representation_and_native_cursors()
             .unwrap()
             .with_duplicates()
             .into();
-        let query = input.group_by(&[0], &[GraphAggregate::sum_int("total", 1)]).unwrap();
-        let handle = db.register_standing_relation(&cx, &query, policy()).unwrap();
+        let query = input
+            .group_by(&[0], &[GraphAggregate::sum_int("total", 1)])
+            .unwrap();
+        let handle = db
+            .register_standing_relation(&cx, &query, policy())
+            .unwrap();
         for step in 0..2 {
             let expected = query
                 .execute_governed(
                     policy(),
                     |pattern: &PreparedGraphPattern<GraphValueRow>, allowance: GqlQueryPolicy| {
                         db.execute_graph_pattern_governed_at(
-                            &cx, pattern, db.frontier().unwrap(), allowance,
+                            &cx,
+                            pattern,
+                            db.frontier().unwrap(),
+                            allowance,
                         )
                     },
                     || cx.checkpoint(),
@@ -216,16 +248,28 @@ fn intermediate_root_group_rebuild_keeps_row_representation_and_native_cursors()
                 .value;
             let expected: Vec<Vec<QueryValue>> = expected
                 .into_iter()
-                .map(|row| row.values().iter().cloned().map(QueryValue::Value).collect())
+                .map(|row| {
+                    row.values()
+                        .iter()
+                        .cloned()
+                        .map(QueryValue::Value)
+                        .collect()
+                })
                 .collect();
             let (at, result) = db.standing_native_query(&cx, &handle, delivery()).unwrap();
             assert_eq!(at, db.frontier().unwrap());
-            assert_eq!(result, QueryResult::Rows {
-                columns: query.columns().to_vec(), rows: expected.clone(),
-            });
+            assert_eq!(
+                result,
+                QueryResult::Rows {
+                    columns: query.columns().to_vec(),
+                    rows: expected.clone(),
+                }
+            );
             assert_eq!(
                 db.standing_native_cursor(&cx, &handle, delivery())
-                    .unwrap().collect::<Result<Vec<_>, _>>().unwrap(),
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
                 expected
             );
             if step == 0 {
@@ -248,12 +292,22 @@ fn conversion_errors_are_not_hidden_by_zero_pages_and_unbounded_sorts_still_refu
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut seed = WriteBatch::new(RelationId(1));
         for (id, value) in [(1, i64::MAX), (2, 1)] {
-            seed.create_vertex(VId(id), vec![LabelId(1)], vec![(Q, CanonicalScalar::Int(value))]);
+            seed.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(Q, CanonicalScalar::Int(value))],
+            );
         }
         db.write(&commit, seed).await.unwrap();
         for (text, expected) in [
-            ("MATCH (n:L) WITH SUM(n.q) AS total RETURN total LIMIT 0", GraphIntegerErrorKind::Overflow),
-            ("MATCH (n:L) WITH AVG(n.q) AS mean RETURN mean LIMIT 0", GraphIntegerErrorKind::IncompatibleOperands),
+            (
+                "MATCH (n:L) WITH SUM(n.q) AS total RETURN total LIMIT 0",
+                GraphIntegerErrorKind::Overflow,
+            ),
+            (
+                "MATCH (n:L) WITH AVG(n.q) AS mean RETURN mean LIMIT 0",
+                GraphIntegerErrorKind::IncompatibleOperands,
+            ),
         ] {
             assert!(matches!(
                 db.register_standing_native(&cx, text, &GqlParameters::new(), symbols, policy()),
@@ -268,10 +322,16 @@ fn conversion_errors_are_not_hidden_by_zero_pages_and_unbounded_sorts_still_refu
             Err(StandingQueryError::Unsupported)
         ));
         // Exact terminal results still retain their wide domain.
-        assert!(db.query(
-            &cx, "MATCH (n:L) RETURN SUM(n.q) AS total",
-            &GqlParameters::new(), symbols, policy(),
-        ).is_ok());
+        assert!(
+            db.query(
+                &cx,
+                "MATCH (n:L) RETURN SUM(n.q) AS total",
+                &GqlParameters::new(),
+                symbols,
+                policy(),
+            )
+            .is_ok()
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -288,32 +348,51 @@ fn group_input_quotas_survive_nested_rebuild_without_relaxing_siblings_or_source
         builder.vertex("n").unwrap();
         let input: PreparedGraphSet = builder
             .prepare_values(&[GraphColumn::property("bucket", "n", P)], 0, None)
-            .unwrap().with_duplicates().into();
-        let global = input.clone().group_by(&[], &[GraphAggregate::count_rows("total")]).unwrap();
+            .unwrap()
+            .with_duplicates()
+            .into();
+        let global = input
+            .clone()
+            .group_by(&[], &[GraphAggregate::count_rows("total")])
+            .unwrap();
         let nested = input
-            .group_by(&[0], &[GraphAggregate::count_rows("copies")]).unwrap()
-            .group_by(&[], &[GraphAggregate::sum_int("total", 1)]).unwrap();
+            .group_by(&[0], &[GraphAggregate::count_rows("copies")])
+            .unwrap()
+            .group_by(&[], &[GraphAggregate::sum_int("total", 1)])
+            .unwrap();
         let queries = [global.clone(), nested];
         let one = GqlQueryPolicy::new(100, 1, 50_000_000, 50_000_000);
-        let handles: Vec<_> = queries.iter().map(|query| {
-            db.register_standing_relation(&cx, query, one).unwrap()
-        }).collect();
+        let handles: Vec<_> = queries
+            .iter()
+            .map(|query| db.register_standing_relation(&cx, query, one).unwrap())
+            .collect();
         for (step, count) in [6, 7, 6].into_iter().enumerate() {
             for handle in &handles {
                 let expected = QueryResult::Rows {
                     columns: vec!["total".into()],
-                    rows: vec![vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(count)))]],
+                    rows: vec![vec![QueryValue::Value(GraphValue::Scalar(
+                        CanonicalScalar::Int(count),
+                    ))]],
                 };
-                assert_eq!(db.standing_native_query(&cx, handle, delivery()).unwrap().1, expected);
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, delivery()).unwrap().1,
+                    expected
+                );
                 db.rebuild_standing_query(&cx, handle, one).unwrap();
-                assert_eq!(db.standing_native_query(&cx, handle, delivery()).unwrap().1, expected);
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, delivery()).unwrap().1,
+                    expected
+                );
                 // A failed rebuild must leave the accepted circuit unchanged.
                 for refused in [
                     GqlQueryPolicy::new(100, 0, 50_000_000, 50_000_000),
                     GqlQueryPolicy::new(0, 1, 50_000_000, 50_000_000),
                 ] {
                     assert!(db.rebuild_standing_query(&cx, handle, refused).is_err());
-                    assert_eq!(db.standing_native_query(&cx, handle, delivery()).unwrap().1, expected);
+                    assert_eq!(
+                        db.standing_native_query(&cx, handle, delivery()).unwrap().1,
+                        expected
+                    );
                 }
             }
             if step == 2 {
@@ -321,7 +400,11 @@ fn group_input_quotas_survive_nested_rebuild_without_relaxing_siblings_or_source
             }
             let mut change = WriteBatch::new(RelationId(1));
             if step == 0 {
-                change.create_vertex(VId(999), vec![LabelId(1)], vec![(P, CanonicalScalar::Int(10))]);
+                change.create_vertex(
+                    VId(999),
+                    vec![LabelId(1)],
+                    vec![(P, CanonicalScalar::Int(10))],
+                );
             } else {
                 change.delete_vertex(VId(999));
             }
@@ -331,15 +414,39 @@ fn group_input_quotas_survive_nested_rebuild_without_relaxing_siblings_or_source
         // exceed a quota of two even though UNION DISTINCT returns two rows.
         let literal = GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1)));
         let right = PreparedGraphSet::singleton()
-            .unwind("unused".into(), GraphSetValue::List(vec![literal.clone(); 3])).unwrap()
-            .project(vec![GraphSetProjection::new("total", literal)], GraphSetQuantifier::All).unwrap();
-        let union = global.combine(GraphSetOperation::Union, GraphSetQuantifier::Distinct, right).unwrap();
-        let sibling = db.register_standing_relation(&cx, &union, policy()).unwrap();
+            .unwind(
+                "unused".into(),
+                GraphSetValue::List(vec![literal.clone(); 3]),
+            )
+            .unwrap()
+            .project(
+                vec![GraphSetProjection::new("total", literal)],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
+        let union = global
+            .combine(
+                GraphSetOperation::Union,
+                GraphSetQuantifier::Distinct,
+                right,
+            )
+            .unwrap();
+        let sibling = db
+            .register_standing_relation(&cx, &union, policy())
+            .unwrap();
         let before = db.standing_native_query(&cx, &sibling, delivery()).unwrap();
-        assert!(db.rebuild_standing_query(
-            &cx, &sibling, GqlQueryPolicy::new(100, 2, 50_000_000, 50_000_000),
-        ).is_err());
-        assert_eq!(db.standing_native_query(&cx, &sibling, delivery()).unwrap(), before);
+        assert!(
+            db.rebuild_standing_query(
+                &cx,
+                &sibling,
+                GqlQueryPolicy::new(100, 2, 50_000_000, 50_000_000),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            db.standing_native_query(&cx, &sibling, delivery()).unwrap(),
+            before
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -353,21 +460,34 @@ fn conversion_failure_fences_derived_rows_not_committed_writes_and_rebuild_recov
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut initial = WriteBatch::new(RelationId(1));
         for (id, value) in [(1, i64::MAX - 1), (2, 1)] {
-            initial.create_vertex(VId(id), vec![LabelId(1)], vec![(Q, CanonicalScalar::Int(value))]);
+            initial.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(Q, CanonicalScalar::Int(value))],
+            );
         }
         db.write(&commit, initial).await.unwrap();
         let text = "MATCH (n:L) WITH SUM(n.q) AS total RETURN total";
         let params = GqlParameters::new();
-        let handle = db.register_standing_native(&cx, text, &params, symbols, policy()).unwrap();
+        let handle = db
+            .register_standing_native(&cx, text, &params, symbols, policy())
+            .unwrap();
         assert_native(&db, &cx, &handle, text, &params);
         let mut overflow = WriteBatch::new(RelationId(1));
         overflow.set_vertex_property(VId(2), Q, Some(CanonicalScalar::Int(2)));
         let at = db.write(&commit, overflow).await.unwrap();
         assert_eq!(db.frontier().unwrap(), at);
         assert!(db.standing_native_query(&cx, &handle, delivery()).is_err());
-        let QueryResult::Rows { rows, .. } = db.query(
-            &cx, "MATCH (n:L) RETURN SUM(n.q) AS total", &params, symbols, policy(),
-        ).unwrap() else {
+        let QueryResult::Rows { rows, .. } = db
+            .query(
+                &cx,
+                "MATCH (n:L) RETURN SUM(n.q) AS total",
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap()
+        else {
             panic!("exact aggregate rows");
         };
         assert_eq!(rows[0][0].as_integer(), Some(i128::from(i64::MAX) + 1));
@@ -376,7 +496,10 @@ fn conversion_failure_fences_derived_rows_not_committed_writes_and_rebuild_recov
         let mut repair = WriteBatch::new(RelationId(1));
         repair.set_vertex_property(VId(2), Q, Some(CanonicalScalar::Int(0)));
         let repaired = db.write(&commit, repair).await.unwrap();
-        assert_eq!(db.rebuild_standing_query(&cx, &handle, policy()).unwrap(), repaired);
+        assert_eq!(
+            db.rebuild_standing_query(&cx, &handle, policy()).unwrap(),
+            repaired
+        );
         assert_native(&db, &cx, &handle, text, &params);
     });
     assert!(report.lab_test_passed(), "{report:?}");

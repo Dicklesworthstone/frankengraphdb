@@ -212,9 +212,11 @@ fn every_module_has_an_audit_verdict() {
                 pending.push(path);
             } else if path.extension().is_some_and(|ext| ext == "rs") {
                 let relative = path.strip_prefix(&src).expect("path belongs to src");
-                let name = relative.components()
+                let name = relative
+                    .components()
                     .map(|part| part.as_os_str().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>().join("/");
+                    .collect::<Vec<_>>()
+                    .join("/");
                 on_disk.insert(name);
             }
         }
@@ -280,10 +282,10 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
         ExternalCryptoAuditEvidence, REGISTERED_CRYPTO_PROFILE_COUNT,
         REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION, REGISTERED_EXTERNAL_CRYPTO_AUDIT_PLAN,
         REGISTERED_OBJECT_AEAD_PROFILES, REGISTERED_PASSPHRASE_KDF_PROFILES,
-        REGISTERED_SIGNATURE_PROFILES,
-        admit_external_crypto_audit, external_crypto_audit_plan_digest,
-        registered_crypto_profile_set_digest, registered_object_aead_profile,
-        registered_passphrase_kdf_profile, registered_signature_profile,
+        REGISTERED_SIGNATURE_PROFILES, admit_external_crypto_audit,
+        external_crypto_audit_plan_digest, registered_crypto_profile_set_digest,
+        registered_object_aead_profile, registered_passphrase_kdf_profile,
+        registered_signature_profile,
     };
 
     fn digest(byte: u8) -> [u8; 32] {
@@ -333,8 +335,10 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
     assert_eq!(REGISTERED_CRYPTO_PROFILE_SET_SCHEMA_VERSION, 1);
     assert_eq!(
         usize::from(REGISTERED_CRYPTO_PROFILE_COUNT),
-        REGISTERED_OBJECT_AEAD_PROFILES.len() + REGISTERED_PASSPHRASE_KDF_PROFILES.len()
-            + REGISTERED_SIGNATURE_PROFILES.len() + 1
+        REGISTERED_OBJECT_AEAD_PROFILES.len()
+            + REGISTERED_PASSPHRASE_KDF_PROFILES.len()
+            + REGISTERED_SIGNATURE_PROFILES.len()
+            + 1
     );
     assert_eq!(REGISTERED_CRYPTO_PROFILE_COUNT, 4);
 
@@ -374,10 +378,15 @@ fn external_audit_evidence_is_canonical_and_release_blocking() {
         .filter_map(|id| registered_signature_profile(id).map(|profile| (id, profile)))
         .collect();
     let inventoried_signature_profiles: Vec<_> = REGISTERED_SIGNATURE_PROFILES
-        .iter().copied().map(|profile| (profile.id(), profile)).collect();
+        .iter()
+        .copied()
+        .map(|profile| (profile.id(), profile))
+        .collect();
     assert_eq!(resolved_signature_profiles, inventoried_signature_profiles);
     assert!(
-        inventoried_signature_profiles.windows(2).all(|rows| rows[0].0 < rows[1].0),
+        inventoried_signature_profiles
+            .windows(2)
+            .all(|rows| rows[0].0 < rows[1].0),
         "signature inventory IDs must be unique and canonically ordered"
     );
 

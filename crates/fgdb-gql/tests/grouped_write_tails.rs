@@ -71,7 +71,11 @@ fn inputs(query: &PreparedGraphEdgeUpsertQuery, records: &[Record]) -> Vec<Vec<G
         .collect()
 }
 
-fn finish(query: &PreparedGraphEdgeUpsertQuery, records: &[Record], rows: u64) -> Result<Output, Failure> {
+fn finish(
+    query: &PreparedGraphEdgeUpsertQuery,
+    records: &[Record],
+    rows: u64,
+) -> Result<Output, Failure> {
     query.project_rows_governed(
         inputs(query, records),
         GqlExecutionStats::default(),
@@ -82,7 +86,11 @@ fn finish(query: &PreparedGraphEdgeUpsertQuery, records: &[Record], rows: u64) -
 }
 
 fn values(output: &Output) -> Vec<Vec<GraphValue>> {
-    output.value.iter().map(|row| row.values().to_vec()).collect()
+    output
+        .value
+        .iter()
+        .map(|row| row.values().to_vec())
+        .collect()
 }
 
 #[test]
@@ -216,9 +224,7 @@ fn summaries_and_dropped_identities_do_not_acquire_property_read_authority() {
 
 #[test]
 fn grouped_final_field_errors_still_refuse_under_limit_zero() {
-    let query = prepare(
-        "WITH r AS edge, count(*) AS n RETURN 12/(edge.p-4) AS value LIMIT 0",
-    );
+    let query = prepare("WITH r AS edge, count(*) AS n RETURN 12/(edge.p-4) AS value LIMIT 0");
     assert!(matches!(
         finish(&query, &[(A, Some(4), None)], 0),
         Err(GqlQueryError::Source(_))

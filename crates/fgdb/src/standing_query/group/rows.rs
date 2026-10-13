@@ -27,12 +27,15 @@ fn govern(meter: &mut Meter<'_>, event: GlaExecutionEvent) -> Result<(), Standin
     }
 }
 
-fn conversion_error(error: SpillSetAggregateRowError<StandingQueryFailure>) -> StandingQueryFailure {
+fn conversion_error(
+    error: SpillSetAggregateRowError<StandingQueryFailure>,
+) -> StandingQueryFailure {
     match error {
         SpillSetAggregateRowError::Control(error) => error,
-        SpillSetAggregateRowError::Value(GraphAggregateError::OutputExpression { column, error }) => {
-            StandingQueryFailure::OutputExpression { column, error }
-        }
+        SpillSetAggregateRowError::Value(GraphAggregateError::OutputExpression {
+            column,
+            error,
+        }) => StandingQueryFailure::OutputExpression { column, error },
         SpillSetAggregateRowError::Value(_) => StandingQueryFailure::InvalidDelta,
     }
 }
@@ -128,7 +131,10 @@ impl State {
             .map_err(zset_error)?;
         for (row, _) in converted.iter() {
             meter.charge(ZSetEvent::Work)?;
-            if sink.weight(row).is_some_and(|weight| weight < &ZWeight::ZERO) {
+            if sink
+                .weight(row)
+                .is_some_and(|weight| weight < &ZWeight::ZERO)
+            {
                 return Err(StandingQueryFailure::InvalidDelta);
             }
         }
@@ -373,7 +379,14 @@ mod tests {
             stats: StandingQueryStats::default(),
             checkpoint: &mut checkpoint,
         };
-        drop(candidate.row_output.as_mut().unwrap().prepare(&raw, &mut meter).unwrap());
+        drop(
+            candidate
+                .row_output
+                .as_mut()
+                .unwrap()
+                .prepare(&raw, &mut meter)
+                .unwrap(),
+        );
         same(&candidate, &before);
         apply(&mut candidate, &ZSet::new(), policy(), &mut || Ok(())).unwrap();
         assert_eq!(candidate.rows(), before.rows());
@@ -424,6 +437,9 @@ mod tests {
             Err(StandingQueryFailure::InvalidDelta)
         ));
         assert_eq!(state.rows().weight(&key), Some(&ZWeight::ONE));
-        assert_eq!(state.delta().unwrap().weight(&key), Some(&ZWeight::from_i128(-2)));
+        assert_eq!(
+            state.delta().unwrap().weight(&key),
+            Some(&ZWeight::from_i128(-2))
+        );
     }
 }

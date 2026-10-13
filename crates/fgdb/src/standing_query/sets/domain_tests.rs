@@ -66,7 +66,9 @@ fn all_declared_domains_match_native_admission_for_empty_and_null_operands() {
                     let left = declared(&[left_kind], empty);
                     let right = declared(&[right_kind], empty);
                     let l = db.register_standing_relation(&cx, &left, policy()).unwrap();
-                    let r = db.register_standing_relation(&cx, &right, policy()).unwrap();
+                    let r = db
+                        .register_standing_relation(&cx, &right, policy())
+                        .unwrap();
                     // Explicit expectation: all NULL values must NOT license
                     // different concrete schemas, nor narrow an open schema.
                     let expected = if left_kind == Any || right_kind == Any {
@@ -202,7 +204,10 @@ fn an_open_prefix_does_not_bypass_later_schema_or_resource_refusals() {
         let handle = db
             .register_standing_set(&cx, &a, &b, SetOperation::UnionAll, policy())
             .unwrap();
-        assert_eq!(db.standing_set_total(&cx, &handle).unwrap().to_i128(), Some(2));
+        assert_eq!(
+            db.standing_set_total(&cx, &handle).unwrap().to_i128(),
+            Some(2)
+        );
         let mut other = Database::open_memory(&commit, keys()).await.unwrap();
         let foreign = other
             .register_standing_relation(&cx, &declared(&[Any], false), policy())
@@ -377,7 +382,9 @@ fn mixed_value_bags_keep_signed_multiplicities_and_feed_grouped_ranked_circuits(
                         .with_order_by(&[GraphValueOrder::descending(1)])
                         .unwrap()
                         .with_page(1, Some(3));
-                    let g = db.register_standing_relation(&cx, &group, policy()).unwrap();
+                    let g = db
+                        .register_standing_relation(&cx, &group, policy())
+                        .unwrap();
                     grouped.push((group, g));
                     cases.push((vertex, reverse, operation, query, h));
                 }
@@ -466,7 +473,13 @@ fn mixed_value_bags_keep_signed_multiplicities_and_feed_grouped_ranked_circuits(
                     columns: query.columns().to_vec(),
                     rows: snapshot(&db, &cx, query)
                         .into_iter()
-                        .map(|row| row.values().iter().cloned().map(QueryValue::Value).collect())
+                        .map(|row| {
+                            row.values()
+                                .iter()
+                                .cloned()
+                                .map(QueryValue::Value)
+                                .collect()
+                        })
                         .collect(),
                 };
                 let delivered = db

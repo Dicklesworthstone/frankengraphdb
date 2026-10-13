@@ -679,15 +679,16 @@ mod tests {
         ] {
             let zones = Cell::new(0);
             let catalog = Cell::new(0);
-            let template = PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
-                source,
-                &[("at", GqlParameterType::UInt64)],
-                ObservedResolver {
-                    zones: &zones,
-                    catalog: &catalog,
-                },
-            )
-            .unwrap();
+            let template =
+                PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
+                    source,
+                    &[("at", GqlParameterType::UInt64)],
+                    ObservedResolver {
+                        zones: &zones,
+                        catalog: &catalog,
+                    },
+                )
+                .unwrap();
             assert!(
                 zones.get() > 0,
                 "the aggregate compiler must see the host resolver"
@@ -716,12 +717,13 @@ mod tests {
                 symbols,
             )
             .unwrap();
-            let resolved = PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
-                source,
-                &declarations,
-                symbols,
-            )
-            .unwrap();
+            let resolved =
+                PreparedTemporalGraphAggregateText::prepare_with_parameter_types_and_resolver(
+                    source,
+                    &declarations,
+                    symbols,
+                )
+                .unwrap();
             assert_eq!(
                 original.canonical_template_bytes(),
                 resolved.canonical_template_bytes()

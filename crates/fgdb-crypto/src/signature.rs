@@ -5,8 +5,8 @@
 //! transcript. This is a registry, not evidence that an audit has happened.
 
 use crate::ed25519::{
-    ED25519_PUBLIC_KEY_BYTES, ED25519_SEED_BYTES, ED25519_SIGNATURE_BYTES,
-    Ed25519Error, Ed25519VerifyingKey,
+    ED25519_PUBLIC_KEY_BYTES, ED25519_SEED_BYTES, ED25519_SIGNATURE_BYTES, Ed25519Error,
+    Ed25519VerifyingKey,
 };
 
 /// Pure Ed25519 with canonical encodings and strict subgroup admission.
@@ -90,9 +90,17 @@ pub enum SignatureError {
     /// No registered primitive is selected by this ID.
     UnsupportedProfile { profile_id: u16 },
     /// Public-key bytes do not have the selected profile's exact width.
-    PublicKeyLength { profile_id: u16, expected: u16, actual: usize },
+    PublicKeyLength {
+        profile_id: u16,
+        expected: u16,
+        actual: usize,
+    },
     /// Signature bytes do not have the selected profile's exact width.
-    SignatureLength { profile_id: u16, expected: u16, actual: usize },
+    SignatureLength {
+        profile_id: u16,
+        expected: u16,
+        actual: usize,
+    },
     /// The selected primitive refused the key or signature.
     Primitive(Ed25519Error),
 }
@@ -103,11 +111,21 @@ impl core::fmt::Display for SignatureError {
             Self::UnsupportedProfile { profile_id } => {
                 write!(f, "unsupported signature profile {profile_id}")
             }
-            Self::PublicKeyLength { profile_id, expected, actual } => write!(
-                f, "signature profile {profile_id} public key has {actual} bytes; expected {expected}"
+            Self::PublicKeyLength {
+                profile_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "signature profile {profile_id} public key has {actual} bytes; expected {expected}"
             ),
-            Self::SignatureLength { profile_id, expected, actual } => write!(
-                f, "signature profile {profile_id} signature has {actual} bytes; expected {expected}"
+            Self::SignatureLength {
+                profile_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "signature profile {profile_id} signature has {actual} bytes; expected {expected}"
             ),
             Self::Primitive(error) => core::fmt::Display::fmt(error, f),
         }
@@ -139,12 +157,22 @@ pub fn verify_signature(
         .ok_or(SignatureError::UnsupportedProfile { profile_id })?;
     match profile {
         SignatureProfile::Ed25519StrictV1 => {
-            let public_key: [u8; 32] = public_key.try_into().map_err(|_| SignatureError::PublicKeyLength {
-                profile_id, expected: profile.public_key_len(), actual: public_key.len(),
-            })?;
-            let signature: &[u8; 64] = signature.try_into().map_err(|_| SignatureError::SignatureLength {
-                profile_id, expected: profile.signature_len(), actual: signature.len(),
-            })?;
+            let public_key: [u8; 32] =
+                public_key
+                    .try_into()
+                    .map_err(|_| SignatureError::PublicKeyLength {
+                        profile_id,
+                        expected: profile.public_key_len(),
+                        actual: public_key.len(),
+                    })?;
+            let signature: &[u8; 64] =
+                signature
+                    .try_into()
+                    .map_err(|_| SignatureError::SignatureLength {
+                        profile_id,
+                        expected: profile.signature_len(),
+                        actual: signature.len(),
+                    })?;
             Ed25519VerifyingKey::from_bytes(public_key)
                 .and_then(|key| key.verify(message, signature))
                 .map_err(SignatureError::Primitive)
@@ -170,9 +198,13 @@ mod tests {
     #[test]
     fn numeric_lookup_matches_the_complete_inventory() {
         let resolved: Vec<_> = (0..=u16::MAX)
-            .filter_map(|id| registered_signature_profile(id).map(|p| (id, p))).collect();
-        let inventoried: Vec<_> = REGISTERED_SIGNATURE_PROFILES.iter().copied()
-            .map(|p| (p.id(), p)).collect();
+            .filter_map(|id| registered_signature_profile(id).map(|p| (id, p)))
+            .collect();
+        let inventoried: Vec<_> = REGISTERED_SIGNATURE_PROFILES
+            .iter()
+            .copied()
+            .map(|p| (p.id(), p))
+            .collect();
         assert_eq!(resolved, inventoried);
         assert!(inventoried.windows(2).all(|rows| rows[0].0 < rows[1].0));
         let profile = registered_signature_profile(1).unwrap();
@@ -188,16 +220,30 @@ mod tests {
         let public = unhex::<32>(PUBLIC);
         let signature = unhex::<64>(SIGNATURE);
         for profile_id in [0, 2, u16::MAX] {
-            assert_eq!(verify_signature(profile_id, &public, b"", &signature),
-                Err(SignatureError::UnsupportedProfile { profile_id }));
+            assert_eq!(
+                verify_signature(profile_id, &public, b"", &signature),
+                Err(SignatureError::UnsupportedProfile { profile_id })
+            );
         }
         for actual in [0, 1, 31, 33, 64] {
-            assert_eq!(verify_signature(1, &vec![0; actual], b"", &signature),
-                Err(SignatureError::PublicKeyLength { profile_id: 1, expected: 32, actual }));
+            assert_eq!(
+                verify_signature(1, &vec![0; actual], b"", &signature),
+                Err(SignatureError::PublicKeyLength {
+                    profile_id: 1,
+                    expected: 32,
+                    actual
+                })
+            );
         }
         for actual in [0, 1, 32, 63, 65, 128] {
-            assert_eq!(verify_signature(1, &public, b"", &vec![0; actual]),
-                Err(SignatureError::SignatureLength { profile_id: 1, expected: 64, actual }));
+            assert_eq!(
+                verify_signature(1, &public, b"", &vec![0; actual]),
+                Err(SignatureError::SignatureLength {
+                    profile_id: 1,
+                    expected: 64,
+                    actual
+                })
+            );
         }
     }
 
@@ -206,15 +252,20 @@ mod tests {
         let public = unhex::<32>(PUBLIC);
         let signature = unhex::<64>(SIGNATURE);
         assert_eq!(verify_signature(1, &public, b"", &signature), Ok(()));
-        assert_eq!(verify_signature(1, &public, b"wrong", &signature),
-            Err(SignatureError::Primitive(Ed25519Error::InvalidSignature)));
+        assert_eq!(
+            verify_signature(1, &public, b"wrong", &signature),
+            Err(SignatureError::Primitive(Ed25519Error::InvalidSignature))
+        );
         let mut identity = [0; 32];
         identity[0] = 1;
         let mut forgery = [0; 64];
         forgery[..32].copy_from_slice(&unhex::<32>(
-            "5866666666666666666666666666666666666666666666666666666666666666"));
+            "5866666666666666666666666666666666666666666666666666666666666666",
+        ));
         forgery[32] = 1; // [S]B=R for any message if identity A were permitted.
-        assert_eq!(verify_signature(1, &identity, b"any signer", &forgery),
-            Err(SignatureError::Primitive(Ed25519Error::InvalidPublicKey)));
+        assert_eq!(
+            verify_signature(1, &identity, b"any signer", &forgery),
+            Err(SignatureError::Primitive(Ed25519Error::InvalidPublicKey))
+        );
     }
 }

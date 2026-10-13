@@ -5,9 +5,7 @@
 use super::*;
 use crate::edge_upsert_text::PreparedGraphEdgeUpsertQueryText;
 use crate::mutation_text::WriteReturnGroupTemplate;
-use crate::set_text::{
-    ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
-};
+use crate::set_text::{ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate};
 use crate::{
     GraphEdgeReturnBinding, GraphSetColumnType, GraphSetProjection, GraphSetQuantifier,
     PreparedGraphEdgeUpsertQuery,

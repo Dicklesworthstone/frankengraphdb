@@ -65,7 +65,10 @@ fn prepare(text: &str) -> PreparedGraphMutationQuery {
 }
 
 fn rows(values: Vec<Vec<GraphValue>>) -> Vec<GraphValueRow> {
-    values.into_iter().map(GraphValueRow::from_owned_values).collect()
+    values
+        .into_iter()
+        .map(GraphValueRow::from_owned_values)
+        .collect()
 }
 
 fn graph() -> WriteBatch {
@@ -74,7 +77,10 @@ fn graph() -> WriteBatch {
         batch.create_vertex(
             VId(id as u128),
             vec![ITEM],
-            vec![(P, CanonicalScalar::Int(id)), (Q, CanonicalScalar::Int(id * 10))],
+            vec![
+                (P, CanonicalScalar::Int(id)),
+                (Q, CanonicalScalar::Int(id * 10)),
+            ],
         );
     }
     for (id, destination, weight) in [(11, 2, 5), (12, 3, 7)] {
@@ -149,8 +155,16 @@ fn grouped_vertex_updates_read_final_fields_and_count_selection_occurrences() {
             EmbeddedTxnCompletion::WriteCommitted { .. }
         ));
         assert_eq!(
-            read(&db, cx, "MATCH (n:Item) RETURN n.p AS p, n.q AS q ORDER BY p"),
-            vec![vec![int(11), int(110)], vec![int(12), int(120)], vec![int(13), int(130)]]
+            read(
+                &db,
+                cx,
+                "MATCH (n:Item) RETURN n.p AS p, n.q AS q ORDER BY p"
+            ),
+            vec![
+                vec![int(11), int(110)],
+                vec![int(12), int(120)],
+                vec![int(13), int(130)]
+            ]
         );
     });
 }
@@ -168,7 +182,10 @@ fn grouped_relationship_updates_keep_parallel_occurrences_without_reapplying_set
         let (_, result) = txn
             .execute_graph_mutation_query_governed(&mut db, cx, &query, policy(2))
             .unwrap();
-        assert_eq!(result.value, rows(vec![vec![int(6), int(3)], vec![int(8), int(3)]]));
+        assert_eq!(
+            result.value,
+            rows(vec![vec![int(6), int(3)], vec![int(8), int(3)]])
+        );
         txn.finish(&mut db, commit).await.unwrap();
         assert_eq!(
             read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r.w AS w ORDER BY w"),
@@ -291,17 +308,23 @@ fn failed_grouped_results_roll_back_the_statement_but_keep_prior_staging() {
         let budget = txn.execute_graph_mutation_query_governed(
             &mut db,
             cx,
-            &prepare(
-                "MATCH (n:Item) SET n.p=0 WITH n AS node, count(*) AS c RETURN node.p AS p",
-            ),
+            &prepare("MATCH (n:Item) SET n.p=0 WITH n AS node, count(*) AS c RETURN node.p AS p"),
             policy(0),
         );
         assert!(budget.is_err());
         assert_eq!(db.frontier().unwrap(), before);
         txn.finish(&mut db, commit).await.unwrap();
         assert_eq!(
-            read(&db, cx, "MATCH (n:Item) RETURN n.p AS p, n.q AS q ORDER BY p"),
-            vec![vec![int(1), int(99)], vec![int(2), int(20)], vec![int(3), int(30)]]
+            read(
+                &db,
+                cx,
+                "MATCH (n:Item) RETURN n.p AS p, n.q AS q ORDER BY p"
+            ),
+            vec![
+                vec![int(1), int(99)],
+                vec![int(2), int(20)],
+                vec![int(3), int(30)]
+            ]
         );
         assert_eq!(
             read(&db, cx, "MATCH (a)-[r:R]->(b) RETURN r.w AS w ORDER BY w"),

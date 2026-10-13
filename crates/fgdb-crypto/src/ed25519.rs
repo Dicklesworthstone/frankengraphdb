@@ -76,12 +76,19 @@ impl Ed25519SigningKey {
         expanded.expose_mut()[0] &= 248;
         expanded.expose_mut()[31] &= 63;
         expanded.expose_mut()[31] |= 64;
-        let scalar = expanded.expose()[..32].try_into().expect("32-byte secret scalar");
+        let scalar = expanded.expose()[..32]
+            .try_into()
+            .expect("32-byte secret scalar");
         let bytes = Point::base().multiply(scalar).encode();
-        Self { expanded, verifying_key: Ed25519VerifyingKey { bytes } }
+        Self {
+            expanded,
+            verifying_key: Ed25519VerifyingKey { bytes },
+        }
     }
 
-    pub fn verifying_key(&self) -> Ed25519VerifyingKey { self.verifying_key }
+    pub fn verifying_key(&self) -> Ed25519VerifyingKey {
+        self.verifying_key
+    }
 
     /// Deterministic pure Ed25519. SHA-512 sees prefix||message and R||A||message
     /// as streaming transcripts, without allocating/copying the full message.
@@ -94,7 +101,9 @@ impl Ed25519SigningKey {
         let nonce = scalar::reduce(digest.expose());
         let r = Point::base().multiply(nonce.expose()).encode();
         let challenge = challenge(&r, &self.verifying_key.bytes, message);
-        let secret = self.expanded.expose()[..32].try_into().expect("32-byte secret scalar");
+        let secret = self.expanded.expose()[..32]
+            .try_into()
+            .expect("32-byte secret scalar");
         let s = scalar::mul_add(challenge.expose(), secret, nonce.expose());
         let mut signature = [0; 64];
         signature[..32].copy_from_slice(&r);
@@ -111,13 +120,19 @@ impl Ed25519VerifyingKey {
         }
         Ok(Self { bytes })
     }
-    pub fn to_bytes(self) -> [u8; 32] { self.bytes }
-    pub fn as_bytes(&self) -> &[u8; 32] { &self.bytes }
+    pub fn to_bytes(self) -> [u8; 32] {
+        self.bytes
+    }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.bytes
+    }
 
     pub fn verify(&self, message: &[u8], signature: &[u8; 64]) -> Result<(), Ed25519Error> {
         let r_bytes = signature[..32].try_into().expect("32-byte R");
         let s = signature[32..].try_into().expect("32-byte S");
-        if !scalar::canonical(s) { return Err(Ed25519Error::InvalidSignature); }
+        if !scalar::canonical(s) {
+            return Err(Ed25519Error::InvalidSignature);
+        }
         let r = Point::decode(r_bytes).ok_or(Ed25519Error::InvalidSignature)?;
         // Constructor validation is retained by the private immutable bytes.
         let a = Point::decode(&self.bytes).ok_or(Ed25519Error::InvalidPublicKey)?;
@@ -141,20 +156,37 @@ fn challenge(r: &[u8; 32], a: &[u8; 32], message: &[u8]) -> Secret<32> {
     scalar::reduce(digest.expose())
 }
 
-struct Point { x: Field, y: Field, z: Field, t: Field }
+struct Point {
+    x: Field,
+    y: Field,
+    z: Field,
+    t: Field,
+}
 impl Point {
-    fn identity() -> Self { Self { x: Field::ZERO, y: Field::ONE, z: Field::ONE, t: Field::ZERO } }
+    fn identity() -> Self {
+        Self {
+            x: Field::ZERO,
+            y: Field::ONE,
+            z: Field::ONE,
+            t: Field::ZERO,
+        }
+    }
     fn base() -> Self {
         let x = Field([
-            54554, 36645, 11616, 51542, 42930, 38181, 51040, 26924,
-            56412, 64982, 57905, 49316, 21502, 52590, 14035, 8553,
+            54554, 36645, 11616, 51542, 42930, 38181, 51040, 26924, 56412, 64982, 57905, 49316,
+            21502, 52590, 14035, 8553,
         ]);
         let y = Field([
-            26200, 26214, 26214, 26214, 26214, 26214, 26214, 26214,
-            26214, 26214, 26214, 26214, 26214, 26214, 26214, 26214,
+            26200, 26214, 26214, 26214, 26214, 26214, 26214, 26214, 26214, 26214, 26214, 26214,
+            26214, 26214, 26214, 26214,
         ]);
         let t = x.mul(&y);
-        Self { x, y, z: Field::ONE, t }
+        Self {
+            x,
+            y,
+            z: Field::ONE,
+            t,
+        }
     }
     /// Complete extended twisted-Edwards addition (a=-1); all operands are
     /// private valid points. The identity and doubling need no exceptional arm.
@@ -167,11 +199,20 @@ impl Point {
         let f = d.sub(&c);
         let g = d.add(&c);
         let h = b.add(&a);
-        Self { x: e.mul(&f), y: g.mul(&h), z: f.mul(&g), t: e.mul(&h) }
+        Self {
+            x: e.mul(&f),
+            y: g.mul(&h),
+            z: f.mul(&g),
+            t: e.mul(&h),
+        }
     }
     fn select(a: &Self, b: &Self, bit: u8) -> Self {
-        Self { x: Field::select(&a.x, &b.x, bit), y: Field::select(&a.y, &b.y, bit),
-            z: Field::select(&a.z, &b.z, bit), t: Field::select(&a.t, &b.t, bit) }
+        Self {
+            x: Field::select(&a.x, &b.x, bit),
+            y: Field::select(&a.y, &b.y, bit),
+            z: Field::select(&a.z, &b.z, bit),
+            t: Field::select(&a.t, &b.t, bit),
+        }
     }
     fn multiply(&self, scalar: &[u8; 32]) -> Self {
         let mut point = Self::identity();
@@ -186,7 +227,9 @@ impl Point {
         self.x.mul(&rhs.z).equals(&rhs.x.mul(&self.z))
             & self.y.mul(&rhs.z).equals(&rhs.y.mul(&self.z))
     }
-    fn is_identity(&self) -> bool { self.x.is_zero() & self.y.equals(&self.z) }
+    fn is_identity(&self) -> bool {
+        self.x.is_zero() & self.y.equals(&self.z)
+    }
     fn encode(&self) -> [u8; 32] {
         let inverse = self.z.invert();
         let x = self.x.mul(&inverse);
@@ -202,13 +245,24 @@ impl Point {
         let y2 = y.square();
         let u = y2.sub(&Field::ONE);
         let v = Field::D.mul(&y2).add(&Field::ONE);
-        if v.is_zero() { return None; }
+        if v.is_zero() {
+            return None;
+        }
         let ratio = u.mul(&v.invert());
         let mut x = ratio.sqrt_candidate();
-        if !x.square().equals(&ratio) { x = x.mul(&Field::SQRT_M1); }
-        if !v.mul(&x.square()).equals(&u) || (x.is_zero() && sign != 0) { return None; }
+        if !x.square().equals(&ratio) {
+            x = x.mul(&Field::SQRT_M1);
+        }
+        if !v.mul(&x.square()).equals(&u) || (x.is_zero() && sign != 0) {
+            return None;
+        }
         x = Field::select(&x, &x.negate(), x.parity() ^ sign);
         let t = x.mul(&y);
-        Some(Self { x, y, z: Field::ONE, t })
+        Some(Self {
+            x,
+            y,
+            z: Field::ONE,
+            t,
+        })
     }
 }
