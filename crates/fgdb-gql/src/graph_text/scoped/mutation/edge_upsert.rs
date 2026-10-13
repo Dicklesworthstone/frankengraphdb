@@ -1,7 +1,9 @@
 //! Native directed relationship MERGE branch actions over bound MATCH endpoints.
 
 use super::*;
-use crate::edge_upsert_text::{EdgeReturnTemplate, EdgeUpsertActionTemplate, EdgeUpsertValueTemplate};
+use crate::edge_upsert_text::{
+    EdgeReturnTemplate, EdgeUpsertActionTemplate, EdgeUpsertValueTemplate,
+};
 use mutation_query::ReturnLeaves;
 
 #[path = "edge_upsert/returning.rs"]
@@ -113,7 +115,10 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn edge_upsert_pattern(&mut self, returning: bool) -> Result<ParsedEdgeUpsert<'a>, GraphEdgeUpsertTextError> {
+    fn edge_upsert_pattern(
+        &mut self,
+        returning: bool,
+    ) -> Result<ParsedEdgeUpsert<'a>, GraphEdgeUpsertTextError> {
         self.word("MERGE")?;
         self.punct(b'(', "(")?;
         let left = self.variable()?;
@@ -276,8 +281,7 @@ impl PreparedGraphEdgeUpsertText {
     where
         R: GraphSymbolResolver + ?Sized,
     {
-        Self::prepare_definition(statement, declarations, resolve, false)
-            .map(|(upsert, _)| upsert)
+        Self::prepare_definition(statement, declarations, resolve, false).map(|(upsert, _)| upsert)
     }
 
     // One grammar, parameter namespace and resolver cache for actions and
@@ -294,12 +298,17 @@ impl PreparedGraphEdgeUpsertText {
         let parsed = parser.edge_upsert_pattern(returning)?;
         let parsed_return = if returning {
             Some(parser.edge_upsert_return(parsed.relationship)?)
-        } else { None };
+        } else {
+            None
+        };
         parser.end()?;
         if let Some(parsed) = &parsed_return {
             mutation_query::admit_return(
-                &parsed.projection, &parsed.types(), &parser.syntax.parameters,
-                parsed.grouping.as_ref(), parsed.at,
+                &parsed.projection,
+                &parsed.types(),
+                &parser.syntax.parameters,
+                parsed.grouping.as_ref(),
+                parsed.at,
             )?;
         }
         let mut projections = Vec::new();
@@ -348,7 +357,9 @@ impl PreparedGraphEdgeUpsertText {
         let on_match = resolve_actions(parsed.on_match, &mut symbol)?;
         let on_create = resolve_actions(parsed.on_create, &mut symbol)?;
         let after = resolve_actions(parsed.after, &mut symbol)?;
-        let returning = parsed_return.map(|parsed| parsed.resolve(&mut symbol)).transpose()?;
+        let returning = parsed_return
+            .map(|parsed| parsed.resolve(&mut symbol))
+            .transpose()?;
 
         let columns = projections
             .into_iter()
@@ -395,12 +406,15 @@ impl PreparedGraphEdgeUpsertText {
             properties: Vec::new(),
             undirected: false,
         };
-        Ok((Self {
-            merge,
-            on_match,
-            on_create,
-            after,
-        }, returning))
+        Ok((
+            Self {
+                merge,
+                on_match,
+                on_create,
+                after,
+            },
+            returning,
+        ))
     }
 
     pub fn bind_parameters(

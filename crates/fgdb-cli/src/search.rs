@@ -177,9 +177,7 @@ impl SearchFlags {
                     "coordinates" => VectorEncoding::Coordinates,
                     "packed" => VectorEncoding::PackedF32Le,
                     _ => {
-                        return Err(Failure::usage(
-                            "--vector-encoding is coordinates or packed",
-                        ));
+                        return Err(Failure::usage("--vector-encoding is coordinates or packed"));
                     }
                 };
                 once(&mut self.vector_encoding, encoding, flag)
@@ -766,14 +764,27 @@ mod tests {
 
     fn options(parts: &[&str]) -> Options {
         let mut args = vec![
-            "--db", "unused", "--key-file", "unused",
-            "--property", "x=1", "--property", "y=2",
-            "--property", "embedding=3", "--property", "bio=4",
-            "--label", "Document=1",
+            "--db",
+            "unused",
+            "--key-file",
+            "unused",
+            "--property",
+            "x=1",
+            "--property",
+            "y=2",
+            "--property",
+            "embedding=3",
+            "--property",
+            "bio=4",
+            "--label",
+            "Document=1",
         ];
         args.extend_from_slice(parts);
-        crate::parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>(), "search")
-            .expect("search arguments")
+        crate::parse(
+            &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            "search",
+        )
+        .expect("search arguments")
     }
 
     fn bytes(value: Vec<u8>) -> CanonicalScalar {
@@ -787,8 +798,14 @@ mod tests {
             &["--vector-property", "x", "--vector-property", "y"]
         };
         let mut parts = vec![
-            "--vector", "1,0", "--vector-encoding", encoding,
-            "--metric", metric, "--k", "4",
+            "--vector",
+            "1,0",
+            "--vector-encoding",
+            encoding,
+            "--metric",
+            metric,
+            "--k",
+            "4",
         ];
         parts.extend_from_slice(properties);
         prepare(&options(&parts)).expect("vector request")
@@ -798,15 +815,29 @@ mod tests {
     fn packed_flag_binds_one_property_without_changing_query_dimensions_or_mode() {
         for ann in [false, true] {
             let mut parts = vec![
-                "--vector", "1,2,3", "--vector-property", "embedding",
-                "--vector-encoding", "packed", "--metric", "cosine",
-                "--as-of", "7", "--eligible", "2,1,2", "--vertex-label", "Document",
+                "--vector",
+                "1,2,3",
+                "--vector-property",
+                "embedding",
+                "--vector-encoding",
+                "packed",
+                "--metric",
+                "cosine",
+                "--as-of",
+                "7",
+                "--eligible",
+                "2,1,2",
+                "--vertex-label",
+                "Document",
             ];
             if ann {
                 parts.extend_from_slice(&["--ann", "32"]);
             }
             let request = prepare(&options(&parts)).unwrap();
-            assert_eq!(request.read.projection.encoding, VectorEncoding::PackedF32Le);
+            assert_eq!(
+                request.read.projection.encoding,
+                VectorEncoding::PackedF32Le
+            );
             assert_eq!(request.read.projection.vector, [PropertyKeyId(3)]);
             assert_eq!(request.read.index.vector.as_ref().unwrap().dimensions, 3);
             assert_eq!(request.read.as_of, Some(CommitSeq(7)));
@@ -818,7 +849,10 @@ mod tests {
             };
             let (query, mode) = vector.expect("expected vector search");
             assert_eq!(query, [1.0, 2.0, 3.0]);
-            assert_eq!(matches!(mode, VectorSearch::Approximate { ef_search: 32 }), ann);
+            assert_eq!(
+                matches!(mode, VectorSearch::Approximate { ef_search: 32 }),
+                ann
+            );
             assert!(request.read.config_for(request.search()).is_ok());
         }
     }
@@ -826,21 +860,65 @@ mod tests {
     #[test]
     fn packed_encoding_is_explicit_and_invalid_projection_shapes_refuse() {
         let default = prepare(&options(&["--vector", "1", "--vector-property", "x"])).unwrap();
-        assert_eq!(default.read.projection.encoding, VectorEncoding::Coordinates);
+        assert_eq!(
+            default.read.projection.encoding,
+            VectorEncoding::Coordinates
+        );
         for parts in [
             vec!["--vector", "1,2", "--vector-property", "embedding"],
-            vec!["--vector", "1,2", "--vector-property", "x", "--vector-property", "y", "--vector-encoding", "packed"],
+            vec![
+                "--vector",
+                "1,2",
+                "--vector-property",
+                "x",
+                "--vector-property",
+                "y",
+                "--vector-encoding",
+                "packed",
+            ],
             vec!["--vector", "1,2", "--vector-encoding", "packed"],
-            vec!["--vector-property", "embedding", "--vector-encoding", "packed"],
-            vec!["--text", "graph", "--text-property", "bio", "--vector-encoding", "packed"],
-            vec!["--text", "graph", "--text-property", "bio", "--vector-encoding", "coordinates"],
-            vec!["--vector", "1,2", "--vector-property", "unknown", "--vector-encoding", "packed"],
+            vec![
+                "--vector-property",
+                "embedding",
+                "--vector-encoding",
+                "packed",
+            ],
+            vec![
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector-encoding",
+                "packed",
+            ],
+            vec![
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector-encoding",
+                "coordinates",
+            ],
+            vec![
+                "--vector",
+                "1,2",
+                "--vector-property",
+                "unknown",
+                "--vector-encoding",
+                "packed",
+            ],
         ] {
-            let error = prepare(&options(&parts)).err().expect("invalid search must refuse");
+            let error = prepare(&options(&parts))
+                .err()
+                .expect("invalid search must refuse");
             assert_eq!(error.code, 2, "{}", error.message);
         }
         for invalid in ["auto", "f64", "PACKED", ""] {
-            assert!(SearchFlags::default().set("--vector-encoding", invalid).is_err());
+            assert!(
+                SearchFlags::default()
+                    .set("--vector-encoding", invalid)
+                    .is_err()
+            );
         }
         let mut flags = SearchFlags::default();
         flags.set("--vector-encoding", "packed").unwrap();
@@ -852,48 +930,95 @@ mod tests {
         let request = vector_request("packed", "l2");
         let config = request.read.config_for(request.search()).unwrap();
         for value in [
-            CanonicalScalar::Int(1), bytes(vec![]), bytes(vec![0; 7]), bytes(vec![0; 9]),
+            CanonicalScalar::Int(1),
+            bytes(vec![]),
+            bytes(vec![0; 7]),
+            bytes(vec![0; 9]),
             bytes([f32::NAN.to_le_bytes(), 0.0_f32.to_le_bytes()].concat()),
             bytes([f32::INFINITY.to_le_bytes(), 0.0_f32.to_le_bytes()].concat()),
         ] {
-            assert!(request.read.projection.project(
-                VId(1), &config, |_| Some(&value), &mut WorkBudget::new(100),
-            ).is_err());
+            assert!(
+                request
+                    .read
+                    .projection
+                    .project(VId(1), &config, |_| Some(&value), &mut WorkBudget::new(100),)
+                    .is_err()
+            );
         }
         for value in [None, Some(CanonicalScalar::Null)] {
-            let document = request.read.projection.project(
-                VId(1), &config, |_| value.as_ref(), &mut WorkBudget::new(100),
-            ).unwrap();
+            let document = request
+                .read
+                .projection
+                .project(
+                    VId(1),
+                    &config,
+                    |_| value.as_ref(),
+                    &mut WorkBudget::new(100),
+                )
+                .unwrap();
             assert!(document.vector.is_none());
         }
         let value = bytes([2.0_f32.to_le_bytes(), (-3.0_f32).to_le_bytes()].concat());
-        let document = request.read.projection.project(
-            VId(1), &config, |_| Some(&value), &mut WorkBudget::new(100),
-        ).unwrap();
+        let document = request
+            .read
+            .projection
+            .project(VId(1), &config, |_| Some(&value), &mut WorkBudget::new(100))
+            .unwrap();
         assert_eq!(document.vector, Some(vec![2.0, -3.0]));
-        assert!(request.read.projection.project(
-            VId(1), &config, |_| Some(&value), &mut WorkBudget::new(0),
-        ).is_err(), "packed decoding must retain the native work budget");
+        assert!(
+            request
+                .read
+                .projection
+                .project(VId(1), &config, |_| Some(&value), &mut WorkBudget::new(0),)
+                .is_err(),
+            "packed decoding must retain the native work budget"
+        );
     }
 
     fn native_hits(request: &Prepared) -> Rows {
         let config = request.read.config_for(request.search()).unwrap();
         let documents: Vec<IndexDocument> = [[6_i16, 0], [2, 0], [3, 2], [2, 0]]
-            .into_iter().enumerate().map(|(ordinal, coordinates)| {
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, coordinates)| {
                 let properties = BTreeMap::from([
-                    (PropertyKeyId(1), CanonicalScalar::Int(i64::from(coordinates[0]))),
-                    (PropertyKeyId(2), CanonicalScalar::Int(i64::from(coordinates[1]))),
-                    (PropertyKeyId(3), bytes(coordinates.into_iter()
-                        .flat_map(|value| f32::from(value).to_le_bytes()).collect())),
+                    (
+                        PropertyKeyId(1),
+                        CanonicalScalar::Int(i64::from(coordinates[0])),
+                    ),
+                    (
+                        PropertyKeyId(2),
+                        CanonicalScalar::Int(i64::from(coordinates[1])),
+                    ),
+                    (
+                        PropertyKeyId(3),
+                        bytes(
+                            coordinates
+                                .into_iter()
+                                .flat_map(|value| f32::from(value).to_le_bytes())
+                                .collect(),
+                        ),
+                    ),
                 ]);
-                request.read.projection.project(
-                    VId(u128::try_from(ordinal).unwrap() + 1), &config, |key| properties.get(&key),
-                    &mut WorkBudget::new(1_000),
-                ).unwrap()
-            }).collect();
+                request
+                    .read
+                    .projection
+                    .project(
+                        VId(u128::try_from(ordinal).unwrap() + 1),
+                        &config,
+                        |key| properties.get(&key),
+                        &mut WorkBudget::new(1_000),
+                    )
+                    .unwrap()
+            })
+            .collect();
         let snapshot = BeaconIndex::build(config, documents, &mut WorkBudget::new(100_000))
-            .unwrap().snapshot();
-        request.search().execute(&snapshot, &mut WorkBudget::new(100_000)).unwrap()
+            .unwrap()
+            .snapshot();
+        request
+            .search()
+            .execute(&snapshot, &mut WorkBudget::new(100_000))
+            .unwrap()
     }
 
     #[test]
@@ -908,25 +1033,45 @@ mod tests {
         let hits = match native_hits(&vector_request("packed", "l2")) {
             Rows::Vector(hits) => Some(hits),
             _ => None,
-        }.expect("expected vector hits");
-        assert_eq!(hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
-            [VId(2), VId(4), VId(3), VId(1)]);
-        assert_eq!(hits.iter().map(|hit| hit.distance).collect::<Vec<_>>(), [1.0, 1.0, 8.0, 25.0]);
+        }
+        .expect("expected vector hits");
+        assert_eq!(
+            hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [VId(2), VId(4), VId(3), VId(1)]
+        );
+        assert_eq!(
+            hits.iter().map(|hit| hit.distance).collect::<Vec<_>>(),
+            [1.0, 1.0, 8.0, 25.0]
+        );
     }
 
     #[test]
     fn packed_encoding_reaches_hybrid_and_graph_retrieval_without_changing_fusion() {
         for graph in [false, true] {
             let mut parts = vec![
-                "--text", "graph", "--text-property", "bio", "--vector", "1,0",
-                "--vector-property", "embedding", "--vector-encoding", "packed",
-                "--k", "2", "--candidates", "4",
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector",
+                "1,0",
+                "--vector-property",
+                "embedding",
+                "--vector-encoding",
+                "packed",
+                "--k",
+                "2",
+                "--candidates",
+                "4",
             ];
             if graph {
                 parts.extend_from_slice(&["--expand-from", "1", "--max-hops", "2"]);
             }
             let request = prepare(&options(&parts)).unwrap();
-            assert_eq!(request.read.projection.encoding, VectorEncoding::PackedF32Le);
+            assert_eq!(
+                request.read.projection.encoding,
+                VectorEncoding::PackedF32Le
+            );
             assert_eq!(request.graph.is_some(), graph);
             assert!(request.read.config_for(request.search()).is_ok());
             let query = request.retrieval().unwrap();

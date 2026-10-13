@@ -129,8 +129,8 @@ pub use edge_upsert_query::{
     PreparedGraphEdgeUpsertQuery,
 };
 pub use edge_upsert_text::{
-    GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertText,
-    PreparedGraphEdgeUpsertQueryText,
+    GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertQueryText,
+    PreparedGraphEdgeUpsertText,
 };
 pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,

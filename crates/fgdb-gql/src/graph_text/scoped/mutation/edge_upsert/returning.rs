@@ -6,12 +6,17 @@ use super::*;
 use crate::edge_upsert_text::PreparedGraphEdgeUpsertQueryText;
 use crate::mutation_text::WriteReturnGroupTemplate;
 use crate::set_text::{ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate};
-use crate::{GraphEdgeReturnBinding, GraphSetColumnType, GraphSetProjection, GraphSetQuantifier,
-    PreparedGraphEdgeUpsertQuery};
+use crate::{
+    GraphEdgeReturnBinding, GraphSetColumnType, GraphSetProjection, GraphSetQuantifier,
+    PreparedGraphEdgeUpsertQuery,
+};
 use mutation_query::{ReturnLeaves, ReturnMapInput};
 
 #[derive(Clone, Copy)]
-enum EdgeBinding<'a> { Edge, Property(Name<'a>) }
+enum EdgeBinding<'a> {
+    Edge,
+    Property(Name<'a>),
+}
 
 pub(super) struct ParsedEdgeReturn<'a> {
     variable: Name<'a>,
@@ -26,35 +31,66 @@ pub(super) struct ParsedEdgeReturn<'a> {
 }
 impl<'a> ReturnLeaves<'a> for ParsedEdgeReturn<'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
-        let TokenKind::Word(word) = parser.current.kind else { return Ok(None) };
+        let TokenKind::Word(word) = parser.current.kind else {
+            return Ok(None);
+        };
         if word != self.variable.text
-            || matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'(')) {
+            || matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
             return Ok(None);
         }
         let source = parser.name()?;
-        let input = if parser.take(b'.')? { ReturnMapInput::Property(parser.name()?) }
-            else { ReturnMapInput::Identity };
+        let input = if parser.take(b'.')? {
+            ReturnMapInput::Property(parser.name()?)
+        } else {
+            ReturnMapInput::Identity
+        };
         self.map_input(parser, source, input).map(Some)
     }
-    fn map_input(&mut self, parser: &mut Parser<'a>, source: Name<'a>, input: ReturnMapInput<'a>)
-        -> Result<usize, GraphPatternTextError>
-    {
+    fn map_input(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+        input: ReturnMapInput<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
         if source.text != self.variable.text {
-            return Err(error(source.at, GraphPatternTextErrorKind::Expected("the MERGE relationship variable")));
+            return Err(error(
+                source.at,
+                GraphPatternTextErrorKind::Expected("the MERGE relationship variable"),
+            ));
         }
         let (binding, kind) = match input {
-            ReturnMapInput::Identity | ReturnMapInput::Guard => (EdgeBinding::Edge, GraphSetColumnType::Edge),
-            ReturnMapInput::Property(key) => (EdgeBinding::Property(key), GraphSetColumnType::Scalar),
-            ReturnMapInput::Properties => return Err(error(source.at,
-                GraphPatternTextErrorKind::Expected("an explicit MERGE relationship property, not a complete property map"))),
+            ReturnMapInput::Identity | ReturnMapInput::Guard => {
+                (EdgeBinding::Edge, GraphSetColumnType::Edge)
+            }
+            ReturnMapInput::Property(key) => {
+                (EdgeBinding::Property(key), GraphSetColumnType::Scalar)
+            }
+            ReturnMapInput::Properties => {
+                return Err(error(
+                    source.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "an explicit MERGE relationship property, not a complete property map",
+                    ),
+                ));
+            }
         };
-        if let Some(column) = self.bindings.iter().position(|(old, _)| match (old, binding) {
-            (EdgeBinding::Edge, EdgeBinding::Edge) => true,
-            (EdgeBinding::Property(old), EdgeBinding::Property(key)) => old.text == key.text,
-            _ => false,
-        }) { return Ok(column); }
-        parser.capacity(self.bindings.len(), MAX_PATTERN_VERTICES,
-            crate::algebra::PatternLimitDimension::Columns)?;
+        if let Some(column) = self
+            .bindings
+            .iter()
+            .position(|(old, _)| match (old, binding) {
+                (EdgeBinding::Edge, EdgeBinding::Edge) => true,
+                (EdgeBinding::Property(old), EdgeBinding::Property(key)) => old.text == key.text,
+                _ => false,
+            })
+        {
+            return Ok(column);
+        }
+        parser.capacity(
+            self.bindings.len(),
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
         self.bindings.push((binding, kind));
         Ok(self.bindings.len() - 1)
     }
@@ -63,7 +99,8 @@ impl<'a> ReturnLeaves<'a> for ParsedEdgeReturn<'a> {
     }
 }
 impl<'a> ParsedEdgeReturn<'a> {
-    pub(super) fn resolve(self,
+    pub(super) fn resolve(
+        self,
         symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
     ) -> Result<EdgeReturnTemplate, GraphPatternTextError> {
         let mut bindings = Vec::new();
@@ -71,35 +108,69 @@ impl<'a> ParsedEdgeReturn<'a> {
             bindings.push(match binding {
                 EdgeBinding::Edge => GraphEdgeReturnBinding::Edge,
                 EdgeBinding::Property(name) => {
-                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)? else {
+                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)?
+                    else {
                         unreachable!("shared resolver checked the symbol domain")
                     };
                     GraphEdgeReturnBinding::Property(key)
                 }
             });
         }
-        Ok(EdgeReturnTemplate { bindings, projection: self.projection, grouping: self.grouping,
-            quantifier: self.quantifier, order: self.order, offset: self.offset, count: self.count, at: self.at })
+        Ok(EdgeReturnTemplate {
+            bindings,
+            projection: self.projection,
+            grouping: self.grouping,
+            quantifier: self.quantifier,
+            order: self.order,
+            offset: self.offset,
+            count: self.count,
+            at: self.at,
+        })
     }
 }
 impl<'a> Parser<'a> {
-    pub(super) fn edge_upsert_return(&mut self, variable: Name<'a>) -> Result<ParsedEdgeReturn<'a>, GraphEdgeUpsertTextError> {
+    pub(super) fn edge_upsert_return(
+        &mut self,
+        variable: Name<'a>,
+    ) -> Result<ParsedEdgeReturn<'a>, GraphEdgeUpsertTextError> {
         let at = self.current.at;
         self.word("RETURN")?;
-        let quantifier = if self.take_word("DISTINCT")? { GraphSetQuantifier::Distinct }
-            else { self.take_all_quantifier()?; GraphSetQuantifier::All };
+        let quantifier = if self.take_word("DISTINCT")? {
+            GraphSetQuantifier::Distinct
+        } else {
+            self.take_all_quantifier()?;
+            GraphSetQuantifier::All
+        };
         // RETURN * would also include bound endpoints. Do not silently drop
         // them from this deliberately singular selected-relationship profile.
         if matches!(self.current.kind, TokenKind::Punct(b'*')) {
-            return Err(error(self.current.at, GraphPatternTextErrorKind::Expected(
-                "explicit MERGE relationship RETURN columns")).into());
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::Expected("explicit MERGE relationship RETURN columns"),
+            )
+            .into());
         }
-        let mut returning = ParsedEdgeReturn { variable, bindings: Vec::new(), projection: Vec::new(),
-            grouping: None, quantifier, order: Vec::new(), offset: ReadPageNumber::Literal(0), count: None, at };
+        let mut returning = ParsedEdgeReturn {
+            variable,
+            bindings: Vec::new(),
+            projection: Vec::new(),
+            grouping: None,
+            quantifier,
+            order: Vec::new(),
+            offset: ReadPageNumber::Literal(0),
+            count: None,
+            at,
+        };
         let items = self.write_return_items(&mut returning)?;
         returning.projection = items.projection;
         returning.grouping = items.grouping;
-        if let Some(ReadStageTemplate::Page { order, offset, count, .. }) = self.row_page_sourced(&items.output, &items.spellings)? {
+        if let Some(ReadStageTemplate::Page {
+            order,
+            offset,
+            count,
+            ..
+        }) = self.row_page_sourced(&items.output, &items.spellings)?
+        {
             returning.order = order;
             returning.offset = offset;
             returning.count = count;
@@ -108,46 +179,88 @@ impl<'a> Parser<'a> {
     }
 }
 impl EdgeReturnTemplate {
-    fn bind(&self, upsert: PreparedGraphEdgeUpsert, values: &[GqlParameterValue])
-        -> Result<PreparedGraphEdgeUpsertQuery, GraphEdgeUpsertTextError>
-    {
+    fn bind(
+        &self,
+        upsert: PreparedGraphEdgeUpsert,
+        values: &[GqlParameterValue],
+    ) -> Result<PreparedGraphEdgeUpsertQuery, GraphEdgeUpsertTextError> {
         let mut projection = Vec::new();
         for output in &self.projection {
-            projection.push(GraphSetProjection::new(&output.name,
-                return_projection::bind_read_value(&output.value, values)?));
+            projection.push(GraphSetProjection::new(
+                &output.name,
+                return_projection::bind_read_value(&output.value, values)?,
+            ));
         }
         let mut query = PreparedGraphEdgeUpsertQuery::prepare_with_grouping(
-            upsert, self.bindings.clone(), projection, self.quantifier,
-            self.grouping.as_ref().map(|group| group.bind(values)).transpose()?,
-        ).map_err(|kind| GraphEdgeUpsertTextError { offset: self.at, kind: GraphEdgeUpsertTextErrorKind::ReturnBuild(kind) })?;
+            upsert,
+            self.bindings.clone(),
+            projection,
+            self.quantifier,
+            self.grouping
+                .as_ref()
+                .map(|group| group.bind(values))
+                .transpose()?,
+        )
+        .map_err(|kind| GraphEdgeUpsertTextError {
+            offset: self.at,
+            kind: GraphEdgeUpsertTextErrorKind::ReturnBuild(kind),
+        })?;
         if !self.order.is_empty() {
-            query = query.with_order_by(&self.order).map_err(|kind| crate::GraphSetTextError {
-                offset: self.at, kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
-            })?;
+            query = query
+                .with_order_by(&self.order)
+                .map_err(|kind| crate::GraphSetTextError {
+                    offset: self.at,
+                    kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
+                })?;
         }
-        Ok(query.with_page(return_projection::pipeline::page_value(&self.offset, values),
-            self.count.as_ref().map(|count| return_projection::pipeline::page_value(count, values))))
+        Ok(query.with_page(
+            return_projection::pipeline::page_value(&self.offset, values),
+            self.count
+                .as_ref()
+                .map(|count| return_projection::pipeline::page_value(count, values)),
+        ))
     }
 }
 impl PreparedGraphEdgeUpsertQueryText {
-    pub fn prepare(statement: &str, relation: RelationId, resolve: impl GraphSymbolResolver)
-        -> Result<Self, GraphEdgeUpsertTextError>
-    {
+    pub fn prepare(
+        statement: &str,
+        relation: RelationId,
+        resolve: impl GraphSymbolResolver,
+    ) -> Result<Self, GraphEdgeUpsertTextError> {
         Self::prepare_with_parameter_types(statement, relation, &[], resolve)
     }
-    pub fn prepare_with_parameter_types(statement: &str, _relation: RelationId,
-        declarations: &[(&str, GqlParameterType)], mut resolve: impl GraphSymbolResolver,
+    pub fn prepare_with_parameter_types(
+        statement: &str,
+        _relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        mut resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphEdgeUpsertTextError> {
-        let body = mutation_query::statement_body(statement, "one relationship MERGE RETURN statement")?;
-        let (upsert, returning) = PreparedGraphEdgeUpsertText::prepare_definition(body, declarations, &mut resolve, true)?;
-        Ok(Self { statement: statement.to_owned(), upsert,
-            returning: returning.expect("query mode prepares a RETURN definition") })
+        let body =
+            mutation_query::statement_body(statement, "one relationship MERGE RETURN statement")?;
+        let (upsert, returning) = PreparedGraphEdgeUpsertText::prepare_definition(
+            body,
+            declarations,
+            &mut resolve,
+            true,
+        )?;
+        Ok(Self {
+            statement: statement.to_owned(),
+            upsert,
+            returning: returning.expect("query mode prepares a RETURN definition"),
+        })
     }
     #[must_use]
-    pub fn statement(&self) -> &str { &self.statement }
+    pub fn statement(&self) -> &str {
+        &self.statement
+    }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[GqlParameterSpec] { self.upsert.parameter_schema() }
-    pub fn bind_parameters(&self, arguments: &GqlParameters) -> Result<PreparedGraphEdgeUpsertQuery, GraphEdgeUpsertTextError> {
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        self.upsert.parameter_schema()
+    }
+    pub fn bind_parameters(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<PreparedGraphEdgeUpsertQuery, GraphEdgeUpsertTextError> {
         let upsert = self.upsert.bind_parameters(arguments)?;
         let values = self.upsert.merge.selection.checked_arguments(arguments)?;
         self.returning.bind(upsert, &values)

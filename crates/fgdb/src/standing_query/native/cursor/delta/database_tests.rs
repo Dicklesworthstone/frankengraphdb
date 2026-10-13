@@ -90,8 +90,10 @@ fn compressed_native_changes_integrate_to_fresh_answers_across_query_families() 
         // These definitions must exercise the newly admitted owners, not a
         // relational normalization that was already supported by the cursor.
         for handle in &handles[11..] {
-            assert!(matches!(db.admitted_standing_query(&cx, handle).unwrap(),
-                StandingQuery::Aggregate(_) | StandingQuery::ProjectedAggregate { .. }));
+            assert!(matches!(
+                db.admitted_standing_query(&cx, handle).unwrap(),
+                StandingQuery::Aggregate(_) | StandingQuery::ProjectedAggregate { .. }
+            ));
         }
         let mut accepted: Vec<_> = handles.iter().map(|h| snapshot(&db, &cx, h)).collect();
         for h in &handles {
@@ -248,8 +250,11 @@ fn failed_and_closed_delta_delivery_is_retryable_without_changing_the_view() {
             )
             .unwrap();
         let before = snapshot(&db, &cx, &handle);
-        assert!(db.standing_native_delta_cursor(&cx, &direct_aggregate, before.0, policy())
-            .unwrap().is_none());
+        assert!(
+            db.standing_native_delta_cursor(&cx, &direct_aggregate, before.0, policy())
+                .unwrap()
+                .is_none()
+        );
         assert!(matches!(
             other.standing_native_delta_cursor(&cx, &handle, before.0, policy()),
             Err(StandingQueryError::ForeignHandle)
@@ -333,9 +338,13 @@ fn direct_vertex_and_edge_aggregate_baselines_empty_ticks_and_rebuilds_remain_di
             "MATCH (n) RETURN COUNT(*)+1 AS c HAVING COUNT(*)>0 ORDER BY COUNT(*) LIMIT 1",
             "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS c",
         ];
-        let handles: Vec<_> = texts.iter().map(|text|
-            db.register_standing_native(&cx, text, &params, symbols, maintain()).unwrap()
-        ).collect();
+        let handles: Vec<_> = texts
+            .iter()
+            .map(|text| {
+                db.register_standing_native(&cx, text, &params, symbols, maintain())
+                    .unwrap()
+            })
+            .collect();
         for (index, handle) in handles.iter().enumerate() {
             let owner = db.admitted_standing_query(&cx, handle).unwrap();
             if index == 1 {
@@ -343,20 +352,34 @@ fn direct_vertex_and_edge_aggregate_baselines_empty_ticks_and_rebuilds_remain_di
             } else {
                 assert!(matches!(owner, StandingQuery::Aggregate(_)));
             }
-            assert!(db.standing_native_delta_cursor(&cx, handle, CommitSeq(0), policy())
-                .unwrap().is_none());
+            assert!(
+                db.standing_native_delta_cursor(&cx, handle, CommitSeq(0), policy())
+                    .unwrap()
+                    .is_none()
+            );
         }
         let mut accepted: Vec<_> = handles.iter().map(|h| snapshot(&db, &cx, h)).collect();
         let mut first = write(1, 7);
-        first.create_vertex(VId(2), vec![], vec![(PropertyKeyId(1), CanonicalScalar::Int(9))]);
+        first.create_vertex(
+            VId(2),
+            vec![],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(9))],
+        );
         first.add_edge(fgdb_types::EId(1), VId(1), VId(2), vec![]);
         let first_at = db.write(&commit, first).await.unwrap();
         for (text, (handle, (after, old))) in texts.iter().zip(handles.iter().zip(&mut accepted)) {
-            let changes = db.standing_native_delta_cursor(&cx, handle, *after, policy())
-                .unwrap().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            let changes = db
+                .standing_native_delta_cursor(&cx, handle, *after, policy())
+                .unwrap()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
             assert!(!changes.is_empty(), "{text}");
             *old = integrate(std::mem::take(old), changes);
-            assert_eq!(*old, bag(db.query(&cx, text, &params, symbols, maintain()).unwrap()));
+            assert_eq!(
+                *old,
+                bag(db.query(&cx, text, &params, symbols, maintain()).unwrap())
+            );
             *after = first_at;
         }
         // A physical property change does not change any of these counts.
@@ -364,34 +387,52 @@ fn direct_vertex_and_edge_aggregate_baselines_empty_ticks_and_rebuilds_remain_di
         unchanged.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(100)));
         let empty_at = db.write(&commit, unchanged).await.unwrap();
         for (handle, (after, old)) in handles.iter().zip(&mut accepted) {
-            let mut empty = db.standing_native_delta_cursor(
-                &cx, handle, *after, GqlQueryPolicy::new(0, 0, 100, 100),
-            ).unwrap().unwrap();
+            let mut empty = db
+                .standing_native_delta_cursor(
+                    &cx,
+                    handle,
+                    *after,
+                    GqlQueryPolicy::new(0, 0, 100, 100),
+                )
+                .unwrap()
+                .unwrap();
             assert_eq!(empty.snapshot_seq(), empty_at);
             assert!(empty.next().is_none());
             assert_eq!(empty.state(), VertexScanState::Exhausted);
             assert_eq!(empty.row_stats().result_rows, 0);
             drop(empty);
-            assert!(matches!(db.standing_native_delta_cursor(&cx, handle, CommitSeq(0), policy()),
-                Err(StandingQueryError::DeltaGap { .. })));
+            assert!(matches!(
+                db.standing_native_delta_cursor(&cx, handle, CommitSeq(0), policy()),
+                Err(StandingQueryError::DeltaGap { .. })
+            ));
             assert_eq!(snapshot(&db, &cx, handle).1, *old);
             *after = empty_at;
         }
         for handle in &handles {
             db.rebuild_standing_query(&cx, handle, maintain()).unwrap();
-            assert!(db.standing_native_delta_cursor(&cx, handle, first_at, policy())
-                .unwrap().is_none());
+            assert!(
+                db.standing_native_delta_cursor(&cx, handle, first_at, policy())
+                    .unwrap()
+                    .is_none()
+            );
         }
         // Deleting an endpoint retracts the real edge from the same commit.
         let mut remove = WriteBatch::new(RelationId(1));
         remove.delete_vertex(VId(2));
         let last = db.write(&commit, remove).await.unwrap();
         for (text, (handle, (after, old))) in texts.iter().zip(handles.iter().zip(&mut accepted)) {
-            let changes = db.standing_native_delta_cursor(&cx, handle, *after, policy())
-                .unwrap().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            let changes = db
+                .standing_native_delta_cursor(&cx, handle, *after, policy())
+                .unwrap()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
             assert!(!changes.is_empty(), "{text}");
             *old = integrate(std::mem::take(old), changes);
-            assert_eq!(*old, bag(db.query(&cx, text, &params, symbols, maintain()).unwrap()));
+            assert_eq!(
+                *old,
+                bag(db.query(&cx, text, &params, symbols, maintain()).unwrap())
+            );
             assert_eq!(snapshot(&db, &cx, handle), (last, old.clone()));
         }
     });
@@ -406,13 +447,21 @@ fn direct_aggregate_frames_share_governed_mapping_and_failure_does_not_consume_t
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let basis = db.write(&commit, write(1, 7)).await.unwrap();
-        let handle = db.register_standing_native(&cx,
-            "MATCH (n) RETURN COUNT(*) AS c,MAX(n) AS last,COUNT(*) AS again",
-            &GqlParameters::new(), symbols, maintain()).unwrap();
+        let handle = db
+            .register_standing_native(
+                &cx,
+                "MATCH (n) RETURN COUNT(*) AS c,MAX(n) AS last,COUNT(*) AS again",
+                &GqlParameters::new(),
+                symbols,
+                maintain(),
+            )
+            .unwrap();
         db.write(&commit, write(u128::MAX, 9)).await.unwrap();
         let accepted = snapshot(&db, &cx, &handle);
-        let mut full = db.standing_native_delta_cursor(&cx, &handle, basis, policy())
-            .unwrap().unwrap();
+        let mut full = db
+            .standing_native_delta_cursor(&cx, &handle, basis, policy())
+            .unwrap()
+            .unwrap();
         assert_eq!(full.columns(), &["c", "last", "again"]);
         assert_eq!(full.row_stats().snapshot_records, 0);
         assert_eq!(full.row_stats().result_rows, 0);
@@ -420,19 +469,36 @@ fn direct_aggregate_frames_share_governed_mapping_and_failure_does_not_consume_t
         let expected = full.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
         let usage = full.evaluator_stats();
         assert_eq!(expected.len(), 2);
-        assert!(expected.iter().any(|(cells, weight)| weight > &ZWeight::ZERO
-            && cells == &vec![QueryValue::Count(2), QueryValue::Value(GraphValue::Vertex(VId(u128::MAX))), QueryValue::Count(2)]));
+        assert!(
+            expected
+                .iter()
+                .any(|(cells, weight)| weight > &ZWeight::ZERO
+                    && cells
+                        == &vec![
+                            QueryValue::Count(2),
+                            QueryValue::Value(GraphValue::Vertex(VId(u128::MAX))),
+                            QueryValue::Count(2)
+                        ])
+        );
         drop(full);
         let exact = GqlQueryPolicy::new(0, 2, usage.work_units, usage.scratch_entries);
-        assert_eq!(db.standing_native_delta_cursor(&cx, &handle, basis, exact)
-            .unwrap().unwrap().collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        assert_eq!(
+            db.standing_native_delta_cursor(&cx, &handle, basis, exact)
+                .unwrap()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected
+        );
         for allowance in [
             GqlQueryPolicy::new(0, 1, usage.work_units, usage.scratch_entries),
             GqlQueryPolicy::new(0, 2, usage.work_units - 1, usage.scratch_entries),
             GqlQueryPolicy::new(0, 2, usage.work_units, usage.scratch_entries - 1),
         ] {
-            let mut short = db.standing_native_delta_cursor(&cx, &handle, basis, allowance)
-                .unwrap().unwrap();
+            let mut short = db
+                .standing_native_delta_cursor(&cx, &handle, basis, allowance)
+                .unwrap()
+                .unwrap();
             let mut prefix = Vec::new();
             loop {
                 match short.next().expect("one-less allowance must refuse") {
@@ -446,8 +512,10 @@ fn direct_aggregate_frames_share_governed_mapping_and_failure_does_not_consume_t
             assert_eq!(short.state(), VertexScanState::Failed);
             assert!(short.next().is_none());
         }
-        let mut closed = db.standing_native_delta_cursor(&cx, &handle, basis, exact)
-            .unwrap().unwrap();
+        let mut closed = db
+            .standing_native_delta_cursor(&cx, &handle, basis, exact)
+            .unwrap()
+            .unwrap();
         assert_eq!(closed.evaluator_stats(), initial);
         closed.close();
         assert!(closed.next().is_none());
@@ -459,15 +527,29 @@ fn direct_aggregate_frames_share_governed_mapping_and_failure_does_not_consume_t
         let delta = db.standing_query_delta(&cx, &handle).unwrap().unwrap();
         let delta_rows = delta.rows();
         let layout = Arc::clone(handle.native.as_ref().unwrap());
-        let make_group = || Pull::new(view_runs(delta_rows, None, NativeRow::Group),
-            Arc::clone(&layout), accepted.0, policy(), StandingQueryStats {
-                work_units: initial.work_units, scratch_entries: initial.scratch_entries,
-                ..StandingQueryStats::default()
-            });
+        let make_group = || {
+            Pull::new(
+                view_runs(delta_rows, None, NativeRow::Group),
+                Arc::clone(&layout),
+                accepted.0,
+                policy(),
+                StandingQueryStats {
+                    work_units: initial.work_units,
+                    scratch_entries: initial.scratch_entries,
+                    ..StandingQueryStats::default()
+                },
+            )
+        };
         let mut good = make_group();
         let mut calls = 0;
         let mut actual = Vec::new();
-        while let Some(frame) = good.advance(&mut || { calls += 1; Ok(()) }, pull_change) {
+        while let Some(frame) = good.advance(
+            &mut || {
+                calls += 1;
+                Ok(())
+            },
+            pull_change,
+        ) {
             actual.push(frame.unwrap());
         }
         assert_eq!(actual, expected);
@@ -477,12 +559,25 @@ fn direct_aggregate_frames_share_governed_mapping_and_failure_does_not_consume_t
             let mut seen = 0;
             let mut prefix = Vec::new();
             loop {
-                match pull.advance(&mut || {
-                    seen += 1;
-                    if seen == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
-                }, pull_change).expect("checkpoint reached") {
+                match pull
+                    .advance(
+                        &mut || {
+                            seen += 1;
+                            if seen == stop {
+                                Err(StandingQueryFailure::Interrupted)
+                            } else {
+                                Ok(())
+                            }
+                        },
+                        pull_change,
+                    )
+                    .expect("checkpoint reached")
+                {
                     Ok(frame) => prefix.push(frame),
-                    Err(error) => { assert_eq!(error, StandingQueryFailure::Interrupted); break; }
+                    Err(error) => {
+                        assert_eq!(error, StandingQueryFailure::Interrupted);
+                        break;
+                    }
                 }
             }
             assert_eq!(seen, stop);
@@ -492,14 +587,23 @@ fn direct_aggregate_frames_share_governed_mapping_and_failure_does_not_consume_t
             assert!(pull.runs.is_none() && pull.pending.is_none());
         }
         let mut pull = make_group();
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = pull.advance(&mut || panic!("aggregate delivery unwind"), pull_change);
-        })).is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = pull.advance(&mut || panic!("aggregate delivery unwind"), pull_change);
+            }))
+            .is_err()
+        );
         assert_eq!(pull.state, VertexScanState::Failed);
         assert!(pull.runs.is_none() && pull.pending.is_none());
         assert_eq!(snapshot(&db, &cx, &handle), accepted);
-        assert_eq!(db.standing_native_delta_cursor(&cx, &handle, basis, exact)
-            .unwrap().unwrap().collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        assert_eq!(
+            db.standing_native_delta_cursor(&cx, &handle, basis, exact)
+                .unwrap()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -512,30 +616,61 @@ fn direct_aggregate_maintenance_failure_never_relabels_an_old_delta_as_current()
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let basis = db.write(&commit, write(1, 1)).await.unwrap();
-        let handle = db.register_standing_native(&cx,
-            "MATCH (n) RETURN n.p AS k,COUNT(*) AS c GROUP BY n.p",
-            &GqlParameters::new(), symbols,
-            GqlQueryPolicy::new(1000, 1, 1_000_000, 1_000_000)).unwrap();
+        let handle = db
+            .register_standing_native(
+                &cx,
+                "MATCH (n) RETURN n.p AS k,COUNT(*) AS c GROUP BY n.p",
+                &GqlParameters::new(),
+                symbols,
+                GqlQueryPolicy::new(1000, 1, 1_000_000, 1_000_000),
+            )
+            .unwrap();
         let first = db.write(&commit, write(2, 1)).await.unwrap();
-        assert!(!db.standing_native_delta_cursor(&cx, &handle, basis, policy())
-            .unwrap().unwrap().collect::<Result<Vec<_>, _>>().unwrap().is_empty());
+        assert!(
+            !db.standing_native_delta_cursor(&cx, &handle, basis, policy())
+                .unwrap()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .is_empty()
+        );
         let failed_at = db.write(&commit, write(3, 2)).await.unwrap();
         assert_eq!(db.frontier().unwrap(), failed_at);
-        assert!(matches!(db.standing_native_delta_cursor(&cx, &handle, first, policy()),
-            Err(StandingQueryError::Unavailable { reason: StandingQueryFailure::ResultBudget, .. })));
+        assert!(matches!(
+            db.standing_native_delta_cursor(&cx, &handle, first, policy()),
+            Err(StandingQueryError::Unavailable {
+                reason: StandingQueryFailure::ResultBudget,
+                ..
+            })
+        ));
         // A rejected rebuild must preserve the fence rather than expose the
         // previously successful tick as a baseline or unchanged successor.
-        assert!(db.rebuild_standing_query(&cx, &handle,
-            GqlQueryPolicy::new(1000, 1, 1_000_000, 1_000_000)).is_err());
-        assert!(matches!(db.standing_native_delta_cursor(&cx, &handle, first, policy()),
-            Err(StandingQueryError::Unavailable { .. })));
+        assert!(
+            db.rebuild_standing_query(
+                &cx,
+                &handle,
+                GqlQueryPolicy::new(1000, 1, 1_000_000, 1_000_000)
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            db.standing_native_delta_cursor(&cx, &handle, first, policy()),
+            Err(StandingQueryError::Unavailable { .. })
+        ));
         db.rebuild_standing_query(&cx, &handle, maintain()).unwrap();
-        assert!(db.standing_native_delta_cursor(&cx, &handle, first, policy())
-            .unwrap().is_none());
+        assert!(
+            db.standing_native_delta_cursor(&cx, &handle, first, policy())
+                .unwrap()
+                .is_none()
+        );
         let before = snapshot(&db, &cx, &handle);
         db.write(&commit, write(4, 2)).await.unwrap();
-        let frames = db.standing_native_delta_cursor(&cx, &handle, before.0, policy())
-            .unwrap().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let frames = db
+            .standing_native_delta_cursor(&cx, &handle, before.0, policy())
+            .unwrap()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert_eq!(integrate(before.1, frames), snapshot(&db, &cx, &handle).1);
     });
     assert!(report.lab_test_passed(), "{report:?}");

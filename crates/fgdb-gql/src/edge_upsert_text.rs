@@ -100,10 +100,15 @@ impl PreparedGraphEdgeUpsertText {
 impl From<crate::GraphSetTextError> for GraphEdgeUpsertTextError {
     fn from(error: crate::GraphSetTextError) -> Self {
         let kind = match error.kind {
-            crate::GraphSetTextErrorKind::Pattern(kind) => GraphEdgeUpsertTextErrorKind::Query(kind),
+            crate::GraphSetTextErrorKind::Pattern(kind) => {
+                GraphEdgeUpsertTextErrorKind::Query(kind)
+            }
             kind => GraphEdgeUpsertTextErrorKind::Relation(kind),
         };
-        Self { offset: error.offset, kind }
+        Self {
+            offset: error.offset,
+            kind,
+        }
     }
 }
 

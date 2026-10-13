@@ -262,22 +262,24 @@ impl<'a> Reader<'a> {
     }
 
     fn reserve_values(&mut self, count: usize) -> Result<(), DecodeError> {
-        self.remaining_values = self.remaining_values.checked_sub(count).ok_or(
-            DecodeError::LimitExceeded {
-                resource: DecodeLimit::Values,
-                limit: self.limits.max_values,
-            },
-        )?;
+        self.remaining_values =
+            self.remaining_values
+                .checked_sub(count)
+                .ok_or(DecodeError::LimitExceeded {
+                    resource: DecodeLimit::Values,
+                    limit: self.limits.max_values,
+                })?;
         Ok(())
     }
 
     fn reserve_data(&mut self, count: usize) -> Result<(), DecodeError> {
-        self.remaining_data_bytes = self.remaining_data_bytes.checked_sub(count).ok_or(
-            DecodeError::LimitExceeded {
-                resource: DecodeLimit::DataBytes,
-                limit: self.limits.max_data_bytes,
-            },
-        )?;
+        self.remaining_data_bytes =
+            self.remaining_data_bytes
+                .checked_sub(count)
+                .ok_or(DecodeError::LimitExceeded {
+                    resource: DecodeLimit::DataBytes,
+                    limit: self.limits.max_data_bytes,
+                })?;
         Ok(())
     }
 

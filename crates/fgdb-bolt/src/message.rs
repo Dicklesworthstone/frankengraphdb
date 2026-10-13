@@ -625,7 +625,10 @@ mod tests {
         let mut decoder = Dechunker::new(4);
         decoder.push(&wire);
         for value in 0..1000_u32 {
-            assert_eq!(decoder.next_message(), Ok(Some(value.to_be_bytes().to_vec())));
+            assert_eq!(
+                decoder.next_message(),
+                Ok(Some(value.to_be_bytes().to_vec()))
+            );
             // The accepted prefix is a cursor, not drain(..prefix) per result.
             // This is a structural law, not a throughput benchmark claim.
             assert_eq!(decoder.pending.len(), wire.len());
@@ -695,7 +698,11 @@ mod tests {
             (0x01, "HELLO", vec![empty()]),
             (0x02, "GOODBYE", vec![]),
             (0x0F, "RESET", vec![]),
-            (0x10, "RUN", vec![Value::string("RETURN 1"), empty(), empty()]),
+            (
+                0x10,
+                "RUN",
+                vec![Value::string("RETURN 1"), empty(), empty()],
+            ),
             (0x11, "BEGIN", vec![empty()]),
             (0x12, "COMMIT", vec![]),
             (0x13, "ROLLBACK", vec![]),
@@ -829,11 +836,7 @@ mod tests {
                 .is_err()
             );
             assert!(
-                decode_fields(
-                    0x66,
-                    vec![Value::Map(vec![]), Value::List(vec![]), bad],
-                )
-                .is_err()
+                decode_fields(0x66, vec![Value::Map(vec![]), Value::List(vec![]), bad],).is_err()
             );
         }
     }
