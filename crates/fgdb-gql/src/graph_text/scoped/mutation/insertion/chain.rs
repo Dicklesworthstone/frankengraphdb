@@ -114,7 +114,7 @@ impl PreparedGraphWriteChainText {
             true,
             true,
         )?;
-        let mut steps = vec![ChainTextStep::Insert(first, returning)];
+        let mut steps = vec![ChainTextStep::Insert(Box::new((first, returning)))];
         while let Some(from) = next {
             // The continuation is at the next write's own clause.
             let mut lexer = Lexer {
@@ -130,7 +130,7 @@ impl PreparedGraphWriteChainText {
                     &mut resolve,
                     from,
                 )?;
-                steps.push(ChainTextStep::EdgeMerge(merge, returning));
+                steps.push(ChainTextStep::EdgeMerge(Box::new((merge, returning))));
                 next = None;
             } else {
                 let (step, returning, after) = PreparedGraphInsertText::prepare_chained(
@@ -140,7 +140,7 @@ impl PreparedGraphWriteChainText {
                     crate::graph_text::LentResolver(&mut resolve),
                     from,
                 )?;
-                steps.push(ChainTextStep::Insert(step, returning));
+                steps.push(ChainTextStep::Insert(Box::new((step, returning))));
                 next = after;
             }
         }
@@ -165,8 +165,8 @@ impl PreparedGraphWriteChainText {
         let mut schema: Vec<GqlParameterSpec> = Vec::new();
         for step in &self.steps {
             let specs = match step {
-                ChainTextStep::Insert(insertion, _) => insertion.parameter_schema(),
-                ChainTextStep::EdgeMerge(merge, _) => merge.parameter_schema(),
+                ChainTextStep::Insert(step) => step.0.parameter_schema(),
+                ChainTextStep::EdgeMerge(step) => step.0.parameter_schema(),
             };
             for spec in specs {
                 if !schema.iter().any(|known| known.name == spec.name) {
@@ -218,7 +218,8 @@ impl PreparedGraphWriteChainText {
         };
         for step in &self.steps {
             match step {
-                ChainTextStep::Insert(insertion, returning) => {
+                ChainTextStep::Insert(step) => {
+                    let (insertion, returning) = &**step;
                     let values =
                         insertion.checked_arguments(&own(insertion.parameter_schema())?)?;
                     if let InsertTextInput::Relation { input, .. } = &insertion.input {
@@ -241,7 +242,8 @@ impl PreparedGraphWriteChainText {
                         }
                     });
                 }
-                ChainTextStep::EdgeMerge(merge, returning) => {
+                ChainTextStep::EdgeMerge(step) => {
+                    let (merge, returning) = &**step;
                     let own = own(merge.parameter_schema())?;
                     if let crate::mutation_text::EdgeMergeTextInput::Row { input, .. } =
                         &merge.input
