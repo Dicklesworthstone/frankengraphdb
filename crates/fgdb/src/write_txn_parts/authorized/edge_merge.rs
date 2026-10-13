@@ -153,7 +153,47 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphEdgeMergeQuery,
         policy: GraphEdgeMergePolicy,
+        clock: impl FnMut() -> u64,
+    ) -> Result<QueryReceipt, QueryFault> {
+        self.execute_graph_edge_merge_query_authorized_checked(
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            query,
+            policy,
+            clock,
+            |_, _| Ok(()),
+        )
+        .await
+    }
+
+    /// Admit a private host representation of the final MERGE rows before
+    /// native completion. The callback runs once, including for zero rows,
+    /// after projection and signed row admission. It receives no database or
+    /// transaction handle and cannot replace the native result.
+    ///
+    /// Host work is charged through the same live write permit. Refusal,
+    /// expiry, retirement or cancellation therefore discards the unpublished
+    /// workspace. No fallible host result processing follows completion.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_edge_merge_query_authorized_checked(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphEdgeMergeQuery,
+        policy: GraphEdgeMergePolicy,
         mut clock: impl FnMut() -> u64,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
     ) -> Result<QueryReceipt, QueryFault> {
         let merged = |error: Fault| error.map_source(GraphEdgeMergeQueryError::Merge);
         let refusal = |error| merged(source(WriteTxnError::Authorization(error)));
@@ -237,6 +277,15 @@ impl<V: Vfs + Clone> Database<V> {
                     .permit
                     .charge_rows_at((execution.clock)(), rows)
                     .map_err(refusal)?;
+                query_cx
+                    .with_restriction(|| {
+                        admit(&result.value, &mut |work| {
+                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.work(work)
+                        })
+                    })
+                    .map_err(source)
+                    .map_err(merged)?;
                 let completion = workspace
                     .transaction()
                     .complete_controlled(self, commit_cx, None, false, || {
