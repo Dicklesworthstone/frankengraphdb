@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, btree_map};
 
 mod spill;
 pub use spill::{EdgeSpillAggregateCursor, EdgeSpillAggregatePlan};
+mod pipeline;
+use pipeline::InputPipeline;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeAggregateBuildError {
@@ -70,8 +72,14 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// the child's order; later columns distinguish only equal collected values.
 /// This in-place finalization shares the source's cumulative work allowance
 /// and cancellation checks. It retains no extra input or ordering table.
-/// Relational input remains outside this profile. Collection payloads are
-/// metered, not spilled.
+/// Single-source WITH chains of ALL column/constant/scalar-VM projections,
+/// scopes and filters execute row by row before numeric grouping. Ordinal-
+/// dependent or additional graph-reading expressions remain outside this path.
+/// Intermediate DISTINCT, ORDER BY, pages,
+/// expansion, multi-source operators and COLLECT consumers are not admitted:
+/// their positional or support semantics cannot be erased by this fusion.
+/// No intermediate match relation is collected. Collection payloads on the
+/// original nonrelational path remain metered, not spilled.
 /// Every child operator and
 /// column is checked before opening the source; a failed plan is never retried
 /// as another source or an eager query. The ordinary row stream's identity
@@ -81,6 +89,7 @@ pub struct EdgeAggregatePlan {
     input: EdgeScanPlan,
     aggregate: PreparedGraphAggregate,
     canonical_collections: bool,
+    pipeline: Option<InputPipeline>,
 }
 impl EdgeAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, EdgeAggregateBuildError> {
@@ -89,13 +98,41 @@ impl EdgeAggregatePlan {
         }) {
             return Err(EdgeAggregateBuildError::RequiresPlainGlobalAggregate);
         }
-        let aggregate = aggregate
-            .prepare_streamed_output()
-            .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?;
         let collects = aggregate
             .aggregates()
             .iter()
             .any(|spec| NumericState::collects(spec.function()));
+        let pipeline = match aggregate.input_relation() {
+            Some(relation) => {
+                // A relational projection canonicalizes its complete result.
+                // That order is immaterial to exact numeric reductions, but
+                // not to COLLECT, even if the raw scan has an identity prefix.
+                let open_extremum_domain = aggregate.aggregates().iter().any(|spec| {
+                    matches!(
+                        spec.function(),
+                        crate::GraphAggregateFunction::Min | crate::GraphAggregateFunction::Max
+                    ) && spec.argument_column().is_some_and(|column| {
+                        relation.column_types()[column] == crate::GraphSetColumnType::Any
+                    })
+                });
+                // Match the relational folded reducer's admission: the owned
+                // extremum cell requires one checked native value domain.
+                if collects || open_extremum_domain {
+                    return Err(EdgeAggregateBuildError::RequiresPlainGlobalAggregate);
+                }
+                Some(
+                    InputPipeline::compile(relation, aggregate.input_pattern())
+                        .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?,
+                )
+            }
+            None => None,
+        };
+        let aggregate = if pipeline.is_some() {
+            aggregate.prepare_complete_group_output()
+        } else {
+            aggregate.prepare_streamed_output()
+        }
+        .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?;
         let canonical_collections = if collects {
             // Preserve the complete existing source-order proof and its
             // finalization path. Only a separately proved plain input may
@@ -114,6 +151,7 @@ impl EdgeAggregatePlan {
             input,
             aggregate,
             canonical_collections,
+            pipeline,
         })
     }
     #[must_use]
@@ -183,6 +221,7 @@ pub struct EdgeAggregateCursor<S, F> {
     input: EdgeScanCursor<S, F>,
     aggregate: PreparedGraphAggregate,
     canonical_collections: bool,
+    pipeline: Option<InputPipeline>,
     state: EdgeScanState,
     pending: Option<PendingGroups>,
     completed: Option<std::vec::IntoIter<GraphAggregateRow>>,
@@ -194,6 +233,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
             input: EdgeScanCursor::new(source, plan.input, policy, checkpoint),
             aggregate: plan.aggregate,
             canonical_collections: plan.canonical_collections,
+            pipeline: plan.pipeline,
             state: EdgeScanState::Open,
             pending: None,
             completed: None,
@@ -285,9 +325,19 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
             // The graph compiler still owns source matching/projection. This
             // single-row transformation completes before any group is changed;
             // a refusal discards accumulation and releases no partial summary.
-            let row = self
-                .aggregate
-                .evaluate_streamed_input(row, &mut |event| meter.event(event).map_err(lift))?;
+            let row = if let Some(pipeline) = &self.pipeline {
+                let Some(row) = pipeline
+                    .evaluate(row, &mut |event| meter.event(event).map_err(lift))?
+                else {
+                    // A rejected binding is not source exhaustion. Continue
+                    // within the same cooperative quantum and shared meter.
+                    continue;
+                };
+                row
+            } else {
+                self.aggregate
+                    .evaluate_streamed_input(row, &mut |event| meter.event(event).map_err(lift))?
+            };
             let state = if global {
                 groups
                     .get_mut(&Vec::<GraphValue>::new())
