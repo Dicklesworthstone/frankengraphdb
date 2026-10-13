@@ -71,6 +71,24 @@ and blank lines are ignored; at most 1 MiB). File and flags combine, and must
 not repeat a name or an ID within a kind. `fgdbd serve` accepts the same file
 per database. It is an explicit mapping you keep, not a catalog in the database.
 
+### Loading edges between vertices that are already in the database
+
+An NDJSON edge endpoint is either the caller key of a vertex row earlier in
+the same input (`"source":"z1"`), or an object naming one vertex that was
+committed before this load began, by an optional label and one property value:
+
+```json
+{"kind":"edge","key":"t1","source":{"label":"Zone","property":"id","value":"int:132"},
+ "destination":{"label":"Zone","property":"id","value":"int:7"},"relation":"TRIP","props":{}}
+```
+
+So vertices can load once and edges arrive in later inputs (monthly trip
+files, `edges.csv` after `nodes.csv`). The match is resolved through the
+property index as of the load's start, so a vertex the same load creates never
+changes it, and a resumed load resolves identically. A match that names no
+committed vertex (`UnresolvedEndpoint`) or several (`AmbiguousEndpoint`) refuses
+at its line before anything commits; a null value matches nothing.
+
 ### Parameters: typed, never interpolated
 
 `--param name=int:42`, `uint:42`, `text:Ada`, `bool:true`, `null`,

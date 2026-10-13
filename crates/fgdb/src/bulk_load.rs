@@ -36,10 +36,57 @@ pub struct BulkVertex {
 #[derive(Clone, Debug)]
 pub struct BulkEdge {
     pub key: String,
-    pub source: String,
-    pub destination: String,
+    pub source: BulkEndpoint,
+    pub destination: BulkEndpoint,
     pub relation: RelationId,
     pub props: Vec<(PropertyKeyId, CanonicalScalar)>,
+}
+
+/// The vertex at one end of a bulk-loaded edge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BulkEndpoint {
+    /// A vertex row of the same source, named by its caller key.
+    Key(String),
+    /// The one vertex committed AS OF THE LOAD'S BASIS (the frontier before
+    /// its first chunk) that matches. Resolving at the basis makes preflight,
+    /// every chunk and every resume agree, even when this load creates
+    /// vertices that also match. No match or several is a typed preflight
+    /// refusal. Boxed so a key endpoint, the common case, stays small.
+    Match(Box<EndpointMatch>),
+}
+/// A vertex that carries `label`, when given, and whose property `key` equals
+/// `value` on its visible row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndpointMatch {
+    pub label: Option<LabelId>,
+    pub key: PropertyKeyId,
+    pub value: CanonicalScalar,
+}
+impl From<String> for BulkEndpoint {
+    fn from(key: String) -> Self {
+        Self::Key(key)
+    }
+}
+impl From<&str> for BulkEndpoint {
+    fn from(key: &str) -> Self {
+        Self::Key(key.to_owned())
+    }
+}
+impl BulkEndpoint {
+    /// An endpoint naming the committed vertex that matches.
+    #[must_use]
+    pub fn matching(label: Option<LabelId>, key: PropertyKeyId, value: CanonicalScalar) -> Self {
+        Self::Match(Box::new(EndpointMatch { label, key, value }))
+    }
+
+    /// The caller key, for an endpoint that names a row of this source.
+    #[must_use]
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Self::Key(key) => Some(key),
+            Self::Match(_) => None,
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub enum BulkRow {
@@ -198,6 +245,19 @@ pub enum BulkLoadErrorKind {
         edge: String,
         endpoint: String,
     },
+    /// A `BulkEndpoint::Match` named no vertex committed as of the basis.
+    /// `row` is the zero-based source row of the edge.
+    UnresolvedEndpoint {
+        row: usize,
+        edge: String,
+        endpoint: BulkEndpoint,
+    },
+    /// A `BulkEndpoint::Match` named more than one vertex as of the basis.
+    AmbiguousEndpoint {
+        row: usize,
+        edge: String,
+        endpoint: BulkEndpoint,
+    },
     InvalidVertex {
         key: String,
         source: VertexPatchError,
@@ -240,6 +300,73 @@ impl core::error::Error for BulkLoadError {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Resolve an edge endpoint: a caller key against this source's vertices
+    /// (`fresh` for the current chunk, then the committed prefix), a match
+    /// against the committed graph as of `basis` through the property index.
+    /// A match must name exactly one visible vertex carrying the label (when
+    /// given) and the exact property value on its visible row.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_endpoint(
+        &self,
+        cx: &QueryCx,
+        basis: CommitSeq,
+        row: usize,
+        edge: &str,
+        endpoint: &BulkEndpoint,
+        fresh: &BTreeMap<String, VId>,
+        committed: &BTreeMap<String, VId>,
+    ) -> Result<VId, BulkLoadErrorKind> {
+        let (label, key, value) = match endpoint {
+            BulkEndpoint::Key(key) => {
+                return fresh
+                    .get(key)
+                    .or_else(|| committed.get(key))
+                    .copied()
+                    .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
+                        edge: edge.to_owned(),
+                        endpoint: key.clone(),
+                    });
+            }
+            BulkEndpoint::Match(matched) => (&matched.label, &matched.key, &matched.value),
+        };
+        let unresolved = || BulkLoadErrorKind::UnresolvedEndpoint {
+            row,
+            edge: edge.to_owned(),
+            endpoint: endpoint.clone(),
+        };
+        // A stored NULL is never an equality candidate (as for MATCH).
+        if matches!(value, CanonicalScalar::Null) {
+            return Err(unresolved());
+        }
+        let mut control = |_| source::checkpoint(cx);
+        let mut found = None;
+        for vid in self.snapshot.property_index.lookup(*key, value) {
+            let Some(vertex) =
+                crate::gql_exec::source::find_vertex(&self.snapshot, *vid, basis, &mut control)?
+            else {
+                continue;
+            };
+            // Historical membership is only a candidate superset: recheck the
+            // visible row's label and exact value.
+            if label.is_some_and(|label| !vertex.labels.contains(&label))
+                || vertex
+                    .props
+                    .binary_search_by_key(key, |(property, _)| *property)
+                    .map_or(true, |at| vertex.props[at].1 != *value)
+            {
+                continue;
+            }
+            if found.replace(vertex.vid).is_some() {
+                return Err(BulkLoadErrorKind::AmbiguousEndpoint {
+                    row,
+                    edge: edge.to_owned(),
+                    endpoint: endpoint.clone(),
+                });
+            }
+        }
+        found.ok_or_else(unresolved)
+    }
+
     // BulkLoadError is a resume report (kind plus committed and pending
     // checkpoints) returned once per load, not per row: its size is immaterial.
     #[allow(clippy::result_large_err)]
@@ -353,6 +480,10 @@ impl<V: Vfs + Clone> Database<V> {
         // Move, do not duplicate, caller-owned checkpoint maps before admission.
         let mut committed = policy.resume.take().unwrap_or_default();
         let mut source = source.into_iter();
+        // The frontier before this load's first chunk: every chunk commits
+        // exactly one sequence, and a resume requires no interleaved writer.
+        let mut basis = CommitSeq(0);
+        let no_keys = BTreeMap::new();
         let preflight = (|| {
             source::checkpoint(cx)?;
             self.ensure_writable()
@@ -371,6 +502,11 @@ impl<V: Vfs + Clone> Database<V> {
             if !resuming {
                 committed.frontier = frontier;
             }
+            basis = u64::try_from(committed.committed_chunks)
+                .ok()
+                .and_then(|chunks| committed.frontier.0.checked_sub(chunks))
+                .map(CommitSeq)
+                .ok_or(BulkLoadErrorKind::InvalidResume)?;
             source::admit_checkpoint(cx, &committed, &policy)?;
             let mut keys = BTreeSet::new();
             let mut vertices = BTreeSet::new();
@@ -438,11 +574,20 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     BulkRow::Edge(e) => {
                         for endpoint in [&e.source, &e.destination] {
-                            if !vertices.contains(endpoint) {
-                                return Err(BulkLoadErrorKind::DanglingEndpointKey {
-                                    edge: e.key.clone(),
-                                    endpoint: endpoint.clone(),
-                                });
+                            match endpoint {
+                                BulkEndpoint::Key(key) => {
+                                    if !vertices.contains(key) {
+                                        return Err(BulkLoadErrorKind::DanglingEndpointKey {
+                                            edge: e.key.clone(),
+                                            endpoint: key.clone(),
+                                        });
+                                    }
+                                }
+                                BulkEndpoint::Match(_) => {
+                                    self.resolve_endpoint(
+                                        cx, basis, index, &e.key, endpoint, &no_keys, &no_keys,
+                                    )?;
+                                }
                             }
                         }
                         if index < committed.next_row {
@@ -454,8 +599,20 @@ impl<V: Vfs + Clone> Database<V> {
                                 .edge(*id)
                                 .map_err(|e| BulkLoadErrorKind::Write(e.into()))?
                                 .ok_or(BulkLoadErrorKind::InvalidResume)?;
-                            if Some(&row.entry.src) != committed.vertices.get(&e.source)
-                                || Some(&row.entry.dst) != committed.vertices.get(&e.destination)
+                            let prefix = |endpoint| {
+                                self.resolve_endpoint(
+                                    cx,
+                                    basis,
+                                    index,
+                                    &e.key,
+                                    endpoint,
+                                    &no_keys,
+                                    &committed.vertices,
+                                )
+                                .map_err(|_| BulkLoadErrorKind::InvalidResume)
+                            };
+                            if row.entry.src != prefix(&e.source)?
+                                || row.entry.dst != prefix(&e.destination)?
                                 || row.entry.relation != e.relation
                                 || row.props != e.props
                                 || !prefix_edges.insert(*id)
@@ -536,8 +693,9 @@ impl<V: Vfs + Clone> Database<V> {
             let prepared = (|| {
                 let mut vertex_batch = WriteBatch::new(policy.vertex_relation);
                 let mut edge_batches: BTreeMap<RelationId, WriteBatch> = BTreeMap::new();
-                for row in chunk {
+                for (offset, row) in chunk.into_iter().enumerate() {
                     source::checkpoint(cx)?;
+                    let ordinal = seal.start + offset;
                     match row {
                         BulkRow::Vertex(v) => {
                             let ElementId::Vertex(id) = self
@@ -553,20 +711,24 @@ impl<V: Vfs + Clone> Database<V> {
                             new_vertices.insert(v.key, id);
                         }
                         BulkRow::Edge(e) => {
-                            let src = *new_vertices
-                                .get(&e.source)
-                                .or_else(|| committed.vertices.get(&e.source))
-                                .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
-                                    edge: e.key.clone(),
-                                    endpoint: e.source.clone(),
-                                })?;
-                            let dst = *new_vertices
-                                .get(&e.destination)
-                                .or_else(|| committed.vertices.get(&e.destination))
-                                .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
-                                    edge: e.key.clone(),
-                                    endpoint: e.destination.clone(),
-                                })?;
+                            let src = self.resolve_endpoint(
+                                cx,
+                                basis,
+                                ordinal,
+                                &e.key,
+                                &e.source,
+                                &new_vertices,
+                                &committed.vertices,
+                            )?;
+                            let dst = self.resolve_endpoint(
+                                cx,
+                                basis,
+                                ordinal,
+                                &e.key,
+                                &e.destination,
+                                &new_vertices,
+                                &committed.vertices,
+                            )?;
                             let ElementId::Edge(id) = self
                                 .allocate_identity(cx, GraphInsertRequest::Edge { row: 0, edge: 0 })
                                 .map_err(BulkLoadErrorKind::Write)?

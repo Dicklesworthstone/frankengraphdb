@@ -122,8 +122,8 @@ pub use buffered_read::{
 
 mod bulk_load;
 pub use bulk_load::{
-    BulkEdge, BulkLoadCheckpoint, BulkLoadError, BulkLoadErrorKind, BulkLoadPolicy, BulkRow,
-    BulkVertex, ChunkFit,
+    BulkEdge, BulkEndpoint, BulkLoadCheckpoint, BulkLoadError, BulkLoadErrorKind, BulkLoadPolicy,
+    BulkRow, BulkVertex, ChunkFit, EndpointMatch,
 };
 
 mod fcw;

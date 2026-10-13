@@ -614,8 +614,8 @@ fn expected(rows: &[BulkRow]) -> (Vertices, Edges) {
                         .insert(
                             row.key.clone(),
                             (
-                                row.source.clone(),
-                                row.destination.clone(),
+                                row.source.key().unwrap().to_owned(),
+                                row.destination.key().unwrap().to_owned(),
                                 row.relation,
                                 row.props.clone()
                             )
@@ -659,8 +659,8 @@ fn generated(seed: u64) -> Vec<BulkRow> {
     for n in 0..208 {
         rows.push(BulkRow::Edge(BulkEdge {
             key: format!("e{n}"),
-            source: format!("v{}", next() % 48),
-            destination: format!("v{}", next() % 48),
+            source: format!("v{}", next() % 48).into(),
+            destination: format!("v{}", next() % 48).into(),
             relation: if n % 2 == 0 { R } else { S },
             props: props(n, (next() % 1999) as i64 - 999),
         }));
@@ -703,7 +703,7 @@ fn ndjson(rows: &[BulkRow]) -> String {
     };
     rows.iter().map(|row| match row {
         BulkRow::Vertex(row) => format!("{{\"kind\":\"vertex\",\"key\":{},\"labels\":[{}],\"props\":{{{}}}}}\n", quote(&row.key), row.labels.iter().map(|label| quote(if label.0 == 1 { "Person" } else { "Other" })).collect::<Vec<_>>().join(","), properties(&row.props)),
-        BulkRow::Edge(row) => format!("{{\"kind\":\"edge\",\"key\":{},\"source\":{},\"destination\":{},\"relation\":{},\"props\":{{{}}}}}\n", quote(&row.key), quote(&row.source), quote(&row.destination), quote(if row.relation == R { "R" } else { "S" }), properties(&row.props)),
+        BulkRow::Edge(row) => format!("{{\"kind\":\"edge\",\"key\":{},\"source\":{},\"destination\":{},\"relation\":{},\"props\":{{{}}}}}\n", quote(&row.key), quote(row.source.key().unwrap()), quote(row.destination.key().unwrap()), quote(if row.relation == R { "R" } else { "S" }), properties(&row.props)),
     }).collect()
 }
 fn runtime_check(test: impl AsyncFnOnce(PurposeContexts)) {
@@ -857,6 +857,92 @@ fn source_row_and_key_byte_bounds_are_caller_selected() {
         let output = fixture.load_command(None).args(flags).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{flags:?}: {output:?}");
     }
+}
+
+/// Incremental ingest across invocations (fgdb-srnr7): vertices load first,
+/// then a separate input's edges name them by `{label, property, value}`. A
+/// match that names no committed vertex refuses at its line before anything
+/// commits; an endpoint object with an unknown field is a malformed row.
+#[test]
+fn edges_in_a_later_load_name_committed_vertices_by_property() {
+    let zones: String = (0..5)
+        .map(|n| {
+            format!("{{\"kind\":\"vertex\",\"key\":\"z{n}\",\"labels\":[\"Person\"],\"props\":{{\"k\":\"int:{n}\"}}}}\n")
+        })
+        .collect();
+    let fixture = Fixture::new("match-endpoints", &zones);
+    fixture.load(None).loaded(5, 1, fixture.basis + 1);
+    let endpoint =
+        |n: i64| format!("{{\"label\":\"Person\",\"property\":\"k\",\"value\":\"int:{n}\"}}");
+    let trip = |n: usize, from: i64, to: String| {
+        format!(
+            "{{\"kind\":\"edge\",\"key\":\"t{n}\",\"source\":{},\"destination\":{to},\"relation\":\"R\",\"props\":{{}}}}\n",
+            endpoint(from)
+        )
+    };
+    let load = |name: &str, text: String| {
+        let input = fixture.root.join(name);
+        std::fs::write(&input, text).unwrap();
+        Outcome::new(
+            fixture
+                .command("load")
+                .arg("--input")
+                .arg(&input)
+                .output()
+                .unwrap(),
+        )
+    };
+    let frontier = fixture.basis + 1;
+    // Line 3 names k=99, which no committed vertex carries.
+    let refused = load(
+        "bad.ndjson",
+        [
+            trip(0, 0, endpoint(1)),
+            trip(1, 1, endpoint(2)),
+            trip(2, 2, endpoint(99)),
+        ]
+        .concat(),
+    );
+    refused.refusal("UnresolvedEndpoint", Some(3));
+    assert!(refused.progress().is_empty());
+    let malformed = load(
+        "malformed.ndjson",
+        trip(
+            0,
+            0,
+            "{\"property\":\"k\",\"value\":\"int:1\",\"extra\":1}".to_owned(),
+        ),
+    );
+    malformed.refusal("MalformedRow", Some(1));
+    // A key endpoint for a vertex of the same input still works beside matches.
+    let trips = [
+        trip(0, 0, endpoint(1)),
+        trip(1, 1, endpoint(2)),
+        "{\"kind\":\"vertex\",\"key\":\"fresh\",\"labels\":[\"Other\"],\"props\":{\"k\":\"int:7\"}}\n"
+            .to_owned(),
+        trip(2, 4, "\"fresh\"".to_owned()),
+    ]
+    .concat();
+    load("trips.ndjson", trips).loaded(4, 1, frontier + 1);
+    let answer = fixture.run(
+        "query",
+        &["MATCH (a:Person)-[:R]->(b) RETURN a.k AS a, b.k AS b ORDER BY a"],
+    );
+    answer.success();
+    let rows: Vec<Vec<String>> = answer
+        .events
+        .iter()
+        .filter(|event| event.get("event").string() == "row")
+        .map(|event| {
+            event
+                .get("cells")
+                .array()
+                .iter()
+                .map(|cell| cell.get("value").string().to_owned())
+                .collect()
+        })
+        .collect();
+    assert_eq!(rows, [["0", "1"], ["1", "2"], ["4", "7"]]);
 }
 
 fn refusal_preserves_frontier(bad: &str, kind: &str) {
@@ -1122,8 +1208,20 @@ fn three_seed_256_row_subprocess_matches_bulk_load_by_caller_key_and_gql() {
                     .iter()
                     .filter_map(|row| match row {
                         BulkRow::Edge(row) if row.relation == relation => Some(vec![
-                            row.source.strip_prefix('v').unwrap().parse().unwrap(),
-                            row.destination.strip_prefix('v').unwrap().parse().unwrap(),
+                            row.source
+                                .key()
+                                .unwrap()
+                                .strip_prefix('v')
+                                .unwrap()
+                                .parse()
+                                .unwrap(),
+                            row.destination
+                                .key()
+                                .unwrap()
+                                .strip_prefix('v')
+                                .unwrap()
+                                .parse()
+                                .unwrap(),
                         ]),
                         _ => None,
                     })
