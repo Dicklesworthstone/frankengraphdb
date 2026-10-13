@@ -447,7 +447,7 @@ fn rights_relation_creation_fields_and_receipt_limits_refuse_before_publication(
             assert_eq!(authorization(error), Error::ScopeDenied);
             let basic = merge();
             let fields = PreparedGraphEdgeMerge::prepare(
-                basic.selection().clone(),
+                basic.selection().expect("a MATCH-prefixed MERGE").clone(),
                 S,
                 basic.source_column(),
                 basic.destination_column(),

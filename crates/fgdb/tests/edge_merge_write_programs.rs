@@ -983,3 +983,135 @@ fn merge_return_rows_cover_every_resolved_edge_through_query_write() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// fgdb-cpny9 (TCK Merge5 [16], [17]): `MATCH ... WITH ... MERGE` resolves
+/// every WITH row's endpoint pair, as a MATCH-selected MERGE does. The row
+/// is the whole scope: its carried vertices are the endpoints and its hidden
+/// reads feed RETURN. Rows that share a pair share its one edge; a second run
+/// matches every pair and allocates nothing.
+#[test]
+fn merge_after_with_resolves_every_with_row() {
+    let ((), report) = run_async_under_lab(0xed9e_4031, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, p) in [(1, 10), (2, 20)] {
+            batch.create_vertex(VId(id), vec![PERSON], vec![(P, CanonicalScalar::Int(p))]);
+        }
+        db.write(&commit, batch).await.unwrap();
+        let arguments = GqlParameters::new();
+        let mut next = 100u128;
+        let text = "MATCH (n:Person) MATCH (m:Person) WITH n AS a, m AS b \
+                    MERGE (a)-[r:S]->(b) RETURN a.p AS a, b.p AS b";
+        let returned = db
+            .query_write(
+                &txcx,
+                &query,
+                &commit,
+                text,
+                &arguments,
+                symbols,
+                R,
+                policy(0, 10),
+                |_| {
+                    next += 1;
+                    Ok::<_, ()>(ElementId::Edge(EId(next)))
+                },
+            )
+            .await
+            .unwrap();
+        let QueryResult::Rows { columns, rows } = returned else {
+            unreachable!("MERGE ... RETURN answers rows")
+        };
+        assert_eq!(columns, ["a", "b"]);
+        let int =
+            |value| GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        assert_eq!(rows.len(), 4);
+        for (a, b) in [(10, 10), (10, 20), (20, 10), (20, 20)] {
+            assert!(rows.contains(&vec![int(a), int(b)]), "{a}, {b}");
+        }
+        let edges = |db: &Database<MemVfs>| {
+            let mut pairs = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.relation == S)
+                .map(|edge| (edge.entry.src, edge.entry.dst))
+                .collect::<Vec<_>>();
+            pairs.sort();
+            pairs
+        };
+        let all = vec![
+            (VId(1), VId(1)),
+            (VId(1), VId(2)),
+            (VId(2), VId(1)),
+            (VId(2), VId(2)),
+        ];
+        assert_eq!(edges(&db), all);
+        // Every pair now matches; no identity is requested, through the
+        // RETURN-less script path as well.
+        let frontier = db.frontier().unwrap();
+        db.query_write(
+            &txcx,
+            &query,
+            &commit,
+            "MATCH (n:Person) MATCH (m:Person) WITH n AS a, m AS b MERGE (a)-[:S]->(b)",
+            &arguments,
+            symbols,
+            R,
+            policy(0, 0),
+            |_| Err::<ElementId, ()>(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(edges(&db), all);
+        assert_eq!(db.frontier().unwrap(), frontier);
+        // Four rows carry two distinct pairs: one edge each.
+        db.query_write(
+            &txcx,
+            &query,
+            &commit,
+            "MATCH (n:Person) MATCH (m:Person) WITH n AS a, m.p AS q MERGE (a)-[:R]->(a)",
+            &arguments,
+            symbols,
+            R,
+            policy(0, 10),
+            |_| {
+                next += 1;
+                Ok::<_, ()>(ElementId::Edge(EId(next)))
+            },
+        )
+        .await
+        .unwrap();
+        let loops = db
+            .edges()
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.entry.relation == R)
+            .count();
+        assert_eq!(loops, 2);
+        // An endpoint the WITH row does not carry refuses before any write.
+        let frontier = db.frontier().unwrap();
+        assert!(
+            db.query_write(
+                &txcx,
+                &query,
+                &commit,
+                "MATCH (n:Person) WITH n.p AS a MERGE (a)-[:S]->(a)",
+                &arguments,
+                symbols,
+                R,
+                policy(0, 10),
+                |_| Err::<ElementId, ()>(()),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
