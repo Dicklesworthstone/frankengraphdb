@@ -204,6 +204,53 @@ fn past_the_resident_budget_each_object_is_read_alone() {
     );
 }
 
+/// A resident pack is released only once every object in it has been read.
+/// Many blocks can name one small object (an identical property patch), so a
+/// walk reads that object again and again; those reads must not release the
+/// pack before the walk reaches its other objects.
+#[test]
+fn rereading_one_object_does_not_release_its_pack() {
+    let dir = scratch_dir("reread");
+    let objects = objects(12, PACK_MIN_OBJECTS + 3);
+    under_lab(0x9a0a, {
+        let dir = dir.clone();
+        let objects = objects.clone();
+        move |cx| async move {
+            publish(&cx, &open(&cx, &dir).await, &objects, None)
+                .await
+                .expect("publish");
+            let store = open(&cx, &dir).await;
+            // As many reads as the pack holds objects, all of the first one.
+            let first = std::slice::from_ref(&objects[0]);
+            for _ in 0..objects.len() {
+                let read = read_all(&cx, &store, first).await;
+                assert_eq!(read[0].as_ref().unwrap(), &objects[0].1);
+            }
+            assert_eq!(
+                store.packs.resident_packs(),
+                1,
+                "rereads of one object do not release its pack"
+            );
+            let (last, rest) = objects.split_last().unwrap();
+            assert!(
+                read_all(&cx, &store, rest)
+                    .await
+                    .iter()
+                    .zip(rest)
+                    .all(|(read, (_, bytes))| read.as_ref().unwrap() == bytes)
+            );
+            assert_eq!(store.packs.resident_packs(), 1);
+            let final_read = read_all(&cx, &store, std::slice::from_ref(last)).await;
+            assert_eq!(final_read[0].as_ref().unwrap(), &last.1);
+            assert_eq!(
+                store.packs.resident_packs(),
+                0,
+                "released once every object was read"
+            );
+        }
+    });
+}
+
 #[test]
 fn a_small_batch_stays_loose_and_creates_no_pack_directory() {
     let dir = scratch_dir("loose");

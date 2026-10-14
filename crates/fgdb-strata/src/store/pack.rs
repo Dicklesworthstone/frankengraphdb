@@ -83,6 +83,8 @@ const PACK_CACHE_BYTES: usize = 256 << 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Location {
     pack: u32,
+    /// The object's position in its pack's table.
+    entry: u32,
     offset: u64,
     len: u32,
 }
@@ -189,8 +191,8 @@ enum Slot {
     Empty,
     Loading,
     Loaded(Arc<[u8]>),
-    /// Served as many objects as its table holds, then released: a walk is
-    /// done with it. Later reads take one object at a time.
+    /// Served every object its table holds at least once, then released: a
+    /// walk is done with it. Later reads take one object at a time.
     Drained,
 }
 
@@ -198,9 +200,15 @@ struct PackFile {
     path: PathBuf,
     len: u64,
     objects: u64,
-    /// Objects this pack has served by any path: whole, or one at a time
-    /// while another read was loading it.
+    /// Distinct objects this pack has served by any path: whole, or one at a
+    /// time while another read was loading it.
     served: std::sync::atomic::AtomicU64,
+    /// One bit per table entry, set once that object has been served. Many
+    /// blocks can name one small object (an identical property patch), and
+    /// counting each of those reads would release the pack before the walk
+    /// reached its other objects: a packed road-ny open read 5,375 objects
+    /// 39,396 extra times, and that many reads then went one object at a time.
+    seen: Box<[std::sync::atomic::AtomicU64]>,
     slot: Mutex<Slot>,
 }
 
@@ -320,10 +328,19 @@ impl PackIndex {
             len,
             objects: objects.len() as u64,
             served: std::sync::atomic::AtomicU64::new(0),
+            seen: (0..objects.len().div_ceil(64))
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect(),
             slot: Mutex::new(Slot::Empty),
         }));
-        for (id, offset, len) in objects {
-            let location = Location { pack, offset, len };
+        for (entry, (id, offset, len)) in objects.into_iter().enumerate() {
+            let entry = u32::try_from(entry).expect("a pack table is far below u32::MAX entries");
+            let location = Location {
+                pack,
+                entry,
+                offset,
+                len,
+            };
             if let Some(previous) = table.objects.insert(id, location) {
                 table.older.entry(id).or_default().insert(0, previous);
             }
@@ -387,7 +404,7 @@ impl PackIndex {
                 Slot::Loaded(bytes) => {
                     let object = bytes[start..end].to_vec();
                     drop(slot);
-                    self.served(&pack);
+                    self.served(&pack, location.entry);
                     return Ok(object);
                 }
                 Slot::Loading | Slot::Drained => false,
@@ -417,7 +434,7 @@ impl PackIndex {
                 })
                 .await
                 .map_err(StoreError::Io)?;
-            self.served(&pack);
+            self.served(&pack, location.entry);
             return Ok(object);
         }
         let loaded = Self::read_whole(cx, vfs, &pack).await;
@@ -427,7 +444,7 @@ impl PackIndex {
                 let object = bytes[start..end].to_vec();
                 *slot = Slot::Loaded(bytes);
                 drop(slot);
-                self.served(&pack);
+                self.served(&pack, location.entry);
                 Ok(object)
             }
             Err(error) => {
@@ -439,13 +456,20 @@ impl PackIndex {
         }
     }
 
-    /// Count one object served. Once a pack has served as many objects as
-    /// its table holds, a loaded pack is released with its budget.
-    fn served(&self, pack: &PackFile) {
-        let served = pack
-            .served
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
+    /// Count the object at `entry` served, once however often it is read.
+    /// Once a pack has served every object its table holds, a loaded pack is
+    /// released with its budget; that is checked on every read, so a load
+    /// that completes after the last distinct object was read one at a time
+    /// is released too.
+    fn served(&self, pack: &PackFile, entry: u32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let bit = 1u64 << (entry % 64);
+        let first = pack.seen[entry as usize / 64].fetch_or(bit, Relaxed) & bit == 0;
+        let served = if first {
+            pack.served.fetch_add(1, Relaxed) + 1
+        } else {
+            pack.served.load(Relaxed)
+        };
         if served < pack.objects {
             return;
         }
