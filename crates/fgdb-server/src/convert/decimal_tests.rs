@@ -97,6 +97,43 @@ fn bad_decimal_text_refuses_whole_arguments_without_exposing_nested_values() {
     assert!(parameters(&[("bad".into(), WireValue::WideInt(1))], None).is_err());
 }
 
+#[test]
+fn json_decimal_tags_share_nested_native_binding_and_canonical_refusals() {
+    use fgdb_protocol::json::{argument, parse_json};
+
+    let input = parse_json(
+        r#"[{"$decimal":"9007199254740993.000000000000000001"},
+            {"amount":{"$decimal":"-0.000000000000000001"}}]"#,
+        32,
+        64,
+    )
+    .unwrap();
+    let bound = parameters(&[("rows".into(), argument(&input).unwrap())], None).unwrap();
+    let Some(GqlParameterValue::List(value)) = bound.get("rows") else {
+        panic!("JSON array must retain its native list type");
+    };
+    assert_eq!(
+        graph(value.value()),
+        WireValue::List(vec![
+            wire(9_007_199_254_740_993_000_000_000_000_000_001),
+            WireValue::Map(vec![("amount".into(), wire(-1))]),
+        ])
+    );
+    for input in [
+        r#"{"$decimal":"1.25"}"#,
+        r#"[{"$decimal":"-0.000000000000000000"}]"#,
+        r#"{"amount":{"$decimal":"10000000000000000.000000000000000000"}}"#,
+    ] {
+        let value = argument(&parse_json(input, 32, 64).unwrap()).unwrap();
+        let error = parameters(&[("payload".into(), value)], None).unwrap_err();
+        assert_eq!(error.parameter, "payload");
+        assert_eq!(
+            error.reason,
+            "a decimal argument must be canonical fixed-scale text"
+        );
+    }
+}
+
 mod served {
     use super::*;
     use crate::execute::{self, Answer, Refusal};
@@ -138,6 +175,87 @@ mod served {
         };
         // The actual FGP typed body, not interpolated decimal query text.
         Execute::decode(&request.encode().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn json_decimal_ingestion_rejects_a_bad_tail_then_commits_both_exact_values() {
+        use fgdb_protocol::json::{Json, argument, parse_json, quote};
+
+        let ((), report) = run_async_under_lab(0xd3c1_0004, |root| async move {
+            let (server, token, _) = fixture(&root, "decimal-json-ingestion").await;
+            let db = &server.databases["test"];
+            let before = db.db.read(&root).await.unwrap().frontier().unwrap();
+            let arguments = |text: &str| {
+                let Json::Object(fields) = parse_json(text, 32, 128).unwrap() else {
+                    panic!("HTTP parameters are a JSON object");
+                };
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), argument(value).unwrap()))
+                    .collect()
+            };
+            let script = "CREATE (a:Item {amount:$a}); CREATE (b:Item {amount:$b})";
+            let error = refused(
+                execute::write(
+                    &root,
+                    db,
+                    &token,
+                    &request(
+                        ExecuteMode::Write,
+                        script,
+                        arguments(r#"{"a":{"$decimal":"0.000000000000000001"},
+                                      "b":{"$decimal":"1.25"}}"#),
+                    ),
+                )
+                .await,
+            );
+            assert_eq!(error.code, ErrorCode::Statement);
+            assert!(!error.message.contains("1.25"));
+            let guard = db.db.read(&root).await.unwrap();
+            assert_eq!(guard.frontier().unwrap(), before);
+            assert!(guard.vertices().unwrap().is_empty());
+            drop(guard);
+            let answer = accepted(
+                execute::write(
+                    &root,
+                    db,
+                    &token,
+                    &request(
+                        ExecuteMode::Write,
+                        script,
+                        arguments(r#"{"a":{"$decimal":"9007199254740993.000000000000000001"},
+                                      "b":{"$decimal":"-0.000000000000000001"}}"#),
+                    ),
+                )
+                .await,
+            );
+            assert!(matches!(answer.outcome,
+                Outcome::WriteCommitted { seq, statements: 2 } if seq == before.0 + 1
+            ));
+            assert_eq!(db.db.read(&root).await.unwrap().vertices().unwrap().len(), 2);
+            for amount in [
+                "9007199254740993.000000000000000001",
+                "-0.000000000000000001",
+            ] {
+                let params = format!(r#"{{"amount":{{"$decimal":{}}}}}"#, quote(amount));
+                let answer = accepted(
+                    execute::read(
+                        &root,
+                        db,
+                        &token,
+                        &request(
+                            ExecuteMode::Read,
+                            "MATCH (n:Item) WHERE n.amount=$amount RETURN n.amount AS amount",
+                            arguments(&params),
+                        ),
+                    )
+                    .await,
+                );
+                assert_eq!(answer.rows, vec![vec![WireValue::Decimal(amount.into())]]);
+            }
+            server.join_database_workers(&root).await;
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

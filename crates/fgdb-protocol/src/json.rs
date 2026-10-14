@@ -336,7 +336,7 @@ pub fn cell(value: &WireValue) -> String {
         WireValue::Bool(v) => format!(r#"{{"type":"bool","value":{v}}}"#),
         WireValue::Int(v) => format!(r#"{{"type":"int","value":"{v}"}}"#),
         WireValue::Text(v) => format!(r#"{{"type":"text","value":{}}}"#, quote(v)),
-        WireValue::Decimal(v) => format!(r#"{{"type":"decimal","value":"{v}"}}"#),
+        WireValue::Decimal(v) => format!(r#"{{"type":"decimal","value":{}}}"#, quote(v)),
         WireValue::Date(v) => format!(r#"{{"type":"date","value":{}}}"#, quote(v)),
         WireValue::LocalTime(v) => format!(r#"{{"type":"localtime","value":{}}}"#, quote(v)),
         WireValue::Time(v) => format!(r#"{{"type":"time","value":{}}}"#, quote(v)),
@@ -389,6 +389,12 @@ pub fn cell(value: &WireValue) -> String {
 /// number `float`, a string `text`, `true`/`false` `bool`, `null` null, an
 /// array a list and an object a map. A non-finite or out-of-range number is
 /// refused, never rounded.
+///
+/// `{"$decimal":"<canonical fixed-scale text>"}` explicitly selects a decimal,
+/// including inside lists and maps. Its string is preserved exactly, not
+/// parsed as a JSON number. This framing layer checks the wire byte bound;
+/// the native parameter binder owns decimal scale, range and canonicality.
+/// Ordinary JSON numbers and strings keep their existing float/text meanings.
 pub fn argument(json: &Json) -> Result<WireValue, String> {
     // JSON has no byte strings. A one-key object whose key starts with `$`
     // (never a property name) spells one: `{"$bytes": "<hex>"}` exactly, or
@@ -402,6 +408,13 @@ pub fn argument(json: &Json) -> Result<WireValue, String> {
     {
         return match (key.as_str(), value) {
             ("$bytes", Json::String(hex)) => bytes_from_hex(hex).map(WireValue::Bytes),
+            ("$decimal", Json::String(text)) => {
+                if text.len() > crate::body::MAX_SCALAR_BYTES {
+                    return Err("a $decimal exceeds the wire scalar byte limit".into());
+                }
+                Ok(WireValue::Decimal(text.clone()))
+            }
+            ("$decimal", _) => Err("a $decimal holds canonical fixed-scale text".into()),
             ("$vector", Json::Array(items)) => {
                 let mut bytes = Vec::with_capacity(items.len() * 4);
                 for item in items {
@@ -418,7 +431,7 @@ pub fn argument(json: &Json) -> Result<WireValue, String> {
                 Ok(WireValue::Bytes(bytes))
             }
             _ => Err(format!(
-                "unknown typed argument {key:?}; use $bytes or $vector"
+                "unknown typed argument {key:?}; use $bytes, $vector or $decimal"
             )),
         };
     }
@@ -473,6 +486,87 @@ pub fn bytes_from_hex(hex: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_decimals_preserve_exact_text_at_every_collection_depth() {
+        let value = parse_json(
+            r#"[{"$decimal":"9007199254740993.000000000000000001"},
+                {"amount":{"$decimal":"-0.000000000000000001"}},
+                [{"$decimal":"9999999999999999.999999999999999999"}]]"#,
+            32,
+            64,
+        )
+        .unwrap();
+        assert_eq!(
+            argument(&value).unwrap(),
+            WireValue::List(vec![
+                WireValue::Decimal("9007199254740993.000000000000000001".into()),
+                WireValue::Map(vec![(
+                    "amount".into(),
+                    WireValue::Decimal("-0.000000000000000001".into()),
+                )]),
+                WireValue::List(vec![WireValue::Decimal(
+                    "9999999999999999.999999999999999999".into(),
+                )]),
+            ])
+        );
+    }
+
+    #[test]
+    fn decimal_tags_require_bounded_text_without_reinterpreting_plain_values() {
+        let parse = |text: &str| argument(&parse_json(text, 16, 64).unwrap());
+        for text in [
+            r#"{"$decimal":1.25}"#,
+            r#"{"$decimal":null}"#,
+            r#"{"$decimal":true}"#,
+            r#"{"$decimal":[]}"#,
+            r#"{"$decimal":{}}"#,
+        ] {
+            assert_eq!(
+                parse(text),
+                Err("a $decimal holds canonical fixed-scale text".into())
+            );
+        }
+        let oversized = Json::Object(BTreeMap::from([(
+            "$decimal".into(),
+            Json::String("9".repeat(crate::body::MAX_SCALAR_BYTES + 1)),
+        )]));
+        assert_eq!(
+            argument(&oversized),
+            Err("a $decimal exceeds the wire scalar byte limit".into())
+        );
+        assert_eq!(parse("1.25"), Ok(WireValue::Float(1.25)));
+        assert_eq!(parse(r#""1.25""#), Ok(WireValue::Text("1.25".into())));
+        assert!(matches!(
+            parse(r#"{"$decimal":"1.25","other":0}"#),
+            Ok(WireValue::Map(_))
+        ));
+        // As for binary FGP, decimal canonicality belongs to the native binder.
+        // This adapter must not silently pad, round or coerce a supplied scale.
+        assert_eq!(
+            parse(r#"{"$decimal":"1.25"}"#),
+            Ok(WireValue::Decimal("1.25".into()))
+        );
+    }
+
+    #[test]
+    fn decimal_cells_escape_raw_wire_strings_and_preserve_canonical_output() {
+        let canonical = "0.000000000000000001";
+        assert_eq!(
+            cell(&WireValue::Decimal(canonical.into())),
+            r#"{"type":"decimal","value":"0.000000000000000001"}"#
+        );
+        // WireValue is a public transport value, not an admitted native scalar.
+        // Even malformed decimal text must remain one safely quoted JSON cell.
+        let raw = "\"\\\n\0";
+        let encoded = cell(&WireValue::Decimal(raw.into()));
+        let Json::Object(fields) = parse_json(&encoded, 8, 64).unwrap() else {
+            panic!("one decimal cell object expected");
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.get("type"), Some(&Json::String("decimal".into())));
+        assert_eq!(fields.get("value"), Some(&Json::String(raw.into())));
+    }
 
     #[test]
     fn typed_arguments_spell_bytes_and_packed_vectors() {
