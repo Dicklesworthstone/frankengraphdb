@@ -211,11 +211,21 @@ impl<'a> Shape<'a> {
 /// Binary trie in canonical variable order, not stored edge orientation.
 /// Unary loops contain only diagonal values. Parallel edge support is unique
 /// here; its exact weight remains in the parent's unchanged topology table.
+///
+/// Rows are stored flat: the roots ascending, each root's children ascending
+/// in one shared vector, and a probed root -> row index. A tree of trees cost
+/// two random descents per topology key to build and one per domain lookup
+/// (38% of a 730K-edge triangle count). The build charges exactly what that
+/// tree build charged, in the same order (pinned by a law against it).
 struct Trie {
     low: usize,
     high: usize,
     roots: Vec<VId>,
-    children: BTreeMap<VId, Vec<VId>>,
+    /// Probed, never iterated: root -> its row.
+    rows: crate::id_hash::IdMap<VId, usize>,
+    /// Row `r`'s children are `children[offsets[r]..offsets[r + 1]]`.
+    offsets: Vec<usize>,
+    children: Vec<VId>,
 }
 impl Trie {
     fn build<E>(
@@ -223,7 +233,13 @@ impl Trie {
         topology: &BTreeMap<TopologyKey, Multiplicity>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
-        let mut rows: BTreeMap<VId, BTreeSet<VId>> = BTreeMap::new();
+        use crate::id_hash::IdSet;
+        // A key is unique per (left, relation, right), so one orientation per
+        // key never repeats a pair; only the undirected doubling can.
+        let mut repeated =
+            (atom.direction == GlaDirection::Undirected).then(IdSet::<(VId, VId)>::default);
+        let mut lows = IdSet::<VId>::default();
+        let mut pairs = Vec::new();
         for &(left, relation, right) in topology.keys() {
             control(GlaExecutionEvent::Work)?;
             if relation != atom.relation {
@@ -249,34 +265,53 @@ impl Trie {
                 } else {
                     (to, from)
                 };
-                if !rows.contains_key(&low) {
+                let new_low = !lows.contains(&low);
+                if new_low {
                     control(GlaExecutionEvent::ScratchEntry)?;
                 }
-                if !rows.get(&low).is_some_and(|row| row.contains(&high)) {
+                let new_pair = new_low
+                    || repeated
+                        .as_ref()
+                        .is_none_or(|seen| !seen.contains(&(low, high)));
+                if new_pair {
                     control(GlaExecutionEvent::ScratchEntry)?;
-                    rows.entry(low).or_default().insert(high);
+                    lows.insert(low);
+                    if let Some(seen) = &mut repeated {
+                        seen.insert((low, high));
+                    }
+                    pairs.push((low, high));
                 }
             }
         }
+        drop(lows);
+        drop(repeated);
+        pairs.sort_unstable();
         let mut roots = Vec::new();
-        let mut children = BTreeMap::new();
-        for (low, values) in rows {
+        let mut rows = crate::id_hash::IdMap::default();
+        let mut offsets = vec![0];
+        let mut children = Vec::with_capacity(pairs.len());
+        let mut at = 0;
+        while at < pairs.len() {
+            let low = pairs[at].0;
             control(GlaExecutionEvent::Work)?;
             control(GlaExecutionEvent::ScratchEntry)?;
+            rows.insert(low, roots.len());
             roots.push(low);
             control(GlaExecutionEvent::ScratchEntry)?;
-            let mut child = Vec::new();
-            for value in values {
+            while let Some(&(_, value)) = pairs.get(at).filter(|(row, _)| *row == low) {
                 control(GlaExecutionEvent::Work)?;
                 control(GlaExecutionEvent::ScratchEntry)?;
-                child.push(value);
+                children.push(value);
+                at += 1;
             }
-            children.insert(low, child);
+            offsets.push(children.len());
         }
         Ok(Self {
             low: atom.left.min(atom.right),
             high: atom.left.max(atom.right),
             roots,
+            rows,
+            offsets,
             children,
         })
     }
@@ -286,8 +321,10 @@ impl Trie {
         } else if variable == self.high {
             Some(
                 assigned[self.low]
-                    .and_then(|low| self.children.get(&low))
-                    .map_or(&[][..], Vec::as_slice),
+                    .and_then(|low| self.rows.get(&low))
+                    .map_or(&[][..], |&row| {
+                        &self.children[self.offsets[row]..self.offsets[row + 1]]
+                    }),
             )
         } else {
             None

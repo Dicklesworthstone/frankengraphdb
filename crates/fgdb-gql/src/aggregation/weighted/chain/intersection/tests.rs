@@ -417,3 +417,132 @@ fn support_summaries_do_not_expand_or_reject_an_above_count_parallel_product() {
     assert_eq!(rows[0].get(0).unwrap().as_count(), Some(1));
     assert!(matches!(run(&count), Err(GqlQueryError::Source(_))));
 }
+
+/// The tree-of-trees build the flat trie replaced: the reference for every
+/// charge it makes and every row it holds.
+fn tree_build(
+    atom: Atom,
+    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    events: &mut Vec<GlaExecutionEvent>,
+) -> BTreeMap<VId, Vec<VId>> {
+    let mut rows: BTreeMap<VId, BTreeSet<VId>> = BTreeMap::new();
+    for &(left, relation, right) in topology.keys() {
+        events.push(GlaExecutionEvent::Work);
+        if relation != atom.relation {
+            continue;
+        }
+        let orientations = match atom.direction {
+            GlaDirection::Forward => [(left, right), (left, right)],
+            GlaDirection::Reverse => [(right, left), (right, left)],
+            GlaDirection::Undirected => [(left, right), (right, left)],
+        };
+        let count = if atom.direction == GlaDirection::Undirected && left != right {
+            2
+        } else {
+            1
+        };
+        for &(from, to) in orientations.iter().take(count) {
+            events.push(GlaExecutionEvent::Work);
+            if atom.left == atom.right && from != to {
+                continue;
+            }
+            let (low, high) = if atom.left <= atom.right {
+                (from, to)
+            } else {
+                (to, from)
+            };
+            if !rows.contains_key(&low) {
+                events.push(GlaExecutionEvent::ScratchEntry);
+            }
+            if !rows.get(&low).is_some_and(|row| row.contains(&high)) {
+                events.push(GlaExecutionEvent::ScratchEntry);
+                rows.entry(low).or_default().insert(high);
+            }
+        }
+    }
+    let mut children = BTreeMap::new();
+    for (low, values) in rows {
+        events.extend([
+            GlaExecutionEvent::Work,
+            GlaExecutionEvent::ScratchEntry,
+            GlaExecutionEvent::ScratchEntry,
+        ]);
+        let mut child = Vec::new();
+        for value in values {
+            events.extend([GlaExecutionEvent::Work, GlaExecutionEvent::ScratchEntry]);
+            child.push(value);
+        }
+        children.insert(low, child);
+    }
+    children
+}
+
+#[test]
+fn flat_tries_charge_and_hold_what_the_tree_build_did() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = |bound: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % bound
+    };
+    for round in 0..12 {
+        // Two relations over six vertices, loops and both orientations of a
+        // pair included; keys are unique as in any topology table.
+        let topology: BTreeMap<TopologyKey, Multiplicity> = (0..8 + 4 * round)
+            .map(|_| {
+                let key = (
+                    VId(u128::from(next(6))),
+                    RelationId(1 + next(2)),
+                    VId(u128::from(next(6))),
+                );
+                (key, Multiplicity::ONE)
+            })
+            .collect();
+        for direction in [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ] {
+            for (left, right) in [(0, 1), (1, 0), (1, 1)] {
+                let atom = Atom {
+                    left,
+                    right,
+                    relation: RelationId(1),
+                    direction,
+                };
+                let mut expected = Vec::new();
+                let rows = tree_build(atom, &topology, &mut expected);
+                let mut events = Vec::new();
+                let trie = Trie::build(atom, &topology, &mut |event| {
+                    events.push(event);
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+                assert_eq!(events, expected, "{round} {direction:?} {left} {right}");
+                assert!(trie.roots.iter().eq(rows.keys()));
+                // A loop atom's one variable ranges over its roots alone.
+                if trie.low != trie.high {
+                    let mut assigned = [None; MAX_PATTERN_VERTICES];
+                    for (low, children) in &rows {
+                        assigned[trie.low] = Some(*low);
+                        assert_eq!(trie.domain(trie.high, &assigned), Some(&children[..]));
+                    }
+                    // An absent row is an empty domain, as the tree's was.
+                    assigned[trie.low] = Some(VId(99));
+                    assert_eq!(trie.domain(trie.high, &assigned), Some(&[][..]));
+                }
+                // A refusal at any charge stops the build there.
+                for stop in 1..=expected.len() {
+                    let mut at = 0;
+                    let result = Trie::build(atom, &topology, &mut |_| {
+                        at += 1;
+                        if at == stop { Err(at) } else { Ok(()) }
+                    });
+                    assert!(matches!(result, Err(found) if found == stop));
+                    assert_eq!(at, stop);
+                }
+            }
+        }
+    }
+}
