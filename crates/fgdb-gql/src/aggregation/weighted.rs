@@ -74,6 +74,138 @@ struct EdgeAccess {
     direction: GlaDirection,
 }
 
+/// An ungrouped aggregate over one directed typed edge whose only other
+/// operators are endpoint selections and a projection of its two vertices
+/// (fgdb-61p1n). Each admitted edge that passes its endpoints is one binding
+/// and no two share anything, so weighing them into a topology first (a sort
+/// of every arrival, an index over the keys, a weight search per binding)
+/// cannot pay for itself.
+struct SingleScan<'p> {
+    access: EdgeAccess,
+    columns: &'p [ValueProjection],
+}
+
+fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
+    if !aggregate.keys.is_empty() {
+        return None;
+    }
+    let operators = aggregate.input.plan().operators();
+    let Some(GlaOperator::ScanEdges {
+        relation,
+        direction,
+    }) = operators.first()
+    else {
+        return None;
+    };
+    if *direction == GlaDirection::Undirected {
+        return None;
+    }
+    let mut columns = None;
+    for operator in &operators[1..] {
+        match operator {
+            GlaOperator::Select { slot, .. } if columns.is_none() && slot.ordinal() < 2 => {}
+            GlaOperator::ProjectValues { columns: output }
+                if columns.is_none()
+                    && output.iter().all(|column| {
+                        matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() < 2)
+                    }) =>
+            {
+                columns = Some(output.as_slice());
+            }
+            GlaOperator::OrderByValues if columns.is_some() => {}
+            GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            } if columns.is_some() => {}
+            _ => return None,
+        }
+    }
+    Some(SingleScan {
+        access: EdgeAccess {
+            source: 0,
+            destination: 1,
+            relation: relation.one()?,
+            direction: *direction,
+        },
+        columns: columns?,
+    })
+}
+
+/// Edges in arrival order, each charged one Work as the topology charges
+/// it. Endpoints are tested exactly as `topology::Endpoints::admit` tests
+/// them: source then destination, each vertex once per side, its verdict
+/// one ScratchEntry. A passing edge is visited with multiplicity one, which
+/// for the counts, distinct counts and extrema `eligible` admits is the
+/// topology's sum of the same edges.
+fn visit_single_scan<'a, E, C, F, R, M, P>(
+    scan: &SingleScan<'_>,
+    plan: &crate::algebra::GlaPlan<GraphValueRow>,
+    edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+    mut test_vertex: F,
+    mut property: R,
+    mut control: M,
+    mut visit: P,
+) -> Result<(), VisitError<E, C>>
+where
+    F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+    P: FnMut(
+        &[ValueProjection],
+        &[Option<VId>],
+        &mut R,
+        &mut M,
+        Multiplicity,
+    ) -> Result<(), VisitError<E, C>>,
+{
+    let filters = endpoint_filters(plan.operators(), core::slice::from_ref(&scan.access));
+    let (from, to) = filters
+        .as_ref()
+        .and_then(|filters| filters.get(&scan.access.relation))
+        .map_or((&[][..], &[][..]), |(from, to)| {
+            (from.as_slice(), to.as_slice())
+        });
+    // Probed, never iterated: no order of theirs reaches a result.
+    let mut tested = [
+        std::collections::HashMap::<VId, bool>::new(),
+        std::collections::HashMap::<VId, bool>::new(),
+    ];
+    for (source, relation, destination) in edges {
+        control(GlaExecutionEvent::Work)?;
+        if relation != scan.access.relation {
+            continue;
+        }
+        let mut passes = |side: usize, vertex: VId, predicates: &[VertexPredicate]| {
+            if predicates.is_empty() {
+                return Ok(true);
+            }
+            match tested[side].entry(vertex) {
+                std::collections::hash_map::Entry::Occupied(known) => Ok(*known.get()),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let result = test_vertex(vertex, predicates)?;
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    Ok::<_, VisitError<E, C>>(*entry.insert(result))
+                }
+            }
+        };
+        if !passes(0, source, from)? || !passes(1, destination, to)? {
+            continue;
+        }
+        let bindings = match scan.access.direction {
+            GlaDirection::Forward => [Some(source), Some(destination)],
+            _ => [Some(destination), Some(source)],
+        };
+        visit(
+            scan.columns,
+            &bindings,
+            &mut property,
+            &mut control,
+            Multiplicity::ONE,
+        )?;
+    }
+    Ok(())
+}
+
 fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
     let operators = aggregate.input.plan().operators();
     // A mixed-type atom must retain each concrete relationship's multiplicity.
@@ -1191,6 +1323,9 @@ where
             },
         );
     }
+    if let Some(scan) = single_scan(aggregate) {
+        return visit_single_scan(&scan, plan, edges, test_vertex, property, control, visit);
+    }
 
     let mut accesses = Vec::new();
     let mut undirected = BTreeSet::new();
@@ -2026,6 +2161,103 @@ mod tests {
             "MATCH (a)-[:R]->{2,4}(b) RETURN COUNT(DISTINCT b) AS n",
         ] {
             assert!(chain_shape(&query(text)).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn single_edge_scans_visit_arrivals_with_enumeration_answers() {
+        let mut edges = distinct_edge_graph();
+        edges.push((EId(400), VId(4), RelationId(1), VId(2)));
+        edges.push((EId(401), VId(5), RelationId(1), VId(0)));
+        // Into the unlabelled 4 and 5, and into 1, which lacks n = 7.
+        edges.push((EId(404), VId(0), RelationId(1), VId(4)));
+        edges.push((EId(405), VId(2), RelationId(1), VId(5)));
+        edges.push((EId(406), VId(3), RelationId(1), VId(1)));
+        // Another relation: scanned by none of the patterns below.
+        edges.push((EId(402), VId(1), RelationId(2), VId(5)));
+        edges.push((EId(403), VId(0), RelationId(2), VId(1)));
+        let labelled: BTreeSet<VId> = [0, 1, 2, 3].map(VId).into();
+        let properties = BTreeMap::from([
+            (VId(0), CanonicalScalar::Int(7)),
+            (VId(2), CanonicalScalar::Int(7)),
+            (VId(3), CanonicalScalar::Int(7)),
+            (VId(4), CanonicalScalar::Int(7)),
+        ]);
+        let all: Vec<VId> = (0..6).map(VId).collect();
+        let run = |aggregate: &PreparedGraphAggregate| {
+            run_counted(aggregate, &all, &edges, &labelled, &properties)
+        };
+        for pattern in [
+            "(a:L)-[:R]->(b:L)",
+            "(a)-[:R]->(b)",
+            "(a:L)<-[:R]-(b)",
+            "(a {n: 7})-[:R]->(b:L)",
+            "(a)<-[:R]-(b {n: 7})",
+            "(a)-[:R]->(b {n: 7})",
+            "(a:L)<-[:R]-(b:L)",
+        ] {
+            for returns in [
+                "COUNT(*) AS c",
+                "COUNT(*) AS c,COUNT(DISTINCT b) AS d,COUNT(a) AS e,MIN(b) AS lo,MAX(a) AS hi",
+            ] {
+                let text = format!("MATCH {pattern} RETURN {returns}");
+                let scanned = query(&text);
+                let enumerated = query(&format!("{text},COLLECT(b) AS bag"))
+                    .with_aggregate_output_prefix(returns.split(',').count())
+                    .unwrap();
+                assert!(single_scan(&scanned).is_some(), "{text}");
+                assert!(!eligible(&enumerated), "{text}");
+                assert_eq!(run(&scanned).value, run(&enumerated).value, "{text}");
+            }
+        }
+        for text in [
+            "MATCH (a)-[:R]->(b) RETURN a,COUNT(*) AS c GROUP BY a",
+            "MATCH (a)-[:R]-(b) RETURN COUNT(*) AS c",
+            "MATCH (a)-[:R]->(b) RETURN MIN(b.n) AS lo",
+            "MATCH (a)-[:R]->(a) RETURN COUNT(*) AS c",
+            "MATCH (a)-[:R]->(b) WHERE a.n = b.n RETURN COUNT(*) AS c",
+            "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS c",
+        ] {
+            assert!(single_scan(&query(text)).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn single_edge_scans_stop_at_every_checkpoint() {
+        let text = "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS c,MAX(b) AS hi";
+        let aggregate = query(text);
+        let enumerated = query(&format!("{text},COLLECT(b) AS bag"))
+            .with_aggregate_output_prefix(2)
+            .unwrap();
+        assert!(single_scan(&aggregate).is_some());
+        let edges: Vec<_> = distinct_edge_graph()
+            .into_iter()
+            .map(|(_, source, relation, destination)| (source, relation, destination))
+            .collect();
+        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        let execute = |aggregate: &PreparedGraphAggregate, stop: Option<usize>| {
+            let mut at = 0;
+            let result = aggregate.execute_governed(
+                edges.len() as u64,
+                (0..5).map(VId),
+                edges.iter().copied(),
+                |vid, _| Ok::<_, ()>(vid != VId(4)),
+                |_, _| Ok(None),
+                policy,
+                || {
+                    at += 1;
+                    if Some(at) == stop { Err(at) } else { Ok(()) }
+                },
+            );
+            (result, at)
+        };
+        let (completed, events) = execute(&aggregate, None);
+        let (expected, _) = execute(&enumerated, None);
+        assert_eq!(completed.unwrap().value, expected.unwrap().value);
+        for stop in 1..=events {
+            let (result, at) = execute(&aggregate, Some(stop));
+            assert!(matches!(result, Err(GqlQueryError::Interrupted(n)) if n == stop));
+            assert_eq!(at, stop);
         }
     }
 
