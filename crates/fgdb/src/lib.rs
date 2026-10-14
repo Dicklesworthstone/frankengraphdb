@@ -2856,8 +2856,8 @@ impl<V: Vfs + Clone> Database<V> {
             .map_or(0, |entry| entry.marker.commit_seq);
         let published = PublishedRead {
             store,
-            chain,
             root_id: checkpoint.root_id,
+            manifest: checkpoint.manifest,
         };
         Ok(if chain_frontier == checkpoint.published_at.0 {
             ReadGeneration::Current(published)
@@ -2873,7 +2873,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// Type-erased for the same reason as [`Self::read_current_generation`].
     fn read_published<'a>(
         cx: &'a CommitCx,
-        keys: &'a DatabaseKeys,
+        _keys: &'a DatabaseKeys,
         published: PublishedRead<V>,
     ) -> SendFuture<'a, Result<EmbeddedReadView, OpenError>>
     where
@@ -2882,12 +2882,12 @@ impl<V: Vfs + Clone> Database<V> {
         Box::pin(async move {
             let PublishedRead {
                 store,
-                chain,
                 root_id,
+                manifest,
             } = published;
             let (root, blocks, block_props, patches) = store.reopen(cx, root_id).await?;
             let mut snapshot =
-                current_generation(keys, &chain, root_id, root, blocks, block_props, patches);
+                current_generation(manifest, root_id, root, blocks, block_props, patches);
             snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
             Ok(EmbeddedReadView {
                 snapshot: Arc::new(snapshot),
@@ -3006,7 +3006,7 @@ impl<V: Vfs + Clone> Database<V> {
                     &coordinator,
                     &store,
                     &keys,
-                    checkpoint.root_id,
+                    checkpoint,
                     &mut crypto_verification_events,
                     replay_capacity,
                 )
@@ -3038,6 +3038,7 @@ impl<V: Vfs + Clone> Database<V> {
         let manifest_len = manifest_bytes_len(&snapshot)?;
         let slot_generation = match slot_store.recover(cx).await {
             Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                ensure_slot_target_resolves(cx, &store, &snapshot, path).await?;
                 let slot = spine_slot(&keys, 1, snapshot.manifest, manifest_len);
                 slot_store
                     .create(cx, &slot)
@@ -3078,6 +3079,7 @@ impl<V: Vfs + Clone> Database<V> {
                             slot_manifest: ObjectId(slot.root_manifest_oid),
                         });
                     }
+                    ensure_slot_target_resolves(cx, &store, &snapshot, path).await?;
                     let healed = next_slot_generation(slot.slot_generation)?;
                     let next = spine_slot(&keys, healed, snapshot.manifest, manifest_len);
                     slot_store
@@ -5604,10 +5606,13 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     coordinator: &CommitCoordinator<V>,
     store: &BlockStore<V>,
     keys: &DatabaseKeys,
-    root_id: PartitionRootVersion,
+    checkpoint: SelectedCheckpoint,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
     replay_capacity: ReplayRootCapacity,
 ) -> Result<OpenedGeneration, RebuildError> {
+    let SelectedCheckpoint {
+        root_id, manifest, ..
+    } = checkpoint;
     // The sealed lists a retained writer holds come from the same verified
     // reads as the decoded state.
     let fgdb_strata::store::ReopenedPartition {
@@ -5642,15 +5647,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     // statement histories or retaining an extra strong spent-set handle.
     let mut next_birth_ordinal =
         writer.spent_vertices().len() as u64 + writer.spent_edges().len() as u64;
-    let snapshot = current_generation(
-        keys,
-        coordinator.chain(),
-        root_id,
-        root,
-        blocks,
-        block_props,
-        patches,
-    );
+    let snapshot = current_generation(manifest, root_id, root, blocks, block_props, patches);
     let mut versions = VersionHeads::from_checkpoint(&snapshot);
 
     // The SUFFIX: everything the crash window or plain lag left past the
@@ -5841,14 +5838,18 @@ enum ReadGeneration<V: Vfs> {
 /// scanned, not yet read.
 struct PublishedRead<V: Vfs> {
     store: BlockStore<V>,
-    chain: fgdb_chronicle::MarkerChain,
     root_id: PartitionRootVersion,
+    /// The stored manifest that selected `root_id`.
+    manifest: ManifestVersion,
 }
 
 /// The checkpoint a root slot selects, once verified (fgdb-ge6a).
 struct SelectedCheckpoint {
     root_id: PartitionRootVersion,
     published_at: CommitSeq,
+    /// The stored manifest the root slot named, whose one record selected
+    /// `root_id`. A current checkpoint keeps this identity as its own.
+    manifest: ManifestVersion,
 }
 
 /// Select the checkpoint the root slot names, accepting it only when the
@@ -5944,6 +5945,7 @@ fn checkpoint_from_manifest(
     Ok(SelectedCheckpoint {
         root_id: record.root,
         published_at: root.published_at,
+        manifest: claimed,
     })
 }
 
@@ -5951,9 +5953,45 @@ fn checkpoint_from_manifest(
 /// recovered chain: the decoded state, its derived indexes, and the manifest
 /// identity re-derived from the one record that publishes it. Its delta window
 /// starts empty; each caller states what history it retains.
+/// An open may write a root slot only naming a manifest the store resolves to
+/// exactly this generation's root. A slot naming an absent or different
+/// manifest makes the database unopenable by every binary (fgdb-79kyi
+/// incident, 2026-10-14), so a violation refuses the open with nothing
+/// written. Every lawful path satisfies it: a rebuild or a lagging checkpoint
+/// stored the manifest it publishes, and a current checkpoint names the stored
+/// manifest it was selected from.
+async fn ensure_slot_target_resolves<V: Vfs>(
+    cx: &CommitCx,
+    store: &BlockStore<V>,
+    snapshot: &Snapshot,
+    path: &Path,
+) -> Result<(), OpenError> {
+    match store.resolve_manifest(cx, snapshot.manifest).await {
+        Ok(resolved) if resolved.len() == 1 && resolved[0].0.root == snapshot.root => Ok(()),
+        outcome => Err(OpenError::SlotUnrecoverable {
+            path: path.to_path_buf(),
+            detail: format!(
+                "refusing to name manifest {:?} in the root slot: it does not resolve to this \
+                 generation's root ({})",
+                snapshot.manifest.0,
+                match outcome {
+                    Ok(resolved) => format!("{} record(s) naming another root", resolved.len()),
+                    Err(error) => error.to_string(),
+                }
+            ),
+        }),
+    }
+}
+
+/// `manifest` is the identity of the STORED manifest that selected this
+/// checkpoint, never a re-encoding of its record. A re-encoding names the same
+/// record only while the encoder writes the stored manifest's format; once it
+/// writes a newer one, the re-derived identity names an object that was never
+/// stored, and the open's slot reconciliation would publish a root slot naming
+/// it, leaving the database unopenable by every binary (fgdb-79kyi incident,
+/// 2026-10-14, manifest V3).
 fn current_generation(
-    keys: &DatabaseKeys,
-    chain: &fgdb_chronicle::MarkerChain,
+    manifest: ManifestVersion,
     root_id: PartitionRootVersion,
     root: fgdb_strata::root::PartitionRoot,
     blocks: Vec<Vec<AdjacencyEntry>>,
@@ -5961,17 +5999,6 @@ fn current_generation(
     patches: Vec<VertexPatchRows>,
 ) -> Snapshot {
     let published_at = root.published_at;
-    let published_chain_hash = chain_commitment_at(chain, published_at)
-        .expect("select_checkpoint bound this publication to the recovered chain");
-    let manifest_records = records_of(&[(root.clone(), root_id, published_chain_hash)])
-        .expect("one root is one canonical record");
-    let manifest_bytes =
-        encode_manifest(&manifest_records).expect("records_of proved these records canonical");
-    let manifest = ManifestVersion(fgdb_strata::manifest::manifest_id(
-        keys.k_oid(),
-        keys.namespace,
-        &manifest_bytes,
-    ));
     Snapshot {
         // Built on first use by a reader; a commit extends it only once built.
         adjacency: std::sync::OnceLock::new(),
@@ -8982,3 +9009,7 @@ mod lazy_writable_adjacency_laws {
         assert!(db.verify_snapshot_indexes().unwrap());
     }
 }
+
+#[cfg(test)]
+#[path = "pre_pack_open_tests.rs"]
+mod pre_pack_open_laws;
