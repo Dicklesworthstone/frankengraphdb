@@ -24,8 +24,12 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 /// Retained coordinate bytes over all live snapshots. A graph too large for
-/// this is admitted afresh by every statement, as before.
-const ADMITTED_BYTES: usize = 128 * 1024 * 1024;
+/// this is admitted afresh by every statement, as before. roadnet-ca (2.0M
+/// vertices, 5.5M edges) needs more than 128 MiB, and readmitting it made a
+/// resident count of its edges 3.6x slower; at 512 MiB the budget covers
+/// graphs of several times that, beside a resident server that already holds
+/// gigabytes for them.
+const ADMITTED_BYTES: usize = 512 * 1024 * 1024;
 
 pub(super) static ADMITTED: LiveCache<Snapshot, AdmissionKey, Arc<AdmittedCore>> =
     LiveCache::new(ADMITTED_BYTES);
