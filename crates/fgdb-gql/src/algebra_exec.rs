@@ -421,6 +421,14 @@ fn build_identified_index<E>(
         }
     }
     let alternations = alternation_selectors(index.keys().map(|(relation, _)| *relation));
+    // Identified edges need not arrive grouped by endpoint, so each push is
+    // one hash probe into a staging map, which becomes the ordered adjacency
+    // once at the end. Neighbors keep their arrival order within a key, so
+    // every charged event, and each list's sort, is as before.
+    let mut staged: BTreeMap<_, IdentifiedStage> = index
+        .keys()
+        .map(|key| (*key, IdentifiedStage::new()))
+        .collect();
     for (edge, source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         for direction in [
@@ -429,7 +437,7 @@ fn build_identified_index<E>(
             GlaDirection::Undirected,
         ] {
             for selector in edge_selectors(relation, &alternations) {
-                let Some(adjacency) = index.get_mut(&(selector, direction)) else {
+                let Some(adjacency) = staged.get_mut(&(selector, direction)) else {
                     continue;
                 };
                 let (from, to) = if direction == GlaDirection::Reverse {
@@ -438,17 +446,18 @@ fn build_identified_index<E>(
                     (source, destination)
                 };
                 control(GlaExecutionEvent::ScratchEntry)?;
-                // The newest key first, as in push_neighbor; same events.
-                match adjacency.last_entry() {
-                    Some(mut last) if *last.key() == from => last.get_mut().push((edge, to)),
-                    _ => push_identified(adjacency, from, (edge, to), control)?,
-                }
+                push_identified(adjacency, from, (edge, to), control)?;
                 if direction == GlaDirection::Undirected && source != destination {
                     control(GlaExecutionEvent::ScratchEntry)?;
                     push_identified(adjacency, destination, (edge, source), control)?;
                 }
             }
         }
+    }
+    for (key, adjacency) in staged {
+        let mut entries: Vec<_> = adjacency.into_iter().collect();
+        entries.sort_unstable_by_key(|(from, _)| *from);
+        index.insert(key, entries.into_iter().collect());
     }
     for adjacency in index.values_mut() {
         for neighbors in adjacency.values_mut() {
@@ -458,18 +467,22 @@ fn build_identified_index<E>(
     Ok(index)
 }
 
+/// An identified adjacency while it is built: probed, never iterated before
+/// it is sorted into the index, so its order never reaches a result.
+type IdentifiedStage = std::collections::HashMap<VId, Vec<(EId, VId)>>;
+
 /// One identified neighbor under `from`, charging the key's own scratch
-/// entry first when it is new: one search, where contains_key then entry
-/// took two.
+/// entry first when it is new: one probe, where contains_key then entry
+/// took two searches.
 fn push_identified<E>(
-    adjacency: &mut BTreeMap<VId, Vec<(EId, VId)>>,
+    adjacency: &mut IdentifiedStage,
     from: VId,
     neighbor: (EId, VId),
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     match adjacency.entry(from) {
-        std::collections::btree_map::Entry::Occupied(mut entry) => entry.get_mut().push(neighbor),
-        std::collections::btree_map::Entry::Vacant(entry) => {
+        std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().push(neighbor),
+        std::collections::hash_map::Entry::Vacant(entry) => {
             control(GlaExecutionEvent::ScratchEntry)?;
             entry.insert(vec![neighbor]);
         }
@@ -597,7 +610,9 @@ struct Execution<'i, F, C, P, Row> {
     test_vertex: F,
     control: C,
     project: P,
-    predicate_cache: BTreeMap<(usize, VId), bool>,
+    // Probed per binding and never iterated, so a hash map: one probe where
+    // a tree took a search for get and another for insert.
+    predicate_cache: std::collections::HashMap<(usize, VId), bool>,
     projected: ProjectedRows<Row>,
     active_probe: Option<usize>,
     probe_matches: [bool; crate::algebra::MAX_PATTERN_IDENTITIES],
@@ -867,21 +882,19 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         }
                         continue;
                     };
-                    let key = (ordinal, vid);
-                    let keep = if let Some(keep) = self.predicate_cache.get(&key) {
-                        *keep
-                    } else {
-                        (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                        // Cache hits neither reread the source nor repeat literal
-                        // comparison work. Reserve that work before source entry.
-                        for predicate in predicates {
-                            for _ in 0..predicate.comparison_work_units() {
-                                (self.control)(GlaExecutionEvent::Work)?;
+                    let keep = match self.predicate_cache.entry((ordinal, vid)) {
+                        std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                            // Cache hits neither reread the source nor repeat literal
+                            // comparison work. Reserve that work before source entry.
+                            for predicate in predicates {
+                                for _ in 0..predicate.comparison_work_units() {
+                                    (self.control)(GlaExecutionEvent::Work)?;
+                                }
                             }
+                            *entry.insert((self.test_vertex)(vid, predicates)?)
                         }
-                        let keep = (self.test_vertex)(vid, predicates)?;
-                        self.predicate_cache.insert(key, keep);
-                        keep
                     };
                     if !keep {
                         next = None;
@@ -1475,7 +1488,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             test_vertex,
             control,
             project,
-            predicate_cache: BTreeMap::new(),
+            predicate_cache: std::collections::HashMap::new(),
             projected: ProjectedRows::<Row>::for_plan(distinct, operators),
             active_probe: None,
             probe_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
