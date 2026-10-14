@@ -554,6 +554,48 @@ fn expiry_is_rechecked_during_execution_and_cannot_be_caught_and_ignored() {
 }
 
 #[test]
+fn charges_sharing_one_time_still_observe_retirement_expiry_and_a_backward_clock() {
+    let authority = authority();
+    let token = authority.issue_at(&grant(), START).unwrap();
+    let verified = authority.verify_at(&token, BRANCH, START).unwrap();
+    // A time already checked, then the expiry boundary.
+    let mut permit = verified.begin_read_at(BRANCH, START).unwrap();
+    for _ in 0..3 {
+        assert_eq!(permit.charge_work_at(END - 1, 1), Ok(()));
+    }
+    assert_eq!(permit.charge_work_at(END, 1), Err(Error::Expired));
+    assert_eq!(
+        permit.charge_work_at(END - 1, 0),
+        Err(Error::ExecutionStopped)
+    );
+    // A checked time, then an earlier one, then the checked one again.
+    let mut permit = verified.begin_read_at(BRANCH, START).unwrap();
+    assert_eq!(permit.charge_work_at(START + 5, 1), Ok(()));
+    assert_eq!(permit.charge_work_at(START + 5, 1), Ok(()));
+    assert_eq!(
+        permit.charge_work_at(START + 4, 1),
+        Err(Error::ClockWentBackwards)
+    );
+    assert_eq!(
+        permit.charge_work_at(START + 5, 0),
+        Err(Error::ExecutionStopped)
+    );
+    assert_eq!(permit.usage().work, 2);
+    // Retirement between two charges at one checked time.
+    let mut permit = verified.begin_read_at(BRANCH, START).unwrap();
+    assert_eq!(permit.charge_work_at(START, 1), Ok(()));
+    assert!(authority.retire());
+    assert_eq!(
+        permit.charge_work_at(START, 1),
+        Err(Error::AuthorityRetired)
+    );
+    assert_eq!(
+        permit.charge_work_at(START, 0),
+        Err(Error::ExecutionStopped)
+    );
+}
+
+#[test]
 fn budgets_intersect_and_zero_really_disallows_work() {
     let authority = authority();
     let token = authority
