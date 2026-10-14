@@ -56,12 +56,6 @@ impl Drop for Workspace {
     }
 }
 
-/// The host clock of one authorized write, erased where its execution is
-/// built: every write path is then compiled once, not once per caller's clock
-/// type, which multiplied the whole evaluator in the lib-test crate
-/// (fgdb-2goz). Send, because the execution lives across awaits.
-type WriteClock<'c> = &'c mut (dyn FnMut() -> u64 + Send);
-
 struct Execution<'cx, 'permit, Clock> {
     cx: &'cx CommitCx,
     permit: ExecutionPermit<'permit, WriteAccess>,
@@ -344,7 +338,7 @@ impl<V: Vfs + Clone> Database<V> {
         token: &CapabilityToken,
         branch: &str,
         batch: WriteBatch,
-        clock: impl FnMut() -> u64 + Send,
+        clock: impl FnMut() -> u64,
     ) -> Result<CommitSeq, WriteTxnError> {
         self.write_ordered_authorized(
             txn_cx,
@@ -388,7 +382,7 @@ impl<V: Vfs + Clone> Database<V> {
         token: &CapabilityToken,
         branch: &str,
         batches: Vec<WriteBatch>,
-        mut clock: impl FnMut() -> u64 + Send,
+        mut clock: impl FnMut() -> u64,
     ) -> Result<CommitSeq, WriteTxnError> {
         if authority.namespace() != self.keys.namespace {
             return Err(WriteTxnError::Authorization(Error::WrongAuthority));
@@ -405,7 +399,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock: &mut clock as WriteClock<'_>,
+                    clock,
                 };
                 execution.checkpoint()?;
                 if batches.is_empty() {

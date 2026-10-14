@@ -275,7 +275,7 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
         relation: RelationId,
         policy: GraphWriteProgramPolicy,
-        mut clock: impl FnMut() -> u64 + Send,
+        mut clock: impl FnMut() -> u64,
     ) -> Result<QueryResult, Fault> {
         let refusal = |error| admission(WriteTxnError::Authorization(error));
         if authority.namespace() != self.keys.namespace {
@@ -287,7 +287,7 @@ impl<V: Vfs + Clone> Database<V> {
         let mut execution = Execution {
             cx: commit_cx,
             permit,
-            clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
+            clock,
         };
         commit_cx
             .with_restriction_async(async {

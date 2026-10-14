@@ -103,7 +103,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         deletion: &PreparedGraphDelete,
         policy: GraphDeletePolicy,
-        clock: impl FnMut() -> u64 + Send,
+        clock: impl FnMut() -> u64,
     ) -> Result<(GraphDeleteStats, EmbeddedTxnCompletion), Fault> {
         self.delete_authorized_inner(
             txn_cx, query_cx, commit_cx, authority, token, branch, deletion, policy, clock, false,
@@ -129,7 +129,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         deletion: &PreparedGraphDelete,
         policy: GraphDeletePolicy,
-        clock: impl FnMut() -> u64 + Send,
+        clock: impl FnMut() -> u64,
     ) -> Result<Receipt, Fault> {
         self.delete_authorized_inner(
             txn_cx, query_cx, commit_cx, authority, token, branch, deletion, policy, clock, true,
@@ -148,7 +148,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         deletion: &PreparedGraphDelete,
         policy: GraphDeletePolicy,
-        mut clock: impl FnMut() -> u64 + Send,
+        mut clock: impl FnMut() -> u64,
         returning: bool,
     ) -> Result<Receipt, Fault> {
         if authority.namespace() != self.keys.namespace {
@@ -171,7 +171,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
+                    clock,
                 };
                 execution.checkpoint().map_err(source)?;
                 let mut workspace = Workspace(Some(

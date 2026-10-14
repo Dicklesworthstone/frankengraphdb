@@ -183,7 +183,7 @@ impl<V: Vfs + Clone> Database<V> {
         script: &PreparedGraphWriteScript,
         arguments: &GqlParameters,
         policy: GraphWriteProgramPolicy,
-        clock: impl FnMut() -> u64 + Send,
+        clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
             txn_cx,
@@ -217,7 +217,7 @@ impl<V: Vfs + Clone> Database<V> {
         script: &PreparedGraphWriteScript,
         arguments: &GqlParameters,
         policy: GraphWriteProgramPolicy,
-        clock: impl FnMut() -> u64 + Send,
+        clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramReceipt, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
             txn_cx,
@@ -264,7 +264,7 @@ impl<V: Vfs + Clone> Database<V> {
         arguments: &[GqlParameters],
         max_statements: usize,
         policy: GraphWriteProgramPolicy,
-        clock: impl FnMut() -> u64 + Send,
+        clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
             txn_cx,
@@ -299,7 +299,7 @@ impl<V: Vfs + Clone> Database<V> {
         arguments: &[GqlParameters],
         max_statements: usize,
         policy: GraphWriteProgramPolicy,
-        clock: impl FnMut() -> u64 + Send,
+        clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramReceipt, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
             txn_cx,
@@ -333,7 +333,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         batch: &BoundGraphWriteScriptBatch,
         policy: GraphWriteProgramPolicy,
-        clock: impl FnMut() -> u64 + Send,
+        clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
             txn_cx,
@@ -366,7 +366,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         batch: &BoundGraphWriteScriptBatch,
         policy: GraphWriteProgramPolicy,
-        clock: impl FnMut() -> u64 + Send,
+        clock: impl FnMut() -> u64,
     ) -> Result<(GraphWriteProgramReceipt, EmbeddedTxnCompletion), Fault> {
         self.authorized_script_inner(
             txn_cx,
@@ -386,7 +386,7 @@ impl<V: Vfs + Clone> Database<V> {
 
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)] // one terminal script/batch report
-    async fn authorized_script_inner<Receipt, Clock: FnMut() -> u64 + Send>(
+    async fn authorized_script_inner<Receipt, Clock: FnMut() -> u64>(
         &mut self,
         txn_cx: &TxnCx,
         query_cx: &QueryCx,
@@ -410,7 +410,7 @@ impl<V: Vfs + Clone> Database<V> {
         let mut execution = Execution {
             cx: commit_cx,
             permit,
-            clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
+            clock,
         };
         commit_cx
             .with_restriction_async(async {

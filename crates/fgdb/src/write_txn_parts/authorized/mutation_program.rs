@@ -50,7 +50,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         program: &PreparedGraphMutationProgram,
         policy: GraphMutationPolicy,
-        mut clock: impl FnMut() -> u64 + Send,
+        mut clock: impl FnMut() -> u64,
     ) -> Result<(GraphMutationProgramStats, EmbeddedTxnCompletion), Fault> {
         let refusal = |error| Fault::Preflight(WriteTxnError::Authorization(error));
         if authority.namespace() != self.keys.namespace {
@@ -67,7 +67,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
+                    clock,
                 };
                 execution.checkpoint().map_err(Fault::Preflight)?;
                 let mut workspace = Workspace(Some(

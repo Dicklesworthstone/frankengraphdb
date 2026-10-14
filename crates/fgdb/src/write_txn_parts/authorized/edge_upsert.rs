@@ -4,7 +4,7 @@
 use super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxnError,
 };
-use crate::write_txn::authorized::{WriteClock, edge_merge, stage};
+use crate::write_txn::authorized::{edge_merge, stage};
 use crate::write_txn::{
     WriteTxn, edge_upsert_actions, edge_upsert_property, edge_upsert_query_selection_policy,
     edge_upsert_returning,
@@ -149,7 +149,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphEdgeUpsertQuery,
         policy: GraphEdgeUpsertPolicy,
-        clock: impl FnMut() -> u64 + Send,
+        clock: impl FnMut() -> u64,
     ) -> Result<QueryReceipt, QueryFault> {
         self.execute_graph_edge_upsert_query_authorized_checked(
             txn_cx,
@@ -185,7 +185,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphEdgeUpsertQuery,
         policy: GraphEdgeUpsertPolicy,
-        mut clock: impl FnMut() -> u64 + Send,
+        mut clock: impl FnMut() -> u64,
         admit: impl FnOnce(
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
@@ -212,7 +212,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock: &mut clock as WriteClock<'_>,
+                    clock,
                 };
                 execution.checkpoint().map_err(query_source)?;
                 let mut workspace = Workspace(Some(
@@ -313,7 +313,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         input: &PreparedGraphEdgeUpsert,
         policy: GraphEdgeUpsertPolicy,
-        mut clock: impl FnMut() -> u64 + Send,
+        mut clock: impl FnMut() -> u64,
     ) -> Result<Receipt, Fault> {
         let refusal = |error| source(WriteTxnError::Authorization(error));
         if authority.namespace() != self.keys.namespace {
@@ -336,7 +336,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock: &mut clock as WriteClock<'_>,
+                    clock,
                 };
                 execution.checkpoint().map_err(source)?;
                 let mut workspace = Workspace(Some(

@@ -210,13 +210,6 @@ fn query_error(error: GqlQueryError<ReadError, QueryError>) -> QueryError {
     }
 }
 
-/// The host clock of one authorized execution, erased at its entry. Every
-/// query path below is then compiled once, not once per caller's clock type:
-/// each distinct test clock closure used to compile its own copy of the whole
-/// evaluator (fgdb-2goz). It is sampled at most once per host clock interval
-/// and at delivery, never per charge, so the indirect call costs nothing.
-type HostClock<'c> = &'c mut dyn FnMut() -> u64;
-
 #[allow(clippy::too_many_arguments)]
 fn authorized<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
     database: &Database<V>,
@@ -230,7 +223,7 @@ fn authorized<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
         &Arc<Snapshot>,
         CommitSeq,
         &PlannerPredicates,
-        &RefCell<Execution<'_, '_, HostClock<'_>>>,
+        &RefCell<Execution<'_, '_, Clock>>,
     ) -> Result<Vec<Row>, QueryError>,
 ) -> Result<Vec<Row>, QueryError> {
     authorized_with_errors(
@@ -262,7 +255,7 @@ fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
         &Arc<Snapshot>,
         CommitSeq,
         &PlannerPredicates,
-        &RefCell<Execution<'_, '_, HostClock<'_>>>,
+        &RefCell<Execution<'_, '_, Clock>>,
     ) -> Result<Vec<Row>, Error>,
 ) -> Result<Vec<Row>, Error> {
     // The host picks its issuer, not the request. Reject a different database
@@ -282,7 +275,7 @@ fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
         .begin_read_at(branch, now)
         .map_err(QueryError::Authorization)
         .map_err(map_error)?;
-    let execution = RefCell::new(Execution::new(cx, permit, &mut clock as HostClock<'_>));
+    let execution = RefCell::new(Execution::new(cx, permit, clock));
     execution.borrow_mut().checkpoint().map_err(map_error)?;
     database
         .ensure_readable()
