@@ -11,7 +11,7 @@ use fgdb_gql::spill_set::{SpillSetCrossPlan, SpillSetRowError};
 use fgdb_strata::tiered::memory::MemoryPool;
 use fgdb_types::CanonicalScalarResolver;
 
-fn position(spool: &NativeResultSpool) -> RunInput {
+pub(super) fn position(spool: &NativeResultSpool) -> RunInput {
     RunInput::new(
         Run {
             pages: spool.run.clone(),
@@ -21,7 +21,7 @@ fn position(spool: &NativeResultSpool) -> RunInput {
     )
 }
 
-fn decode(
+pub(super) fn decode(
     bytes: TrackedBytes,
     pool: &MemoryPool,
     work: &mut Work<'_>,

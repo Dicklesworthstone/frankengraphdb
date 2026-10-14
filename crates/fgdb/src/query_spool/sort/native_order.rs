@@ -15,6 +15,8 @@ pub use buffered::PreparedBufferedOrder;
 mod binary;
 #[path = "cross.rs"]
 mod cross;
+#[path = "relational_join.rs"]
+mod relational_join;
 #[path = "staged.rs"]
 mod staged;
 

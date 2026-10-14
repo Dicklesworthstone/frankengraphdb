@@ -11,6 +11,6 @@
 
 pub use crate::set_ops::spill::{
     AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregatePlan, SpillSetAggregateRowError,
-    SpillSetBinaryPlan, SpillSetBuildError, SpillSetCrossPlan, SpillSetMergeStep, SpillSetRowError,
-    SpillSetRows, SpillSetStage, SpillSetValuesPlan,
+    SpillSetBinaryPlan, SpillSetBuildError, SpillSetCrossPlan, SpillSetJoinPlan, SpillSetMergeStep,
+    SpillSetRowError, SpillSetRows, SpillSetStage, SpillSetValuesPlan,
 };

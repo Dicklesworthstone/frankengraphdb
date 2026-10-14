@@ -20,6 +20,9 @@ use crate::stream::{AsyncVertexScanPlan, VertexScanBuildError};
 use crate::{GlaExecutionEvent, GraphAggregateError, GraphAggregateRow};
 use core::convert::Infallible;
 
+mod relational_join;
+pub use relational_join::SpillSetJoinPlan;
+
 /// A refusal found before any graph source or scratch writer is opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpillSetBuildError {
@@ -62,6 +65,7 @@ pub enum AsyncSpillSetSourcePlan {
     Join(AsyncEdgeJoinPlan),
     Binary(SpillSetBinaryPlan),
     Cross(SpillSetCrossPlan),
+    RowJoin(SpillSetJoinPlan),
     Aggregate(SpillSetAggregatePlan),
 }
 impl AsyncSpillSetSourcePlan {
@@ -70,7 +74,7 @@ impl AsyncSpillSetSourcePlan {
             Self::Values(_) => ScanKind::Values,
             Self::Vertex(_) => ScanKind::Vertex,
             Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
-            Self::Binary(_) | Self::Cross(_) => ScanKind::Set,
+            Self::Binary(_) | Self::Cross(_) | Self::RowJoin(_) => ScanKind::Set,
             Self::Aggregate(aggregate) => aggregate.input().source().kind(),
         }
     }
@@ -405,6 +409,13 @@ impl AsyncSpillSetPlan {
                     stages,
                 });
             }
+            CompiledSource::RowJoin(join) => {
+                return Ok(Self {
+                    source: AsyncSpillSetSourcePlan::RowJoin(join),
+                    graph: None,
+                    stages,
+                });
+            }
             CompiledSource::Aggregate(aggregate) => {
                 return Ok(Self {
                     source: AsyncSpillSetSourcePlan::Aggregate(aggregate),
@@ -460,6 +471,7 @@ impl AsyncSpillSetPlan {
         match &self.source {
             AsyncSpillSetSourcePlan::Binary(binary) => binary.columns(),
             AsyncSpillSetSourcePlan::Cross(cross) => cross.columns(),
+            AsyncSpillSetSourcePlan::RowJoin(join) => join.columns(),
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => aggregate.columns(),
             _ => self
                 .graph
@@ -492,6 +504,11 @@ impl AsyncSpillSetPlan {
                 .stage_count()
                 .saturating_add(cross.right().stage_count())
                 .saturating_add(2),
+            AsyncSpillSetSourcePlan::RowJoin(join) => join
+                .left()
+                .stage_count()
+                .saturating_add(join.right().stage_count())
+                .saturating_add(2),
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => {
                 aggregate.input().stage_count().saturating_add(3)
             }
@@ -515,6 +532,10 @@ impl AsyncSpillSetPlan {
                 .left()
                 .aggregate_count()
                 .saturating_add(cross.right().aggregate_count()),
+            AsyncSpillSetSourcePlan::RowJoin(join) => join
+                .left()
+                .aggregate_count()
+                .saturating_add(join.right().aggregate_count()),
             _ => 0,
         }
     }
@@ -886,7 +907,20 @@ fn compile_stages<'a>(
                 false,
             )
         }
-        SetNode::ProcedureCall(_) | SetNode::Join { .. } | SetNode::Owned => {
+        SetNode::Join { left, right, spec } => (
+            CompiledSource::RowJoin(SpillSetJoinPlan {
+                left: Box::new(AsyncSpillSetPlan::compile_at(left, depth + 1)?),
+                right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
+                spec: spec.clone(),
+                columns: query.columns.clone(),
+                types: query.types.clone(),
+            }),
+            query.types.clone(),
+            Operation::Identity,
+            true,
+            false,
+        ),
+        SetNode::ProcedureCall(_) | SetNode::Owned => {
             return Err(SpillSetBuildError::Unsupported { depth });
         }
     };
@@ -913,6 +947,7 @@ enum CompiledSource<'a> {
     Pattern(&'a PreparedGraphPattern<GraphValueRow>),
     Binary(SpillSetBinaryPlan),
     Cross(SpillSetCrossPlan),
+    RowJoin(SpillSetJoinPlan),
     Aggregate(SpillSetAggregatePlan),
 }
 
