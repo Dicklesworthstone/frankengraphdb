@@ -50,7 +50,7 @@ pub use relational::{
     AuthorizedSpoolCursor,
 };
 
-use admission::{ADMITTED, AdmissionKey, AdmittedCore, Recording};
+use admission::{ADMITTED, AdmissionKey, AdmittedCore, CoreEdge, Recording};
 use tape::Step;
 
 #[cfg(test)]
@@ -299,6 +299,10 @@ fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
     })
 }
 
+/// Vertex tables at least this long index their sealed rows for the edge
+/// phase's endpoint lookups; smaller ones search.
+const POSITIONED_VERTICES: usize = 4096;
+
 // Admitted records in visitor order, sorted by identity once sealed. Full-scan
 // visitors already yield ascending VIds and EIds, so sealing is one pass; a
 // sorted vector replaces per-record ordered-map inserts and lookups (fgdb-61p1n).
@@ -400,7 +404,7 @@ impl<'a> Tables<'a> {
                         if tables.admit_edge((identity, properties), predicates, control)?
                             && let Some(recording) = &recording
                         {
-                            recording.borrow_mut().edge(identity, block, row_at);
+                            recording.borrow_mut().edge(block, row_at);
                         }
                         Ok(())
                     },
@@ -427,22 +431,23 @@ impl<'a> Tables<'a> {
     }
 
     /// Fill empty tables from a core recorded on this same snapshot allocation.
+    /// Each edge's identity is read back from the statement its coordinates
+    /// name, which is the one the recording scan admitted.
     fn refill(&mut self, snapshot: &'a Snapshot, core: &AdmittedCore) {
         self.vertices.extend(
             core.vertices
                 .iter()
                 .map(|&(vid, patch, row)| (vid, &snapshot.patches[patch as usize][row as usize])),
         );
-        self.edges.extend(core.edges.iter().map(|edge| {
-            (
-                (edge.eid, edge.src, edge.relation, edge.dst),
-                source::edge_properties_at(
-                    &snapshot.block_props,
-                    edge.block as usize,
-                    edge.row as usize,
-                ),
-            )
-        }));
+        self.edges
+            .extend(core.edges.iter().map(|&CoreEdge { block, row }| {
+                let (block, row) = (block as usize, row as usize);
+                let edge = &snapshot.blocks[block][row];
+                (
+                    (edge.eid, edge.src, edge.relation, edge.dst),
+                    source::edge_properties_at(&snapshot.block_props, block, row),
+                )
+            }));
         self.records = core.records;
     }
 
@@ -584,6 +589,8 @@ impl<'a> Tables<'a> {
         self.records += 1;
         self.vertices_sealed &= self.vertices.last().is_none_or(|&(last, _)| last < row.vid);
         self.vertices.push((row.vid, row));
+        // An index over the table before this vertex no longer describes it.
+        self.positions = None;
         Ok(Some(labels))
     }
 
@@ -600,6 +607,12 @@ impl<'a> Tables<'a> {
         if !self.vertices_sealed {
             seal_by_key(&mut self.vertices, |&(vid, _)| vid);
             self.vertices_sealed = true;
+        }
+        // Each admitted edge looks up both endpoints. In a large table a
+        // binary search is a chain of cache misses (30% of a web-google edge
+        // count), so the first edge indexes the sealed table once.
+        if self.positions.is_none() && self.vertices.len() >= POSITIONED_VERTICES {
+            self.positions = positions::VertexPositions::build(&self.vertices).map(Arc::new);
         }
         if !(predicates.allows_relation(relation)
             && self.vertex(src).is_some()
