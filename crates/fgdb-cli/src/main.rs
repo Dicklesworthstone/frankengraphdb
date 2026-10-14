@@ -1273,6 +1273,7 @@ fn open_failure(error: fgdb::OpenError) -> Failure {
         | E::ForeignSlot { .. }
         | E::WrongDek { .. }
         | E::SlotDisagreesWithStream { .. }
+        | E::UnsupportedManifestFormat { .. }
         | E::SlotUnrecoverable { .. }
         | E::NotEmpty { .. } => Failure::open(error),
         _ => Failure::io(error),

@@ -536,6 +536,15 @@ pub enum OpenError {
         path: PathBuf,
         slot_manifest: ObjectId,
     },
+    /// The root slot names a manifest in a format this build does not read:
+    /// a newer binary wrote the database. Refused by name when the manifest
+    /// is resolved, before any partition object is read and with nothing
+    /// written (fgdb-eslqh).
+    UnsupportedManifestFormat {
+        path: PathBuf,
+        slot_manifest: ObjectId,
+        format: u16,
+    },
     /// The root file exists but recovery selected no credible slot.
     SlotUnrecoverable {
         path: PathBuf,
@@ -945,6 +954,16 @@ impl core::fmt::Display for OpenError {
             Self::SlotUnrecoverable { path, detail } => write!(
                 f,
                 "the root file in {} selected no credible slot: {detail}",
+                path.display()
+            ),
+            Self::UnsupportedManifestFormat {
+                path,
+                slot_manifest,
+                format,
+            } => write!(
+                f,
+                "the root slot in {} names manifest {slot_manifest:?} in format {format}, which \
+                 this build does not read: a newer binary wrote this database",
                 path.display()
             ),
             Self::NotADatabase { path, missing } => write!(
@@ -3070,6 +3089,12 @@ impl<V: Vfs + Clone> Database<V> {
                                     .is_some_and(|expected| {
                                         expected == record.published_chain_hash
                                     })
+                        }
+                        Err(error) => {
+                            if let Some(refusal) = unsupported_manifest(&error, stale, path) {
+                                return Err(refusal);
+                            }
+                            false
                         }
                         _ => false,
                     };
@@ -5900,10 +5925,32 @@ async fn read_slot<V: Vfs>(
     let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
     match store.resolve_manifest(cx, claimed).await {
         Ok(resolved) if resolved.len() == 1 => Ok(Some((claimed, resolved))),
+        Err(error) if let Some(refusal) = unsupported_manifest(&error, claimed, path) => {
+            Err(refusal)
+        }
         _ => Err(OpenError::SlotDisagreesWithStream {
             path: path.to_path_buf(),
             slot_manifest: claimed.0,
         }),
+    }
+}
+
+/// The named refusal for a manifest whose format this build does not read
+/// (fgdb-eslqh): a newer binary's database, not damage.
+fn unsupported_manifest(
+    error: &StoreError,
+    manifest: ManifestVersion,
+    path: &Path,
+) -> Option<OpenError> {
+    match error {
+        StoreError::MalformedManifest(
+            fgdb_strata::manifest::ManifestError::UnsupportedFormat { format },
+        ) => Some(OpenError::UnsupportedManifestFormat {
+            path: path.to_path_buf(),
+            slot_manifest: manifest.0,
+            format: *format,
+        }),
+        _ => None,
     }
 }
 
@@ -9013,3 +9060,7 @@ mod lazy_writable_adjacency_laws {
 #[cfg(test)]
 #[path = "pre_pack_open_tests.rs"]
 mod pre_pack_open_laws;
+
+#[cfg(test)]
+#[path = "manifest_format_open_tests.rs"]
+mod manifest_format_open_laws;
