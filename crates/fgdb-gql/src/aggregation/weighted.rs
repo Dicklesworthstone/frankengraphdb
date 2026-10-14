@@ -143,9 +143,9 @@ fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
 }
 
 /// Edges in arrival order, each charged one Work as the topology charges
-/// it. Endpoints are tested exactly as `topology::Endpoints::admit` tests
-/// them: source then destination, each vertex once per side, its verdict
-/// one ScratchEntry. Unanchored, a passing edge is visited with multiplicity
+/// it. Endpoints are tested in `topology::Endpoints::admit`'s order: source
+/// then destination, each vertex once per side (once in all when both sides
+/// share their predicates), its verdict one ScratchEntry. Unanchored, a passing edge is visited with multiplicity
 /// one. Anchored, it joins its slot-0 vertex's count (a new anchor costs one
 /// ScratchEntry); each anchor is then visited once with that multiplicity,
 /// after re-reading its property columns once per further edge, as the
@@ -180,6 +180,10 @@ where
         .map_or((&[][..], &[][..]), |(from, to)| {
             (from.as_slice(), to.as_slice())
         });
+    // Both sides under one predicate list (`(:N)-[:E]->(:N)`) give a vertex
+    // one verdict wherever it is reached: a second test could only repeat
+    // the first, so each vertex is read and charged once, not once per side.
+    let shared = from == to;
     // Probed, never iterated: no order of theirs reaches a result.
     let mut tested = [
         std::collections::HashMap::<VId, bool>::new(),
@@ -196,7 +200,7 @@ where
             if predicates.is_empty() {
                 return Ok(true);
             }
-            match tested[side].entry(vertex) {
+            match tested[if shared { 0 } else { side }].entry(vertex) {
                 std::collections::hash_map::Entry::Occupied(known) => Ok(*known.get()),
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let result = test_vertex(vertex, predicates)?;
@@ -2337,6 +2341,46 @@ mod tests {
                 "{fail_at}"
             );
             assert_eq!(reads, fail_at);
+        }
+    }
+
+    #[test]
+    fn one_predicate_list_on_both_sides_tests_each_vertex_once() {
+        let edges: Vec<_> = distinct_edge_graph()
+            .into_iter()
+            .map(|(_, source, relation, destination)| (source, relation, destination))
+            .collect();
+        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        for (text, shared) in [
+            ("MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS c", true),
+            ("MATCH (a:L)<-[:R]-(b:L) RETURN COUNT(*) AS c", true),
+            ("MATCH (a:L)-[:R]->(b {n: 7}) RETURN COUNT(*) AS c", false),
+        ] {
+            let aggregate = query(text);
+            assert!(single_scan(&aggregate).is_some(), "{text}");
+            let mut tested = Vec::new();
+            let value = CanonicalScalar::Int(7);
+            aggregate
+                .execute_governed(
+                    edges.len() as u64,
+                    (0..5).map(VId),
+                    edges.iter().copied(),
+                    |vid, predicates| {
+                        tested.push(vid);
+                        Ok::<_, ()>(predicates.iter().all(|predicate| {
+                            predicate.matches_borrowed(
+                                (vid != VId(4)).then_some(fgdb_delta_types::LabelId(1)),
+                                (vid != VId(1)).then_some((PropertyKeyId(1), &value)),
+                            )
+                        }))
+                    },
+                    |_, _| Ok(None),
+                    policy,
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap();
+            let distinct: BTreeSet<_> = tested.iter().copied().collect();
+            assert_eq!(distinct.len() == tested.len(), shared, "{text}: {tested:?}");
         }
     }
 
