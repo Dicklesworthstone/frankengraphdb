@@ -1169,19 +1169,19 @@ impl PreparedGraphAggregate {
                 }
                 let key = &key[..self.keys.len()];
                 control(GlaExecutionEvent::Work)?;
-                if !groups.contains_key(key) {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    let mut owned_key = Vec::new();
-                    for value in key {
-                        control(GlaExecutionEvent::ScratchEntry)?;
-                        owned_key.push(*value);
-                    }
-                    let state = new_group(&self.aggregates, control)?;
-                    groups.insert(owned_key, state);
+                // One tree descent for an existing group, two for a new one
+                // (it was three), with the same events in the same order.
+                if let Some(state) = groups.get_mut(key) {
+                    return update_group(&self.aggregates, state, &values, multiplicity, control);
                 }
-                let state = groups
-                    .get_mut(key)
-                    .expect("the admitted group was initialized");
+                control(GlaExecutionEvent::ScratchEntry)?;
+                let mut owned_key = Vec::new();
+                for value in key {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    owned_key.push(*value);
+                }
+                let state = new_group(&self.aggregates, control)?;
+                let state = groups.entry(owned_key).or_insert(state);
                 update_group(&self.aggregates, state, &values, multiplicity, control)
             },
         )?;
