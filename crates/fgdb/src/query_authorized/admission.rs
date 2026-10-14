@@ -18,8 +18,7 @@
 use super::tape::{Step, Tape};
 use crate::Snapshot;
 use crate::query::prism::LiveCache;
-use fgdb_delta_types::RelationId;
-use fgdb_types::{CommitSeq, EId, VId};
+use fgdb_types::{CommitSeq, VId};
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -38,13 +37,12 @@ pub(super) struct AdmissionKey {
     pub(super) edges: bool,
 }
 
-/// One admitted edge: its identity and where its winning statement sits.
+/// Where one admitted edge's winning statement sits. Its identity is that
+/// statement's, read back on refill from the snapshot allocation the core is
+/// kept beside: 8 bytes per edge instead of 64, which is what lets a
+/// web-google core (5.1M edges) fit the retention budget at all.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CoreEdge {
-    pub(super) eid: EId,
-    pub(super) src: VId,
-    pub(super) dst: VId,
-    pub(super) relation: RelationId,
     pub(super) block: u32,
     pub(super) row: u32,
 }
@@ -53,7 +51,9 @@ pub(super) struct CoreEdge {
 /// as coordinates into the snapshot allocation that produced them.
 #[derive(Debug, Default)]
 pub(super) struct AdmittedCore {
-    /// Identity, patch and row of each admitted vertex.
+    /// Identity, patch and row of each admitted vertex. The identity stays
+    /// inline: a vertex-only statement refills from it without touching the
+    /// rows, and vertices are few beside edges.
     pub(super) vertices: Vec<(VId, u32, u32)>,
     pub(super) edges: Vec<CoreEdge>,
     pub(super) records: u64,
@@ -87,7 +87,8 @@ impl Recording {
         self.core.tape.poll();
     }
 
-    /// An admitted vertex and the number of its labels that were charged.
+    /// The admitted vertex `vid` at `row` of `patch`, and the number of its
+    /// labels that were charged.
     pub(super) fn vertex(&mut self, vid: VId, patch: usize, row: usize, labels: usize) {
         match (
             u32::try_from(patch),
@@ -102,24 +103,12 @@ impl Recording {
         }
     }
 
-    /// An admitted edge.
-    pub(super) fn edge(
-        &mut self,
-        (eid, src, relation, dst): (EId, VId, RelationId, VId),
-        block: usize,
-        row: usize,
-    ) {
+    /// The admitted edge whose winning statement is `row` of `block`.
+    pub(super) fn edge(&mut self, block: usize, row: usize) {
         match (u32::try_from(block), u32::try_from(row)) {
             (Ok(block), Ok(row)) => {
                 self.core.tape.emit(Some(Step::Edge));
-                self.core.edges.push(CoreEdge {
-                    eid,
-                    src,
-                    dst,
-                    relation,
-                    block,
-                    row,
-                });
+                self.core.edges.push(CoreEdge { block, row });
             }
             _ => self.abandoned = true,
         }

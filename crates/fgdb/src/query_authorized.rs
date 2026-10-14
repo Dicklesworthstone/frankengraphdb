@@ -50,7 +50,7 @@ pub use relational::{
     AuthorizedSpoolCursor,
 };
 
-use admission::{ADMITTED, AdmissionKey, AdmittedCore, Recording};
+use admission::{ADMITTED, AdmissionKey, AdmittedCore, CoreEdge, Recording};
 use tape::Step;
 
 #[cfg(test)]
@@ -404,7 +404,7 @@ impl<'a> Tables<'a> {
                         if tables.admit_edge((identity, properties), predicates, control)?
                             && let Some(recording) = &recording
                         {
-                            recording.borrow_mut().edge(identity, block, row_at);
+                            recording.borrow_mut().edge(block, row_at);
                         }
                         Ok(())
                     },
@@ -431,22 +431,23 @@ impl<'a> Tables<'a> {
     }
 
     /// Fill empty tables from a core recorded on this same snapshot allocation.
+    /// Each edge's identity is read back from the statement its coordinates
+    /// name, which is the one the recording scan admitted.
     fn refill(&mut self, snapshot: &'a Snapshot, core: &AdmittedCore) {
         self.vertices.extend(
             core.vertices
                 .iter()
                 .map(|&(vid, patch, row)| (vid, &snapshot.patches[patch as usize][row as usize])),
         );
-        self.edges.extend(core.edges.iter().map(|edge| {
-            (
-                (edge.eid, edge.src, edge.relation, edge.dst),
-                source::edge_properties_at(
-                    &snapshot.block_props,
-                    edge.block as usize,
-                    edge.row as usize,
-                ),
-            )
-        }));
+        self.edges
+            .extend(core.edges.iter().map(|&CoreEdge { block, row }| {
+                let (block, row) = (block as usize, row as usize);
+                let edge = &snapshot.blocks[block][row];
+                (
+                    (edge.eid, edge.src, edge.relation, edge.dst),
+                    source::edge_properties_at(&snapshot.block_props, block, row),
+                )
+            }));
         self.records = core.records;
     }
 
