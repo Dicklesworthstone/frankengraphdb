@@ -134,7 +134,7 @@ fn compact_with_limit(
     // The winning statement's row, by the same forward last-block-wins pass
     // the collapse applied to the entries themselves — shared with the
     // whole-graph scan so the two cannot drift apart.
-    let mut winning_props = crate::root::winning_edge_rows(blocks, block_props);
+    let mut winning_props = crate::root::WinningEdgeRows::new(blocks, block_props);
 
     // DROP BY OBSERVABILITY, NOT BY AGE. A version whose life ended at or before
     // the floor can never be seen again; one still live at the floor must stay
@@ -144,7 +144,7 @@ fn compact_with_limit(
         .into_iter()
         .filter(|(_, entry)| entry.retired_at.is_none_or(|r| r.0 > floor.0))
         .map(|(key, entry)| {
-            let row = winning_props.remove(&key).unwrap_or_default();
+            let row = winning_props.row(key);
             (entry, row)
         })
         .collect();

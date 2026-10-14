@@ -1747,25 +1747,77 @@ pub fn merge_edge_with_props(
     Ok(Some((*winner, Vec::new())))
 }
 
-/// The row each EId's LAST statement carries, by one forward pass in
-/// publication order — the same last-block-wins rule the entry collapse
-/// applies, over the hosted columns instead. Shared by the whole-graph scan
-/// and compaction so neither can drift to a second precedence rule.
-pub(crate) fn winning_edge_rows(
-    blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
-    block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
-) -> std::collections::BTreeMap<(EId, CommitSeq), crate::edge_props::EdgePropertyRow> {
-    let mut rows = std::collections::BTreeMap::new();
-    for (block, props) in blocks.iter().zip(block_props) {
-        for (index, entry) in block.as_ref().iter().enumerate() {
-            let row = props
-                .as_ref()
-                .map(|props| props.borrow().props_of(index))
-                .unwrap_or_default();
-            rows.insert((entry.eid, entry.created_at), row);
+/// The row each statement's LAST copy carries, in publication order — the
+/// same last-block-wins rule the entry collapse applies, over the hosted
+/// columns instead. Shared by the whole-graph scan and compaction so neither
+/// can drift to a second precedence rule.
+///
+/// One sorted list of `(statement, block, index)` positions, the last copy of
+/// each statement kept, read through a cursor: both callers ask in ascending
+/// statement order, and a row is cloned only for a statement asked about. The
+/// ordered map this replaced inserted, and cloned a row for, every copy in the
+/// history in publication order, which a keyed EId permutation makes random
+/// key order: on a packed web-google (5.1M edges) that was about a quarter of
+/// a writable open (fgdb-e8gr4).
+pub(crate) struct WinningEdgeRows<'a, P> {
+    /// Ascending by statement, one position per statement.
+    positions: Vec<((EId, CommitSeq), usize, usize)>,
+    next: usize,
+    block_props: &'a [Option<P>],
+}
+
+impl<'a, P: Borrow<crate::edge_props::BlockProps>> WinningEdgeRows<'a, P> {
+    pub(crate) fn new(
+        blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+        block_props: &'a [Option<P>],
+    ) -> Self {
+        let mut positions: Vec<_> = blocks
+            .iter()
+            .zip(block_props)
+            .enumerate()
+            .flat_map(|(block_at, (block, _))| {
+                block
+                    .as_ref()
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, entry)| ((entry.eid, entry.created_at), block_at, index))
+            })
+            .collect();
+        // Within one statement the latest copy sorts first, so keeping the
+        // first of each run keeps the last copy in publication order.
+        positions.sort_unstable_by(|a, b| a.0.cmp(&b.0).then((b.1, b.2).cmp(&(a.1, a.2))));
+        positions.dedup_by_key(|position| position.0);
+        Self {
+            positions,
+            next: 0,
+            block_props,
         }
     }
-    rows
+
+    /// The row the last copy of `key` carries; the empty row when no block
+    /// holds `key`. Asked in ascending order the cursor only moves forward;
+    /// any other order is answered by a search.
+    pub(crate) fn row(&mut self, key: (EId, CommitSeq)) -> crate::edge_props::EdgePropertyRow {
+        let at = if self.next == 0 || self.positions[self.next - 1].0 < key {
+            while self
+                .positions
+                .get(self.next)
+                .is_some_and(|position| position.0 < key)
+            {
+                self.next += 1;
+            }
+            self.next
+        } else {
+            self.positions.partition_point(|position| position.0 < key)
+        };
+        match self.positions.get(at) {
+            Some(&(found, block_at, index)) if found == key => self.block_props[block_at]
+                .as_ref()
+                .map(|props| props.borrow().props_of(index))
+                .unwrap_or_default(),
+            _ => Default::default(),
+        }
+    }
 }
 
 /// Every edge with a visible version at `as_of`, each beside the row its
@@ -1816,11 +1868,11 @@ fn visible_with_props(
     block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
     as_of: CommitSeq,
 ) -> Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)> {
-    let mut rows = winning_edge_rows(blocks, block_props);
+    let mut rows = WinningEdgeRows::new(blocks, block_props);
     statements
         .iter()
         .filter(|(_, entry)| entry.visible_at(as_of))
-        .map(|(key, entry)| (*entry, rows.remove(key).unwrap_or_default()))
+        .map(|(key, entry)| (*entry, rows.row(*key)))
         .collect()
 }
 

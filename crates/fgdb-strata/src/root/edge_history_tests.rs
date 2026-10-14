@@ -357,3 +357,84 @@ fn structured_identities_spread_without_overflow() {
         assert_eq!(chains.statements().len(), rows.len());
     }
 }
+
+/// The replaced winning-row fold, kept as the oracle: every copy inserted in
+/// publication order, so the last copy of each statement wins.
+fn winning_rows_by_map(
+    blocks: &[Vec<AdjacencyEntry>],
+    block_props: &[Option<crate::edge_props::BlockProps>],
+) -> BTreeMap<(EId, CommitSeq), crate::edge_props::EdgePropertyRow> {
+    let mut rows = BTreeMap::new();
+    for (block, props) in blocks.iter().zip(block_props) {
+        for (index, entry) in block.iter().enumerate() {
+            let row = props
+                .as_ref()
+                .map(|props| props.props_of(index))
+                .unwrap_or_default();
+            rows.insert((entry.eid, entry.created_at), row);
+        }
+    }
+    rows
+}
+
+/// Some blocks host no patch; the others give each entry no row or one of a
+/// few distinct rows.
+fn block_props(
+    rng: &mut Rng,
+    blocks: &[Vec<AdjacencyEntry>],
+) -> Vec<Option<crate::edge_props::BlockProps>> {
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_types::CanonicalScalar;
+    blocks
+        .iter()
+        .map(|block| {
+            rng.chance(80).then(|| {
+                let rows: Vec<_> = (0..1 + rng.below(3))
+                    .map(|_| {
+                        let value = rng.below(1_000);
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(value as i64))]
+                    })
+                    .collect();
+                let locators = block
+                    .iter()
+                    .map(|_| rng.below(rows.len() as u64 + 1) as u8)
+                    .collect();
+                crate::edge_props::BlockProps { locators, rows }
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn winning_rows_answer_exactly_as_the_publication_order_map() {
+    let mut rng = Rng(0x7e1d_0b10_c0de_5a17);
+    let mut restated = 0;
+    for trial in 0..20_000 {
+        let blocks = history(&mut rng);
+        let props = block_props(&mut rng, &blocks);
+        let expected = winning_rows_by_map(&blocks, &props);
+        restated += blocks.iter().map(Vec::len).sum::<usize>() - expected.len();
+        // Ascending, as both callers ask, with absent statements between.
+        let mut rows = super::WinningEdgeRows::new(&blocks, &props);
+        for (&(eid, created), row) in &expected {
+            let absent = (eid, CommitSeq(created.0.wrapping_sub(1)));
+            if !expected.contains_key(&absent) {
+                assert!(rows.row(absent).is_empty(), "trial {trial}: {absent:?}");
+            }
+            assert_eq!(&rows.row((eid, created)), row, "trial {trial}");
+        }
+        assert!(rows.row((EId(u128::MAX), CommitSeq(u64::MAX))).is_empty());
+        // Any other order is answered the same.
+        let mut keys: Vec<_> = expected.keys().copied().collect();
+        for at in (1..keys.len()).rev() {
+            keys.swap(at, rng.below(at as u64 + 1) as usize);
+        }
+        let mut shuffled = super::WinningEdgeRows::new(&blocks, &props);
+        for key in keys {
+            assert_eq!(&shuffled.row(key), &expected[&key], "trial {trial}");
+        }
+    }
+    // The generator restates statements across blocks, so later copies
+    // really do override earlier ones.
+    assert!(restated > 10_000, "restated copies: {restated}");
+}
