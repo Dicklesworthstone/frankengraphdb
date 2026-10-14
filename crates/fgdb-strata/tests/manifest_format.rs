@@ -10,6 +10,9 @@
 //! closed-and-reopened store resolves every named partition with nothing
 //! carried in memory, and an absent root is a typed refusal NAMING the
 //! missing identity — never a silently smaller graph.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when a lab test proves them Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::RelationId;

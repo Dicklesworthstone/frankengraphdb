@@ -1,5 +1,8 @@
 //! Public cold-incidence APIs over real Chronicle/Strata and injected MemVfs.
 //! Result vectors below belong only to the independent test oracle.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{

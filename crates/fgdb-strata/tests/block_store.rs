@@ -11,6 +11,9 @@
 //! `&CommitCx`, while every synchronous read accepts the shared sealed
 //! `StorageReadCx` contract and runs under the caller's role restriction — the
 //! doctrine-3 boundary a lab runtime swaps to inject filesystem faults.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when a lab test proves them Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::RelationId;

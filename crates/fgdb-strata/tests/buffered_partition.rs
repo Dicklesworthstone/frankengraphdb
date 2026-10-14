@@ -1,5 +1,8 @@
 //! A cold source consumes the same durable objects as reopen, with independently
 //! specified point/adjacency answers and a one-frame eviction/refault boundary.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when a lab test proves them Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};

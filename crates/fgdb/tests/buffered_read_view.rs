@@ -1,6 +1,9 @@
 //! The public cold reader uses the real Chronicle/Strata checkpoint and Vfs.
 //! Resident views are an independent oracle; explicit expected values also
 //! distinguish historical property changes, deletion and parallel incidence.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 #[path = "buffered_read_view/edge_query.rs"]
 mod edge_query;

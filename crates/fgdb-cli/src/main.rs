@@ -1,5 +1,8 @@
 //! Embedded CLI. Every graph operation uses the public native engine;
 //! symbol IDs remain explicit until the library supplies a durable catalog.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 #![forbid(unsafe_code)]
 
 mod buffered;

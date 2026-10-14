@@ -26,6 +26,9 @@
 //! dropped. No handle, no fold, no block list and no snapshot crosses between
 //! them — only the durable stream, which is the only thing they are supposed to
 //! agree about.
+// Commit-pack reads nest the store's futures past the default recursion
+// limit when this crate proves one Send (see fgdb-strata's lib.rs).
+#![recursion_limit = "256"]
 
 use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, Vfs, VfsFile};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};

@@ -112,6 +112,12 @@
 //! `fgdb-w5-effects-normal-form-819`.
 
 #![forbid(unsafe_code)]
+// Commit-pack reads (fgdb-79kyi) deepen the store's read futures (an object
+// read now resolves pack-first through OrderedReads), so proving a caller's
+// future Send nests deeper than the default limit of 128, which the
+// recursion_depth_exceeding_limit future-incompatibility lint
+// (rust-lang/rust#159228) rejects under -D warnings. As in fgdb-server.
+#![recursion_limit = "256"]
 
 mod buffered_read;
 pub use buffered_read::{
