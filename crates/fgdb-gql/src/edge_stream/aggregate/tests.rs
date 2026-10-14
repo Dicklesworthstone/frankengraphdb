@@ -449,8 +449,9 @@ fn ordinary_row_profile_is_not_relaxed_and_unsupported_aggregate_shapes_refuse()
     let q = prepare("MATCH (a)-[r:R]->(b) RETURN SUM(r.p) AS total");
     assert!(EdgeScanPlan::compile(q.input_pattern().plan()).is_err());
     assert!(EdgeAggregatePlan::compile(&q).is_ok());
+    // Plain edge collections now stream (output.rs pins them to the eager
+    // answer); a computed collection and an optional join still refuse.
     for text in [
-        "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT b) AS n",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p+1) AS n",
         "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:S]->(c) RETURN COUNT(*) AS n",
     ] {
