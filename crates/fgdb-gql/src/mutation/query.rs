@@ -266,6 +266,9 @@ impl PreparedGraphMutationQuery {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        // Every engine below (selection, aggregate, ordering, tail) sees one
+        // checkpoint type per error-type pair, not one per caller (fgdb-2goz).
+        let mut checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         let mut selection = policy;
         selection.query = GqlQueryPolicy::new(
             policy.query.rows.max_snapshot_records().unwrap_or(u64::MAX),
