@@ -391,7 +391,10 @@ mod projected {
                             &db, &cx, &issuer, &token, &pool, &text, &args, allowance, imported,
                         )
                         .await;
-                        assert!(matches!(prepared.native.as_ref(), PreparedNativeRead::Set(_)));
+                        assert!(matches!(
+                            prepared.native.as_ref(),
+                            PreparedNativeRead::Set(_)
+                        ));
                         // The ENTIRE raw source fits. The first large computed
                         // row must not escape via the signed-only callback.
                         {
@@ -400,13 +403,9 @@ mod projected {
                                 .session
                                 .open_ordered(&cx, &prepared, &args, limits)
                                 .unwrap();
-                            let error = opened
-                                .input
-                                .0
-                                .pull()
-                                .unwrap()
-                                .err()
-                                .expect("projection must spend the native allowance");
+                            let Err(error) = opened.input.0.pull().unwrap() else {
+                                panic!("projection must spend the native allowance");
+                            };
                             native_limit(error, dimension);
                             assert_eq!(opened.input.0.state(), ScanState::Failed);
                             assert_eq!(opened.input.0.stats().2.result_rows, 0);
@@ -417,7 +416,7 @@ mod projected {
                         // Opening is still lazy; the same error crosses the
                         // actual spill future before any final row is exposed.
                         let future = session.execute_ordered(&cx, &prepared, &args).unwrap();
-                        native_limit(future.await.err().expect("native refusal"), dimension);
+                        native_limit(future.await.expect_err("native refusal"), dimension);
                         assert!(!session.is_closed());
                         assert_eq!(pool.used(), 0);
                     }
@@ -459,7 +458,15 @@ mod projected {
                 ] {
                     let args = GqlParameters::new().with_int64("factor", factor).unwrap();
                     let (mut wide, prepared) = open(
-                        &db, &cx, &issuer, &token, &pool, text, &args, policy(), imported,
+                        &db,
+                        &cx,
+                        &issuer,
+                        &token,
+                        &pool,
+                        text,
+                        &args,
+                        policy(),
+                        imported,
                     )
                     .await;
                     let needed = usage(&mut wide, &cx, &prepared, &args);
@@ -488,7 +495,7 @@ mod projected {
                         fn require_send<T: Send>(_: &T) {}
                         require_send(&future);
                         if let Some(dimension) = denied {
-                            native_limit(future.await.err().expect("one unit short"), dimension);
+                            native_limit(future.await.expect_err("one unit short"), dimension);
                         } else {
                             let mut cursor = future.await.unwrap();
                             require_send(&cursor);
@@ -528,7 +535,15 @@ mod projected {
                          ORDER BY value LIMIT {count}"
                     );
                     let (mut session, prepared) = open(
-                        &db, &cx, &issuer, &token, &pool, &text, &args, policy(), imported,
+                        &db,
+                        &cx,
+                        &issuer,
+                        &token,
+                        &pool,
+                        &text,
+                        &args,
+                        policy(),
+                        imported,
                     )
                     .await;
                     let pins = Arc::strong_count(&db.snapshot);
@@ -539,9 +554,10 @@ mod projected {
                             .open_ordered(&cx, &prepared, &args, limits)
                             .unwrap();
                         drop(opened.input.0.pull().unwrap().unwrap());
-                        division(
-                            opened.input.0.pull().unwrap().err().expect("second row fails"),
-                        );
+                        let Err(error) = opened.input.0.pull().unwrap() else {
+                            panic!("second row fails");
+                        };
+                        division(error);
                         assert_eq!(opened.input.0.state(), ScanState::Failed);
                         let stats = opened.input.0.stats();
                         assert_eq!((stats.2.snapshot_records, stats.2.result_rows), (2, 1));
@@ -555,8 +571,7 @@ mod projected {
                     division(
                         future
                             .await
-                            .err()
-                            .expect("LIMIT cannot conceal an input failure"),
+                            .expect_err("LIMIT cannot conceal an input failure"),
                     );
                     assert!(!session.is_closed());
                     assert_eq!(pool.used(), 0);
