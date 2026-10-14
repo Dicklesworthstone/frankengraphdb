@@ -136,6 +136,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// edge, oriented root source, then each appended edge in traversal order.
     /// Predicates, paths, multiplicity, DISTINCT and pagination are evaluated by
     /// the existing AsyncEdgeJoinCursor, not a second graph interpreter.
+    /// Correlated EXISTS/NOT EXISTS scopes use the same incidence source and
+    /// native probe predicates. One witness ends a positive search; absence
+    /// requires exhaustion. Child records never multiply or escape the outer
+    /// result. Each active probe has its own definition-bounded frame charge;
+    /// histories, decoding and predicates share the outer cumulative policy.
     ///
     /// One bounded source record per active hop is retained. Routed incidence
     /// directories, decode workspaces, traversal and copied results all use this
@@ -153,7 +158,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// must retain the guard with the row. Exhaustion establishes completion.
     /// The view/context are borrowed, but the prepared definition is not.
     /// Initial admission/recovery retain their existing bounds. Owner-level API:
-    /// no Warden grant, durable result lease, OPTIONAL/probe or unbounded walk.
+    /// no Warden grant, durable result lease, OPTIONAL, independent probe scans,
+    /// nested probes or variable-length probe/outer traversal. These profiles
+    /// refuse during physical preparation, never as an empty neighborhood.
     // The cursor's source and checkpoint are opaque, and stable Rust cannot
     // name an opaque type in an alias, so this and the three join openers
     // below spell the type out (as the resident join entry points do).
