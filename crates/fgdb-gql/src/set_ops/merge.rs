@@ -40,8 +40,8 @@ where
     control(GlaExecutionEvent::Work)?;
     let order = match (left, right) {
         (None, None) => return Ok(SpillSetMergeStep::Done),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => return Ordering::Less,
+        (None, Some(_)) => return Ordering::Greater,
         (Some(a), Some(b)) => compare(a, b, control)?,
     };
     Ok(match (operation, order) {
@@ -68,41 +68,98 @@ where
     C: FnMut(GlaExecutionEvent) -> Result<(), E>,
     F: FnMut(&T, &T, &mut C) -> Result<Ordering, E>,
 {
-    let len = rows.len();
-    for root in (0..len / 2).rev() {
-        sift(rows, root, len, control, compare)?;
+    let mut sort = InPlaceSort::new(rows.len());
+    loop {
+        let mut remaining = usize::MAX;
+        if sort
+            .advance(rows, &mut remaining, control, compare)?
+            .is_ready()
+        {
+            return Ok(());
+        }
     }
-    for end in (1..len).rev() {
-        control(GlaExecutionEvent::Work)?;
-        rows.swap(0, end);
-        sift(rows, 0, end, control, compare)?;
-    }
-    Ok(())
 }
-fn sift<T, E, C, F>(
-    rows: &mut [T],
-    mut root: usize,
+
+/// Resumable form of the same in-place heapsort used by blocking consumers.
+/// Only indices survive a yield; rows and payloads stay in their original
+/// allocation. Each quantum unit permits one heap descent or extraction swap.
+/// Comparisons remain indivisible governed calls, not wall-clock-bounded work.
+///
+/// The owner must supply the same, otherwise unchanged slice on every advance
+/// and discard both state and rows on failure. Pending never admits output.
+/// Suspension adds no control events and repeats no comparison or move, so the
+/// synchronous and cooperative paths have identical cumulative transcripts.
+pub(crate) struct InPlaceSort {
+    len: usize,
+    build: usize,
     end: usize,
-    control: &mut C,
-    compare: &mut F,
-) -> Result<(), E>
-where
-    C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-    F: FnMut(&T, &T, &mut C) -> Result<Ordering, E>,
-{
-    while root < end / 2 {
-        let mut child = 2 * root + 1;
-        if child + 1 < end && compare(&rows[child], &rows[child + 1], control)? == Ordering::Less {
-            child += 1;
+    root: Option<usize>,
+}
+
+impl InPlaceSort {
+    pub(crate) fn new(len: usize) -> Self {
+        Self {
+            len,
+            build: len / 2,
+            end: len,
+            root: None,
         }
-        if compare(&rows[root], &rows[child], control)? != Ordering::Less {
-            break;
-        }
-        control(GlaExecutionEvent::Work)?;
-        rows.swap(root, child);
-        root = child;
     }
-    Ok(())
+
+    pub(crate) fn advance<T, E, C, F>(
+        &mut self,
+        rows: &mut [T],
+        remaining: &mut usize,
+        control: &mut C,
+        compare: &mut F,
+    ) -> Result<core::task::Poll<()>, E>
+    where
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+        F: FnMut(&T, &T, &mut C) -> Result<Ordering, E>,
+    {
+        assert_eq!(rows.len(), self.len, "sort input changed across suspension");
+        loop {
+            if let Some(root) = self.root {
+                if root >= self.end / 2 {
+                    self.root = None;
+                    continue;
+                }
+                if *remaining == 0 {
+                    return Ok(core::task::Poll::Pending);
+                }
+                *remaining -= 1;
+                // root < end / 2 proves both the multiplication and the
+                // left-child index, including odd heaps and usize boundaries.
+                let mut child = 2 * root + 1;
+                if child + 1 < self.end
+                    && compare(&rows[child], &rows[child + 1], control)? == Ordering::Less
+                {
+                    child += 1;
+                }
+                if compare(&rows[root], &rows[child], control)? != Ordering::Less {
+                    self.root = None;
+                    continue;
+                }
+                control(GlaExecutionEvent::Work)?;
+                rows.swap(root, child);
+                self.root = Some(child);
+            } else if self.build != 0 {
+                self.build -= 1;
+                self.root = Some(self.build);
+            } else if self.end > 1 {
+                if *remaining == 0 {
+                    return Ok(core::task::Poll::Pending);
+                }
+                *remaining -= 1;
+                control(GlaExecutionEvent::Work)?;
+                self.end -= 1;
+                rows.swap(0, self.end);
+                self.root = Some(0);
+            } else {
+                return Ok(core::task::Poll::Ready(()));
+            }
+        }
+    }
 }
 fn unique<T, E, C, F>(rows: &mut Vec<T>, control: &mut C, compare: &mut F) -> Result<(), E>
 where
@@ -145,6 +202,157 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum SortEvent {
+        Compare((i32, usize), (i32, usize)),
+        Work,
+    }
+
+    // The former blocking kernel is an independent transcript oracle. Equal
+    // keys carry distinct occurrence IDs to expose any changed swap/tie order.
+    fn reference_sort(rows: &mut [(i32, usize)], events: &mut Vec<SortEvent>) {
+        fn compare(a: (i32, usize), b: (i32, usize), events: &mut Vec<SortEvent>) -> Ordering {
+            events.push(SortEvent::Compare(a, b));
+            events.push(SortEvent::Work);
+            a.0.cmp(&b.0)
+        }
+        fn sift(
+            rows: &mut [(i32, usize)],
+            mut root: usize,
+            end: usize,
+            events: &mut Vec<SortEvent>,
+        ) {
+            while root < end / 2 {
+                let mut child = 2 * root + 1;
+                if child + 1 < end
+                    && compare(rows[child], rows[child + 1], events) == Ordering::Less
+                {
+                    child += 1;
+                }
+                if compare(rows[root], rows[child], events) != Ordering::Less {
+                    break;
+                }
+                events.push(SortEvent::Work);
+                rows.swap(root, child);
+                root = child;
+            }
+        }
+        let len = rows.len();
+        for root in (0..len / 2).rev() {
+            sift(rows, root, len, events);
+        }
+        for end in (1..len).rev() {
+            events.push(SortEvent::Work);
+            rows.swap(0, end);
+            sift(rows, 0, end, events);
+        }
+    }
+
+    fn advance_traced(
+        sort: &mut InPlaceSort,
+        rows: &mut [(i32, usize)],
+        remaining: &mut usize,
+        events: &std::cell::RefCell<Vec<SortEvent>>,
+    ) -> core::task::Poll<()> {
+        sort.advance(
+            rows,
+            remaining,
+            &mut |_| {
+                events.borrow_mut().push(SortEvent::Work);
+                Ok::<_, ()>(())
+            },
+            &mut |a, b, control| {
+                events.borrow_mut().push(SortEvent::Compare(*a, *b));
+                control(GlaExecutionEvent::Work)?;
+                Ok(a.0.cmp(&b.0))
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cooperative_sort_preserves_every_comparison_move_and_tied_occurrence() {
+        for len in 0..=6 {
+            for mut code in 0..3_usize.pow(len) {
+                let input: Vec<_> = (0..len as usize)
+                    .map(|at| {
+                        let value = (code % 3) as i32 - 1;
+                        code /= 3;
+                        (value, at)
+                    })
+                    .collect();
+                let mut expected = input.clone();
+                let mut expected_events = Vec::new();
+                reference_sort(&mut expected, &mut expected_events);
+                assert!(expected.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+                for quantum in [1, 2, 5, 64, usize::MAX] {
+                    let mut actual = input.clone();
+                    let events = std::cell::RefCell::new(Vec::new());
+                    let mut sort = InPlaceSort::new(actual.len());
+                    let mut zero = 0;
+                    let first = advance_traced(&mut sort, &mut actual, &mut zero, &events);
+                    assert_eq!(first.is_ready(), len < 2);
+                    assert_eq!(actual, input);
+                    assert!(events.borrow().is_empty());
+                    loop {
+                        let mut remaining = quantum;
+                        let result = advance_traced(&mut sort, &mut actual, &mut remaining, &events);
+                        if result.is_ready() {
+                            break;
+                        }
+                        assert_eq!(remaining, 0);
+                    }
+                    assert_eq!(actual, expected);
+                    assert_eq!(*events.borrow(), expected_events);
+                    let mut zero = 0;
+                    assert!(advance_traced(&mut sort, &mut actual, &mut zero, &events).is_ready());
+                    assert_eq!(*events.borrow(), expected_events);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cooperative_sort_refuses_at_every_original_control_boundary() {
+        let input: Vec<_> = (0..37).map(|at| ((at * 13 % 17) as i32, at)).collect();
+        let mut expected = input.clone();
+        let mut events = Vec::new();
+        reference_sort(&mut expected, &mut events);
+        let calls = events.iter().filter(|e| **e == SortEvent::Work).count();
+        for quantum in [1, 3, 64] {
+            for stop in 1..=calls {
+                let mut rows = input.clone();
+                let mut seen = 0;
+                let mut sort = InPlaceSort::new(rows.len());
+                let result = loop {
+                    let mut remaining = quantum;
+                    let result = sort.advance(
+                        &mut rows,
+                        &mut remaining,
+                        &mut |_| {
+                            seen += 1;
+                            if seen == stop { Err(stop) } else { Ok(()) }
+                        },
+                        &mut |a, b, control| {
+                            control(GlaExecutionEvent::Work)?;
+                            Ok(a.0.cmp(&b.0))
+                        },
+                    );
+                    if !matches!(result, Ok(core::task::Poll::Pending)) {
+                        break result;
+                    }
+                };
+                assert_eq!(result, Err(stop));
+                assert_eq!(seen, stop);
+                // A refused partially ordered buffer still owns every input
+                // exactly once; no element was lost, cloned or overwritten.
+                rows.sort_by_key(|row| row.1);
+                assert_eq!(rows, input);
+            }
+        }
+    }
+
     fn run(
         left: Vec<i32>,
         right: Vec<i32>,
