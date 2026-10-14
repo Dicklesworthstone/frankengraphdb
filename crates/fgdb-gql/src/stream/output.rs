@@ -241,8 +241,8 @@ mod projected_tests {
     };
     use crate::{
         GlaLimitDimension, GqlQueryError, GqlQueryPolicy, GraphIntegerBinary, GraphIntegerError,
-        GraphIntegerErrorKind, GraphIntegerExpression, GraphIntegerOp,
-        GraphSetProjection, GraphSetQuantifier, GraphSetRowPull, GraphSetValue, PreparedGraphSet,
+        GraphIntegerErrorKind, GraphIntegerExpression, GraphIntegerOp, GraphSetProjection,
+        GraphSetQuantifier, GraphSetRowPull, GraphSetValue, PreparedGraphSet,
     };
     use fgdb_delta_types::PropertyKeyId;
     use fgdb_types::{CanonicalScalar, CommitSeq};
@@ -466,7 +466,10 @@ mod projected_tests {
         let mut raw = VertexScanCursor::new(Source::new([2, 5, 9]), plan.clone(), wide(), || {
             Ok::<_, usize>(())
         });
-        assert_eq!(raw.by_ref().collect::<Result<Vec<_>, _>>().unwrap().len(), 3);
+        assert_eq!(
+            raw.by_ref().collect::<Result<Vec<_>, _>>().unwrap().len(),
+            3
+        );
         let allowance = raw.evaluator_stats().scratch_entries;
         let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, allowance);
         let source = Source::new([2, 5, 9]);
@@ -574,7 +577,10 @@ mod projected_tests {
             let mut cursor =
                 VertexScanCursor::new(source, plan.clone(), wide(), || Ok::<_, usize>(()));
             let first = pull_next(&mut cursor, &pull).unwrap().unwrap();
-            assert_eq!(first.values()[1], GraphValue::Scalar(CanonicalScalar::Int(5)));
+            assert_eq!(
+                first.values()[1],
+                GraphValue::Scalar(CanonicalScalar::Int(5))
+            );
             let error = pull_next(&mut cursor, &pull).unwrap().unwrap_err();
             if source_failure {
                 assert!(matches!(

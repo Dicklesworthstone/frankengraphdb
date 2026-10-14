@@ -1210,7 +1210,10 @@ mod projected_budget_tests {
                 // Both open lazily. The first credited pull must refuse with
                 // the native evaluator error, not a successful unmetered row.
                 denied(session.stream(&cx, &prepared, &args).unwrap(), dimension);
-                denied(session.stream_send(&cx, &prepared, &args).unwrap(), dimension);
+                denied(
+                    session.stream_send(&cx, &prepared, &args).unwrap(),
+                    dimension,
+                );
             }
         });
         assert!(report.lab_test_passed(), "{report:?}");
