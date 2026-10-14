@@ -78,8 +78,7 @@ impl ScanSortTail {
             || width > crate::algebra::MAX_PATTERN_VERTICES
             || order.len() > width
             || order.iter().enumerate().any(|(at, key)| {
-                key.column >= width
-                    || order[..at].iter().any(|prior| prior.column == key.column)
+                key.column >= width || order[..at].iter().any(|prior| prior.column == key.column)
             })
         {
             return None;

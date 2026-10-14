@@ -384,19 +384,15 @@ mod projected {
                                 PreparedNativeRead::Set(_)
                             ));
                             for value in [4, -7] {
-                                let args = GqlParameters::new()
-                                    .with_int64("value", value)
-                                    .unwrap();
+                                let args = GqlParameters::new().with_int64("value", value).unwrap();
                                 // DISTINCT and LIMIT belong to the final result:
                                 // all five private occurrences still reach projection.
                                 usage(&mut session, &cx, &prepared, &args);
                                 let available = if distinct { 1_usize } else { 5_usize };
                                 let selected = available.saturating_sub(skip);
-                                let selected =
-                                    count.map_or(selected, |count| selected.min(count));
-                                let future = session
-                                    .execute_ordered(&cx, &prepared, &args)
-                                    .unwrap();
+                                let selected = count.map_or(selected, |count| selected.min(count));
+                                let future =
+                                    session.execute_ordered(&cx, &prepared, &args).unwrap();
                                 assert_eq!(future.columns(), &["value"]);
                                 assert_eq!(future.snapshot_seq(), CommitSeq(1));
                                 fn require_send<T: Send>(_: &T) {}
@@ -476,7 +472,15 @@ mod projected {
                     "12 / (n.p - $divisor) AS value LIMIT 0"
                 );
                 let (mut session, prepared) = open(
-                    &db, &cx, &issuer, &token, &pool, text, &args, policy(), imported,
+                    &db,
+                    &cx,
+                    &issuer,
+                    &token,
+                    &pool,
+                    text,
+                    &args,
+                    policy(),
+                    imported,
                 )
                 .await;
                 let error = session
@@ -503,7 +507,15 @@ mod projected {
                 assert_eq!(pool.used(), 0);
                 drop(session);
                 let (mut session, prepared) = open(
-                    &db, &cx, &issuer, &token, &pool, text, &args, policy(), imported,
+                    &db,
+                    &cx,
+                    &issuer,
+                    &token,
+                    &pool,
+                    text,
+                    &args,
+                    policy(),
+                    imported,
                 )
                 .await;
                 let mut cursor = session

@@ -1205,14 +1205,9 @@ mod pulled_projection_tests {
         for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
             for width in [1, crate::algebra::MAX_PATTERN_VERTICES] {
                 for (offset, count) in [(0, None), (0, Some(0)), (u64::MAX, Some(1))] {
-                    let tail = ScanSortTail::for_relation(
-                        width,
-                        Vec::new(),
-                        quantifier,
-                        offset,
-                        count,
-                    )
-                    .unwrap();
+                    let tail =
+                        ScanSortTail::for_relation(width, Vec::new(), quantifier, offset, count)
+                            .unwrap();
                     let expected: Vec<_> = (0..width)
                         .map(|column| GraphValueOrder::ascending(column).with_nulls_first(true))
                         .collect();
@@ -1225,9 +1220,11 @@ mod pulled_projection_tests {
                     assert_eq!((tail.offset(), tail.count()), (offset, count));
                 }
             }
-            let keys = vec![GraphValueOrder::descending(1), GraphValueOrder::ascending(0)];
-            let tail = ScanSortTail::for_relation(2, keys.clone(), quantifier, 1, Some(3))
-                .unwrap();
+            let keys = vec![
+                GraphValueOrder::descending(1),
+                GraphValueOrder::ascending(0),
+            ];
+            let tail = ScanSortTail::for_relation(2, keys.clone(), quantifier, 1, Some(3)).unwrap();
             assert_eq!(tail.order(), keys);
             for (width, keys) in [
                 (0, Vec::new()),
@@ -1235,9 +1232,7 @@ mod pulled_projection_tests {
                 (2, vec![GraphValueOrder::ascending(2)]),
                 (2, vec![GraphValueOrder::ascending(0); 2]),
             ] {
-                assert!(
-                    ScanSortTail::for_relation(width, keys, quantifier, 0, Some(0)).is_none()
-                );
+                assert!(ScanSortTail::for_relation(width, keys, quantifier, 0, Some(0)).is_none());
             }
         }
     }
