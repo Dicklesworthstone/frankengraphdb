@@ -96,8 +96,9 @@ impl SpillAggregatePlan {
 
 /// A complete aggregate input admitted for asynchronous local source access.
 /// The ordinary numeric definition and row evaluators own every semantic step.
-/// Fixed-hop edge expansions use the native awaitable join driver. Probes,
-/// OPTIONAL/variable-length expansion refuse before the host opens storage.
+/// Fixed-hop edge expansions and correlated fixed-hop/copy-only probes use the
+/// native awaitable join driver. Independent/nested probes and OPTIONAL or
+/// variable-length expansion refuse before the host opens storage.
 /// Relational inputs retain every projection, filter, UNWIND, binary set,
 /// DISTINCT, ordering and window barrier before reduction. Values inputs use the
 /// native singleton without a graph source. This plan contains no result or
@@ -136,12 +137,15 @@ impl AsyncSpillAggregatePlan {
         ) {
             // Select the access contract from the bound program, never by
             // retrying a rejected compiler or a failed storage operation.
+            // A copy-only probe needs the join driver despite having no Expand.
             if aggregate
                 .input_pattern()
                 .plan()
                 .operators()
                 .iter()
-                .any(|operator| matches!(operator, GlaOperator::Expand { .. }))
+                .any(|operator| {
+                    matches!(operator, GlaOperator::Expand { .. } | GlaOperator::Probe { .. })
+                })
             {
                 AsyncEdgeJoinSpillAggregatePlan::from_definition(definition)
                     .map(Self::Join)

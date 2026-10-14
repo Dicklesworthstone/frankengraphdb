@@ -1,6 +1,8 @@
 //! Correlated probes over real committed histories and the cold Strata reader.
 //! Literal graph products below are test oracles, never production sources.
 
+mod spill;
+
 use asupersync::lab::run_async_under_lab;
 use fgdb::{BufferLimits, BufferedReadLimits, BufferedReadView, Database, DatabaseKeys,
     MemVfs, MemoryPool, WriteBatch};

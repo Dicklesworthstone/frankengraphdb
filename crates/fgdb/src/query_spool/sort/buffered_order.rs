@@ -61,7 +61,9 @@ impl PreparedNativeRead {
     /// partitioned reducer, then converts every group to ordinary row values
     /// before downstream clauses. Exact rational averages and wide integer
     /// overflow retain the native row-domain refusal. COLLECT is unsupported.
-    /// Probes, OPTIONAL/variable-length paths and keyed/theta joins refuse.
+    /// Correlated fixed-hop or copy-only EXISTS/NOT EXISTS use the async join
+    /// source, including probes without an expansion. Independent/nested probes,
+    /// OPTIONAL/variable-length paths and keyed/theta joins still refuse.
     /// Terminal exact aggregate results have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));
@@ -124,7 +126,7 @@ impl PreparedNativeRead {
                 .plan()
                 .operators()
                 .iter()
-                .any(|op| matches!(op, GlaOperator::Expand { .. }))
+                .any(|op| matches!(op, GlaOperator::Expand { .. } | GlaOperator::Probe { .. }))
             {
                 let (plan, tail) =
                     AsyncEdgeJoinPlan::compile_sort_input(query.plan()).map_err(error)?;
