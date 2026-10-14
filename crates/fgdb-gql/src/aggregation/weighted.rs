@@ -907,10 +907,17 @@ fn chain_counts<E, C>(
 ) -> Result<BTreeMap<VId, u128>, VisitError<E, C>> {
     let empty = Hops::default();
     let hop = |at: usize| hops.get(&chain.relations[at]).unwrap_or(&empty);
-    let mut levels: Vec<BTreeMap<VId, u128>> = vec![sources.iter().map(|&a| (a, 1)).collect()];
+    // Each level accumulates in an id-hash map, pair by pair in the order the
+    // ordered levels produce them (so an overflow stops at the same pair), and
+    // is then frozen as a vector sorted by vertex: later passes read it in
+    // the same order a BTreeMap would, and look vertices up by binary search.
+    let mut first: Vec<(VId, u128)> = sources.iter().map(|&a| (a, 1)).collect();
+    first.sort_unstable_by_key(|&(vertex, _)| vertex);
+    first.dedup_by_key(|&mut (vertex, _)| vertex);
+    let mut levels: Vec<Vec<(VId, u128)>> = vec![first];
     for at in 0..chain.relations.len() {
-        let mut next = BTreeMap::<VId, u128>::new();
-        for (&vertex, &walks) in &levels[at] {
+        let mut next = crate::id_hash::IdMap::<VId, u128>::default();
+        for &(vertex, walks) in &levels[at] {
             for (&far, &multiplicity) in hop(at).out.get(&vertex).into_iter().flatten() {
                 control(GlaExecutionEvent::Work)?;
                 let slot = next.entry(far).or_insert(0);
@@ -923,8 +930,15 @@ fn chain_counts<E, C>(
         for _ in &next {
             control(GlaExecutionEvent::ScratchEntry)?;
         }
+        let mut next: Vec<(VId, u128)> = next.into_iter().collect();
+        next.sort_unstable_by_key(|&(vertex, _)| vertex);
         levels.push(next);
     }
+    let walks_into = |level: &[(VId, u128)], vertex: VId| {
+        level
+            .binary_search_by_key(&vertex, |&(vertex, _)| vertex)
+            .map_or(0, |at| level[at].1)
+    };
     let same = |i: usize, j: usize| chain.relations[i] == chain.relations[j];
     // Three-hop edge coincidences summed over the sources once, per endpoint:
     // N12 (the same loop twice at a source, then a third edge) and N13 (an
@@ -964,7 +978,7 @@ fn chain_counts<E, C>(
     }
     let mut counts = BTreeMap::<VId, u128>::new();
     for &length in &chain.lengths {
-        for (&end, &walks) in &levels[length] {
+        for &(end, walks) in &levels[length] {
             control(GlaExecutionEvent::Work)?;
             let source = sources.binary_search(&end).is_ok();
             let mut trails = walks;
@@ -974,7 +988,7 @@ fn chain_counts<E, C>(
             if chain.trail && length == 3 {
                 // trails = walks - N12 - N23 - N13 + 2 N123, all walk counts.
                 let n23 = if same(1, 2) {
-                    let into = levels[1].get(&end).copied().unwrap_or(0);
+                    let into = walks_into(&levels[1], end);
                     hop(1).loops(end).checked_mul(into).ok_or_else(overflow)?
                 } else {
                     0
@@ -1039,7 +1053,10 @@ where
             admitted.insert(vertex);
         }
     }
-    let mut hops = BTreeMap::<RelationId, Hops>::new();
+    // Each relation's oriented edges, charged as they arrive, then counted
+    // once from their sorted order into the same multiplicity maps (built in
+    // bulk), not with two tree searches per edge.
+    let mut arrivals: Vec<(RelationId, Vec<(VId, VId)>)> = Vec::new();
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         if !chain.relations.contains(&relation) {
@@ -1051,13 +1068,45 @@ where
             (destination, source)
         };
         control(GlaExecutionEvent::ScratchEntry)?;
-        let hop = hops.entry(relation).or_default();
-        let slot = hop.out.entry(from).or_default().entry(to).or_insert(0);
-        *slot = slot.checked_add(1).ok_or_else(overflow)?;
-        if from == to {
-            let loops = hop.loops.entry(from).or_insert(0);
-            *loops = loops.checked_add(1).ok_or_else(overflow)?;
+        let at = match arrivals.iter().position(|(known, _)| *known == relation) {
+            Some(at) => at,
+            None => {
+                arrivals.push((relation, Vec::new()));
+                arrivals.len() - 1
+            }
+        };
+        arrivals[at].1.push((from, to));
+    }
+    let mut hops = BTreeMap::<RelationId, Hops>::new();
+    for (relation, mut pairs) in arrivals {
+        pairs.sort_unstable();
+        let mut out = Vec::new();
+        let mut loops = Vec::new();
+        let mut at = 0;
+        while at < pairs.len() {
+            let from = pairs[at].0;
+            let mut targets = Vec::new();
+            while at < pairs.len() && pairs[at].0 == from {
+                let to = pairs[at].1;
+                let start = at;
+                while at < pairs.len() && pairs[at] == (from, to) {
+                    at += 1;
+                }
+                let count = (at - start) as u128;
+                if from == to {
+                    loops.push((from, count));
+                }
+                targets.push((to, count));
+            }
+            out.push((from, targets.into_iter().collect()));
         }
+        hops.insert(
+            relation,
+            Hops {
+                out: out.into_iter().collect(),
+                loops: loops.into_iter().collect(),
+            },
+        );
     }
     // A fixed chain binds its source from its first atom's edges: an edge
     // scan admits no vertex table unless rows are read, so the admitted
