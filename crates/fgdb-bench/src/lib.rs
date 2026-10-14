@@ -499,11 +499,40 @@ pub const EDGES_PER_NEW_VERTEX: usize = 3;
 const INGEST_BATCH_EDGES: usize = 64;
 pub const LOAD_SEED: u64 = 0x46474442; // "FGDB"
 
-/// Sealed-block files on disk == current root reference count (56 B each).
+/// Stored objects on disk == current root reference count (56 B each): the
+/// loose files of the block directory plus every object of each commit pack
+/// in its `packs` subdirectory (fgdb_strata::store::PACK_DIR; a pack's header
+/// declares its object count at bytes 8..12, little-endian).
 pub fn count_stored_blocks(dir: &Path) -> u128 {
-    std::fs::read_dir(dir.join("strata-blocks"))
-        .map(|entries| entries.flatten().count() as u128)
-        .unwrap_or(0)
+    let blocks = dir.join("strata-blocks");
+    let loose = std::fs::read_dir(&blocks)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                .count() as u128
+        })
+        .unwrap_or(0);
+    let packed = std::fs::read_dir(blocks.join("packs"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"))
+                .filter_map(|entry| {
+                    let mut header = [0u8; 12];
+                    std::io::Read::read_exact(
+                        &mut std::fs::File::open(entry.path()).ok()?,
+                        &mut header,
+                    )
+                    .ok()?;
+                    Some(u128::from(u32::from_le_bytes([
+                        header[8], header[9], header[10], header[11],
+                    ])))
+                })
+                .sum::<u128>()
+        })
+        .unwrap_or(0);
+    loose + packed
 }
 
 /// Shape 1: durable ingest under power-law degree skew. Every commit is the
