@@ -13,6 +13,7 @@
 pub mod bytes;
 pub mod context;
 pub mod decimal;
+mod decimal_text;
 pub mod embedded_txn;
 pub mod float_arithmetic;
 pub mod ids;
@@ -35,6 +36,7 @@ pub use decimal::{
     CanonicalDecimal, DecimalDecodeError, DecimalError, DecimalOperation, MAX_DECIMAL_COEFFICIENT,
     MIN_DECIMAL_COEFFICIENT, STRICT_PORTABLE_DECIMAL_PRECISION, STRICT_PORTABLE_DECIMAL_SCALE,
 };
+pub use decimal_text::{DecimalParseError, MAX_DECIMAL_TEXT_BYTES};
 pub use embedded_txn::{EmbeddedTxnCompletion, EmbeddedTxnState};
 pub use float_arithmetic::{ExactBinary64Sum, FloatArithmeticError};
 pub use ids::{
