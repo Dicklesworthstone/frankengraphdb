@@ -74,9 +74,7 @@ fn families() -> Vec<Vec<CanonicalScalar>> {
         // distinct offsets/local times rather than collapsing during DISTINCT.
         [(0, 3600), (0, 0), (3_600_000_000_000, 3600), (1, 0)]
             .into_iter()
-            .map(|(n, offset)| {
-                CanonicalScalar::Time(CanonicalTime::new(time(n), offset).unwrap())
-            })
+            .map(|(n, offset)| CanonicalScalar::Time(CanonicalTime::new(time(n), offset).unwrap()))
             .collect(),
         [(-1, 86_399_999_999_999), (0, 0), (0, 1)]
             .into_iter()
