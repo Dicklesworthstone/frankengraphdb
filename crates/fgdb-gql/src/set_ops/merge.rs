@@ -40,8 +40,8 @@ where
     control(GlaExecutionEvent::Work)?;
     let order = match (left, right) {
         (None, None) => return Ok(SpillSetMergeStep::Done),
-        (Some(_), None) => return Ordering::Less,
-        (None, Some(_)) => return Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
         (Some(a), Some(b)) => compare(a, b, control)?,
     };
     Ok(match (operation, order) {
