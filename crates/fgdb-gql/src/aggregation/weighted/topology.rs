@@ -132,13 +132,12 @@ fn sorted<E, C>(
             previous = Some(key);
         }
     }
-    let mut endpoints = Endpoints {
-        filters,
-        tested: BTreeMap::new(),
-    };
+    let mut verdicts = filters.map(|filters| Verdicts::new(filters, &runs, &arrivals));
     for at in 0..runs.len() {
         control(GlaExecutionEvent::Work)?;
-        if filters.is_some() && !endpoints.admit(arrivals[at], test_vertex, control)? {
+        if let Some(verdicts) = &mut verdicts
+            && !verdicts.admit(at, arrivals[at], test_vertex, control)?
+        {
             // A first arrival that fails rejects its whole key.
             first[at] = false;
             continue;
@@ -167,6 +166,102 @@ fn sorted<E, C>(
         start = end;
     }
     Ok(topology)
+}
+
+/// Endpoint verdicts for `sorted`, one per (vertex, relation) group and side:
+/// exactly what `Endpoints` caches per (side, relation, vertex), without a
+/// tree search per edge (22% of a 730k-edge grouped count with a source
+/// label). The key sort already makes each source group contiguous; one more
+/// sort numbers the destination groups. A group is tested at its first
+/// arrival that reaches it, so tests and their entries keep their order.
+struct Verdicts<'a> {
+    filters: &'a EndpointFilters,
+    /// The group of each arrival's source, then of its destination.
+    source: Vec<usize>,
+    destination: Vec<usize>,
+    sources: Vec<Option<bool>>,
+    destinations: Vec<Option<bool>>,
+}
+
+impl<'a> Verdicts<'a> {
+    fn new(
+        filters: &'a EndpointFilters,
+        runs: &[(VId, RelationId, VId, usize)],
+        arrivals: &[TopologyKey],
+    ) -> Self {
+        let tests = |side: fn(&(Vec<VertexPredicate>, Vec<VertexPredicate>)) -> bool| {
+            filters.values().any(side)
+        };
+        let (mut source, mut sources) = (Vec::new(), Vec::new());
+        if tests(|(from, _)| !from.is_empty()) {
+            source = vec![0; runs.len()];
+            let mut previous = None;
+            for &(vertex, relation, _, at) in runs {
+                if previous != Some((vertex, relation)) {
+                    previous = Some((vertex, relation));
+                    sources.push(None);
+                }
+                source[at] = sources.len() - 1;
+            }
+        }
+        let (mut destination, mut destinations) = (Vec::new(), Vec::new());
+        if tests(|(_, to)| !to.is_empty()) {
+            let mut order: Vec<(VId, RelationId, usize)> = arrivals
+                .iter()
+                .enumerate()
+                .map(|(at, &(_, relation, vertex))| (vertex, relation, at))
+                .collect();
+            order.sort_unstable();
+            destination = vec![0; arrivals.len()];
+            let mut previous = None;
+            for (vertex, relation, at) in order {
+                if previous != Some((vertex, relation)) {
+                    previous = Some((vertex, relation));
+                    destinations.push(None);
+                }
+                destination[at] = destinations.len() - 1;
+            }
+        }
+        Self {
+            filters,
+            source,
+            destination,
+            sources,
+            destinations,
+        }
+    }
+
+    /// `Endpoints::admit` for arrival `at`: the same tests, in the same order.
+    fn admit<E, C>(
+        &mut self,
+        at: usize,
+        (source, relation, destination): TopologyKey,
+        test_vertex: &mut impl FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+    ) -> Result<bool, VisitError<E, C>> {
+        let Some((from, to)) = self.filters.get(&relation) else {
+            return Ok(true);
+        };
+        let mut passes =
+            |verdict: &mut Option<bool>, vertex: VId, predicates: &[VertexPredicate]| {
+                if let Some(known) = *verdict {
+                    return Ok(known);
+                }
+                let result = test_vertex(vertex, predicates)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                *verdict = Some(result);
+                Ok::<_, VisitError<E, C>>(result)
+            };
+        if !from.is_empty() && !passes(&mut self.sources[self.source[at]], source, from)? {
+            return Ok(false);
+        }
+        Ok(to.is_empty()
+            || passes(
+                &mut self.destinations[self.destination[at]],
+                destination,
+                to,
+            )?)
+    }
 }
 
 #[cfg(test)]
