@@ -465,3 +465,104 @@ fn identified_edge_counts_and_reach_take_the_native_visitor_with_owner_results()
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// More vertices than an admitted table searches (it indexes its sealed rows
+/// for the edge phase's endpoint lookups): an edge with a hidden endpoint is
+/// still dropped exactly as in a database that never held that vertex.
+#[test]
+fn large_tables_drop_hidden_endpoint_edges_as_the_visible_only_graph_does() {
+    const VERTICES: u128 = 6000;
+    const EDGES: u128 = 20_000;
+    fn hidden(id: u128) -> bool {
+        id % 7 == 3
+    }
+    fn endpoints(edge: u128) -> (u128, u128) {
+        ((edge * 7919) % VERTICES, (edge * 104_729 + 13) % VERTICES)
+    }
+    let ((), report) = run_async_under_lab(0x5ec0_8502, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut graphs = Vec::new();
+        for visible_only in [false, true] {
+            let mut db =
+                Database::open_memory(&commit, DatabaseKeys::new([0x25; 32], NS, [0x36; 32]))
+                    .await
+                    .unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for id in 0..VERTICES {
+                if visible_only && hidden(id) {
+                    continue;
+                }
+                let labels = vec![if hidden(id) { LabelId(99) } else { LabelId(1) }];
+                let properties = vec![(P, CanonicalScalar::Int((id % 10) as i64))];
+                batch.create_vertex(VId(id), labels, properties);
+            }
+            for edge in 0..EDGES {
+                let (from, to) = endpoints(edge);
+                if visible_only && (hidden(from) || hidden(to)) {
+                    continue;
+                }
+                batch.add_edge(EId(100_000 + edge), VId(from), VId(to), vec![]);
+            }
+            db.write(&commit, batch).await.unwrap();
+            graphs.push(db);
+        }
+        let (db, reference) = (&graphs[0], &graphs[1]);
+        let issuer = authority();
+        let mut grant = grant();
+        grant.limits = QueryLimits {
+            max_nodes: 1_000_000,
+            max_work: 100_000_000,
+            max_rows: 1000,
+        };
+        let token = issuer.issue_at(&grant, 100).unwrap();
+        let policy = GqlQueryPolicy::new(1_000_000, 1000, 100_000_000, 100_000_000);
+        let dropped = (0..EDGES)
+            .filter(|&edge| {
+                let (from, to) = endpoints(edge);
+                hidden(from) || hidden(to)
+            })
+            .count() as u64;
+        assert!(dropped > 1000, "{dropped}");
+        for text in [
+            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS c",
+            "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS c",
+            "MATCH (a)-[:R]->(b) RETURN a.p AS k,COUNT(*) AS c GROUP BY a.p",
+            "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS c",
+        ] {
+            let definition = prepare(text);
+            let expected = reference
+                .execute_graph_aggregate_governed(&cx, &definition, policy)
+                .unwrap()
+                .value;
+            let actual = db
+                .execute_graph_aggregate_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    &definition,
+                    policy,
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "{text}");
+        }
+        let edges = prepare("MATCH (a)-[:R]->(b) RETURN COUNT(*) AS c");
+        let all = db
+            .execute_graph_aggregate_governed(&cx, &edges, policy)
+            .unwrap()
+            .value;
+        assert_eq!(all[0].values(), &[GraphAggregateValue::Count(EDGES as u64)]);
+        let visible = reference
+            .execute_graph_aggregate_governed(&cx, &edges, policy)
+            .unwrap()
+            .value;
+        assert_eq!(
+            visible[0].values(),
+            &[GraphAggregateValue::Count(EDGES as u64 - dropped)]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

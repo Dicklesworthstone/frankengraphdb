@@ -299,6 +299,10 @@ fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
     })
 }
 
+/// Vertex tables at least this long index their sealed rows for the edge
+/// phase's endpoint lookups; smaller ones search.
+const POSITIONED_VERTICES: usize = 4096;
+
 // Admitted records in visitor order, sorted by identity once sealed. Full-scan
 // visitors already yield ascending VIds and EIds, so sealing is one pass; a
 // sorted vector replaces per-record ordered-map inserts and lookups (fgdb-61p1n).
@@ -584,6 +588,8 @@ impl<'a> Tables<'a> {
         self.records += 1;
         self.vertices_sealed &= self.vertices.last().is_none_or(|&(last, _)| last < row.vid);
         self.vertices.push((row.vid, row));
+        // An index over the table before this vertex no longer describes it.
+        self.positions = None;
         Ok(Some(labels))
     }
 
@@ -600,6 +606,12 @@ impl<'a> Tables<'a> {
         if !self.vertices_sealed {
             seal_by_key(&mut self.vertices, |&(vid, _)| vid);
             self.vertices_sealed = true;
+        }
+        // Each admitted edge looks up both endpoints. In a large table a
+        // binary search is a chain of cache misses (30% of a web-google edge
+        // count), so the first edge indexes the sealed table once.
+        if self.positions.is_none() && self.vertices.len() >= POSITIONED_VERTICES {
+            self.positions = positions::VertexPositions::build(&self.vertices).map(Arc::new);
         }
         if !(predicates.allows_relation(relation)
             && self.vertex(src).is_some()
