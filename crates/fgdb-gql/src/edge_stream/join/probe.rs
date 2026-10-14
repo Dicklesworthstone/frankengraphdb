@@ -9,8 +9,8 @@ use crate::GraphWalkBounds;
 use crate::algebra::GraphWalkSearch;
 use std::collections::BTreeMap;
 
-mod walk;
 mod asynchronous;
+mod walk;
 
 #[derive(Clone, Copy)]
 enum Binding {

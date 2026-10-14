@@ -623,7 +623,9 @@ fn test_native_stage<S: EdgeScanSource, C>(
 ) -> ScanResult<bool, S::Error, C> {
     let ids = &traversal.bindings;
     match op {
-        GlaOperator::CapturePath { start, segments, .. } => {
+        GlaOperator::CapturePath {
+            start, segments, ..
+        } => {
             control(GlaExecutionEvent::ScratchEntry)?;
             for _ in segments {
                 control(GlaExecutionEvent::ScratchEntry)?;

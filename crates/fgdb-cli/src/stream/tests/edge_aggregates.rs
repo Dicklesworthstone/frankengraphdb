@@ -231,8 +231,7 @@ fn edge_collections_stream_while_shape_and_late_data_refusals_emit_no_success() 
         );
         assert!(output.ends_with("\"seq\":1,\"count\":1}\n"));
 
-        let future =
-            "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COUNT(*) AS total";
+        let future = "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COUNT(*) AS total";
         let mut output = Vec::new();
         assert!(
             run(&db, &cx, &edge_options(future), true, &mut output).is_err(),

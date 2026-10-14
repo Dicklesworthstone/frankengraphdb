@@ -316,9 +316,7 @@ fn supported_projection_and_pipeline_streams_do_not_weaken_real_refusals() {
             "MATCH (n) WITH n.p AS p RETURN COUNT(*) AS total",
         ] {
             let opts = options(text);
-            let eager = db
-                .query(&cx, text, &opts.params, &opts, policy())
-                .unwrap();
+            let eager = db.query(&cx, text, &opts.params, &opts, policy()).unwrap();
             let mut expected = Vec::new();
             okay(crate::render(eager, 1, "rows", true, &mut expected));
             let mut bytes = Vec::new();

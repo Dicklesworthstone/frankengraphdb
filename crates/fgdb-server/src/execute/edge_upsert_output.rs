@@ -5,7 +5,7 @@ use super::{Refusal, convert, write_refusal};
 use fgdb::WriteTxnError;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_protocol::body::{
-    BodyError, ErrorCode, MAX_COLUMNS, MAX_NAME_BYTES, ResultChunk, WireValue,
+    Body, BodyError, ErrorCode, MAX_COLUMNS, MAX_NAME_BYTES, ResultChunk, WireValue,
 };
 
 mod admission;
@@ -46,13 +46,20 @@ pub(super) fn collect(
     }
     // Even an empty result carries its schema. Use the same structural codec
     // as actual delivery so invalid names cannot fail only after a write lands.
-    ResultChunk { columns: Some(columns.to_vec()), rows: Vec::new() }
-        .encode().map_err(body_refusal)?;
+    ResultChunk {
+        columns: Some(columns.to_vec()),
+        rows: Vec::new(),
+    }
+    .encode()
+    .map_err(body_refusal)?;
     let mut rows = Vec::new();
     for row in input {
         charge(1)?;
         if row.values().len() != columns.len() {
-            return Err(Refusal::new(ErrorCode::Execution, "native RETURN row width mismatch"));
+            return Err(Refusal::new(
+                ErrorCode::Execution,
+                "native RETURN row width mismatch",
+            ));
         }
         // The old per-cell charge could admit an arbitrarily large nested
         // value for one unit, then bill its payload only AFTER copying it.
@@ -60,8 +67,8 @@ pub(super) fn collect(
         admission::row(row.values(), &mut charge)?;
         let cells: Vec<_> = row.values().iter().map(convert::graph).collect();
         let bytes = ResultChunk::row_len(&cells).map_err(body_refusal)?;
-        let units = u64::try_from(bytes.div_ceil(64))
-            .map_err(|_| body_refusal(BodyError::TooLarge))?;
+        let units =
+            u64::try_from(bytes.div_ceil(64)).map_err(|_| body_refusal(BodyError::TooLarge))?;
         charge(units)?;
         rows.push(cells);
     }
@@ -78,7 +85,7 @@ mod tests {
     use fgdb::WriteBatch;
     use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
     use fgdb_gql::GraphSymbolKind;
-    use fgdb_protocol::body::{Execute, ExecuteMode, Outcome, MAX_NAME_BYTES};
+    use fgdb_protocol::body::{Execute, ExecuteMode, MAX_NAME_BYTES, Outcome};
     use fgdb_types::{CanonicalScalar, CommitSeq, EId, PurposeContexts, VId};
     use fgdb_warden::{CapabilityToken, Grant, QueryLimits, Rights, Scope};
     use std::sync::Arc;
@@ -123,10 +130,15 @@ mod tests {
         if existing {
             let mut seed = WriteBatch::new(R);
             for (edge, src, dst, p) in [(FIRST, 1, 2, 10), (SECOND, 2, 1, 20)] {
-                seed.add_edge(edge, VId(src), VId(dst), vec![
-                    (P, CanonicalScalar::Int(p)),
-                    (SECRET, CanonicalScalar::ucs_basic_text("private").unwrap()),
-                ]);
+                seed.add_edge(
+                    edge,
+                    VId(src),
+                    VId(dst),
+                    vec![
+                        (P, CanonicalScalar::Int(p)),
+                        (SECRET, CanonicalScalar::ucs_basic_text("private").unwrap()),
+                    ],
+                );
             }
             guard.write(&contexts.commit(), seed).await.unwrap();
         }
@@ -135,15 +147,24 @@ mod tests {
     }
 
     fn token(db: &Served, rows: u64) -> CapabilityToken {
-        db.authority.issue_at(&Grant {
-            branch: TRUNK.into(),
-            labels: Scope::only([L]),
-            relations: Scope::only([R, S]),
-            properties: Scope::only([P]),
-            rights: Rights::ReadWrite,
-            limits: QueryLimits { max_nodes: 1_000_000, max_work: 100_000_000, max_rows: rows },
-            expires_at_ms: u64::MAX / 2,
-        }, unix_millis()).unwrap()
+        db.authority
+            .issue_at(
+                &Grant {
+                    branch: TRUNK.into(),
+                    labels: Scope::only([L]),
+                    relations: Scope::only([R, S]),
+                    properties: Scope::only([P]),
+                    rights: Rights::ReadWrite,
+                    limits: QueryLimits {
+                        max_nodes: 1_000_000,
+                        max_work: 100_000_000,
+                        max_rows: rows,
+                    },
+                    expires_at_ms: u64::MAX / 2,
+                },
+                unix_millis(),
+            )
+            .unwrap()
     }
 
     fn request(tail: &str) -> Execute {
@@ -154,7 +175,7 @@ mod tests {
         }
     }
 
-    async fn state(cx: &Cx, db: &Served) -> (CommitSeq, Vec<fgdb::EdgePropertyRow>) {
+    async fn state(cx: &Cx, db: &Served) -> (CommitSeq, Vec<fgdb::EdgeRecord>) {
         let guard = db.db.read(cx).await.unwrap();
         (guard.frontier().unwrap(), guard.edges().unwrap())
     }
@@ -165,30 +186,76 @@ mod tests {
             let server = fixture(&root, "edge-upsert-output-bag", true).await;
             let db = &server.databases["test"];
             let before = state(&root, db).await.0;
-            let answer = accepted(write(&root, db, &token(db, 4), &request(
-                "RETURN r AS edge,r.p AS p,r.secret AS hidden ORDER BY edge"
-            )).await);
+            let answer = accepted(
+                write(
+                    &root,
+                    db,
+                    &token(db, 4),
+                    &request("RETURN r AS edge,r.p AS p,r.secret AS hidden ORDER BY edge"),
+                )
+                .await,
+            );
             assert_eq!(answer.columns, vec!["edge", "p", "hidden"]);
-            assert_eq!(answer.rows, vec![
-                vec![WireValue::Edge(FIRST.0), WireValue::Int(12), WireValue::Null],
-                vec![WireValue::Edge(FIRST.0), WireValue::Int(12), WireValue::Null],
-                vec![WireValue::Edge(SECOND.0), WireValue::Int(22), WireValue::Null],
-                vec![WireValue::Edge(SECOND.0), WireValue::Int(22), WireValue::Null],
-            ]);
-            assert!(matches!(answer.outcome, Outcome::WriteCommitted { seq, statements: 1 } if seq == before.0 + 1));
-            let encoded = ResultChunk { columns: Some(answer.columns), rows: answer.rows }.encode().unwrap();
+            assert_eq!(
+                answer.rows,
+                vec![
+                    vec![
+                        WireValue::Edge(FIRST.0),
+                        WireValue::Int(12),
+                        WireValue::Null
+                    ],
+                    vec![
+                        WireValue::Edge(FIRST.0),
+                        WireValue::Int(12),
+                        WireValue::Null
+                    ],
+                    vec![
+                        WireValue::Edge(SECOND.0),
+                        WireValue::Int(22),
+                        WireValue::Null
+                    ],
+                    vec![
+                        WireValue::Edge(SECOND.0),
+                        WireValue::Int(22),
+                        WireValue::Null
+                    ],
+                ]
+            );
+            assert!(
+                matches!(answer.outcome, Outcome::WriteCommitted { seq, statements: 1 } if seq == before.0 + 1)
+            );
+            let encoded = ResultChunk {
+                columns: Some(answer.columns),
+                rows: answer.rows,
+            }
+            .encode()
+            .unwrap();
             assert_eq!(ResultChunk::decode(&encoded).unwrap().rows.len(), 4);
-            let answer = accepted(write(&root, db, &token(db, 1), &request(
-                "WITH r.p AS p RETURN count(*) AS n,sum(p) AS total"
-            )).await);
-            assert_eq!(answer.rows, vec![vec![WireValue::Int(4), WireValue::Int(76)]]);
-            assert!(matches!(answer.outcome, Outcome::WriteCommitted { seq, statements: 1 } if seq == before.0 + 2));
+            let answer = accepted(
+                write(
+                    &root,
+                    db,
+                    &token(db, 1),
+                    &request("WITH r.p AS p RETURN count(*) AS n,sum(p) AS total"),
+                )
+                .await,
+            );
+            assert_eq!(
+                answer.rows,
+                vec![vec![WireValue::Int(4), WireValue::Int(76)]]
+            );
+            assert!(
+                matches!(answer.outcome, Outcome::WriteCommitted { seq, statements: 1 } if seq == before.0 + 2)
+            );
             let guard = db.db.read(&root).await.unwrap();
             for (edge, expected) in [(FIRST, 14), (SECOND, 24)] {
-                assert_eq!(guard.edge(edge).unwrap().unwrap().props, vec![
-                    (P, CanonicalScalar::Int(expected)),
-                    (SECRET, CanonicalScalar::ucs_basic_text("private").unwrap()),
-                ]);
+                assert_eq!(
+                    guard.edge(edge).unwrap().unwrap().props,
+                    vec![
+                        (P, CanonicalScalar::Int(expected)),
+                        (SECRET, CanonicalScalar::ucs_basic_text("private").unwrap()),
+                    ]
+                );
             }
             drop(guard);
             server.join_database_workers(&root).await;
@@ -205,19 +272,21 @@ mod tests {
         let rows = collect(&valid, &[], &mut |work| {
             charged += work;
             Ok(())
-        }).unwrap_or_else(|error| panic!("{}", error.message));
+        })
+        .unwrap_or_else(|error| panic!("{}", error.message));
         assert!(rows.is_empty());
         assert_eq!(charged, 1 + 1 + (MAX_NAME_BYTES as u64).div_ceil(64));
         let invalid = vec!["x".repeat(MAX_NAME_BYTES + 1)];
         let error = collect(&invalid, &[], &mut |_| Ok(()))
-            .err().expect("even a zero-row answer must validate its schema");
+            .expect_err("even a zero-row answer must validate its schema");
         assert_eq!(error.code, ErrorCode::Budget);
         assert!(!error.message.contains(&invalid[0]));
         let mut polls = 0;
         let error = collect(&valid, &[], &mut |_| {
             polls += 1;
             Err(WriteTxnError::AuthorizedMutationRefused)
-        }).err().expect("host work refusal cannot be ignored");
+        })
+        .expect_err("host work refusal cannot be ignored");
         assert_eq!(polls, 1);
         assert_eq!(error.code, ErrorCode::PermissionDenied);
     }
@@ -228,26 +297,42 @@ mod tests {
             let server = fixture(&root, "edge-output-limits", true).await;
             let db = &server.databases["test"];
             let before = state(&root, db).await;
-            for (tail, rows) in [
-                ("RETURN r", 3),
-                ("RETURN 1/(r.p-22) AS bad LIMIT 0", 0),
-            ] {
-                assert!(write(&root, db, &token(db, rows), &request(tail)).await.is_err());
+            for (tail, rows) in [("RETURN r", 3), ("RETURN 1/(r.p-22) AS bad LIMIT 0", 0)] {
+                assert!(
+                    write(&root, db, &token(db, rows), &request(tail))
+                        .await
+                        .is_err()
+                );
                 assert_eq!(state(&root, db).await, before);
             }
             let mut statement = request("RETURN r.p AS p");
             statement.mode = ExecuteMode::Read;
             assert!(read(&root, db, &token(db, 4), &statement).await.is_err());
             assert_eq!(state(&root, db).await, before);
-            let answer = accepted(write(&root, db, &token(db, 0), &request(
-                "WITH r.p AS p WHERE p < 0 RETURN p"
-            )).await);
+            let answer = accepted(
+                write(
+                    &root,
+                    db,
+                    &token(db, 0),
+                    &request("WITH r.p AS p WHERE p < 0 RETURN p"),
+                )
+                .await,
+            );
             assert_eq!(answer.columns, vec!["p"]);
             assert!(answer.rows.is_empty());
-            assert!(matches!(answer.outcome, Outcome::WriteCommitted { seq, statements: 1 } if seq == (before.0).0 + 1));
+            assert!(
+                matches!(answer.outcome, Outcome::WriteCommitted { seq, statements: 1 } if seq == (before.0).0 + 1)
+            );
             let guard = db.db.read(&root).await.unwrap();
             for (edge, expected) in [(FIRST, 12), (SECOND, 22)] {
-                assert!(guard.edge(edge).unwrap().unwrap().props.contains(&(P, CanonicalScalar::Int(expected))));
+                assert!(
+                    guard
+                        .edge(edge)
+                        .unwrap()
+                        .unwrap()
+                        .props
+                        .contains(&(P, CanonicalScalar::Int(expected)))
+                );
             }
             drop(guard);
             server.join_database_workers(&root).await;

@@ -811,7 +811,7 @@ async fn write_returning(
             .map_err(returning_refusal),
     };
     drop(guard);
-    let (execution, completion) = result.map_err(|error| output_refusal.unwrap_or(error))?;
+    let (_execution, completion) = result.map_err(|error| output_refusal.unwrap_or(error))?;
     // Every write-RETURN family is converted and body-admitted while its
     // rollback workspace is still private. A successful checked call must
     // therefore have installed the exact rows before native completion.

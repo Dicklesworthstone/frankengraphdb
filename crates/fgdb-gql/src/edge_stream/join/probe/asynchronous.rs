@@ -2,8 +2,8 @@
 //! Only the active local binding owns records. A first TRUE witness finishes;
 //! anti joins complement successful exhaustion, never a source/control error.
 
-use super::*;
 use super::super::asynchronous::{FrameSource, admit, check_admission};
+use super::*;
 
 impl Probe {
     pub(in crate::edge_stream::join) async fn accepts_async<S, F, C>(
@@ -23,10 +23,11 @@ impl Probe {
         // Admission precedes vectors and payloads. This guard covers fixed
         // slots; every awaited record brings its own source payload guard.
         // Declare the guard first so local records/vectors drop before refund.
-        let _guard = flatten(source.reserve_traversal(
-            self.outer_width + self.steps.len() - 1,
-            &mut |event| meter.event(event),
-        ))?;
+        let _guard = flatten(
+            source.reserve_traversal(self.outer_width + self.steps.len() - 1, &mut |event| {
+                meter.event(event)
+            }),
+        )?;
         for _ in 0..self.outer_width + 4 * self.steps.len() {
             meter.event(GlaExecutionEvent::ScratchEntry)?;
         }
@@ -52,13 +53,20 @@ impl Probe {
             records[depth] = None;
             let step = &self.steps[depth];
             let candidate = match step.binding {
-                Binding::Copy { source: from, nullable } => {
+                Binding::Copy {
+                    source: from,
+                    nullable,
+                } => {
                     if matches!(positions[depth], Position::Copy(true)) {
                         None
                     } else {
                         positions[depth] = Position::Copy(true);
                         let value = ids[from];
-                        if value.is_none() && !nullable { None } else { Some(value) }
+                        if value.is_none() && !nullable {
+                            None
+                        } else {
+                            Some(value)
+                        }
                     }
                 }
                 Binding::Expand(expansion) => {
@@ -67,18 +75,22 @@ impl Probe {
                             unreachable!("compiled fixed expansion position");
                         };
                         let mut admitted = None;
-                        let result = source.next_incident_candidate(
-                            from,
-                            expansion.relation,
-                            expansion.direction,
-                            after,
-                            &mut |event| admit(meter, &mut after, &mut admitted, event),
-                        ).await;
+                        let result = source
+                            .next_incident_candidate(
+                                from,
+                                expansion.relation,
+                                expansion.direction,
+                                after,
+                                &mut |event| admit(meter, &mut after, &mut admitted, event),
+                            )
+                            .await;
                         let candidate = match result {
                             Ok(candidate) => candidate,
                             Err(EdgeExpansionSourceError::Read(error)) => flatten(Err(error))?,
                             Err(EdgeExpansionSourceError::Unavailable) => {
-                                return Err(GqlQueryError::Source(EdgeScanError::ExpansionUnavailable));
+                                return Err(GqlQueryError::Source(
+                                    EdgeScanError::ExpansionUnavailable,
+                                ));
                             }
                         };
                         check_admission(&candidate, admitted)?;
@@ -86,10 +98,14 @@ impl Probe {
                         if let Some(candidate) = candidate {
                             // Invisible identities still advance and consume
                             // candidate admission. They are not NULL witnesses.
-                            let Some(record) = candidate.record else { continue; };
+                            let Some(record) = candidate.record else {
+                                continue;
+                            };
                             meter.event(GlaExecutionEvent::Work)?;
                             let edge = record.edge();
-                            if !expansion.relation.matches(edge.relation) { continue; }
+                            if !expansion.relation.matches(edge.relation) {
+                                continue;
+                            }
                             let to = match expansion.direction {
                                 GlaDirection::Forward if edge.source == from => edge.target,
                                 GlaDirection::Reverse if edge.target == from => edge.source,
@@ -100,7 +116,9 @@ impl Probe {
                             for vid in [from, to] {
                                 meter.event(GlaExecutionEvent::Work)?;
                                 if record.vertex(vid).is_none() {
-                                    return Err(GqlQueryError::Source(EdgeScanError::DanglingEndpoint));
+                                    return Err(GqlQueryError::Source(
+                                        EdgeScanError::DanglingEndpoint,
+                                    ));
                                 }
                             }
                             records[depth] = Some(record);
@@ -119,7 +137,9 @@ impl Probe {
                 }
             };
             let Some(candidate) = candidate else {
-                if depth == 0 { return Ok(self.anti); }
+                if depth == 0 {
+                    return Ok(self.anti);
+                }
                 depth -= 1;
                 ids.pop();
                 continue;
@@ -142,9 +162,14 @@ impl Probe {
                     // Charge the deepest retained local record when possible,
                     // rather than accumulating every sibling's charge on the
                     // outer row. A copy-only prefix still has an outer owner.
-                    let owner = records.iter().rev().flatten().next()
+                    let owner = records
+                        .iter()
+                        .rev()
+                        .flatten()
+                        .next()
                         .unwrap_or_else(|| outer_records.last().expect("outer record"));
-                    source.evaluation_event(owner, event)
+                    source
+                        .evaluation_event(owner, event)
                         .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
                 })?
             };
@@ -170,7 +195,9 @@ struct Records<'a, R, E> {
 }
 impl<R: AsyncEdgeScanRecord, E> EdgeScanSource for Records<'_, R, E> {
     type Error = E;
-    fn snapshot_seq(&self) -> CommitSeq { self.outer.snapshot_seq() }
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.outer.snapshot_seq()
+    }
     fn next_edge<C>(
         &mut self,
         _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
@@ -201,7 +228,9 @@ impl<R: AsyncEdgeScanRecord, E> EdgeScanSource for Records<'_, R, E> {
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
             if let Some(record) = record {
                 let edge = record.edge();
-                if vid == edge.source || vid == edge.target { return Ok(record.vertex(vid)); }
+                if vid == edge.source || vid == edge.target {
+                    return Ok(record.vertex(vid));
+                }
             }
         }
         self.outer.vertex(vid, control)

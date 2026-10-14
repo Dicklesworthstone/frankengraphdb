@@ -339,7 +339,10 @@ fn pipeline_aggregates_stream_while_unsupported_shapes_and_future_history_refuse
         ] {
             let opts = options(text);
             let prepared = PreparedNativeRead::prepare(text, &opts.params, &opts).unwrap();
-            assert!(matches!(prepared, PreparedNativeRead::PipelineAggregate(_)), "{text}");
+            assert!(
+                matches!(prepared, PreparedNativeRead::PipelineAggregate(_)),
+                "{text}"
+            );
             let eager = db.query(&cx, text, &opts.params, &opts, policy()).unwrap();
             let mut expected = Vec::new();
             okay(crate::render(eager, 1, "rows", true, &mut expected));

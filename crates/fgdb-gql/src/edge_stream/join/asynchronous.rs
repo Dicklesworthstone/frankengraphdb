@@ -105,13 +105,12 @@ impl AsyncEdgeJoinPlan {
     }
 
     fn check_access(plan: &GlaPlan<GraphValueRow>) -> Result<(), EdgeScanBuildError> {
-        if let Some(operator) = plan
-            .operators()
-            .iter()
-            .position(|op| {
-                matches!(op, GlaOperator::ScanVertices | GlaOperator::VarLengthExpand { .. })
-            })
-        {
+        if let Some(operator) = plan.operators().iter().position(|op| {
+            matches!(
+                op,
+                GlaOperator::ScanVertices | GlaOperator::VarLengthExpand { .. }
+            )
+        }) {
             return Err(EdgeScanBuildError { operator });
         }
         Ok(())
@@ -649,11 +648,17 @@ where
     for instruction in ops {
         meter.event(GlaExecutionEvent::Work)?;
         source
-            .evaluation_event(records.last().expect("active record"), GlaExecutionEvent::Work)
+            .evaluation_event(
+                records.last().expect("active record"),
+                GlaExecutionEvent::Work,
+            )
             .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))?;
         match instruction {
             Instruction::Probe(probe) => {
-                if !probe.accepts_async(traversal, records, source, meter, seq).await? {
+                if !probe
+                    .accepts_async(traversal, records, source, meter, seq)
+                    .await?
+                {
                     return Ok(None);
                 }
             }
