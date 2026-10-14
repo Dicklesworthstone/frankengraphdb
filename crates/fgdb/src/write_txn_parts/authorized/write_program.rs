@@ -94,7 +94,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         program: &PreparedGraphWriteProgram,
         policy: GraphWriteProgramPolicy,
-        clock: impl FnMut() -> u64,
+        clock: impl FnMut() -> u64 + Send,
     ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
         self.write_program_authorized_inner(
             txn_cx,
@@ -130,7 +130,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         program: &PreparedGraphWriteProgram,
         policy: GraphWriteProgramPolicy,
-        clock: impl FnMut() -> u64,
+        clock: impl FnMut() -> u64 + Send,
     ) -> Result<(GraphWriteProgramReceipt, EmbeddedTxnCompletion), Fault> {
         self.write_program_authorized_inner(
             txn_cx,
@@ -159,7 +159,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         program: &PreparedGraphWriteProgram,
         policy: GraphWriteProgramPolicy,
-        mut clock: impl FnMut() -> u64,
+        mut clock: impl FnMut() -> u64 + Send,
         returning: bool,
         receipt: impl FnOnce(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>) -> Receipt,
     ) -> Result<(Receipt, EmbeddedTxnCompletion), Fault> {
@@ -173,7 +173,7 @@ impl<V: Vfs + Clone> Database<V> {
         let mut execution = Execution {
             cx: commit_cx,
             permit,
-            clock,
+            clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
         };
         self.complete_authorized_program(
             txn_cx,

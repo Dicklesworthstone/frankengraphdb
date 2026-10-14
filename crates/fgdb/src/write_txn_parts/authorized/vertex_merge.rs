@@ -2,8 +2,8 @@
 //! Reuse the native reducer, point projection and checked scalar-action collector.
 
 use crate::write_txn::authorized::{
-    Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteBatch, WriteTxn,
-    WriteTxnError, selection, stage,
+    Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteBatch, WriteClock,
+    WriteTxn, WriteTxnError, selection, stage,
 };
 use crate::write_txn::{
     collect_vertex_merge, vertex_upsert_actions, vertex_upsert_labels, vertex_upsert_properties,
@@ -52,7 +52,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphVertexUpsertQuery,
         policy: GraphVertexUpsertPolicy,
-        clock: impl FnMut() -> u64,
+        clock: impl FnMut() -> u64 + Send,
     ) -> Result<
         (
             GraphVertexUpsertStats,
@@ -102,7 +102,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphVertexUpsertQuery,
         policy: GraphVertexUpsertPolicy,
-        mut clock: impl FnMut() -> u64,
+        mut clock: impl FnMut() -> u64 + Send,
         admit: impl FnOnce(
             &[fgdb_gql::algebra::GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
@@ -137,7 +137,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock,
+                    clock: &mut clock as WriteClock<'_>,
                 };
                 execution.checkpoint().map_err(source)?;
                 let mut workspace = Workspace(Some(
@@ -496,7 +496,7 @@ mod all_targets {
             branch: &str,
             query: &PreparedGraphVertexUpsertQuery,
             policy: GraphVertexUpsertPolicy,
-            clock: impl FnMut() -> u64,
+            clock: impl FnMut() -> u64 + Send,
         ) -> Result<Receipt, UpsertFault> {
             self.execute_graph_vertex_upserts_query_authorized_checked(
                 txn_cx,
@@ -529,7 +529,7 @@ mod all_targets {
             branch: &str,
             query: &PreparedGraphVertexUpsertQuery,
             policy: GraphVertexUpsertPolicy,
-            mut clock: impl FnMut() -> u64,
+            mut clock: impl FnMut() -> u64 + Send,
             admit: impl FnOnce(
                 &[GraphValueRow],
                 &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
@@ -550,7 +550,7 @@ mod all_targets {
                     let mut execution = Execution {
                         cx: commit_cx,
                         permit,
-                        clock,
+                        clock: &mut clock as WriteClock<'_>,
                     };
                     execution.checkpoint().map_err(staging)?;
                     let mut workspace = Workspace(Some(

@@ -62,7 +62,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphEdgeUpsertQuery,
         policy: GraphEdgeUpsertPolicy,
-        clock: impl FnMut() -> u64,
+        clock: impl FnMut() -> u64 + Send,
     ) -> Result<Receipt, Fault> {
         self.execute_graph_edge_upserts_query_authorized_checked(
             txn_cx,
@@ -101,7 +101,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphEdgeUpsertQuery,
         policy: GraphEdgeUpsertPolicy,
-        mut clock: impl FnMut() -> u64,
+        mut clock: impl FnMut() -> u64 + Send,
         admit: impl FnOnce(
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
@@ -128,7 +128,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock,
+                    clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
                 };
                 execution.checkpoint().map_err(source)?;
                 let mut workspace = Workspace(Some(

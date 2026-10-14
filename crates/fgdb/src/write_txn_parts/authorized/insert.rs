@@ -82,7 +82,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         insertion: &PreparedGraphInsert,
         policy: GraphInsertPolicy,
-        clock: impl FnMut() -> u64,
+        clock: impl FnMut() -> u64 + Send,
     ) -> Result<(GraphInsertStats, EmbeddedTxnCompletion), Fault> {
         self.insert_authorized_inner(
             txn_cx, query_cx, commit_cx, authority, token, branch, insertion, policy, clock, false,
@@ -110,7 +110,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         insertion: &PreparedGraphInsert,
         policy: GraphInsertPolicy,
-        clock: impl FnMut() -> u64,
+        clock: impl FnMut() -> u64 + Send,
     ) -> Result<Receipt, Fault> {
         self.insert_authorized_inner(
             txn_cx, query_cx, commit_cx, authority, token, branch, insertion, policy, clock, true,
@@ -155,7 +155,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphInsertQuery,
         policy: GraphInsertPolicy,
-        clock: impl FnMut() -> u64,
+        clock: impl FnMut() -> u64 + Send,
     ) -> Result<QueryReceipt, QueryFault> {
         self.execute_graph_insert_query_authorized_checked(
             txn_cx,
@@ -194,7 +194,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphInsertQuery,
         policy: GraphInsertPolicy,
-        mut clock: impl FnMut() -> u64,
+        mut clock: impl FnMut() -> u64 + Send,
         admit: impl FnOnce(
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
@@ -222,7 +222,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock,
+                    clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
                 };
                 execution.checkpoint().map_err(query_source)?;
                 let mut workspace = Workspace(Some(
@@ -305,7 +305,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         insertion: &PreparedGraphInsert,
         policy: GraphInsertPolicy,
-        mut clock: impl FnMut() -> u64,
+        mut clock: impl FnMut() -> u64 + Send,
         returning: bool,
     ) -> Result<Receipt, Fault> {
         if authority.namespace() != self.keys.namespace {
@@ -328,7 +328,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock,
+                    clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
                 };
                 execution.checkpoint().map_err(source)?;
                 let mut workspace = Workspace(Some(
@@ -522,7 +522,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         merge: &fgdb_gql::PreparedGraphVertexMerge,
         policy: fgdb_gql::GraphVertexMergePolicy,
-        mut clock: impl FnMut() -> u64,
+        mut clock: impl FnMut() -> u64 + Send,
     ) -> Result<MergeReceipt, MergeFault> {
         if authority.namespace() != self.keys.namespace {
             return Err(merge_source(WriteTxnError::Authorization(
@@ -546,7 +546,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock,
+                    clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
                 };
                 execution.checkpoint().map_err(merge_source)?;
                 execution

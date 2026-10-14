@@ -186,7 +186,7 @@ impl<V: Vfs + Clone> Database<V> {
         program: &PreparedGraphWriteProgram,
         query: &PreparedGraphPattern<Row>,
         policy: GraphWriteProgramPolicy,
-        mut clock: impl FnMut() -> u64,
+        mut clock: impl FnMut() -> u64 + Send,
     ) -> Result<Receipt<Row>, Fault> {
         let refusal = |error| Fault::Program(preflight(WriteTxnError::Authorization(error)));
         if authority.namespace() != self.keys.namespace {
@@ -201,7 +201,7 @@ impl<V: Vfs + Clone> Database<V> {
         let mut execution = Execution {
             cx: commit_cx,
             permit,
-            clock,
+            clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
         };
         self.complete_authorized_program_with_output(
             txn_cx,

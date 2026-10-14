@@ -15,7 +15,7 @@ use fgdb_types::{
     QueryCx, TxnCx, VId,
 };
 use fgdb_warden::{Authority, CapabilityToken, Grant, QueryLimits, Rights, Scope};
-use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 const NOW: u64 = 100;
 const R: RelationId = RelationId(1);
@@ -186,9 +186,9 @@ fn no_op_checked_admission_preserves_native_results_stats_and_clock_charges() {
         let mut baseline = None;
         for checked in [false, true] {
             let (mut db, authority, token) = fixture(commit, 2).await;
-            let clocks = Cell::new(0);
+            let clocks = AtomicUsize::new(0);
             let clock = || {
-                clocks.set(clocks.get() + 1);
+                clocks.fetch_add(1, Ordering::Relaxed);
                 NOW
             };
             let (stats, result, completion) = if checked {
@@ -233,7 +233,7 @@ fn no_op_checked_admission_preserves_native_results_stats_and_clock_charges() {
                 result.evaluator,
                 values(&result.value),
                 completion,
-                clocks.get(),
+                clocks.load(Ordering::Relaxed),
             );
             if let Some(expected) = &baseline {
                 assert_eq!(&actual, expected);
@@ -256,7 +256,7 @@ fn output_meter_and_final_completion_recheck_the_same_live_permit() {
                 db.vertices().unwrap(),
                 db.edges().unwrap(),
             );
-            let now = Cell::new(NOW);
+            let now = AtomicU64::new(NOW);
             let mut entered = false;
             let result = db
                 .execute_graph_edge_merge_query_authorized_checked(
@@ -268,7 +268,7 @@ fn output_meter_and_final_completion_recheck_the_same_live_permit() {
                     "main",
                     &prepared("RETURN r.value AS value LIMIT 0"),
                     policy(),
-                    || now.get(),
+                    || now.load(Ordering::Relaxed),
                     |rows, work| {
                         entered = true;
                         assert!(rows.is_empty());
@@ -279,7 +279,7 @@ fn output_meter_and_final_completion_recheck_the_same_live_permit() {
                                 work(0)
                             }
                             _ => {
-                                now.set(1000);
+                                now.store(1000, Ordering::Relaxed);
                                 Ok(())
                             }
                         }

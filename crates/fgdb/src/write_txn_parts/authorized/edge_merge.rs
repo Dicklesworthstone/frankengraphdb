@@ -83,7 +83,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         merge: &PreparedGraphEdgeMerge,
         policy: GraphEdgeMergePolicy,
-        mut clock: impl FnMut() -> u64,
+        mut clock: impl FnMut() -> u64 + Send,
     ) -> Result<Receipt, Fault> {
         let refusal = |error| source(WriteTxnError::Authorization(error));
         if authority.namespace() != self.keys.namespace {
@@ -103,7 +103,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock,
+                    clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
                 };
                 execution.checkpoint().map_err(source)?;
                 let mut workspace = Workspace(Some(
@@ -153,7 +153,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphEdgeMergeQuery,
         policy: GraphEdgeMergePolicy,
-        clock: impl FnMut() -> u64,
+        clock: impl FnMut() -> u64 + Send,
     ) -> Result<QueryReceipt, QueryFault> {
         self.execute_graph_edge_merge_query_authorized_checked(
             txn_cx,
@@ -189,7 +189,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         query: &PreparedGraphEdgeMergeQuery,
         policy: GraphEdgeMergePolicy,
-        mut clock: impl FnMut() -> u64,
+        mut clock: impl FnMut() -> u64 + Send,
         admit: impl FnOnce(
             &[GraphValueRow],
             &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
@@ -217,7 +217,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut execution = Execution {
                     cx: commit_cx,
                     permit,
-                    clock,
+                    clock: &mut clock as crate::write_txn::authorized::WriteClock<'_>,
                 };
                 execution.checkpoint().map_err(source).map_err(merged)?;
                 let mut workspace = Workspace(Some(
