@@ -297,7 +297,8 @@ mod tests {
                     assert!(events.borrow().is_empty());
                     loop {
                         let mut remaining = quantum;
-                        let result = advance_traced(&mut sort, &mut actual, &mut remaining, &events);
+                        let result =
+                            advance_traced(&mut sort, &mut actual, &mut remaining, &events);
                         if result.is_ready() {
                             break;
                         }

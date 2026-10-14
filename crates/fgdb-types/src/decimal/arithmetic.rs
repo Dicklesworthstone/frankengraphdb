@@ -216,8 +216,14 @@ mod tests {
     #[test]
     fn zero_divisors_and_out_of_profile_results_refuse_instead_of_wrapping() {
         for value in [0, 1, -1, MAX_DECIMAL_COEFFICIENT, -MAX_DECIMAL_COEFFICIENT] {
-            assert_eq!(d(value).checked_div(d(0)), Err(DecimalError::DivisionByZero));
-            assert_eq!(d(value).checked_rem(d(0)), Err(DecimalError::DivisionByZero));
+            assert_eq!(
+                d(value).checked_div(d(0)),
+                Err(DecimalError::DivisionByZero)
+            );
+            assert_eq!(
+                d(value).checked_rem(d(0)),
+                Err(DecimalError::DivisionByZero)
+            );
             assert_eq!(d(value).checked_mul(d(0)), Ok(d(0)));
         }
         for sign in [-1, 1] {

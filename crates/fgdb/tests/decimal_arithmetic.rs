@@ -76,7 +76,9 @@ fn d(coefficient: i128) -> CanonicalScalar {
 }
 
 fn argument(name: &str, coefficient: i128) -> GqlParameters {
-    GqlParameters::new().with_scalar(name, d(coefficient)).unwrap()
+    GqlParameters::new()
+        .with_scalar(name, d(coefficient))
+        .unwrap()
 }
 
 async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) {
@@ -181,7 +183,14 @@ fn parameterized_decimal_reads_and_writes_preserve_rounding_masking_and_reopen()
             (UNIT / 4, vec![5 * UNIT / 2, 5 * UNIT + 1]),
         ] {
             assert_eq!(
-                read_amounts(&db, &cx, &issuer, &token, query, &argument("factor", factor)),
+                read_amounts(
+                    &db,
+                    &cx,
+                    &issuer,
+                    &token,
+                    query,
+                    &argument("factor", factor)
+                ),
                 expected
             );
         }
@@ -213,7 +222,16 @@ fn parameterized_decimal_reads_and_writes_preserve_rounding_masking_and_reopen()
         let zero_rows = issuer.issue_at(&grant(0), NOW).unwrap();
         let mut session = db
             .authorized_write_session(
-                &txn, &commit, &issuer, &zero_rows, "main", symbols, R, policy(), 64, || NOW,
+                &txn,
+                &commit,
+                &issuer,
+                &zero_rows,
+                "main",
+                symbols,
+                R,
+                policy(),
+                64,
+                || NOW,
             )
             .unwrap();
         let (stats, completion) = session
@@ -234,13 +252,21 @@ fn parameterized_decimal_reads_and_writes_preserve_rounding_masking_and_reopen()
         assert_eq!(amount(&db, SECOND), d(10 * UNIT + 2));
         assert_eq!(db.vertex(HIDDEN).unwrap(), original_hidden);
         for vertex in [FIRST, SECOND] {
-            assert!(db.vertex(vertex).unwrap().unwrap().props.contains(&(SECRET, d(0))));
+            assert!(
+                db.vertex(vertex)
+                    .unwrap()
+                    .unwrap()
+                    .props
+                    .contains(&(SECRET, d(0)))
+            );
         }
         let all = db.vertices().unwrap();
         let seq = db.frontier().unwrap();
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         assert_eq!(db.vertices().unwrap(), all);
         assert_eq!(db.frontier().unwrap(), seq);
         assert_eq!(
@@ -266,24 +292,46 @@ fn a_late_decimal_exception_rolls_back_the_entire_program_and_closes_the_session
         seed(&mut db, &commit).await;
         let issuer = authority();
         let token = issuer.issue_at(&grant(0), NOW).unwrap();
-        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
         let text = "MATCH (n) SET n.amount = n.amount + $inc; \
                     MATCH (n) SET n.amount = n.amount / $divisor";
         for divisor in [0, 2 * UNIT] {
-            let params = argument("inc", UNIT).with_scalar("divisor", d(divisor)).unwrap();
+            let params = argument("inc", UNIT)
+                .with_scalar("divisor", d(divisor))
+                .unwrap();
             let mut session = db
                 .authorized_write_session(
-                    &txn, &commit, &issuer, &token, "main", symbols, R, policy(), 64, || NOW,
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols,
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
                 )
                 .unwrap();
             let result = session.query_stats(&cx, text, &params).await;
             if divisor == 0 {
                 let error = result.unwrap_err();
-                assert_eq!(arithmetic(&error), Some(GraphIntegerErrorKind::DivisionByZero));
+                assert_eq!(
+                    arithmetic(&error),
+                    Some(GraphIntegerErrorKind::DivisionByZero)
+                );
                 assert!(session.is_closed());
                 drop(session);
                 assert_eq!(
-                    (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
                     before
                 );
             } else {
@@ -311,10 +359,18 @@ fn decimal_math_does_not_relax_numeric_domains_scope_or_where_exceptions() {
         seed(&mut db, &commit).await;
         let issuer = authority();
         let token = issuer.issue_at(&grant(10), NOW).unwrap();
-        let before = (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap());
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
         let multiply = "MATCH (n) SET n.amount = n.amount * $factor";
         for (text, factor, kind) in [
-            (multiply, CanonicalScalar::Int(2), Some(GraphIntegerErrorKind::IncompatibleOperands)),
+            (
+                multiply,
+                CanonicalScalar::Int(2),
+                Some(GraphIntegerErrorKind::IncompatibleOperands),
+            ),
             (
                 multiply,
                 CanonicalScalar::Float(CanonicalF64::new(0.5)),
@@ -331,7 +387,16 @@ fn decimal_math_does_not_relax_numeric_domains_scope_or_where_exceptions() {
             let params = GqlParameters::new().with_scalar("factor", factor).unwrap();
             let mut session = db
                 .authorized_write_session(
-                    &txn, &commit, &issuer, &token, "main", symbols, R, policy(), 64, || NOW,
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols,
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
                 )
                 .unwrap();
             let error = session.query_stats(&cx, text, &params).await.unwrap_err();
@@ -341,34 +406,62 @@ fn decimal_math_does_not_relax_numeric_domains_scope_or_where_exceptions() {
             assert!(session.is_closed());
             drop(session);
             assert_eq!(
-                (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
                 before
             );
         }
         let mut session = db
             .authorized_read_session(
-                &cx, &issuer, &token, "main", symbols, policy().mutations.query, || NOW,
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                policy().mutations.query,
+                || NOW,
             )
             .unwrap();
         assert!(
-            session.query(
-                &cx,
-                "MATCH (n) WHERE n.amount / $zero > $zero RETURN n.amount AS amount",
-                &argument("zero", 0),
-            ).is_err(),
+            session
+                .query(
+                    &cx,
+                    "MATCH (n) WHERE n.amount / $zero > $zero RETURN n.amount AS amount",
+                    &argument("zero", 0),
+                )
+                .is_err(),
             "division failure is not WHERE UNKNOWN"
         );
         drop(session);
         assert_eq!(
-            (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap()),
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
             before
         );
         let mut read_only = grant(10);
         read_only.rights = Rights::Read;
         let token = issuer.issue_at(&read_only, NOW).unwrap();
-        assert!(db.authorized_write_session(
-            &txn, &commit, &issuer, &token, "main", symbols, R, policy(), 64, || NOW,
-        ).is_err());
+        assert!(
+            db.authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                R,
+                policy(),
+                64,
+                || NOW,
+            )
+            .is_err()
+        );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }

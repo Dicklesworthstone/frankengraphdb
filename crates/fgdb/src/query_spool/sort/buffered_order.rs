@@ -162,7 +162,10 @@ impl PreparedBufferedOrder {
         query: &fgdb_gql::PreparedGraphSet,
         as_of: Option<CommitSeq>,
     ) -> core::result::Result<Self, fgdb_gql::spill_set::SpillSetBuildError> {
-        Ok(Self::from_relation(AsyncSpillSetPlan::compile(query)?, as_of))
+        Ok(Self::from_relation(
+            AsyncSpillSetPlan::compile(query)?,
+            as_of,
+        ))
     }
 
     /// Reuse a fully admitted relational program as private aggregate input.
@@ -314,7 +317,9 @@ impl PreparedBufferedOrder {
                                 Input::Binary(source.clone())
                             }
                             AsyncSpillSetSourcePlan::Cross(source) => Input::Cross(source.clone()),
-                            AsyncSpillSetSourcePlan::RowJoin(source) => Input::RowJoin(source.clone()),
+                            AsyncSpillSetSourcePlan::RowJoin(source) => {
+                                Input::RowJoin(source.clone())
+                            }
                             AsyncSpillSetSourcePlan::Aggregate(source) => {
                                 Input::Aggregate(source.clone())
                             }
@@ -415,9 +420,23 @@ impl PreparedBufferedOrder {
             Input::RowJoin(plan) => {
                 let plan = plan.clone();
                 Box::pin(super::relational_join::execute(
-                    plan, as_of, view, cx, input_policy, scratch, destination,
-                    auxiliary, group_capacity, max_partitions, run_rows, max_runs,
-                    page_bytes, max_row_bytes, max_input_rows, max_sort_work, resolver,
+                    plan,
+                    as_of,
+                    view,
+                    cx,
+                    input_policy,
+                    scratch,
+                    destination,
+                    auxiliary,
+                    group_capacity,
+                    max_partitions,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    max_row_bytes,
+                    max_input_rows,
+                    max_sort_work,
+                    resolver,
                 ))
             }
             Input::Aggregate(plan) => {

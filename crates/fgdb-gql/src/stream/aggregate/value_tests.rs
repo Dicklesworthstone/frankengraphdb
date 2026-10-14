@@ -439,18 +439,15 @@ mod float_admission {
             for cut in 1..=events.len() {
                 let mut state = seeded(function);
                 let mut calls = 0;
-                let denied = state.update_governed::<(), usize>(
-                    Input::from_value(&value),
-                    7,
-                    &mut |_| {
+                let denied =
+                    state.update_governed::<(), usize>(Input::from_value(&value), 7, &mut |_| {
                         calls += 1;
                         if calls == cut {
                             Err(GqlQueryError::Interrupted(cut))
                         } else {
                             Ok(())
                         }
-                    },
-                );
+                    });
                 assert!(matches!(denied, Err(GqlQueryError::Interrupted(at)) if at == cut));
                 let NumericState::Distinct(ref distinct) = state else {
                     panic!("lost DISTINCT ownership");
@@ -498,9 +495,9 @@ mod float_admission {
             };
             assert!(matches!(
                 denied,
-                Err(GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow {
-                    aggregate: 7
-                }))
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::ArithmeticOverflow { aggregate: 7 }
+                ))
             ));
             assert!(matches!(
                 state,
@@ -605,12 +602,10 @@ mod float_admission {
         let wide = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
         for grouped in [false, true] {
             let plan = VertexAggregatePlan::compile(&definition(grouped)).unwrap();
-            let mut integer = VertexAggregateCursor::new(
-                Source::new(false),
-                plan.clone(),
-                wide,
-                || Ok::<_, usize>(()),
-            );
+            let mut integer =
+                VertexAggregateCursor::new(Source::new(false), plan.clone(), wide, || {
+                    Ok::<_, usize>(())
+                });
             let integer_rows = integer.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
             let integer_stats = integer.evaluator_stats();
             let source = Source::new(true);
@@ -635,8 +630,7 @@ mod float_admission {
                 let total = if grouped { 4.0 } else { 12.0 };
                 assert_eq!(
                     row.values(),
-                    &[total, 4.0, 4.0, 4.0]
-                        .map(|value| GraphAggregateValue::Value(float(value)))
+                    &[total, 4.0, 4.0, 4.0].map(|value| GraphAggregateValue::Value(float(value)))
                 );
             }
             let exact = GqlQueryPolicy::new(
@@ -645,12 +639,10 @@ mod float_admission {
                 stats.work_units,
                 stats.scratch_entries,
             );
-            let mut admitted = VertexAggregateCursor::new(
-                Source::new(true),
-                plan.clone(),
-                exact,
-                || Ok::<_, usize>(()),
-            );
+            let mut admitted =
+                VertexAggregateCursor::new(Source::new(true), plan.clone(), exact, || {
+                    Ok::<_, usize>(())
+                });
             assert_eq!(
                 admitted.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
                 expected
@@ -677,12 +669,8 @@ mod float_admission {
             ] {
                 let source = Source::new(true);
                 let drops = source.drops.clone();
-                let mut cursor = VertexAggregateCursor::new(
-                    source,
-                    plan.clone(),
-                    policy,
-                    || Ok::<_, usize>(()),
-                );
+                let mut cursor =
+                    VertexAggregateCursor::new(source, plan.clone(), policy, || Ok::<_, usize>(()));
                 assert!(matches!(
                     cursor.by_ref().collect::<Result<Vec<_>, _>>(),
                     Err(GqlQueryError::Evaluator(error)) if error.dimension == dimension
