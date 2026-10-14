@@ -2,6 +2,10 @@
 //! and exact aggregate operands continue through its checked integer path.
 //! Float arithmetic is finite binary64; its bit kernel has constant bounded
 //! work and no payload allocation. The enclosing instruction owns admission.
+//! Homogeneous Decimal operations use the native fixed-scale decimal kernel;
+//! mixed Decimal/Int/Float arithmetic refuses rather than losing precision.
+
+mod decimal;
 
 use super::{ExpressionCell, GraphIntegerBinary, GraphIntegerErrorKind, GraphIntegerUnary};
 use fgdb_types::{CanonicalF64, CanonicalScalar, FloatArithmeticError};
@@ -42,7 +46,7 @@ fn operand(cell: &ExpressionCell<'_>) -> Result<Option<CanonicalF64>, GraphInteg
 }
 
 pub(super) fn check(cell: &ExpressionCell<'_>) -> Result<(), GraphIntegerErrorKind> {
-    if float(cell).is_some() {
+    if float(cell).is_some() || decimal::get(cell).is_some() {
         Ok(())
     } else {
         cell.integer().map(|_| ())
@@ -53,6 +57,9 @@ pub(super) fn unary(
     op: GraphIntegerUnary,
     cell: &ExpressionCell<'_>,
 ) -> Result<Option<CanonicalScalar>, GraphIntegerErrorKind> {
+    if let Some(value) = decimal::get(cell) {
+        return decimal::unary(op, value).map(Some);
+    }
     let Some(value) = float(cell) else {
         return Ok(None);
     };
@@ -71,6 +78,9 @@ pub(super) fn binary(
     left: &ExpressionCell<'_>,
     right: &ExpressionCell<'_>,
 ) -> Result<Option<CanonicalScalar>, GraphIntegerErrorKind> {
+    if decimal::get(left).is_some() || decimal::get(right).is_some() {
+        return decimal::binary(op, left, right).map(Some);
+    }
     if float(left).is_none() && float(right).is_none() {
         return Ok(None);
     }
