@@ -232,6 +232,26 @@ pub trait GraphSetSource<E, C> {
     }
 }
 
+/// Borrow one caller-specific pattern callback behind one stable source type.
+/// This is an execution-code-size boundary only: it forwards the exact policy,
+/// rows, errors and control domain without buffering or fallback.
+pub(crate) struct PatternSource<'a, E, C> {
+    pub(crate) patterns: &'a mut dyn FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+}
+
+impl<E, C> GraphSetSource<E, C> for PatternSource<'_, E, C> {
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+        (self.patterns)(pattern, policy)
+    }
+}
+
 impl<E, C, F> GraphSetSource<E, C> for F
 where
     F: FnMut(

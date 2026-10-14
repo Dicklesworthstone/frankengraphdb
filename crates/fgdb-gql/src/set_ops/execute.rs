@@ -184,16 +184,12 @@ impl<Checkpoint> Meter<Checkpoint> {
     }
 }
 
-pub(super) fn execute<E, C, S, Checkpoint>(
+pub(super) fn execute<E, C>(
     query: &PreparedGraphSet,
     policy: GqlQueryPolicy,
-    source: &mut S,
-    checkpoint: Checkpoint,
-) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C>
-where
-    S: GraphSetSource<E, C>,
-    Checkpoint: FnMut() -> Result<(), C>,
-{
+    source: &mut dyn GraphSetSource<E, C>,
+    checkpoint: &mut dyn FnMut() -> Result<(), C>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
     let mut meter = Meter {
         policy,
         checkpoint,
@@ -224,7 +220,7 @@ fn run<E, C, S, Checkpoint>(
     operand: &mut usize,
 ) -> SetResult<Vec<GraphValueRow>, E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
@@ -330,7 +326,7 @@ fn run_node<E, C, S, Checkpoint>(
     operand: &mut usize,
 ) -> SetResult<Vec<GraphValueRow>, E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     Ok(match &query.node {

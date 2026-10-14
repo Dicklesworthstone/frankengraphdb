@@ -25,6 +25,7 @@ pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
+pub(crate) use procedure::PatternSource;
 pub use procedure::{
     GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection,
     ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
@@ -888,8 +889,14 @@ impl PreparedGraphSet {
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let patterns: &mut dyn FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> = &mut source;
+        let mut source = PatternSource { patterns };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut source, checkpoint)
     }
 
@@ -901,21 +908,31 @@ impl PreparedGraphSet {
     pub fn execute_governed_with_procedures<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        patterns: impl FnMut(
+        mut patterns: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        procedures: impl FnMut(
+        mut procedures: impl FnMut(
             &PreparedProcedureCall,
             &[crate::algebra::GraphValue],
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let patterns: &mut dyn FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> = &mut patterns;
+        let procedures: &mut dyn FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> = &mut procedures;
         let mut source = WithProcedures {
             patterns,
             procedures,
         };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut source, checkpoint)
     }
 
@@ -927,21 +944,34 @@ impl PreparedGraphSet {
     pub fn execute_governed_with_elements<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        patterns: impl FnMut(
+        mut patterns: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        procedures: impl FnMut(
+        mut procedures: impl FnMut(
             &PreparedProcedureCall,
             &[crate::algebra::GraphValue],
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        elements: impl FnMut(
+        mut elements: impl FnMut(
             fgdb_delta_types::ElementId,
             fgdb_delta_types::PropertyKeyId,
         ) -> Result<Option<fgdb_types::CanonicalScalar>, E>,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let patterns: &mut dyn FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> = &mut patterns;
+        let procedures: &mut dyn FnMut(
+            &PreparedProcedureCall,
+            &[crate::algebra::GraphValue],
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> = &mut procedures;
+        let elements: &mut dyn FnMut(
+            fgdb_delta_types::ElementId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<fgdb_types::CanonicalScalar>, E> = &mut elements;
         let mut source = WithElementReads {
             source: WithProcedures {
                 patterns,
@@ -949,6 +979,7 @@ impl PreparedGraphSet {
             },
             elements,
         };
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut source, checkpoint)
     }
 
@@ -958,7 +989,7 @@ impl PreparedGraphSet {
         &self,
         rows: Vec<GraphValueRow>,
         policy: GqlQueryPolicy,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
         struct OwnedRows(Option<Vec<GraphValueRow>>);
         impl<E, C> GraphSetSource<E, C> for OwnedRows {
@@ -973,6 +1004,7 @@ impl PreparedGraphSet {
                 self.0.take()
             }
         }
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut OwnedRows(Some(rows)), checkpoint)
     }
 
@@ -982,8 +1014,10 @@ impl PreparedGraphSet {
         &self,
         policy: GqlQueryPolicy,
         source: &mut impl GraphSetSource<E, C>,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        let source: &mut dyn GraphSetSource<E, C> = source;
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, source, checkpoint)
     }
 
