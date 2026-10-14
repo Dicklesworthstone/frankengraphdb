@@ -74,6 +74,104 @@ struct EdgeAccess {
     direction: GlaDirection,
 }
 
+/// A plain vertex scan: ScanVertices, then only Selects on that vertex, one
+/// projection of it, and the terminal order/page of an aggregate child
+/// (fgdb-61p1n). Each vertex binds once, so the GLA's identity-keyed predicate
+/// cache never hits: every test is a miss that pays a cache insert. This shape
+/// runs the same steps directly, charging exactly the GLA's events.
+struct VertexScan<'p> {
+    selects: Vec<&'p [VertexPredicate]>,
+    columns: &'p [ValueProjection],
+}
+
+fn vertex_scan(aggregate: &PreparedGraphAggregate) -> Option<VertexScan<'_>> {
+    let operators = aggregate.input.plan().operators();
+    if !matches!(operators.first(), Some(GlaOperator::ScanVertices)) {
+        return None;
+    }
+    let mut selects = Vec::new();
+    let mut columns = None;
+    for operator in &operators[1..] {
+        match operator {
+            GlaOperator::Select { slot, predicates }
+                if columns.is_none() && slot.ordinal() == 0 =>
+            {
+                selects.push(predicates.as_slice());
+            }
+            GlaOperator::ProjectValues { columns: output }
+                if columns.is_none()
+                    && output.iter().all(|column| match column {
+                        ValueProjection::Vertex { slot }
+                        | ValueProjection::Property { slot, .. } => slot.ordinal() == 0,
+                        _ => false,
+                    }) =>
+            {
+                columns = Some(output.as_slice());
+            }
+            GlaOperator::OrderByValues if columns.is_some() => {}
+            GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            } if columns.is_some() => {}
+            _ => return None,
+        }
+    }
+    Some(VertexScan {
+        selects,
+        columns: columns?,
+    })
+}
+
+/// The GLA's vertex scan, step for step: one Work per vertex, then per
+/// Select one Work, the predicate cache entry it would insert (each vertex
+/// is new to it), the literal comparison work and the test; then one Work
+/// and the projection's visit. A refused Select ends the vertex.
+fn visit_vertex_scan<'a, E, C, F, R, M, P>(
+    scan: &VertexScan<'_>,
+    vertices: impl IntoIterator<Item = VId>,
+    mut test_vertex: F,
+    mut property: R,
+    mut control: M,
+    mut visit: P,
+) -> Result<(), VisitError<E, C>>
+where
+    F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+    P: FnMut(
+        &[ValueProjection],
+        &[Option<VId>],
+        &mut R,
+        &mut M,
+        Multiplicity,
+    ) -> Result<(), VisitError<E, C>>,
+{
+    'vertices: for vertex in vertices {
+        control(GlaExecutionEvent::Work)?;
+        for predicates in &scan.selects {
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            for predicate in *predicates {
+                for _ in 0..predicate.comparison_work_units() {
+                    control(GlaExecutionEvent::Work)?;
+                }
+            }
+            if !test_vertex(vertex, predicates)? {
+                continue 'vertices;
+            }
+        }
+        control(GlaExecutionEvent::Work)?;
+        visit(
+            scan.columns,
+            &[Some(vertex)],
+            &mut property,
+            &mut control,
+            Multiplicity::ONE,
+        )?;
+    }
+    Ok(())
+}
+
 /// An aggregate over one directed typed edge whose only other operators are
 /// endpoint selections and a projection of its two endpoints (fgdb-61p1n).
 /// Each admitted edge that passes its endpoints is one binding, so weighing
@@ -1423,6 +1521,9 @@ where
             visit,
         );
     }
+    if let Some(scan) = vertex_scan(aggregate) {
+        return visit_vertex_scan(&scan, vertices, test_vertex, property, control, visit);
+    }
     if !eligible(aggregate) {
         return plan.visit_value_bindings(
             vertices,
@@ -2324,6 +2425,114 @@ mod tests {
             "MATCH (a)-[:R]->{2,4}(b) RETURN COUNT(DISTINCT b) AS n",
         ] {
             assert!(chain_shape(&query(text)).is_none(), "{text}");
+        }
+    }
+
+    /// The direct vertex scan is the GLA's vertex scan event for event: the
+    /// same Work/ScratchEntry sequence, the same vertex tests in the same
+    /// order and the same visited bindings, for unfiltered, labelled,
+    /// property-filtered and grouped shapes; and it stops at every event.
+    #[test]
+    fn vertex_scans_are_the_gla_scan_event_for_event() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Step {
+            Event(GlaExecutionEvent),
+            Test(VId),
+            Visit(Vec<Option<VId>>),
+        }
+        let labelled = |vid: VId| !vid.0.is_multiple_of(3);
+        let value = CanonicalScalar::Int(7);
+        let other = CanonicalScalar::Int(1);
+        let property_of = |vid: VId| {
+            if vid.0.is_multiple_of(2) {
+                &value
+            } else {
+                &other
+            }
+        };
+        let vertices: Vec<VId> = (0..12).map(VId).collect();
+        for text in [
+            "MATCH (a) RETURN COUNT(*) AS n",
+            "MATCH (a:L) RETURN COUNT(*) AS n",
+            "MATCH (a:L {n: 7}) RETURN a,COUNT(*) AS n GROUP BY a",
+            "MATCH (a:L) WHERE a.n = 7 RETURN a.n,COUNT(*) AS n GROUP BY a.n",
+        ] {
+            let aggregate = query(text);
+            let scan = vertex_scan(&aggregate).unwrap_or_else(|| panic!("{text}"));
+            let trace = |direct: bool, stop: Option<usize>| {
+                let steps = core::cell::RefCell::new(Vec::new());
+                let mut events = 0;
+                let record = |step: Step| steps.borrow_mut().push(step);
+                let test = |vid: VId, predicates: &[VertexPredicate]| {
+                    record(Step::Test(vid));
+                    Ok::<_, VisitError<(), usize>>(predicates.iter().all(|predicate| {
+                        predicate.matches_borrowed(
+                            labelled(vid).then_some(fgdb_delta_types::LabelId(1)),
+                            Some((PropertyKeyId(1), property_of(vid))),
+                        )
+                    }))
+                };
+                let property = |vid: VId, _: PropertyKeyId| Ok(Some(property_of(vid)));
+                let control = |event: GlaExecutionEvent| {
+                    events += 1;
+                    record(Step::Event(event));
+                    if Some(events) == stop {
+                        Err(GqlQueryError::Interrupted(events))
+                    } else {
+                        Ok(())
+                    }
+                };
+                let result = if direct {
+                    visit_vertex_scan(
+                        &scan,
+                        vertices.iter().copied(),
+                        test,
+                        property,
+                        control,
+                        |_, bindings, _, _, _| {
+                            record(Step::Visit(bindings.to_vec()));
+                            Ok(())
+                        },
+                    )
+                } else {
+                    aggregate.input.plan().visit_value_bindings(
+                        vertices.iter().copied(),
+                        [],
+                        test,
+                        property,
+                        control,
+                        |_, bindings, _, _| {
+                            record(Step::Visit(bindings.to_vec()));
+                            Ok(())
+                        },
+                    )
+                };
+                (result.map_err(|_| ()), steps.into_inner())
+            };
+            let (direct, direct_steps) = trace(true, None);
+            let (gla, gla_steps) = trace(false, None);
+            assert!(direct.is_ok() && gla.is_ok(), "{text}");
+            assert_eq!(direct_steps, gla_steps, "{text}");
+            let events = direct_steps
+                .iter()
+                .filter(|step| matches!(step, Step::Event(_)))
+                .count();
+            for stop in 1..=events {
+                let (result, steps) = trace(true, Some(stop));
+                assert!(result.is_err(), "{text}: {stop}");
+                let seen = steps
+                    .iter()
+                    .filter(|step| matches!(step, Step::Event(_)))
+                    .count();
+                assert_eq!(seen, stop, "{text}");
+            }
+        }
+        for text in [
+            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a), (b) RETURN COUNT(*) AS n",
+            "MATCH (a) WHERE a.n = a.n RETURN COUNT(*) AS n",
+        ] {
+            assert!(vertex_scan(&query(text)).is_none(), "{text}");
         }
     }
 
