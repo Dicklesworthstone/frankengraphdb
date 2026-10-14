@@ -378,22 +378,42 @@ impl<I: Ord + Clone> StatementHistoryIndex<I> {
 
 impl StatementHistoryIndex<EId> {
     pub(crate) fn edges(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
-        let mut histories = BTreeMap::<EId, Vec<(CommitSeq, usize, usize)>>::new();
-        for (block, entries) in blocks.iter().enumerate() {
-            for (row, entry) in entries.as_ref().iter().enumerate() {
-                histories
-                    .entry(entry.eid)
-                    .or_default()
-                    .push((entry.created_at, block, row));
-            }
-        }
+        let statements = edge_statements(blocks);
         let mut work = 0;
-        let histories = histories
-            .into_iter()
-            .map(|(eid, versions)| (eid, unit_set(versions, &mut work)))
+        let histories = statements
+            .chunk_by(|a, b| a.0 == b.0)
+            .map(|group| (group[0].0, statement_history(group, &mut work)))
             .collect();
         Self(IndexMap::from_sorted(histories, &mut work))
     }
+}
+
+/// Every edge statement's `(identity, created_at, block, row)`, sorted, so
+/// each identity's statements are one run in history order. One sort of one
+/// vector replaces an ordered-map insert per statement, in the random key
+/// order a keyed EId permutation gives: on a packed web-google (5.1M edges)
+/// those inserts were about 40% of building the adjacency index.
+fn edge_statements(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Vec<(EId, CommitSeq, usize, usize)> {
+    let mut statements =
+        Vec::with_capacity(blocks.iter().map(|entries| entries.as_ref().len()).sum());
+    for (block, entries) in blocks.iter().enumerate() {
+        for (row, entry) in entries.as_ref().iter().enumerate() {
+            statements.push((entry.eid, entry.created_at, block, row));
+        }
+    }
+    statements.sort_unstable();
+    statements
+}
+
+/// The history of one identity's run from [`edge_statements`].
+fn statement_history(group: &[(EId, CommitSeq, usize, usize)], work: &mut u64) -> History {
+    unit_set(
+        group
+            .iter()
+            .map(|&(_, created_at, block, row)| (created_at, block, row))
+            .collect(),
+        work,
+    )
 }
 
 /// The `(block, row)` of the latest statement in `history` created at or
@@ -449,41 +469,35 @@ impl AdjacencyIndex {
     /// then assemble each persistent tree bottom-up. The contents equal
     /// folding every row through `apply_added`, without a path copy per row.
     pub(crate) fn build(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
-        let mut work = 0;
-        let mut histories = BTreeMap::<EId, Vec<(CommitSeq, usize, usize)>>::new();
-        let mut outgoing = BTreeMap::<VId, Vec<EId>>::new();
-        let mut incoming = BTreeMap::<VId, Vec<EId>>::new();
-        for (block, entries) in blocks.iter().enumerate() {
-            for (row, entry) in entries.as_ref().iter().enumerate() {
-                work += 1;
-                histories
-                    .entry(entry.eid)
-                    .or_default()
-                    .push((entry.created_at, block, row));
-                outgoing.entry(entry.src).or_default().push(entry.eid);
-                incoming.entry(entry.dst).or_default().push(entry.eid);
+        let statements = edge_statements(blocks);
+        let mut work = statements.len() as u64;
+        // Each statement's endpoints beside its identity's position in
+        // `histories`, so assembling a face never searches for a history.
+        let mut histories: Vec<(EId, History)> = Vec::new();
+        let mut outgoing = Vec::with_capacity(statements.len());
+        let mut incoming = Vec::with_capacity(statements.len());
+        for group in statements.chunk_by(|a, b| a.0 == b.0) {
+            let at = histories.len();
+            for &(eid, _, block, row) in group {
+                let entry = &blocks[block].as_ref()[row];
+                outgoing.push((entry.src, eid, at));
+                incoming.push((entry.dst, eid, at));
             }
+            histories.push((group[0].0, statement_history(group, &mut work)));
         }
-        let histories: Vec<(EId, History)> = histories
-            .into_iter()
-            .map(|(eid, versions)| (eid, unit_set(versions, &mut work)))
-            .collect();
-        let face = |map: BTreeMap<VId, Vec<EId>>, work: &mut u64| {
-            let items = map
-                .into_iter()
-                .map(|(vid, mut eids)| {
-                    eids.sort_unstable();
-                    eids.dedup();
-                    let entries = eids
-                        .into_iter()
-                        .map(|eid| {
-                            let at = histories
-                                .binary_search_by_key(&eid, |&(eid, _)| eid)
-                                .expect("every incident identity has a history");
-                            (eid, histories[at].1.clone())
-                        })
+        drop(statements);
+        let face = |mut incidences: Vec<(VId, EId, usize)>, work: &mut u64| {
+            // `at` follows from the identity, so this dedups (vertex, identity).
+            incidences.sort_unstable();
+            incidences.dedup();
+            let items = incidences
+                .chunk_by(|a, b| a.0 == b.0)
+                .map(|group| {
+                    let entries = group
+                        .iter()
+                        .map(|&(_, eid, at)| (eid, histories[at].1.clone()))
                         .collect();
-                    (vid, IndexMap::from_sorted(entries, work))
+                    (group[0].0, IndexMap::from_sorted(entries, work))
                 })
                 .collect();
             IndexMap::from_sorted(items, work)
