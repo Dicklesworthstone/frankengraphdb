@@ -209,7 +209,15 @@ fn prepare(
                     options.coordinate,
                     options,
                 )
-                .map_err(Failure::query)?;
+                .map_err(|error| {
+                    // A read given to --write would otherwise surface only as
+                    // a write-grammar error at its first read keyword.
+                    if PreparedNativeRead::prepare(&step.text, &params, options).is_ok() {
+                        Failure::usage("a read statement: pass it with --query, not --write")
+                    } else {
+                        Failure::query(error)
+                    }
+                })?;
                 // Count expanded UNWIND statements, not merely the one textual
                 // clause, against this invocation's existing 64-statement cap.
                 statements = statements
@@ -217,8 +225,26 @@ fn prepare(
                     .ok_or_else(|| Failure::usage("transaction statement count overflow"))?;
                 Ok(PreparedStep::Write(Box::new(bound)))
             } else {
-                let query = PreparedNativeRead::prepare(&step.text, &params, options)
-                    .map_err(execution_failure)?;
+                let query =
+                    PreparedNativeRead::prepare(&step.text, &params, options).map_err(|error| {
+                        // Likewise a write given to --query: preparing it as a
+                        // write only classifies the text; nothing executes.
+                        let write = matches!(
+                            write_returning::prepare_statement(&step.text, &params, options),
+                            Ok(Some(_))
+                        ) || BoundNativeGraphWrite::bind_with_resolver(
+                            &step.text,
+                            &params,
+                            options.coordinate,
+                            options,
+                        )
+                        .is_ok();
+                        if write {
+                            Failure::usage("a write statement: pass it with --write, not --query")
+                        } else {
+                            execution_failure(error)
+                        }
+                    })?;
                 if matches!(
                     query.facade_class(),
                     NativeReadClass::TemporalPattern
