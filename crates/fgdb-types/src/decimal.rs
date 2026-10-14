@@ -6,6 +6,8 @@
 //! encoding can observe them.  Rescaling is always explicit and uses
 //! round-half-to-even; every overflow is rejected.
 
+mod arithmetic;
+
 use std::fmt;
 
 /// Decimal precision fixed by this `STRICT_PORTABLE` profile.
@@ -258,6 +260,9 @@ pub enum DecimalOperation {
     Add,
     Subtract,
     Negate,
+    Multiply,
+    Divide,
+    Remainder,
 }
 
 impl fmt::Display for DecimalOperation {
@@ -268,6 +273,9 @@ impl fmt::Display for DecimalOperation {
             Self::Add => "addition",
             Self::Subtract => "subtraction",
             Self::Negate => "negation",
+            Self::Multiply => "multiplication",
+            Self::Divide => "division",
+            Self::Remainder => "remainder",
         };
         f.write_str(name)
     }
@@ -279,6 +287,7 @@ pub enum DecimalError {
     ScaleOutOfRange { scale: u32, max: u32 },
     CoefficientOutOfRange { coefficient: i128, precision: u32 },
     ArithmeticOverflow { operation: DecimalOperation },
+    DivisionByZero,
 }
 
 impl fmt::Display for DecimalError {
@@ -297,6 +306,7 @@ impl fmt::Display for DecimalError {
             Self::ArithmeticOverflow { operation } => {
                 write!(f, "decimal {operation} overflow")
             }
+            Self::DivisionByZero => f.write_str("decimal division by zero"),
         }
     }
 }
