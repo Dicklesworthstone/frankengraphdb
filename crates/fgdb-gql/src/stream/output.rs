@@ -450,9 +450,12 @@ mod projected_tests {
         );
         // Each private source row has its existing completion event, and each
         // completed projected result has one additional final emit checkpoint.
+        // Every evaluator event is one work unit (algebra_exec::charge), a
+        // scratch entry included, so the projection's scratch entries count
+        // here as well as above.
         assert_eq!(
             cursor.evaluator_stats().work_units,
-            raw.evaluator_stats().work_units + projection_work + 3
+            raw.evaluator_stats().work_units + projection_work + projection_scratch + 3
         );
         assert_eq!(cursor.state(), VertexScanState::Exhausted);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
