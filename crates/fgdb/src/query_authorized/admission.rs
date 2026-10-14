@@ -18,7 +18,8 @@
 use super::tape::{Step, Tape};
 use crate::Snapshot;
 use crate::query::prism::LiveCache;
-use fgdb_types::{CommitSeq, VId};
+use fgdb_delta_types::RelationId;
+use fgdb_types::{CommitSeq, EId, VId};
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -36,6 +37,29 @@ pub(super) struct AdmissionKey {
     /// Whether the plan reads edges: a vertex-only plan admits none.
     pub(super) edges: bool,
 }
+
+/// A core keeps its edges' identities inline beside their coordinates while
+/// all of them fit this many bytes; a larger core reads each back from its
+/// statement on refill. Read-back costs a lookup per edge (epinions edge
+/// count +10%, the unlabelled one +25%), so it is only paid where inline
+/// identities would not fit the budget at all (web-google's ~290 MB).
+const INLINE_IDENTITY_BYTES: usize = ADMITTED_BYTES / 2;
+
+/// Lets the admission laws (which run serialized) cover both refill forms.
+#[cfg(test)]
+pub(super) static INLINE_IDENTITIES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+fn inline_identity_bytes() -> usize {
+    #[cfg(test)]
+    if !INLINE_IDENTITIES.load(std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    INLINE_IDENTITY_BYTES
+}
+
+/// An admitted edge's identity: (EId, src, relation, dst).
+pub(super) type EdgeIdentity = (EId, VId, RelationId, VId);
 
 /// Where one admitted edge's winning statement sits. Its identity is that
 /// statement's, read back on refill from the snapshot allocation the core is
@@ -56,6 +80,9 @@ pub(super) struct AdmittedCore {
     /// rows, and vertices are few beside edges.
     pub(super) vertices: Vec<(VId, u32, u32)>,
     pub(super) edges: Vec<CoreEdge>,
+    /// Each edge's identity in `edges` order, while they fit
+    /// [`INLINE_IDENTITY_BYTES`]; otherwise refill reads them back.
+    pub(super) identities: Option<Vec<EdgeIdentity>>,
     pub(super) records: u64,
     pub(super) tape: Tape,
     /// Where each vertex sits in the sealed table this core refills, built by
@@ -69,6 +96,9 @@ impl AdmittedCore {
         size_of::<Self>()
             + self.vertices.capacity() * size_of::<(VId, u32, u32)>()
             + self.edges.capacity() * size_of::<CoreEdge>()
+            + self.identities.as_ref().map_or(0, |identities| {
+                identities.capacity() * size_of::<EdgeIdentity>()
+            })
             + self.tape.bytes()
     }
 }
@@ -79,6 +109,8 @@ impl AdmittedCore {
 pub(super) struct Recording {
     core: AdmittedCore,
     abandoned: bool,
+    /// The identities outgrew [`INLINE_IDENTITY_BYTES`] and were dropped.
+    compact: bool,
 }
 
 impl Recording {
@@ -103,12 +135,23 @@ impl Recording {
         }
     }
 
-    /// The admitted edge whose winning statement is `row` of `block`.
-    pub(super) fn edge(&mut self, block: usize, row: usize) {
+    /// The admitted edge `identity`, whose winning statement is `row` of
+    /// `block`.
+    pub(super) fn edge(&mut self, identity: EdgeIdentity, block: usize, row: usize) {
         match (u32::try_from(block), u32::try_from(row)) {
             (Ok(block), Ok(row)) => {
                 self.core.tape.emit(Some(Step::Edge));
                 self.core.edges.push(CoreEdge { block, row });
+                if !self.compact {
+                    let identities = self.core.identities.get_or_insert_with(Vec::new);
+                    if (identities.len() + 1) * size_of::<EdgeIdentity>() <= inline_identity_bytes()
+                    {
+                        identities.push(identity);
+                    } else {
+                        self.core.identities = None;
+                        self.compact = true;
+                    }
+                }
             }
             _ => self.abandoned = true,
         }
@@ -124,6 +167,9 @@ impl Recording {
         core.tape = core.tape.finish();
         core.vertices.shrink_to_fit();
         core.edges.shrink_to_fit();
+        if let Some(identities) = &mut core.identities {
+            identities.shrink_to_fit();
+        }
         Some(core)
     }
 }
