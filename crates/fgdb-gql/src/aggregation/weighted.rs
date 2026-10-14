@@ -74,21 +74,23 @@ struct EdgeAccess {
     direction: GlaDirection,
 }
 
-/// An ungrouped aggregate over one directed typed edge whose only other
-/// operators are endpoint selections and a projection of its two vertices
-/// (fgdb-61p1n). Each admitted edge that passes its endpoints is one binding
-/// and no two share anything, so weighing them into a topology first (a sort
-/// of every arrival, an index over the keys, a weight search per binding)
-/// cannot pay for itself.
+/// An aggregate over one directed typed edge whose only other operators are
+/// endpoint selections and a projection of its two endpoints (fgdb-61p1n).
+/// Each admitted edge that passes its endpoints is one binding, so weighing
+/// them into a topology first (a sort of every arrival, an index over the
+/// keys, a weight search per binding) cannot pay for itself.
 struct SingleScan<'p> {
     access: EdgeAccess,
     columns: &'p [ValueProjection],
+    /// Every column reads slot 0 alone: bindings that share their slot-0
+    /// vertex are the same input to every key and aggregate, so each such
+    /// anchor is visited once, weighted by its passing edges, in ascending
+    /// vertex order (the root order `RootGroups` requires). Otherwise only
+    /// an ungrouped aggregate of vertex columns qualifies, edge by edge.
+    anchored: bool,
 }
 
 fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
-    if !aggregate.keys.is_empty() {
-        return None;
-    }
     let operators = aggregate.input.plan().operators();
     let Some(GlaOperator::ScanEdges {
         relation,
@@ -104,12 +106,7 @@ fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
     for operator in &operators[1..] {
         match operator {
             GlaOperator::Select { slot, .. } if columns.is_none() && slot.ordinal() < 2 => {}
-            GlaOperator::ProjectValues { columns: output }
-                if columns.is_none()
-                    && output.iter().all(|column| {
-                        matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() < 2)
-                    }) =>
-            {
+            GlaOperator::ProjectValues { columns: output } if columns.is_none() => {
                 columns = Some(output.as_slice());
             }
             GlaOperator::OrderByValues if columns.is_some() => {}
@@ -120,6 +117,19 @@ fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
             _ => return None,
         }
     }
+    let columns = columns?;
+    let anchored = columns.iter().all(|column| match column {
+        ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
+            slot.ordinal() == 0
+        }
+        _ => false,
+    });
+    let vertices = columns
+        .iter()
+        .all(|column| matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() < 2));
+    if !anchored && !(vertices && aggregate.keys.is_empty()) {
+        return None;
+    }
     Some(SingleScan {
         access: EdgeAccess {
             source: 0,
@@ -127,16 +137,21 @@ fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
             relation: relation.one()?,
             direction: *direction,
         },
-        columns: columns?,
+        columns,
+        anchored,
     })
 }
 
 /// Edges in arrival order, each charged one Work as the topology charges
 /// it. Endpoints are tested exactly as `topology::Endpoints::admit` tests
 /// them: source then destination, each vertex once per side, its verdict
-/// one ScratchEntry. A passing edge is visited with multiplicity one, which
-/// for the counts, distinct counts and extrema `eligible` admits is the
-/// topology's sum of the same edges.
+/// one ScratchEntry. Unanchored, a passing edge is visited with multiplicity
+/// one. Anchored, it joins its slot-0 vertex's count (a new anchor costs one
+/// ScratchEntry); each anchor is then visited once with that multiplicity,
+/// after re-reading its property columns once per further edge, as the
+/// weighted visitor re-reads them per further occurrence. For the counts,
+/// distinct counts and extrema `eligible` admits, both equal the topology's
+/// weighted sum over the same edges.
 fn visit_single_scan<'a, E, C, F, R, M, P>(
     scan: &SingleScan<'_>,
     plan: &crate::algebra::GlaPlan<GraphValueRow>,
@@ -170,6 +185,8 @@ where
         std::collections::HashMap::<VId, bool>::new(),
         std::collections::HashMap::<VId, bool>::new(),
     ];
+    // Anchor -> (passing edges, the first partner): probed, then sorted.
+    let mut anchors = std::collections::HashMap::<VId, (u64, VId)>::new();
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         if relation != scan.access.relation {
@@ -191,16 +208,45 @@ where
         if !passes(0, source, from)? || !passes(1, destination, to)? {
             continue;
         }
-        let bindings = match scan.access.direction {
-            GlaDirection::Forward => [Some(source), Some(destination)],
-            _ => [Some(destination), Some(source)],
+        let (anchor, partner) = match scan.access.direction {
+            GlaDirection::Forward => (source, destination),
+            _ => (destination, source),
         };
+        if scan.anchored {
+            match anchors.entry(anchor) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().0 += 1,
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    entry.insert((1, partner));
+                }
+            }
+            continue;
+        }
         visit(
             scan.columns,
-            &bindings,
+            &[Some(anchor), Some(partner)],
             &mut property,
             &mut control,
             Multiplicity::ONE,
+        )?;
+    }
+    let mut anchors: Vec<_> = anchors.into_iter().collect();
+    anchors.sort_unstable_by_key(|(anchor, _)| *anchor);
+    for (anchor, (count, partner)) in anchors {
+        for _ in 1..count {
+            for column in scan.columns {
+                if let ValueProjection::Property { key, .. } = column {
+                    control(GlaExecutionEvent::Work)?;
+                    property(anchor, *key)?;
+                }
+            }
+        }
+        visit(
+            scan.columns,
+            &[Some(anchor), Some(partner)],
+            &mut property,
+            &mut control,
+            Multiplicity(NonZeroU64::new(count)),
         )?;
     }
     Ok(())
@@ -2196,22 +2242,42 @@ mod tests {
             "(a)-[:R]->(b {n: 7})",
             "(a:L)<-[:R]-(b:L)",
         ] {
-            for returns in [
-                "COUNT(*) AS c",
-                "COUNT(*) AS c,COUNT(DISTINCT b) AS d,COUNT(a) AS e,MIN(b) AS lo,MAX(a) AS hi",
+            for (returns, group, anchored) in [
+                ("COUNT(*) AS c", "", true),
+                (
+                    "COUNT(*) AS c,COUNT(DISTINCT b) AS d,COUNT(a) AS e,MIN(b) AS lo,MAX(a) AS hi",
+                    "",
+                    false,
+                ),
+                ("a,COUNT(*) AS c", " GROUP BY a", true),
+                ("a.n,COUNT(*) AS c,MAX(a) AS hi", " GROUP BY a.n", true),
+                (
+                    "COUNT(a.n) AS k,COUNT(DISTINCT a.n) AS d,MIN(a.n) AS lo,COUNT(*) AS c",
+                    "",
+                    true,
+                ),
             ] {
                 let text = format!("MATCH {pattern} RETURN {returns}");
-                let scanned = query(&text);
-                let enumerated = query(&format!("{text},COLLECT(b) AS bag"))
-                    .with_aggregate_output_prefix(returns.split(',').count())
+                let scanned = query(&format!("{text}{group}"));
+                // The prefix counts aggregate columns; a grouped query's
+                // first column is its key.
+                let aggregates = returns.split(',').count() - usize::from(!group.is_empty());
+                let enumerated = query(&format!("{text},COLLECT(b) AS bag{group}"))
+                    .with_aggregate_output_prefix(aggregates)
                     .unwrap();
-                assert!(single_scan(&scanned).is_some(), "{text}");
-                assert!(!eligible(&enumerated), "{text}");
-                assert_eq!(run(&scanned).value, run(&enumerated).value, "{text}");
+                let scan = single_scan(&scanned);
+                assert_eq!(
+                    scan.map(|scan| scan.anchored),
+                    Some(anchored),
+                    "{text}{group}"
+                );
+                assert!(!eligible(&enumerated), "{text}{group}");
+                assert_eq!(run(&scanned).value, run(&enumerated).value, "{text}{group}");
             }
         }
         for text in [
-            "MATCH (a)-[:R]->(b) RETURN a,COUNT(*) AS c GROUP BY a",
+            "MATCH (a)-[:R]->(b) RETURN b,COUNT(*) AS c GROUP BY b",
+            "MATCH (a)-[:R]->(b) RETURN a,COUNT(b) AS c GROUP BY a",
             "MATCH (a)-[:R]-(b) RETURN COUNT(*) AS c",
             "MATCH (a)-[:R]->(b) RETURN MIN(b.n) AS lo",
             "MATCH (a)-[:R]->(a) RETURN COUNT(*) AS c",
@@ -2219,6 +2285,58 @@ mod tests {
             "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS c",
         ] {
             assert!(single_scan(&query(text)).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn anchored_scans_read_every_property_occurrence_and_keep_each_failure() {
+        let text = "MATCH (a:L)-[:R]->(b) RETURN a.n,COUNT(*) AS c";
+        let scanned = query(&format!("{text} GROUP BY a.n"));
+        let enumerated = query(&format!("{text},COLLECT(b) AS bag GROUP BY a.n"))
+            .with_aggregate_output_prefix(1)
+            .unwrap();
+        assert!(single_scan(&scanned).is_some_and(|scan| scan.anchored));
+        let edges: Vec<_> = distinct_edge_graph()
+            .into_iter()
+            .map(|(_, source, relation, destination)| (source, relation, destination))
+            .collect();
+        let value = CanonicalScalar::Int(7);
+        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        let execute = |aggregate: &PreparedGraphAggregate, fail_at: Option<usize>| {
+            let mut reads = 0;
+            let result = aggregate.execute_governed(
+                edges.len() as u64,
+                (0..5).map(VId),
+                edges.iter().copied(),
+                |vid, _| Ok::<_, usize>(vid != VId(4)),
+                |_, _| {
+                    reads += 1;
+                    if Some(reads) == fail_at {
+                        Err(reads)
+                    } else {
+                        Ok(Some(&value))
+                    }
+                },
+                policy,
+                || Ok::<_, ()>(()),
+            );
+            (result.map(|result| result.value), reads)
+        };
+        let (scanned_rows, scanned_reads) = execute(&scanned, None);
+        let (enumerated_rows, enumerated_reads) = execute(&enumerated, None);
+        assert_eq!(scanned_rows.unwrap(), enumerated_rows.unwrap());
+        // One read per passing edge, as the ordinary evaluator makes.
+        assert_eq!(scanned_reads, enumerated_reads);
+        for fail_at in 1..=scanned_reads {
+            let (result, reads) = execute(&scanned, Some(fail_at));
+            assert!(
+                matches!(
+                    result,
+                    Err(GqlQueryError::Source(GraphAggregateError::Source(n))) if n == fail_at
+                ),
+                "{fail_at}"
+            );
+            assert_eq!(reads, fail_at);
         }
     }
 
