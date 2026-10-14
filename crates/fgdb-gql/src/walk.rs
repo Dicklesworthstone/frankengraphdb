@@ -390,7 +390,10 @@ impl<'a> GraphPathCursor<'a> {
         }
         let mut next = Vec::new();
         let mut pending = Vec::new();
-        let mut canonical = BTreeMap::<VId, GraphPath>::new();
+        // Each endpoint's best path so far, with the generation number of
+        // the step that made it best.
+        let mut canonical = BTreeMap::<VId, (u64, GraphPath)>::new();
+        let mut generated = 0_u64;
         for path in core::mem::take(&mut self.frontier) {
             control(GlaExecutionEvent::Work)?;
             let endpoint = path.steps().last().map_or(path.start(), |step| step.1);
@@ -454,7 +457,7 @@ impl<'a> GraphPathCursor<'a> {
                     if unique {
                         // Compare before copying: parallel edges and tied
                         // routes cannot multiply the next layer's prefixes.
-                        let previous = canonical.get(&step.1);
+                        let previous = canonical.get(&step.1).map(|(_, path)| path);
                         if let Some(previous) = previous {
                             let candidate =
                                 path.steps().iter().copied().chain(core::iter::once(step));
@@ -477,7 +480,8 @@ impl<'a> GraphPathCursor<'a> {
                             control(GlaExecutionEvent::ScratchEntry)?;
                         }
                         let child = Self::extend_path(&path, step, control)?;
-                        canonical.insert(step.1, child);
+                        generated += 1;
+                        canonical.insert(step.1, (generated, child));
                     } else {
                         control(GlaExecutionEvent::ScratchEntry)?;
                         let child = Self::extend_path(&path, step, control)?;
@@ -490,13 +494,19 @@ impl<'a> GraphPathCursor<'a> {
                 pending.push(path);
             }
         }
-        // Endpoint coalescing chooses identities, not endpoint ordering. Move
-        // those winners into the same canonical path order used by ALL modes.
-        for (_, path) in canonical {
+        // Endpoint coalescing chooses identities, not endpoint ordering. The
+        // winners leave in the order they were generated: a sorted frontier
+        // expanded through sorted neighbor lists (identified adjacency is
+        // sorted) generates its paths in canonical order already, so the sort
+        // below only has to verify that order.
+        let mut winners = Vec::with_capacity(canonical.len());
+        for (_, winner) in canonical {
             control(GlaExecutionEvent::Work)?;
             control(GlaExecutionEvent::ScratchEntry)?;
-            next.push(path);
+            winners.push(winner);
         }
+        winners.sort_unstable_by_key(|(generated, _)| *generated);
+        next.extend(winners.into_iter().map(|(_, path)| path));
         Self::sort_paths(&mut next, control)?;
         self.pending = pending.into_iter();
         self.frontier = next;
@@ -528,10 +538,24 @@ impl<'a> GraphPathCursor<'a> {
 
     /// Fallible in-place heapsort keeps comparison work interruptible without
     /// allocating a second path buffer or hiding fallible control in `Ord`.
+    /// Input already in strictly ascending order is verified with one charged
+    /// comparison per adjacent pair instead: a layer generated from a sorted
+    /// frontier and sorted neighbor lists is, and sorted input is heapsort's
+    /// worst case.
     fn sort_paths<E>(
         paths: &mut [GraphPath],
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<(), E> {
+        let mut ascending = true;
+        for pair in paths.windows(2) {
+            if !Self::compare_paths(&pair[0], &pair[1], control)?.is_lt() {
+                ascending = false;
+                break;
+            }
+        }
+        if ascending {
+            return Ok(());
+        }
         for root in (0..paths.len() / 2).rev() {
             Self::sift_paths(paths, root, control)?;
         }
@@ -1111,15 +1135,25 @@ mod shortest_path_tests {
                             any.extend(unique);
                         }
                         let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
+                        // The order is canonical whatever the input order:
+                        // reversed neighbor lists generate paths out of order.
+                        let reversed: BTreeMap<VId, Vec<(EId, VId)>> = adjacency
+                            .iter()
+                            .map(|(vertex, neighbors)| {
+                                (*vertex, neighbors.iter().rev().copied().collect())
+                            })
+                            .collect();
                         for (search, expected) in [
                             (GraphWalkSearch::AllShortest, &all),
                             (GraphWalkSearch::AnyShortest, &any),
                         ] {
-                            assert_eq!(
-                                &run(VId(source), bounds, search, &adjacency),
-                                expected,
-                                "mask={mask}, source={source}, bounds={bounds:?}, {search:?}"
-                            );
+                            for input in [&adjacency, &reversed] {
+                                assert_eq!(
+                                    &run(VId(source), bounds, search, input),
+                                    expected,
+                                    "mask={mask}, source={source}, bounds={bounds:?}, {search:?}"
+                                );
+                            }
                         }
                     }
                 }
