@@ -232,14 +232,28 @@ pub trait GraphSetSource<E, C> {
     }
 }
 
+/// A caller's pattern callback, erased at a governed set boundary so the
+/// set engine is compiled once per error pair, not once per caller closure
+/// (fgdb-2goz).
+pub(crate) type DynPatterns<'a, E, C> = dyn FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
+    + 'a;
+
+/// A caller's procedure callback, erased at the same boundary.
+pub(crate) type DynProcedures<'a, E, C> = dyn FnMut(
+        &PreparedProcedureCall,
+        &[GraphValue],
+        GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
+    + 'a;
+
 /// Borrow one caller-specific pattern callback behind one stable source type.
 /// This is an execution-code-size boundary only: it forwards the exact policy,
 /// rows, errors and control domain without buffering or fallback.
 pub(crate) struct PatternSource<'a, E, C> {
-    pub(crate) patterns: &'a mut dyn FnMut(
-        &PreparedGraphPattern<GraphValueRow>,
-        GqlQueryPolicy,
-    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    pub(crate) patterns: &'a mut DynPatterns<'a, E, C>,
 }
 
 impl<E, C> GraphSetSource<E, C> for PatternSource<'_, E, C> {
