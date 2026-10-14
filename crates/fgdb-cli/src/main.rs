@@ -100,6 +100,7 @@ Supply the same bindings on reopen; no implicit catalog or hashed names.
 (# comments and blank lines ignored, at most 1 MiB); fgdbd serve accepts the
 same file per database. Flags and file must not repeat a name or an ID.
 query --certify-to <file> saves a portable result certificate after emitting rows.
+An existing <file> is refused (exit 2) before the query runs unless --overwrite is given.
 query and replay take the same four limits as diff; a refusal names the limit it hit.
 query --stream pulls and flushes one native row at a time. Use a single-vertex
 scan with leading vertex identity, or a one-edge scan with leading edge/source identities.
@@ -380,6 +381,8 @@ struct Options {
     bindings_file: Option<PathBuf>,
     coordinate: RelationId,
     certify_to: Option<PathBuf>,
+    /// `--overwrite`: `--certify-to` may replace an existing certificate.
+    overwrite: bool,
     certificate: Option<PathBuf>,
     input: Option<PathBuf>,
     rows_per_chunk: Option<usize>,
@@ -578,6 +581,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut steps: Vec<transaction::Step> = Vec::new();
     let mut rollback = false;
     let mut stream = false;
+    let mut overwrite = false;
     let mut buffered = buffered::BufferedOptions::default();
     let mut spill = spill::SpillOptions::default();
     let mut budget = QueryBudget::default();
@@ -592,6 +596,15 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 return Err(Failure::usage("--stream is allowed once, only on query"));
             }
             stream = true;
+            continue;
+        }
+        if arg == "--overwrite" {
+            if command != "query" || overwrite {
+                return Err(Failure::usage(
+                    "--overwrite is allowed once, only on query --certify-to",
+                ));
+            }
+            overwrite = true;
             continue;
         }
         if arg == "--buffered" {
@@ -780,6 +793,11 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
             "--stream cannot be combined with --certify-to",
         ));
     }
+    if overwrite && certify_to.is_none() {
+        return Err(Failure::usage(
+            "--overwrite only applies to query --certify-to",
+        ));
+    }
     let fnx_call = command == "query" && text.as_deref().is_some_and(fnx::is_call);
     buffered.validate()?;
     if buffered.enabled() && (stream || certify_to.is_some() || fnx_call) {
@@ -829,6 +847,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         bindings_file,
         coordinate,
         certify_to,
+        overwrite,
         certificate,
         input,
         rows_per_chunk,
@@ -1473,9 +1492,11 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     } else if options.stream {
                         stream::run(&view, &cx, &options, robot, out)
                     } else {
-                        view.query(&cx, &options.text, &options.params, &options, options.budget.policy())
+                        // The result names the snapshot that answered: a
+                        // temporal read's bound AS OF cut, not the frontier.
+                        view.query_with_snapshot(&cx, &options.text, &options.params, &options, options.budget.policy())
                             .map_err(execution_failure)
-                            .and_then(|result| render(result, view.frontier().0, "rows", robot, out))
+                            .and_then(|(result, seq)| render(result, seq.0, "rows", robot, out))
                     };
                     // The process exits next. A view owns only memory (no lease,
                     // file or writer), and freeing a large generation cell by cell
@@ -1546,11 +1567,27 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 let Some(path) = &options.certify_to else {
                     return Err(Failure::usage("unknown or missing subcommand; use fgdb help"));
                 };
+                // A certificate is an audit artifact: replacing one is an
+                // explicit choice (fgdb-vuyw5). Refuse before executing, and
+                // create the file new, so one appearing meanwhile still wins.
+                let exists = || Failure::usage(format!("certificate {} already exists; pass --overwrite to replace it", path.display()));
+                if !options.overwrite && asupersync::fs::try_exists(path).await.map_err(Failure::io)? {
+                    return Err(exists());
+                }
                 let (result, certificate) = db.execute_certified(&contexts.query(), &options.text, &options.params, &options, options.budget.policy()).map_err(execution_failure)?;
                 render(result, certificate.plan.snapshot_seq.0, "rows", robot, out)?;
                 out.flush().map_err(Failure::io)?;
                 contexts.query().checkpoint().map_err(Failure::io)?;
-                asupersync::fs::write(path, certificate.canonical_bytes()).await.map_err(Failure::io)
+                if options.overwrite {
+                    return asupersync::fs::write(path, certificate.canonical_bytes()).await.map_err(Failure::io);
+                }
+                let mut file = match asupersync::fs::File::create_new(path).await {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Err(exists()),
+                    Err(error) => return Err(Failure::io(error)),
+                };
+                asupersync::io::AsyncWriteExt::write_all(&mut file, &certificate.canonical_bytes()).await.map_err(Failure::io)?;
+                asupersync::io::AsyncWriteExt::flush(&mut file).await.map_err(Failure::io)
             });
             outcome.map_err(|failure| {
                 if tunable {

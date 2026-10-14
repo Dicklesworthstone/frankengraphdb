@@ -1044,14 +1044,29 @@ fn lifecycle_across_processes_has_exact_query_and_history_ndjson() {
     );
     let historic = db.command("query", &["--param", &format!("old=uint:{inserted}"), "MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ $old WHERE p.name='Ada' RETURN p.born AS born"]);
     historic.success();
+    // The result names the snapshot that answered, the bound AS OF cut, not
+    // the frontier (fgdb-vuyw5), as --stream already did.
     assert_eq!(
         historic.stdout,
         format!(
             "{{\"v\":1,\"event\":\"invocation\"}}\n\
          {{\"v\":1,\"event\":\"columns\",\"columns\":[\"born\"]}}\n\
          {{\"v\":1,\"event\":\"row\",\"cells\":[{{\"type\":\"int\",\"value\":\"1815\"}}]}}\n\
-         {{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{updated},\"count\":1}}\n"
+         {{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{inserted},\"count\":1}}\n"
         )
+    );
+    // A current read still names the frontier.
+    let current = db.command(
+        "query",
+        &["MATCH (p:Person) WHERE p.name='Ada' RETURN p.born AS born"],
+    );
+    current.success();
+    assert!(
+        current.stdout.ends_with(&format!(
+            "\"kind\":\"rows\",\"seq\":{updated},\"count\":1}}\n"
+        )),
+        "{}",
+        current.stdout
     );
 
     let edge_query =
@@ -1082,6 +1097,43 @@ fn lifecycle_across_processes_has_exact_query_and_history_ndjson() {
         r#"[[{"type":"text","value":"Ada"},{"type":"int","value":"1816"}]]"#,
     );
     assert_eq!(reopened.sequence("rows"), deleted);
+}
+
+#[test]
+fn certify_to_never_silently_replaces_an_existing_certificate() {
+    // fgdb-vuyw5: a certificate is an audit artifact.
+    let db = TestDb::new("certificate-no-clobber");
+    db.create();
+    let first = db.write(&["INSERT (:Person {name:'Ada',born:1815})"]);
+    let certificate = PathBuf::from(&db.key).with_file_name("kept.certificate");
+    let path = certificate.to_str().unwrap();
+    let query = "MATCH (p:Person) RETURN p.born AS born";
+    let created = db.command("query", &["--certify-to", path, query]);
+    created.success();
+    assert_eq!(created.sequence("rows"), first);
+    let original = std::fs::read(&certificate).unwrap();
+
+    let second = db.write(&["MATCH (p:Person) SET p.born=1816"]);
+    let refused = db.command("query", &["--certify-to", path, query]);
+    assert_eq!(refused.code, 2, "{}{}", refused.stdout, refused.stderr);
+    assert!(
+        refused.stdout.contains("already exists"),
+        "{}",
+        refused.stdout
+    );
+    assert!(
+        !refused.stdout.contains("\"event\":\"row\""),
+        "refused before any row"
+    );
+    assert_eq!(std::fs::read(&certificate).unwrap(), original);
+
+    let replaced = db.command("query", &["--certify-to", path, "--overwrite", query]);
+    replaced.success();
+    assert_eq!(replaced.sequence("rows"), second);
+    assert_ne!(std::fs::read(&certificate).unwrap(), original);
+
+    let stray = db.command("query", &["--overwrite", query]);
+    assert_eq!(stray.code, 2, "{}{}", stray.stdout, stray.stderr);
 }
 
 #[test]
@@ -1512,21 +1564,25 @@ fn refused_zoned_timestamp_preserves_cli_history_reopen_and_rebuild() {
         r#"{{"type":"timestamp","value":{{"instant_utc_nanos":"{INSTANT}","utc_offset_seconds":-18000,"zone":null}}}}"#,
     );
     let timestamp_rows = format!(r#"{{"v":1,"event":"row","cells":[{expected_cell}]}}"#);
+    // Each result names the snapshot that answered (fgdb-vuyw5).
     let queries = [
         (
             "frontier",
             "MATCH (p:Person) RETURN p.born AS value".to_owned(),
             true,
+            advanced,
         ),
         (
             "AS OF baseline",
             format!("MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {seeded} RETURN p.born AS value"),
             true,
+            seeded,
         ),
         (
             "AS OF refused zoned input",
             format!("MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {before} RETURN p.born AS value"),
             false,
+            before,
         ),
     ];
     for phase in ["after close", "after reopen", "after open_rebuilding"] {
@@ -1562,7 +1618,7 @@ fn refused_zoned_timestamp_preserves_cli_history_reopen_and_rebuild() {
             });
         }
         // Record every actual subprocess result even if an earlier phase fails.
-        for (name, query, has_row) in &queries {
+        for (name, query, has_row, seq) in &queries {
             let output = db.command("query", &[query]);
             let rows = if *has_row {
                 format!("{timestamp_rows}\n")
@@ -1573,7 +1629,7 @@ fn refused_zoned_timestamp_preserves_cli_history_reopen_and_rebuild() {
             let expected_stdout = format!(
                 "{{\"v\":1,\"event\":\"invocation\"}}\n\
                  {{\"v\":1,\"event\":\"columns\",\"columns\":[\"value\"]}}\n\
-                 {rows}{{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{advanced},\"count\":{count}}}\n"
+                 {rows}{{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{seq},\"count\":{count}}}\n"
             );
             steps.push((
                 format!("CLI {phase}: {name}"),
@@ -1963,14 +2019,17 @@ fn cli_pinned_timestamp_round_trips_through_subprocess_recovery() {
     let expected_cell = format!(
         r#"{{"type":"timestamp","value":{{"instant_utc_nanos":"{INSTANT}","utc_offset_seconds":0,"zone":{{"identifier":"{ZONE}","tzdb_oid":"{oid_hex}"}}}}}}"#,
     );
+    // Each result names the snapshot that answered (fgdb-vuyw5).
     let queries = [
         (
             "MATCH (p:Person) RETURN p.born AS value".to_owned(),
             format!(r#"[[{{"type":"null"}}],[{expected_cell}]]"#),
+            advanced,
         ),
         (
             format!("MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {written} RETURN p.born AS value"),
             format!("[[{expected_cell}]]"),
+            written,
         ),
     ];
     let runtime = RuntimeBuilder::new().build().unwrap();
@@ -1995,13 +2054,13 @@ fn cli_pinned_timestamp_round_trips_through_subprocess_recovery() {
             };
             assert!(opened.is_ok(), "embedded {phase}: {:?}", opened.err());
         }
-        for (query, expected) in &queries {
+        for (query, expected, seq) in &queries {
             let output = db.command(
                 "query",
                 &["--tzdb-file", artifact_path.to_str().unwrap(), query],
             );
             assert_rows(&output, expected);
-            assert_eq!(output.sequence("rows"), advanced, "CLI {phase}: {query}");
+            assert_eq!(output.sequence("rows"), *seq, "CLI {phase}: {query}");
         }
         // The same pinned artifact must survive decoding at every native
         // relational stage, not only the database read and final rendering.
