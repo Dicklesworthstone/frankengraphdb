@@ -2214,10 +2214,12 @@ mod float_parameter_tests {
     fn decimal_witnesses_preserve_parameter_holes_nulls_and_lazy_branches() {
         const UNIT: i128 = 1_000_000_000_000_000_000;
         let prepared = template("x / $delta", CanonicalScalarKind::Decimal);
-        assert!(prepared.0.iter().any(|op| matches!(
-            op,
-            MutationIntegerTemplateOp::Parameter { index: 0, .. }
-        )));
+        assert!(
+            prepared
+                .0
+                .iter()
+                .any(|op| matches!(op, MutationIntegerTemplateOp::Parameter { index: 0, .. }))
+        );
         let transcript = |program: &[MutationIntegerTemplateOp]| {
             let mut bytes = Vec::new();
             for op in program {
