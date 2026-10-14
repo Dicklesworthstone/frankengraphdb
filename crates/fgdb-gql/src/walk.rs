@@ -294,7 +294,9 @@ pub(crate) struct GraphPathCursor<'a> {
     depth: u32,
     frontier: Vec<GraphPath>,
     pending: std::vec::IntoIter<GraphPath>,
-    settled: BTreeMap<VId, u32>,
+    /// Only looked up and cleared, never iterated, so its order can never
+    /// reach a result or a charge.
+    settled: std::collections::HashMap<VId, u32>,
     done: bool,
 }
 
@@ -315,7 +317,7 @@ impl<'a> GraphPathCursor<'a> {
             depth: 0,
             frontier: vec![GraphPath::new(source, Box::new([]))],
             pending: Vec::new().into_iter(),
-            settled: BTreeMap::new(),
+            settled: std::collections::HashMap::new(),
             done: false,
         })
     }
@@ -372,6 +374,20 @@ impl<'a> GraphPathCursor<'a> {
             GraphWalkSearch::Acyclic | GraphWalkSearch::Simple
         );
         let unique = self.search == GraphWalkSearch::AnyShortest;
+        if shortest && self.depth >= self.bounds.minimum() {
+            // Settle the whole layer before expanding any of it, so an edge
+            // between two vertices of this layer is pruned like an edge back
+            // to an earlier one. Recording the same depth keeps every
+            // equal-depth witness of this layer eligible.
+            for path in &self.frontier {
+                control(GlaExecutionEvent::Work)?;
+                let endpoint = path.steps().last().map_or(path.start(), |step| step.1);
+                if !self.settled.contains_key(&endpoint) {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    self.settled.insert(endpoint, self.depth);
+                }
+            }
+        }
         let mut next = Vec::new();
         let mut pending = Vec::new();
         let mut canonical = BTreeMap::<VId, GraphPath>::new();
@@ -405,6 +421,14 @@ impl<'a> GraphPathCursor<'a> {
             {
                 for &step in neighbors {
                     control(GlaExecutionEvent::Work)?;
+                    if shortest && self.settled.contains_key(&step.1) {
+                        // A settled endpoint is never reopened: this child
+                        // would be dropped at the start of the next layer,
+                        // unemitted and unexpanded. Drop it before any prefix
+                        // comparison or copy, so a layer copies one path per
+                        // newly reached vertex, not one per edge.
+                        continue;
+                    }
                     if restricted {
                         // Inspect the actual path, not endpoint settlement.
                         // Keep all valid parallel edges and distinct prefixes.
@@ -992,6 +1016,114 @@ mod repetition_tests {
                 run(VId(0), bounds, &adjacency, mode),
                 vec![VId(u128::from(MAX_GRAPH_WALK_HOPS))]
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod shortest_path_tests {
+    use super::*;
+
+    fn run(
+        source: VId,
+        bounds: GraphWalkBounds,
+        search: GraphWalkSearch,
+        adjacency: &BTreeMap<VId, Vec<(EId, VId)>>,
+    ) -> Vec<Vec<(EId, VId)>> {
+        let mut cursor = GraphPathCursor::new(source, bounds, search, Some(adjacency), &mut |_| {
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        let mut rows = Vec::new();
+        while let Some(path) = cursor.next_with_control(&mut |_| Ok::<_, ()>(())).unwrap() {
+            assert_eq!(path.start(), source);
+            rows.push(path.steps().to_vec());
+        }
+        rows
+    }
+
+    /// SHORTEST from the definition, by complete walk enumeration that never
+    /// prunes: an endpoint's admitted length is the least length in the bounds
+    /// at which any walk reaches it. ALL SHORTEST returns every walk of that
+    /// length to it; ANY SHORTEST the least of them under the canonical
+    /// (edge, vertex) order. Rows come layer by layer in canonical order.
+    #[test]
+    fn shortest_paths_match_complete_walk_enumeration() {
+        for mask in 0..512_u32 {
+            let mut adjacency = BTreeMap::<VId, Vec<(EId, VId)>>::new();
+            for source in 0..3_u128 {
+                for destination in 0..3_u128 {
+                    if mask & (1 << (3 * source + destination)) != 0 {
+                        adjacency
+                            .entry(VId(source))
+                            .or_default()
+                            .push((EId(10 * source + destination + 1), VId(destination)));
+                    }
+                }
+            }
+            // One parallel edge, with a larger identity than its twin.
+            if let Some(neighbors) = adjacency.values_mut().next() {
+                let (edge, vertex) = neighbors[0];
+                neighbors.push((EId(edge.0 + 100), vertex));
+                neighbors.sort();
+            }
+            for source in 0..4_u128 {
+                let mut layers: Vec<Vec<Vec<(EId, VId)>>> = vec![vec![Vec::new()]];
+                for depth in 1..=4 {
+                    let mut next = Vec::new();
+                    for walk in &layers[depth - 1] {
+                        let at = walk.last().map_or(VId(source), |step| step.1);
+                        for &step in adjacency.get(&at).into_iter().flatten() {
+                            let mut extended = walk.clone();
+                            extended.push(step);
+                            next.push(extended);
+                        }
+                    }
+                    layers.push(next);
+                }
+                let endpoint =
+                    |walk: &Vec<(EId, VId)>| walk.last().map_or(VId(source), |step| step.1);
+                for maximum in 0..=4_u32 {
+                    for minimum in 0..=maximum {
+                        let admitted = minimum as usize..=maximum as usize;
+                        let mut least = BTreeMap::<VId, usize>::new();
+                        for depth in admitted.clone() {
+                            for walk in &layers[depth] {
+                                least.entry(endpoint(walk)).or_insert(depth);
+                            }
+                        }
+                        let mut all = Vec::new();
+                        let mut any = Vec::new();
+                        for depth in admitted.clone() {
+                            let mut shortest: Vec<_> = layers[depth]
+                                .iter()
+                                .filter(|walk| least[&endpoint(walk)] == depth)
+                                .cloned()
+                                .collect();
+                            shortest.sort();
+                            let mut first = BTreeMap::<VId, Vec<(EId, VId)>>::new();
+                            for walk in &shortest {
+                                first.entry(endpoint(walk)).or_insert_with(|| walk.clone());
+                            }
+                            let mut unique: Vec<_> = first.into_values().collect();
+                            unique.sort();
+                            all.extend(shortest);
+                            any.extend(unique);
+                        }
+                        let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
+                        for (search, expected) in [
+                            (GraphWalkSearch::AllShortest, &all),
+                            (GraphWalkSearch::AnyShortest, &any),
+                        ] {
+                            assert_eq!(
+                                &run(VId(source), bounds, search, &adjacency),
+                                expected,
+                                "mask={mask}, source={source}, bounds={bounds:?}, {search:?}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }
