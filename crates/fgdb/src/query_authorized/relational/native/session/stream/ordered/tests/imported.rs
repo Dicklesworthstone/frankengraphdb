@@ -230,3 +230,340 @@ fn imported_handles_keep_exact_session_ownership_and_branch_rebinding() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+// Both factories must keep the same native projection meter after importing a
+// cached template. Drive real scoped sources and the existing spill pipeline.
+mod projected {
+    use super::*;
+    use fgdb_gql::{GlaLimitDimension, GraphIntegerErrorKind};
+
+    fn clock() -> u64 {
+        100
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn open<'a>(
+        db: &Database<MemVfs>,
+        cx: &QueryCx,
+        issuer: &'a Authority,
+        token: &CapabilityToken,
+        pool: &MemoryPool,
+        text: &str,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+        imported: bool,
+    ) -> (Session<'a, fn() -> u64>, AuthorizedPreparedRead) {
+        let (scratch, _) = file(cx, pool).await;
+        let (destination, _) = file(cx, pool).await;
+        let mut physical = limits();
+        physical.max_row_bytes = 16_384;
+        physical.max_input_rows = 5;
+        if imported {
+            let (selector, native) = retained(text, params);
+            db.authorized_prepared_ordered_read_session(
+                cx,
+                issuer,
+                token,
+                "main",
+                symbols as Resolver,
+                policy,
+                clock as fn() -> u64,
+                selector,
+                native,
+                scratch,
+                destination,
+                physical,
+            )
+            .unwrap()
+        } else {
+            let mut session = db
+                .authorized_ordered_read_session(
+                    cx,
+                    issuer,
+                    token,
+                    "main",
+                    symbols as Resolver,
+                    policy,
+                    clock as fn() -> u64,
+                    scratch,
+                    destination,
+                    physical,
+                )
+                .unwrap();
+            let prepared = session.prepare(cx, text, params).unwrap();
+            (session, prepared)
+        }
+    }
+
+    fn usage(
+        session: &mut Session<'_, fn() -> u64>,
+        cx: &QueryCx,
+        prepared: &AuthorizedPreparedRead,
+        params: &GqlParameters,
+    ) -> GlaExecutionStats {
+        let limits = session.limits;
+        let mut opened = session
+            .session
+            .open_ordered(cx, prepared, params, limits)
+            .unwrap();
+        let mut count = 0;
+        while let Some(row) = opened.input.0.pull() {
+            drop(row.expect("the wide input allowance admits the whole source"));
+            count += 1;
+        }
+        assert_eq!(count, 5);
+        let (at, kind, rows, evaluator) = opened.input.0.stats();
+        assert_eq!((at, kind), (CommitSeq(1), ScanKind::Vertex));
+        assert_eq!((rows.snapshot_records, rows.result_rows), (5, 5));
+        assert_eq!(opened.input.0.state(), ScanState::Exhausted);
+        assert!(opened.input.0.pull().is_none());
+        assert_eq!(opened.input.0.stats().3, evaluator);
+        evaluator
+    }
+
+    fn native_limit(error: NativeSpoolError, dimension: GlaLimitDimension) {
+        assert!(matches!(
+            error,
+            NativeSpoolError::Authorized(error)
+                if matches!(error.as_ref(), QueryError::Stream(GqlQueryError::Evaluator(limit))
+                    if limit.dimension == dimension
+                        && limit.observed == u128::from(limit.limit) + 1)
+        ));
+    }
+
+    fn division(error: NativeSpoolError) {
+        assert!(matches!(
+            error,
+            NativeSpoolError::Authorized(error)
+                if matches!(error.as_ref(),
+                    QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                        row: 1,
+                        column: 1,
+                        error,
+                    })) if error.kind == GraphIntegerErrorKind::DivisionByZero)
+        ));
+    }
+
+    #[test]
+    fn ordered_projection_refuses_native_limits_even_beneath_limit_zero() {
+        let ((), report) = run_async_under_lab(0x8600_0013, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let pool = MemoryPool::new(2_000_000, 0).unwrap();
+            let empty = GqlParameters::new();
+            let (mut raw, prepared) = open(
+                &db,
+                &cx,
+                &issuer,
+                &token,
+                &pool,
+                "MATCH (n:L) RETURN n AS id ORDER BY id",
+                &empty,
+                policy(),
+                false,
+            )
+            .await;
+            let source = usage(&mut raw, &cx, &prepared, &empty);
+            drop(raw);
+            let args = GqlParameters::new()
+                .with_text("value", &"ab".repeat(2048))
+                .unwrap();
+            for imported in [false, true] {
+                for count in [0, 1] {
+                    let text = format!(
+                        "MATCH (n:L) RETURN n AS id,toUpper($value) AS value \
+                         ORDER BY value LIMIT {count}"
+                    );
+                    for (dimension, allowance) in [
+                        (
+                            GlaLimitDimension::WorkUnits,
+                            GqlQueryPolicy::new(100_000, 100, source.work_units, 1_000_000),
+                        ),
+                        (
+                            GlaLimitDimension::ScratchEntries,
+                            GqlQueryPolicy::new(100_000, 100, 1_000_000, source.scratch_entries),
+                        ),
+                    ] {
+                        let (mut session, prepared) = open(
+                            &db, &cx, &issuer, &token, &pool, &text, &args, allowance, imported,
+                        )
+                        .await;
+                        assert!(matches!(prepared.native.as_ref(), PreparedNativeRead::Set(_)));
+                        // The ENTIRE raw source fits. The first large computed
+                        // row must not escape via the signed-only callback.
+                        {
+                            let limits = session.limits;
+                            let mut opened = session
+                                .session
+                                .open_ordered(&cx, &prepared, &args, limits)
+                                .unwrap();
+                            let error = opened
+                                .input
+                                .0
+                                .pull()
+                                .unwrap()
+                                .err()
+                                .expect("projection must spend the native allowance");
+                            native_limit(error, dimension);
+                            assert_eq!(opened.input.0.state(), ScanState::Failed);
+                            assert_eq!(opened.input.0.stats().2.result_rows, 0);
+                            let stats = opened.input.0.stats();
+                            assert!(opened.input.0.pull().is_none());
+                            assert_eq!(opened.input.0.stats(), stats);
+                        }
+                        // Opening is still lazy; the same error crosses the
+                        // actual spill future before any final row is exposed.
+                        let future = session.execute_ordered(&cx, &prepared, &args).unwrap();
+                        native_limit(future.await.err().expect("native refusal"), dimension);
+                        assert!(!session.is_closed());
+                        assert_eq!(pool.used(), 0);
+                    }
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn imported_ordered_projection_uses_inclusive_cumulative_input_allowances() {
+        let ((), report) = run_async_under_lab(0x8600_0014, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let issuer = authority();
+            let mut capability = grant();
+            capability.limits.max_rows = 2;
+            let token = issuer.issue_at(&capability, 100).unwrap();
+            let pool = MemoryPool::new(2_000_000, 0).unwrap();
+            let text = "MATCH (n:L) RETURN n AS id,n.p * $factor AS value \
+                        ORDER BY value DESC SKIP 1 LIMIT 2";
+            for imported in [false, true] {
+                for (factor, expected) in [
+                    (
+                        2,
+                        vec![
+                            vec![GraphValue::Vertex(VId(3)), scalar(6)],
+                            vec![GraphValue::Vertex(VId(5)), scalar(4)],
+                        ],
+                    ),
+                    (
+                        -2,
+                        vec![
+                            vec![GraphValue::Vertex(VId(2)), scalar(-2)],
+                            vec![GraphValue::Vertex(VId(5)), scalar(-4)],
+                        ],
+                    ),
+                ] {
+                    let args = GqlParameters::new().with_int64("factor", factor).unwrap();
+                    let (mut wide, prepared) = open(
+                        &db, &cx, &issuer, &token, &pool, text, &args, policy(), imported,
+                    )
+                    .await;
+                    let needed = usage(&mut wide, &cx, &prepared, &args);
+                    drop(wide);
+                    for (work, scratch, denied) in [
+                        (needed.work_units, needed.scratch_entries, None),
+                        (
+                            needed.work_units - 1,
+                            needed.scratch_entries,
+                            Some(GlaLimitDimension::WorkUnits),
+                        ),
+                        (
+                            needed.work_units,
+                            needed.scratch_entries - 1,
+                            Some(GlaLimitDimension::ScratchEntries),
+                        ),
+                    ] {
+                        let allowance = GqlQueryPolicy::new(5, 2, work, scratch);
+                        let (mut session, prepared) = open(
+                            &db, &cx, &issuer, &token, &pool, text, &args, allowance, imported,
+                        )
+                        .await;
+                        let future = session.execute_ordered(&cx, &prepared, &args).unwrap();
+                        assert_eq!(future.columns(), &["id", "value"]);
+                        assert_eq!(future.snapshot_seq(), CommitSeq(1));
+                        fn require_send<T: Send>(_: &T) {}
+                        require_send(&future);
+                        if let Some(dimension) = denied {
+                            native_limit(future.await.err().expect("one unit short"), dimension);
+                        } else {
+                            let mut cursor = future.await.unwrap();
+                            require_send(&cursor);
+                            assert_eq!(values(&mut cursor).await, expected);
+                            drop(cursor);
+                        }
+                        assert!(!session.is_closed());
+                        assert_eq!(pool.used(), 0);
+                    }
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn ordered_projection_errors_fuse_input_without_crediting_the_failed_row() {
+        let ((), report) = run_async_under_lab(0x8600_0015, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let mut db = database(&contexts.commit()).await;
+            let mut hidden = WriteBatch::new(RelationId(1));
+            hidden.create_vertex(
+                VId(0),
+                vec![LabelId(99)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+            );
+            db.write(&contexts.commit(), hidden).await.unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let pool = MemoryPool::new(2_000_000, 0).unwrap();
+            let args = GqlParameters::new().with_int64("divisor", 1).unwrap();
+            for imported in [false, true] {
+                for count in [0, 1] {
+                    let text = format!(
+                        "MATCH (n) RETURN n AS id,12 / (n.p - $divisor) AS value \
+                         ORDER BY value LIMIT {count}"
+                    );
+                    let (mut session, prepared) = open(
+                        &db, &cx, &issuer, &token, &pool, &text, &args, policy(), imported,
+                    )
+                    .await;
+                    let pins = Arc::strong_count(&db.snapshot);
+                    {
+                        let limits = session.limits;
+                        let mut opened = session
+                            .session
+                            .open_ordered(&cx, &prepared, &args, limits)
+                            .unwrap();
+                        drop(opened.input.0.pull().unwrap().unwrap());
+                        division(
+                            opened.input.0.pull().unwrap().err().expect("second row fails"),
+                        );
+                        assert_eq!(opened.input.0.state(), ScanState::Failed);
+                        let stats = opened.input.0.stats();
+                        assert_eq!((stats.2.snapshot_records, stats.2.result_rows), (2, 1));
+                        assert_eq!(Arc::strong_count(&db.snapshot), pins);
+                        for _ in 0..3 {
+                            assert!(opened.input.0.pull().is_none());
+                            assert_eq!(opened.input.0.stats(), stats);
+                        }
+                    }
+                    let future = session.execute_ordered(&cx, &prepared, &args).unwrap();
+                    division(
+                        future
+                            .await
+                            .err()
+                            .expect("LIMIT cannot conceal an input failure"),
+                    );
+                    assert!(!session.is_closed());
+                    assert_eq!(pool.used(), 0);
+                    assert_eq!(Arc::strong_count(&db.snapshot), pins);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

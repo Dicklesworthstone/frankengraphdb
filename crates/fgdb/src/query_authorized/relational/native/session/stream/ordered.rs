@@ -242,40 +242,31 @@ where
         )
     }
 }
-/// A pulled set (fgdb-7xqxb): each scanned source row takes the set's own
-/// projection, through the eager per-row evaluator, before it enters the
-/// private sort. Every evaluation step is a signed checkpoint, as in the
-/// unordered set pull, and an arithmetic failure is the eager Projection
-/// error at the same source ordinal.
-struct SetInput<S, F, M> {
+/// A pulled set (fgdb-7xqxb): scan and projection share the original native
+/// work/scratch meter and signed checkpoint. Only completed projected rows
+/// spend the private sort-input allowance; final delivery has its own quota.
+/// Projection errors keep their source ordinal and fuse the input cursor,
+/// including when an outer LIMIT would discard every result.
+struct SetInput<S, F> {
     rows: VertexInput<S, F>,
     pull: GraphSetRowPull,
-    ordinal: u64,
-    meter: M,
 }
-impl<S, F, M> InputCursor for SetInput<S, F, M>
+impl<S, F> InputCursor for SetInput<S, F>
 where
     S: VertexScanSource<Error = QueryError> + Send,
     F: FnMut() -> core::result::Result<(), QueryError> + Send,
-    M: FnMut(GlaExecutionEvent) -> core::result::Result<(), QueryError> + Send,
 {
     fn pull(&mut self) -> Option<Result<SpoolRow>> {
-        let row = match self.rows.0.next()? {
-            Ok(row) => row,
-            Err(error) => return Some(Err(authorized(scan_error(error)))),
-        };
-        let ordinal = self.ordinal;
-        self.ordinal += 1;
-        let projected = self
-            .pull
-            .project(&row, ordinal, &mut self.meter, |column, error| {
+        self.rows
+            .0
+            .next_projected(&self.pull, scan_error, |ordinal, column, error| {
                 QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection {
                     row: usize::try_from(ordinal).unwrap_or(usize::MAX),
                     column,
                     error,
                 }))
-            });
-        Some(projected.map(SpoolRow::governed).map_err(authorized))
+            })
+            .map(|row| row.map(SpoolRow::governed).map_err(authorized))
     }
     fn state(&self) -> ScanState {
         self.rows.state()
@@ -479,18 +470,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
                             move || control.borrow_mut().checkpoint(),
                         ));
                         match pull {
-                            Some(pull) => {
-                                let meter = execution.clone();
-                                Box::new(SetInput {
-                                    rows,
-                                    pull,
-                                    ordinal: 0,
-                                    meter: move |event| match event {
-                                        GlaExecutionEvent::Work => meter.borrow_mut().checkpoint(),
-                                        _ => Ok(()),
-                                    },
-                                })
-                            }
+                            Some(pull) => Box::new(SetInput { rows, pull }),
                             None => Box::new(rows),
                         }
                     }
