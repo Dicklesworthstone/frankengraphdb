@@ -1,7 +1,11 @@
 //! Native directed relationship MERGE branch actions over bound MATCH endpoints.
 
 use super::*;
-use crate::edge_upsert_text::{EdgeUpsertActionTemplate, EdgeUpsertValueTemplate};
+use crate::edge_upsert_text::{EdgeReturnTemplate, EdgeUpsertActionTemplate, EdgeUpsertValueTemplate};
+use mutation_query::ReturnLeaves;
+
+#[path = "edge_upsert/returning.rs"]
+mod returning;
 use crate::{
     GraphEdgeMergeTextError, GraphEdgeUpsertAction, GraphEdgeUpsertBranch,
     GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, GraphEdgeUpsertValue,
@@ -19,6 +23,7 @@ struct ParsedEdgeUpsertAction<'a> {
 }
 
 struct ParsedEdgeUpsert<'a> {
+    relationship: Name<'a>,
     source: Name<'a>,
     destination: Name<'a>,
     relation: Name<'a>,
@@ -108,7 +113,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn edge_upsert_pattern(&mut self) -> Result<ParsedEdgeUpsert<'a>, GraphEdgeUpsertTextError> {
+    fn edge_upsert_pattern(&mut self, returning: bool) -> Result<ParsedEdgeUpsert<'a>, GraphEdgeUpsertTextError> {
         self.word("MERGE")?;
         self.punct(b'(', "(")?;
         let left = self.variable()?;
@@ -213,20 +218,20 @@ impl<'a> Parser<'a> {
             }
         }
 
-        if on_match.is_empty() && on_create.is_empty() && after.is_empty() {
+        if !returning && on_match.is_empty() && on_create.is_empty() && after.is_empty() {
             return Err(error(
                 self.current.at,
                 GraphPatternTextErrorKind::Expected("ON MATCH SET, ON CREATE SET or SET"),
             )
             .into());
         }
-        self.end()?;
         let (source, destination) = if incoming {
             (right, left)
         } else {
             (left, right)
         };
         Ok(ParsedEdgeUpsert {
+            relationship,
             source,
             destination,
             relation,
@@ -271,10 +276,32 @@ impl PreparedGraphEdgeUpsertText {
     where
         R: GraphSymbolResolver + ?Sized,
     {
+        Self::prepare_definition(statement, declarations, resolve, false)
+            .map(|(upsert, _)| upsert)
+    }
+
+    // One grammar, parameter namespace and resolver cache for actions and
+    // RETURN. Do not split source strings or reparse a synthetic MATCH query.
+    pub(crate) fn prepare_definition<R: GraphSymbolResolver + ?Sized>(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+        returning: bool,
+    ) -> Result<(Self, Option<EdgeReturnTemplate>), GraphEdgeUpsertTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
         parser.parse_match_prefix()?;
-        let parsed = parser.edge_upsert_pattern()?;
+        let parsed = parser.edge_upsert_pattern(returning)?;
+        let parsed_return = if returning {
+            Some(parser.edge_upsert_return(parsed.relationship)?)
+        } else { None };
+        parser.end()?;
+        if let Some(parsed) = &parsed_return {
+            mutation_query::admit_return(
+                &parsed.projection, &parsed.types(), &parser.syntax.parameters,
+                parsed.grouping.as_ref(), parsed.at,
+            )?;
+        }
         let mut projections = Vec::new();
         let source = parser.mutation_projection(&mut projections, parsed.source, None)?;
         let destination = parser.mutation_projection(&mut projections, parsed.destination, None)?;
@@ -321,6 +348,7 @@ impl PreparedGraphEdgeUpsertText {
         let on_match = resolve_actions(parsed.on_match, &mut symbol)?;
         let on_create = resolve_actions(parsed.on_create, &mut symbol)?;
         let after = resolve_actions(parsed.after, &mut symbol)?;
+        let returning = parsed_return.map(|parsed| parsed.resolve(&mut symbol)).transpose()?;
 
         let columns = projections
             .into_iter()
@@ -367,12 +395,12 @@ impl PreparedGraphEdgeUpsertText {
             properties: Vec::new(),
             undirected: false,
         };
-        Ok(Self {
+        Ok((Self {
             merge,
             on_match,
             on_create,
             after,
-        })
+        }, returning))
     }
 
     pub fn bind_parameters(

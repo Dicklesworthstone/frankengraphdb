@@ -222,9 +222,18 @@ pub(in crate::standing_query::native) fn open<'a, V: Vfs + Clone>(
                 | StandingQuery::Window(_)
                 | StandingQuery::Closure(_),
             ) => sets::delta(root).map(Changes::Rows),
-            (Layout::Aggregate { .. } | Layout::GroupCircuit { .. }, StandingQuery::Group(_)) => {
+            (
+                Layout::Aggregate { .. } | Layout::GroupCircuit { .. },
+                StandingQuery::Aggregate(_)
+                | StandingQuery::ProjectedAggregate { .. }
+                | StandingQuery::Group(_),
+            ) => {
+                // All three owners retain the accepted FINAL derivative. In
+                // particular, projected sources already applied HAVING,
+                // DISTINCT and the output window; never pull private support
+                // or reconstruct a difference from complete result snapshots.
                 database
-                    .standing_group_delta(cx, handle)?
+                    .standing_query_delta(cx, handle)?
                     .map(|view| Changes::Groups(view.rows))
             }
             _ => return Err(StandingQueryError::Unsupported),
