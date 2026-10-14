@@ -404,7 +404,7 @@ impl<'a> Tables<'a> {
                         if tables.admit_edge((identity, properties), predicates, control)?
                             && let Some(recording) = &recording
                         {
-                            recording.borrow_mut().edge(block, row_at);
+                            recording.borrow_mut().edge(identity, block, row_at);
                         }
                         Ok(())
                     },
@@ -439,15 +439,25 @@ impl<'a> Tables<'a> {
                 .iter()
                 .map(|&(vid, patch, row)| (vid, &snapshot.patches[patch as usize][row as usize])),
         );
-        self.edges
-            .extend(core.edges.iter().map(|&CoreEdge { block, row }| {
-                let (block, row) = (block as usize, row as usize);
-                let edge = &snapshot.blocks[block][row];
-                (
-                    (edge.eid, edge.src, edge.relation, edge.dst),
-                    source::edge_properties_at(&snapshot.block_props, block, row),
-                )
-            }));
+        let properties = |block: u32, row: u32| {
+            source::edge_properties_at(&snapshot.block_props, block as usize, row as usize)
+        };
+        match &core.identities {
+            Some(identities) => {
+                self.edges.extend(identities.iter().zip(&core.edges).map(
+                    |(&identity, &CoreEdge { block, row })| (identity, properties(block, row)),
+                ))
+            }
+            None => self
+                .edges
+                .extend(core.edges.iter().map(|&CoreEdge { block, row }| {
+                    let edge = &snapshot.blocks[block as usize][row as usize];
+                    (
+                        (edge.eid, edge.src, edge.relation, edge.dst),
+                        properties(block, row),
+                    )
+                })),
+        }
         self.records = core.records;
     }
 

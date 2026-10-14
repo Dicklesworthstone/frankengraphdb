@@ -5,7 +5,7 @@
 //! commit never serves the previous generation's records.
 
 use super::super::SCANS;
-use super::{ADMITTED, AdmissionKey};
+use super::{ADMITTED, AdmissionKey, INLINE_IDENTITIES};
 use crate::{Database, DatabaseKeys, MemVfs, QueryError, QueryResult, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
@@ -18,17 +18,21 @@ use fgdb_types::{
 use fgdb_warden::{Authority, CapabilityToken, Grant, QueryLimits, Restriction, Scope};
 use std::cell::Cell;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x61; 32]);
 const BRANCH: &str = "main";
 const P: PropertyKeyId = PropertyKeyId(1);
 const W: PropertyKeyId = PropertyKeyId(2);
 /// Whole-graph statements that read edges: one admitted set serves them all.
-const EDGE_READS: [&str; 4] = [
+const EDGE_READS: [&str; 5] = [
     "MATCH (a:L)-[:R]->(b:L) RETURN count(*) AS n",
     "MATCH (a:L)-[:R]->(b) RETURN a.p AS p, count(*) AS d ORDER BY d DESC, p ASC LIMIT 3",
     "MATCH (a:L)-[:R]->(b:L)-[:R]->(c:L) RETURN count(*) AS n",
     "MATCH (a:L)-[:R]->(b:M) RETURN b.p AS p ORDER BY p",
+    // Each edge's own property beside its endpoints: a refill that pairs a
+    // record's properties with another record's identity answers differently.
+    "MATCH (a)-[r:R]->(b) RETURN a.p AS p, b.p AS q, r.w AS w ORDER BY p, q, w",
 ];
 /// A vertex-only plan admits no edge: its own admitted set.
 const VERTEX_READ: &str = "MATCH (n:L) RETURN count(*) AS n";
@@ -196,7 +200,15 @@ fn footprint(
 #[test]
 fn a_reused_full_scan_spends_exactly_what_its_scan_spent() {
     let _serial = serial();
-    let ((), report) = run_async_under_lab(0x61b1_0001, |root| async move {
+    for inline in [true, false] {
+        INLINE_IDENTITIES.store(inline, Ordering::Relaxed);
+        a_reused_full_scan_spends_exactly_what_its_scan_spent_with(inline);
+    }
+    INLINE_IDENTITIES.store(true, Ordering::Relaxed);
+}
+
+fn a_reused_full_scan_spends_exactly_what_its_scan_spent_with(inline: bool) {
+    let ((), report) = run_async_under_lab(0x61b1_0001, move |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
         let token = issuer().issue_at(&open(), 100).unwrap();
@@ -209,6 +221,13 @@ fn a_reused_full_scan_spends_exactly_what_its_scan_spent() {
             let warm = footprint(&db, &cx, &token, text);
             assert_eq!(scans(), before + 1, "{text}: the second statement reuses");
             assert_eq!(warm, cold, "{text}");
+            if text != VERTEX_READ {
+                let at = db.frontier().unwrap();
+                let core = ADMITTED
+                    .lookup(&db.snapshot, AdmissionKey { at, edges: true })
+                    .unwrap();
+                assert_eq!(core.identities.is_some(), inline, "{text}: refill form");
+            }
             // Interrupted at any ordinal, the hit stops where a scan on a
             // database with nothing to reuse stops, with the same refusal.
             let interrupted = |db: &Database<MemVfs>, stop| {
@@ -244,7 +263,15 @@ fn a_reused_full_scan_spends_exactly_what_its_scan_spent() {
 #[test]
 fn statements_with_one_admitted_set_share_it() {
     let _serial = serial();
-    let ((), report) = run_async_under_lab(0x61b1_0002, |root| async move {
+    for inline in [true, false] {
+        INLINE_IDENTITIES.store(inline, Ordering::Relaxed);
+        statements_with_one_admitted_set_share_it_with(inline);
+    }
+    INLINE_IDENTITIES.store(true, Ordering::Relaxed);
+}
+
+fn statements_with_one_admitted_set_share_it_with(inline: bool) {
+    let ((), report) = run_async_under_lab(0x61b1_0002, move |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
         let token = issuer().issue_at(&open(), 100).unwrap();
@@ -277,6 +304,11 @@ fn statements_with_one_admitted_set_share_it() {
         assert_eq!((edges.vertices.len(), vertices.vertices.len()), (8, 8));
         assert_eq!((edges.edges.len(), vertices.edges.len()), (9, 0));
         assert_eq!((edges.records, vertices.records), (17, 8));
+        assert_eq!(
+            edges.identities.as_ref().map(Vec::len),
+            inline.then_some(9),
+            "edge identities inline only while they fit"
+        );
         // The reused statements above resolved vertices through the core's
         // position index, so their equality with the fresh scans covers it.
         for core in [&edges, &vertices] {
