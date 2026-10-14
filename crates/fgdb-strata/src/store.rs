@@ -352,6 +352,27 @@ enum PrefetchedPatch {
     ),
 }
 
+/// Objects at most this many bytes are proven on the calling task. Hashing and
+/// decoding a few hundred bytes takes about a microsecond, while a blocking-
+/// pool round trip wakes and parks a thread for several times that: on a
+/// packed road-ny (about 495k objects of ~450 bytes) the open spent more
+/// kernel time handing proofs to the pool than proving them.
+const INLINE_PROOF_BYTES: usize = 4096;
+
+/// Run a CPU-only proof over `bytes` bytes on the blocking pool, or inline
+/// when it is small enough that the hand-off would cost more than the work.
+/// Without a pool (the lab runtime) both complete inline, in order.
+async fn prove_off_task<T: Send + 'static>(
+    bytes: usize,
+    proof: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    if bytes <= INLINE_PROOF_BYTES {
+        proof()
+    } else {
+        asupersync::runtime::spawn_blocking(proof).await
+    }
+}
+
 /// The patch half of a propertied block's admission, once its bytes are in
 /// hand: the patch's identity and format, the joint locator bijection, and
 /// the joint logical digest (V5) the block's header declares. A propertied
@@ -1625,7 +1646,7 @@ impl<V: Vfs> BlockStore<V> {
             .await?;
         let k_oid = self.k_oid.clone();
         let namespace = self.namespace;
-        let (bytes, decoded) = asupersync::runtime::spawn_blocking(move || {
+        let (bytes, decoded) = prove_off_task(bytes.len(), move || {
             let actual = block_id(k_oid.expose(), namespace, &bytes);
             if actual != id {
                 return Err(StoreError::IdentityMismatch {
@@ -1655,7 +1676,7 @@ impl<V: Vfs> BlockStore<V> {
         };
         let k_oid = self.k_oid.clone();
         let resolver = self.scalar_resolver.clone();
-        Ok(asupersync::runtime::spawn_blocking(move || {
+        Ok(prove_off_task(bytes.len() + patch_bytes.len(), move || {
             let (_, declared_digest) = crate::header_partition_and_digest(&bytes);
             let proof = prove_block_patch(
                 k_oid.expose(),
