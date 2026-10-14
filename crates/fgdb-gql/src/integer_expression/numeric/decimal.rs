@@ -129,7 +129,10 @@ mod tests {
             (GraphIntegerUnary::Negate, 2 * UNIT),
             (GraphIntegerUnary::Abs, 2 * UNIT),
         ] {
-            assert_eq!(eval(&[literal(-2 * UNIT), Op::Unary(op)], &[]), Ok(d(expected)));
+            assert_eq!(
+                eval(&[literal(-2 * UNIT), Op::Unary(op)], &[]),
+                Ok(d(expected))
+            );
         }
         assert_eq!(
             eval(
@@ -153,7 +156,10 @@ mod tests {
                     literal(2 * UNIT),
                     Op::Compare(IntegerComparison::Greater),
                 ],
-                &[GraphValue::Scalar(d(5 * UNIT)), GraphValue::Scalar(d(2 * UNIT))],
+                &[
+                    GraphValue::Scalar(d(5 * UNIT)),
+                    GraphValue::Scalar(d(2 * UNIT))
+                ],
             ),
             Ok(CanonicalScalar::Bool(true))
         );
@@ -169,7 +175,10 @@ mod tests {
             Op::Binary(GraphIntegerBinary::Multiply),
         ];
         for (value, expected) in [(d(4 * UNIT), 12 * UNIT), (CanonicalScalar::Null, 30 * UNIT)] {
-            assert_eq!(eval(&expression, &[GraphValue::Scalar(value)]), Ok(d(expected)));
+            assert_eq!(
+                eval(&expression, &[GraphValue::Scalar(value)]),
+                Ok(d(expected))
+            );
         }
         let lazy = [
             Op::Truth(Some(true)),
@@ -183,13 +192,21 @@ mod tests {
         for (right, expected) in [(UNIT, CanonicalScalar::Null), (UNIT + 1, d(UNIT))] {
             assert_eq!(
                 eval(
-                    &[literal(UNIT), literal(right), Op::Binary(GraphIntegerBinary::NullIf)],
+                    &[
+                        literal(UNIT),
+                        literal(right),
+                        Op::Binary(GraphIntegerBinary::NullIf)
+                    ],
                     &[],
                 ),
                 Ok(expected)
             );
         }
-        for op in [GraphIntegerBinary::Add, GraphIntegerBinary::Divide, GraphIntegerBinary::Remainder] {
+        for op in [
+            GraphIntegerBinary::Add,
+            GraphIntegerBinary::Divide,
+            GraphIntegerBinary::Remainder,
+        ] {
             assert_eq!(
                 eval(&[Op::Literal(None), literal(0), Op::Binary(op)], &[]),
                 Ok(CanonicalScalar::Null)
@@ -205,9 +222,8 @@ mod tests {
     fn mixed_numeric_results_do_not_cast_or_hide_a_later_nonnumeric_arm() {
         let float = CanonicalScalar::Float(CanonicalF64::new(3.5));
         for other in [CanonicalScalar::Int(3), float] {
-            let operand = Op::Scalar(
-                ScalarPredicate::new(other.clone(), IntegerComparison::Equal).unwrap(),
-            );
+            let operand =
+                Op::Scalar(ScalarPredicate::new(other.clone(), IntegerComparison::Equal).unwrap());
             for chosen in [false, true] {
                 assert_eq!(
                     eval(
@@ -243,11 +259,14 @@ mod tests {
             Op::SimpleCase { alternatives: 2 },
         ];
         assert!(GraphIntegerExpression::prepare_scalar(&bad).is_err());
-        assert!(GraphIntegerExpression::prepare_scalar(&[
-            literal(UNIT),
-            Op::Truth(Some(true)),
-            Op::Coalesce,
-        ]).is_err());
+        assert!(
+            GraphIntegerExpression::prepare_scalar(&[
+                literal(UNIT),
+                Op::Truth(Some(true)),
+                Op::Coalesce,
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -255,18 +274,47 @@ mod tests {
         for (input, expected) in [(1, 0), (3, 2), (5, 2), (-1, 0), (-3, -2), (-5, -2)] {
             assert_eq!(
                 eval(
-                    &[literal(input), literal(2 * UNIT), Op::Binary(GraphIntegerBinary::Divide)],
+                    &[
+                        literal(input),
+                        literal(2 * UNIT),
+                        Op::Binary(GraphIntegerBinary::Divide)
+                    ],
                     &[],
                 ),
                 Ok(d(expected))
             );
         }
         for (left, right, op, expected) in [
-            (UNIT, 0, GraphIntegerBinary::Divide, GraphIntegerErrorKind::DivisionByZero),
-            (UNIT, 0, GraphIntegerBinary::Remainder, GraphIntegerErrorKind::DivisionByZero),
-            (MAX_DECIMAL_COEFFICIENT, 1, GraphIntegerBinary::Add, GraphIntegerErrorKind::Overflow),
-            (-MAX_DECIMAL_COEFFICIENT, 1, GraphIntegerBinary::Subtract, GraphIntegerErrorKind::Overflow),
-            (MAX_DECIMAL_COEFFICIENT, 2 * UNIT, GraphIntegerBinary::Multiply, GraphIntegerErrorKind::Overflow),
+            (
+                UNIT,
+                0,
+                GraphIntegerBinary::Divide,
+                GraphIntegerErrorKind::DivisionByZero,
+            ),
+            (
+                UNIT,
+                0,
+                GraphIntegerBinary::Remainder,
+                GraphIntegerErrorKind::DivisionByZero,
+            ),
+            (
+                MAX_DECIMAL_COEFFICIENT,
+                1,
+                GraphIntegerBinary::Add,
+                GraphIntegerErrorKind::Overflow,
+            ),
+            (
+                -MAX_DECIMAL_COEFFICIENT,
+                1,
+                GraphIntegerBinary::Subtract,
+                GraphIntegerErrorKind::Overflow,
+            ),
+            (
+                MAX_DECIMAL_COEFFICIENT,
+                2 * UNIT,
+                GraphIntegerBinary::Multiply,
+                GraphIntegerErrorKind::Overflow,
+            ),
         ] {
             assert_eq!(
                 eval(&[literal(left), literal(right), Op::Binary(op)], &[]),
@@ -279,7 +327,9 @@ mod tests {
     #[test]
     fn integers_floats_and_exact_aggregates_are_not_implicit_decimal_casts() {
         let ops = [
-            Op::ScalarColumn(0), Op::ScalarColumn(1), Op::Binary(GraphIntegerBinary::Multiply),
+            Op::ScalarColumn(0),
+            Op::ScalarColumn(1),
+            Op::Binary(GraphIntegerBinary::Multiply),
         ];
         for other in [
             CanonicalScalar::Int(2),
@@ -288,16 +338,25 @@ mod tests {
             CanonicalScalar::ucs_basic_text("2").unwrap(),
         ] {
             for reverse in [false, true] {
-                let mut row = vec![GraphValue::Scalar(d(UNIT)), GraphValue::Scalar(other.clone())];
+                let mut row = vec![
+                    GraphValue::Scalar(d(UNIT)),
+                    GraphValue::Scalar(other.clone()),
+                ];
                 if reverse {
                     row.reverse();
                 }
-                assert_eq!(eval(&ops, &row), Err(GraphIntegerErrorKind::IncompatibleOperands));
+                assert_eq!(
+                    eval(&ops, &row),
+                    Err(GraphIntegerErrorKind::IncompatibleOperands)
+                );
             }
         }
         let expression = GraphIntegerExpression::prepare_scalar(&[
-            Op::ScalarColumn(0), literal(UNIT), Op::Binary(GraphIntegerBinary::Add),
-        ]).unwrap();
+            Op::ScalarColumn(0),
+            literal(UNIT),
+            Op::Binary(GraphIntegerBinary::Add),
+        ])
+        .unwrap();
         assert!(matches!(
             expression.evaluate_loaded_with_control(
                 1,
@@ -311,18 +370,28 @@ mod tests {
         for ops in [
             vec![literal(UNIT)],
             vec![literal(UNIT), Op::Unary(GraphIntegerUnary::Negate)],
-            vec![literal(UNIT), literal(UNIT), Op::Binary(GraphIntegerBinary::Add)],
+            vec![
+                literal(UNIT),
+                literal(UNIT),
+                Op::Binary(GraphIntegerBinary::Add),
+            ],
         ] {
             assert!(GraphIntegerExpression::prepare(&ops).is_err());
             assert!(GraphIntegerExpression::prepare_scalar(&ops).is_ok());
         }
         let old = [
-            Op::Literal(Some(5)), Op::Literal(Some(2)), Op::Binary(GraphIntegerBinary::Divide),
+            Op::Literal(Some(5)),
+            Op::Literal(Some(2)),
+            Op::Binary(GraphIntegerBinary::Divide),
         ];
         assert_eq!(eval(&old, &[]), Ok(CanonicalScalar::Int(2)));
         assert_eq!(
-            GraphIntegerExpression::prepare(&old).unwrap().canonical_bytes(),
-            GraphIntegerExpression::prepare_scalar(&old).unwrap().canonical_bytes()
+            GraphIntegerExpression::prepare(&old)
+                .unwrap()
+                .canonical_bytes(),
+            GraphIntegerExpression::prepare_scalar(&old)
+                .unwrap()
+                .canonical_bytes()
         );
     }
 
@@ -334,15 +403,18 @@ mod tests {
             Op::Binary(GraphIntegerBinary::Multiply),
             literal(2 * UNIT),
             Op::Binary(GraphIntegerBinary::Divide),
-        ]).unwrap();
+        ])
+        .unwrap();
         let row = [GraphValue::Scalar(d(MAX_DECIMAL_COEFFICIENT))];
         let frozen = expression.canonical_bytes();
         let mut calls = 0;
         assert_eq!(
-            expression.evaluate_scalar_with_control(&row, &mut |_| {
-                calls += 1;
-                Ok::<_, usize>(())
-            }).unwrap(),
+            expression
+                .evaluate_scalar_with_control(&row, &mut |_| {
+                    calls += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap(),
             d(5 * 10_i128.pow(33))
         );
         assert!(calls > 5);

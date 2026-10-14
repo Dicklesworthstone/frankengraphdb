@@ -12,35 +12,80 @@ pub struct SpillSetJoinPlan {
     pub(super) types: Vec<GraphSetColumnType>,
 }
 impl SpillSetJoinPlan {
-    pub fn left(&self) -> &AsyncSpillSetPlan { &self.left }
-    pub fn right(&self) -> &AsyncSpillSetPlan { &self.right }
-    pub fn columns(&self) -> &[String] { &self.columns }
-    pub fn column_types(&self) -> &[GraphSetColumnType] { &self.types }
-    pub fn kind(&self) -> RowJoinKind { self.spec.kind() }
-    pub fn validate_row_with_control<E>(&self,row:&GraphValueRow,side:usize,control:&mut impl FnMut(GlaExecutionEvent)->Result<(),E>)->Result<(),SpillSetRowError<E>> {
-        self.spec.validate_input_with_control(side,row,control).map_err(failure)
+    pub fn left(&self) -> &AsyncSpillSetPlan {
+        &self.left
     }
-    pub fn matches_pair_with_control<E>(&self,left:&GraphValueRow,right:&GraphValueRow,control:&mut impl FnMut(GlaExecutionEvent)->Result<(),E>)->Result<bool,SpillSetRowError<E>> {
-        self.spec.test_pair_with_control(left,right,control).map_err(failure)
+    pub fn right(&self) -> &AsyncSpillSetPlan {
+        &self.right
     }
-    pub fn project_pair_with_control<E>(&self,left:Option<&GraphValueRow>,right:Option<&GraphValueRow>,control:&mut impl FnMut(GlaExecutionEvent)->Result<(),E>)->Result<GraphValueRow,SpillSetRowError<E>> {
-        self.spec.project_output_with_control(left,right,control).map_err(failure)
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    pub fn column_types(&self) -> &[GraphSetColumnType] {
+        &self.types
+    }
+    pub fn kind(&self) -> RowJoinKind {
+        self.spec.kind()
+    }
+    pub fn validate_row_with_control<E>(
+        &self,
+        row: &GraphValueRow,
+        side: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), SpillSetRowError<E>> {
+        self.spec
+            .validate_input_with_control(side, row, control)
+            .map_err(failure)
+    }
+    pub fn matches_pair_with_control<E>(
+        &self,
+        left: &GraphValueRow,
+        right: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, SpillSetRowError<E>> {
+        self.spec
+            .test_pair_with_control(left, right, control)
+            .map_err(failure)
+    }
+    pub fn project_pair_with_control<E>(
+        &self,
+        left: Option<&GraphValueRow>,
+        right: Option<&GraphValueRow>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<GraphValueRow, SpillSetRowError<E>> {
+        self.spec
+            .project_output_with_control(left, right, control)
+            .map_err(failure)
     }
 }
 impl core::fmt::Debug for SpillSetJoinPlan {
-    fn fmt(&self,f:&mut core::fmt::Formatter<'_>)->core::fmt::Result {
-        f.debug_struct("SpillSetJoinPlan").field("kind",&self.kind()).field("columns",&self.columns.len()).field("definition",&"[REDACTED]").finish()
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SpillSetJoinPlan")
+            .field("kind", &self.kind())
+            .field("columns", &self.columns.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
-fn failure<E>(error:RowJoinError<E>)->SpillSetRowError<E> {
-    let native=match error {
-        RowJoinError::Delta(ZSetError::Control(error)|ZSetError::Callback(error))=>return SpillSetRowError::Control(error),
-        RowJoinError::Delta(ZSetError::Arithmetic(error))=>RowJoinError::Delta(ZSetError::Arithmetic(error)),
-        RowJoinError::Delta(ZSetError::WeightAdmission{required_limbs,limit})=>RowJoinError::Delta(ZSetError::WeightAdmission{required_limbs,limit}),
-        RowJoinError::InputSchema{side}=>RowJoinError::InputSchema{side},
-        RowJoinError::NegativeMultiplicity{side}=>RowJoinError::NegativeMultiplicity{side},
-        RowJoinError::ResultBudget{limit}=>RowJoinError::ResultBudget{limit},
-        RowJoinError::InvalidResult=>RowJoinError::InvalidResult,
+fn failure<E>(error: RowJoinError<E>) -> SpillSetRowError<E> {
+    let native = match error {
+        RowJoinError::Delta(ZSetError::Control(error) | ZSetError::Callback(error)) => {
+            return SpillSetRowError::Control(error);
+        }
+        RowJoinError::Delta(ZSetError::Arithmetic(error)) => {
+            RowJoinError::Delta(ZSetError::Arithmetic(error))
+        }
+        RowJoinError::Delta(ZSetError::WeightAdmission {
+            required_limbs,
+            limit,
+        }) => RowJoinError::Delta(ZSetError::WeightAdmission {
+            required_limbs,
+            limit,
+        }),
+        RowJoinError::InputSchema { side } => RowJoinError::InputSchema { side },
+        RowJoinError::NegativeMultiplicity { side } => RowJoinError::NegativeMultiplicity { side },
+        RowJoinError::ResultBudget { limit } => RowJoinError::ResultBudget { limit },
+        RowJoinError::InvalidResult => RowJoinError::InvalidResult,
     };
     SpillSetRowError::Native(GraphSetExecutionError::Join(native))
 }

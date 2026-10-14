@@ -2074,11 +2074,8 @@ mod tests {
             );
         }
 
-        let expression = GraphIntegerExpression::prepare_scalar(&[
-            decimal(-1),
-            GraphIntegerOp::ToText,
-        ])
-        .unwrap();
+        let expression =
+            GraphIntegerExpression::prepare_scalar(&[decimal(-1), GraphIntegerOp::ToText]).unwrap();
         let mut events = 0;
         assert_eq!(
             expression

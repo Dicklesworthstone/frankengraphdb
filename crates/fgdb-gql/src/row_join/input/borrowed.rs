@@ -102,7 +102,9 @@ impl RowJoinSpec {
                 self.validate_input_with_control(side, row, control)?;
             }
         }
-        Ok(project(self, left, right, &mut |value| control(event(value)))?)
+        Ok(project(self, left, right, &mut |value| {
+            control(event(value))
+        })?)
     }
 }
 
