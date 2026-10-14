@@ -665,7 +665,7 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
     assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
     assert!(String::from_utf8_lossy(&starved.stdout).contains("(raise with --max-work-units)"));
 
-    // A repeated or malformed limit is a usage error; write takes none.
+    // A repeated or malformed limit is a usage error.
     let twice = ["--max-work-units", "1", "--max-work-units", "2", text];
     refused(&fixture.robot("query", &twice), 2, "usage");
     refused(
@@ -673,8 +673,15 @@ fn query_limits_govern_a_read_and_the_refusal_names_the_limit() {
         2,
         "usage",
     );
+    // A write is governed by the same limits (fgdb-ewc7i), and refused
+    // before anything commits.
     let write = ["--max-work-units", "1", "INSERT (:Person {id: 9})"];
-    refused(&fixture.robot("write", &write), 2, "usage");
+    let starved = fixture.robot("write", &write);
+    refused(&starved, 3, "query");
+    assert!(String::from_utf8_lossy(&starved.stdout).contains("WorkUnits"));
+    let count = fixture.robot("query", &["MATCH (n:Person {id: 9}) RETURN count(*) AS c"]);
+    succeeded(&count, "rows");
+    assert!(String::from_utf8_lossy(&count.stdout).contains(r#""value":"0""#));
 }
 
 /// `--bindings-file` adds its bindings to the flags' (the fixture binds

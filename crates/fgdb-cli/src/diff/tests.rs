@@ -719,7 +719,7 @@ fn native_diff_delivery_preserves_complete_queries_and_exact_domains_after_reope
 }
 
 #[test]
-fn query_and_replay_take_the_same_exact_limits_and_write_refuses_them() {
+fn query_replay_and_write_take_the_same_exact_limits() {
     let argv = |extra: &[&str]| -> Vec<String> {
         let mut argv: Vec<String> = ["--db", "unused", "--key-file", "unused"]
             .iter()
@@ -776,9 +776,15 @@ fn query_and_replay_take_the_same_exact_limits_and_write_refuses_them() {
         replay.budget.policy(),
         GqlQueryPolicy::new(100_000, 100_000, 7, 10_000_000)
     );
-    okay(crate::parse(&argv(&[]), "write"));
-    let error = crate::parse(&argv(&["--max-work-units", "1"]), "write")
-        .err()
-        .expect("write takes no query limits");
-    assert_eq!(error.code, 2);
+    // write takes the same four limits (fgdb-ewc7i, write_budget_tests).
+    assert_eq!(
+        okay(crate::parse(&argv(&[]), "write")).budget.policy(),
+        policy()
+    );
+    assert_eq!(
+        okay(crate::parse(&argv(&["--max-work-units", "1"]), "write"))
+            .budget
+            .policy(),
+        GqlQueryPolicy::new(100_000, 100_000, 1, 10_000_000)
+    );
 }
