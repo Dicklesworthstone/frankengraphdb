@@ -216,15 +216,45 @@ fn push_neighbor<E>(
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     control(GlaExecutionEvent::ScratchEntry)?;
+    // Scans deliver edges grouped by source, so the newest key usually takes
+    // the next neighbor without a search from the root. Same events.
+    if let Some(mut last) = adjacency.last_entry()
+        && *last.key() == source
+    {
+        last.get_mut().push(destination);
+        return Ok(());
+    }
     adjacency.entry(source).or_default().push(destination);
     Ok(())
 }
 
+/// Whether `values` is already ascending, one charged comparison per
+/// adjacent pair up to the first descent. Edges usually arrive in canonical
+/// (source, destination) order, which leaves forward and reverse neighbor
+/// lists sorted: a heapsort's worst case (every sift moves) at about
+/// 3 d log d charged events for a list of d, against d - 1 for this check.
+fn ascending<T: Ord, E>(
+    values: &[T],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<bool, E> {
+    for pair in values.windows(2) {
+        control(GlaExecutionEvent::Work)?;
+        if pair[0] > pair[1] {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// In-place iterative heapsort; each comparison/swap crosses the work seam.
+/// An already ascending list is only checked (`ascending`).
 fn sort_neighbors<E>(
     values: &mut [VId],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
+    if ascending(values, control)? {
+        return Ok(());
+    }
     let len = values.len();
     for root in (0..len / 2).rev() {
         sift_neighbors(values, root, len, control)?;
@@ -408,19 +438,14 @@ fn build_identified_index<E>(
                     (source, destination)
                 };
                 control(GlaExecutionEvent::ScratchEntry)?;
-                if !adjacency.contains_key(&from) {
-                    control(GlaExecutionEvent::ScratchEntry)?;
+                // The newest key first, as in push_neighbor; same events.
+                match adjacency.last_entry() {
+                    Some(mut last) if *last.key() == from => last.get_mut().push((edge, to)),
+                    _ => push_identified(adjacency, from, (edge, to), control)?,
                 }
-                adjacency.entry(from).or_default().push((edge, to));
                 if direction == GlaDirection::Undirected && source != destination {
                     control(GlaExecutionEvent::ScratchEntry)?;
-                    if !adjacency.contains_key(&destination) {
-                        control(GlaExecutionEvent::ScratchEntry)?;
-                    }
-                    adjacency
-                        .entry(destination)
-                        .or_default()
-                        .push((edge, source));
+                    push_identified(adjacency, destination, (edge, source), control)?;
                 }
             }
         }
@@ -431,6 +456,25 @@ fn build_identified_index<E>(
         }
     }
     Ok(index)
+}
+
+/// One identified neighbor under `from`, charging the key's own scratch
+/// entry first when it is new: one search, where contains_key then entry
+/// took two.
+fn push_identified<E>(
+    adjacency: &mut BTreeMap<VId, Vec<(EId, VId)>>,
+    from: VId,
+    neighbor: (EId, VId),
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    match adjacency.entry(from) {
+        std::collections::btree_map::Entry::Occupied(mut entry) => entry.get_mut().push(neighbor),
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            entry.insert(vec![neighbor]);
+        }
+    }
+    Ok(())
 }
 
 fn sort_identified_neighbors<E>(
@@ -460,6 +504,9 @@ fn sort_identified_neighbors<E>(
             root = child;
         }
         Ok(())
+    }
+    if ascending(values, control)? {
+        return Ok(());
     }
     let end = values.len();
     for root in (0..end / 2).rev() {
@@ -1879,6 +1926,39 @@ mod tests {
                 assert!(events <= 8 * u64::from(len) * (depth + 1));
             }
         }
+    }
+
+    #[test]
+    fn an_ascending_neighbor_list_is_checked_not_sorted() {
+        for len in 0..=40_u128 {
+            // Repeated neighbors (parallel edges) are still ascending.
+            let values: Vec<_> = (0..len).map(|at| VId(at / 2)).collect();
+            let mut checked = values.clone();
+            let mut events = 0;
+            sort_neighbors(&mut checked, &mut |event| {
+                assert_eq!(event, GlaExecutionEvent::Work);
+                events += 1;
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+            assert_eq!(checked, values);
+            assert_eq!(events, len.saturating_sub(1));
+
+            let values: Vec<_> = (0..len).map(|at| (EId(at), VId(len - at))).collect();
+            let mut checked = values.clone();
+            let mut events = 0;
+            sort_identified_neighbors(&mut checked, &mut |_| {
+                events += 1;
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+            assert_eq!(checked, values);
+            assert_eq!(events, len.saturating_sub(1));
+        }
+        // One descent anywhere still sorts the whole list.
+        let mut values = vec![VId(1), VId(2), VId(3), VId(0)];
+        sort_neighbors(&mut values, &mut |_| Ok::<_, ()>(())).unwrap();
+        assert_eq!(values, [VId(0), VId(1), VId(2), VId(3)]);
     }
 
     #[test]
