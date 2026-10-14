@@ -58,6 +58,10 @@ pub(super) struct AdmittedCore {
     pub(super) edges: Vec<CoreEdge>,
     pub(super) records: u64,
     pub(super) tape: Tape,
+    /// Where each vertex sits in the sealed table this core refills, built by
+    /// the first statement that refills it and shared by every later one.
+    /// Not counted in `bytes`: 8 bytes per vertex, built after admission.
+    pub(super) positions: std::sync::OnceLock<Option<Arc<super::positions::VertexPositions>>>,
 }
 
 impl AdmittedCore {

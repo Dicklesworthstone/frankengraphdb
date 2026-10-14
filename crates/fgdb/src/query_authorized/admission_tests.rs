@@ -277,6 +277,14 @@ fn statements_with_one_admitted_set_share_it() {
         assert_eq!((edges.vertices.len(), vertices.vertices.len()), (8, 8));
         assert_eq!((edges.edges.len(), vertices.edges.len()), (9, 0));
         assert_eq!((edges.records, vertices.records), (17, 8));
+        // The reused statements above resolved vertices through the core's
+        // position index, so their equality with the fresh scans covers it.
+        for core in [&edges, &vertices] {
+            assert!(
+                core.positions.get().is_some_and(Option::is_some),
+                "a reused core indexes its sealed vertex table"
+            );
+        }
         assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

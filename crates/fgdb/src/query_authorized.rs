@@ -36,6 +36,8 @@ mod analytics;
 mod beacon;
 #[path = "query_authorized/overlay.rs"]
 mod overlay;
+#[path = "query_authorized/positions.rs"]
+mod positions;
 #[path = "query_authorized/relational.rs"]
 mod relational;
 #[path = "query_authorized/tape.rs"]
@@ -304,6 +306,9 @@ struct Tables<'a> {
     vertices: Vec<(VId, &'a VertexRow)>,
     /// Whether `vertices` is strictly ascending, so endpoint checks can search it.
     vertices_sealed: bool,
+    /// Identity to position in the sealed `vertices`, shared through the
+    /// cached core this table was refilled from; absent, lookups search.
+    positions: Option<Arc<positions::VertexPositions>>,
     edges: Vec<Edge<'a>>,
     labels: BTreeMap<VId, Vec<GraphValue>>,
     types: BTreeMap<EId, CanonicalScalar>,
@@ -351,6 +356,7 @@ impl<'a> Tables<'a> {
             edges: plan.reads_edges(),
         };
         let mut tables = Self::new();
+        let mut reused = None;
         if let Some(core) = reusable.then(|| ADMITTED.lookup(snapshot, key)).flatten() {
             // Spend first: every limit refuses before the tables are refilled.
             core.tape.replay(&mut *poll, |step| match step {
@@ -359,6 +365,7 @@ impl<'a> Tables<'a> {
                 Step::Checkpoint => Ok(()),
             })?;
             tables.refill(snapshot, &core);
+            reused = Some(core);
         } else {
             #[cfg(test)]
             SCANS.with(|scans| scans.set(scans.get() + 1));
@@ -407,6 +414,14 @@ impl<'a> Tables<'a> {
             }
         }
         tables.seal();
+        if let Some(core) = reused {
+            // Every statement refilling this core seals the same table, so
+            // the first one's index serves them all.
+            tables.positions = core
+                .positions
+                .get_or_init(|| positions::VertexPositions::build(&tables.vertices).map(Arc::new))
+                .clone();
+        }
         tables.metadata(plan, predicates, control)?;
         Ok(tables)
     }
@@ -511,6 +526,7 @@ impl<'a> Tables<'a> {
         Self {
             vertices: Vec::new(),
             vertices_sealed: true,
+            positions: None,
             edges: Vec::new(),
             labels: BTreeMap::new(),
             types: BTreeMap::new(),
@@ -529,10 +545,14 @@ impl<'a> Tables<'a> {
     }
 
     fn vertex(&self, vid: VId) -> Option<&'a VertexRow> {
-        self.vertices
-            .binary_search_by_key(&vid, |&(vid, _)| vid)
-            .ok()
-            .map(|at| self.vertices[at].1)
+        match &self.positions {
+            Some(positions) => positions.find(&self.vertices, vid),
+            None => self
+                .vertices
+                .binary_search_by_key(&vid, |&(vid, _)| vid)
+                .ok(),
+        }
+        .map(|at| self.vertices[at].1)
     }
 
     fn edge(&self, eid: EId) -> Option<&Edge<'a>> {
