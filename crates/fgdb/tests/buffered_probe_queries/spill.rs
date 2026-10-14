@@ -30,7 +30,9 @@ impl AsyncRead for File {
     ) -> Poll<io::Result<()>> {
         let bytes = &mut self.get_mut().0;
         let at = bytes.position() as usize;
-        let count = output.remaining().min(bytes.get_ref().len().saturating_sub(at));
+        let count = output
+            .remaining()
+            .min(bytes.get_ref().len().saturating_sub(at));
         if count != 0 {
             output.put_slice(&bytes.get_ref()[at..at + count]);
             bytes.set_position((at + count) as u64);
@@ -72,7 +74,9 @@ async fn file(cx: &QueryCx, pool: &MemoryPool) -> SpillFile<File> {
             max_runs: 512,
             max_run_bytes: 1_000_000,
         },
-    ).await.unwrap()
+    )
+    .await
+    .unwrap()
 }
 fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -85,10 +89,14 @@ fn native(text: &str) -> PreparedNativeRead {
     PreparedNativeRead::prepare(text, &GqlParameters::new(), resolve).unwrap()
 }
 fn encoded(values: &[i64]) -> Vec<Vec<u8>> {
-    values.iter().map(|value| {
-        GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(*value))])
-            .canonical_bytes().unwrap()
-    }).collect()
+    values
+        .iter()
+        .map(|value| {
+            GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(*value))])
+                .canonical_bytes()
+                .unwrap()
+        })
+        .collect()
 }
 async fn ordered(
     view: &mut BufferedReadView<MemVfs>,
@@ -98,15 +106,31 @@ async fn ordered(
 ) -> Result<(Vec<Vec<u8>>, CommitSeq), NativeSpoolError> {
     // A physical-plan refusal must fail the test here, not masquerade as the
     // execution refusal expected by the caller's LIMIT-zero/anti cases.
-    let prepared = native(text).prepare_buffered_order(&GqlParameters::new()).unwrap();
+    let prepared = native(text)
+        .prepare_buffered_order(&GqlParameters::new())
+        .unwrap();
     let pool = MemoryPool::new(4_000_000, 0).unwrap();
     let mut scratch = file(cx, &pool).await;
     let mut destination = file(cx, &pool).await;
     let mut auxiliary = file(cx, &pool).await;
-    let (spool, _) = prepared.spool_in_view(
-        view, cx, policy, &mut scratch, &mut destination, &mut auxiliary,
-        4, 64, 2, 256, 1024, 65_536, 1000, SORT_WORK,
-    ).await?;
+    let (spool, _) = prepared
+        .spool_in_view(
+            view,
+            cx,
+            policy,
+            &mut scratch,
+            &mut destination,
+            &mut auxiliary,
+            4,
+            64,
+            2,
+            256,
+            1024,
+            65_536,
+            1000,
+            SORT_WORK,
+        )
+        .await?;
     let mut reader = spool.reader(&mut destination);
     let mut rows = Vec::new();
     while let Some(row) = reader.next_row(cx).await? {
@@ -122,15 +146,32 @@ async fn aggregate(
     text: &str,
     policy: GqlQueryPolicy,
 ) -> Result<AggregateRows, NativeAggregateSpoolError> {
-    let prepared = native(text).prepare_buffered_aggregate(&GqlParameters::new()).unwrap();
+    let prepared = native(text)
+        .prepare_buffered_aggregate(&GqlParameters::new())
+        .unwrap();
     let pool = MemoryPool::new(4_000_000, 0).unwrap();
     let mut source = file(cx, &pool).await;
     let mut partition = file(cx, &pool).await;
     let mut destination = file(cx, &pool).await;
-    let (spool, _) = prepared.spool_in_view(
-        view, cx, policy, &mut source, &mut partition, &mut destination,
-        4, 64, 2, 256, 1024, 65_536, 1000, SORT_WORK, None,
-    ).await?;
+    let (spool, _) = prepared
+        .spool_in_view(
+            view,
+            cx,
+            policy,
+            &mut source,
+            &mut partition,
+            &mut destination,
+            4,
+            64,
+            2,
+            256,
+            1024,
+            65_536,
+            1000,
+            SORT_WORK,
+            None,
+        )
+        .await?;
     let mut reader = spool.reader(&mut destination, None);
     let mut rows = Vec::new();
     while let Some(row) = reader.next_row(cx).await? {
@@ -153,21 +194,50 @@ fn copy_only_probes_reach_external_order_and_with_stages_at_the_selected_cut() {
         db.write(&contexts.commit(), change).await.unwrap();
         let mut view = cold(&contexts, &vfs, memory()).await;
         let logical = prepare(&format!("{HEAD} RETURN b.p AS value"));
-        assert!(logical.plan().operators().iter().any(|op| matches!(op, GlaOperator::Probe { .. })));
-        assert!(!logical.plan().operators().iter().any(|op| matches!(op, GlaOperator::Expand { .. })));
+        assert!(
+            logical
+                .plan()
+                .operators()
+                .iter()
+                .any(|op| matches!(op, GlaOperator::Probe { .. }))
+        );
+        assert!(
+            !logical
+                .plan()
+                .operators()
+                .iter()
+                .any(|op| matches!(op, GlaOperator::Expand { .. }))
+        );
         let relation = PreparedGraphSetText::prepare(
-            &format!("{HEAD} WITH b.p AS value RETURN value"), resolve,
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+            &format!("{HEAD} WITH b.p AS value RETURN value"),
+            resolve,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
         let physical = AsyncSpillSetPlan::compile(&relation).unwrap();
-        assert!(matches!(physical.source(), AsyncSpillSetSourcePlan::Join(_)));
+        assert!(matches!(
+            physical.source(),
+            AsyncSpillSetSourcePlan::Join(_)
+        ));
         for cut in [1, 2] {
             for (tail, wanted) in [
-                ("RETURN b.p AS value ORDER BY value DESC SKIP 1 LIMIT 2",
-                    if cut == 1 { vec![2, 2] } else { vec![] }),
-                ("RETURN DISTINCT b.p AS value ORDER BY value DESC",
-                    if cut == 1 { vec![3, 2] } else { vec![3] }),
-                ("WITH b.p AS value RETURN value+10 AS result ORDER BY result DESC",
-                    if cut == 1 { vec![13, 12, 12, 12] } else { vec![13] }),
+                (
+                    "RETURN b.p AS value ORDER BY value DESC SKIP 1 LIMIT 2",
+                    if cut == 1 { vec![2, 2] } else { vec![] },
+                ),
+                (
+                    "RETURN DISTINCT b.p AS value ORDER BY value DESC",
+                    if cut == 1 { vec![3, 2] } else { vec![3] },
+                ),
+                (
+                    "WITH b.p AS value RETURN value+10 AS result ORDER BY result DESC",
+                    if cut == 1 {
+                        vec![13, 12, 12, 12]
+                    } else {
+                        vec![13]
+                    },
+                ),
             ] {
                 let text = format!("{HEAD} FOR SYSTEM_TIME AS OF SEQ {cut} {tail}");
                 let (rows, snapshot) = ordered(&mut view, &cx, &text, policy()).await.unwrap();
@@ -180,15 +250,21 @@ fn copy_only_probes_reach_external_order_and_with_stages_at_the_selected_cut() {
         let anti = "MATCH (a)-[r:R]->(b) WHERE NOT EXISTS { MATCH (b) WHERE b.p>=2 } \
             RETURN r ORDER BY r";
         let (rows, _) = ordered(&mut view, &cx, anti, policy()).await.unwrap();
-        let expected: Vec<_> = [0, 1, 3, u128::MAX].into_iter().map(|id| {
-            GraphValueRow::from_owned_values(vec![GraphValue::Edge(EId(id))])
-                .canonical_bytes().unwrap()
-        }).collect();
+        let expected: Vec<_> = [0, 1, 3, u128::MAX]
+            .into_iter()
+            .map(|id| {
+                GraphValueRow::from_owned_values(vec![GraphValue::Edge(EId(id))])
+                    .canonical_bytes()
+                    .unwrap()
+            })
+            .collect();
         assert_eq!(rows, expected);
         // Ordinary single-edge scans remain admitted through their original path.
         let plain = "MATCH (a)-[r:R]->(b) RETURN r.p AS value ORDER BY value DESC";
-        assert_eq!(ordered(&mut view, &cx, plain, policy()).await.unwrap().0,
-            encoded(&[11, 10, 9, 8, 7]));
+        assert_eq!(
+            ordered(&mut view, &cx, plain, policy()).await.unwrap().0,
+            encoded(&[11, 10, 9, 8, 7])
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -201,10 +277,16 @@ fn copy_only_probes_feed_terminal_and_pipeline_exact_aggregates_without_spending
         let vfs = MemVfs::new().unwrap();
         let mut db = seed(&contexts, &vfs).await;
         let definition = PreparedGraphAggregateText::prepare(
-            &format!("{HEAD} RETURN COUNT(*) AS hits"), resolve,
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
-        assert!(matches!(AsyncSpillAggregatePlan::compile(&definition).unwrap(),
-            AsyncSpillAggregatePlan::Join(_)));
+            &format!("{HEAD} RETURN COUNT(*) AS hits"),
+            resolve,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert!(matches!(
+            AsyncSpillAggregatePlan::compile(&definition).unwrap(),
+            AsyncSpillAggregatePlan::Join(_)
+        ));
         for (cut, count, sum) in [(1, 4, 9), (2, 1, 3)] {
             if cut == 2 {
                 let mut change = WriteBatch::new(R);
@@ -219,15 +301,27 @@ fn copy_only_probes_feed_terminal_and_pipeline_exact_aggregates_without_spending
                 let text = format!("{HEAD} {tail}");
                 let one_output = GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000);
                 let rows = aggregate(&mut view, &cx, &text, one_output).await.unwrap();
-                assert_eq!(rows, vec![(vec![], vec![
-                    GraphAggregateValue::Count(count), GraphAggregateValue::Integer(sum),
-                    GraphAggregateValue::Average(GraphExactAverage::new(sum, count).unwrap()),
-                ])], "{text} at {cut}");
+                assert_eq!(
+                    rows,
+                    vec![(
+                        vec![],
+                        vec![
+                            GraphAggregateValue::Count(count),
+                            GraphAggregateValue::Integer(sum),
+                            GraphAggregateValue::Average(
+                                GraphExactAverage::new(sum, count).unwrap()
+                            ),
+                        ]
+                    )],
+                    "{text} at {cut}"
+                );
             }
             let empty = "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b) WHERE b.p>99 } \
                 RETURN COUNT(*) AS hits";
-            assert_eq!(aggregate(&mut view, &cx, empty, policy()).await.unwrap(),
-                vec![(vec![], vec![GraphAggregateValue::Count(0)])]);
+            assert_eq!(
+                aggregate(&mut view, &cx, empty, policy()).await.unwrap(),
+                vec![(vec![], vec![GraphAggregateValue::Count(0)])]
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -244,24 +338,43 @@ fn external_probe_refusals_are_not_hidden_by_zero_windows_or_absence() {
         let mut view = cold(&contexts, &vfs, pool.clone()).await;
         let late = "MATCH (a)-[r:R]->(b) WHERE EXISTS { \
             MATCH (b) WHERE b.p/(b.p-1)>0 } RETURN r ORDER BY r LIMIT 0";
-        assert!(matches!(ordered(&mut view, &cx, late, policy()).await,
-            Err(NativeSpoolError::BufferedExecute(_))));
+        assert!(matches!(
+            ordered(&mut view, &cx, late, policy()).await,
+            Err(NativeSpoolError::BufferedExecute(_))
+        ));
         let anti = "MATCH (a)-[r:R]->(b) WHERE NOT EXISTS { MATCH (b) WHERE b.p=999 } \
             RETURN r ORDER BY r LIMIT 0";
-        let refused = ordered(&mut view, &cx, anti,
-            GqlQueryPolicy::new(1, 100, 10_000_000, 10_000_000)).await;
+        let refused = ordered(
+            &mut view,
+            &cx,
+            anti,
+            GqlQueryPolicy::new(1, 100, 10_000_000, 10_000_000),
+        )
+        .await;
         assert!(matches!(refused,
             Err(NativeSpoolError::BufferedExecute(error)) if matches!(*error, GqlQueryError::Rows(_))));
         // Zero output is legal when full input evaluation actually succeeds.
-        assert!(ordered(&mut view, &cx, anti, policy()).await.unwrap().0.is_empty());
+        assert!(
+            ordered(&mut view, &cx, anti, policy())
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
         let independent = "MATCH (a)-[r:R]->(b) WHERE NOT EXISTS { MATCH (x) }";
         let before = pool.used();
         for tail in ["RETURN r LIMIT 0", "WITH r AS edge RETURN edge LIMIT 0"] {
-            assert!(native(&format!("{independent} {tail}"))
-                .prepare_buffered_order(&GqlParameters::new()).is_err());
+            assert!(
+                native(&format!("{independent} {tail}"))
+                    .prepare_buffered_order(&GqlParameters::new())
+                    .is_err()
+            );
         }
-        assert!(native(&format!("{independent} RETURN COUNT(*) AS hits LIMIT 0"))
-            .prepare_buffered_aggregate(&GqlParameters::new()).is_err());
+        assert!(
+            native(&format!("{independent} RETURN COUNT(*) AS hits LIMIT 0"))
+                .prepare_buffered_aggregate(&GqlParameters::new())
+                .is_err()
+        );
         assert_eq!(pool.used(), before, "physical refusal opened no source");
         drop(view);
         assert_eq!(pool.used(), 0);

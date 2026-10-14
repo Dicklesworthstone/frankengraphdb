@@ -144,7 +144,10 @@ impl AsyncSpillAggregatePlan {
                 .operators()
                 .iter()
                 .any(|operator| {
-                    matches!(operator, GlaOperator::Expand { .. } | GlaOperator::Probe { .. })
+                    matches!(
+                        operator,
+                        GlaOperator::Expand { .. } | GlaOperator::Probe { .. }
+                    )
                 })
             {
                 AsyncEdgeJoinSpillAggregatePlan::from_definition(definition)

@@ -78,7 +78,10 @@ fn bad_decimal_text_refuses_whole_arguments_without_exposing_nested_values() {
         for bad in [
             WireValue::Decimal(text.into()),
             WireValue::List(vec![wire(1), WireValue::Decimal(text.into())]),
-            WireValue::Map(vec![("private-key".into(), WireValue::Decimal(text.into()))]),
+            WireValue::Map(vec![(
+                "private-key".into(),
+                WireValue::Decimal(text.into()),
+            )]),
         ] {
             let error = parameters(&[("a".into(), wire(1)), ("z".into(), bad)], None).unwrap_err();
             assert_eq!(error.parameter, "z");
@@ -92,8 +95,10 @@ fn bad_decimal_text_refuses_whole_arguments_without_exposing_nested_values() {
     }
     // This feature does not reinterpret ordinary text or widen aggregate IDs.
     let bound = parameters(&[("text".into(), WireValue::Text("1.23".into()))], None).unwrap();
-    assert!(matches!(bound.get("text"), Some(GqlParameterValue::Scalar(value))
-        if matches!(value.value(), CanonicalScalar::Text(_))));
+    assert!(
+        matches!(bound.get("text"), Some(GqlParameterValue::Scalar(value))
+        if matches!(value.value(), CanonicalScalar::Text(_)))
+    );
     assert!(parameters(&[("bad".into(), WireValue::WideInt(1))], None).is_err());
 }
 
@@ -152,7 +157,9 @@ mod served {
         let (mut server, token, path) = served(cx, name).await;
         let db = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
         db.symbols.bind(GraphSymbolKind::Label, "Item", 1).unwrap();
-        db.symbols.bind(GraphSymbolKind::Property, "amount", 1).unwrap();
+        db.symbols
+            .bind(GraphSymbolKind::Property, "amount", 1)
+            .unwrap();
         (server, token, path)
     }
 
@@ -203,8 +210,10 @@ mod served {
                     &request(
                         ExecuteMode::Write,
                         script,
-                        arguments(r#"{"a":{"$decimal":"0.000000000000000001"},
-                                      "b":{"$decimal":"1.25"}}"#),
+                        arguments(
+                            r#"{"a":{"$decimal":"0.000000000000000001"},
+                                      "b":{"$decimal":"1.25"}}"#,
+                        ),
                     ),
                 )
                 .await,
@@ -223,8 +232,10 @@ mod served {
                     &request(
                         ExecuteMode::Write,
                         script,
-                        arguments(r#"{"a":{"$decimal":"9007199254740993.000000000000000001"},
-                                      "b":{"$decimal":"-0.000000000000000001"}}"#),
+                        arguments(
+                            r#"{"a":{"$decimal":"9007199254740993.000000000000000001"},
+                                      "b":{"$decimal":"-0.000000000000000001"}}"#,
+                        ),
                     ),
                 )
                 .await,
@@ -232,7 +243,10 @@ mod served {
             assert!(matches!(answer.outcome,
                 Outcome::WriteCommitted { seq, statements: 2 } if seq == before.0 + 1
             ));
-            assert_eq!(db.db.read(&root).await.unwrap().vertices().unwrap().len(), 2);
+            assert_eq!(
+                db.db.read(&root).await.unwrap().vertices().unwrap().len(),
+                2
+            );
             for amount in [
                 "9007199254740993.000000000000000001",
                 "-0.000000000000000001",
@@ -307,7 +321,10 @@ mod served {
                     columns: Some(queried.columns),
                     rows: queried.rows,
                 };
-                assert_eq!(ResultChunk::decode(&chunk.encode().unwrap()).unwrap(), chunk);
+                assert_eq!(
+                    ResultChunk::decode(&chunk.encode().unwrap()).unwrap(),
+                    chunk
+                );
             }
             let updated = accepted(
                 execute::write(
@@ -341,7 +358,9 @@ mod served {
                 DatabaseSecurityNamespaceId([0x92; 32]),
                 [0x93; 32],
             );
-            let reopened = Database::open(&contexts.commit(), &path, keys).await.unwrap();
+            let reopened = Database::open(&contexts.commit(), &path, keys)
+                .await
+                .unwrap();
             assert_eq!(reopened.frontier().unwrap(), frontier);
             assert_eq!(reopened.vertices().unwrap(), expected);
         });
@@ -393,7 +412,10 @@ mod served {
             assert!(matches!(answer.outcome,
                 Outcome::WriteCommitted { seq, statements: 2 } if seq == before.0 + 1
             ));
-            assert_eq!(db.db.read(&root).await.unwrap().vertices().unwrap().len(), 2);
+            assert_eq!(
+                db.db.read(&root).await.unwrap().vertices().unwrap().len(),
+                2
+            );
             server.join_database_workers(&root).await;
         });
         assert!(report.lab_test_passed(), "{report:?}");

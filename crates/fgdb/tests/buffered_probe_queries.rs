@@ -1,28 +1,41 @@
 //! Correlated probes over real committed histories and the cold Strata reader.
 //! Literal graph products below are test oracles, never production sources.
 
+// An integration test's children resolve beside it, not under its own directory.
+#[path = "buffered_probe_queries/spill.rs"]
 mod spill;
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{BufferLimits, BufferedReadLimits, BufferedReadView, Database, DatabaseKeys,
-    MemVfs, MemoryPool, WriteBatch};
+use fgdb::{
+    BufferLimits, BufferedReadLimits, BufferedReadView, Database, DatabaseKeys, MemVfs, MemoryPool,
+    WriteBatch,
+};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
-use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
-    PreparedGraphText};
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts,
-    QueryCx, VId};
+use fgdb_gql::{
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
+};
+use fgdb_types::{
+    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
+};
 
 const R: RelationId = RelationId(7);
 const S: RelationId = RelationId(8);
 const P: PropertyKeyId = PropertyKeyId(9);
 const IDS: [VId; 3] = [VId(0), VId(1_u128 << 100), VId(u128::MAX)];
 const EDGES: [(u128, usize, usize, i64); 5] = [
-    (0, 0, 1, 7), (1, 0, 1, 8), (2, 1, 2, 9), (3, 2, 0, 10),
+    (0, 0, 1, 7),
+    (1, 0, 1, 8),
+    (2, 1, 2, 9),
+    (3, 2, 0, 10),
     (u128::MAX, 1, 1, 11),
 ];
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xc4; 32], DatabaseSecurityNamespaceId([0xc5; 32]), [0xc6; 32])
+    DatabaseKeys::new(
+        [0xc4; 32],
+        DatabaseSecurityNamespaceId([0xc5; 32]),
+        [0xc6; 32],
+    )
 }
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
@@ -32,34 +45,74 @@ fn prepare(text: &str) -> PreparedGraphPattern<GraphValueRow> {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         _ => None,
-    }).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
 }
 async fn seed(contexts: &PurposeContexts, vfs: &MemVfs) -> Database<MemVfs> {
-    let mut db = Database::create_with_vfs(&contexts.commit(), vfs.clone(), vfs.database_dir(), keys())
-        .await.unwrap();
+    let mut db =
+        Database::create_with_vfs(&contexts.commit(), vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
     let mut batch = WriteBatch::new(R);
     for (at, id) in IDS.iter().enumerate() {
         batch.create_vertex(*id, vec![], vec![(P, CanonicalScalar::Int(at as i64 + 1))]);
     }
     for (id, from, to, p) in EDGES {
-        batch.add_edge(EId(id), IDS[from], IDS[to], vec![(P, CanonicalScalar::Int(p))]);
+        batch.add_edge(
+            EId(id),
+            IDS[from],
+            IDS[to],
+            vec![(P, CanonicalScalar::Int(p))],
+        );
     }
-    assert_eq!(db.write(&contexts.commit(), batch).await.unwrap(), CommitSeq(1));
+    assert_eq!(
+        db.write(&contexts.commit(), batch).await.unwrap(),
+        CommitSeq(1)
+    );
     db
 }
-async fn cold(contexts: &PurposeContexts, vfs: &MemVfs, pool: MemoryPool) -> BufferedReadView<MemVfs> {
+async fn cold(
+    contexts: &PurposeContexts,
+    vfs: &MemVfs,
+    pool: MemoryPool,
+) -> BufferedReadView<MemVfs> {
     let limits = BufferedReadLimits {
-        max_root_bytes: 64 * 1024, max_source_bytes: 4 * 1024 * 1024,
-        max_blocks: 512, max_vertex_patches: 512, max_work: 10_000_000,
-        buffer: BufferLimits { max_frames: 1, max_ghost_entries: 2, max_extent_bytes: 16 * 1024 },
+        max_root_bytes: 64 * 1024,
+        max_source_bytes: 4 * 1024 * 1024,
+        max_blocks: 512,
+        max_vertex_patches: 512,
+        max_work: 10_000_000,
+        buffer: BufferLimits {
+            max_frames: 1,
+            max_ghost_entries: 2,
+            max_extent_bytes: 16 * 1024,
+        },
     };
-    Database::open_buffered_read_view_with_vfs(&contexts.commit(), vfs.clone(),
-        vfs.database_dir(), keys(), pool, limits).await.unwrap()
+    Database::open_buffered_read_view_with_vfs(
+        &contexts.commit(),
+        vfs.clone(),
+        vfs.database_dir(),
+        keys(),
+        pool,
+        limits,
+    )
+    .await
+    .unwrap()
 }
-fn memory() -> MemoryPool { MemoryPool::new(64 * 1024 * 1024, 0).unwrap() }
-async fn collect(view: &mut BufferedReadView<MemVfs>, cx: &QueryCx,
-    plan: &PreparedGraphPattern<GraphValueRow>, cut: CommitSeq) -> Vec<Vec<GraphValue>> {
-    let mut cursor = view.stream_graph_edge_joins_governed_at(cx, plan, cut, policy()).unwrap();
+fn memory() -> MemoryPool {
+    MemoryPool::new(64 * 1024 * 1024, 0).unwrap()
+}
+async fn collect(
+    view: &mut BufferedReadView<MemVfs>,
+    cx: &QueryCx,
+    plan: &PreparedGraphPattern<GraphValueRow>,
+    cut: CommitSeq,
+) -> Vec<Vec<GraphValue>> {
+    let mut cursor = view
+        .stream_graph_edge_joins_governed_at(cx, plan, cut, policy())
+        .unwrap();
     assert_eq!(cursor.snapshot_seq(), cut);
     let mut rows = Vec::new();
     while let Some(result) = cursor.next().await {
@@ -80,24 +133,46 @@ fn atom(edge: &str, end: &str, direction: usize) -> String {
 }
 fn orient(from: usize, to: usize, direction: usize) -> Vec<(usize, usize)> {
     match direction {
-        0 => vec![(from, to)], 1 => vec![(to, from)],
-        _ if from == to => vec![(from, to)], _ => vec![(from, to), (to, from)],
+        0 => vec![(from, to)],
+        1 => vec![(to, from)],
+        _ if from == to => vec![(from, to)],
+        _ => vec![(from, to), (to, from)],
     }
 }
 fn text(directions: [usize; 2], two_hops: bool, anti: bool, repeatable: bool) -> String {
     let root = atom("r", "b", directions[0]);
     let child = atom("s", "c", directions[1]);
-    let tail = if two_hops { atom("t", "a", directions[1]) } else { String::new() };
-    let mode = if repeatable { "REPEATABLE ELEMENTS " } else { "" };
+    let tail = if two_hops {
+        atom("t", "a", directions[1])
+    } else {
+        String::new()
+    };
+    let mode = if repeatable {
+        "REPEATABLE ELEMENTS "
+    } else {
+        ""
+    };
     let negation = if anti { "NOT " } else { "" };
-    format!("MATCH (a){root} WHERE {negation}EXISTS {{ MATCH {mode}(b){child}{tail} \
-        WHERE s.p>=9 }} RETURN r,a,b,r.p AS rp,a.p AS ap")
+    format!(
+        "MATCH (a){root} WHERE {negation}EXISTS {{ MATCH {mode}(b){child}{tail} \
+        WHERE s.p>=9 }} RETURN r,a,b,r.p AS rp,a.p AS ap"
+    )
 }
-fn expected(cut: u64, directions: [usize; 2], two_hops: bool, anti: bool, repeatable: bool)
-    -> Vec<Vec<GraphValue>> {
-    if cut == 0 { return Vec::new(); }
-    let edges: Vec<_> = EDGES.into_iter().filter(|(id, _, _, _)| cut < 2 || *id != 2)
-        .map(|(id, a, b, p)| (id, a, b, if cut >= 2 && id == 0 { 17 } else { p })).collect();
+fn expected(
+    cut: u64,
+    directions: [usize; 2],
+    two_hops: bool,
+    anti: bool,
+    repeatable: bool,
+) -> Vec<Vec<GraphValue>> {
+    if cut == 0 {
+        return Vec::new();
+    }
+    let edges: Vec<_> = EDGES
+        .into_iter()
+        .filter(|(id, _, _, _)| cut < 2 || *id != 2)
+        .map(|(id, a, b, p)| (id, a, b, if cut >= 2 && id == 0 { 17 } else { p }))
+        .collect();
     let mut rows = Vec::new();
     for &(r, x, y, rp) in &edges {
         for (a, b) in orient(x, y, directions[0]) {
@@ -106,21 +181,36 @@ fn expected(cut: u64, directions: [usize; 2], two_hops: bool, anti: bool, repeat
             let mut witnesses = 0;
             for &(s, x, y, sp) in &edges {
                 for (from, c) in orient(x, y, directions[1]) {
-                    if from != b || sp < 9 { continue; }
-                    if !two_hops { witnesses += 1; continue; }
+                    if from != b || sp < 9 {
+                        continue;
+                    }
+                    if !two_hops {
+                        witnesses += 1;
+                        continue;
+                    }
                     for &(t, x, y, _) in &edges {
-                        if !repeatable && t == s { continue; }
+                        if !repeatable && t == s {
+                            continue;
+                        }
                         for (from, end) in orient(x, y, directions[1]) {
-                            if from == c && end == a { witnesses += 1; }
+                            if from == c && end == a {
+                                witnesses += 1;
+                            }
                         }
                     }
                 }
             }
-            if (witnesses != 0) == anti { continue; }
+            if (witnesses != 0) == anti {
+                continue;
+            }
             let ap = if cut >= 2 && a == 0 { 21 } else { a as i64 + 1 };
-            rows.push(vec![GraphValue::Edge(EId(r)), GraphValue::Vertex(IDS[a]),
-                GraphValue::Vertex(IDS[b]), GraphValue::Scalar(CanonicalScalar::Int(rp)),
-                GraphValue::Scalar(CanonicalScalar::Int(ap))]);
+            rows.push(vec![
+                GraphValue::Edge(EId(r)),
+                GraphValue::Vertex(IDS[a]),
+                GraphValue::Vertex(IDS[b]),
+                GraphValue::Scalar(CanonicalScalar::Int(rp)),
+                GraphValue::Scalar(CanonicalScalar::Int(ap)),
+            ]);
         }
     }
     rows.sort();
@@ -147,21 +237,43 @@ fn cold_correlated_probes_match_literal_products_and_resident_historical_queries
         let mut view = cold(&contexts, &vfs, memory()).await;
         let mut cases = 0;
         for cut in 0..=3 {
-            for first in 0..3 { for child in 0..3 {
-                for two_hops in [false, true] { for anti in [false, true] {
-                    for repeatable in [false, true] {
-                        let text = text([first, child], two_hops, anti, repeatable);
-                        let plan = prepare(&text);
-                        let expected = expected(cut, [first, child], two_hops, anti, repeatable);
-                        let resident = db.execute_graph_pattern_governed_at(&cx, &plan, CommitSeq(cut), policy()).unwrap();
-                        assert_eq!(resident.value.iter().map(|row| row.values().to_vec()).collect::<Vec<_>>(), expected,
-                            "resident {text} at {cut}");
-                        assert_eq!(collect(&mut view, &cx, &plan, CommitSeq(cut)).await, expected,
-                            "cold {text} at {cut}");
-                        cases += 1;
+            for first in 0..3 {
+                for child in 0..3 {
+                    for two_hops in [false, true] {
+                        for anti in [false, true] {
+                            for repeatable in [false, true] {
+                                let text = text([first, child], two_hops, anti, repeatable);
+                                let plan = prepare(&text);
+                                let expected =
+                                    expected(cut, [first, child], two_hops, anti, repeatable);
+                                let resident = db
+                                    .execute_graph_pattern_governed_at(
+                                        &cx,
+                                        &plan,
+                                        CommitSeq(cut),
+                                        policy(),
+                                    )
+                                    .unwrap();
+                                assert_eq!(
+                                    resident
+                                        .value
+                                        .iter()
+                                        .map(|row| row.values().to_vec())
+                                        .collect::<Vec<_>>(),
+                                    expected,
+                                    "resident {text} at {cut}"
+                                );
+                                assert_eq!(
+                                    collect(&mut view, &cx, &plan, CommitSeq(cut)).await,
+                                    expected,
+                                    "cold {text} at {cut}"
+                                );
+                                cases += 1;
+                            }
+                        }
                     }
-                }}
-            }}
+                }
+            }
         }
         assert_eq!(cases, 288);
         let statement = text([2, 2], true, false, false);
@@ -171,13 +283,21 @@ fn cold_correlated_probes_match_literal_products_and_resident_historical_queries
         assert_eq!(collect(&mut pinned, &cx, &plan, CommitSeq(1)).await, old);
         db.compact(&contexts.commit()).await.unwrap();
         drop(db);
-        let reopened = Database::open_with_vfs(&contexts.commit(), vfs.clone(), vfs.database_dir(), keys()).await.unwrap();
+        let reopened =
+            Database::open_with_vfs(&contexts.commit(), vfs.clone(), vfs.database_dir(), keys())
+                .await
+                .unwrap();
         let mut compacted = cold(&contexts, &vfs, memory()).await;
-        assert_eq!(collect(&mut compacted, &cx, &plan, CommitSeq(3)).await, latest);
+        assert_eq!(
+            collect(&mut compacted, &cx, &plan, CommitSeq(3)).await,
+            latest
+        );
         assert_eq!(collect(&mut pinned, &cx, &plan, CommitSeq(1)).await, old);
         let paged = prepare(&format!("{statement} SKIP 1 LIMIT 2"));
-        assert_eq!(collect(&mut compacted, &cx, &paged, CommitSeq(3)).await,
-            latest.into_iter().skip(1).take(2).collect::<Vec<_>>());
+        assert_eq!(
+            collect(&mut compacted, &cx, &paged, CommitSeq(3)).await,
+            latest.into_iter().skip(1).take(2).collect::<Vec<_>>()
+        );
         assert_eq!(reopened.frontier().unwrap(), CommitSeq(3));
         drop(pinned);
         assert_eq!(pinned_pool.used(), 0);
@@ -200,15 +320,32 @@ fn captured_only_probes_use_same_cut_stored_and_missing_nulls() {
         db.write(&contexts.commit(), missing).await.unwrap();
         let mut view = cold(&contexts, &vfs, memory()).await;
         for (predicate, before, after) in [
-            ("EXISTS { MATCH (b) WHERE b.p IS NULL }", vec![], vec![0, 1, u128::MAX]),
-            ("EXISTS { MATCH (b) WHERE b.p>=2 }", vec![0, 1, 2, u128::MAX], vec![2]),
-            ("NOT EXISTS { MATCH (b) WHERE b.p<>NULL }", vec![0, 1, 2, 3, u128::MAX], vec![0, 1, 2, 3, u128::MAX]),
+            (
+                "EXISTS { MATCH (b) WHERE b.p IS NULL }",
+                vec![],
+                vec![0, 1, u128::MAX],
+            ),
+            (
+                "EXISTS { MATCH (b) WHERE b.p>=2 }",
+                vec![0, 1, 2, u128::MAX],
+                vec![2],
+            ),
+            (
+                "NOT EXISTS { MATCH (b) WHERE b.p<>NULL }",
+                vec![0, 1, 2, 3, u128::MAX],
+                vec![0, 1, 2, 3, u128::MAX],
+            ),
         ] {
             let plan = prepare(&format!("MATCH (a)-[r:R]->(b) WHERE {predicate} RETURN r"));
             for cut in 1..=3 {
-                let expected: Vec<_> = (if cut == 1 { &before } else { &after }).iter()
-                    .map(|id| vec![GraphValue::Edge(EId(*id))]).collect();
-                assert_eq!(collect(&mut view, &cx, &plan, CommitSeq(cut)).await, expected);
+                let expected: Vec<_> = (if cut == 1 { &before } else { &after })
+                    .iter()
+                    .map(|id| vec![GraphValue::Edge(EId(*id))])
+                    .collect();
+                assert_eq!(
+                    collect(&mut view, &cx, &plan, CommitSeq(cut)).await,
+                    expected
+                );
             }
         }
     });
@@ -224,22 +361,48 @@ fn anti_probe_refusal_cannot_publish_absence_or_revoke_prior_delivered_rows() {
         let _db = seed(&contexts, &vfs).await;
         let pool = memory();
         let mut view = cold(&contexts, &vfs, pool.clone()).await;
-        let plan = prepare("MATCH (a)-[r:R]->(b) WHERE NOT EXISTS { \
-            MATCH (b)-[s:R]->(c) WHERE s.p=999 } RETURN r");
-        let mut refused = view.stream_graph_edge_joins_governed(&cx, &plan,
-            GqlQueryPolicy::new(1, 100, 10_000_000, 10_000_000)).unwrap();
-        assert!(matches!(refused.next().await, Some(Err(GqlQueryError::Rows(_)))));
+        let plan = prepare(
+            "MATCH (a)-[r:R]->(b) WHERE NOT EXISTS { \
+            MATCH (b)-[s:R]->(c) WHERE s.p=999 } RETURN r",
+        );
+        let mut refused = view
+            .stream_graph_edge_joins_governed(
+                &cx,
+                &plan,
+                GqlQueryPolicy::new(1, 100, 10_000_000, 10_000_000),
+            )
+            .unwrap();
+        assert!(matches!(
+            refused.next().await,
+            Some(Err(GqlQueryError::Rows(_)))
+        ));
         assert_eq!(refused.row_stats().result_rows, 0);
         assert!(refused.next().await.is_none());
         drop(refused);
-        let independent = prepare("MATCH (a)-[r:R]->(b) WHERE NOT EXISTS { MATCH (x) } RETURN r LIMIT 0");
+        let independent =
+            prepare("MATCH (a)-[r:R]->(b) WHERE NOT EXISTS { MATCH (x) } RETURN r LIMIT 0");
         let before = pool.used();
-        assert!(view.stream_graph_edge_joins_governed(&cx, &independent, policy()).is_err());
-        assert_eq!(pool.used(), before, "physical refusal precedes source construction");
-        let mut cursor = view.stream_graph_edge_joins_governed(&cx, &plan,
-            GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000)).unwrap();
+        assert!(
+            view.stream_graph_edge_joins_governed(&cx, &independent, policy())
+                .is_err()
+        );
+        assert_eq!(
+            pool.used(),
+            before,
+            "physical refusal precedes source construction"
+        );
+        let mut cursor = view
+            .stream_graph_edge_joins_governed(
+                &cx,
+                &plan,
+                GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000),
+            )
+            .unwrap();
         let held = cursor.next().await.unwrap().unwrap();
-        assert!(matches!(cursor.next().await, Some(Err(GqlQueryError::Rows(_)))));
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Rows(_)))
+        ));
         assert_eq!(cursor.row_stats().result_rows, 1);
         assert!(cursor.next().await.is_none());
         drop(cursor);

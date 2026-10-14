@@ -67,7 +67,9 @@ impl CanonicalDecimal {
         if whole.len() > 1 && whole.starts_with('0') {
             return Err(DecimalParseError::NonCanonical);
         }
-        if whole.len() > (STRICT_PORTABLE_DECIMAL_PRECISION - STRICT_PORTABLE_DECIMAL_SCALE) as usize {
+        if whole.len()
+            > (STRICT_PORTABLE_DECIMAL_PRECISION - STRICT_PORTABLE_DECIMAL_SCALE) as usize
+        {
             return Err(DecimalParseError::OutOfRange);
         }
         let mut coefficient = 0_i128;
