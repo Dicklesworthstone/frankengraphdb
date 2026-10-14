@@ -682,24 +682,38 @@ async fn read_bounded<F: VfsFile>(
         // stream without ever materializing the unbounded tail. Each read asks
         // for everything still allowed, so an object costs one data op plus
         // the end-of-file op.
+        //
+        // The read window is zeroed once as it grows, never again per read:
+        // the end-of-file probe reuses what the data read left unfilled. The
+        // result keeps only the bytes read. An open reads every stored object
+        // of a partition and holds them until each is proven; at a 16 KiB
+        // ceiling a ceiling-sized buffer per object cost road-ny (about 495k
+        // objects of ~450 bytes) ~8 GB of zero-filled, retained capacity
+        // (fgdb-2n2a2). The window grows amortized, not exactly: a manifest
+        // of tens of MB is read in READ_OP_BYTES ops, and exact growth would
+        // copy everything read so far once per op.
         let allowed = usize::try_from(limit.saturating_add(1)).unwrap_or(usize::MAX);
         let mut bytes = Vec::new();
-        while bytes.len() < allowed {
-            let filled = bytes.len();
+        let mut filled = 0;
+        while filled < allowed {
             let ask = (allowed - filled).min(READ_OP_BYTES);
-            bytes.try_reserve(ask).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::OutOfMemory,
-                    "stored object read allocation failed",
-                )
-            })?;
-            bytes.resize(filled + ask, 0);
-            let read = file.read(&mut bytes[filled..]).await?;
-            bytes.truncate(filled + read);
+            if bytes.len() < filled + ask {
+                bytes.try_reserve(filled + ask - bytes.len()).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::OutOfMemory,
+                        "stored object read allocation failed",
+                    )
+                })?;
+                bytes.resize(filled + ask, 0);
+            }
+            let read = file.read(&mut bytes[filled..filled + ask]).await?;
+            filled += read;
             if read == 0 {
                 break;
             }
         }
+        bytes.truncate(filled);
+        bytes.shrink_to_fit();
         let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         ensure_size_within_limit(observed, limit)?;
         Ok(bytes)
@@ -3414,6 +3428,41 @@ mod durability_tests {
                     if found == limit && observed == limit + 1),
                 "{name}"
             );
+        }
+    }
+
+    /// A read returns exactly the object's bytes and holds no more capacity
+    /// than it read, whatever the ceiling: an open keeps every object's bytes
+    /// until it is proven, so ceiling-sized buffers were most of its peak
+    /// resident memory (fgdb-2n2a2). Small, exact-ceiling, multi-read and
+    /// empty objects alike.
+    #[test]
+    fn bounded_reads_keep_only_the_bytes_they_read() {
+        let dir = scratch_dir("bounded-read-exact-capacity");
+        let large = 3 * super::READ_OP_BYTES as u64 + 7;
+        let cases = [
+            ("empty", 0, MAX_STORED_OBJECT_BYTES),
+            ("one", 1, MAX_STORED_OBJECT_BYTES),
+            ("typical", 450, MAX_STORED_OBJECT_BYTES),
+            ("ceiling", MAX_STORED_OBJECT_BYTES, MAX_STORED_OBJECT_BYTES),
+            ("one-op-of-large", super::READ_OP_BYTES as u64, large),
+            ("large", large, large),
+        ];
+        for (name, len, limit) in cases {
+            let fill = |len: u64| (0..len).map(|at| (at % 251) as u8).collect::<Vec<u8>>();
+            let path = dir.join(name);
+            std::fs::write(&path, fill(len)).expect("fixture");
+            let read = under_lab(51, move |cx| async move {
+                let file = UnixVfs::new().open_read(&path).await.expect("open fixture");
+                read_bounded(&cx, file, limit).await
+            })
+            .expect("within the ceiling");
+            assert!(
+                read == fill(len),
+                "{name}: read {} of {len} bytes",
+                read.len()
+            );
+            assert_eq!(read.capacity(), read.len(), "{name}: retained capacity");
         }
     }
 
