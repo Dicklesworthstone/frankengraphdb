@@ -356,6 +356,11 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property 
   --param 'q=json:[0.1,0.8,0.1]' \
   "CALL hybrid.search(vector => \$q, vector_property => 'emb', metric => 'cosine', k => 5)
      YIELD node, score RETURN node.title, score ORDER BY score DESC"
+# ...or the same packed property through the search command
+fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property emb=3 \
+  --vector 0.1,0.8,0.1 --vector-encoding packed --vector-property emb --metric cosine --k 5
+# (hybrid.search rows are in canonical vertex order unless the query orders them:
+#  ORDER BY score DESC returns them in rank order)
 
 # Replay a saved certificate against the current database state
 fgdb replay --db mydb.fgdbdir --key-file fgdb.keys --certificate result.cert
