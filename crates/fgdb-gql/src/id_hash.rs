@@ -15,7 +15,7 @@ const MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
 
 /// A per-map seed; `Default` draws a fresh one.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct IdState(u64);
+pub struct IdState(u64);
 
 impl Default for IdState {
     fn default() -> Self {
@@ -32,7 +32,7 @@ impl BuildHasher for IdState {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct IdHasher(u64);
+pub struct IdHasher(u64);
 
 impl IdHasher {
     fn word(&mut self, word: u64) {
@@ -81,7 +81,9 @@ impl Hasher for IdHasher {
 }
 
 /// A hash map over identity keys with a fresh seed per map.
-pub(crate) type IdMap<K, V> = std::collections::HashMap<K, V, IdState>;
+pub type IdMap<K, V> = std::collections::HashMap<K, V, IdState>;
+/// A hash set over identity keys with a fresh seed per set.
+pub type IdSet<K> = std::collections::HashSet<K, IdState>;
 
 #[cfg(test)]
 mod tests {

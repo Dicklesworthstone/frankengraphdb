@@ -27,7 +27,7 @@ mod evidence_limits;
 mod evidence_page;
 pub mod free_join;
 mod graph_text;
-mod id_hash;
+pub mod id_hash;
 pub mod insertion;
 pub mod insertion_query;
 mod insertion_query_text;

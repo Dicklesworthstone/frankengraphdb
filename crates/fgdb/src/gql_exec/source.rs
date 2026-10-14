@@ -2470,7 +2470,10 @@ fn slot_closure<'a, E>(
     steps: &[BoundStep<'_>],
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<Closure<'a>>, E> {
-    use std::collections::BTreeSet;
+    // Probed sets and maps: every frontier is sorted before it is walked and
+    // the selected edges are sorted by EId once, so visit order, admission
+    // order and every charge are those of ordered sets.
+    use fgdb_gql::id_hash::{IdMap, IdSet};
     let index = snapshot.adjacency_index();
     let edges = index.edge_count();
     let mean = (edges / snapshot.property_index.vertex_count().max(1)).max(1);
@@ -2494,17 +2497,17 @@ fn slot_closure<'a, E>(
         Ok(closure_fits(admitted, incidences, remaining, growth, cap))
     };
     let width = if root.is_some() { 2 } else { 1 };
-    let mut selected = BTreeMap::<EId, BorrowedEdge<'a>>::new();
-    let mut slots = vec![BTreeSet::<VId>::new(); width + steps.len()];
+    let mut selected = IdMap::<EId, BorrowedEdge<'a>>::default();
+    let mut slots = vec![IdSet::<VId>::default(); width + steps.len()];
     let admit = |entry: &AdjacencyEntry,
                  block: usize,
                  row: usize,
-                 selected: &mut BTreeMap<EId, BorrowedEdge<'a>>,
-                 target: &mut BTreeSet<VId>,
+                 selected: &mut IdMap<EId, BorrowedEdge<'a>>,
+                 target: &mut IdSet<VId>,
                  far: VId,
                  control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
      -> Result<(), E> {
-        if let std::collections::btree_map::Entry::Vacant(slot) = selected.entry(entry.eid) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = selected.entry(entry.eid) {
             // Its SnapshotRecord is charged when the closure commits.
             control(SourceEvent::ScratchEntry)?;
             slot.insert((
@@ -2545,12 +2548,13 @@ fn slot_closure<'a, E>(
         }
     }
     for (at, step) in steps.iter().enumerate() {
-        let near = slots[step.source].iter().copied().collect::<Vec<_>>();
+        let mut near = slots[step.source].iter().copied().collect::<Vec<_>>();
+        near.sort_unstable();
         let (zero, maximum) = step.walk.unwrap_or((false, 1));
-        let mut target = BTreeSet::new();
+        let mut target = IdSet::default();
         // Vertices already expanded by this step: a walk that returns to one
         // reuses edges this step admitted when it first left it.
-        let mut expanded = BTreeSet::new();
+        let mut expanded = IdSet::default();
         if step.walk.is_some() {
             for &vertex in &near {
                 control(SourceEvent::ScratchEntry)?;
@@ -2610,7 +2614,9 @@ fn slot_closure<'a, E>(
         control(SourceEvent::SnapshotRecord)?;
     }
     let reached = slots.into_iter().flatten().collect();
-    Ok(Some((selected.into_values().collect(), reached)))
+    let mut selected: Vec<_> = selected.into_values().collect();
+    selected.sort_unstable_by_key(|((eid, ..), _)| *eid);
+    Ok(Some((selected, reached)))
 }
 
 /// The per-slot closure of a vertex-rooted flat plan (ScanVertices, root
