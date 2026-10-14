@@ -62,25 +62,40 @@ impl ScanSortTail {
 
     /// The tail of a relation whose complete projected rows the caller sorts
     /// (a pulled set, fgdb-7xqxb): `width` visible cells, the relation's own
-    /// ORDER BY keys over them and its page, with no hidden cell and no
-    /// DISTINCT. None when the width is out of range or a key names no cell.
+    /// ORDER BY keys, quantifier and page, with no hidden cells. An implicit
+    /// order is canonical whole-row order (NULL first), not explicit ASC's
+    /// default NULLS LAST. The consumer must drain and project the complete
+    /// input before applying DISTINCT and then the page, even for LIMIT 0.
+    /// None for an invalid width, repeated key or out-of-range column.
     pub(crate) fn for_relation(
         width: usize,
-        order: Vec<crate::algebra::GraphValueOrder>,
+        mut order: Vec<crate::algebra::GraphValueOrder>,
+        quantifier: crate::GraphSetQuantifier,
         offset: u64,
         count: Option<u64>,
     ) -> Option<Self> {
         if width == 0
             || width > crate::algebra::MAX_PATTERN_VERTICES
-            || order.iter().any(|key| key.column >= width)
+            || order.len() > width
+            || order.iter().enumerate().any(|(at, key)| {
+                key.column >= width
+                    || order[..at].iter().any(|prior| prior.column == key.column)
+            })
         {
             return None;
+        }
+        if order.is_empty() {
+            order = (0..width)
+                .map(|column| {
+                    crate::algebra::GraphValueOrder::ascending(column).with_nulls_first(true)
+                })
+                .collect();
         }
         Some(Self {
             evaluation_width: width,
             visible_width: width,
             order,
-            distinct: false,
+            distinct: quantifier == crate::GraphSetQuantifier::Distinct,
             offset,
             count,
         })

@@ -1021,7 +1021,9 @@ impl PreparedGraphSet {
         if !self.order.is_empty() || self.offset != 0 || self.count.is_some() {
             return None;
         }
-        let pull = self.vertex_projection()?;
+        let (pull, GraphSetQuantifier::All) = self.vertex_projection()? else {
+            return None;
+        };
         let GraphSetValue::Column(column) = *pull.projection.first()?.value() else {
             return None;
         };
@@ -1035,12 +1037,16 @@ impl PreparedGraphSet {
     }
 
     /// The ordered pull of this relation, when it has one (fgdb-7xqxb): the
-    /// same `Project ALL` over one vertex-rooted pattern as
-    /// [`Self::row_pull`], with this relation's own ORDER BY and page
-    /// returned as the external sort's tail.
+    /// same checked projection over one vertex-rooted pattern as
+    /// [`Self::row_pull`], with this relation's ALL/DISTINCT, ORDER BY and
+    /// page returned as the external sort's tail. Without ORDER BY, the
+    /// tail specifies the ordinary canonical whole-row order, NULL first.
     ///
     /// The caller projects every scanned row with [`GraphSetRowPull::project`]
-    /// and sorts the complete projected bag by the tail. Ties then break on
+    /// and sorts the complete projected bag by the tail. DISTINCT removes
+    /// equal complete projected rows only after sorting and before the page;
+    /// it never deduplicates source rows or skips a fallible projection.
+    /// Every evaluated cell is visible. Ties then break on
     /// the whole typed row, as the eager projection's canonical sort followed
     /// by its stable ORDER BY does, so no output cell needs to lead with the
     /// root. The pattern's own rows must lead with the root vertex, or
@@ -1048,7 +1054,7 @@ impl PreparedGraphSet {
     /// eager path numbers its canonically sorted input.
     #[must_use]
     pub fn ordered_row_pull(&self) -> Option<(GraphSetRowPull, crate::scan_stream::ScanSortTail)> {
-        let pull = self.vertex_projection()?;
+        let (pull, quantifier) = self.vertex_projection()?;
         let columns = pull.pattern.value_columns();
         if !columns.is_empty()
             && !matches!(
@@ -1061,20 +1067,22 @@ impl PreparedGraphSet {
         let tail = crate::scan_stream::ScanSortTail::for_relation(
             pull.projection.len(),
             self.order.clone(),
+            quantifier,
             self.offset,
             self.count,
         )?;
         Some((pull, tail))
     }
 
-    /// `Project ALL` over one vertex-rooted, relationship-free pattern with
+    /// A projection over one vertex-rooted, relationship-free pattern with
     /// no inner order or page, whose every cell a pull can evaluate: a column,
     /// a bound constant or integer arithmetic over columns.
-    fn vertex_projection(&self) -> Option<GraphSetRowPull> {
+    /// The consumer, not this accessor, owns the returned quantifier.
+    fn vertex_projection(&self) -> Option<(GraphSetRowPull, GraphSetQuantifier)> {
         let SetNode::Project {
             input,
             projection,
-            quantifier: GraphSetQuantifier::All,
+            quantifier,
             preserve_order: false,
         } = &self.node
         else {
@@ -1114,10 +1122,13 @@ impl PreparedGraphSet {
         {
             return None;
         }
-        Some(GraphSetRowPull {
-            pattern: pattern.clone(),
-            projection: projection.clone(),
-        })
+        Some((
+            GraphSetRowPull {
+                pattern: pattern.clone(),
+                projection: projection.clone(),
+            },
+            *quantifier,
+        ))
     }
 }
 
@@ -1165,5 +1176,161 @@ impl GraphSetRowPull {
             &mut projection::no_element_reads,
             arithmetic,
         )
+    }
+}
+
+#[cfg(test)]
+mod pulled_projection_tests {
+    use super::*;
+    use crate::algebra::{GraphValue, GraphValueOrder};
+    use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_types::{CanonicalScalar, VId};
+
+    fn input(text: &str) -> PreparedGraphSet {
+        PreparedGraphSet::from(
+            PreparedGraphText::prepare(text, |kind, name: &str| {
+                (kind == GraphSymbolKind::Property && name == "p")
+                    .then_some(GraphSymbol::Property(PropertyKeyId(1)))
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn relational_sort_tails_pin_quantifiers_windows_and_canonical_null_order() {
+        use crate::scan_stream::ScanSortTail;
+        for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
+            for width in [1, crate::algebra::MAX_PATTERN_VERTICES] {
+                for (offset, count) in [(0, None), (0, Some(0)), (u64::MAX, Some(1))] {
+                    let tail = ScanSortTail::for_relation(
+                        width,
+                        Vec::new(),
+                        quantifier,
+                        offset,
+                        count,
+                    )
+                    .unwrap();
+                    let expected: Vec<_> = (0..width)
+                        .map(|column| GraphValueOrder::ascending(column).with_nulls_first(true))
+                        .collect();
+                    assert_eq!(tail.order(), expected);
+                    assert_eq!(
+                        (tail.evaluation_width(), tail.visible_width()),
+                        (width, width)
+                    );
+                    assert_eq!(tail.distinct(), quantifier == GraphSetQuantifier::Distinct);
+                    assert_eq!((tail.offset(), tail.count()), (offset, count));
+                }
+            }
+            let keys = vec![GraphValueOrder::descending(1), GraphValueOrder::ascending(0)];
+            let tail = ScanSortTail::for_relation(2, keys.clone(), quantifier, 1, Some(3))
+                .unwrap();
+            assert_eq!(tail.order(), keys);
+            for (width, keys) in [
+                (0, Vec::new()),
+                (crate::algebra::MAX_PATTERN_VERTICES + 1, Vec::new()),
+                (2, vec![GraphValueOrder::ascending(2)]),
+                (2, vec![GraphValueOrder::ascending(0); 2]),
+            ] {
+                assert!(
+                    ScanSortTail::for_relation(width, keys, quantifier, 0, Some(0)).is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_pull_keeps_every_projected_occurrence_for_the_existing_sorter() {
+        let source = input("MATCH (n) RETURN n AS id,n.p AS p");
+        let source_bytes = source.incremental_pattern().unwrap().canonical_bytes();
+        for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
+            let query = source
+                .clone()
+                .project(
+                    vec![
+                        GraphSetProjection::new("p", GraphSetValue::Column(1)),
+                        GraphSetProjection::new(
+                            "marker",
+                            GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+                        ),
+                    ],
+                    quantifier,
+                )
+                .unwrap()
+                .with_page(1, Some(2));
+            let frozen = query.canonical_bytes();
+            let (pull, tail) = query.ordered_row_pull().unwrap();
+            assert_eq!(query.canonical_bytes(), frozen);
+            assert_eq!(pull.pattern().canonical_bytes(), source_bytes);
+            assert_eq!(tail.distinct(), quantifier == GraphSetQuantifier::Distinct);
+            assert_eq!((tail.offset(), tail.count()), (1, Some(2)));
+            let mut events = 0;
+            let mut projected = Vec::new();
+            for (ordinal, value) in [9, -4, 9].into_iter().enumerate() {
+                let row = GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(ordinal as u128 + 1)),
+                    GraphValue::Scalar(CanonicalScalar::Int(value)),
+                ]);
+                projected.push(
+                    pull.project(
+                        &row,
+                        ordinal as u64,
+                        &mut |_| {
+                            events += 1;
+                            Ok::<_, ()>(())
+                        },
+                        |_, _| (),
+                    )
+                    .unwrap(),
+                );
+            }
+            assert!(events > 0);
+            assert_eq!(projected.len(), 3);
+            assert_eq!(projected[0], projected[2]);
+            assert_eq!(
+                projected[1].values(),
+                &[
+                    GraphValue::Scalar(CanonicalScalar::Int(-4)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_sort_admission_never_widens_unordered_or_unproved_source_profiles() {
+        let source = input("MATCH (n) RETURN n AS id,n.p AS p");
+        for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
+            let identity = source
+                .clone()
+                .project(
+                    vec![GraphSetProjection::new("id", GraphSetValue::Column(0))],
+                    quantifier,
+                )
+                .unwrap();
+            assert_eq!(
+                identity.row_pull().is_some(),
+                quantifier == GraphSetQuantifier::All
+            );
+            assert!(identity.ordered_row_pull().is_some());
+            for child in [
+                source.clone().with_page(0, Some(0)),
+                source.clone().with_page(1, None),
+                source.clone().nested().unwrap(),
+                input("MATCH (n) RETURN n.p AS p,n AS id"),
+            ] {
+                let query = child
+                    .project(
+                        vec![GraphSetProjection::new("first", GraphSetValue::Column(0))],
+                        quantifier,
+                    )
+                    .unwrap()
+                    .with_page(0, Some(0));
+                assert!(query.ordered_row_pull().is_none());
+            }
+        }
     }
 }

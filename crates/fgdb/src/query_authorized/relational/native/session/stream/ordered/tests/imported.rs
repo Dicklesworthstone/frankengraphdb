@@ -345,6 +345,207 @@ mod projected {
     }
 
     #[test]
+    fn computed_set_quantifiers_sort_before_paging_with_or_without_order_by() {
+        let ((), report) = run_async_under_lab(0x8600_0016, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let pool = MemoryPool::new(2_000_000, 0).unwrap();
+            let declarations = GqlParameters::new().with_int64("value", 0).unwrap();
+            for imported in [false, true] {
+                for distinct in [false, true] {
+                    for order in ["", "ORDER BY value DESC"] {
+                        let pages = [(0, None), (0, Some(0)), (0, Some(2)), (1, Some(3))];
+                        for (skip, count) in pages {
+                            let quantifier = if distinct { "DISTINCT" } else { "ALL" };
+                            let page = count.map_or_else(String::new, |count| {
+                                format!("SKIP {skip} LIMIT {count}")
+                            });
+                            let text = format!(
+                                "MATCH (n:L) RETURN {quantifier} $value AS value {order} {page}"
+                            );
+                            let (mut session, prepared) = open(
+                                &db,
+                                &cx,
+                                &issuer,
+                                &token,
+                                &pool,
+                                &text,
+                                &declarations,
+                                policy(),
+                                imported,
+                            )
+                            .await;
+                            session.limits.run_rows = 1;
+                            assert!(matches!(
+                                prepared.native.as_ref(),
+                                PreparedNativeRead::Set(_)
+                            ));
+                            for value in [4, -7] {
+                                let args = GqlParameters::new()
+                                    .with_int64("value", value)
+                                    .unwrap();
+                                // DISTINCT and LIMIT belong to the final result:
+                                // all five private occurrences still reach projection.
+                                usage(&mut session, &cx, &prepared, &args);
+                                let available = if distinct { 1_usize } else { 5_usize };
+                                let selected = available.saturating_sub(skip);
+                                let selected =
+                                    count.map_or(selected, |count| selected.min(count));
+                                let future = session
+                                    .execute_ordered(&cx, &prepared, &args)
+                                    .unwrap();
+                                assert_eq!(future.columns(), &["value"]);
+                                assert_eq!(future.snapshot_seq(), CommitSeq(1));
+                                fn require_send<T: Send>(_: &T) {}
+                                require_send(&future);
+                                let mut cursor = future.await.unwrap();
+                                require_send(&cursor);
+                                assert_eq!(
+                                    values(&mut cursor).await,
+                                    vec![vec![scalar(value)]; selected]
+                                );
+                                drop(cursor);
+                                assert!(!session.is_closed());
+                                assert_eq!(pool.used(), 0);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn distinct_null_projection_obeys_one_final_row_quota_not_input_multiplicity() {
+        let ((), report) = run_async_under_lab(0x8600_0017, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let issuer = authority();
+            let mut capability = grant();
+            capability.limits.max_rows = 1;
+            let token = issuer.issue_at(&capability, 100).unwrap();
+            let pool = MemoryPool::new(2_000_000, 0).unwrap();
+            let args = GqlParameters::new();
+            for imported in [false, true] {
+                let (mut session, prepared) = open(
+                    &db,
+                    &cx,
+                    &issuer,
+                    &token,
+                    &pool,
+                    "MATCH (n:L) RETURN DISTINCT NULL AS value",
+                    &args,
+                    GqlQueryPolicy::new(5, 1, 1_000_000, 1_000_000),
+                    imported,
+                )
+                .await;
+                session.limits.run_rows = 1;
+                usage(&mut session, &cx, &prepared, &args);
+                let mut cursor = session
+                    .execute_ordered(&cx, &prepared, &args)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                assert_eq!(values(&mut cursor).await, vec![vec![null()]]);
+                drop(cursor);
+                assert!(!session.is_closed());
+                assert_eq!(pool.used(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn distinct_limit_zero_keeps_native_admission_and_late_projection_errors() {
+        let ((), report) = run_async_under_lab(0x8600_0018, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let pool = MemoryPool::new(2_000_000, 0).unwrap();
+            let args = GqlParameters::new().with_int64("divisor", 1).unwrap();
+            for imported in [false, true] {
+                let text = concat!(
+                    "MATCH (n) RETURN DISTINCT n AS id,",
+                    "12 / (n.p - $divisor) AS value LIMIT 0"
+                );
+                let (mut session, prepared) = open(
+                    &db, &cx, &issuer, &token, &pool, text, &args, policy(), imported,
+                )
+                .await;
+                let error = session
+                    .execute_ordered(&cx, &prepared, &args)
+                    .unwrap()
+                    .await
+                    .expect_err("DISTINCT and LIMIT 0 must not conceal the second row's error");
+                division(error);
+                assert!(!session.is_closed());
+                assert_eq!(pool.used(), 0);
+                let safe = GqlParameters::new().with_int64("divisor", 4).unwrap();
+                // A source error abandoned the destination's paged writer.
+                // It refunds resident buffers, not the file's poison fence.
+                let retry = session
+                    .execute_ordered(&cx, &prepared, &safe)
+                    .unwrap()
+                    .await
+                    .expect_err("an abandoned spill writer cannot be reused");
+                assert!(matches!(
+                    retry,
+                    NativeSpoolError::Spill(SpillError::PoisonedFile)
+                ));
+                assert!(!session.is_closed());
+                assert_eq!(pool.used(), 0);
+                drop(session);
+                let (mut session, prepared) = open(
+                    &db, &cx, &issuer, &token, &pool, text, &args, policy(), imported,
+                )
+                .await;
+                let mut cursor = session
+                    .execute_ordered(&cx, &prepared, &safe)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                assert!(values(&mut cursor).await.is_empty());
+                drop(cursor);
+                assert_eq!(pool.used(), 0);
+
+                let text = "MATCH (n:L) RETURN DISTINCT n AS id,7 AS value LIMIT 0";
+                let empty = GqlParameters::new();
+                for dimension in [
+                    GlaLimitDimension::WorkUnits,
+                    GlaLimitDimension::ScratchEntries,
+                ] {
+                    let allowance = match dimension {
+                        GlaLimitDimension::WorkUnits => GqlQueryPolicy::new(5, 0, 0, 1_000_000),
+                        GlaLimitDimension::ScratchEntries => {
+                            GqlQueryPolicy::new(5, 0, 1_000_000, 0)
+                        }
+                    };
+                    let (mut denied, prepared) = open(
+                        &db, &cx, &issuer, &token, &pool, text, &empty, allowance, imported,
+                    )
+                    .await;
+                    let error = denied
+                        .execute_ordered(&cx, &prepared, &empty)
+                        .unwrap()
+                        .await
+                        .expect_err("a zero-result page does not bypass native limits");
+                    native_limit(error, dimension);
+                    assert!(!denied.is_closed());
+                    assert_eq!(pool.used(), 0);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
     fn ordered_projection_refuses_native_limits_even_beneath_limit_zero() {
         let ((), report) = run_async_under_lab(0x8600_0013, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
