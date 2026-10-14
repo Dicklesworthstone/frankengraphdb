@@ -332,17 +332,53 @@ impl Trie {
     }
 }
 
-/// Fallible lower/strict-upper bound: all comparisons are charged and no
-/// identity is incremented, so the full u128 domain includes both endpoints.
-fn seek<E>(
+/// One variable's candidates from one trie: all of its roots, or the
+/// children of its low variable's assignment.
+#[derive(Clone, Copy)]
+enum Domain<'t> {
+    Roots(&'t Trie),
+    Children(&'t [VId]),
+}
+impl<'t> Domain<'t> {
+    fn values(self) -> &'t [VId] {
+        match self {
+            Self::Roots(trie) => &trie.roots,
+            Self::Children(values) => values,
+        }
+    }
+
+    /// Whether `value` is a candidate: one probe of a trie's row index, or a
+    /// binary search of a child list, each comparison charged.
+    fn contains<E>(
+        self,
+        value: VId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        match self {
+            Self::Roots(trie) => {
+                control(GlaExecutionEvent::Work)?;
+                Ok(trie.rows.contains_key(&value))
+            }
+            Self::Children(values) => {
+                let at = lower_bound(values, Some(value), false, control)?;
+                Ok(values.get(at) == Some(&value))
+            }
+        }
+    }
+}
+
+/// The first position at or after (strictly after, when `exclusive`)
+/// `bound`; every comparison is charged and no identity is incremented, so
+/// the full u128 domain includes both endpoints.
+fn lower_bound<E>(
     values: &[VId],
     bound: Option<VId>,
     exclusive: bool,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-) -> Result<Option<VId>, E> {
+) -> Result<usize, E> {
     control(GlaExecutionEvent::Work)?;
     let Some(bound) = bound else {
-        return Ok(values.first().copied());
+        return Ok(0);
     };
     let (mut low, mut high) = (0, values.len());
     while low < high {
@@ -354,49 +390,76 @@ fn seek<E>(
             high = middle;
         }
     }
-    Ok(values.get(low).copied())
+    Ok(low)
 }
 
+/// Where a variable's previous answer sits in the domain that produced it:
+/// that domain's (address, length) and the answer's index.
+type Resume = Option<(usize, usize, usize)>;
+
+/// The smallest value after `after` in every incident trie's domain. The
+/// shortest domain drives and each other one is probed per candidate: a
+/// root list (hundreds of thousands of vertices) is a hash probe rather than
+/// a binary search repeated for every candidate, which was most of a
+/// 730K-edge triangle count's comparisons. The next call for the same
+/// variable resumes after its previous answer instead of searching again.
 fn intersect<E>(
     tries: &[Trie],
     variable: usize,
     assigned: &[Option<VId>],
     after: Option<VId>,
+    resume: &mut Resume,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<VId>, E> {
     let mut domains = [None; crate::algebra::MAX_PATTERN_EDGES];
     let mut count = 0;
     for trie in tries {
         control(GlaExecutionEvent::Work)?;
-        if let Some(domain) = trie.domain(variable, assigned) {
-            if domain.is_empty() {
+        if let Some(values) = trie.domain(variable, assigned) {
+            if values.is_empty() {
                 return Ok(None);
             }
-            domains[count] = Some(domain);
+            domains[count] = Some(if variable == trie.low {
+                Domain::Roots(trie)
+            } else {
+                Domain::Children(values)
+            });
             count += 1;
         }
     }
-    let Some(first) = domains[0] else {
+    let Some(driver) = (0..count).min_by_key(|&at| domains[at].map_or(0, |d| d.values().len()))
+    else {
         return Ok(None);
     };
-    let Some(mut candidate) = seek(first, after, true, control)? else {
-        return Ok(None);
+    let values = domains[driver]
+        .expect("counted domains are present")
+        .values();
+    let key = (values.as_ptr() as usize, values.len());
+    let mut at = match (*resume, after) {
+        (Some((address, len, index)), Some(after))
+            if (address, len) == key && values.get(index) == Some(&after) =>
+        {
+            index + 1
+        }
+        _ => lower_bound(values, after, true, control)?,
     };
-    loop {
-        let mut moved = false;
-        for domain in domains[..count].iter().flatten() {
-            let Some(next) = seek(domain, Some(candidate), false, control)? else {
-                return Ok(None);
-            };
-            if next > candidate {
-                candidate = next;
-                moved = true;
+    'candidates: while let Some(&candidate) = values.get(at) {
+        control(GlaExecutionEvent::Work)?;
+        for (other, domain) in domains[..count].iter().enumerate() {
+            if other != driver
+                && !domain
+                    .expect("counted domains are present")
+                    .contains(candidate, control)?
+            {
+                at += 1;
+                continue 'candidates;
             }
         }
-        if !moved {
-            return Ok(Some(candidate));
-        }
+        *resume = Some((key.0, key.1, at));
+        return Ok(Some(candidate));
     }
+    *resume = None;
+    Ok(None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -436,6 +499,7 @@ where
     }
     let mut assigned = [None; MAX_PATTERN_VERTICES];
     let mut after = [None; MAX_PATTERN_VERTICES];
+    let mut resume: [Resume; MAX_PATTERN_VERTICES] = [None; MAX_PATTERN_VERTICES];
     let mut bindings = [None; MAX_PATTERN_VERTICES];
     let mut depth = 0;
     loop {
@@ -474,7 +538,14 @@ where
             continue;
         }
         let variable = shape.order[depth];
-        let Some(value) = intersect(&tries, variable, &assigned, after[depth], &mut control)?
+        let Some(value) = intersect(
+            &tries,
+            variable,
+            &assigned,
+            after[depth],
+            &mut resume[depth],
+            &mut control,
+        )?
         else {
             assigned[variable] = None;
             after[depth] = None;
