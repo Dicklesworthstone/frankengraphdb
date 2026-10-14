@@ -471,8 +471,10 @@ fn build_identified_index<E>(
             }
         }
     }
-    for (key, stage) in keys.into_iter().zip(staged) {
-        index.insert(key, stage.into_adjacency());
+    for (key, adjacency) in keys.into_iter().zip(staged) {
+        let mut entries: Vec<_> = adjacency.into_iter().collect();
+        entries.sort_unstable_by_key(|(from, _)| *from);
+        index.insert(key, entries.into_iter().collect());
     }
     for adjacency in index.values_mut() {
         for neighbors in adjacency.values_mut() {
@@ -482,60 +484,26 @@ fn build_identified_index<E>(
     Ok(index)
 }
 
-/// An identified adjacency while it is built: each endpoint's neighbor list
-/// in arrival order, found through a probed (never iterated) slot index.
-/// Admitted edges arrive grouped by endpoint, so the newest endpoint's slot
-/// is remembered and most pushes skip the probe; each list is allocated once
-/// and moved, not rehashed with the map.
-#[derive(Default)]
-struct IdentifiedStage {
-    slots: crate::id_hash::IdMap<VId, usize>,
-    keys: Vec<VId>,
-    lists: Vec<Vec<(EId, VId)>>,
-    newest: Option<(VId, usize)>,
-}
-impl IdentifiedStage {
-    /// The ordered adjacency: every endpoint once, ascending.
-    fn into_adjacency(self) -> BTreeMap<VId, Vec<(EId, VId)>> {
-        let Self {
-            keys, mut lists, ..
-        } = self;
-        let mut order: Vec<usize> = (0..keys.len()).collect();
-        order.sort_unstable_by_key(|&slot| keys[slot]);
-        order
-            .into_iter()
-            .map(|slot| (keys[slot], std::mem::take(&mut lists[slot])))
-            .collect()
-    }
-}
+/// An identified adjacency while it is built: probed, never iterated before
+/// it is sorted into the index, so its order never reaches a result.
+type IdentifiedStage = crate::id_hash::IdMap<VId, Vec<(EId, VId)>>;
 
 /// One identified neighbor under `from`, charging the key's own scratch
-/// entry first when it is new.
+/// entry first when it is new: one probe, where contains_key then entry
+/// took two searches.
 fn push_identified<E>(
-    stage: &mut IdentifiedStage,
+    adjacency: &mut IdentifiedStage,
     from: VId,
     neighbor: (EId, VId),
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
-    let slot = match stage.newest {
-        Some((key, slot)) if key == from => slot,
-        _ => {
-            let slot = match stage.slots.entry(from) {
-                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    let slot = stage.lists.len();
-                    entry.insert(slot);
-                    stage.keys.push(from);
-                    stage.lists.push(Vec::new());
-                    slot
-                }
-            };
-            stage.newest = Some((from, slot));
-            slot
+    match adjacency.entry(from) {
+        std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().push(neighbor),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            entry.insert(vec![neighbor]);
         }
-    };
-    stage.lists[slot].push(neighbor);
+    }
     Ok(())
 }
 
