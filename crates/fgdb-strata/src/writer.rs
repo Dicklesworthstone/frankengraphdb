@@ -411,46 +411,47 @@ impl BlockWriter {
         patches: &[VertexPatchRows],
         frontier: CommitSeq,
     ) -> Self {
-        let mut live = BTreeMap::new();
-        for (entry, props) in live_edges {
-            live.insert(
-                entry.eid,
-                LiveEdge {
-                    src: entry.src,
-                    relation: entry.relation,
-                    dst: entry.dst,
-                    created_at: entry.created_at,
-                    props,
-                },
-            );
-        }
-        let mut spent = BTreeSet::new();
-        for block in blocks {
-            for entry in block {
-                spent.insert(entry.eid);
-            }
-        }
-        let mut live_vertices = BTreeMap::new();
-        for row in crate::vertex::merge_all_vertices(patches, frontier) {
-            live_vertices.insert(row.vid, row);
-        }
-        let mut spent_vertices = BTreeSet::new();
-        for rows in patches {
-            for row in rows {
-                spent_vertices.insert(row.vid);
-            }
-        }
+        let live = last_wins(
+            live_edges
+                .into_iter()
+                .map(|(entry, props)| {
+                    (
+                        entry.eid,
+                        LiveEdge {
+                            src: entry.src,
+                            relation: entry.relation,
+                            dst: entry.dst,
+                            created_at: entry.created_at,
+                            props,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let spent: BTreeSet<EId> = blocks.iter().flatten().map(|entry| entry.eid).collect();
+        let live_vertices = last_wins(
+            crate::vertex::merge_all_vertices(patches, frontier)
+                .into_iter()
+                .map(|row| (row.vid, row))
+                .collect(),
+        );
+        let spent_vertices: BTreeSet<VId> = patches.iter().flatten().map(|row| row.vid).collect();
         // The chain head per family is the LAST published block of that
         // family — publication order IS the chain (fgdb-4391).
-        let mut chain_heads = BTreeMap::new();
-        for (sealed_block, entries) in sealed.iter().zip(blocks) {
-            if let Some(first) = entries.first() {
-                chain_heads.insert(
-                    (first.src, first.relation),
-                    DeltaBlockVersion(sealed_block.block_id),
-                );
-            }
-        }
+        let chain_heads = last_wins(
+            sealed
+                .iter()
+                .zip(blocks)
+                .filter_map(|(sealed_block, entries)| {
+                    entries.first().map(|first| {
+                        (
+                            (first.src, first.relation),
+                            DeltaBlockVersion(sealed_block.block_id),
+                        )
+                    })
+                })
+                .collect(),
+        );
         Self {
             graph,
             branch,
@@ -1595,6 +1596,51 @@ impl BlockWriter {
         };
         validate_root(&root).map_err(WriteError::Root)?;
         Ok(root)
+    }
+}
+
+/// The map that inserting `pairs` in order builds, a later pair replacing an
+/// earlier one with an equal key, built in one bulk pass. A writable open
+/// assembles its writer's maps from millions of pairs; one insert each, in the
+/// random key order a keyed EId permutation gives, was most of that assembly
+/// on a packed web-google (fgdb-e8gr4).
+fn last_wins<K: Ord, V>(mut pairs: Vec<(K, V)>) -> BTreeMap<K, V> {
+    // Stable: pairs with equal keys keep their order, so the last one wins.
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut unique: Vec<(K, V)> = Vec::with_capacity(pairs.len());
+    for pair in pairs {
+        match unique.last_mut() {
+            Some(last) if last.0 == pair.0 => *last = pair,
+            _ => unique.push(pair),
+        }
+    }
+    unique.into_iter().collect()
+}
+
+#[cfg(test)]
+mod last_wins_tests {
+    use super::last_wins;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn last_wins_builds_the_map_that_inserting_in_order_builds() {
+        let mut state = 0x001a_570f_u64;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for trial in 0..2_000 {
+            let len = next(64) as usize;
+            let keys = 1 + next(40);
+            let pairs: Vec<(u64, u64)> = (0..len).map(|at| (next(keys), at as u64)).collect();
+            let mut inserted = BTreeMap::new();
+            for &(key, value) in &pairs {
+                inserted.insert(key, value);
+            }
+            assert_eq!(last_wins(pairs), inserted, "trial {trial}");
+        }
     }
 }
 
