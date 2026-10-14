@@ -4,7 +4,9 @@ use fgdb::{Database, DatabaseKeys, PreparedNativeRead, QueryError, QueryResult, 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::stream::{VertexScanError, VertexScanState};
 use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, RelationBind};
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 
 #[path = "native_aggregate_stream/extended.rs"]
 mod extended;
@@ -215,40 +217,54 @@ fn temporal_rebinding_stays_at_the_exact_cut_and_refuses_future_view_reads() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// WITH-pipeline aggregates over a vertex scan or one directed edge stream
+/// natively (they were refused before the native aggregate cursors, 9f9019dc
+/// and d395d42c; fgdb-4wrnd): each streams exactly the eager answer under the
+/// same columns. A plain row scan is still refused rather than run eagerly
+/// behind a stream.
 #[test]
-fn unsupported_aggregate_shapes_are_never_stripped_or_eagerly_retried() {
+fn with_pipeline_aggregates_stream_the_eager_answer_and_plain_scans_still_refuse() {
     let ((), report) = run_async_under_lab(0xa66e_1004, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
-        let db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut edges = WriteBatch::new(RelationId(1));
+        for (eid, from, to) in [
+            (10, 0, 1),
+            (11, 1, u128::MAX),
+            (12, 2, 0),
+            (13, 0, u128::MAX),
+        ] {
+            edges.add_edge(EId(eid), VId(from), VId(to), vec![]);
+        }
+        db.write(&commit, edges).await.unwrap();
+        let args = GqlParameters::new();
         for text in [
             "MATCH (n:L) WITH n.score AS score RETURN COUNT(*) AS count",
             "MATCH (n:L) WITH n.score AS score RETURN SUM(score) AS total",
             "MATCH (a:L)-[:R]->(b:L) WITH b.score AS s RETURN SUM(s) AS total",
             "MATCH (a:L)-[:R]->(b:L) WITH b.score AS s RETURN COUNT(*) AS count",
         ] {
-            // Ensure a valid native definition, not a vacuous syntax refusal.
-            let prepared =
-                PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols()).unwrap();
-            assert!(
-                matches!(
-                    prepared.stream_aggregate(
-                        &db,
-                        &cx,
-                        &GqlParameters::new(),
-                        GqlQueryPolicy::new(0, 0, 0, 0),
-                    ),
-                    Err(QueryError::AggregateStreamPlan(_) | QueryError::EdgeAggregateStreamPlan(_))
-                ),
-                "{text}"
-            );
+            let prepared = PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
+            let QueryResult::Rows { columns, rows } =
+                prepared.execute(&db, &cx, &args, wide()).unwrap()
+            else {
+                panic!("{text}: not rows")
+            };
+            assert!(!rows.is_empty(), "{text}: a vacuous comparison");
+            let mut cursor = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+            assert_eq!(cursor.columns(), columns, "{text}");
+            let streamed: Vec<_> = cursor
+                .by_ref()
+                .map(|row| row.unwrap().values().to_vec())
+                .collect();
+            assert_eq!(streamed, rows, "{text}");
         }
-        let scan =
-            PreparedNativeRead::prepare("MATCH (n:L) RETURN n", &GqlParameters::new(), symbols())
-                .unwrap();
+        let scan = PreparedNativeRead::prepare("MATCH (n:L) RETURN n", &args, symbols()).unwrap();
         assert!(matches!(
-            scan.stream_aggregate(&db, &cx, &GqlParameters::new(), wide()),
+            scan.stream_aggregate(&db, &cx, &args, wide()),
             Err(QueryError::StreamingUnsupported { .. })
         ));
     });

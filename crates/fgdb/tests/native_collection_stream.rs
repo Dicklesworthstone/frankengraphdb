@@ -281,7 +281,8 @@ fn native_collection_errors_limits_and_empty_input_keep_atomic_result_semantics(
 }
 
 #[test]
-fn native_identified_edge_collections_preserve_order_and_refuse_unproved_inputs() {
+fn native_identified_edge_collections_preserve_order_and_plain_collections_stream_the_eager_order()
+{
     let ((), report) = run_async_under_lab(0xc011_1003, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -349,15 +350,26 @@ fn native_identified_edge_collections_preserve_order_and_refuse_unproved_inputs(
                 }
             }
         }
+        // Plain edge collections stream natively too (they were refused before
+        // the native edge collection cursors; fgdb-4wrnd): each streams the
+        // eager collection, in its order.
         for text in [
             "MATCH (a)-[r:R]->(b) RETURN COLLECT(b) AS vals",
             "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS vals",
         ] {
-            let p = PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols()).unwrap();
-            assert!(
-                p.stream_aggregate(&db, &cx, &GqlParameters::new(), wide())
-                    .is_err()
-            );
+            let args = GqlParameters::new();
+            let p = PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
+            let QueryResult::Rows { columns, rows } = p.execute(&db, &cx, &args, wide()).unwrap()
+            else {
+                panic!("{text}: not rows")
+            };
+            let mut cursor = p.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+            assert_eq!(cursor.columns(), columns, "{text}");
+            let streamed: Vec<_> = cursor
+                .by_ref()
+                .map(|row| row.unwrap().values().to_vec())
+                .collect();
+            assert_eq!(streamed, rows, "{text}");
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

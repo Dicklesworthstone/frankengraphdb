@@ -91,6 +91,52 @@ fn visible(row: &GraphAggregateRow, slots: &[GraphAggregateTextSlot]) -> Vec<Gra
 }
 const SUMMARY: &str = "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n, LOWER(r.kind) AS bucket, SUM(r.price*r.qty) AS total, AVG(DISTINCT ABS(r.price*r.qty)) AS mean GROUP BY LOWER(r.kind)";
 
+/// A computed WITH pipeline that streams natively (refused before the native
+/// aggregate cursors; fgdb-4wrnd) streams the eager outcome: the same columns
+/// and rows, or - when the eager read fails, as a planted overflow makes it -
+/// a terminal error before any row is published. One that still does not
+/// stream (a DISTINCT WITH) is refused by its plan.
+fn assert_streams_the_eager_outcome(
+    db: &Database<fgdb::MemVfs>,
+    cx: &fgdb_types::QueryCx,
+    text: &str,
+    streams: bool,
+) {
+    let args = GqlParameters::new();
+    let query = PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
+    let eager = query.execute(db, cx, &args, wide());
+    let stream = query.stream_aggregate(db, cx, &args, wide());
+    if !streams {
+        // Still outside the native cursor: a typed plan refusal, never an
+        // eager answer behind the stream.
+        assert!(
+            matches!(
+                stream,
+                Err(QueryError::AggregateStreamPlan(_) | QueryError::EdgeAggregateStreamPlan(_))
+            ),
+            "{text}"
+        );
+        return;
+    }
+    let mut cursor = stream.unwrap();
+    match eager {
+        Ok(QueryResult::Rows { columns, rows }) => {
+            assert_eq!(cursor.columns(), columns, "{text}");
+            let streamed: Vec<_> = cursor
+                .by_ref()
+                .map(|row| row.unwrap().values().to_vec())
+                .collect();
+            assert_eq!(streamed, rows, "{text}");
+        }
+        Ok(other) => panic!("{text}: not rows: {other:?}"),
+        Err(_) => {
+            assert!(matches!(cursor.next(), Some(Err(_))), "{text}");
+            assert_eq!(cursor.row_stats().result_rows, 0, "{text}");
+            assert!(cursor.next().is_none(), "{text}");
+        }
+    }
+}
+
 #[test]
 fn native_computed_keys_aliases_and_duplicate_arguments_match_batch_and_hand_answers() {
     let ((), report) = run_async_under_lab(0xa66e_c001, |root| async move {
@@ -213,7 +259,8 @@ fn computed_parameters_and_temporal_cuts_are_frozen_without_borrowing_the_writer
 }
 
 #[test]
-fn projection_quota_and_late_overflow_refusals_are_terminal_and_never_publish_partial_groups() {
+fn projection_quota_and_late_overflow_refusals_are_terminal_and_with_pipelines_stream_the_eager_outcome()
+ {
     let ((), report) = run_async_under_lab(0xa66e_c003, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -272,19 +319,21 @@ fn projection_quota_and_late_overflow_refusals_are_terminal_and_never_publish_pa
         ));
         assert_eq!(bad.row_stats().result_rows, 0);
         assert!(bad.next().is_none());
-        for text in [
-            "MATCH (a)-[r:R]->(b) WITH r.price*2 AS p RETURN SUM(p) AS n",
-            "MATCH (a)-[r:R]->(b) WITH r.price*2 AS p RETURN AVG(p) AS n",
-            "MATCH (a)-[r:R]->(b) WITH DISTINCT r.price AS p RETURN SUM(p) AS n",
+        for (text, streams) in [
+            (
+                "MATCH (a)-[r:R]->(b) WITH r.price*2 AS p RETURN SUM(p) AS n",
+                true,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) WITH r.price*2 AS p RETURN AVG(p) AS n",
+                true,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) WITH DISTINCT r.price AS p RETURN SUM(p) AS n",
+                false,
+            ),
         ] {
-            let query = PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
-            assert!(
-                matches!(
-                    query.stream_aggregate(&db, &cx, &args, GqlQueryPolicy::new(0, 0, 0, 0)),
-                    Err(QueryError::EdgeAggregateStreamPlan(_))
-                ),
-                "{text}"
-            );
+            assert_streams_the_eager_outcome(&db, &cx, text, streams);
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -440,7 +489,7 @@ fn computed_vertex_history_and_scalar_parameters_survive_compaction_and_handle_d
 }
 
 #[test]
-fn computed_vertex_empty_results_quotas_and_late_errors_do_not_bypass_admission() {
+fn computed_vertex_empty_results_quotas_late_errors_and_with_pipelines_keep_the_eager_outcome() {
     let ((), report) = run_async_under_lab(0xa66e_c006, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -514,19 +563,15 @@ fn computed_vertex_empty_results_quotas_and_late_errors_do_not_bypass_admission(
         ));
         assert_eq!(bad.row_stats().result_rows, 0);
         assert!(bad.next().is_none());
-        for text in [
-            "MATCH (n:L) WITH n.price*2 AS p RETURN SUM(p) AS n",
-            "MATCH (n:L) WITH n.price*2 AS p RETURN AVG(p) AS n",
-            "MATCH (n:L) WITH DISTINCT n.price AS p RETURN SUM(p) AS n",
+        for (text, streams) in [
+            ("MATCH (n:L) WITH n.price*2 AS p RETURN SUM(p) AS n", true),
+            ("MATCH (n:L) WITH n.price*2 AS p RETURN AVG(p) AS n", true),
+            (
+                "MATCH (n:L) WITH DISTINCT n.price AS p RETURN SUM(p) AS n",
+                false,
+            ),
         ] {
-            let query = PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
-            assert!(
-                matches!(
-                    query.stream_aggregate(&db, &cx, &args, GqlQueryPolicy::new(0, 0, 0, 0)),
-                    Err(QueryError::AggregateStreamPlan(_))
-                ),
-                "{text}"
-            );
+            assert_streams_the_eager_outcome(&db, &cx, text, streams);
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

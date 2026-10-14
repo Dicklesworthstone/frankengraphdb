@@ -66,7 +66,7 @@ impl PreparedGraphSet {
         let mut operand = 0;
         visit(
             self,
-            &mut source,
+            &mut *source,
             &mut meter,
             &mut operand,
             &mut |row, meter| consume(row, &mut |event| meter.event(event)),

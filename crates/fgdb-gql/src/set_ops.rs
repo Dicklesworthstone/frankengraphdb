@@ -25,7 +25,7 @@ pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
-pub(crate) use procedure::PatternSource;
+pub(crate) use procedure::{DynPatterns, DynProcedures, PatternSource};
 pub use procedure::{
     GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection,
     ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
@@ -891,10 +891,7 @@ impl PreparedGraphSet {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
-        let patterns: &mut dyn FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> = &mut source;
+        let patterns: &mut DynPatterns<'_, E, C> = &mut source;
         let mut source = PatternSource { patterns };
         let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut source, checkpoint)
@@ -911,23 +908,18 @@ impl PreparedGraphSet {
         mut patterns: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut procedures: impl FnMut(
             &PreparedProcedureCall,
             &[crate::algebra::GraphValue],
             GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
-        let patterns: &mut dyn FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> = &mut patterns;
-        let procedures: &mut dyn FnMut(
-            &PreparedProcedureCall,
-            &[crate::algebra::GraphValue],
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> = &mut procedures;
+        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
+        let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
         let mut source = WithProcedures {
             patterns,
             procedures,
@@ -947,27 +939,22 @@ impl PreparedGraphSet {
         mut patterns: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut procedures: impl FnMut(
             &PreparedProcedureCall,
             &[crate::algebra::GraphValue],
             GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        )
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut elements: impl FnMut(
             fgdb_delta_types::ElementId,
             fgdb_delta_types::PropertyKeyId,
         ) -> Result<Option<fgdb_types::CanonicalScalar>, E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
-        let patterns: &mut dyn FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> = &mut patterns;
-        let procedures: &mut dyn FnMut(
-            &PreparedProcedureCall,
-            &[crate::algebra::GraphValue],
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> = &mut procedures;
+        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
+        let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
         let elements: &mut dyn FnMut(
             fgdb_delta_types::ElementId,
             fgdb_delta_types::PropertyKeyId,

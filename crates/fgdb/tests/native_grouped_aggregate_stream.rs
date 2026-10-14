@@ -365,7 +365,8 @@ fn grouped_budgets_are_cumulative_and_delivery_refusals_preserve_only_complete_p
 }
 
 #[test]
-fn empty_grouped_input_differs_from_global_input_and_unsupported_clauses_stay_intact() {
+fn empty_grouped_input_differs_from_global_input_and_grouped_with_pipelines_stream_the_eager_groups()
+ {
     let ((), report) = run_async_under_lab(0xa66e_4004, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -389,19 +390,34 @@ fn empty_grouped_input_differs_from_global_input_and_unsupported_clauses_stay_in
             )
             .unwrap();
         assert!(matches!(global.next(), Some(Err(GqlQueryError::Rows(_)))));
+        // Grouped WITH pipelines stream natively (they were refused before the
+        // native aggregate cursors; fgdb-4wrnd): the stream's groups are the
+        // eager answer, in the same order and layout.
+        let mut seeded = Database::open_memory(&commit, keys()).await.unwrap();
+        seeded.write(&commit, seed()).await.unwrap();
         for statement in [
             "MATCH (n:L) WITH n.a AS key RETURN COUNT(*) AS total GROUP BY key",
             "MATCH (n:L) WITH n.a AS key RETURN key AS key, COUNT(*) AS total GROUP BY key",
             "MATCH (n:L) WITH n.a AS key, n.score AS score RETURN key, SUM(score) AS total GROUP BY key",
         ] {
+            let QueryResult::Rows { columns, rows } = seeded
+                .query(&cx, statement, &args, symbols(), wide())
+                .unwrap()
+            else {
+                panic!("{statement}: not rows")
+            };
+            assert!(!rows.is_empty(), "{statement}: a vacuous comparison");
             let prepared = PreparedNativeRead::prepare(statement, &args, symbols()).unwrap();
-            assert!(
-                matches!(
-                    prepared.stream_aggregate(&db, &cx, &args, zero),
-                    Err(QueryError::AggregateStreamPlan(_))
-                ),
-                "{statement}"
-            );
+            let mut cursor = prepared
+                .stream_aggregate(&seeded, &cx, &args, wide())
+                .unwrap();
+            assert_eq!(cursor.columns(), columns, "{statement}");
+            let slots = cursor.output_slots().to_vec();
+            let streamed: Vec<_> = cursor
+                .by_ref()
+                .map(|row| projected(&row.unwrap(), &slots))
+                .collect();
+            assert_eq!(streamed, rows, "{statement}");
         }
         let mut closed = db
             .query_aggregate_stream(&cx, SUMMARY, &args, symbols(), wide())
