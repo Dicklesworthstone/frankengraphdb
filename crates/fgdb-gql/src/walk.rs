@@ -295,8 +295,9 @@ pub(crate) struct GraphPathCursor<'a> {
     frontier: Vec<GraphPath>,
     pending: std::vec::IntoIter<GraphPath>,
     /// Only looked up and cleared, never iterated, so its order can never
-    /// reach a result or a charge.
-    settled: std::collections::HashMap<VId, u32>,
+    /// reach a result or a charge. Seeded id hashing: SipHash over every
+    /// endpoint a layer reaches was 5% of an epinions SHORTEST.
+    settled: crate::id_hash::IdMap<VId, u32>,
     done: bool,
 }
 
@@ -317,7 +318,7 @@ impl<'a> GraphPathCursor<'a> {
             depth: 0,
             frontier: vec![GraphPath::new(source, Box::new([]))],
             pending: Vec::new().into_iter(),
-            settled: std::collections::HashMap::new(),
+            settled: crate::id_hash::IdMap::default(),
             done: false,
         })
     }

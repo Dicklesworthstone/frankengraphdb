@@ -425,36 +425,53 @@ fn build_identified_index<E>(
     // one hash probe into a staging map, which becomes the ordered adjacency
     // once at the end. Neighbors keep their arrival order within a key, so
     // every charged event, and each list's sort, is as before.
-    let mut staged: BTreeMap<_, IdentifiedStage> = index
-        .keys()
-        .map(|key| (*key, IdentifiedStage::default()))
-        .collect();
-    for (edge, source, relation, destination) in edges {
-        control(GlaExecutionEvent::Work)?;
+    let keys: Vec<_> = index.keys().copied().collect();
+    let mut staged: Vec<IdentifiedStage> =
+        keys.iter().map(|_| IdentifiedStage::default()).collect();
+    // The stages one relation's edges join, in the order the per-edge walk
+    // reaches them (direction, then selector), resolved once per run of that
+    // relation: three tree searches per edge were 9% of an epinions SHORTEST.
+    let stages_of = |relation| {
+        let mut stages = Vec::new();
         for direction in [
             GlaDirection::Forward,
             GlaDirection::Reverse,
             GlaDirection::Undirected,
         ] {
             for selector in edge_selectors(relation, &alternations) {
-                let Some(adjacency) = staged.get_mut(&(selector, direction)) else {
-                    continue;
-                };
-                let (from, to) = if direction == GlaDirection::Reverse {
-                    (destination, source)
-                } else {
-                    (source, destination)
-                };
-                control(GlaExecutionEvent::ScratchEntry)?;
-                push_identified(adjacency, from, (edge, to), control)?;
-                if direction == GlaDirection::Undirected && source != destination {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    push_identified(adjacency, destination, (edge, source), control)?;
+                if let Ok(at) = keys.binary_search(&(selector, direction)) {
+                    stages.push((at, direction));
                 }
             }
         }
+        stages
+    };
+    let mut resolved: Option<(RelationId, Vec<(usize, GlaDirection)>)> = None;
+    for (edge, source, relation, destination) in edges {
+        control(GlaExecutionEvent::Work)?;
+        if resolved
+            .as_ref()
+            .is_none_or(|(known, _)| *known != relation)
+        {
+            resolved = Some((relation, stages_of(relation)));
+        }
+        let (_, stages) = resolved.as_ref().expect("resolved above");
+        for &(at, direction) in stages {
+            let adjacency = &mut staged[at];
+            let (from, to) = if direction == GlaDirection::Reverse {
+                (destination, source)
+            } else {
+                (source, destination)
+            };
+            control(GlaExecutionEvent::ScratchEntry)?;
+            push_identified(adjacency, from, (edge, to), control)?;
+            if direction == GlaDirection::Undirected && source != destination {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                push_identified(adjacency, destination, (edge, source), control)?;
+            }
+        }
     }
-    for (key, adjacency) in staged {
+    for (key, adjacency) in keys.into_iter().zip(staged) {
         let mut entries: Vec<_> = adjacency.into_iter().collect();
         entries.sort_unstable_by_key(|(from, _)| *from);
         index.insert(key, entries.into_iter().collect());
