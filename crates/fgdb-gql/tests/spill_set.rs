@@ -1480,18 +1480,17 @@ fn collection_and_unsupported_group_descendants_still_refuse_before_zero_limit()
         AsyncSpillSetPlan::compile(&nested),
         Err(SpillSetBuildError::Unsupported { depth: 1 })
     ));
+    // A relational join below a group was the unsupported descendant until
+    // d3574354 executed joins over completed child runs; it now compiles.
     let spec = RowJoinSpec::cross(input.column_types(), input.column_types()).unwrap();
-    let unsupported = input
+    let joined = input
         .clone()
         .join(input, spec)
         .unwrap()
         .group_by(&[], &[GraphAggregate::count_rows("count")])
         .unwrap()
         .with_page(0, Some(0));
-    assert!(matches!(
-        AsyncSpillSetPlan::compile(&unsupported),
-        Err(SpillSetBuildError::Unsupported { depth: 1 })
-    ));
+    assert!(AsyncSpillSetPlan::compile(&joined).is_ok());
 }
 
 #[test]
@@ -2086,25 +2085,38 @@ fn cartesian_oversized_rows_and_unsupported_children_refuse_before_empty_pages()
         .unwrap();
     let spec = RowJoinSpec::cross(input.column_types(), input.column_types()).unwrap();
     let relational_join = input.clone().join(input.clone(), spec).unwrap();
-    for unsupported in [collection, relational_join] {
-        for product in [
-            input
-                .clone()
-                .with_page(0, Some(0))
-                .cross_join(unsupported.clone())
-                .unwrap(),
-            unsupported
-                .cross_join(input.clone().with_page(0, Some(0)))
-                .unwrap(),
-        ] {
-            assert!(matches!(
-                AsyncSpillSetPlan::compile(&product.clone().with_page(0, Some(0))),
-                Err(SpillSetBuildError::Unsupported { depth: 1 })
-            ));
-            assert!(matches!(
-                AsyncSpillSetPlan::compile(&product.nested().unwrap().with_page(0, Some(0))),
-                Err(SpillSetBuildError::Unsupported { depth: 2 })
-            ));
-        }
+    // Relational joins execute over completed child runs since d3574354, so
+    // a product over one compiles; a collection child still refuses.
+    for product in [
+        input
+            .clone()
+            .with_page(0, Some(0))
+            .cross_join(relational_join.clone())
+            .unwrap(),
+        relational_join
+            .cross_join(input.clone().with_page(0, Some(0)))
+            .unwrap(),
+    ] {
+        assert!(AsyncSpillSetPlan::compile(&product.clone().with_page(0, Some(0))).is_ok());
+    }
+    let unsupported = collection;
+    for product in [
+        input
+            .clone()
+            .with_page(0, Some(0))
+            .cross_join(unsupported.clone())
+            .unwrap(),
+        unsupported
+            .cross_join(input.clone().with_page(0, Some(0)))
+            .unwrap(),
+    ] {
+        assert!(matches!(
+            AsyncSpillSetPlan::compile(&product.clone().with_page(0, Some(0))),
+            Err(SpillSetBuildError::Unsupported { depth: 1 })
+        ));
+        assert!(matches!(
+            AsyncSpillSetPlan::compile(&product.nested().unwrap().with_page(0, Some(0))),
+            Err(SpillSetBuildError::Unsupported { depth: 2 })
+        ));
     }
 }

@@ -434,6 +434,7 @@ impl ExpressionCell<'_> {
                     CanonicalScalar::Null
                         | CanonicalScalar::Int(_)
                         | CanonicalScalar::Float(_)
+                        | CanonicalScalar::Decimal(_)
                         | CanonicalScalar::Bool(_)
                         | CanonicalScalar::Text(_)
                         | CanonicalScalar::Date(_)
