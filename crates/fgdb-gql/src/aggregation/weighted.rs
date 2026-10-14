@@ -186,11 +186,11 @@ where
     let shared = from == to;
     // Probed, never iterated: no order of theirs reaches a result.
     let mut tested = [
-        std::collections::HashMap::<VId, bool>::new(),
-        std::collections::HashMap::<VId, bool>::new(),
+        crate::id_hash::IdMap::<VId, bool>::default(),
+        crate::id_hash::IdMap::<VId, bool>::default(),
     ];
     // Anchor -> (passing edges, the first partner): probed, then sorted.
-    let mut anchors = std::collections::HashMap::<VId, (u64, VId)>::new();
+    let mut anchors = crate::id_hash::IdMap::<VId, (u64, VId)>::default();
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         if relation != scan.access.relation {

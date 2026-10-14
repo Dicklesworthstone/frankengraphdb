@@ -427,7 +427,7 @@ fn build_identified_index<E>(
     // every charged event, and each list's sort, is as before.
     let mut staged: BTreeMap<_, IdentifiedStage> = index
         .keys()
-        .map(|key| (*key, IdentifiedStage::new()))
+        .map(|key| (*key, IdentifiedStage::default()))
         .collect();
     for (edge, source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
@@ -469,7 +469,7 @@ fn build_identified_index<E>(
 
 /// An identified adjacency while it is built: probed, never iterated before
 /// it is sorted into the index, so its order never reaches a result.
-type IdentifiedStage = std::collections::HashMap<VId, Vec<(EId, VId)>>;
+type IdentifiedStage = crate::id_hash::IdMap<VId, Vec<(EId, VId)>>;
 
 /// One identified neighbor under `from`, charging the key's own scratch
 /// entry first when it is new: one probe, where contains_key then entry
@@ -612,7 +612,7 @@ struct Execution<'i, F, C, P, Row> {
     project: P,
     // Probed per binding and never iterated, so a hash map: one probe where
     // a tree took a search for get and another for insert.
-    predicate_cache: std::collections::HashMap<(usize, VId), bool>,
+    predicate_cache: crate::id_hash::IdMap<(usize, VId), bool>,
     projected: ProjectedRows<Row>,
     active_probe: Option<usize>,
     probe_matches: [bool; crate::algebra::MAX_PATTERN_IDENTITIES],
@@ -1488,7 +1488,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             test_vertex,
             control,
             project,
-            predicate_cache: std::collections::HashMap::new(),
+            predicate_cache: crate::id_hash::IdMap::default(),
             projected: ProjectedRows::<Row>::for_plan(distinct, operators),
             active_probe: None,
             probe_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
