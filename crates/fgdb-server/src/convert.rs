@@ -223,7 +223,12 @@ fn argument_scalar(
             Ok(value) if value.to_string() == *v => CanonicalScalar::Duration(value),
             _ => return Err("a duration argument must be canonical ISO 8601 text"),
         },
-        WireValue::Decimal(_) => return Err("decimal arguments are not supported"),
+        // Decimal output is a canonical fixed-scale string, not a JSON/f64
+        // number. Reuse the core inverse codec for scalar and nested operands.
+        WireValue::Decimal(v) => CanonicalScalar::Decimal(
+            fgdb_types::CanonicalDecimal::parse_canonical(v)
+                .map_err(|_| "a decimal argument must be canonical fixed-scale text")?,
+        ),
         WireValue::Vertex(_)
         | WireValue::Edge(_)
         | WireValue::Path { .. }
@@ -428,3 +433,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod decimal_tests;
