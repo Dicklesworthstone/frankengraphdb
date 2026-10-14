@@ -9,6 +9,18 @@ use fgdb_types::{
     CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 
+/// The owner-path projection cache is process-wide and small, and these
+/// tests fill it and observe reuse. Under the parallel test runner another
+/// test's live snapshots can fill it or hold its lock, so a lawful rebuild
+/// looked like a missing reuse (fgdb-7fqu6). Each test runs alone; a finished
+/// test's entries die with its database.
+static CACHE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
         [0x31; 32],
@@ -93,6 +105,7 @@ fn call() -> FnxCallSpec {
 
 #[test]
 fn database_calls_select_real_multigraph_rows_without_losing_isolates() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -149,6 +162,7 @@ fn database_calls_select_real_multigraph_rows_without_losing_isolates() {
 
 #[test]
 fn retained_view_historical_cut_and_shared_cache_survive_writer_progress_and_drop() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -232,6 +246,7 @@ fn retained_view_historical_cut_and_shared_cache_survive_writer_progress_and_dro
 
 #[test]
 fn excluded_properties_and_explicit_discard_laws_cannot_change_answers() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -285,6 +300,7 @@ fn excluded_properties_and_explicit_discard_laws_cannot_change_answers() {
 
 #[test]
 fn relation_filter_and_selection_recipe_are_bound_even_when_rows_coincide() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -317,6 +333,7 @@ fn relation_filter_and_selection_recipe_are_bound_even_when_rows_coincide() {
 
 #[test]
 fn source_cache_algorithm_and_frontier_limits_preserve_typed_refusals() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -373,6 +390,7 @@ fn source_cache_algorithm_and_frontier_limits_preserve_typed_refusals() {
 
 #[test]
 fn property_successors_and_retirements_resolve_at_the_selected_cut() {
+    let _cache = exclusive();
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -423,6 +441,7 @@ fn property_successors_and_retirements_resolve_at_the_selected_cut() {
 
 #[test]
 fn every_source_and_adapter_checkpoint_can_cancel_without_publishing_results() {
+    let _cache = exclusive();
     use fgdb_types::context::SimulationCheckpointProbe;
     use std::sync::Arc;
     let runtime = RuntimeBuilder::new().build().unwrap();
