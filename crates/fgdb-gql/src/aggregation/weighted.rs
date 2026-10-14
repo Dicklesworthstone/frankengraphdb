@@ -1163,9 +1163,15 @@ fn normalized(
 /// endpoint-triple multiplicities. With it, atoms whose bound keys are equal
 /// must choose distinct parallel relationships: k of them over m occurrences
 /// admit m·(m-1)···(m-k+1) choices, none when k > m (fgdb-ujaad).
+/// `simple` says every topology key weighs one (no parallel edges, decided
+/// once per evaluation). Then a binding's weight is one, or, under DIFFERENT
+/// EDGES, nothing when it takes one key twice, so no key is searched: the
+/// same Work events, without a topology search per atom per binding (a fifth
+/// of a directed triangle count over epinions).
 fn binding_weight<E, C>(
     accesses: &[EdgeAccess],
     topology: &BTreeMap<TopologyKey, Multiplicity>,
+    simple: bool,
     bindings: &[Option<VId>],
     distinct: bool,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
@@ -1191,7 +1197,7 @@ fn binding_weight<E, C>(
             GlaDirection::Reverse => (destination, access.relation, source),
             GlaDirection::Undirected => normalized(source, access.relation, destination, true),
         };
-        if !distinct {
+        if !distinct && !simple {
             weight = weight.product(topology.get(&*slot).copied().ok_or_else(unavailable)?);
         }
     }
@@ -1204,6 +1210,13 @@ fn binding_weight<E, C>(
         }
         control(GlaExecutionEvent::Work)?;
         let group = keys[at..].iter().filter(|key| **key == keys[at]).count() as u64;
+        if simple {
+            // One occurrence: a key taken twice has none left for the second.
+            if group > 1 {
+                return Ok(None);
+            }
+            continue;
+        }
         let available = topology.get(&keys[at]).copied().ok_or_else(unavailable)?;
         let Some(count) = available.exact_count() else {
             // More than u64::MAX occurrences: the product stays above-count.
@@ -1460,6 +1473,7 @@ where
     };
     let needs_original_bindings = needs_original_bindings(plan);
     if needs_original_bindings || distinct {
+        let simple = topology.values().all(|weight| *weight == Multiplicity::ONE);
         // Keep all slots and the complete multiplicity/read callback. Only a
         // topology prefix followed by late reads may use intersection; its
         // guarded fallback is the original visitor, with no extra events.
@@ -1472,7 +1486,7 @@ where
             control,
             |columns, bindings, property, control| {
                 let Some(weight) =
-                    binding_weight(&accesses, &topology, bindings, distinct, control)?
+                    binding_weight(&accesses, &topology, simple, bindings, distinct, control)?
                 else {
                     return Ok(());
                 };
@@ -1654,64 +1668,114 @@ mod tests {
 
     #[test]
     fn distinct_edge_counts_equal_the_identified_evaluator() {
-        let edges = distinct_edge_graph();
+        let parallel = distinct_edge_graph();
+        // The same graph without parallel edges, where every weight is one
+        // and binding_weight searches no key.
+        let mut seen = BTreeSet::new();
+        let simple: Vec<_> = parallel
+            .iter()
+            .copied()
+            .filter(|&(_, source, relation, destination)| {
+                seen.insert((source, relation, destination))
+            })
+            .collect();
+        assert!(simple.len() < parallel.len());
+        for edges in [&parallel, &simple] {
+            let properties = BTreeMap::from([
+                (VId(0), CanonicalScalar::Int(7)),
+                (VId(1), CanonicalScalar::Null),
+                (VId(2), CanonicalScalar::Int(7)),
+                (VId(3), CanonicalScalar::Int(-2)),
+            ]);
+            let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+            for pattern in [
+                "(a)-[:R]->(b)-[:R]->(c)-[:R]->(a)",
+                "(a)-[:R]->(b)-[:R]->(a)",
+                "(a)-[:R]->(b)-[:R]->(c)",
+                "(a)-[:R]->(b)<-[:R]-(c)",
+                "(a)-[:R]->(b)-[:R]->(c)-[:R]->(b)",
+                "(a)-[:R]-(b)-[:R]-(a)",
+                "(a)-[:R]->(b)-[:R]->(c) WHERE a.n=7",
+                "(a)-[:R]->(b)<-[:R]-(c) WHERE a<>c",
+            ] {
+                let prefix = format!(
+                    "MATCH {pattern} RETURN a.n AS root,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
+                );
+                let factored = query(&format!("{prefix} GROUP BY a.n"));
+                // A hidden COLLECT keeps the same five aggregates on the identified
+                // evaluator, which enforces DIFFERENT EDGES by relationship identity.
+                let identified = query(&format!("{prefix},COLLECT(b.n) AS bag GROUP BY a.n"))
+                    .with_aggregate_output_prefix(5)
+                    .unwrap();
+                assert!(counts_distinct_edges(&factored), "{pattern}");
+                assert!(!counts_distinct_edges(&identified), "{pattern}");
+                let run = |aggregate: &PreparedGraphAggregate| {
+                    aggregate
+                        .execute_governed_with_element_maps(
+                            edges.len() as u64,
+                            (0..5).map(VId),
+                            edges.iter().copied(),
+                            |vid, predicates| {
+                                Ok::<_, ()>(predicates.iter().all(|predicate| {
+                                    predicate.matches_borrowed(
+                                        None,
+                                        properties.get(&vid).map(|value| (PropertyKeyId(1), value)),
+                                    )
+                                }))
+                            },
+                            |vid, _| Ok(properties.get(&vid)),
+                            |_, _| Ok(None),
+                            |_| Ok(None),
+                            |_| Ok(None),
+                            |_| Ok(None),
+                            |_| Ok(None),
+                            policy,
+                            || Ok::<_, ()>(()),
+                        )
+                        .unwrap()
+                };
+                let actual = run(&factored);
+                let expected = run(&identified);
+                assert_eq!(actual.value, expected.value, "{pattern}");
+                assert_eq!(actual.rows, expected.rows, "{pattern}");
+            }
+        }
+    }
+
+    #[test]
+    fn simple_topologies_weigh_repeatable_bindings_one_without_a_search() {
+        let mut seen = BTreeSet::new();
+        let simple: Vec<_> = distinct_edge_graph()
+            .into_iter()
+            .filter(|&(_, source, relation, destination)| {
+                seen.insert((source, relation, destination))
+            })
+            .collect();
+        let labelled: BTreeSet<VId> = [0, 1, 2, 3].map(VId).into();
         let properties = BTreeMap::from([
             (VId(0), CanonicalScalar::Int(7)),
-            (VId(1), CanonicalScalar::Null),
             (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Int(-2)),
+            (VId(3), CanonicalScalar::Int(7)),
         ]);
-        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        let all: Vec<VId> = (0..5).map(VId).collect();
         for pattern in [
-            "(a)-[:R]->(b)-[:R]->(c)-[:R]->(a)",
-            "(a)-[:R]->(b)-[:R]->(a)",
-            "(a)-[:R]->(b)-[:R]->(c)",
-            "(a)-[:R]->(b)<-[:R]-(c)",
-            "(a)-[:R]->(b)-[:R]->(c)-[:R]->(b)",
-            "(a)-[:R]-(b)-[:R]-(a)",
-            "(a)-[:R]->(b)-[:R]->(c) WHERE a.n=7",
-            "(a)-[:R]->(b)<-[:R]-(c) WHERE a<>c",
+            "(a)-[:R]->(b)-[:R]->(c)-[:R]->(a) WHERE a.n = 7",
+            "(a)-[:R]->(b)-[:R]->(c) WHERE a.n = 7",
+            "(a:L)-[:R]->(b)<-[:R]-(c {n: 7})",
         ] {
-            let prefix = format!(
-                "MATCH {pattern} RETURN a.n AS root,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
-            );
-            let factored = query(&format!("{prefix} GROUP BY a.n"));
-            // A hidden COLLECT keeps the same five aggregates on the identified
-            // evaluator, which enforces DIFFERENT EDGES by relationship identity.
-            let identified = query(&format!("{prefix},COLLECT(b.n) AS bag GROUP BY a.n"))
-                .with_aggregate_output_prefix(5)
+            let text =
+                format!("MATCH REPEATABLE ELEMENTS {pattern} RETURN COUNT(*) AS c,MIN(b) AS lo");
+            let factored = query(&text);
+            let enumerated = query(&format!("{text},COLLECT(b) AS bag"))
+                .with_aggregate_output_prefix(2)
                 .unwrap();
-            assert!(counts_distinct_edges(&factored), "{pattern}");
-            assert!(!counts_distinct_edges(&identified), "{pattern}");
-            let run = |aggregate: &PreparedGraphAggregate| {
-                aggregate
-                    .execute_governed_with_element_maps(
-                        edges.len() as u64,
-                        (0..5).map(VId),
-                        edges.iter().copied(),
-                        |vid, predicates| {
-                            Ok::<_, ()>(predicates.iter().all(|predicate| {
-                                predicate.matches_borrowed(
-                                    None,
-                                    properties.get(&vid).map(|value| (PropertyKeyId(1), value)),
-                                )
-                            }))
-                        },
-                        |vid, _| Ok(properties.get(&vid)),
-                        |_, _| Ok(None),
-                        |_| Ok(None),
-                        |_| Ok(None),
-                        |_| Ok(None),
-                        |_| Ok(None),
-                        policy,
-                        || Ok::<_, ()>(()),
-                    )
-                    .unwrap()
-            };
-            let actual = run(&factored);
-            let expected = run(&identified);
-            assert_eq!(actual.value, expected.value, "{pattern}");
-            assert_eq!(actual.rows, expected.rows, "{pattern}");
+            assert!(eligible(&factored), "{text}");
+            assert!(!eligible(&enumerated), "{text}");
+            assert_eq!(
+                run_counted(&factored, &all, &simple, &labelled, &properties).value,
+                run_counted(&enumerated, &all, &simple, &labelled, &properties).value,
+                "{text}"
+            );
         }
     }
 
