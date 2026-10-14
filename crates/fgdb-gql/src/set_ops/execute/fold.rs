@@ -46,12 +46,14 @@ impl PreparedGraphSet {
         &self,
         policy: GqlQueryPolicy,
         mut source: impl GraphSetSource<E, C>,
-        checkpoint: impl FnMut() -> Result<(), C>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
         mut consume: impl FnMut(
             GraphValueRow,
             &mut dyn FnMut(GlaExecutionEvent) -> SetResult<(), E, C>,
         ) -> SetResult<(), E, C>,
     ) -> SetResult<(GqlExecutionStats, GlaExecutionStats), E, C> {
+        let source: &mut dyn GraphSetSource<E, C> = &mut source;
+        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         let mut meter = Meter {
             policy,
             checkpoint,
@@ -157,7 +159,7 @@ pub(super) fn visit<E, C, S, Checkpoint>(
     consume: &mut Consumer<'_, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     // Nonfoldable sorting/projection barriers keep their complete selected
@@ -192,7 +194,7 @@ pub(super) fn visit_unwindowed<E, C, S, Checkpoint>(
     consume: &mut Consumer<'_, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     debug_assert!(query.has_foldable_node());
@@ -208,7 +210,7 @@ fn visit_expansion<E, C, S, Checkpoint>(
     consume: &mut Consumer<'_, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
-    S: GraphSetSource<E, C>,
+    S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
