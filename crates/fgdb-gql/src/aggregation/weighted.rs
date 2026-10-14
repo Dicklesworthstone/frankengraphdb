@@ -247,9 +247,10 @@ fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
 /// one. Anchored, it joins its slot-0 vertex's count (a new anchor costs one
 /// ScratchEntry); each anchor is then visited once with that multiplicity,
 /// after re-reading its property columns once per further edge, as the
-/// weighted visitor re-reads them per further occurrence. For the counts,
-/// distinct counts and extrema `eligible` admits, both equal the topology's
-/// weighted sum over the same edges.
+/// weighted visitor re-reads them per further occurrence. Without columns
+/// (COUNT(*) alone) no anchor is kept: one visit carries every passing edge.
+/// For the counts, distinct counts and extrema `eligible` admits, each equals
+/// the topology's weighted sum over the same edges.
 fn visit_single_scan<'a, E, C, F, R, M, P>(
     scan: &SingleScan<'_>,
     plan: &crate::algebra::GlaPlan<GraphValueRow>,
@@ -287,8 +288,18 @@ where
         crate::id_hash::IdMap::<VId, bool>::default(),
         crate::id_hash::IdMap::<VId, bool>::default(),
     ];
+    // Each side's newest verdict. Edges arrive grouped by an endpoint, so
+    // most probes repeat the one before; a known vertex charges nothing.
+    let mut newest: [Option<(VId, bool)>; 2] = [None; 2];
     // Anchor -> (passing edges, the first partner): probed, then sorted.
     let mut anchors = crate::id_hash::IdMap::<VId, (u64, VId)>::default();
+    // The anchor of the newest passing edge and how many passing edges
+    // followed its run's first, not yet added to its count.
+    let mut run: Option<(VId, u64)> = None;
+    // No column reads a binding (COUNT(*) alone): every passing edge is the
+    // same input, so the scan only counts them, keeping the first binding.
+    let constant = scan.columns.is_empty();
+    let mut total: Option<(u64, VId, VId)> = None;
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         if relation != scan.access.relation {
@@ -298,14 +309,21 @@ where
             if predicates.is_empty() {
                 return Ok(true);
             }
-            match tested[if shared { 0 } else { side }].entry(vertex) {
-                std::collections::hash_map::Entry::Occupied(known) => Ok(*known.get()),
+            if let Some((known, verdict)) = newest[side]
+                && known == vertex
+            {
+                return Ok(verdict);
+            }
+            let verdict = match tested[if shared { 0 } else { side }].entry(vertex) {
+                std::collections::hash_map::Entry::Occupied(known) => *known.get(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let result = test_vertex(vertex, predicates)?;
                     control(GlaExecutionEvent::ScratchEntry)?;
-                    Ok::<_, VisitError<E, C>>(*entry.insert(result))
+                    *entry.insert(result)
                 }
-            }
+            };
+            newest[side] = Some((vertex, verdict));
+            Ok::<_, VisitError<E, C>>(verdict)
         };
         if !passes(0, source, from)? || !passes(1, destination, to)? {
             continue;
@@ -314,12 +332,33 @@ where
             GlaDirection::Forward => (source, destination),
             _ => (destination, source),
         };
+        if constant {
+            match &mut total {
+                Some((count, ..)) => *count += 1,
+                None => total = Some((1, anchor, partner)),
+            }
+            continue;
+        }
         if scan.anchored {
-            match anchors.entry(anchor) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().0 += 1,
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    entry.insert((1, partner));
+            match &mut run {
+                Some((last, more)) if *last == anchor => *more += 1,
+                _ => {
+                    if let Some((last, more)) = run.take() {
+                        anchors
+                            .get_mut(&last)
+                            .expect("a run's anchor was entered")
+                            .0 += more;
+                    }
+                    match anchors.entry(anchor) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().0 += 1;
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            control(GlaExecutionEvent::ScratchEntry)?;
+                            entry.insert((1, partner));
+                        }
+                    }
+                    run = Some((anchor, 0));
                 }
             }
             continue;
@@ -331,6 +370,21 @@ where
             &mut control,
             Multiplicity::ONE,
         )?;
+    }
+    if let Some((count, anchor, partner)) = total {
+        return visit(
+            scan.columns,
+            &[Some(anchor), Some(partner)],
+            &mut property,
+            &mut control,
+            Multiplicity(NonZeroU64::new(count)),
+        );
+    }
+    if let Some((last, more)) = run {
+        anchors
+            .get_mut(&last)
+            .expect("a run's anchor was entered")
+            .0 += more;
     }
     let mut anchors: Vec<_> = anchors.into_iter().collect();
     anchors.sort_unstable_by_key(|(anchor, _)| *anchor);
@@ -2708,10 +2762,28 @@ mod tests {
 
     #[test]
     fn single_edge_scans_stop_at_every_checkpoint() {
-        let text = "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS c,MAX(b) AS hi";
-        let aggregate = query(text);
-        let enumerated = query(&format!("{text},COLLECT(b) AS bag"))
-            .with_aggregate_output_prefix(2)
+        // Unanchored, counted without anchors, and anchored in runs.
+        for (text, group, aggregates) in [
+            (
+                "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS c,MAX(b) AS hi",
+                "",
+                2,
+            ),
+            ("MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS c", "", 1),
+            (
+                "MATCH (a:L)<-[:R]-(b) RETURN a,COUNT(*) AS c",
+                " GROUP BY a",
+                1,
+            ),
+        ] {
+            single_edge_scan_stops_at_every_checkpoint(text, group, aggregates);
+        }
+    }
+
+    fn single_edge_scan_stops_at_every_checkpoint(text: &str, group: &str, aggregates: usize) {
+        let aggregate = query(&format!("{text}{group}"));
+        let enumerated = query(&format!("{text},COLLECT(b) AS bag{group}"))
+            .with_aggregate_output_prefix(aggregates)
             .unwrap();
         assert!(single_scan(&aggregate).is_some());
         let edges: Vec<_> = distinct_edge_graph()

@@ -6,6 +6,7 @@
 //! distinct arguments borrow the admitted input until owned rows are released.
 
 mod computed;
+mod groups;
 mod numeric;
 mod relational;
 mod result;
@@ -1114,7 +1115,7 @@ impl PreparedGraphAggregate {
                 .map_err(GqlQueryError::Evaluator)
         };
         let mut streaming = result::RootGroups::new(self);
-        let mut groups: BTreeMap<Vec<ValueRef<'a>>, Vec<Accumulator<'a>>> = BTreeMap::new();
+        let mut groups = groups::GroupTable::new(self.keys.len());
         if self.keys.is_empty() {
             control(GlaExecutionEvent::ScratchEntry)?;
             groups.insert(Vec::new(), new_group(&self.aggregates, &mut control)?);
@@ -1169,8 +1170,8 @@ impl PreparedGraphAggregate {
                 }
                 let key = &key[..self.keys.len()];
                 control(GlaExecutionEvent::Work)?;
-                // One tree descent for an existing group, two for a new one
-                // (it was three), with the same events in the same order.
+                // One probe for an existing group, two for a new one (it was
+                // three tree descents), with the same events in the same order.
                 if let Some(state) = groups.get_mut(key) {
                     return update_group(&self.aggregates, state, &values, multiplicity, control);
                 }
@@ -1181,13 +1182,13 @@ impl PreparedGraphAggregate {
                     owned_key.push(*value);
                 }
                 let state = new_group(&self.aggregates, control)?;
-                let state = groups.entry(owned_key).or_insert(state);
+                let state = groups.insert(owned_key, state);
                 update_group(&self.aggregates, state, &values, multiplicity, control)
             },
         )?;
         let value = match streaming {
             Some(streaming) => streaming.finish(&mut control)?,
-            None => self.finish_groups(&groups, &mut control)?,
+            None => self.finish_groups(&groups.into_tree(), &mut control)?,
         };
         // Even empty and zero-count outputs observe a terminal checkpoint.
         control(GlaExecutionEvent::Work)?;
