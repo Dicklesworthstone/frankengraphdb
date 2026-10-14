@@ -22,7 +22,6 @@ use crate::tiered::memory::{MemoryCharge, MemoryError, MemoryPool};
 use crate::vertex::{VertexPatchRows, VertexRow};
 use crate::{AdjacencyEntry, PartitionRootVersion};
 use asupersync::fs::Vfs;
-use asupersync::io::AsyncReadExt;
 use fgdb_delta_types::RelationId;
 use fgdb_types::{CommitCx, CommitSeq, EId, QueryCx, StorageReadCx, VId};
 use std::cmp::Reverse;
@@ -655,25 +654,9 @@ impl<V: Vfs> BufferedPartition<V> {
         match self.buffer.prepare(cx, key, admission)? {
             PreparedExtent::Resident(handle) => Ok(handle),
             PreparedExtent::Load(mut pending) => {
-                let mut file = cx
-                    .with_restriction_async(
-                        self.store.vfs.open_read(&self.store.path(key.object())),
-                    )
-                    .await
-                    .map_err(StoreError::Io)?;
-                cx.with_restriction_async(async {
-                    file.read_exact(pending.as_mut()).await?;
-                    let mut extra = [0u8; 1];
-                    if file.read(&mut extra).await? != 0 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "admitted object length changed",
-                        ));
-                    }
-                    Ok(())
-                })
-                .await
-                .map_err(StoreError::Io)?;
+                self.store
+                    .read_object_exact(cx, key.object(), pending.as_mut())
+                    .await?;
                 Ok(self.buffer.complete(cx, pending)?)
             }
         }

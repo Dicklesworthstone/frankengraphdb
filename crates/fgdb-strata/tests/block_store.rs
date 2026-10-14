@@ -1547,89 +1547,99 @@ fn more_blocks_than_one_flush() -> (Vec<Vec<u8>>, Vec<DeltaBlockVersion>) {
 }
 
 /// **A BATCH NAMES NO OBJECT BEFORE ITS STAGED SYNCS, AND REWRITES WHAT A CRASH
-/// LEFT STAGED.** A batch writes up to `BATCH_SYNCS_IN_FLIGHT` staging inodes,
-/// syncs them together, and only then renames them to canonical names. More
-/// objects than one flush holds force a flush mid-batch; crashing that flush
-/// after its syncs but before its renames must leave every one of its objects
-/// without a canonical name, only noncanonical staging inodes. A clean retry
-/// must rewrite those leftovers, not refuse them, and leave none behind.
+/// LEFT STAGED.** A flush writes its objects under noncanonical staging names
+/// (one inode per object below `PACK_MIN_OBJECTS`, one pack inode at or above
+/// it), syncs them and proves their durable bytes, and only then renames them
+/// to canonical names. Crashing a flush after its syncs but before its
+/// renames must leave every one of its objects without a canonical name and
+/// unreadable, only noncanonical staging inodes. A clean retry must rewrite
+/// those leftovers, not refuse them, and leave none behind. Both publication
+/// units are exercised: a loose batch, then a packed one.
 #[test]
 fn a_batch_names_no_object_before_its_staged_syncs_and_rewrites_leftover_staging() {
-    use fgdb_strata::store::BATCH_SYNCS_IN_FLIGHT;
+    use fgdb_strata::store::{PACK_DIR, PACK_MIN_OBJECTS};
     let dir = scratch_dir("batch-flush-window");
     under_lab(0x9_111, move |cx| async move {
         let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
             .await
             .expect("store");
         let staging_names = || {
-            std::fs::read_dir(dir.join(BLOCK_DIR))
+            let loose = std::fs::read_dir(dir.join(BLOCK_DIR))
                 .expect("blocks directory")
                 .map(|entry| entry.expect("entry").file_name())
                 .filter(|name| {
                     name.to_string_lossy()
                         .starts_with(".block-publication.staging.")
                 })
-                .count()
+                .count();
+            let packed = std::fs::read_dir(dir.join(BLOCK_DIR).join(PACK_DIR))
+                .map(|entries| {
+                    entries
+                        .map(|entry| entry.expect("entry").file_name())
+                        .filter(|name| name.to_string_lossy() == ".pack-staging")
+                        .count()
+                })
+                .unwrap_or(0);
+            (loose, packed)
         };
         let (blocks, ids) = more_blocks_than_one_flush();
-
-        let mut receipts = PublishReceipts::new();
-        let mut batch = store
-            .publication_batch(
-                &cx,
-                &mut receipts,
-                Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication),
-            )
-            .expect("batch");
-        let mut crashed_at = None;
-        for (at, bytes) in blocks.iter().enumerate() {
-            if let Err(error) = batch.put_verified(&cx, bytes, None).await {
-                crashed_at = Some((at, error));
-                break;
+        let loose = PACK_MIN_OBJECTS - 1;
+        assert!(blocks.len() - loose >= PACK_MIN_OBJECTS);
+        for (blocks, ids, staged) in [
+            (&blocks[..loose], &ids[..loose], (loose, 0)),
+            (&blocks[loose..], &ids[loose..], (0, 1)),
+        ] {
+            let mut receipts = PublishReceipts::new();
+            let mut batch = store
+                .publication_batch(
+                    &cx,
+                    &mut receipts,
+                    Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication),
+                )
+                .expect("batch");
+            for bytes in blocks {
+                batch.put_verified(&cx, bytes, None).await.expect("staged");
             }
-        }
-        let Some((at, error)) = crashed_at else {
-            panic!("more objects than one flush holds never flushed mid-batch");
-        };
-        assert_eq!(
-            at, BATCH_SYNCS_IN_FLIGHT,
-            "the full flush runs at the next put"
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("complete staging inode before canonical publication"),
-            "wrong crash instant: {error}"
-        );
-        drop(batch);
-        for id in &ids {
+            let error = batch.finish(&cx).await.expect_err("the crash instant");
             assert!(
-                !store.path(id.0).exists(),
-                "a staged object was named before its flush renamed it"
+                error
+                    .to_string()
+                    .contains("complete staging inode before canonical publication"),
+                "wrong crash instant: {error}"
             );
-            assert!(!receipts.holds(*id));
-        }
-        assert_eq!(staging_names(), BATCH_SYNCS_IN_FLIGHT);
+            for id in ids {
+                assert!(
+                    !store.path(id.0).exists(),
+                    "a staged object was named before its flush renamed it"
+                );
+                assert!(
+                    store.get_bytes(&cx, *id).await.is_err(),
+                    "a staged object was readable before its flush named it"
+                );
+                assert!(!receipts.holds(*id));
+            }
+            assert_eq!(staging_names(), staged);
 
-        let mut batch = store
-            .publication_batch(&cx, &mut receipts, None)
-            .expect("retry");
-        for bytes in &blocks {
-            batch
-                .put_verified(&cx, bytes, None)
-                .await
-                .expect("restaged");
+            let mut batch = store
+                .publication_batch(&cx, &mut receipts, None)
+                .expect("retry");
+            for bytes in blocks {
+                batch
+                    .put_verified(&cx, bytes, None)
+                    .await
+                    .expect("restaged");
+            }
+            batch.finish(&cx).await.expect("durable batch");
+            for (id, bytes) in ids.iter().zip(blocks) {
+                assert!(receipts.holds(*id));
+                assert_eq!(&store.get_bytes(&cx, *id).await.expect("published"), bytes);
+            }
+            assert_eq!(
+                staging_names(),
+                (0, 0),
+                "a flush renames every staging inode away"
+            );
         }
-        batch.finish(&cx).await.expect("durable batch");
-        for (id, bytes) in ids.iter().zip(&blocks) {
-            assert!(receipts.holds(*id));
-            assert_eq!(&store.get_bytes(&cx, *id).await.expect("published"), bytes);
-        }
-        assert_eq!(
-            staging_names(),
-            0,
-            "a flush renames every staging inode away"
-        );
     });
 }
 
@@ -1797,13 +1807,17 @@ fn a_receipted_property_patch_is_not_reread_by_a_later_block() {
         let mut batch = store
             .publication_batch(&cx, &mut fresh, None)
             .expect("batch");
+        // Objects are staged in memory and checked against their canonical
+        // files when the batch publishes them, so the refusal is the batch's.
+        let published = match batch
+            .put_verified(&cx, &hosts[1].bytes, Some(&patch.bytes))
+            .await
+        {
+            Ok(_) => batch.finish(&cx).await,
+            Err(error) => Err(error),
+        };
         assert!(
-            matches!(
-                batch
-                    .put_verified(&cx, &hosts[1].bytes, Some(&patch.bytes))
-                    .await,
-                Err(StoreError::DamagedExisting { .. })
-            ),
+            matches!(published, Err(StoreError::DamagedExisting { .. })),
             "a session without the receipt re-reads the file and sees the damage"
         );
     });

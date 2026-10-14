@@ -84,7 +84,11 @@ use std::sync::Arc;
 mod bounded_read;
 use bounded_read::RootReadEvent;
 pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
+mod pack;
+pub use pack::{PACK_DIR, PACK_MIN_OBJECTS};
 mod buffered_read;
+#[cfg(test)]
+mod pack_tests;
 pub use buffered_read::{
     BufferedEdge, BufferedPartition, BufferedReadCx, BufferedReadError, BufferedReadLimits,
     BufferedScanError, BufferedScanEvent, BufferedValue, BufferedVertexCandidate,
@@ -735,6 +739,8 @@ pub struct BlockStore<V: Vfs = UnixVfs> {
     k_oid: SharedSecret<32>,
     namespace: DatabaseSecurityNamespaceId,
     scalar_resolver: Option<Arc<dyn CanonicalScalarResolver + Send + Sync>>,
+    /// Where packed objects are, shared by every clone of this store.
+    packs: Arc<pack::PackIndex>,
 }
 
 impl<V: Vfs> core::fmt::Debug for BlockStore<V> {
@@ -949,6 +955,7 @@ impl<V: Vfs> BlockStore<V> {
         )
         .await?;
 
+        let packs = Arc::new(pack::PackIndex::load(cx, &vfs, dir.join(PACK_DIR)).await?);
         Ok(Self {
             vfs,
             dir,
@@ -956,6 +963,7 @@ impl<V: Vfs> BlockStore<V> {
             k_oid,
             namespace,
             scalar_resolver: None,
+            packs,
         })
     }
 
@@ -985,6 +993,7 @@ impl<V: Vfs> BlockStore<V> {
             )
             .into());
         }
+        let packs = Arc::new(pack::PackIndex::load(cx, &vfs, dir.join(PACK_DIR)).await?);
         Ok(Self {
             vfs,
             publication_lock_path: dir.join(PUBLICATION_LOCK_FILE),
@@ -992,6 +1001,7 @@ impl<V: Vfs> BlockStore<V> {
             k_oid: k_oid.into(),
             namespace,
             scalar_resolver: None,
+            packs,
         })
     }
 
@@ -1343,7 +1353,9 @@ impl<V: Vfs> BlockStore<V> {
             receipts,
             permit: self.acquire_publication_permit(cx)?,
             objects: std::collections::BTreeSet::new(),
-            staged: Vec::new(),
+            unflushed: Vec::new(),
+            unflushed_bytes: 0,
+            packed: false,
             pending: Vec::new(),
             crash_at,
             failed: false,
@@ -1365,16 +1377,118 @@ impl<V: Vfs> BlockStore<V> {
         decode_block(&bytes).map_err(StoreError::Malformed)
     }
 
+    /// The stored bytes of `id`, wherever they are: a pack this store knows,
+    /// else the object's loose file, else a pack published since this store
+    /// last looked (another process may have committed). The caller verifies
+    /// identity, as it always has; the location is only where to look.
     async fn read_object_bytes(
         &self,
         cx: &impl StorageReadCx,
         id: ObjectId,
         limit: u64,
     ) -> Result<Vec<u8>, StoreError> {
-        let file = cx
-            .with_restriction_async(self.vfs.open_read(&self.path(id)))
-            .await?;
-        read_bounded(cx, file, limit).await
+        if let Some(bytes) = self.read_packed(cx, id, limit).await? {
+            return Ok(bytes);
+        }
+        let loose = async {
+            let file = cx
+                .with_restriction_async(self.vfs.open_read(&self.path(id)))
+                .await?;
+            read_bounded(cx, file, limit).await
+        };
+        match loose.await {
+            Err(StoreError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && self.packs.refresh(cx, &self.vfs).await? =>
+            {
+                match self.read_packed(cx, id, limit).await? {
+                    Some(bytes) => Ok(bytes),
+                    None => Err(StoreError::Io(error)),
+                }
+            }
+            result => result,
+        }
+    }
+
+    /// The bytes of a packed copy of `id`, or `None` when no known pack has
+    /// one. With several copies (a recovery republished an object whose
+    /// older copy is damaged), the newest copy whose bytes derive `id` wins;
+    /// when none does, the newest copy is returned for the caller to refuse.
+    async fn read_packed(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+        limit: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let copies = match self.packs.locate(id) {
+            pack::Located::None => return Ok(None),
+            pack::Located::One(location) => {
+                return self
+                    .packs
+                    .read(cx, &self.vfs, location, limit)
+                    .await
+                    .map(Some);
+            }
+            pack::Located::Several(copies) => copies,
+        };
+        let mut newest = None;
+        for location in copies {
+            let read = self.packs.read(cx, &self.vfs, location, limit).await;
+            if let Ok(bytes) = &read
+                && self.derives(id, bytes)
+            {
+                return read.map(Some);
+            }
+            newest.get_or_insert(read);
+        }
+        newest.expect("several copies").map(Some)
+    }
+
+    /// Whether `bytes` derive `id` under some stored family's transcript.
+    /// The transcripts are domain-separated, so at most one family can.
+    fn derives(&self, id: ObjectId, bytes: &[u8]) -> bool {
+        use StoredObjectKind::{
+            Block, EdgePropertyPatch, IndexSegment, Manifest, Root, Segment, VertexPatch,
+        };
+        [
+            Block,
+            Root,
+            Segment,
+            IndexSegment,
+            VertexPatch,
+            EdgePropertyPatch,
+            Manifest,
+        ]
+        .into_iter()
+        .any(|kind| kind.identity(self.k_oid.expose(), self.namespace, bytes) == id)
+    }
+
+    /// Fill `out` with the object `id`, whose admitted length is `out.len()`.
+    /// A stored object of any other length is refused.
+    pub(crate) async fn read_object_exact(
+        &self,
+        cx: &impl StorageReadCx,
+        id: ObjectId,
+        out: &mut [u8],
+    ) -> Result<(), StoreError> {
+        let changed = || {
+            StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "admitted object length changed",
+            ))
+        };
+        let bytes = self
+            .read_object_bytes(cx, id, out.len() as u64)
+            .await
+            .map_err(|error| match error {
+                StoreError::ObjectTooLarge { .. } => changed(),
+                error => error,
+            })?;
+        if bytes.len() != out.len() {
+            return Err(changed());
+        }
+        out.copy_from_slice(&bytes);
+        Ok(())
     }
 
     /// Load the raw bytes of a block, verifying identity but not decoding.
@@ -3087,7 +3201,13 @@ pub struct BlockPublicationBatch<'a, V: Vfs> {
     receipts: &'a mut PublishReceipts,
     permit: ObjectPublicationPermit,
     objects: std::collections::BTreeSet<ObjectId>,
-    staged: Vec<StagedObject<V::File>>,
+    /// Objects staged since the last flush, in staging order. Nothing is
+    /// written until a flush decides between one pack and loose files.
+    unflushed: Vec<(StoredObjectKind, ObjectId, Vec<u8>)>,
+    unflushed_bytes: usize,
+    /// Whether a flush of this batch published a pack, whose name `finish`
+    /// must make durable in the pack directory.
+    packed: bool,
     pending: Vec<PendingAdmission>,
     crash_at: Option<BlockStoreCrashPoint>,
     failed: bool,
@@ -3103,32 +3223,31 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         bytes: &[u8],
     ) -> Result<(), StoreError> {
         if !self.objects.contains(&id) {
-            if self.staged.len() == BATCH_SYNCS_IN_FLIGHT {
+            let limit = kind.stored_limit();
+            ensure_size_within_limit(u64::try_from(bytes.len()).unwrap_or(u64::MAX), limit)?;
+            if self.unflushed_bytes + bytes.len() > pack::PACK_TARGET_BYTES {
                 self.flush_staged(cx).await?;
             }
-            let staged = self
-                .store
-                .stage_object_under_permit(kind, cx, id, bytes, self.staged.len(), &self.permit)
-                .await?;
-            self.staged.push(staged);
+            self.unflushed_bytes += bytes.len();
+            self.unflushed.push((kind, id, bytes.to_vec()));
             self.objects.insert(id);
         }
         Ok(())
     }
 
-    /// The bytes of an object this batch staged but has not yet flushed: its
-    /// canonical name does not exist until the flush renames it.
+    /// The bytes of an object this batch staged but has not yet flushed: it
+    /// has no canonical location until the flush publishes it.
     fn staged_bytes(&self, id: ObjectId) -> Option<Vec<u8>> {
-        let path = self.store.path(id);
-        self.staged
+        self.unflushed
             .iter()
-            .find(|object| object.path == path)
-            .map(|object| object.bytes.clone())
+            .find(|(_, staged, _)| *staged == id)
+            .map(|(_, _, bytes)| bytes.clone())
     }
 
-    /// Make every object staged so far canonical: sync all of their inodes
-    /// with every sync in flight at once, prove each inode's durable bytes,
-    /// then give each new inode its content-addressed name. The names become
+    /// Make every object staged so far canonical: as one pack when there are
+    /// at least [`PACK_MIN_OBJECTS`], else as loose files whose inodes sync
+    /// with every sync in flight at once. Either way the durable bytes are
+    /// proven by a read-back before anything is named. The names become
     /// durable only at `finish`'s directory barrier, and receipts escape only
     /// after it. A failed or cancelled flush poisons this batch.
     pub async fn flush(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
@@ -3140,7 +3259,134 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     }
 
     async fn flush_staged(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
-        let mut staged = std::mem::take(&mut self.staged);
+        let objects = std::mem::take(&mut self.unflushed);
+        self.unflushed_bytes = 0;
+        if objects.len() >= PACK_MIN_OBJECTS {
+            return self.flush_pack(cx, &objects).await;
+        }
+        for chunk in objects.chunks(BATCH_SYNCS_IN_FLIGHT) {
+            let mut staged = Vec::with_capacity(chunk.len());
+            for (slot, (kind, id, bytes)) in chunk.iter().enumerate() {
+                staged.push(
+                    self.store
+                        .stage_object_under_permit(*kind, cx, *id, bytes, slot, &self.permit)
+                        .await?,
+                );
+            }
+            self.flush_loose(cx, staged).await?;
+        }
+        Ok(())
+    }
+
+    /// Publish `objects` as one pack: write it under the staging name, sync
+    /// it, prove its durable bytes, then give it its content-addressed name
+    /// in the pack directory. A pack already published under that name (the
+    /// same bytes, by a batch that failed before its receipts) is re-synced,
+    /// never rewritten, as an existing loose object is.
+    async fn flush_pack(
+        &mut self,
+        cx: &CommitCx,
+        objects: &[(StoredObjectKind, ObjectId, Vec<u8>)],
+    ) -> Result<(), StoreError> {
+        let store = self.store;
+        let dir = store.packs.dir().to_path_buf();
+        match cx.with_restriction_async(store.vfs.create_dir(&dir)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !cx
+                    .with_restriction_async(store.vfs.symlink_metadata(&dir))
+                    .await?
+                    .file_type()
+                    .is_dir()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "strata pack path exists but is not a directory",
+                    )
+                    .into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let entries: Vec<(ObjectId, &[u8])> = objects
+            .iter()
+            .map(|(_, id, bytes)| (*id, bytes.as_slice()))
+            .collect();
+        let bytes = pack::encode(&entries);
+        let path = dir.join(pack::name(&bytes));
+        match cx
+            .with_restriction_async(store.vfs.symlink_metadata(&path))
+            .await
+        {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "canonical pack path exists but is not a regular file",
+                    )
+                    .into());
+                }
+                let existing_opts = OpenOptions::new().read(true).write(true);
+                let existing = cx
+                    .with_restriction_async(store.vfs.open(&path, &existing_opts))
+                    .await?;
+                let reread = cx
+                    .with_restriction_async(store.vfs.open(&path, &existing_opts))
+                    .await?;
+                if read_bounded(cx, reread, pack::MAX_PACK_BYTES).await? != bytes {
+                    return Err(StoreError::Collision {
+                        object_id: ObjectId(fgdb_crypto::blake3::hash(&bytes).0),
+                    });
+                }
+                cx.with_restriction_async(existing.sync_all()).await?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let staging_path = dir.join(pack::PACK_STAGING_FILE);
+                let mut staging = store.open_staging_inode(cx, &staging_path).await?;
+                staging.write_all(&bytes).await?;
+                if self.crash_at == Some(BlockStoreCrashPoint::AfterBatchStagingWrite) {
+                    return Err(std::io::Error::other(
+                        "crash: batch staging bytes before inode sync",
+                    )
+                    .into());
+                }
+                cx.with_restriction_async(staging.sync_all()).await?;
+                store
+                    .verify_durable_bytes(cx, &staging_path, &bytes, pack::MAX_PACK_BYTES)
+                    .await?;
+                if self.crash_at
+                    == Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication)
+                {
+                    return Err(StoreError::Io(std::io::Error::other(
+                        "crash: complete staging inode before canonical publication",
+                    )));
+                }
+                // Close before rename for platforms that refuse to move an
+                // open file. The batch's permit spans the absence check, the
+                // staging write and the move.
+                drop(staging);
+                store.vfs.rename(&staging_path, &path).await?;
+                if self.crash_at
+                    == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync)
+                {
+                    return Err(std::io::Error::other(
+                        "crash: strata block inode durable before directory entry",
+                    )
+                    .into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        store.packs.published(path, &bytes);
+        self.packed = true;
+        Ok(())
+    }
+
+    async fn flush_loose(
+        &mut self,
+        cx: &CommitCx,
+        mut staged: Vec<StagedObject<V::File>>,
+    ) -> Result<(), StoreError> {
         let creates = staged.iter().any(|object| object.staging.is_some());
         if creates && self.crash_at == Some(BlockStoreCrashPoint::AfterBatchStagingWrite) {
             return Err(
@@ -3294,6 +3540,11 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                     "crash: batch inodes durable before directory barrier",
                 )
                 .into());
+            }
+            if self.packed {
+                // The packs' names, then (below) the pack directory's own
+                // entry, which this batch may have created.
+                sync_directory(cx, &self.store.vfs, self.store.packs.dir()).await?;
             }
             sync_directory(cx, &self.store.vfs, &self.store.dir).await?;
             if self.crash_at == Some(BlockStoreCrashPoint::AfterBatchDirectorySync) {
