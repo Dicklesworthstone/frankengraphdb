@@ -200,6 +200,17 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             self.run_left = WORK_RUN - n;
             return Ok(());
         }
+        // A larger run (an evaluator's) is one Warden call while the
+        // allowance covers it twice over, as a deferred run must: no unit of
+        // it can refuse. Below that every unit is still charged alone.
+        if runs
+            && self.in_runs
+            && n > WORK_RUN
+            && self.failure.is_none()
+            && self.remaining_work() >= 2 * n
+        {
+            return self.charge_work(n);
+        }
         for _ in 0..n {
             self.charge_work(1)?;
         }

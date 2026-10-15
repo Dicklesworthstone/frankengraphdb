@@ -274,6 +274,215 @@ fn weighted_counts_groups_and_support_summaries_equal_unfactored_bags() {
     }
 }
 
+/// A 30-vertex, three-relation graph whose triangle count takes thousands
+/// of work units, so evaluator runs open and close many times.
+fn run_graph() -> Vec<(VId, RelationId, VId)> {
+    (0..30_u128)
+        .flat_map(|a| {
+            (0..30_u128).flat_map(move |b| {
+                (1..=3_u64)
+                    .filter(move |r| (a * 7 + b * 3 + u128::from(*r)) % 4 == 0)
+                    .map(move |r| (VId(a), RelationId(r), VId(b)))
+            })
+        })
+        .collect()
+}
+
+/// **AN EVALUATOR RUN CHARGES THE PER-EVENT TOTAL IN FEWER HOST CALLS.** A
+/// triangle count over a 30-vertex, three-relation graph returns the same
+/// value and statistics with a checkpoint that takes a run in one call as
+/// with one that is called per unit; the host sees exactly the per-unit
+/// total, in far fewer calls.
+#[test]
+fn evaluator_runs_charge_the_per_event_total_in_fewer_host_calls() {
+    use crate::GovernedCheckpoint;
+    use std::cell::Cell;
+    struct Bulk<'c> {
+        units: &'c Cell<u64>,
+        calls: &'c Cell<u64>,
+    }
+    impl GovernedCheckpoint<()> for Bulk<'_> {
+        const RUNS: bool = true;
+        fn unit(&mut self) -> Result<(), ()> {
+            self.units(1)
+        }
+        fn units(&mut self, n: u64) -> Result<(), ()> {
+            self.units.set(self.units.get() + n);
+            self.calls.set(self.calls.get() + 1);
+            Ok(())
+        }
+    }
+    let q = aggregate("MATCH (a)-[:R]->(b)-[:S]->(c)-[:T]->(a) RETURN COUNT(*) AS n");
+    let edges = run_graph();
+    let mut per_unit = 0_u64;
+    let expected = q
+        .execute_governed(
+            edges.len() as u64,
+            (0..30).map(VId),
+            edges.iter().copied(),
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            wide(),
+            || {
+                per_unit += 1;
+                Ok::<_, ()>(())
+            },
+        )
+        .unwrap();
+    let (units, calls) = (Cell::new(0), Cell::new(0));
+    let bulk = q
+        .execute_governed(
+            edges.len() as u64,
+            (0..30).map(VId),
+            edges.iter().copied(),
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            wide(),
+            Bulk {
+                units: &units,
+                calls: &calls,
+            },
+        )
+        .unwrap();
+    assert_eq!(bulk, expected);
+    assert_eq!(units.get(), per_unit, "the per-unit total");
+    assert!(
+        calls.get() * 100 < units.get(),
+        "{} calls for {} units",
+        calls.get(),
+        units.get()
+    );
+}
+
+/// **AN EVALUATOR RUN NEVER MOVES A REFUSAL.** Over the same graph, a
+/// grouped and an ungrouped triangle count refuse at every sampled work,
+/// scratch and host limit exactly as per-event charging does: the evaluator
+/// limit's own unit observes limit + 1, and a host that charges a run in one
+/// call (refusing inside it at the exceeding unit, as fgdb's signed meter
+/// does) refuses at the same host ordinal as one called per unit.
+#[test]
+fn evaluator_runs_refuse_at_the_per_event_ordinal() {
+    use crate::{GlaLimitDimension, GlaLimitExceeded, GovernedCheckpoint};
+    /// Refuses at unit `budget + 1`, inside a bulk call as fgdb's signed
+    /// meter does, and is never to be called again after refusing.
+    struct Budget<'u> {
+        used: &'u mut u64,
+        budget: u64,
+        refused: bool,
+    }
+    impl GovernedCheckpoint<u64> for Budget<'_> {
+        const RUNS: bool = true;
+        fn unit(&mut self) -> Result<(), u64> {
+            self.units(1)
+        }
+        fn units(&mut self, n: u64) -> Result<(), u64> {
+            assert!(!self.refused, "called after refusing");
+            if self.budget - *self.used < n {
+                *self.used = self.budget;
+                self.refused = true;
+                return Err(self.budget + 1);
+            }
+            *self.used += n;
+            Ok(())
+        }
+    }
+    let edges = run_graph();
+    for text in [
+        "MATCH (a)-[:R]->(b)-[:S]->(c)-[:T]->(a) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R]->(b)-[:S]->(c)-[:T]->(a) RETURN a, COUNT(*) AS n GROUP BY a",
+    ] {
+        let q = aggregate(text);
+        let run = |policy, checkpoint: &mut dyn FnMut() -> Result<(), u64>| {
+            q.execute_governed(
+                edges.len() as u64,
+                (0..30).map(VId),
+                edges.iter().copied(),
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                policy,
+                checkpoint,
+            )
+        };
+        let mut host = 0_u64;
+        let baseline = run(wide(), &mut || {
+            host += 1;
+            Ok(())
+        })
+        .unwrap();
+        let (work, scratch) = (
+            baseline.evaluator.work_units,
+            baseline.evaluator.scratch_entries,
+        );
+        assert!(work > 4 * 1024, "{work} units must span several runs");
+        let sampled = |total: u64| (0..total).filter(move |at| at % 13 == 0 || total - at <= 40);
+        for limit in sampled(work) {
+            let refused = run(
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, limit, u64::MAX),
+                &mut || Ok(()),
+            );
+            assert!(
+                matches!(refused, Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                    dimension: GlaLimitDimension::WorkUnits,
+                    limit: found,
+                    observed,
+                })) if found == limit && observed == u128::from(limit) + 1),
+                "work limit {limit}"
+            );
+        }
+        for limit in sampled(scratch) {
+            let refused = run(
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, limit),
+                &mut || Ok(()),
+            );
+            assert!(
+                matches!(refused, Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                    dimension: GlaLimitDimension::ScratchEntries,
+                    limit: found,
+                    observed,
+                })) if found == limit && observed == u128::from(limit) + 1),
+                "scratch limit {limit}"
+            );
+        }
+        for budget in sampled(host) {
+            let mut used = 0;
+            let refused = q.execute_governed(
+                edges.len() as u64,
+                (0..30).map(VId),
+                edges.iter().copied(),
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                Budget {
+                    used: &mut used,
+                    budget,
+                    refused: false,
+                },
+            );
+            assert!(
+                matches!(refused, Err(GqlQueryError::Interrupted(at)) if at == budget + 1),
+                "host budget {budget}"
+            );
+            assert_eq!(used, budget);
+        }
+        let mut used = 0;
+        let accepted = q.execute_governed(
+            edges.len() as u64,
+            (0..30).map(VId),
+            edges.iter().copied(),
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            wide(),
+            Budget {
+                used: &mut used,
+                budget: host,
+                refused: false,
+            },
+        );
+        assert_eq!(accepted.unwrap(), baseline);
+        assert_eq!(used, host);
+    }
+}
+
 #[test]
 fn every_trie_build_seek_and_complete_binding_refusal_retries_without_partial_aggregate() {
     let q = aggregate(

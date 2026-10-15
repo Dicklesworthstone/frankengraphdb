@@ -105,7 +105,8 @@ pub use aggregation::{
 pub use algebra::GraphMatchMode;
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
-    GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GlaLimitDimension, GlaLimitExceeded, GovernedCheckpoint, GqlQueryError, GqlQueryExecution,
+    GqlQueryPolicy,
 };
 pub use deletion::{
     GraphDeleteBuildError, GraphDeleteError, GraphDeletePolicy, GraphDeleteProposal,

@@ -10,7 +10,7 @@ mod projection;
 mod trail;
 pub(crate) use comparison::{charge_payload, compare_element_properties, compare_properties};
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
-pub use projection::ProjectedRows;
+pub use projection::{GovernedCheckpoint, ProjectedRows};
 
 use crate::algebra::{
     EdgeRelation, GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphPath,

@@ -239,6 +239,51 @@ impl super::GlaExecutionStats {
     ) -> Result<(), super::GlaLimitExceeded> {
         super::charge(self, limits, event)
     }
+
+    /// `n` Work events in one step: the same total, and the same refusal
+    /// (every unit up to the limit admitted, the next observing limit + 1),
+    /// as `n` calls of [`Self::charge_event`] with Work.
+    pub fn charge_work_units(
+        &mut self,
+        limits: super::GlaExecutionLimits,
+        n: u64,
+    ) -> Result<(), super::GlaLimitExceeded> {
+        let observed = u128::from(self.work_units) + u128::from(n);
+        if n > 0 && observed > u128::from(limits.max_work_units) {
+            self.work_units = self.work_units.max(limits.max_work_units);
+            return Err(super::GlaLimitExceeded {
+                dimension: super::GlaLimitDimension::WorkUnits,
+                limit: limits.max_work_units,
+                observed: u128::from(self.work_units) + 1,
+            });
+        }
+        self.work_units = observed as u64;
+        Ok(())
+    }
+}
+
+/// A governed execution's host checkpoint: one unit per evaluator event.
+/// A plain closure is called once per event, before the event's own limits
+/// are judged and before the evaluator continues.
+///
+/// A host that takes runs (`RUNS`) instead accepts its units for up to an
+/// evaluator run of events at once, through `units(n)`, after the evaluator
+/// has gone past them: always in event order, before any refusal of a later
+/// event or the outcome is reported, and never after the host has refused.
+/// `units(n)` must refuse at the unit that `n` calls of `unit` would refuse.
+pub trait GovernedCheckpoint<C> {
+    /// Whether this host takes evaluator runs.
+    const RUNS: bool = false;
+    fn unit(&mut self) -> Result<(), C>;
+    fn units(&mut self, n: u64) -> Result<(), C> {
+        (0..n).try_for_each(|_| self.unit())
+    }
+}
+
+impl<C, F: FnMut() -> Result<(), C>> GovernedCheckpoint<C> for F {
+    fn unit(&mut self) -> Result<(), C> {
+        self()
+    }
 }
 
 impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {

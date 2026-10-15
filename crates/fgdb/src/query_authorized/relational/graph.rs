@@ -108,7 +108,7 @@ fn visit_at<Clock: FnMut() -> u64>(
                 .map(|&((_, from, relation, to), _)| (from, relation, to))
         };
         let remaining = usage.remaining(policy);
-        let checkpoint = || execution.borrow_mut().checkpoint();
+        let checkpoint = WorkCheckpoint(execution);
         // A vertex-only aggregate tests and reads the vertex its scan has just
         // yielded: `scan` remembers it, so neither finds it again (count_vertices
         // 1.9-2.3x). An edge-reading one keeps the plain lookups. Its endpoint
@@ -153,6 +153,24 @@ fn visit_at<Clock: FnMut() -> u64>(
         };
         usage.finish(policy, result)
     })
+}
+
+/// The governed evaluator's checkpoint over the live execution: one signed
+/// unit per event, and an evaluator run's units in one call. The callbacks
+/// it runs past are table lookups that charge nothing, and the phase's
+/// signed work is already charged in runs (`work_runs`).
+struct WorkCheckpoint<'e, 'cx, 'permit, Clock>(&'e RefCell<Execution<'cx, 'permit, Clock>>);
+
+impl<Clock: FnMut() -> u64> fgdb_gql::GovernedCheckpoint<QueryError>
+    for WorkCheckpoint<'_, '_, '_, Clock>
+{
+    const RUNS: bool = true;
+    fn unit(&mut self) -> Result<(), QueryError> {
+        self.0.borrow_mut().checkpoint()
+    }
+    fn units(&mut self, n: u64) -> Result<(), QueryError> {
+        self.0.borrow_mut().work_units(n)
+    }
 }
 
 impl<V: Vfs + Clone> Database<V> {
