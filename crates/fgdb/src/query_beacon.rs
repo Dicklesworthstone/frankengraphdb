@@ -13,6 +13,8 @@ use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::cell::RefCell;
 
+#[path = "query_beacon/demand.rs"]
+pub(crate) mod demand;
 #[path = "query_beacon/graph.rs"]
 pub(crate) mod graph;
 #[path = "query_beacon/indexed.rs"]
