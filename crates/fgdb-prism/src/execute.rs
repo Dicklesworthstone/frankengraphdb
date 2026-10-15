@@ -312,8 +312,8 @@ fn gather_threads(arcs: usize) -> usize {
         .min(MAX_GATHER_THREADS)
 }
 
-/// One PageRank pass as a gather: each target adds what every arc into it
-/// carries, its sources ascending. That is the order a source-ascending
+/// One PageRank pass as a gather: each target starts at the pass's initial
+/// value and adds what every arc into it carries, its sources ascending. That is the order a source-ascending
 /// scatter adds them in, and each arc's value is the scatter's `push * share`
 /// (`contrib[source]` alone when unweighted, `contrib[source] * shares[arc]`
 /// when weighted), so every sum is the scatter's floating-point sequence.
@@ -324,6 +324,7 @@ fn gather_pass(
     sources: &[usize],
     contrib: &[f64],
     shares: Option<&[f64]>,
+    initial: f64,
     next: &mut [f64],
     threads: usize,
 ) {
@@ -332,7 +333,7 @@ fn gather_pass(
     let gather = |low: usize, rows: &mut [f64]| {
         for (at, slot) in rows.iter_mut().enumerate() {
             let target = low + at;
-            let mut sum = *slot;
+            let mut sum = initial;
             let (start, end) = (offsets[target], offsets[target + 1]);
             match shares {
                 None => {
@@ -369,6 +370,56 @@ fn gather_pass(
             scope.spawn(move || gather(start, rows));
             rest = tail;
             low = high;
+        }
+    });
+}
+
+/// Spend `len` units in runs of FNX_METER_RUN: the calls `metered` makes for
+/// a walk of `len` items, made before the walk.
+fn charge_runs<C>(len: usize, meter: &mut impl FnxMeter<C>) -> Result<(), FnxExecutionError<C>> {
+    let mut start = 0;
+    while start < len {
+        let end = len.min(start + FNX_METER_RUN);
+        meter
+            .units(end - start)
+            .map_err(FnxExecutionError::Cancelled)?;
+        start = end;
+    }
+    Ok(())
+}
+
+/// Each source's per-arc value for this pass: the scatter's push * share,
+/// push alpha times rank, share 1 / sum unweighted (the weighted share is per
+/// arc). Independent per source, so several threads give identical bits.
+fn contributions(
+    options: crate::PageRankOptions,
+    ranks: &[f64],
+    sums: &[f64],
+    contrib: &mut [f64],
+    threads: usize,
+) {
+    let fill = |low: usize, rows: &mut [f64]| {
+        for (at, slot) in rows.iter_mut().enumerate() {
+            let index = low + at;
+            let push = options.alpha() * ranks[index];
+            *slot = if options.weighted() {
+                push
+            } else if sums[index] > 0.0 {
+                push * (1.0 / sums[index])
+            } else {
+                0.0
+            };
+        }
+    };
+    let n = contrib.len();
+    if threads <= 1 {
+        fill(0, contrib);
+        return;
+    }
+    let chunk = n.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (at, rows) in contrib.chunks_mut(chunk.max(1)).enumerate() {
+            scope.spawn(move || fill(at * chunk, rows));
         }
     });
 }
@@ -425,6 +476,9 @@ fn pagerank<C>(
     let mut face_ok = in_offsets.len() == n + 1 && in_offsets[n] == in_sources.len();
     let threads = gather_threads(in_sources.len());
     let mut contrib = reserve(n)?;
+    // The rows with nothing to spread, ascending: each pass's dangling mass
+    // sums exactly these, in the order a full walk would meet them.
+    let mut dangling: Vec<usize> = reserve(n)?;
     let mut shares: Vec<f64> = Vec::new();
     let mut cursor: Vec<usize> = Vec::new();
     if options.weighted() && face_ok {
@@ -478,6 +532,9 @@ fn pagerank<C>(
                 cursor[target] = slot + 1;
             }
         }
+        if sum == 0.0 {
+            dangling.push(source);
+        }
         sums.push(sum);
         ranks.push(1.0 / population);
         next.push(0.0);
@@ -492,28 +549,19 @@ fn pagerank<C>(
         // Each pass spends one unit per vertex or arc, as before, but asks
         // the meter for up to FNX_METER_RUN of them at once; the arithmetic
         // and its order are unchanged.
+        // The dangling walk still spends a unit per row, charged first; it
+        // adds exactly the dangling rows' ranks, ascending, as a full walk
+        // that skips the others does.
+        charge_runs(n, meter)?;
         let mut dangling_mass = 0.0;
-        metered(n, meter, |source| {
-            if sums[source] == 0.0 {
-                dangling_mass += ranks[source];
-            }
-            Ok(())
-        })?;
+        for &source in &dangling {
+            dangling_mass += ranks[source];
+        }
         let initial = base + options.alpha() * dangling_mass / population;
-        metered(n, meter, |index| {
-            next[index] = initial;
-            // The scatter's per-arc value is push * share, push this alpha
-            // times rank; unweighted, every arc's share is 1 / sum.
-            let push = options.alpha() * ranks[index];
-            contrib[index] = if options.weighted() {
-                push
-            } else if sums[index] > 0.0 {
-                push * (1.0 / sums[index])
-            } else {
-                0.0
-            };
-            Ok(())
-        })?;
+        // The initial values are the gather's starting sums; the
+        // contribution walk spends its unit per row first.
+        charge_runs(n, meter)?;
+        contributions(options, &ranks, &sums, &mut contrib, threads);
         // The walk's units are one stream: a row's unit, then its arcs, row
         // after row, n + m in all. They are charged first, in runs of
         // FNX_METER_RUN across rows, so the meter sees exactly the calls a
@@ -531,6 +579,7 @@ fn pagerank<C>(
             in_sources,
             &contrib,
             options.weighted().then_some(shares.as_slice()),
+            initial,
             &mut next,
             threads,
         );
@@ -1047,11 +1096,11 @@ mod tests {
         for weighted in [false, true] {
             let shares = weighted.then_some(shares.as_slice());
             let mut one = start.clone();
-            gather_pass(offsets, sources, &contrib, shares, &mut one, 1);
+            gather_pass(offsets, sources, &contrib, shares, 0.25, &mut one, 1);
             assert_ne!(one, start, "the gather added something");
             for threads in 2..=8 {
                 let mut many = start.clone();
-                gather_pass(offsets, sources, &contrib, shares, &mut many, threads);
+                gather_pass(offsets, sources, &contrib, shares, 0.25, &mut many, threads);
                 assert!(
                     one.iter()
                         .zip(&many)
