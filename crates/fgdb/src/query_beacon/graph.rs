@@ -52,7 +52,10 @@ pub(crate) fn evaluate(
 /// The same execution body with an admitted-edge event for a host's combined
 /// vertex/edge allowance. The callback runs AFTER historical winner selection,
 /// relation scope and BOTH selected endpoint checks, before retaining an arc.
-/// It sees no hidden candidate, raw row, identity or property.
+/// It sees no hidden candidate, raw row, identity or property. Since
+/// 2903b02e the session path runs its own evaluator, so only `evaluate`
+/// reaches this body.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_with_edge_admission(
     snapshot: &Snapshot,

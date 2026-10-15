@@ -93,7 +93,7 @@ fn exact_top_k_matches_full_sort_for_metrics_filters_and_link_profiles() {
                     for selection in 0..4 {
                         let select = |id: VId| match selection {
                             0 => true,
-                            1 => id.0 % 3 == 0,
+                            1 => id.0.is_multiple_of(3),
                             2 => id == graph.nodes[47].id,
                             _ => false,
                         };
