@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 #[path = "prepared_graph.rs"]
 mod graph;
+#[path = "prepared_native.rs"]
+mod native;
 
 /// An immutable resident search generation owned by exactly one authorized
 /// session. Obtain it through `AuthorizedReadSession::prepare_beacon_index`;
