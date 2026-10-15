@@ -43,19 +43,14 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
     ) -> Result<Option<EId>, EdgeScanSourceError<ReadError, C>> {
         let cx = self.cx;
         cx.with_restriction(|| {
-            let mut node = self.view.snapshot.adjacency_index().histories.0.as_deref();
-            let mut successor = None;
             // Strict successor, not eid+1: zero and u128::MAX are ordinary IDs.
             // Each visited node is metered; no unmetered rank lookup or ID bag.
-            while let Some(current) = node {
-                control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-                if self.after.is_none_or(|after| current.key > after) {
-                    successor = Some(current.key);
-                    node = current.left.0.as_deref();
-                } else {
-                    node = current.right.0.as_deref();
-                }
-            }
+            let successor = self
+                .view
+                .snapshot
+                .adjacency_index()
+                .next_identity(self.after, &mut || control(GlaExecutionEvent::Work))
+                .map_err(EdgeScanSourceError::Control)?;
             if let Some(eid) = successor {
                 self.after = Some(eid);
             }
@@ -130,38 +125,22 @@ pub(super) fn edge_from_view<'a, C>(
 ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<ReadError, C>> {
     cx.with_restriction(|| {
         let snapshot = &view.snapshot;
-        let mut node = snapshot.adjacency_index().histories.0.as_deref();
-        let mut history = None;
-        while let Some(current) = node {
-            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-            match eid.cmp(&current.key) {
-                core::cmp::Ordering::Less => node = current.left.0.as_deref(),
-                core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
-                core::cmp::Ordering::Equal => {
-                    history = Some(&current.value);
-                    break;
-                }
-            }
-        }
-        let Some(history) = history else {
+        let mut charge = || control(GlaExecutionEvent::Work);
+        let Some(history) = snapshot
+            .adjacency_index()
+            .history_charged(eid, &mut charge)
+            .map_err(EdgeScanSourceError::Control)?
+        else {
             return Ok(None);
         };
-        let mut node = history.0.as_deref();
-        let mut winner = None;
-        while let Some(current) = node {
-            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-            // History keys are (created_at, block, row). Pick the last
-            // coordinate at or before the cut, INCLUDING a retirement
-            // restatement. Falling back to an older live row resurrects
-            // deletes and can mix topology with another version's costs.
-            if current.key.0 <= as_of {
-                winner = Some(current.key);
-                node = current.right.0.as_deref();
-            } else {
-                node = current.left.0.as_deref();
-            }
-        }
-        let Some((_, block, row)) = winner else {
+        // History keys are (created_at, block, row). Pick the last
+        // coordinate at or before the cut, INCLUDING a retirement
+        // restatement. Falling back to an older live row resurrects
+        // deletes and can mix topology with another version's costs.
+        let Some((block, row)) = history
+            .latest_charged(as_of, &mut charge)
+            .map_err(EdgeScanSourceError::Control)?
+        else {
             return Ok(None);
         };
         control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
