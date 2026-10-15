@@ -78,17 +78,28 @@ const HEADER_LEN: usize = OFF_DIGEST + 32;
 /// patch_id(32) + first_seq(8) + last_seq(8).
 const REF_LEN: usize = 32 + 8 + 8;
 
-/// The largest number of blocks this build will read from one root.
-pub const MAX_ROOT_BLOCKS: u32 = 1 << 20;
+/// The largest number of blocks this build will read from one root: a V5
+/// root, whose three-level shape bounds its own bytes. A partition holds at
+/// least one block per (source, relation) family, so this also bounds a
+/// one-partition graph's source vertices; 2^20 refused roadnet-ca (1.97M
+/// sources) and pokec (1.6M) at load (fgdb-u9jln).
+pub const MAX_ROOT_BLOCKS: u32 = 1 << 24;
 /// The largest number of vertex patches this build will read from one root.
-pub const MAX_ROOT_PATCHES: u32 = 1 << 20;
-/// The largest canonical root byte string this format version can encode.
+pub const MAX_ROOT_PATCHES: u32 = 1 << 24;
+/// The largest number of blocks a flat (V3) or two-level (V4) root may name.
+/// Their encodings grow with every reference, so they keep the original
+/// ceiling: it bounds what a damaged count can make a reader allocate.
+pub const MAX_FLAT_ROOT_BLOCKS: u32 = 1 << 20;
+/// The vertex-patch counterpart of [`MAX_FLAT_ROOT_BLOCKS`].
+pub const MAX_FLAT_ROOT_PATCHES: u32 = 1 << 20;
+/// The largest canonical flat (V3) root byte string.
 ///
-/// Storage applies this before materializing a root. Keeping the byte ceiling
+/// Storage applies this before materializing a root object of any format; a
+/// segmented root's own bytes are far smaller. Keeping the byte ceiling
 /// derived beside the layout prevents the block store from drifting to a much
 /// larger, block-shaped allocation bound when the durable root format changes.
 pub const MAX_ENCODED_ROOT_BYTES: usize =
-    HEADER_LEN + (MAX_ROOT_BLOCKS as usize + MAX_ROOT_PATCHES as usize) * REF_LEN;
+    HEADER_LEN + (MAX_FLAT_ROOT_BLOCKS as usize + MAX_FLAT_ROOT_PATCHES as usize) * REF_LEN;
 
 /// One block a root names, and the sequence range it covers.
 ///
@@ -524,6 +535,20 @@ impl core::error::Error for RootError {}
 /// Producers call this before an invalid root can escape; encoders and decoders
 /// call the same function so publication and persistence cannot drift into two
 /// definitions of lawfulness.
+/// Refuse a root the flat (V3) and two-level (V4) formats cannot name: their
+/// decoders refuse counts past the flat ceilings, so their encoders must too.
+fn within_flat_ceilings(root: &PartitionRoot) -> Result<(), RootError> {
+    let declared = u32::try_from(root.blocks.len()).unwrap_or(u32::MAX);
+    if declared > MAX_FLAT_ROOT_BLOCKS {
+        return Err(RootError::ImplausibleBlockCount { declared });
+    }
+    let declared = u32::try_from(root.vertex_patches.len()).unwrap_or(u32::MAX);
+    if declared > MAX_FLAT_ROOT_PATCHES {
+        return Err(RootError::ImplausiblePatchCount { declared });
+    }
+    Ok(())
+}
+
 pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
     let declared = u32::try_from(root.blocks.len()).unwrap_or(u32::MAX);
     if declared > MAX_ROOT_BLOCKS {
@@ -634,6 +659,7 @@ pub fn root_logical_digest(root: &PartitionRoot) -> [u8; 32] {
 /// Encode a root canonically, refusing anything that is not.
 pub fn encode_root(root: &PartitionRoot) -> Result<Vec<u8>, RootError> {
     validate_root(root)?;
+    within_flat_ceilings(root)?;
 
     let mut out =
         Vec::with_capacity(HEADER_LEN + (root.blocks.len() + root.vertex_patches.len()) * REF_LEN);
@@ -681,12 +707,13 @@ pub fn decode_root(bytes: &[u8]) -> Result<PartitionRoot, RootError> {
     let u32_at = |at: usize| -> u32 {
         u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
     };
+    // A flat root's bytes grow with its counts: the flat ceilings bound them.
     let count = u32_at(OFF_BLOCK_COUNT);
-    if count > MAX_ROOT_BLOCKS {
+    if count > MAX_FLAT_ROOT_BLOCKS {
         return Err(RootError::ImplausibleBlockCount { declared: count });
     }
     let patch_count = u32_at(OFF_PATCH_COUNT);
-    if patch_count > MAX_ROOT_PATCHES {
+    if patch_count > MAX_FLAT_ROOT_PATCHES {
         return Err(RootError::ImplausiblePatchCount {
             declared: patch_count,
         });
@@ -762,7 +789,8 @@ pub const ROOT_LOGICAL_DIGEST_DOMAIN_V4: &[u8] = b"fgdb.strata.root-logical-dige
 /// The largest canonical V4 root: every full segment of both lists at their
 /// ceilings, plus two tails just short of a segment.
 pub const MAX_ENCODED_ROOT_V4_BYTES: usize = HEADER_LEN
-    + (MAX_ROOT_BLOCKS as usize / SEGMENT_REFS + MAX_ROOT_PATCHES as usize / SEGMENT_REFS)
+    + (MAX_FLAT_ROOT_BLOCKS as usize / SEGMENT_REFS
+        + MAX_FLAT_ROOT_PATCHES as usize / SEGMENT_REFS)
         * SEGMENT_REF_LEN
     + 2 * (SEGMENT_REFS - 1) * REF_LEN;
 
@@ -772,8 +800,8 @@ pub const MAX_ENCODED_ROOT_V4_BYTES: usize = HEADER_LEN
 /// the last full index, then the tail inline, all named by [`SegmentRef`] as
 /// in V4. A commit writes and hashes at most 15 segment references and 255
 /// tail references per list, plus one index reference per 4,096 references
-/// (256 at the ceiling), and at most one new segment and one new index
-/// segment per list. Additive over V3
+/// (256 at 2^20 references, 4,096 at the 2^24 ceiling), and at most one new
+/// segment and one new index segment per list. Additive over V3
 /// and V4 (§16.6 additive-minor): both still decode, and writers emit V5.
 pub const ROOT_FORMAT_V5: u16 = 5;
 /// Domain separator for the V5 logical digest, which binds each full index
@@ -788,8 +816,8 @@ const fn max_v5_list_bytes(ceiling: u32) -> usize {
     (ceiling as usize / INDEX_COVERS + INDEX_REFS - 1) * SEGMENT_REF_LEN
         + (SEGMENT_REFS - 1) * REF_LEN
 }
-/// The largest canonical V5 root, from above: 67,934 bytes at any history up
-/// to the count ceilings.
+/// The largest canonical V5 root, from above: 682,334 bytes at any history up
+/// to the count ceilings (67,934 up to 2^20 references per list).
 pub const MAX_ENCODED_ROOT_V5_BYTES: usize =
     HEADER_LEN + max_v5_list_bytes(MAX_ROOT_BLOCKS) + max_v5_list_bytes(MAX_ROOT_PATCHES);
 
@@ -803,10 +831,13 @@ pub const MAX_ENCODED_ROOT_V5_BYTES: usize =
 /// adds its index segments to that. A read budget clamped to the flat ceiling
 /// would refuse a lawful root.
 pub const MAX_ROOT_READ_BYTES: usize = {
+    let flat_segments = (MAX_FLAT_ROOT_BLOCKS as usize / SEGMENT_REFS
+        + MAX_FLAT_ROOT_PATCHES as usize / SEGMENT_REFS)
+        * SEGMENT_BYTES;
     let segments = (MAX_ROOT_BLOCKS as usize / SEGMENT_REFS
         + MAX_ROOT_PATCHES as usize / SEGMENT_REFS)
         * SEGMENT_BYTES;
-    let v4 = MAX_ENCODED_ROOT_V4_BYTES + segments;
+    let v4 = MAX_ENCODED_ROOT_V4_BYTES + flat_segments;
     let v5 = MAX_ENCODED_ROOT_V5_BYTES
         + segments
         + (MAX_ROOT_BLOCKS as usize / INDEX_COVERS + MAX_ROOT_PATCHES as usize / INDEX_COVERS)
@@ -1162,6 +1193,9 @@ fn encode_segmented(
     format: Segmented,
 ) -> Result<EncodedRoot, RootError> {
     validate_root(root)?;
+    if format == Segmented::V4 {
+        within_flat_ceilings(root)?;
+    }
     let coordinate = (root.graph, root.branch, root.partition);
     if cache.coordinate != Some(coordinate) {
         *cache = SegmentCache {
@@ -1299,12 +1333,18 @@ pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
         buf.copy_from_slice(&bytes[at..at + 32]);
         buf
     };
+    // A V4 root's reference lists grow with its counts, as a flat root's do;
+    // only V5's index level keeps the root bounded past the flat ceilings.
+    let (block_ceiling, patch_ceiling) = match format {
+        Segmented::V4 => (MAX_FLAT_ROOT_BLOCKS, MAX_FLAT_ROOT_PATCHES),
+        Segmented::V5 => (MAX_ROOT_BLOCKS, MAX_ROOT_PATCHES),
+    };
     let count = u32_at(OFF_BLOCK_COUNT);
-    if count > MAX_ROOT_BLOCKS {
+    if count > block_ceiling {
         return Err(RootError::ImplausibleBlockCount { declared: count });
     }
     let patch_count = u32_at(OFF_PATCH_COUNT);
-    if patch_count > MAX_ROOT_PATCHES {
+    if patch_count > patch_ceiling {
         return Err(RootError::ImplausiblePatchCount {
             declared: patch_count,
         });

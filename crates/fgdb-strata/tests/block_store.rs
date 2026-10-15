@@ -2885,14 +2885,17 @@ fn a_damaged_or_substituted_segment_refuses_the_root() {
 /// to the flat one would refuse a lawful root.
 #[test]
 fn a_bounded_root_read_charges_every_segment_it_names() {
+    // Both lists at a format's ceiling: V4 at the flat one, V5 at its own.
+    const V4_REFS: usize = 2 * fgdb_strata::root::MAX_FLAT_ROOT_BLOCKS as usize;
+    const V5_REFS: usize = 2 * fgdb_strata::root::MAX_ROOT_BLOCKS as usize;
     const LARGEST_V4_READ: usize =
-        MAX_ENCODED_ROOT_V4_BYTES + (2 << 20) / SEGMENT_REFS * SEGMENT_BYTES;
+        MAX_ENCODED_ROOT_V4_BYTES + V4_REFS / SEGMENT_REFS * SEGMENT_BYTES;
     // A V5 read at the ceilings: the root, every full index segment of both
     // lists, and every segment.
     const LARGEST_V5_READ: usize = MAX_ENCODED_ROOT_V5_BYTES
-        + (2 << 20) / (SEGMENT_REFS * fgdb_strata::root_segment::INDEX_REFS)
+        + V5_REFS / (SEGMENT_REFS * fgdb_strata::root_segment::INDEX_REFS)
             * fgdb_strata::root_segment::INDEX_BYTES
-        + (2 << 20) / SEGMENT_REFS * SEGMENT_BYTES;
+        + V5_REFS / SEGMENT_REFS * SEGMENT_BYTES;
     const _: () = assert!(LARGEST_V4_READ > MAX_ENCODED_ROOT_BYTES);
     const _: () = assert!(MAX_ROOT_READ_BYTES >= LARGEST_V4_READ);
     const _: () = assert!(MAX_ROOT_READ_BYTES >= LARGEST_V5_READ);
