@@ -7,13 +7,15 @@ use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphEdgeMergePolicy, GraphEdgeUpsertPolicy, GraphSymbol,
     GraphSymbolKind, GraphWriteProgramPolicy, PreparedGraphEdgeUpsertQueryText,
     PreparedGraphVertexUpsertText, PreparedGraphWriteProgram,
 };
-use fgdb_gql::algebra::GraphValue;
-use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use fgdb_warden::{Authority, Grant, QueryLimits, Restriction, Rights, Scope};
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x57; 32]);

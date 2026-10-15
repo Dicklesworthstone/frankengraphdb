@@ -124,13 +124,12 @@ impl<'a> ExpansionCursor<'a> {
         result
     }
 
-    pub fn request(
-        &mut self,
-        work: &mut dyn WorkControl,
-    ) -> Result<ExpansionRequest, BeaconError> {
+    pub fn request(&mut self, work: &mut dyn WorkControl) -> Result<ExpansionRequest, BeaconError> {
         self.step(|cursor| {
             if cursor.pending.is_some() || cursor.active.is_some() {
-                return Err(BeaconError::InvalidQuery("expansion source request is outstanding"));
+                return Err(BeaconError::InvalidQuery(
+                    "expansion source request is outstanding",
+                ));
             }
             if cursor.complete || cursor.candidates == 0 {
                 cursor.complete = true;
@@ -138,7 +137,11 @@ impl<'a> ExpansionCursor<'a> {
             }
             if let Some(&id) = cursor.seeds.get(cursor.next_seed) {
                 work.charge(tree_work(cursor.distance.len()))?;
-                cursor.pending = Some(Membership { id, hops: 0, seed: true });
+                cursor.pending = Some(Membership {
+                    id,
+                    hops: 0,
+                    seed: true,
+                });
                 return Ok(ExpansionRequest::Seed(id));
             }
             while let Some((id, hops)) = cursor.frontier.pop_front() {
@@ -162,14 +165,20 @@ impl<'a> ExpansionCursor<'a> {
     ) -> Result<(), BeaconError> {
         self.step(|cursor| {
             if cursor.pending.is_some() {
-                return Err(BeaconError::InvalidQuery("expansion membership is outstanding"));
+                return Err(BeaconError::InvalidQuery(
+                    "expansion membership is outstanding",
+                ));
             }
             let (_, hops) = cursor.active.ok_or(BeaconError::InvalidQuery(
                 "expansion has no active neighbor source",
             ))?;
             work.charge(tree_work(cursor.distance.len()))?;
             // An active source is strictly below max_hops <= u32::MAX.
-            cursor.pending = Some(Membership { id, hops: hops + 1, seed: false });
+            cursor.pending = Some(Membership {
+                id,
+                hops: hops + 1,
+                seed: false,
+            });
             Ok(())
         })
     }
@@ -210,7 +219,9 @@ impl<'a> ExpansionCursor<'a> {
     pub fn finish_neighbors(&mut self) -> Result<(), BeaconError> {
         self.step(|cursor| {
             if cursor.pending.is_some() || cursor.active.take().is_none() {
-                return Err(BeaconError::InvalidQuery("expansion neighbor source is incomplete"));
+                return Err(BeaconError::InvalidQuery(
+                    "expansion neighbor source is incomplete",
+                ));
             }
             Ok(())
         })
@@ -229,7 +240,9 @@ impl<'a> ExpansionCursor<'a> {
             return Err(error);
         }
         if !self.complete || self.pending.is_some() || self.active.is_some() {
-            return Err(BeaconError::InvalidQuery("expansion traversal is incomplete"));
+            return Err(BeaconError::InvalidQuery(
+                "expansion traversal is incomplete",
+            ));
         }
         if self.candidates == 0 {
             return Ok(Vec::new());
@@ -254,7 +267,9 @@ impl<'a> ExpansionCursor<'a> {
         let mut rows = Vec::new();
         while !best.is_empty() {
             work.charge(tree_work(best.len()))?;
-            let (hops, id) = best.pop().ok_or(BeaconError::Invariant("expansion heap disappeared"))?;
+            let (hops, id) = best
+                .pop()
+                .ok_or(BeaconError::Invariant("expansion heap disappeared"))?;
             rows.push(GraphHit { id, hops });
         }
         for i in 0..rows.len() / 2 {

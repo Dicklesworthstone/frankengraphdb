@@ -426,9 +426,8 @@ fn expand_controlled(
     eligible: &mut impl FnMut(VId, &mut dyn WorkControl) -> Result<bool, BeaconError>,
     work: &mut dyn WorkControl,
 ) -> Result<Vec<GraphHit>, BeaconError> {
-    let mut cursor = ExpansionCursor::new(
-        seeds, max_hops, include_seeds, candidates, limits, work,
-    )?;
+    let mut cursor =
+        ExpansionCursor::new(seeds, max_hops, include_seeds, candidates, limits, work)?;
     loop {
         match cursor.request(work)? {
             ExpansionRequest::Seed(id) => {
@@ -981,8 +980,7 @@ mod source_tests {
         let mut work = WorkBudget::new(100_000);
         for &(from, to) in &arcs {
             graph
-                .insert_edge(from, to, ExpansionDirection::Outgoing,
-                    &mut work)
+                .insert_edge(from, to, ExpansionDirection::Outgoing, &mut work)
                 .unwrap();
         }
         let expected = vec![GraphHit {
