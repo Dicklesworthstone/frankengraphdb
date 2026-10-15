@@ -23,7 +23,7 @@ use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_strata::{edge_props::EdgePropertyPatchError, vertex::VertexPatchError};
 use fgdb_types::{CanonicalScalar, CommitCx, CommitSeq, EId, QueryCx, VId};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod source;
 
@@ -300,6 +300,24 @@ impl core::error::Error for BulkLoadError {
     }
 }
 
+/// The vertices a load has written, by caller key. The checkpoint keeps an
+/// ordered map; the chunk loop resolves endpoints through hashed ones, since a
+/// string-keyed tree search per endpoint was ~5% of a web-google load
+/// (fgdb-79kyi). Only probed, so no order reaches a result.
+trait VertexKeys {
+    fn find(&self, key: &str) -> Option<VId>;
+}
+impl VertexKeys for BTreeMap<String, VId> {
+    fn find(&self, key: &str) -> Option<VId> {
+        self.get(key).copied()
+    }
+}
+impl VertexKeys for HashMap<String, VId> {
+    fn find(&self, key: &str) -> Option<VId> {
+        self.get(key).copied()
+    }
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Resolve an edge endpoint: a caller key against this source's vertices
     /// (`fresh` for the current chunk, then the committed prefix), a match
@@ -314,15 +332,14 @@ impl<V: Vfs + Clone> Database<V> {
         row: usize,
         edge: &str,
         endpoint: &BulkEndpoint,
-        fresh: &BTreeMap<String, VId>,
-        committed: &BTreeMap<String, VId>,
+        fresh: &impl VertexKeys,
+        committed: &impl VertexKeys,
     ) -> Result<VId, BulkLoadErrorKind> {
         let (label, key, value) = match endpoint {
             BulkEndpoint::Key(key) => {
                 return fresh
-                    .get(key)
-                    .or_else(|| committed.get(key))
-                    .copied()
+                    .find(key)
+                    .or_else(|| committed.find(key))
                     .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
                         edge: edge.to_owned(),
                         endpoint: key.clone(),
@@ -525,7 +542,7 @@ impl<V: Vfs + Clone> Database<V> {
         // The frontier before this load's first chunk: every chunk commits
         // exactly one sequence, and a resume requires no interleaved writer.
         let mut basis = CommitSeq(0);
-        let no_keys = BTreeMap::new();
+        let no_keys = BTreeMap::<String, VId>::new();
         let preflight = (|| {
             source::checkpoint(cx)?;
             self.ensure_writable()
@@ -550,8 +567,10 @@ impl<V: Vfs + Clone> Database<V> {
                 .map(CommitSeq)
                 .ok_or(BulkLoadErrorKind::InvalidResume)?;
             source::admit_checkpoint(cx, &committed, &policy)?;
-            let mut keys = BTreeSet::new();
-            let mut vertices = BTreeSet::new();
+            // Probed, never iterated: hashed sets spare an ordered set's string
+            // comparisons over every source key (fgdb-79kyi).
+            let mut keys = HashSet::new();
+            let mut vertices = HashSet::new();
             let mut prefix_vertices = BTreeSet::new();
             let mut prefix_edges = BTreeSet::new();
             let mut count = 0usize;
@@ -717,6 +736,13 @@ impl<V: Vfs + Clone> Database<V> {
                 });
             }
         };
+        // `committed.vertices`, hashed for endpoint resolution, and extended
+        // with each chunk exactly when the checkpoint is.
+        let mut vertex_keys: HashMap<String, VId> = committed
+            .vertices
+            .iter()
+            .map(|(key, &id)| (key.clone(), id))
+            .collect();
         for (index, seal) in seals.iter().enumerate() {
             let skip = seal.end() <= committed.next_row;
             let chunk = match source::read_verified(
@@ -746,7 +772,7 @@ impl<V: Vfs + Clone> Database<V> {
                     pending: None,
                 });
             };
-            let mut new_vertices = BTreeMap::new();
+            let mut new_vertices = HashMap::new();
             let mut new_edges = BTreeMap::new();
             let prepared = (|| {
                 let mut vertex_batch = WriteBatch::new(policy.vertex_relation);
@@ -776,7 +802,7 @@ impl<V: Vfs + Clone> Database<V> {
                                 &e.key,
                                 &e.source,
                                 &new_vertices,
-                                &committed.vertices,
+                                &vertex_keys,
                             )?;
                             let dst = self.resolve_endpoint(
                                 cx,
@@ -785,7 +811,7 @@ impl<V: Vfs + Clone> Database<V> {
                                 &e.key,
                                 &e.destination,
                                 &new_vertices,
-                                &committed.vertices,
+                                &vertex_keys,
                             )?;
                             let ElementId::Edge(id) = self
                                 .allocate_identity(cx, GraphInsertRequest::Edge { row: 0, edge: 0 })
@@ -827,6 +853,7 @@ impl<V: Vfs + Clone> Database<V> {
                 .await
             {
                 Ok(frontier) => {
+                    vertex_keys.extend(new_vertices.iter().map(|(key, &id)| (key.clone(), id)));
                     committed.vertices.extend(new_vertices);
                     committed.edges.extend(new_edges);
                     committed.frontier = frontier;

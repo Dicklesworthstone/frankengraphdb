@@ -22,7 +22,7 @@ use fgdb_gql::GqlParameterValue;
 pub(crate) use fgdb_protocol::json::{Json, parse_json};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, PurposeContexts, VId};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, HashSet},
     io::{self, Write},
 };
 
@@ -105,9 +105,12 @@ pub(super) async fn run<V: Vfs + Clone>(
     let rows = Rows::new(source.reader(), &cx, options, resolver);
     // Validate all format/shape/key failures before touching a checkpoint. Drop
     // these temporary key sets before recovery maps or the engine's preflight.
+    // They are only probed, never iterated, so their order reaches nothing: a
+    // hashed set spares the string comparisons of an ordered one, most of this
+    // pass on a 6M-row source (fgdb-79kyi).
     let key_bytes = {
-        let mut keys = BTreeSet::new();
-        let mut vertices = BTreeSet::new();
+        let mut keys = HashSet::new();
+        let mut vertices = HashSet::new();
         let mut key_bytes = 0usize;
         for (index, row) in rows.clone().enumerate() {
             let row = row.map_err(|e| e.failure())?;
