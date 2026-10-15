@@ -73,10 +73,12 @@ fn visit_at<Clock: FnMut() -> u64>(
     // in runs.
     work_runs(execution, GqlQueryError::Interrupted, || {
         let mut usage = AdmissionUsage::default();
+        // A graph aggregate reads its edges as triples alone.
         let tables = Tables::admit(
             snapshot,
             query.input_pattern().plan(),
             at,
+            true,
             scope,
             || {
                 execution
@@ -99,10 +101,12 @@ fn visit_at<Clock: FnMut() -> u64>(
             },
         )
         .map_err(|error| error.map_source(GraphAggregateError::Source))?;
-        let edges = tables
-            .edges
-            .iter()
-            .map(|&((_, from, relation, to), _)| (from, relation, to));
+        let owned_edges = || {
+            tables
+                .edges
+                .iter()
+                .map(|&((_, from, relation, to), _)| (from, relation, to))
+        };
         let remaining = usage.remaining(policy);
         let checkpoint = || execution.borrow_mut().checkpoint();
         // A vertex-only aggregate tests and reads the vertex its scan has just
@@ -110,11 +114,26 @@ fn visit_at<Clock: FnMut() -> u64>(
         // 1.9-2.3x). An edge-reading one keeps the plain lookups. Its endpoint
         // tests run in the evaluator's hottest loop, and the remembering
         // closures measured 5-13% slower there.
-        let result = if query.input_pattern().plan().reads_edges() {
+        // Each source of triples gets its own call, so the evaluator's
+        // hottest loop reads one plain iterator (a chained one cost a
+        // compact-core count 6-15%).
+        let result = if let Some(inline) = tables.inline_triples() {
             query.execute_governed(
                 tables.records,
                 tables.vertices.iter().map(|&(vid, _)| vid),
-                edges,
+                inline
+                    .iter()
+                    .map(|&(_, from, relation, to)| (from, relation, to)),
+                |vid, required| Ok(tables.matches(vid, required, scope)),
+                |vid, key| Ok(tables.property(vid, key, scope)),
+                remaining,
+                checkpoint,
+            )
+        } else if query.input_pattern().plan().reads_edges() {
+            query.execute_governed(
+                tables.records,
+                tables.vertices.iter().map(|&(vid, _)| vid),
+                owned_edges(),
                 |vid, required| Ok(tables.matches(vid, required, scope)),
                 |vid, key| Ok(tables.property(vid, key, scope)),
                 remaining,
@@ -125,7 +144,7 @@ fn visit_at<Clock: FnMut() -> u64>(
             query.execute_governed(
                 tables.records,
                 tables.scan(&last),
-                edges,
+                owned_edges(),
                 |vid, required| Ok(tables.matches_after(&last, vid, required, scope)),
                 |vid, key| Ok(tables.property_after(&last, vid, key, scope)),
                 remaining,

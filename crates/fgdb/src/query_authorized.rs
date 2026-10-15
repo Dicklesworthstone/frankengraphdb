@@ -439,6 +439,9 @@ struct Tables<'a> {
     /// cached core this table was refilled from; absent, lookups search.
     positions: Option<Arc<positions::VertexPositions>>,
     edges: Vec<Edge<'a>>,
+    /// A refilled core whose sealed inline identities stand in for `edges`
+    /// when only their (source, relation, destination) triples are read.
+    edge_core: Option<Arc<AdmittedCore>>,
     labels: BTreeMap<VId, Vec<GraphValue>>,
     types: BTreeMap<EId, CanonicalScalar>,
     property_maps: PropertyMaps,
@@ -459,10 +462,14 @@ impl<'a> Tables<'a> {
     /// a full scan's records and live calls depend only on the snapshot and
     /// the cut, so the first one on a snapshot is recorded and later ones
     /// replay its calls and refill from it (`admission.rs`, fgdb-61p1n).
+    // `triples_only` is the caller's read mode beside the cut: a struct for
+    // one flag would only rename it.
+    #[allow(clippy::too_many_arguments)]
     fn admit<Row: GlaOutput>(
         snapshot: &'a Arc<Snapshot>,
         plan: &GlaPlan<Row>,
         at: CommitSeq,
+        triples_only: bool,
         predicates: &PlannerPredicates,
         mut node: impl FnMut() -> Result<(), Fault>,
         poll: &mut impl FnMut() -> Result<(), Fault>,
@@ -493,7 +500,16 @@ impl<'a> Tables<'a> {
                 Step::Edge => charge_edge(control),
                 Step::Checkpoint => Ok(()),
             })?;
-            tables.refill(snapshot, &core);
+            // A reader of triples alone takes a core's sealed inline
+            // identities in place instead of copying every edge.
+            let in_place = triples_only
+                && core.identities.is_some()
+                && !plan.projects_types()
+                && !plan.projects_edge_property_maps();
+            tables.refill(snapshot, &core, !in_place);
+            if in_place {
+                tables.edge_core = Some(Arc::clone(&core));
+            }
             reused = Some(core);
         } else {
             #[cfg(test)]
@@ -558,12 +574,16 @@ impl<'a> Tables<'a> {
     /// Fill empty tables from a core recorded on this same snapshot allocation.
     /// Each edge's identity is read back from the statement its coordinates
     /// name, which is the one the recording scan admitted.
-    fn refill(&mut self, snapshot: &'a Snapshot, core: &AdmittedCore) {
+    fn refill(&mut self, snapshot: &'a Snapshot, core: &AdmittedCore, edges: bool) {
         self.vertices.extend(
             core.vertices
                 .iter()
                 .map(|&(vid, patch, row)| (vid, &snapshot.patches[patch as usize][row as usize])),
         );
+        if !edges {
+            self.records = core.records;
+            return;
+        }
         let properties = |block: u32, row: u32| {
             source::edge_properties_at(&snapshot.block_props, block as usize, row as usize)
         };
@@ -668,11 +688,20 @@ impl<'a> Tables<'a> {
             vertices_sealed: true,
             positions: None,
             edges: Vec::new(),
+            edge_core: None,
             labels: BTreeMap::new(),
             types: BTreeMap::new(),
             property_maps: PropertyMaps::default(),
             records: 0,
         }
+    }
+
+    /// The refilled core's sealed inline identities, in identity order, when
+    /// this table took them in place of `edges`.
+    fn inline_triples(&self) -> Option<&[admission::EdgeIdentity]> {
+        self.edge_core
+            .as_ref()
+            .and_then(|core| core.identities.as_deref())
     }
 
     /// Sort both tables by identity. A repeated identity keeps its last
@@ -1049,6 +1078,7 @@ fn pattern_at_controlled<Row: GlaOutput>(
         snapshot,
         pattern.plan(),
         at,
+        false,
         scope,
         || node().map_err(GqlQueryError::Interrupted),
         &mut || poll().map_err(GqlQueryError::Interrupted),

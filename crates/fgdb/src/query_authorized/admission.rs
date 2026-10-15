@@ -170,6 +170,18 @@ impl Recording {
         core.records = records;
         core.tape = core.tape.finish();
         core.vertices.shrink_to_fit();
+        // Inline identities are sealed here once, as every refill's table
+        // would seal them (by identity, a repeat keeping its last
+        // admission), so a refill is already in order and a triples-only
+        // read can take them in place. The tape keeps admission order.
+        if let Some(identities) = core.identities.take() {
+            let mut paired: Vec<(EdgeIdentity, CoreEdge)> =
+                identities.into_iter().zip(core.edges.drain(..)).collect();
+            super::seal_by_key(&mut paired, |&((eid, ..), _)| eid);
+            let (identities, edges): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
+            core.identities = Some(identities);
+            core.edges = edges;
+        }
         core.edges.shrink_to_fit();
         if let Some(identities) = &mut core.identities {
             identities.shrink_to_fit();
