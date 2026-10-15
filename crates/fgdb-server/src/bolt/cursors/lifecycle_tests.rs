@@ -19,7 +19,7 @@ fn connection(server: &Server, token: CapabilityToken) -> Connection<'_> {
         transaction: None,
         output_database: None,
         output_generation: None,
-        id: 0xb017_c0,
+        id: 0x00b0_17c0,
     }
 }
 

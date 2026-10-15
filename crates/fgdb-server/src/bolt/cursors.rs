@@ -200,16 +200,16 @@ impl<'s> Connection<'s> {
         let (id, pending, bytes) = transaction.cursors.take(qid)?;
         self.pending = Some(pending);
         let outcome = self.pull_pending(cx, io, n, discard).await;
-        if let Some(pending) = self.pending.take() {
-            if outcome.is_ok() {
-                self.transaction
-                    .as_mut()
-                    .expect("delivery does not finish a transaction")
-                    .cursors
-                    .restore(id, pending, bytes)?;
-            }
-            // On error, drop this result. handle() drops all remaining cursors
-            // and the pinned transaction before entering FAILED.
+        // On error, drop this result. handle() drops all remaining cursors
+        // and the pinned transaction before entering FAILED.
+        if let Some(pending) = self.pending.take()
+            && outcome.is_ok()
+        {
+            self.transaction
+                .as_mut()
+                .expect("delivery does not finish a transaction")
+                .cursors
+                .restore(id, pending, bytes)?;
         }
         outcome
     }
