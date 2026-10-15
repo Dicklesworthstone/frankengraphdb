@@ -69,7 +69,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
             control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
             let snapshot = &self.view.snapshot;
             snapshot
-                .property_index
+                .property_index()
                 .visible_row(&snapshot.patches, vid, self.as_of, &mut |event| {
                     control(match event {
                         // The cursor charges one candidate history BEFORE this
@@ -126,7 +126,7 @@ fn vertex_successor<C>(
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
 ) -> Result<Option<VId>, C> {
     cx.with_restriction(|| {
-        let mut node = view.snapshot.property_index.histories.0.as_deref();
+        let mut node = view.snapshot.property_index().histories.0.as_deref();
         let mut successor = None;
         // No +1 sentinel: VId(0) and VId(u128::MAX) are ordinary identities.
         while let Some(current) = node {

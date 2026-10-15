@@ -160,14 +160,14 @@ where
     let Some(bounds) = bounds else {
         return Ok(None);
     };
-    let candidates = bounds.candidates(&snapshot.property_index, control)?;
+    let candidates = bounds.candidates(snapshot.property_index(), control)?;
     let mut rows = Vec::new();
     for vid in &candidates {
         control(SourceEvent::Work)?;
         control(SourceEvent::SnapshotRecord)?;
         if let Some(row) =
             snapshot
-                .property_index
+                .property_index()
                 .visible_row(&snapshot.patches, *vid, as_of, control)?
         {
             let mut matches = true;

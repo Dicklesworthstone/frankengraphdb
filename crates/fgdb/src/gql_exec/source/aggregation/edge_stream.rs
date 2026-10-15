@@ -98,7 +98,7 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
             let snapshot = &self.view.snapshot;
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
             snapshot
-                .property_index
+                .property_index()
                 .visible_row(&snapshot.patches, vid, self.as_of, &mut |event| {
                     control(match event {
                         // SnapshotRecords counts candidate EDGE histories once,

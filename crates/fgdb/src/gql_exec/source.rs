@@ -376,6 +376,30 @@ impl<I: Ord + Clone> StatementHistoryIndex<I> {
     }
 }
 
+impl StatementHistoryIndex<VId> {
+    /// The vertex statement histories [`PropertyEqualityIndex::build`] gives
+    /// `statement_histories`, without indexing any property value: a writer
+    /// resolving a vertex's version chain needs only these coordinates.
+    pub(crate) fn vertices(patches: &[VertexPatchRows]) -> Self {
+        let mut statements = Vec::with_capacity(patches.iter().map(|rows| rows.len()).sum());
+        for (patch, rows) in patches.iter().enumerate() {
+            for (row_at, row) in rows.iter().enumerate() {
+                statements.push((row.vid, row.created_at, patch, row_at));
+            }
+        }
+        statements.sort_unstable();
+        let mut work = 0;
+        let histories = statements
+            .chunk_by(|a, b| a.0 == b.0)
+            .map(|group| {
+                let versions = group.iter().map(|&(_, at, patch, row)| (at, patch, row));
+                (group[0].0, unit_set(versions.collect(), &mut work))
+            })
+            .collect();
+        Self(IndexMap::from_sorted(histories, &mut work))
+    }
+}
+
 impl StatementHistoryIndex<EId> {
     pub(crate) fn edges(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
         let statements = edge_statements(blocks);
@@ -1150,17 +1174,19 @@ pub(crate) fn bound_vertices<'a, E, Row>(
         let Some(range) = prefix_range(key, text) else {
             return Ok(None);
         };
-        if !snapshot.property_index.prefix_types_are_safe(&range) {
+        if !snapshot.property_index().prefix_types_are_safe(&range) {
             return Ok(None);
         }
-        let candidates = snapshot.property_index.range_candidates(&range, control)?;
+        let candidates = snapshot
+            .property_index()
+            .range_candidates(&range, control)?;
         let mut rows = Vec::new();
         for vid in &candidates {
             control(SourceEvent::Work)?;
             control(SourceEvent::SnapshotRecord)?;
             if let Some(row) =
                 snapshot
-                    .property_index
+                    .property_index()
                     .visible_row(&snapshot.patches, *vid, as_of, control)?
             {
                 // Historical membership is only a candidate superset. Recheck
@@ -1224,7 +1250,7 @@ pub(crate) fn bound_vertices<'a, E, Row>(
         return range_vertices(snapshot, prefix, as_of, control);
     };
     let mut rows = Vec::new();
-    let candidates = snapshot.property_index.lookup(key, &value);
+    let candidates = snapshot.property_index().lookup(key, &value);
     for vid in candidates {
         control(SourceEvent::Work)?;
         // History candidates consume admission even when their visible row
@@ -1234,7 +1260,7 @@ pub(crate) fn bound_vertices<'a, E, Row>(
         // The visible row remains the authority for the complete predicate.
         if let Some(row) =
             snapshot
-                .property_index
+                .property_index()
                 .visible_row(&snapshot.patches, *vid, as_of, control)?
             && bound_predicates
                 .iter()
@@ -1300,14 +1326,16 @@ fn range_vertices<'a, E>(
     let Some(range) = range else {
         return Ok(None);
     };
-    let candidates = snapshot.property_index.range_candidates(&range, control)?;
+    let candidates = snapshot
+        .property_index()
+        .range_candidates(&range, control)?;
     let mut rows = Vec::new();
     for vid in &candidates {
         control(SourceEvent::Work)?;
         control(SourceEvent::SnapshotRecord)?;
         if let Some(row) =
             snapshot
-                .property_index
+                .property_index()
                 .visible_row(&snapshot.patches, *vid, as_of, control)?
             && predicates().all(|predicate| predicate.matches(&row.labels, &row.props))
         {
@@ -1563,6 +1591,18 @@ mod indexed_tests {
                 "seed {seed}: extend of a bulk build"
             );
             assert_nested_avl(&extended.candidates);
+            // A writer's value-free vertex histories are the index's.
+            let vertices = StatementHistoryIndex::vertices(&patches);
+            assert!(
+                vertices.0.len() == built.histories.len()
+                    && vertices
+                        .0
+                        .iter()
+                        .zip(built.histories.iter())
+                        .all(|((a, ah), (b, bh))| a == b && ah.iter().eq(bh.iter())),
+                "seed {seed}: value-free vertex histories"
+            );
+            assert_nested_avl(&vertices.0);
         }
     }
 
@@ -2083,7 +2123,7 @@ pub(crate) fn find_vertex<'a, E>(
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<&'a VertexRow>, E> {
     snapshot
-        .property_index
+        .property_index()
         .visible_row(&snapshot.patches, vid, as_of, control)
 }
 
@@ -2534,7 +2574,7 @@ fn slot_closure<'a, E>(
     use fgdb_gql::id_hash::{IdMap, IdSet};
     let index = snapshot.adjacency_index();
     let edges = index.edge_count();
-    let mean = (edges / snapshot.property_index.vertex_count().max(1)).max(1);
+    let mean = (edges / snapshot.property_index().vertex_count().max(1)).max(1);
     let cap = (edges / 2).max(4096);
     let later = |from: usize| steps[from..].iter().map(step_hops).sum::<u64>();
     let probe = |frontier: &[VId],
@@ -2751,11 +2791,11 @@ fn indexed_roots<E>(
         return Ok(None);
     };
     let mut roots = Vec::new();
-    for vid in snapshot.property_index.lookup(key, value) {
+    for vid in snapshot.property_index().lookup(key, value) {
         control(SourceEvent::Work)?;
         if let Some(row) =
             snapshot
-                .property_index
+                .property_index()
                 .visible_row(&snapshot.patches, *vid, as_of, control)?
             && predicates
                 .iter()

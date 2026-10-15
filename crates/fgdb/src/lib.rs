@@ -1694,7 +1694,11 @@ struct Snapshot {
     /// Built on first use, because a point read by property never touches
     /// adjacency; a commit extends it incrementally once it is built.
     adjacency: std::sync::OnceLock<Arc<gql_exec::source::AdjacencyIndex>>,
-    property_index: Arc<gql_exec::source::PropertyEqualityIndex>,
+    /// The derived property-equality index, read through
+    /// [`Snapshot::property_index`]. Built on first use, because a scan, a
+    /// traversal or a load by caller keys never looks a vertex up by value; a
+    /// commit extends it incrementally once it is built.
+    property_index: std::sync::OnceLock<Arc<gql_exec::source::PropertyEqualityIndex>>,
     /// The root's block references, aligned with `blocks`. Retained so the
     /// next commit can tell which decoded blocks the new root carries forward
     /// unchanged (fgdb-gieu) — content addressing makes the identity the
@@ -1766,7 +1770,10 @@ impl VersionHeads {
                 blocks: snapshot.blocks.clone(),
                 block_props: snapshot.block_props.clone(),
                 patches: snapshot.patches.clone(),
-                vertices: snapshot.property_index.statement_histories(),
+                vertices: match snapshot.property_index.get() {
+                    Some(index) => std::sync::OnceLock::from(index.statement_histories()),
+                    None => std::sync::OnceLock::new(),
+                },
                 edges: std::sync::OnceLock::new(),
                 frontier: snapshot.frontier,
                 #[cfg(test)]
@@ -1866,14 +1873,16 @@ impl Eq for VersionHeads {}
 
 /// Immutable payloads and history coordinates only: retaining the whole
 /// Snapshot would force its copy-on-write path on every post-open commit.
-/// Vertex coordinates share the existing index; edge coordinates are built on
-/// the first existing-edge lookup, without indexing endpoint incidence.
+/// Vertex coordinates share the property index when it is built and are
+/// otherwise built from the patches on the first existing-vertex lookup; edge
+/// coordinates are built on the first existing-edge lookup, without indexing
+/// endpoint incidence or property values.
 #[derive(Debug)]
 struct CheckpointVersionBasis {
     blocks: Vec<Arc<[AdjacencyEntry]>>,
     block_props: Vec<Option<Arc<BlockProps>>>,
     patches: Vec<VertexPatchRows>,
-    vertices: gql_exec::source::StatementHistoryIndex<VId>,
+    vertices: std::sync::OnceLock<gql_exec::source::StatementHistoryIndex<VId>>,
     edges: std::sync::OnceLock<gql_exec::source::StatementHistoryIndex<EId>>,
     frontier: CommitSeq,
     #[cfg(test)]
@@ -1889,7 +1898,10 @@ impl CheckpointVersionBasis {
         let mut version = None;
         match elem {
             ElementId::Vertex(vid) => {
-                let mut history = self.vertices.coordinates(vid).peekable();
+                let index = self.vertices.get_or_init(|| {
+                    gql_exec::source::StatementHistoryIndex::vertices(&self.patches)
+                });
+                let mut history = index.coordinates(vid).peekable();
                 let mut winner = None;
                 while let Some((created_at, patch, row)) = history.next() {
                     if history.peek().is_some_and(|next| next.0 == created_at) {
@@ -1997,6 +2009,18 @@ impl Snapshot {
     fn adjacency_index(&self) -> &Arc<gql_exec::source::AdjacencyIndex> {
         self.adjacency
             .get_or_init(|| Arc::new(gql_exec::source::AdjacencyIndex::build(&self.blocks)))
+    }
+
+    /// The generation's property-equality index, built from its vertex
+    /// patches on first use when it was not built with the generation. The
+    /// build is a pure, deterministic function of `patches`, so a lazy index
+    /// equals an eager one.
+    fn property_index(&self) -> &Arc<gql_exec::source::PropertyEqualityIndex> {
+        self.property_index.get_or_init(|| {
+            Arc::new(gql_exec::source::PropertyEqualityIndex::build(
+                &self.patches,
+            ))
+        })
     }
 
     fn in_neighbours_at(
@@ -4519,13 +4543,17 @@ impl<V: Vfs + Clone> Database<V> {
             )),
             None => std::sync::OnceLock::new(),
         };
+        // The property index likewise: a handle that has looked nothing up
+        // by value (a CLI load by caller keys) never builds or extends one.
+        let property_index = match self.snapshot.property_index.get() {
+            Some(index) => std::sync::OnceLock::from(Arc::new(
+                index.extend(&decoded_patches, self.snapshot.patch_refs.len()),
+            )),
+            None => std::sync::OnceLock::new(),
+        };
         self.snapshot = Arc::new(Snapshot {
             adjacency,
-            property_index: Arc::new(
-                self.snapshot
-                    .property_index
-                    .extend(&decoded_patches, self.snapshot.patch_refs.len()),
-            ),
+            property_index,
             blocks: decoded,
             block_props: decoded_props,
             refs: root.blocks,
@@ -4564,7 +4592,10 @@ impl<V: Vfs + Clone> Database<V> {
                 .adjacency
                 .get()
                 .map_or(0, |index| index.maintenance_work()),
-            self.snapshot.property_index.maintenance_work(),
+            self.snapshot
+                .property_index
+                .get()
+                .map_or(0, |index| index.maintenance_work()),
         ))
     }
 
@@ -4578,7 +4609,7 @@ impl<V: Vfs + Clone> Database<V> {
             .equivalent(&gql_exec::source::AdjacencyIndex::build(
                 &self.snapshot.blocks,
             ))
-            && self.snapshot.property_index.equivalent(
+            && self.snapshot.property_index().equivalent(
                 &gql_exec::source::PropertyEqualityIndex::build(&self.snapshot.patches),
             ))
     }
@@ -5056,6 +5087,7 @@ impl<V: Vfs + Clone> Database<V> {
             published_chain_hash,
             std::mem::take(&mut self.receipts),
             self.snapshot.adjacency.get().is_some(),
+            self.snapshot.property_index.get().is_some(),
         )
         .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
@@ -5715,6 +5747,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             published_chain_hash,
             PublishReceipts::default(),
             true,
+            true,
         )
         .await?;
         return Ok((snapshot, writer, heads, receipts));
@@ -6052,9 +6085,10 @@ fn current_generation(
 ) -> Snapshot {
     let published_at = root.published_at;
     Snapshot {
-        // Built on first use by a reader; a commit extends it only once built.
+        // Both built on first use by a reader; a commit extends each only
+        // once built.
         adjacency: std::sync::OnceLock::new(),
-        property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(&patches)),
+        property_index: std::sync::OnceLock::new(),
         blocks: blocks.into_iter().map(Arc::from).collect(),
         refs: root.blocks,
         block_props: block_props
@@ -6105,6 +6139,7 @@ async fn rebuild<V: Vfs>(
         frontier,
         published_chain_hash,
         PublishReceipts::default(),
+        true,
         true,
     )
     .await?;
@@ -6599,8 +6634,9 @@ async fn fold_stream<V: Vfs>(
 /// Type-erased because open, recovery and compaction all end here: a caller's
 /// `Send` proof stops at `dyn Future + Send` instead of descending through
 /// Strata publication (fgdb-a5y6m).
-/// `build_adjacency` builds the snapshot's adjacency index with the
-/// generation; otherwise it is built on first use, as after a checkpoint open.
+/// `build_adjacency` and `build_property_index` build the snapshot's
+/// adjacency and property-equality indexes with the generation; otherwise
+/// each is built on first use, as after a checkpoint open.
 #[allow(clippy::too_many_arguments)]
 fn publish_and_snapshot<'a, V: Vfs>(
     cx: &'a CommitCx,
@@ -6611,6 +6647,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
     published_chain_hash: Digest,
     receipts: PublishReceipts,
     build_adjacency: bool,
+    build_property_index: bool,
 ) -> SendFuture<'a, Result<PublishedGeneration, RebuildError>> {
     Box::pin(publish_and_snapshot_inner(
         cx,
@@ -6621,6 +6658,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
         published_chain_hash,
         receipts,
         build_adjacency,
+        build_property_index,
     ))
 }
 
@@ -6634,6 +6672,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     published_chain_hash: Digest,
     receipts: PublishReceipts,
     build_adjacency: bool,
+    build_property_index: bool,
 ) -> Result<PublishedGeneration, RebuildError> {
     // Publish from a clone and hand the fold state back: the caller retains it
     // so later commits fold only their own template (fgdb-fujt). The strata
@@ -6691,9 +6730,13 @@ async fn publish_and_snapshot_inner<V: Vfs>(
             } else {
                 std::sync::OnceLock::new()
             },
-            property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(
-                &decoded_patches,
-            )),
+            property_index: if build_property_index {
+                std::sync::OnceLock::from(Arc::new(gql_exec::source::PropertyEqualityIndex::build(
+                    &decoded_patches,
+                )))
+            } else {
+                std::sync::OnceLock::new()
+            },
             blocks: decoded.into_iter().map(Arc::from).collect(),
             refs: reopened_root.blocks,
             block_props: decoded_props
@@ -9113,6 +9156,81 @@ mod lazy_writable_adjacency_laws {
             db.snapshot.adjacency.get().is_some(),
             "a serving handle keeps its index across a compaction"
         );
+        assert!(db.verify_snapshot_indexes().unwrap());
+    }
+
+    /// The property-equality index follows adjacency: an open, a pure insert
+    /// and an untouched compaction leave it unbuilt (a CLI load by caller
+    /// keys never pays for it), the first lookup builds it from the patches,
+    /// and a commit or compaction then keeps it, extended, equal to a fresh
+    /// build.
+    #[test]
+    fn the_property_index_is_built_by_its_first_lookup_and_then_kept() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let key = PropertyKeyId(1);
+        let mut db = runtime
+            .block_on(Database::create_with_vfs(&cx, vfs.clone(), &dir, keys()))
+            .unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        for vid in 1..=4_u128 {
+            let value = CanonicalScalar::Int((vid % 2) as i64);
+            origin.create_vertex(VId(vid), vec![], vec![(key, value)]);
+        }
+        runtime.block_on(db.write(&cx, origin)).unwrap();
+        drop(db);
+
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs, &dir, keys()))
+            .unwrap();
+        assert!(
+            db.snapshot.property_index.get().is_none(),
+            "open leaves it unbuilt"
+        );
+        let mut insert = WriteBatch::new(RelationId(1));
+        insert.create_vertex(VId(5), vec![], vec![(key, CanonicalScalar::Int(1))]);
+        runtime.block_on(db.write(&cx, insert)).unwrap();
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            db.snapshot.property_index.get().is_none(),
+            "a pure insert and a compaction do not build it"
+        );
+        assert_eq!(db.index_maintenance_work().unwrap().1, 0);
+
+        let odd = |db: &Database<MemVfs>| {
+            let mut vids: Vec<_> = db
+                .snapshot
+                .property_index()
+                .lookup(key, &CanonicalScalar::Int(1))
+                .into_iter()
+                .copied()
+                .collect();
+            vids.sort_unstable();
+            vids
+        };
+        assert_eq!(odd(&db), vec![VId(1), VId(3), VId(5)]);
+        assert!(
+            db.snapshot.property_index.get().is_some(),
+            "the lookup built it"
+        );
+        assert!(db.verify_snapshot_indexes().unwrap());
+
+        let mut more = WriteBatch::new(RelationId(1));
+        more.create_vertex(VId(7), vec![], vec![(key, CanonicalScalar::Int(1))]);
+        runtime.block_on(db.write(&cx, more)).unwrap();
+        let work = db.index_maintenance_work().unwrap().1;
+        assert!(work > 0, "the commit extended the built index: {work}");
+        assert_eq!(odd(&db), vec![VId(1), VId(3), VId(5), VId(7)]);
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            db.snapshot.property_index.get().is_some(),
+            "a serving handle keeps its index across a compaction"
+        );
+        assert_eq!(odd(&db), vec![VId(1), VId(3), VId(5), VId(7)]);
         assert!(db.verify_snapshot_indexes().unwrap());
     }
 }

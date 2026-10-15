@@ -100,6 +100,10 @@ fn constant_sized_commits_do_not_rebuild_growing_history() {
         // Keep a predecessor pinned throughout: deep COW clones are not an
         // acceptable substitute for path-copy maintenance.
         let pinned = db.read_session().unwrap();
+        // Each derived index is built on its first use, and only a built one
+        // is extended by a commit; the comparison builds both, so every
+        // commit below maintains two built indexes.
+        assert!(db.verify_snapshot_indexes().unwrap());
         for step in 1..=400_u64 {
             let id = u128::from(step);
             let mut batch = WriteBatch::new(R);

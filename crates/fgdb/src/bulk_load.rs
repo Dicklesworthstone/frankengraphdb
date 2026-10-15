@@ -341,7 +341,7 @@ impl<V: Vfs + Clone> Database<V> {
         }
         let mut control = |_| source::checkpoint(cx);
         let mut found = None;
-        for vid in self.snapshot.property_index.lookup(*key, value) {
+        for vid in self.snapshot.property_index().lookup(*key, value) {
             let Some(vertex) =
                 crate::gql_exec::source::find_vertex(&self.snapshot, *vid, basis, &mut control)?
             else {
