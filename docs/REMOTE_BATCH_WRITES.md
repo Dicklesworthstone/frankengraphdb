@@ -41,9 +41,52 @@ Values are JSON strings using the normal remote parameter spellings:
 JSON number. JSON escaping affects the file representation, not query text.
 Duplicate object keys and malformed/invalid typed values refuse the entire file.
 
+## CSV through the same atomic writer
+
+Add `--csv-types name=text,age=int64` to read ordinary CSV instead of typed
+JSON. Types are explicit and case-sensitive; the file extension does not choose
+a parser. The first CSV record must name every declared column exactly once,
+but its order may differ from the declaration order. There are no inferred
+types, inherited defaults or ignored extra columns.
+
+```csv
+name,age
+"Ada, A.",37
+Bob,29
+```
+
+```sh
+fgdb --robot remote write \
+  --addr 127.0.0.1:7688 --database social --token-file writer.hex \
+  --rows-file people.csv --csv-types name=text,age=int64 \
+  'CREATE (:Person {name:$name, age:$age})'
+```
+
+CSV decoding uses `fgdb_gql::csv_parameters::decode_csv_parameters`, the same
+native decoder as embedded imports. It handles an initial UTF-8 BOM, LF/CRLF,
+quoted commas/newlines and doubled quotes. Accepted column types are `int64`,
+`uint64`, `int`, `text`, `bool`, `null`, `float`, `decimal`, and `bytes`.
+Only an **unquoted** `\N` is NULL; quoted `"\N"` is literal text. `int64` and
+`uint64` are non-nullable; `int` admits canonical NULL as well as signed values.
+Empty text, empty hexadecimal bytes and NULL remain distinct. Floats must be
+finite, decimals must be exactly representable without exponent notation, and
+bytes are even-length hexadecimal without a prefix. Packed vector properties
+can be imported as their hexadecimal byte representation.
+
+`--csv-types` requires `--rows-file` on `remote write` and cannot be repeated.
+The schema is capped at 65,536 bytes and native parameter-name/count bounds
+(64 bytes per name, 1,000 columns). CSV source bytes are capped at 1 MiB, decoded
+fields at 65,536 bytes, records at 1,024, and cumulative native parameter
+transcripts at 1 MiB. Native scalar admission and the complete FGP frame bound
+also apply. One bounded CSV decode runs between cancellation checkpoints;
+conversion checks cancellation at every row and field. The entire admitted
+request remains resident, and no request is sent before the last row validates.
+These declarations govern input decoding, not server statement binding or
+capability policy; those remain independently enforced by the server.
+
 ## Bounds and transaction semantics
 
-The source file is capped at 1 MiB; its JSON tree uses the existing 65,536-value
+The source file is capped at 1 MiB; a JSON tree uses the existing 65,536-value
 and 65,536-byte token limits. There must be 1..=1,024 argument sets, with at most
 1,024 parameters per set. The complete encoded request, including its Ready
 header, must fit the client's 1 MiB frame limit. A smaller negotiated server
