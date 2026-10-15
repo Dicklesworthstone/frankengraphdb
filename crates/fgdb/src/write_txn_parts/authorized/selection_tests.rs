@@ -44,10 +44,12 @@ async fn database(cx: &CommitCx, hidden: usize, value: CanonicalScalar) -> Datab
         .await
         .unwrap();
     let mut properties = vec![(P, value)];
+    // Hidden values stay small, so even 255 of them fit one row's 16 KiB
+    // storage bound: only how many keys there are moves a physical lookup.
     for key in 0..hidden {
         properties.push((
             PropertyKeyId(10 + key as u64),
-            CanonicalScalar::bytes(vec![0x63; 1024]).unwrap(),
+            CanonicalScalar::bytes(vec![0x63; 16]).unwrap(),
         ));
     }
     let mut batch = WriteBatch::new(R);
