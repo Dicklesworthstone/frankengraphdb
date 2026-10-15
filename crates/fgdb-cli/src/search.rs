@@ -241,14 +241,21 @@ impl SearchFlags {
                 once(&mut self.as_of, CommitSeq(seq), flag)
             }
             "--expand-from" => {
-                let seeds = value
-                    .split(',')
-                    .map(|raw| {
-                        raw.trim().parse::<u128>().map(VId).map_err(|_| {
-                            Failure::usage("--expand-from is comma-separated vertex identities")
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                // Admit occurrences before allocation, even duplicate seeds.
+                // Reuse the native expansion ceiling; zero hops and an empty
+                // endpoint filter must not turn ingress into an unbounded list.
+                let limit = ExpansionLimits::default().max_seed_ids;
+                let mut seeds = Vec::new();
+                for raw in value.split(',') {
+                    if seeds.len() == limit {
+                        return Err(Failure::usage(format!(
+                            "--expand-from accepts at most {limit} seed identities",
+                        )));
+                    }
+                    seeds.push(raw.trim().parse::<u128>().map(VId).map_err(|_| {
+                        Failure::usage("--expand-from is comma-separated vertex identities")
+                    })?);
+                }
                 once(&mut self.expand_from, seeds, flag)
             }
             "--expand-relation" => once(&mut self.expand_relation, value.to_owned(), flag),
