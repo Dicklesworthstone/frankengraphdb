@@ -10,6 +10,12 @@ use crate::{BeaconError, WorkControl};
 const MAX_DIMENSIONS: usize = 65_536;
 const MAX_LEVEL: usize = 32;
 
+#[cfg(test)]
+thread_local! {
+    // Physical distance work only; validation and logical charges stay separate.
+    static DISTANCE_COORDINATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DistanceMetric {
     SquaredEuclidean,
@@ -245,11 +251,20 @@ impl Hnsw {
         }
         let mut ranked = match mode {
             VectorSearch::Exact => {
-                let mut best = BinaryHeap::new();
+                let mut best = BinaryHeap::<Ranked>::new();
                 for slot in 0..self.nodes.len() {
                     work.charge(1)?;
                     if eligible(self.nodes[slot].id) {
-                        retain_best(&mut best, self.candidate(query, norm, slot, work)?, k);
+                        let cutoff = if best.len() == k {
+                            best.peek().map(|worst| worst.cost)
+                        } else {
+                            None
+                        };
+                        if let Some(candidate) =
+                            self.exact_candidate(query, norm, slot, cutoff, work)?
+                        {
+                            retain_best(&mut best, candidate, k);
+                        }
                     }
                 }
                 best.into_sorted_vec()
@@ -298,6 +313,51 @@ impl Hnsw {
         })
     }
 
+    /// A finite squared distance is a monotone sum of nonnegative terms.
+    /// Once a prefix exceeds the full heap's worst distance, its suffix cannot
+    /// make this candidate a winner. Equality MUST continue: the complete score
+    /// and identity tie-break still apply. Dot/cosine sums are not monotone.
+    /// Build and ANN routing deliberately keep the unbounded distance kernel.
+    fn exact_candidate(
+        &self,
+        query: &[f32],
+        norm: f64,
+        slot: usize,
+        cutoff: Option<f64>,
+        work: &mut dyn WorkControl,
+    ) -> Result<Option<Ranked>, BeaconError> {
+        let Some(cutoff) =
+            cutoff.filter(|_| self.config.metric == DistanceMetric::SquaredEuclidean)
+        else {
+            return self.candidate(query, norm, slot, work).map(Some);
+        };
+        // Keep the SAME logical admission and cancellation boundary as a full
+        // distance, even when physical arithmetic stops early. No quota can
+        // start admitting a formerly refused query because a suffix was skipped.
+        work.charge(self.config.dimensions)?;
+        let node = &self.nodes[slot];
+        let mut sum = 0.0_f64;
+        // Check in small blocks rather than branch on every coordinate. Do not
+        // reorder additions, use FMA, normalize vectors or round a bound: every
+        // surviving score must keep the unbounded kernel's exact f64 bits.
+        for (left, right) in query.chunks(16).zip(node.vector.chunks(16)) {
+            #[cfg(test)]
+            DISTANCE_COORDINATES.with(|used| used.set(used.get() + left.len()));
+            for (&left, &right) in left.iter().zip(right) {
+                let delta = f64::from(left) - f64::from(right);
+                sum += delta * delta;
+            }
+            if sum > cutoff {
+                return Ok(None);
+            }
+        }
+        Ok(Some(Ranked {
+            cost: if sum == 0.0 { 0.0 } else { sum },
+            id: node.id,
+            slot,
+        }))
+    }
+
     fn distance(
         &self,
         left: &[f32],
@@ -307,6 +367,8 @@ impl Hnsw {
         work: &mut dyn WorkControl,
     ) -> Result<f64, BeaconError> {
         work.charge(self.config.dimensions)?;
+        #[cfg(test)]
+        DISTANCE_COORDINATES.with(|used| used.set(used.get() + self.config.dimensions));
         let mut sum = 0.0f64;
         // Deliberately scalar, fixed-order f64 accumulation; no FMA or parallel
         // reduction. f32 inputs and bounded dimensions cannot overflow f64.
@@ -533,6 +595,10 @@ fn level_for(id: u128, seed: u64, m: usize) -> usize {
     }
     level
 }
+
+#[cfg(test)]
+#[path = "hnsw/exact_tests.rs"]
+mod exact_tests;
 
 #[cfg(test)]
 mod tests {
