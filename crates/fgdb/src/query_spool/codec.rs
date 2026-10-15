@@ -1,6 +1,6 @@
 //! Shared allocation-free admission for the existing native row encoder.
 //! The byte shape and overlap bound serve buffered sort input and aggregate
-//! frames alike; GraphValueRow remains the only canonical encoder.
+//! frames alike; the native value and row encoders remain authoritative.
 
 use super::*;
 use core::mem::{size_of, size_of_val};
@@ -302,6 +302,12 @@ fn body_shape(
     Ok((body, nodes))
 }
 
+fn encoded_value_shape(value: &GraphValue, cx: &QueryCx) -> Result<(usize, usize)> {
+    let mut remaining = GraphValue::MAX_LIST_NODES;
+    let (body, nodes) = body_shape(value, 0, &mut remaining, cx)?;
+    Ok((add(8 + VALUE.len(), body)?, nodes))
+}
+
 pub(super) fn encoded_shape(row: &GraphValueRow, cx: &QueryCx) -> Result<(usize, usize)> {
     if row.len() > fgdb_gql::algebra::MAX_PATTERN_VERTICES {
         return invalid();
@@ -315,6 +321,27 @@ pub(super) fn encoded_shape(row: &GraphValueRow, cx: &QueryCx) -> Result<(usize,
         nodes = add(nodes, count)?;
     }
     Ok((bytes, nodes))
+}
+
+/// Encode one borrowed grouping key without cloning it into a temporary row
+/// or charging unrelated input columns. The same structural walker and codec
+/// overlap bound apply as for a whole row. Only one key workspace is live at
+/// a time; its returned capacity stays admitted until the caller drops it.
+pub(super) fn encode_value(
+    pool: &MemoryPool,
+    work: &mut sort::Work<'_>,
+    value: &GraphValue,
+) -> Result<(Vec<u8>, MemoryCharge)> {
+    let (len, nodes) = encoded_value_shape(value, work.cx)?;
+    work.charge(add(len, nodes)?)?;
+    let budget = add(mul(len, 8)?, mul(nodes, 128)?)?;
+    let mut charge = pool.reserve(work.cx, budget).map_err(SpillError::Memory)?;
+    let bytes = value.canonical_bytes().map_err(NativeSpoolError::Encode)?;
+    if bytes.len() != len {
+        return invalid();
+    }
+    retain_reservation(&mut charge, bytes.capacity(), work.cx)?;
+    Ok((bytes, charge))
 }
 
 /// Admit overlapping row/cell/scalar vectors and iterative traversal before
@@ -349,6 +376,96 @@ mod tests {
     use asupersync::lab::run_async_under_lab;
     use fgdb_strata::tiered::memory::MemoryError;
     use fgdb_types::{CanonicalBytes, CanonicalScalar, PurposeContexts, VId};
+
+    #[test]
+    fn individual_key_encodings_keep_native_bytes_and_admitted_capacity() {
+        let ((), report) = run_async_under_lab(0xc0de_a003, |root| async move {
+            let cx = PurposeContexts::narrow_runtime_root(&root).query();
+            let values = [
+                GraphValue::Scalar(CanonicalScalar::Null),
+                GraphValue::Scalar(CanonicalScalar::Int(i64::MIN)),
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("λ\0雪").unwrap()),
+                GraphValue::Scalar(CanonicalScalar::bytes(vec![0, 255, 42]).unwrap()),
+                GraphValue::Vertex(VId(u128::MAX)),
+                GraphValue::Edge(fgdb_types::EId(u128::MAX)),
+                GraphValue::Vertices(vec![VId(1), VId(u128::MAX)].into_boxed_slice()),
+                GraphValue::Edges(vec![fgdb_types::EId(7)].into_boxed_slice()),
+                GraphValue::List(Vec::new().into_boxed_slice()),
+                GraphValue::map(vec![(
+                    "payload".into(),
+                    GraphValue::List(
+                        vec![
+                            GraphValue::Scalar(CanonicalScalar::Int(7)),
+                            GraphValue::Scalar(
+                                CanonicalScalar::ucs_basic_text(&"x".repeat(8192)).unwrap(),
+                            ),
+                        ]
+                        .into_boxed_slice(),
+                    ),
+                )])
+                .unwrap(),
+            ];
+            for value in values {
+                let expected = value.canonical_bytes().unwrap();
+                let (len, nodes) = encoded_value_shape(&value, &cx).unwrap();
+                assert_eq!(len, expected.len());
+                let workspace = 8 * len + 128 * nodes;
+                let mut work = sort::Work {
+                    cx: &cx,
+                    used: 0,
+                    limit: u64::MAX,
+                };
+                let small = MemoryPool::new(workspace - 1, 0).unwrap();
+                assert!(matches!(
+                    encode_value(&small, &mut work, &value),
+                    Err(NativeSpoolError::Spill(SpillError::Memory(
+                        MemoryError::ResourceExhausted { requested, .. }
+                    ))) if requested == workspace
+                ));
+                assert_eq!(small.used(), 0);
+                let pool = MemoryPool::new(workspace, 0).unwrap();
+                let encoded = encode_value(&pool, &mut work, &value).unwrap();
+                assert_eq!(encoded.0, expected);
+                assert_eq!(encoded.1.bytes(), encoded.0.capacity());
+                assert_eq!(pool.used(), encoded.0.capacity());
+                drop(encoded);
+                assert_eq!(pool.used(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn individual_key_encoding_refuses_work_and_depth_before_retention() {
+        let ((), report) = run_async_under_lab(0xc0de_a004, |root| async move {
+            let cx = PurposeContexts::narrow_runtime_root(&root).query();
+            let value = GraphValue::Scalar(CanonicalScalar::Int(7));
+            let (len, nodes) = encoded_value_shape(&value, &cx).unwrap();
+            let pool = MemoryPool::new(65_536, 0).unwrap();
+            let mut work = sort::Work {
+                cx: &cx,
+                used: 0,
+                limit: (len + nodes - 1) as u64,
+            };
+            assert!(matches!(
+                encode_value(&pool, &mut work, &value),
+                Err(NativeSpoolError::SortWorkLimit { attempted, .. })
+                    if attempted == (len + nodes) as u64
+            ));
+            assert_eq!(pool.used(), 0);
+            work.limit = u64::MAX;
+            let mut too_deep = value;
+            for _ in 0..=GraphValue::MAX_LIST_DEPTH {
+                too_deep = GraphValue::List(vec![too_deep].into_boxed_slice());
+            }
+            assert!(matches!(
+                encode_value(&pool, &mut work, &too_deep),
+                Err(NativeSpoolError::Spill(SpillError::InvalidRun))
+            ));
+            assert_eq!(pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 
     #[test]
     fn encoder_releases_completed_workspace_but_keeps_output_capacity_admitted() {

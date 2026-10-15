@@ -41,23 +41,13 @@ fn key_hash(
     }
     let mut hash = fgdb_crypto::Hasher::new();
     hash.update(b"fgdb.native-aggregate.partition.v1");
-    // The selected values' combined canonical bytes are no larger than the
-    // complete row. Reserve one codec workspace before allocating any key.
-    let (len, nodes) = account::encoded_shape(row, work.cx)?;
-    work.charge(len.checked_add(nodes).ok_or(SpillError::SizeOverflow)?)?;
-    let budget = len
-        .checked_mul(8)
-        .and_then(|bytes| {
-            nodes
-                .checked_mul(128)
-                .and_then(|node_bytes| bytes.checked_add(node_bytes))
-        })
-        .ok_or(SpillError::SizeOverflow)?;
-    let _codec = pool.reserve(work.cx, budget).map_err(SpillError::Memory)?;
+    // Only a key's native encoding exists here. A large MIN/MAX argument or
+    // other non-key input is already admitted by the row decoder, and must
+    // not require a second, whole-row encoder workspace just to hash the key.
+    // The tuple frees the previous key's bytes before refunding its capacity.
     for &key in definition.group_key_columns() {
-        let bytes = row.values()[key]
-            .canonical_bytes()
-            .map_err(NativeSpoolError::Encode)?;
+        let encoded = account::encode_value(pool, work, &row.values()[key])?;
+        let bytes = &encoded.0;
         work.charge(8)?;
         hash.update(&(bytes.len() as u64).to_be_bytes());
         for chunk in bytes.chunks(4096) {
@@ -170,6 +160,145 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder};
+    use fgdb_gql::{GraphAggregate, PreparedGraphAggregate};
+    use fgdb_types::PurposeContexts;
+
+    fn definition(keys: &[usize]) -> SpillAggregateDefinition {
+        let mut builder = GraphPatternBuilder::new();
+        builder.vertex("n").unwrap();
+        let input = builder
+            .prepare_values(
+                &[
+                    GraphColumn::property("key", "n", PropertyKeyId(1)),
+                    GraphColumn::property("payload", "n", PropertyKeyId(2)),
+                    GraphColumn::property("other", "n", PropertyKeyId(3)),
+                ],
+                0,
+                None,
+            )
+            .unwrap()
+            .with_duplicates();
+        let aggregate = PreparedGraphAggregate::prepare(
+            input,
+            keys,
+            &[GraphAggregate::average_int("average", 0)],
+            0,
+            None,
+        )
+        .unwrap();
+        SpillAggregatePlan::compile(&aggregate)
+            .unwrap()
+            .definition()
+            .clone()
+    }
+
+    #[test]
+    fn grouping_hash_workspace_and_work_do_not_depend_on_non_key_payloads() {
+        let ((), report) = run_async_under_lab(0x5ba1_1032, |root| async move {
+            let cx = PurposeContexts::narrow_runtime_root(&root).query();
+            let definition = definition(&[0]);
+            let key = GraphValue::Scalar(CanonicalScalar::Int(7));
+            // Compute the old hash transcript directly, independent of the
+            // new admission helper and the partition-discovery algorithm.
+            let encoded = key.canonical_bytes().unwrap();
+            let mut expected = fgdb_crypto::Hasher::new();
+            expected.update(b"fgdb.native-aggregate.partition.v1");
+            expected.update(&(encoded.len() as u64).to_be_bytes());
+            expected.update(&encoded);
+            let expected = expected.finalize().0;
+            let mut baseline_work = None;
+            for bytes in [0, 1024, 8192, 65_536] {
+                let row = GraphValueRow::from_owned_values(vec![
+                    key.clone(),
+                    GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text(&"x".repeat(bytes)).unwrap(),
+                    ),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ]);
+                // The caller owns and admits this input. Only the key codec
+                // uses this pool; no total-query-memory claim is made here.
+                let pool = MemoryPool::new(1024, 0).unwrap();
+                let mut work = Work {
+                    cx: &cx,
+                    used: 0,
+                    limit: u64::MAX,
+                };
+                assert_eq!(
+                    key_hash(&row, &definition, &pool, &mut work).unwrap(),
+                    expected
+                );
+                assert_eq!(pool.used(), 0);
+                assert_eq!(*baseline_work.get_or_insert(work.used), work.used);
+                if bytes != 0 {
+                    let (len, nodes) = account::encoded_shape(&row, &cx).unwrap();
+                    assert!(8 * len + 128 * nodes > pool.limit());
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn compound_keys_keep_framing_order_and_refund_every_work_refusal() {
+        let ((), report) = run_async_under_lab(0x5ba1_1033, |root| async move {
+            let cx = PurposeContexts::narrow_runtime_root(&root).query();
+            let row = GraphValueRow::from_owned_values(vec![
+                GraphValue::Scalar(CanonicalScalar::Int(7)),
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"x".repeat(8192)).unwrap()),
+                GraphValue::map(vec![(
+                    "key".into(),
+                    GraphValue::List(
+                        vec![
+                            GraphValue::Scalar(CanonicalScalar::Null),
+                            GraphValue::Scalar(CanonicalScalar::Int(9)),
+                        ]
+                        .into_boxed_slice(),
+                    ),
+                )])
+                .unwrap(),
+            ]);
+            let pool = MemoryPool::new(65_536, 0).unwrap();
+            for keys in [vec![0, 2], vec![2, 0]] {
+                let definition = definition(&keys);
+                let mut expected = fgdb_crypto::Hasher::new();
+                expected.update(b"fgdb.native-aggregate.partition.v1");
+                for &key in definition.group_key_columns() {
+                    let bytes = row.values()[key].canonical_bytes().unwrap();
+                    expected.update(&(bytes.len() as u64).to_be_bytes());
+                    expected.update(&bytes);
+                }
+                let mut work = Work {
+                    cx: &cx,
+                    used: 0,
+                    limit: u64::MAX,
+                };
+                assert_eq!(
+                    key_hash(&row, &definition, &pool, &mut work).unwrap(),
+                    expected.finalize().0
+                );
+                assert_eq!(pool.used(), 0);
+                let required = work.used;
+                for limit in 0..required {
+                    let mut work = Work {
+                        cx: &cx,
+                        used: 0,
+                        limit,
+                    };
+                    assert!(matches!(
+                        key_hash(&row, &definition, &pool, &mut work),
+                        Err(NativeAggregateSpoolError::Spool(
+                            NativeSpoolError::SortWorkLimit { .. }
+                        ))
+                    ));
+                    assert_eq!(pool.used(), 0, "work limit {limit}");
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 
     fn varying(hashes: &[[u8; 32]]) -> VaryingBits {
         let mut bits = VaryingBits::default();

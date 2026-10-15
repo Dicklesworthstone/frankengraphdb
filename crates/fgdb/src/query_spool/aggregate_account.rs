@@ -10,7 +10,9 @@ pub(super) fn decoded(bytes: &[u8], cx: &QueryCx) -> Result<usize> {
     super::super::codec::decoded(bytes, cx).map_err(Into::into)
 }
 
+#[cfg(test)]
 pub(super) use super::super::codec::encoded_shape;
+pub(super) use super::super::codec::encode_value;
 
 /// The existing encoder can temporarily own row, cell and scalar byte vectors
 /// together. Admit their geometric growth and iterative traversal stack before
