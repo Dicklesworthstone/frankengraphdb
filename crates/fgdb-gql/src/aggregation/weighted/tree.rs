@@ -31,7 +31,7 @@ impl Forest {
 
     pub(super) fn build<E>(
         suffix: &[EdgeAccess],
-        topology: &BTreeMap<TopologyKey, Multiplicity>,
+        topology: &Topology,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         let mut roots: BTreeMap<usize, Message> = BTreeMap::new();
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn empty_subtrees_annihilate_overflow_and_remain_distinct_from_leaves() {
-        let topology = BTreeMap::from([
+        let topology = Topology::from(BTreeMap::from([
             (
                 (VId(1), RelationId(1), VId(2)),
                 Multiplicity(NonZeroU64::new(u64::MAX)),
@@ -183,7 +183,7 @@ mod tests {
                 (VId(2), RelationId(1), VId(3)),
                 Multiplicity::ONE.sum(Multiplicity::ONE),
             ),
-        ]);
+        ]));
         let edges = [
             EdgeAccess {
                 source: 0,

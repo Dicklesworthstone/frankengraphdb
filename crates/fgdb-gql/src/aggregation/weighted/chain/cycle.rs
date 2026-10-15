@@ -280,7 +280,7 @@ fn eliminate<E, C>(
 
 pub(super) struct Reduced {
     pattern: PreparedGraphPattern<GraphValueRow>,
-    topology: BTreeMap<TopologyKey, Multiplicity>,
+    topology: Topology,
     accesses: Vec<EdgeAccess>,
     slots: [Option<usize>; MAX_PATTERN_VERTICES],
     columns: Vec<ValueProjection>,
@@ -289,7 +289,7 @@ pub(super) struct Reduced {
 
 pub(super) fn contract<E, C>(
     plan: &GlaPlan<GraphValueRow>,
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
     accesses: &[EdgeAccess],
     forest: &tree::Forest,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
@@ -451,7 +451,7 @@ pub(super) fn contract<E, C>(
     }
     Ok(Some(Reduced {
         pattern,
-        topology: derived,
+        topology: derived.into(),
         accesses: mapped_accesses,
         slots,
         columns,

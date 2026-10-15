@@ -53,7 +53,7 @@ pub(super) fn weigh<E, C>(
     filters: Option<&EndpointFilters>,
     test_vertex: &mut impl FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
-) -> Result<BTreeMap<TopologyKey, Multiplicity>, VisitError<E, C>> {
+) -> Result<Topology, VisitError<E, C>> {
     if undirected.is_empty() {
         sorted(edges, filters, test_vertex, control)
     } else {
@@ -67,7 +67,7 @@ fn online<E, C>(
     filters: Option<&EndpointFilters>,
     test_vertex: &mut impl FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
-) -> Result<BTreeMap<TopologyKey, Multiplicity>, VisitError<E, C>> {
+) -> Result<Topology, VisitError<E, C>> {
     let mut endpoints = Endpoints {
         filters,
         tested: BTreeMap::new(),
@@ -94,7 +94,7 @@ fn online<E, C>(
             topology.insert(key, Multiplicity::ONE);
         }
     }
-    Ok(topology)
+    Ok(topology.into())
 }
 
 /// Every key is its edge's own triple, so the edges of one key share one
@@ -106,7 +106,7 @@ fn sorted<E, C>(
     filters: Option<&EndpointFilters>,
     test_vertex: &mut impl FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
-) -> Result<BTreeMap<TopologyKey, Multiplicity>, VisitError<E, C>> {
+) -> Result<Topology, VisitError<E, C>> {
     // The arrival ordinal breaks ties: each key's run starts at its first
     // arrival, and the run's length is its multiplicity.
     let mut runs: Vec<(VId, RelationId, VId, usize)> = edges
@@ -147,7 +147,7 @@ fn sorted<E, C>(
             control(GlaExecutionEvent::ScratchEntry)?;
         }
     }
-    let mut topology = BTreeMap::new();
+    let mut topology = Vec::new();
     let mut start = 0;
     while start < runs.len() {
         let (source, relation, destination, arrival) = runs[start];
@@ -158,14 +158,15 @@ fn sorted<E, C>(
             end += 1;
         }
         if first[arrival] {
-            topology.insert(
+            topology.push((
                 (source, relation, destination),
                 Multiplicity(NonZeroU64::new((end - start) as u64)),
-            );
+            ));
         }
         start = end;
     }
-    Ok(topology)
+    // Runs are sorted and each key's run is one entry, so keys ascend.
+    Ok(Topology::from_sorted(topology))
 }
 
 /// Endpoint verdicts for `sorted`, one per (vertex, relation) group and side:

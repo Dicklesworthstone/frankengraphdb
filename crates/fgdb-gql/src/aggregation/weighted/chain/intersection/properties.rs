@@ -16,7 +16,7 @@ type Cells = Vec<Vec<GraphValue>>;
 // trace independently of the intersection control/event implementation.
 fn execute(
     q: &GlaPlan<GraphValueRow>,
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
     values: &BTreeMap<VId, CanonicalScalar>,
     optimized: bool,
     stop: usize,
@@ -97,7 +97,7 @@ fn read_cells<'a, E>(
     Ok(cells)
 }
 
-fn topology(mask: usize, direction: GlaDirection) -> BTreeMap<TopologyKey, Multiplicity> {
+fn topology(mask: usize, direction: GlaDirection) -> Topology {
     let mut result = BTreeMap::new();
     for a in 0..3 {
         for b in 0..3 {
@@ -114,7 +114,7 @@ fn topology(mask: usize, direction: GlaDirection) -> BTreeMap<TopologyKey, Multi
             }
         }
     }
-    result
+    result.into()
 }
 
 #[test]
@@ -183,10 +183,10 @@ fn every_property_source_failure_is_the_same_failure_after_the_same_reads() {
 
 #[test]
 fn interleaved_vertex_filters_keep_fallback_reads_even_when_the_cycle_never_closes() {
-    let graph = BTreeMap::from([
+    let graph = Topology::from(BTreeMap::from([
         ((VId(0), RelationId(1), VId(1)), Multiplicity::ONE),
         ((VId(1), RelationId(1), VId(2)), Multiplicity::ONE),
-    ]);
+    ]));
     for input in [
         "MATCH (a:L)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN a.p,b,c",
         "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) WHERE b.p=1 RETURN a.p,b,c",
@@ -267,6 +267,7 @@ fn late_property_intersection_keeps_root_contiguity_and_prunes_sparse_wedges() {
         values.insert(VId(i), CanonicalScalar::Int(i as i64));
         values.insert(VId(n + i + 1), CanonicalScalar::Int(i as i64));
     }
+    let graph = Topology::from(graph);
     let q = pattern("MATCH (a)-[:R]->(b)-[:S]->(c)-[:T]->(a) WHERE a.p=c.p RETURN a,c.p");
     assert!(Shape::compile(q.plan()).is_some());
     let mut work = 0;

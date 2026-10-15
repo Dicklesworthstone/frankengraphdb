@@ -51,11 +51,7 @@ fn projected(columns: &[ValueProjection], bindings: &[Option<VId>]) -> Vec<VId> 
         })
         .collect()
 }
-fn collect(
-    plan: &GlaPlan<GraphValueRow>,
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
-    optimized: bool,
-) -> Vec<Vec<VId>> {
+fn collect(plan: &GlaPlan<GraphValueRow>, topology: &Topology, optimized: bool) -> Vec<Vec<VId>> {
     let mut result = Vec::new();
     if optimized {
         visit_bindings(
@@ -128,6 +124,7 @@ fn triangle_intersections_match_independent_assignments_and_the_original_visitor
                         }
                     }
                 }
+                let topology = Topology::from(topology);
                 let present = |from, to| {
                     topology.contains_key(&match direction {
                         GlaDirection::Forward => (VId(from), RelationId(1), VId(to)),
@@ -159,7 +156,7 @@ fn triangle_intersections_match_independent_assignments_and_the_original_visitor
 
 #[test]
 fn cliques_parallel_constraints_loops_aliases_and_reversed_atoms_share_one_binding_assignment() {
-    let topology: BTreeMap<_, _> = [0, 1, 1_u128 << 100, u128::MAX]
+    let topology: Topology = [0, 1, 1_u128 << 100, u128::MAX]
         .into_iter()
         .flat_map(|a| {
             [0, 1, 1_u128 << 100, u128::MAX]
@@ -202,7 +199,10 @@ fn only_pure_cyclic_support_uses_intersection_and_fallback_keeps_its_event_trace
         assert!(Shape::compile(pattern(input).plan()).is_none(), "{input}");
     }
     let q = pattern("MATCH (a)-[:R]->(b)-[:R]->(c) RETURN a,b,c");
-    let topology = BTreeMap::from([((VId(0), RelationId(1), VId(1)), Multiplicity::ONE)]);
+    let topology = Topology::from(BTreeMap::from([(
+        (VId(0), RelationId(1), VId(1)),
+        Multiplicity::ONE,
+    )]));
     let mut direct_events = Vec::new();
     q.plan()
         .visit_value_bindings(
@@ -422,7 +422,7 @@ fn support_summaries_do_not_expand_or_reject_an_above_count_parallel_product() {
 /// charge it makes and every row it holds.
 fn tree_build(
     atom: Atom,
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
     events: &mut Vec<GlaExecutionEvent>,
 ) -> BTreeMap<VId, Vec<VId>> {
     let mut rows: BTreeMap<VId, BTreeSet<VId>> = BTreeMap::new();
@@ -489,7 +489,7 @@ fn flat_tries_charge_and_hold_what_the_tree_build_did() {
     for round in 0..12 {
         // Two relations over six vertices, loops and both orientations of a
         // pair included; keys are unique as in any topology table.
-        let topology: BTreeMap<TopologyKey, Multiplicity> = (0..8 + 4 * round)
+        let topology: Topology = (0..8 + 4 * round)
             .map(|_| {
                 let key = (
                     VId(u128::from(next(6))),

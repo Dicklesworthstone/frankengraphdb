@@ -230,7 +230,7 @@ struct Trie {
 impl Trie {
     fn build<E>(
         atom: Atom,
-        topology: &BTreeMap<TopologyKey, Multiplicity>,
+        topology: &Topology,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         use crate::id_hash::IdSet;
@@ -466,7 +466,7 @@ fn intersect<'t, E>(
 pub(in crate::aggregation::weighted) fn visit_bindings<'a, E, C, F, R, M, P>(
     plan: &GlaPlan<GraphValueRow>,
     vertices: impl IntoIterator<Item = VId>,
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
     test_vertex: F,
     mut property: R,
     mut control: M,

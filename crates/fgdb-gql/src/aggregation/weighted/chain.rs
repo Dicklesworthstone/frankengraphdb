@@ -232,7 +232,7 @@ fn add<E>(
 }
 
 fn oriented<E>(
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
     access: EdgeAccess,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Factor, E> {
@@ -286,7 +286,7 @@ fn compose<E>(
 pub(super) fn visit_bindings<'a, E, C, F, R, M, P>(
     plan: &GlaPlan<GraphValueRow>,
     vertices: impl IntoIterator<Item = VId>,
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
     accesses: &[EdgeAccess],
     forest: &tree::Forest,
     test_vertex: F,
@@ -340,6 +340,7 @@ where
             });
         }
     }
+    let derived = Topology::from(derived);
     let (execution, topology, accesses) = if let Some(reduced) = &reduced {
         (
             reduced.pattern.plan(),

@@ -26,6 +26,72 @@ use core::num::NonZeroU64;
 type TopologyKey = (VId, RelationId, VId);
 type VisitError<E, C> = GqlQueryError<GraphAggregateError<E>, C>;
 
+/// Each topology key once, ascending, beside its multiplicity: the ordered
+/// map's contents as one sorted array. Its readers only iterate it in key
+/// order or look a key up, so the array answers exactly as the map did,
+/// without a node allocation per key (a quarter of a 730k-edge triangle
+/// count was building and walking the map).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(super) struct Topology(Vec<(TopologyKey, Multiplicity)>);
+
+impl Topology {
+    /// From keys that are already ascending and distinct.
+    fn from_sorted(entries: Vec<(TopologyKey, Multiplicity)>) -> Self {
+        debug_assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        Self(entries)
+    }
+    fn get(&self, key: &TopologyKey) -> Option<&Multiplicity> {
+        self.0
+            .binary_search_by(|(known, _)| known.cmp(key))
+            .ok()
+            .map(|at| &self.0[at].1)
+    }
+    #[cfg(test)]
+    fn contains_key(&self, key: &TopologyKey) -> bool {
+        self.get(key).is_some()
+    }
+    fn keys(&self) -> impl Iterator<Item = &TopologyKey> + '_ {
+        self.0.iter().map(|(key, _)| key)
+    }
+    fn values(&self) -> impl Iterator<Item = &Multiplicity> + '_ {
+        self.0.iter().map(|(_, weight)| weight)
+    }
+}
+
+impl IntoIterator for Topology {
+    type Item = (TopologyKey, Multiplicity);
+    type IntoIter = std::vec::IntoIter<(TopologyKey, Multiplicity)>;
+    /// Ascending by key, as the ordered map's owned iteration.
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'t> IntoIterator for &'t Topology {
+    type Item = (&'t TopologyKey, &'t Multiplicity);
+    type IntoIter = core::iter::Map<
+        core::slice::Iter<'t, (TopologyKey, Multiplicity)>,
+        fn(&'t (TopologyKey, Multiplicity)) -> (&'t TopologyKey, &'t Multiplicity),
+    >;
+    /// Ascending by key, as the ordered map iterated.
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().map(|(key, weight)| (key, weight))
+    }
+}
+
+impl From<BTreeMap<TopologyKey, Multiplicity>> for Topology {
+    fn from(map: BTreeMap<TopologyKey, Multiplicity>) -> Self {
+        Self(map.into_iter().collect())
+    }
+}
+
+impl FromIterator<(TopologyKey, Multiplicity)> for Topology {
+    /// As collecting into the ordered map: a repeated key keeps its last weight.
+    fn from_iter<I: IntoIterator<Item = (TopologyKey, Multiplicity)>>(entries: I) -> Self {
+        entries.into_iter().collect::<BTreeMap<_, _>>().into()
+    }
+}
+
 /// None proves a POSITIVE multiplicity exceeds u64::MAX. It is never a capped
 /// numeric answer. Overflow matters only when a completed witness contributes
 /// to COUNT: a doomed path or support-only summary must not fail prematurely.
@@ -1371,7 +1437,7 @@ fn normalized(
 /// of a directed triangle count over epinions).
 fn binding_weight<E, C>(
     accesses: &[EdgeAccess],
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
     simple: bool,
     bindings: &[Option<VId>],
     distinct: bool,
