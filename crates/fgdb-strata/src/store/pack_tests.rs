@@ -647,3 +647,48 @@ fn every_root_walk_reads_each_pack_whole_once_and_releases_it() {
         }
     });
 }
+
+/// Within a root walk a pack is spent once it has served every object the
+/// walked root names in it: an object the root no longer names (a superseded
+/// block left behind by compaction) does not keep the pack resident against
+/// the next one. Outside a walk every object counts.
+#[test]
+fn a_walk_spends_a_pack_once_it_has_served_what_the_root_names_there() {
+    let dir = scratch_dir("named");
+    let first = objects(16, PACK_MIN_OBJECTS + 5);
+    let second = objects(17, PACK_MIN_OBJECTS + 5);
+    under_lab(0x9a0c, {
+        let dir = dir.clone();
+        move |cx| async move {
+            let store = open(&cx, &dir).await;
+            publish(&cx, &store, &first, None).await.expect("publish");
+            publish(&cx, &store, &second, None).await.expect("publish");
+            // The first pack's last object is the one no root names.
+            let (orphan, named) = first.split_last().unwrap();
+            for walk in [false, true] {
+                let store = open(&cx, &dir).await;
+                if walk {
+                    store.packs.rearm(
+                        named
+                            .iter()
+                            .chain(&second)
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                assert!(read_all(&cx, &store, named).await.iter().all(Result::is_ok));
+                store.packs.spend_resident_budget();
+                assert!(read_all(&cx, &store, &second[..1]).await[0].is_ok());
+                assert_eq!(
+                    store.packs.whole_reads(),
+                    if walk { 2 } else { 1 },
+                    "walk={walk}: the second pack is loaded whole only once the first is spent"
+                );
+                assert_eq!(store.packs.resident_packs(), 1, "walk={walk}");
+                // The unnamed object is still served, from wherever it is.
+                let read = read_all(&cx, &store, std::slice::from_ref(orphan)).await;
+                assert_eq!(read[0].as_ref().unwrap(), &orphan.1);
+            }
+        }
+    });
+}

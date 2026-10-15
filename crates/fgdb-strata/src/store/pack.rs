@@ -208,10 +208,18 @@ struct PackFile {
     path: PathBuf,
     len: u64,
     objects: u64,
-    /// Distinct objects this pack has served by any path: whole, or one at a
-    /// time while another read was loading it. At `objects` the pack is
-    /// spent, and only then may it be evicted.
+    /// Distinct wanted objects this pack has served by any path: whole, or
+    /// one at a time while another read was loading it. At `named` the pack
+    /// is spent, and only then may it be evicted.
     served: std::sync::atomic::AtomicU64,
+    /// One bit per table entry the current root walk will read; outside a
+    /// walk, every entry. A compaction leaves objects its root no longer
+    /// names in old packs: counted, they kept those packs unspent through
+    /// the compaction's reopen, which filled the budget and sent 199,014 of
+    /// a web-google reopen's reads one at a time.
+    wanted: Box<[std::sync::atomic::AtomicU64]>,
+    /// Entries set in `wanted`.
+    named: std::sync::atomic::AtomicU64,
     /// One bit per table entry, set once that object has been served. Many
     /// blocks can name one small object (an identical property patch), and
     /// counting each of those reads would spend the pack before the walk
@@ -221,6 +229,35 @@ struct PackFile {
     /// releasing it at once sent 36,576 of one open's reads one at a time.
     seen: Box<[std::sync::atomic::AtomicU64]>,
     slot: Mutex<Slot>,
+}
+
+impl PackFile {
+    /// Forget which objects have been served.
+    fn forget(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        for word in &self.seen {
+            word.store(0, Relaxed);
+        }
+        self.served.store(0, Relaxed);
+    }
+
+    /// Want every object in the table.
+    fn want_everything(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let objects = usize::try_from(self.objects).expect("a pack table fits memory");
+        for (at, word) in self.wanted.iter().enumerate() {
+            let bits = (objects - 64 * at).min(64);
+            word.store(
+                if bits == 64 {
+                    u64::MAX
+                } else {
+                    (1 << bits) - 1
+                },
+                Relaxed,
+            );
+        }
+        self.named.store(self.objects, Relaxed);
+    }
 }
 
 #[derive(Default)]
@@ -339,16 +376,23 @@ impl PackIndex {
 
     fn insert(table: &mut Table, path: PathBuf, len: u64, objects: Vec<(ObjectId, u64, u32)>) {
         let pack = u32::try_from(table.packs.len()).expect("fewer than u32::MAX packs");
-        table.packs.push(Arc::new(PackFile {
+        let words = objects.len().div_ceil(64);
+        let pack_file = PackFile {
             path,
             len,
             objects: objects.len() as u64,
             served: std::sync::atomic::AtomicU64::new(0),
-            seen: (0..objects.len().div_ceil(64))
+            wanted: (0..words)
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect(),
+            named: std::sync::atomic::AtomicU64::new(0),
+            seen: (0..words)
                 .map(|_| std::sync::atomic::AtomicU64::new(0))
                 .collect(),
             slot: Mutex::new(Slot::Empty),
-        }));
+        };
+        pack_file.want_everything();
+        table.packs.push(Arc::new(pack_file));
         for (entry, (id, offset, len)) in objects.into_iter().enumerate() {
             let entry = u32::try_from(entry).expect("a pack table is far below u32::MAX entries");
             let location = Location {
@@ -470,11 +514,14 @@ impl PackIndex {
         }
     }
 
-    /// Count the object at `entry` served, once however often it is read.
+    /// Count the object at `entry` served, once however often it is read,
+    /// when it is one the pack is wanted for.
     fn served(&self, pack: &PackFile, entry: u32) {
         use std::sync::atomic::Ordering::Relaxed;
-        let bit = 1u64 << (entry % 64);
-        if pack.seen[entry as usize / 64].fetch_or(bit, Relaxed) & bit == 0 {
+        let (word, bit) = (entry as usize / 64, 1u64 << (entry % 64));
+        if pack.seen[word].fetch_or(bit, Relaxed) & bit == 0
+            && pack.wanted[word].load(Relaxed) & bit != 0
+        {
             pack.served.fetch_add(1, Relaxed);
         }
     }
@@ -493,7 +540,7 @@ impl PackIndex {
             if fits(*resident, size) {
                 break;
             }
-            if pack.served.load(Relaxed) < pack.objects {
+            if pack.served.load(Relaxed) < pack.named.load(Relaxed) {
                 continue;
             }
             let Ok(mut slot) = pack.slot.try_lock() else {
@@ -513,16 +560,32 @@ impl PackIndex {
     /// a time, an open, a seek and a read each: compacting a packed road-ny
     /// spent 1,374 of its 2,531 main-thread samples re-reading the blocks the
     /// open had just read.
-    pub(super) fn rearm(&self) {
+    ///
+    /// `named` is every object the walk will read by identity; a pack is
+    /// spent once it has served those it holds, whatever else it holds.
+    pub(super) fn rearm(&self, named: impl IntoIterator<Item = ObjectId>) {
         use std::sync::atomic::Ordering::Relaxed;
         for pack in self.packs() {
             let mut slot = pack.slot.lock().expect("pack slot");
             if matches!(*slot, Slot::Drained) {
-                for word in &pack.seen {
-                    word.store(0, Relaxed);
-                }
-                pack.served.store(0, Relaxed);
                 *slot = Slot::Empty;
+            }
+            drop(slot);
+            pack.forget();
+            for word in &pack.wanted {
+                word.store(0, Relaxed);
+            }
+            pack.named.store(0, Relaxed);
+        }
+        let table = self.table.read().expect("pack table");
+        for id in named {
+            let Some(location) = table.objects.get(&id) else {
+                continue;
+            };
+            let pack = &table.packs[location.pack as usize];
+            let bit = 1u64 << (location.entry % 64);
+            if pack.wanted[location.entry as usize / 64].fetch_or(bit, Relaxed) & bit == 0 {
+                pack.named.fetch_add(1, Relaxed);
             }
         }
     }
@@ -531,6 +594,8 @@ impl PackIndex {
     /// A pack holding objects the walked root no longer names (a compaction
     /// superseded them) is never spent, so without this it would keep its
     /// share of the budget for the life of the store.
+    /// Every pack is then wanted for all of its objects again, as before
+    /// any walk.
     pub(super) fn release(&self) {
         let mut freed = 0;
         for pack in self.packs() {
@@ -539,6 +604,9 @@ impl PackIndex {
                 *slot = Slot::Drained;
                 freed += usize::try_from(pack.len).unwrap_or(usize::MAX);
             }
+            drop(slot);
+            pack.forget();
+            pack.want_everything();
         }
         *self.resident.lock().expect("resident packs") -= freed;
     }

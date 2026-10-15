@@ -1999,7 +1999,12 @@ impl<V: Vfs> BlockStore<V> {
         walk: &mut RootWalk,
     ) -> Result<Vec<T>, E> {
         crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
-        self.packs.rearm();
+        self.packs.rearm(
+            root.blocks
+                .iter()
+                .map(|block| block.block_id)
+                .chain(root.vertex_patches.iter().map(|patch| patch.patch_id)),
+        );
 
         let mut blocks = Vec::new();
         let RootWalk {
