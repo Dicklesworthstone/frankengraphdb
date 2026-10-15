@@ -382,10 +382,15 @@ async fn prove_off_task<T: Send + 'static>(
 /// proof of an open ran on the walk's one task: about a quarter of a
 /// compacted road-ny CLI open. A window's proofs go to the blocking pool
 /// [`PROOF_CHUNK`] objects at a time, one hand-off per chunk.
-const PROOF_WINDOW: usize = 256;
+const PROOF_WINDOW: usize = 4096;
 
-/// Objects one blocking-pool task proves.
-const PROOF_CHUNK: usize = 32;
+/// Objects one blocking-pool task proves: eight tasks per window. At 32 per
+/// task a web-google open (743k blocks) made 23k hand-offs, and the walk's
+/// task spent about a sixth of its time contending for the pool's queue.
+/// Measured 2026-10-15, CLI point reads interleaved on a loaded host, against
+/// 256 / 32: web-google 3.54-3.93 -> 3.20-3.28 s, road-ny 1.11-1.79 ->
+/// 0.98-1.29 s; 2048 / 256 and 2048 / 128 fell between.
+const PROOF_CHUNK: usize = 512;
 
 /// `proof` applied to every item on the blocking pool, [`PROOF_CHUNK`] items
 /// per task with every task in flight at once; the results in item order.
