@@ -70,7 +70,7 @@ fn remote_batch_submits_one_native_request_and_reports_only_its_terminal() {
                                     FrameKind::SnapshotResultEnd,
                                     4,
                                     &ResultEnd {
-                                        outcome: completion.clone(),
+                                        outcome: completion,
                                         rows: 0,
                                     },
                                 ),
@@ -160,8 +160,7 @@ fn batch_refusal_or_lost_terminal_never_emits_success_or_retries() {
                 let error = prepared_batch(csv)
                     .execute(&root, &mut client, true, &mut out)
                     .await
-                    .err()
-                    .expect("must not accept a missing or refused completion");
+                    .expect_err("must not accept a missing or refused completion");
                 assert_eq!(error.code, exit);
                 assert!(out.bytes.is_empty());
                 assert_eq!(out.flushes.load(Ordering::SeqCst), 0);
@@ -220,8 +219,7 @@ fn output_failure_keeps_known_batch_completion_and_never_replays() {
             let error = prepared_batch(csv)
                 .execute(&root, &mut client, true, &mut out)
                 .await
-                .err()
-                .expect("failed stdout flush must fail the command");
+                .expect_err("failed stdout flush must fail the command");
             assert_eq!(error.code, 5);
             assert!(error.message.contains("completed at seq 7"));
             assert!(error.message.contains("do not replay"));
@@ -275,8 +273,7 @@ fn a_smaller_negotiated_frame_refuses_without_sending_a_batch_prefix() {
             let error = prepared
                 .execute(&root, &mut client, true, &mut out)
                 .await
-                .err()
-                .expect("negotiated limit must refuse");
+                .expect_err("negotiated limit must refuse");
             assert_eq!(error.code, 5);
             assert!(error.message.contains("negotiated frame limit"));
             assert!(out.bytes.is_empty());
@@ -341,9 +338,7 @@ fn invalid_rows_file_fails_before_a_missing_credential_is_read() {
                 args.extend(["--csv-types".into(), "name=int64".into()]);
             }
             let mut output = Vec::new();
-            let error = super::super::run(&args, true, &mut output)
-                .err()
-                .expect("invalid input");
+            let error = super::super::run(&args, true, &mut output).expect_err("invalid input");
             assert_eq!(error.code, 2, "{}", error.message);
             assert!(output.is_empty());
         }
