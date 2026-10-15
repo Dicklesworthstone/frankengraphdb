@@ -279,48 +279,67 @@ impl WriteTxn {
                     BeaconError::Cancelled
                 })
             };
-            self.beacon_search_graph_with_access_observed(
-                database,
-                cx,
-                search.options(),
-                search.query(),
-                search.expansion(),
-                search.uses_indexed_graph(),
-                Some(&observe),
-                |work| {
-                    let source_scratch = {
-                        let control = work.borrow();
-                        u64::try_from(control.limit.saturating_sub(control.scratch))
-                            .unwrap_or(u64::MAX)
-                    };
-                    let prepared = EndpointFilter::prepare_with_admission(
-                        eligible,
-                        search.query().retrieval.k,
-                        policy.evaluator.max_scratch_entries.min(source_scratch),
-                        &mut Shared(work),
-                        || work.borrow_mut().source(SourceEvent::ScratchEntry),
-                    )?;
-                    // Bound input occurrences and result capacity up front.
-                    // Each unique ID spends the same source/enclosing scratch
-                    // allowance BEFORE retention, not after allocation.
-                    *filter.borrow_mut() = Some(prepared);
-                    Ok(())
-                },
-                |id, work| {
-                    filter
-                        .borrow()
-                        .as_ref()
-                        .expect("endpoint filter prepared before retrieval")
-                        .admits(id, work)
-                },
-                |result| {
-                    filter
-                        .borrow()
-                        .as_ref()
-                        .expect("endpoint filter prepared before retrieval")
-                        .finish(result)
-                },
-            )
+            let prepare_filter = |work: &RefCell<Control<'_>>| {
+                let source_scratch = {
+                    let control = work.borrow();
+                    u64::try_from(control.limit.saturating_sub(control.scratch))
+                        .unwrap_or(u64::MAX)
+                };
+                let prepared = EndpointFilter::prepare_with_admission(
+                    eligible,
+                    search.query().retrieval.k,
+                    policy.evaluator.max_scratch_entries.min(source_scratch),
+                    &mut Shared(work),
+                    || work.borrow_mut().source(SourceEvent::ScratchEntry),
+                )?;
+                // Bound input occurrences and result capacity up front.
+                // Each unique ID spends the same source/enclosing scratch
+                // allowance BEFORE retention, not after allocation.
+                *filter.borrow_mut() = Some(prepared);
+                Ok(())
+            };
+            let eligible_id = |id, work: &RefCell<Control<'_>>| {
+                filter
+                    .borrow()
+                    .as_ref()
+                    .expect("endpoint filter prepared before retrieval")
+                    .admits(id, work)
+            };
+            let finish_filter = |result| {
+                filter
+                    .borrow()
+                    .as_ref()
+                    .expect("endpoint filter prepared before retrieval")
+                    .finish(result)
+            };
+            // Both physical profiles use this same filter and enclosing meter.
+            // Select before source access, never after a failed eager attempt.
+            if search.uses_demand_graph() {
+                self.beacon_search_graph_demand_observed(
+                    database,
+                    cx,
+                    search.options(),
+                    search.query(),
+                    search.expansion(),
+                    Some(&observe),
+                    prepare_filter,
+                    eligible_id,
+                    finish_filter,
+                )
+            } else {
+                self.beacon_search_graph_with_access_observed(
+                    database,
+                    cx,
+                    search.options(),
+                    search.query(),
+                    search.expansion(),
+                    search.uses_indexed_graph(),
+                    Some(&observe),
+                    prepare_filter,
+                    eligible_id,
+                    finish_filter,
+                )
+            }
         };
         if let Some(error) = failure.into_inner() {
             return Err(error);

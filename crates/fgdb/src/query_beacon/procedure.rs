@@ -49,13 +49,15 @@
 //! Both transaction profiles retain conservative global edge-scan witnesses.
 //! Omitted/null access retains the host's default; a nonnull choice needs seeds.
 //!
-//! `graph_access => 'demand'` is an explicit immutable graph-only profile. It
+//! `graph_access => 'demand'` is an explicit graph-only profile. It
 //! resolves only probed vertex histories and reached incidences, without a full
 //! vertex directory, property projection or index build. Visible membership
 //! entries and incidences share the source allowance; native scratch also
 //! reserves the output capacity. Node admission counts unique visible probes,
-//! not the whole corpus. Mixed-modality and transaction demand requests refuse;
-//! neither can silently drop an index lane or staged changes. Existing source
+//! not the whole corpus. Transactions use canonical staged membership and the
+//! native/staged incidence merge, retaining negative and edge-scan dependencies.
+//! Mixed-modality demand requests refuse; no index lane or staged change can
+//! be silently discarded. Existing source
 //! defaults and indexed/materialized accounting are unchanged. Storage itself
 //! remains resident; this does not claim spill or physical timing isolation.
 //!
@@ -240,7 +242,7 @@ fn list<'v>(
 
 impl HybridSearch {
     /// Bind a host backed by the canonical staged overlay. Preserve its
-    /// materialized default while honoring an explicit indexed source choice.
+    /// materialized default while honoring indexed and demand source choices.
     pub(crate) fn bind_filtered<'a>(
         call: &PreparedProcedureCall,
         arguments: &'a [GraphValue],
@@ -548,11 +550,9 @@ impl HybridSearch {
         } else {
             GraphAccess::Materialized
         });
-        if graph_access == GraphAccess::Demand
-            && (!indexed_default || text.is_some() || vector.is_some())
-        {
+        if graph_access == GraphAccess::Demand && (text.is_some() || vector.is_some()) {
             return Err(HybridCallError::Combination(
-                "demand graph access requires an immutable graph-only read",
+                "demand graph access requires a graph-only read",
             ));
         }
         if !graph
@@ -664,7 +664,17 @@ impl HybridSearch {
                 // the caller's --max-work-units raises it as well as lowers it.
                 max_work_units: usize::try_from(remaining.evaluator.max_work_units)
                     .unwrap_or(usize::MAX),
-                max_staging_rows: default.max_staging_rows.min(records),
+                // A transaction demand source caches absent probes as well as
+                // surviving records. Do not turn its physical membership cap
+                // into a proxy for the GQL record allowance: an absent-only
+                // search legitimately reports zero snapshot records. Its live
+                // observer separately admits every actual record and scratch
+                // entry. Existing directory/immutable profiles are unchanged.
+                max_staging_rows: if graph_access == GraphAccess::Demand && !indexed_default {
+                    default.max_staging_rows
+                } else {
+                    default.max_staging_rows.min(records)
+                },
                 ..default
             },
         };
@@ -708,6 +718,11 @@ impl HybridSearch {
     /// the way to its canonical overlay; it is not an immutable-source handle.
     pub(crate) fn uses_indexed_graph(&self) -> bool {
         self.graph_access == GraphAccess::Indexed
+    }
+
+    /// Select the transaction's demand source, never an immutable fallback.
+    pub(crate) fn uses_demand_graph(&self) -> bool {
+        self.graph_access == GraphAccess::Demand
     }
 
     /// The fused query. A lane that was not requested has weight zero and is

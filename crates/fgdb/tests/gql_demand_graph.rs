@@ -216,7 +216,7 @@ fn authorized_prepared_demand_masks_before_expansion_and_retains_live_expiry() {
 }
 
 #[test]
-fn unsupported_demand_profiles_cannot_ignore_staged_writes_or_drop_modalities() {
+fn transaction_demand_observes_staged_writes_without_dropping_modalities() {
     let ((), report) = run_async_under_lab(0xbeac_5205, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let mut db = open(&c.commit(), false).await;
@@ -229,8 +229,8 @@ fn unsupported_demand_profiles_cannot_ignore_staged_writes_or_drop_modalities() 
         let digest = txn.staged_effect_digest().unwrap();
         for tail in ["", " LIMIT 0"] {
             let text = format!("{}{tail}", statement("demand"));
-            let error = txn.query(&db, &c.query(), &text, &params(1, &[11]), symbols, policy()).unwrap_err();
-            assert!(error.to_string().contains("demand graph access requires an immutable graph-only read"));
+            let result = rows(txn.query(&db, &c.query(), &text, &params(1, &[11]), symbols, policy()).unwrap());
+            assert_eq!(result, if tail.is_empty() { expected(11, 2) } else { vec![] });
             assert_eq!(txn.staged_effect_digest().unwrap(), digest);
             assert_eq!(db.frontier().unwrap(), basis);
         }
@@ -238,7 +238,6 @@ fn unsupported_demand_profiles_cannot_ignore_staged_writes_or_drop_modalities() 
             assert_eq!(rows(txn.query(&db, &c.query(), &statement(access), &params(1, &[11]), symbols, policy()).unwrap()),
                 expected(11, 2));
         }
-        txn.abort();
         for modality in [
             "text => 'graph', text_property => 'body'",
             "vector => [1], vector_properties => ['body']",
@@ -248,8 +247,13 @@ fn unsupported_demand_profiles_cannot_ignore_staged_writes_or_drop_modalities() 
                  graph_access => 'demand', {modality}) YIELD node RETURN node LIMIT 0"
             );
             let error = db.query(&c.query(), &text, &GqlParameters::new(), symbols, policy()).unwrap_err();
-            assert!(error.to_string().contains("demand graph access requires an immutable graph-only read"));
+            assert!(error.to_string().contains("demand graph access requires a graph-only read"));
+            let error = txn.query(&db, &c.query(), &text, &GqlParameters::new(), symbols, policy()).unwrap_err();
+            assert!(error.to_string().contains("demand graph access requires a graph-only read"));
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            assert_eq!(db.frontier().unwrap(), basis);
         }
+        txn.abort();
         assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -270,6 +274,137 @@ fn malformed_eligibility_and_late_expressions_refuse_even_under_limit_zero() {
         }
         assert_eq!(rows(db.query(&c.query(), &statement("demand"), &params(1, &[3]), symbols, policy()).unwrap()),
             expected(3, 2));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn transaction_native_demand_uses_a_bounded_reached_source_and_fresh_overlay_each_call() {
+    let ((), report) = run_async_under_lab(0xbeac_5401, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = open(&c.commit(), false).await;
+        let mut txn = db.begin(&c.txn()).unwrap();
+        let mut edit = WriteBatch::new(R);
+        edit.create_vertex(VId(11), vec![LabelId(1)], vec![]);
+        edit.add_edge(EId(11), VId(2), VId(11), vec![]);
+        txn.write(&mut db, edit).unwrap();
+        txn.savepoint(&db, "linked").unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let basis = db.frontier().unwrap();
+        // Four reached vertices and three reached edges, not the 1,029-vertex
+        // overlay directory. Exact counts are read back from the native meter.
+        let tight = GqlQueryPolicy::new(8, 10, 10_000_000, 100_000);
+        let text = statement("demand").replace("eligible =>", "label => 'Node', eligible =>");
+        let prepared = PreparedGraphSetText::prepare(&text, symbols).unwrap();
+        for source in [1, 2] {
+            let parameters = params(source, &[11]);
+            let bound = prepared.bind_parameters(&parameters).unwrap();
+            let result = txn.execute_graph_set_governed(&db, &c.query(), &bound, tight).unwrap();
+            assert!(result.rows.snapshot_records <= 8);
+            assert_eq!(rows(txn.query(&db, &c.query(), &text, &parameters, symbols, tight).unwrap()),
+                expected(11, 3 - source));
+            for mode in ["indexed", "materialized"] {
+                assert!(txn.query(&db, &c.query(), &statement(mode), &parameters, symbols, tight).is_err());
+                assert_eq!(rows(txn.query(&db, &c.query(), &statement(mode), &parameters, symbols, policy()).unwrap()),
+                    expected(11, 3 - source));
+            }
+        }
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!(db.frontier().unwrap(), basis);
+        let mut unlabel = WriteBatch::new(R);
+        unlabel.set_vertex_label(VId(2), LabelId(1), false);
+        txn.write(&mut db, unlabel).unwrap();
+        assert!(rows(txn.query(&db, &c.query(), &text, &params(1, &[11]), symbols, tight).unwrap()).is_empty());
+        txn.rollback_to_savepoint(&db, "linked").unwrap();
+        assert_eq!(rows(txn.query(&db, &c.query(), &text, &params(1, &[11]), symbols, tight).unwrap()), expected(11, 2));
+        txn.commit(&mut db, &c.commit()).await.unwrap();
+        assert_eq!(rows(db.query(&c.query(), &text, &params(1, &[11]), symbols, policy()).unwrap()), expected(11, 2));
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn transaction_demand_exact_allowances_cover_missing_seeds_without_fabricated_records() {
+    let ((), report) = run_async_under_lab(0xbeac_5402, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = open(&c.commit(), false).await;
+        for (source, eligible) in [(1, vec![3]), (9, vec![]), (999, vec![])] {
+            let text = statement("demand");
+            let bound = PreparedGraphSetText::prepare(&text, symbols).unwrap()
+                .bind_parameters(&params(source, &eligible)).unwrap();
+            // Fresh transactions, so an earlier read cannot warm the witness
+            // set and make a deliberately short allowance spuriously succeed.
+            let execute = |allowance| {
+                let mut txn = db.begin(&c.txn()).unwrap();
+                let result = txn.execute_graph_set_governed(&db, &c.query(), &bound, allowance);
+                txn.abort();
+                result
+            };
+            let baseline = execute(policy()).unwrap();
+            if source == 999 {
+                assert_eq!(baseline.rows.snapshot_records, 0);
+                assert!(baseline.value.is_empty());
+            }
+            assert!(baseline.evaluator.work_units > 0);
+            assert!(baseline.evaluator.scratch_entries > 0);
+            let exact = GqlQueryPolicy::new(
+                baseline.rows.snapshot_records, baseline.rows.result_rows,
+                baseline.evaluator.work_units, baseline.evaluator.scratch_entries,
+            );
+            let actual = execute(exact).unwrap();
+            assert_eq!(actual.value, baseline.value);
+            assert_eq!(actual.rows, baseline.rows);
+            assert_eq!(actual.evaluator, baseline.evaluator);
+            let mut short = exact;
+            short.evaluator.max_work_units -= 1;
+            assert!(execute(short).is_err());
+            let mut short = exact;
+            short.evaluator.max_scratch_entries -= 1;
+            assert!(execute(short).is_err());
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn transaction_demand_empty_and_failed_native_reads_retain_dependencies_after_rollback() {
+    let ((), report) = run_async_under_lab(0xbeac_5403, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        for case in 0..4 {
+            let mut db = open(&c.commit(), false).await;
+            let mut txn = db.begin(&c.txn()).unwrap();
+            txn.savepoint(&db, "before-read").unwrap();
+            let source = if case == 1 { 77 } else { 9 };
+            let hops = if case == 2 { 1 } else { 0 };
+            let projection = if case == 3 { "1 / 0 AS fail" } else { "node" };
+            let text = format!(
+                "CALL hybrid.search(seeds => [$source], max_hops => {hops}, include_seeds => true, \
+                 graph_access => 'demand', k => 1) YIELD node RETURN {projection} LIMIT 0"
+            );
+            let parameters = GqlParameters::new().with_int64("source", source).unwrap();
+            let result = txn.query(&db, &c.query(), &text, &parameters, symbols, policy());
+            if case == 3 { assert!(result.is_err()); }
+            else { assert!(rows(result.unwrap()).is_empty()); }
+            txn.rollback_to_savepoint(&db, "before-read").unwrap();
+            let mut concurrent = WriteBatch::new(R);
+            match case {
+                0 | 1 => concurrent.create_vertex(VId(77), vec![LabelId(1)], vec![]),
+                2 => concurrent.add_edge(EId(77), VId(9), VId(3), vec![]),
+                _ => concurrent.delete_vertex(VId(9)),
+            }
+            db.write(&c.commit(), concurrent).await.unwrap();
+            let result = txn.finish(&mut db, &c.commit()).await;
+            if case == 0 {
+                assert!(result.is_ok(), "zero-hop demand must not register an all-vertex scan: {result:?}");
+            } else {
+                assert!(matches!(result, Err(fgdb::WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01", ..
+                }))), "case {case}: {result:?}");
+            }
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
