@@ -2,12 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { LIMITS, graphQuery, queryBody, quoteIdentifier, parseResponse, boundedText, validateResult, plain, cellText, csv, extractGraph, filterGraph } from '../model.mjs';
-import { createLayout, stepLayout } from '../layout.mjs';
+import { createLayout, createSimulation } from '../layout.mjs';
 import { demoResult } from '../demo.mjs';
 const cell = (type, value) => ({ type, value });
 const vertex = value => cell('vertex', value);
 const edge = value => cell('edge', value);
 const result = (columns, rows) => ({ v: 1, columns, rows, seq: 1 });
+const forceModule = new WebAssembly.Module(readFileSync(new URL('../wasm/force.wasm', import.meta.url)));
+const simulation = (nodes, edges, mode) => createSimulation(new WebAssembly.Instance(forceModule, {}).exports, nodes, edges, mode);
 
 test('sample counts come from the actual typed fixture', () => {
   const graph = extractGraph(demoResult());
@@ -120,18 +122,18 @@ test('UTF-8 streaming preserves split multibyte characters and rejects invalid e
 test('layout is deterministic, finite and reaches a bounded settled state in every mode', () => {
   const graph = extractGraph(demoResult());
   for (const mode of ['force', 'clusters', 'radial']) {
-    const a = createLayout(graph.nodes, graph.edges, mode), b = createLayout(graph.nodes, graph.edges, mode);
-    for (let i = 0; i < 25; i++) { stepLayout(a, 10); stepLayout(b, 10); }
-    assert.equal(a.tick, 250); assert.deepEqual(a.points, b.points);
-    assert.ok(a.points.every(p => Number.isFinite(p.x) && Number.isFinite(p.y)));
-    const settled = JSON.stringify(a); stepLayout(a, 10); assert.equal(JSON.stringify(a), settled);
+    const a = simulation(graph.nodes, graph.edges, mode), b = simulation(graph.nodes, graph.edges, mode);
+    for (let i = 0; i < 100; i++) { a.step(8); b.step(8); }
+    assert.equal(a.stats().ticks, 800); assert.deepEqual(a.positions(), b.positions());
+    assert.ok([...a.positions()].every(Number.isFinite));
+    const settled = a.positions(); a.step(8); assert.deepEqual(a.positions(), settled);
   }
 });
 test('layout handles empty, disconnected and self-loop graphs within input bounds', () => {
-  const empty = createLayout([], []); stepLayout(empty, 250); assert.equal(empty.points.length, 0);
+  const empty = simulation([], []); empty.step(8); assert.equal(empty.positions().length, 0);
   const nodes = Array.from({ length: 80 }, (_, i) => ({ id: String(i), group: 'g' + i % 5 }));
-  const state = createLayout(nodes, nodes.map(n => ({ source: n.id, target: n.id }))); stepLayout(state, 250);
-  assert.ok(state.points.every(p => Number.isFinite(p.x) && Number.isFinite(p.y)));
+  const state = simulation(nodes, nodes.map(n => ({ source: n.id, target: n.id }))); for (let i = 0; i < 100; i++) state.step(8);
+  assert.ok([...state.positions()].every(Number.isFinite));
   assert.throws(() => createLayout(Array.from({ length: 751 }, () => ({})), []), /bounds/);
 });
 test('browser shell links only local assets and the application has no markup-evaluation sink', () => {

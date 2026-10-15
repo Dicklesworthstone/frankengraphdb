@@ -7,7 +7,7 @@
 
 use asupersync::http::h1::types::{Method, Response};
 
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
+const CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
     connect-src 'self'; worker-src 'self'; img-src 'self' blob:; \
     base-uri 'none'; frame-ancestors 'none'; form-action 'none'; object-src 'none'";
 
@@ -21,6 +21,7 @@ fn asset(path: &str) -> Option<(&'static str, &'static [u8])> {
         "/studio/model.mjs" => ("text/javascript; charset=utf-8", include_bytes!("model.mjs")),
         "/studio/graph.mjs" => ("text/javascript; charset=utf-8", include_bytes!("graph.mjs")),
         "/studio/layout.mjs" => ("text/javascript; charset=utf-8", include_bytes!("layout.mjs")),
+        "/studio/force.wasm" => ("application/wasm", include_bytes!("wasm/force.wasm")),
         "/studio/demo.mjs" => ("text/javascript; charset=utf-8", include_bytes!("demo.mjs")),
         "/studio/favicon.svg" => ("image/svg+xml", include_bytes!("favicon.svg")),
         _ => return None,
@@ -137,6 +138,20 @@ mod tests {
         assert!(CSP.contains("worker-src 'self'"));
         assert!(CSP.contains("frame-ancestors 'none'"));
         assert!(!CSP.contains("unsafe-inline"));
-        assert!(!CSP.contains("unsafe-eval"));
+        // The Wasm-only keyword must not allow JavaScript string evaluation.
+        assert!(CSP.contains("'wasm-unsafe-eval'"));
+        assert!(!CSP.contains("'unsafe-eval'"));
+    }
+
+    #[test]
+    fn force_module_is_binary_wasm_and_source_files_are_not_routes() {
+        let page = route("/studio/force.wasm", &Method::Get).unwrap();
+        assert_eq!(page.status, 200);
+        assert_eq!(page.mime, "application/wasm");
+        assert!(page.body.starts_with(b"\0asm\x01\0\0\0"));
+        for path in ["/studio/wasm/force.c", "/studio/wasm/build.sh", "/studio/wasm/force.wasm"] {
+            assert_eq!(route(path, &Method::Get).unwrap().status, 404);
+        }
+        assert_eq!(route("/studio/force.wasm", &Method::Post).unwrap().status, 405);
     }
 }
