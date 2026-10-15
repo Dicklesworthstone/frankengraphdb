@@ -37,7 +37,7 @@ mod beacon;
 #[path = "query_authorized/overlay.rs"]
 mod overlay;
 #[path = "query_authorized/positions.rs"]
-mod positions;
+pub(crate) mod positions;
 #[path = "query_authorized/relational.rs"]
 mod relational;
 #[path = "query_authorized/tape.rs"]

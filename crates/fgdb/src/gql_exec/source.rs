@@ -1207,6 +1207,120 @@ pub(crate) struct PropertyEqualityIndex {
     candidates: EqualityCandidates,
     histories: IndexMap<VId, History>,
     work: u64,
+    flat: FlatRowCache,
+}
+
+/// Lookups a generation answers by descent before it flattens its history
+/// index: at least this many, and one per 64 identities. Flattening pokec's
+/// 1.6M identities took 18.6 ms, the cost of about 35k descents, so a
+/// generation never spends much more on flattening than it already spent
+/// descending (a commit makes a new generation), and a one-shot read never
+/// flattens.
+const FLAT_ROW_LOOKUPS: u32 = 4096;
+
+/// A generation's history index, flattened for row lookups (fgdb-61p1n).
+/// Resolving a row descends the identity tree (about 21 separately allocated
+/// nodes on pokec) and then the version tree, charging one Work per node:
+/// half of a resident pokec hub_degree. For each identity this keeps the
+/// number of nodes both descents visit when the cut is at or after its latest
+/// version, and that version's coordinates. Such a lookup is one hashed probe
+/// and charges exactly the descents' Work. An absent identity, an earlier
+/// cut or coordinates past u32 take the descents.
+#[derive(Debug)]
+struct FlatRows {
+    /// The history index these describe. They answer only for that index.
+    root: IndexMap<VId, History>,
+    /// Ascending by identity.
+    rows: Vec<(VId, FlatRow)>,
+    positions: crate::query::authorized::positions::VertexPositions,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FlatRow {
+    /// The version tree's greatest key: the winner for any cut at or after it.
+    latest: CommitSeq,
+    patch: u32,
+    row: u32,
+    /// Nodes the identity descent visits, this identity's own included.
+    path: u8,
+    /// Nodes the version descent visits for a cut at or after `latest`: the
+    /// version tree's right spine.
+    spine: u8,
+}
+
+impl FlatRows {
+    fn build(histories: &IndexMap<VId, History>) -> Option<Self> {
+        let mut rows = Vec::with_capacity(histories.len());
+        // In order, with each node's depth: an AVL tree under 2^32 nodes is
+        // under 47 levels, so a depth fits a byte.
+        let mut stack: Vec<(&IndexNode<VId, History>, u8)> = Vec::new();
+        let mut node = histories.0.as_deref();
+        let mut depth = 1_u8;
+        loop {
+            while let Some(current) = node {
+                stack.push((current, depth));
+                node = current.left.0.as_deref();
+                depth = depth.checked_add(1)?;
+            }
+            let Some((current, path)) = stack.pop() else {
+                break;
+            };
+            if let Some(row) = FlatRow::of(&current.value, path) {
+                rows.push((current.key, row));
+            }
+            node = current.right.0.as_deref();
+            depth = path.checked_add(1)?;
+        }
+        let positions = crate::query::authorized::positions::VertexPositions::build(&rows)?;
+        Some(Self {
+            root: histories.clone(),
+            rows,
+            positions,
+        })
+    }
+
+    fn describes(&self, histories: &IndexMap<VId, History>) -> bool {
+        match (&self.root.0, &histories.0) {
+            (Some(built), Some(current)) => std::sync::Arc::ptr_eq(built, current),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl FlatRow {
+    fn of(history: &History, path: u8) -> Option<Self> {
+        let mut spine = 0_u8;
+        let mut latest = None;
+        let mut node = history.0.as_deref();
+        while let Some(current) = node {
+            spine = spine.checked_add(1)?;
+            latest = Some(current.key);
+            node = current.right.0.as_deref();
+        }
+        let (latest, patch, row) = latest?;
+        Some(Self {
+            latest,
+            patch: u32::try_from(patch).ok()?,
+            row: u32::try_from(row).ok()?,
+            path,
+            spine,
+        })
+    }
+}
+
+/// A generation's flattened rows, built once it has answered enough lookups.
+/// A clone starts empty: an index is cloned to be changed.
+#[derive(Debug, Default)]
+struct FlatRowCache {
+    lookups: std::sync::atomic::AtomicU32,
+    rows: std::sync::OnceLock<Option<FlatRows>>,
+}
+
+impl Clone for FlatRowCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 impl PropertyEqualityIndex {
@@ -1270,6 +1384,7 @@ impl PropertyEqualityIndex {
             candidates: IndexMap::from_sorted(candidates, &mut work),
             histories: IndexMap::from_sorted(histories, &mut work),
             work,
+            flat: FlatRowCache::default(),
         }
     }
 
@@ -1304,6 +1419,7 @@ impl PropertyEqualityIndex {
 
     pub(crate) fn apply_added(&mut self, patches: &[VertexPatchRows], added_from: usize) -> u64 {
         self.work = 0;
+        self.flat = FlatRowCache::default();
         for (patch, rows) in patches.iter().enumerate().skip(added_from) {
             for (row_at, row) in rows.iter().enumerate() {
                 self.work += 1;
@@ -1391,6 +1507,33 @@ impl PropertyEqualityIndex {
         Ok(())
     }
 
+    /// Lookups this generation answers by descent before it flattens.
+    fn flat_threshold(&self) -> u32 {
+        let per_identities = u32::try_from(self.histories.len() / 64).unwrap_or(u32::MAX);
+        FLAT_ROW_LOOKUPS.max(per_identities)
+    }
+
+    /// This generation's flattened rows, once it has answered its threshold
+    /// of lookups, and only while they describe its history index.
+    fn flat_rows(&self) -> Option<&FlatRows> {
+        let flat = match self.flat.rows.get() {
+            Some(flat) => flat,
+            None => {
+                let seen = self
+                    .flat
+                    .lookups
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if seen < self.flat_threshold() {
+                    return None;
+                }
+                self.flat
+                    .rows
+                    .get_or_init(|| FlatRows::build(&self.histories))
+            }
+        };
+        flat.as_ref().filter(|flat| flat.describes(&self.histories))
+    }
+
     /// Resolve a borrowed vertex row in O(log identities + log versions),
     /// charging every node on both search paths. Later patches win equal
     /// creation sequences exactly as in visit_vertices; a retirement winner
@@ -1404,6 +1547,20 @@ impl PropertyEqualityIndex {
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<Option<&'a VertexRow>, E> {
         control(SourceEvent::Work)?;
+        if let Some(flat) = self.flat_rows()
+            && let Some(at) = flat.positions.find(&flat.rows, vid)
+            && flat.rows[at].1.latest <= as_of
+        {
+            let found = flat.rows[at].1;
+            // The descents' charges: each identity node on the search path,
+            // each version node on the right spine, then the row read.
+            for _ in 0..u32::from(found.path) + u32::from(found.spine) {
+                control(SourceEvent::Work)?;
+            }
+            control(SourceEvent::Work)?;
+            let row = &patches[found.patch as usize][found.row as usize];
+            return Ok(row.visible_at(as_of).then_some(row));
+        }
         let mut node = self.histories.0.as_deref();
         let mut history = None;
         while let Some(current) = node {
@@ -2300,6 +2457,171 @@ mod indexed_tests {
             ever_nonempty |= !visible.is_empty();
         }
         assert!(ever_nonempty);
+    }
+
+    /// A flattened lookup answers and charges exactly as the two descents
+    /// (fgdb-61p1n): every identity, absent ones included, at every cut
+    /// around each version, over histories with retirements, superseding
+    /// versions and equal-sequence copies in later patches, before and after
+    /// an extension.
+    #[test]
+    fn flattened_row_lookups_answer_and_charge_as_the_descents() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut random = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let patch = |rows: &[VertexRow]| {
+            let bytes = fgdb_strata::vertex::encode_patch(rows).unwrap();
+            fgdb_strata::vertex::decode_patch(&bytes).unwrap()
+        };
+        // Patch p commits at sequence 3p + 1: creations, later versions and
+        // retirement copies of up to 400 identities (0..400, multiples of 7
+        // never written).
+        let mut patches = Vec::new();
+        let mut live: BTreeMap<u64, u64> = BTreeMap::new();
+        for at in 0..12_u64 {
+            let seq = 3 * at + 1;
+            let mut rows = Vec::new();
+            let mut touched = std::collections::BTreeSet::new();
+            for _ in 0..random(120) + 1 {
+                let vid = random(400);
+                if vid % 7 == 0 || !touched.insert(vid) {
+                    continue;
+                }
+                let row = |created: u64, retired: Option<u64>| VertexRow {
+                    vid: VId(u128::from(vid)),
+                    birth_ordinal: vid,
+                    created_at: CommitSeq(created),
+                    retired_at: retired.map(CommitSeq),
+                    labels: vec![],
+                    props: vec![],
+                };
+                match (live.get(&vid).copied(), random(3)) {
+                    (None, _) => {
+                        rows.push(row(seq, None));
+                        live.insert(vid, seq);
+                    }
+                    // Retire the live version: a copy at its creation sequence.
+                    (Some(created), 0) => {
+                        rows.push(row(created, Some(seq)));
+                        live.remove(&vid);
+                    }
+                    // Supersede it: retire the copy and create a new version.
+                    (Some(created), _) => {
+                        rows.push(row(created, Some(seq)));
+                        rows.push(row(seq, None));
+                        live.insert(vid, seq);
+                    }
+                }
+            }
+            rows.sort_by_key(|row| (row.vid, row.created_at));
+            patches.push(patch(&rows));
+        }
+        let charged = |index: &PropertyEqualityIndex, patches: &[VertexPatchRows], vid, at| {
+            let mut work = 0_u64;
+            let row = index
+                .visible_row(patches, VId(vid), CommitSeq(at), &mut |event| {
+                    assert_eq!(event, SourceEvent::Work);
+                    work += 1;
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+            (row.map(|row| row as *const VertexRow), work)
+        };
+        // Two indexes of one shape: one always descends, the other answers
+        // from its rows.
+        let compare = |patches: &[VertexPatchRows],
+                       descending: &PropertyEqualityIndex,
+                       flat: &PropertyEqualityIndex| {
+            descending.flat.rows.set(None).unwrap();
+            flat.flat
+                .rows
+                .set(FlatRows::build(&flat.histories))
+                .unwrap();
+            let rows = flat.flat_rows().expect("flattened");
+            let mut fast = 0;
+            for vid in 0..410_u64 {
+                for at in 0..=3 * patches.len() as u64 + 2 {
+                    let expected = charged(descending, patches, u128::from(vid), at);
+                    let actual = charged(flat, patches, u128::from(vid), at);
+                    assert_eq!(
+                        (expected.0.is_some(), expected.1),
+                        (actual.0.is_some(), actual.1),
+                        "vid {vid} at {at}"
+                    );
+                    assert_eq!(expected.0, actual.0, "vid {vid} at {at}");
+                    fast += usize::from(
+                        rows.positions
+                            .find(&rows.rows, VId(u128::from(vid)))
+                            .is_some_and(|row| rows.rows[row].1.latest <= CommitSeq(at)),
+                    );
+                }
+            }
+            fast
+        };
+        let first = patches.len() / 2;
+        let built = |patches| PropertyEqualityIndex::build(patches);
+        let early = built(&patches[..first]);
+        let fast_early = compare(&patches[..first], &early, &built(&patches[..first]));
+        let all = built(&patches);
+        let fast_all = compare(&patches, &all, &built(&patches));
+        // An extension starts unflattened, and rows built for the index it
+        // extended do not describe it.
+        let extended = early.extend(&patches, first);
+        assert!(extended.flat.rows.get().is_none());
+        let stale = FlatRows::build(&early.histories).unwrap();
+        assert!(stale.describes(&early.histories) && !stale.describes(&extended.histories));
+        // Inserts shaped the extension's trees, so its descents charge for
+        // that shape; flattened, it charges the same, and it answers as an
+        // index built from every patch.
+        let fast_extended = compare(&patches, &extended, &early.extend(&patches, first));
+        assert!(
+            fast_early > 1_000 && fast_all > 2_000 && fast_extended > 2_000,
+            "{fast_early} {fast_all} {fast_extended}"
+        );
+        for vid in 0..410_u128 {
+            for at in 0..=3 * patches.len() as u64 + 2 {
+                assert_eq!(
+                    charged(&extended, &patches, vid, at).0,
+                    charged(&all, &patches, vid, at).0
+                );
+            }
+        }
+    }
+
+    /// A generation answers FLAT_ROW_LOOKUPS lookups by descent, then
+    /// flattens once and answers from its rows.
+    #[test]
+    fn a_generation_flattens_after_its_lookup_threshold() {
+        let rows: Vec<VertexRow> = (0..64_u64)
+            .map(|vid| VertexRow {
+                vid: VId(u128::from(vid)),
+                birth_ordinal: vid,
+                created_at: CommitSeq(1),
+                retired_at: None,
+                labels: vec![],
+                props: vec![],
+            })
+            .collect();
+        let bytes = fgdb_strata::vertex::encode_patch(&rows).unwrap();
+        let patches = vec![fgdb_strata::vertex::decode_patch(&bytes).unwrap()];
+        let index = PropertyEqualityIndex::build(&patches);
+        let look = |times: u32| {
+            for at in 0..times {
+                let vid = VId(u128::from(at % 64));
+                let row = index
+                    .visible_row(&patches, vid, CommitSeq(1), &mut |_| Ok::<_, ()>(()))
+                    .unwrap();
+                assert_eq!(row.map(|row| row.vid), Some(vid));
+            }
+        };
+        look(FLAT_ROW_LOOKUPS);
+        assert!(index.flat.rows.get().is_none());
+        look(1);
+        assert!(index.flat_rows().is_some_and(|flat| flat.rows.len() == 64));
     }
 }
 
