@@ -126,7 +126,8 @@ function cancelRequest(notify = true) {
 }
 function clearResults() {
   result = null; raw = ''; graph = { nodes: [], edges: [], warnings: [] }; selection = null;
-  queryDuration = null; hiddenLabels = new Set(); $('node-search').value = ''; $('table-filter').value = '';
+  queryDuration = null; hiddenLabels = new Set(); tablePage = 0; tableSort = null; sortAscending = true;
+  renderer.focus = false; $('node-search').value = ''; $('table-filter').value = '';
   renderer.setData(graph); renderResult();
 }
 function clearSession() {
@@ -146,12 +147,19 @@ function updateConnection() {
 }
 async function api(path, token, body, signal) {
   const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: { Accept: 'application/json', Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, body, signal, credentials: 'omit', redirect: 'error', cache: 'no-store', referrerPolicy: 'no-referrer' });
-  const text = await boundedText(response);
-  let data;
-  try { data = parseResponse(text); } catch (error) { throw new Error(`Cannot read the server response: ${error.message}`); }
-  if (!response.ok || data.error) { const error = new Error(`${data.error?.code || response.status}: ${data.error?.message || 'Request refused'}`); error.status = response.status; throw error; }
-  if (data.v !== 1) throw new Error('Studio requires the v1 HTTP JSON API.');
-  return { data, text };
+  try {
+    const text = await boundedText(response);
+    let data;
+    try { data = parseResponse(text); } catch (error) { throw new Error(`Cannot read the server response: ${error.message}`); }
+    if (!response.ok || data?.error) throw new Error(`${data?.error?.code || response.status}: ${data?.error?.message || 'Request refused'}`);
+    if (!data || data.v !== 1) throw new Error('Studio requires the v1 HTTP JSON API.');
+    return { data, text };
+  } catch (error) {
+    // Status remains authoritative even if an intermediary supplies HTML,
+    // invalid UTF-8 or an oversized body instead of the native JSON refusal.
+    if (!response.ok) error.status = response.status;
+    throw error;
+  }
 }
 $('connect-form').addEventListener('submit', async event => {
   event.preventDefault();
@@ -168,7 +176,7 @@ $('connect-form').addEventListener('submit', async event => {
     const { data } = await api(`/v1/databases/${encodeURIComponent(name)}/schema`, token, undefined, signal);
     if (ticket !== requestId) return;
     for (const key of ['labels', 'relations', 'properties']) if (!Array.isArray(data[key]) || data[key].length > 10000 || !data[key].every(value => typeof value === 'string')) throw new Error('Invalid or oversized schema response.');
-    session = { name, token }; schema = data; connecting = false; controller = null;
+    session = { name, token }; schema = data; connecting = false; controller = null; $('connect-submit').disabled = false;
     $('capability-token').value = ''; $('connect-dialog').close(); updateConnection(); renderSchema();
     clearTimeout(timeout); await runQuery();
   } catch (error) {
@@ -177,7 +185,7 @@ $('connect-form').addEventListener('submit', async event => {
     $('connection-error').hidden = false;
   } finally {
     clearTimeout(timeout);
-    if (ticket === requestId || session) { connecting = false; $('connect-submit').disabled = false; }
+    if (ticket === requestId) { connecting = false; controller = null; $('connect-submit').disabled = false; }
   }
 });
 $('disconnect-button').onclick = () => {

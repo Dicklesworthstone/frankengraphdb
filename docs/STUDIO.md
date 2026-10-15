@@ -183,3 +183,17 @@ cargo test --locked -p fgdb-server --lib http::studio
 
 The full repository gate remains `bash scripts/check.sh`. Browser/model checks do
 not substitute for compiling `fgdbd` and testing an authorized live database.
+
+Optional client-state regressions use Python Playwright and Chromium:
+
+```bash
+CHROMIUM=/path/to/chromium python crates/fgdb-server/src/studio/tests/browser_client.py
+```
+
+These tests load the embedded assets in an isolated browser document and inject
+HTTP-response fixtures; they make no network requests. Module URLs, the worker
+packaging and the page origin are adapted only in this test harness. They cover
+raw parameter precision, safe text rendering, cancellation/stale-response fences,
+connection cleanup, schema-changing results and history behavior. They do not
+validate production CSP, module-worker loading, native authorization or `fgdbd`.
+Neither Playwright nor Python is needed to run Studio itself.
