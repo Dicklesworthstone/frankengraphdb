@@ -2571,8 +2571,12 @@ mod closure_fits_tests {
 ///
 /// Before each level the projected closure (see [`closure_fits`]) must stay
 /// within half the snapshot's edges, about where a sequential scan becomes
-/// cheaper (fgdbd measurements: a closure costs 1.6-2.3x a scanned record);
-/// otherwise None leaves the caller's complete admission.
+/// cheaper (fgdbd measurements: a closure costs 1.6-2.3x a scanned record),
+/// or the closure must actually stay within a sixteenth of that: a walk the
+/// projection overestimates still runs while what it admits is small, and a
+/// large one stops after at most that much. Otherwise None leaves the caller's
+/// complete admission. A citation graph's 13-hop reach from a 770-degree hub
+/// projects past the whole graph but holds 1.3% of it (fgdb-61p1n).
 fn slot_closure<'a, E>(
     snapshot: &'a Snapshot,
     as_of: CommitSeq,
@@ -2593,6 +2597,7 @@ fn slot_closure<'a, E>(
     let edges = index.edge_count();
     let mean = (edges / snapshot.property_index().vertex_count().max(1)).max(1);
     let cap = (edges / 2).max(4096);
+    let trial = (cap / 16).max(4096);
     let later = |from: usize| steps[from..].iter().map(step_hops).sum::<u64>();
     let probe = |frontier: &[VId],
                  direction: fgdb_gql::algebra::GlaDirection,
@@ -2609,7 +2614,8 @@ fn slot_closure<'a, E>(
         // no faster than the snapshot's: a hub root projects at the snapshot
         // mean, and an unrelated dense component never inflates a sparse walk.
         let growth = (incidences / frontier.len().max(1)).clamp(1, mean);
-        Ok(closure_fits(admitted, incidences, remaining, growth, cap))
+        Ok(closure_fits(admitted, incidences, remaining, growth, cap)
+            || admitted.saturating_add(incidences) <= trial)
     };
     let width = if root.is_some() { 2 } else { 1 };
     let mut selected = IdMap::<EId, BorrowedEdge<'a>>::default();
