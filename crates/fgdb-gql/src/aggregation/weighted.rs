@@ -766,41 +766,188 @@ fn reach_shape(aggregate: &PreparedGraphAggregate) -> Option<Reach<'_>> {
     })
 }
 
-/// Vertices reachable from `sources` within the reach bounds (minimum <= 1).
+/// A reach's arcs over dense vertex indices numbered in identity order, so an
+/// ascending index walk is an ascending identity walk. The walk kept ordered
+/// sets of identities and the arcs in an ordered map, about three tree
+/// operations per arc: half of a pokec three-hop reach over the ten million
+/// edges of its closure (fgdb-61p1n).
+struct ReachGraph {
+    /// Index to identity, ascending.
+    vertices: Vec<VId>,
+    /// Identity to index; probed only, never iterated into a result.
+    index: crate::id_hash::IdMap<VId, usize>,
+    /// The distinct successors of vertex `i`, ascending, are
+    /// `targets[starts[i]..starts[i + 1]]`.
+    starts: Vec<usize>,
+    targets: Vec<usize>,
+}
+
+impl ReachGraph {
+    /// From arcs over indices that `index` numbered in arrival order.
+    fn new(
+        mut index: crate::id_hash::IdMap<VId, usize>,
+        arrivals: Vec<VId>,
+        arcs: Vec<(usize, usize)>,
+    ) -> Self {
+        let mut ordered: Vec<(VId, usize)> = arrivals.into_iter().zip(0..).collect();
+        ordered.sort_unstable();
+        let mut rank = vec![0; ordered.len()];
+        for (at, &(_, arrival)) in ordered.iter().enumerate() {
+            rank[arrival] = at;
+        }
+        for at in index.values_mut() {
+            *at = rank[*at];
+        }
+        let vertices: Vec<VId> = ordered.into_iter().map(|(vertex, _)| vertex).collect();
+        let mut starts = vec![0; vertices.len() + 1];
+        for &(from, _) in &arcs {
+            starts[rank[from] + 1] += 1;
+        }
+        for at in 1..starts.len() {
+            starts[at] += starts[at - 1];
+        }
+        let mut fill = starts.clone();
+        let mut targets = vec![0; arcs.len()];
+        for (from, to) in arcs {
+            let from = rank[from];
+            targets[fill[from]] = rank[to];
+            fill[from] += 1;
+        }
+        // Sort each vertex's run and keep one of each parallel arc, moving the
+        // kept arcs down in place: every write lands at or below the read.
+        let mut kept = 0;
+        let mut begin = 0;
+        for vertex in 0..vertices.len() {
+            let end = starts[vertex + 1];
+            targets[begin..end].sort_unstable();
+            starts[vertex] = kept;
+            let mut last = None;
+            for read in begin..end {
+                let target = targets[read];
+                if last != Some(target) {
+                    targets[kept] = target;
+                    kept += 1;
+                    last = Some(target);
+                }
+            }
+            begin = end;
+        }
+        starts[vertices.len()] = kept;
+        targets.truncate(kept);
+        Self {
+            vertices,
+            index,
+            starts,
+            targets,
+        }
+    }
+
+    fn successors(&self, vertex: usize) -> &[usize] {
+        &self.targets[self.starts[vertex]..self.starts[vertex + 1]]
+    }
+}
+
+const REACHED: u8 = 1;
+const EXPANDED: u8 = 2;
+
+/// One search's marks over a ReachGraph. A search clears only the vertices
+/// the previous one touched, so a search per source costs what it reaches.
+struct ReachWalk {
+    marks: Vec<u8>,
+    touched: Vec<usize>,
+}
+
+impl ReachWalk {
+    fn new(vertices: usize) -> Self {
+        Self {
+            marks: vec![0; vertices],
+            touched: Vec::new(),
+        }
+    }
+
+    /// Sets `mark` on `vertex`; whether it was unset.
+    fn mark(&mut self, vertex: usize, mark: u8) -> bool {
+        let marks = self.marks[vertex];
+        if marks & mark != 0 {
+            return false;
+        }
+        if marks == 0 {
+            self.touched.push(vertex);
+        }
+        self.marks[vertex] = marks | mark;
+        true
+    }
+
+    fn clear(&mut self) {
+        for vertex in self.touched.drain(..) {
+            self.marks[vertex] = 0;
+        }
+    }
+}
+
+/// Vertices reachable from `sources` within the reach bounds (minimum <= 1),
+/// ascending. Breadth-first over ascending successors: each crossed arc is
+/// one unit of work and each newly reached vertex one scratch entry.
 fn reachable<E, C>(
     reach: &Reach<'_>,
-    adjacency: &BTreeMap<VId, Vec<VId>>,
+    graph: &ReachGraph,
+    walk: &mut ReachWalk,
     sources: &[VId],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
-) -> Result<BTreeSet<VId>, VisitError<E, C>> {
-    let mut reached = BTreeSet::new();
+) -> Result<Vec<VId>, VisitError<E, C>> {
+    walk.clear();
     if reach.minimum > reach.maximum {
-        return Ok(reached);
+        return Ok(Vec::new());
     }
+    // A source on no arc reaches nothing, and nothing reaches it.
+    let mut isolated = Vec::new();
     if reach.minimum == 0 {
         for &source in sources {
             control(GlaExecutionEvent::ScratchEntry)?;
-            reached.insert(source);
+            match graph.index.get(&source) {
+                Some(&at) => {
+                    walk.mark(at, REACHED);
+                }
+                None => isolated.push(source),
+            }
         }
     }
-    let mut expanded: BTreeSet<VId> = sources.iter().copied().collect();
-    let mut frontier = sources.to_vec();
+    let mut frontier = Vec::new();
+    for source in sources {
+        if let Some(&at) = graph.index.get(source) {
+            walk.mark(at, EXPANDED);
+            frontier.push(at);
+        }
+    }
     let mut depth = 0;
     while !frontier.is_empty() && depth < reach.maximum {
         depth += 1;
         let mut next = Vec::new();
         for vertex in frontier {
-            for &neighbor in adjacency.get(&vertex).map_or(&[][..], Vec::as_slice) {
+            for &neighbor in graph.successors(vertex) {
                 control(GlaExecutionEvent::Work)?;
-                if reached.insert(neighbor) {
+                if walk.mark(neighbor, REACHED) {
                     control(GlaExecutionEvent::ScratchEntry)?;
                 }
-                if expanded.insert(neighbor) {
+                if walk.mark(neighbor, EXPANDED) {
                     next.push(neighbor);
                 }
             }
         }
         frontier = next;
+    }
+    let mut found: Vec<usize> = walk
+        .touched
+        .iter()
+        .copied()
+        .filter(|&at| walk.marks[at] & REACHED != 0)
+        .collect();
+    found.sort_unstable();
+    let mut reached: Vec<VId> = found.into_iter().map(|at| graph.vertices[at]).collect();
+    if !isolated.is_empty() {
+        reached.extend(isolated);
+        reached.sort_unstable();
+        reached.dedup();
     }
     Ok(reached)
 }
@@ -830,12 +977,14 @@ where
         Multiplicity,
     ) -> Result<(), VisitError<E, C>>,
 {
-    let mut admitted = BTreeSet::new();
+    let mut admitted = Vec::new();
     for vertex in vertices {
         control(GlaExecutionEvent::Work)?;
         control(GlaExecutionEvent::ScratchEntry)?;
-        admitted.insert(vertex);
+        admitted.push(vertex);
     }
+    admitted.sort_unstable();
+    admitted.dedup();
     let mut sources = Vec::new();
     for &vertex in &admitted {
         let mut selected = true;
@@ -849,7 +998,15 @@ where
             sources.push(vertex);
         }
     }
-    let mut adjacency: BTreeMap<VId, Vec<VId>> = BTreeMap::new();
+    let mut index = crate::id_hash::IdMap::<VId, usize>::default();
+    let mut arrivals = Vec::new();
+    let mut dense = |vertex: VId| {
+        *index.entry(vertex).or_insert_with(|| {
+            arrivals.push(vertex);
+            arrivals.len() - 1
+        })
+    };
+    let mut arcs = Vec::new();
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         if relation != reach.relation {
@@ -861,12 +1018,10 @@ where
             (destination, source)
         };
         control(GlaExecutionEvent::ScratchEntry)?;
-        adjacency.entry(from).or_default().push(to);
+        arcs.push((dense(from), dense(to)));
     }
-    for neighbors in adjacency.values_mut() {
-        neighbors.sort_unstable();
-        neighbors.dedup();
-    }
+    let graph = ReachGraph::new(index, arrivals, arcs);
+    let mut walk = ReachWalk::new(graph.vertices.len());
     let mut emit = |source: VId,
                     target: VId,
                     property: &mut R,
@@ -887,13 +1042,13 @@ where
     };
     if reach.reads_source {
         for &source in &sources {
-            for target in reachable(reach, &adjacency, &[source], &mut control)? {
+            for target in reachable(reach, &graph, &mut walk, &[source], &mut control)? {
                 emit(source, target, &mut property, &mut control)?;
             }
         }
     } else if let Some(&witness) = sources.first() {
         // No column reads the source: any admitted source witnesses the pair.
-        for target in reachable(reach, &adjacency, &sources, &mut control)? {
+        for target in reachable(reach, &graph, &mut walk, &sources, &mut control)? {
             emit(witness, target, &mut property, &mut control)?;
         }
     }
@@ -2406,6 +2561,222 @@ mod tests {
             }
         }
         assert_eq!(checked, 72);
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ReachStep {
+        Charge(GlaExecutionEvent),
+        Test(VId),
+        Bind(VId, VId),
+    }
+
+    /// The ordered walk the dense one replaced (fgdb-61p1n): an ordered map
+    /// of sorted successor lists and ordered sets of reached and expanded
+    /// identities. Its steps, in order, are the dense walk's oracle.
+    fn ordered_reach(
+        reach: &Reach<'_>,
+        admitted: &[VId],
+        edges: &[(VId, RelationId, VId)],
+        selects: &dyn Fn(VId, &[VertexPredicate]) -> bool,
+    ) -> Vec<ReachStep> {
+        use GlaExecutionEvent::{ScratchEntry, Work};
+        use ReachStep::{Bind, Charge, Test};
+        let mut log = Vec::new();
+        let mut distinct = BTreeSet::new();
+        for &vertex in admitted {
+            log.extend([Charge(Work), Charge(ScratchEntry)]);
+            distinct.insert(vertex);
+        }
+        let mut sources = Vec::new();
+        for &vertex in &distinct {
+            let mut selected = true;
+            for predicates in &reach.source_predicates {
+                log.push(Test(vertex));
+                if !selects(vertex, predicates) {
+                    selected = false;
+                    break;
+                }
+            }
+            if selected {
+                sources.push(vertex);
+            }
+        }
+        let mut adjacency: BTreeMap<VId, Vec<VId>> = BTreeMap::new();
+        for &(source, relation, destination) in edges {
+            log.push(Charge(Work));
+            if relation != reach.relation {
+                continue;
+            }
+            let (from, to) = if reach.forward {
+                (source, destination)
+            } else {
+                (destination, source)
+            };
+            log.push(Charge(ScratchEntry));
+            adjacency.entry(from).or_default().push(to);
+        }
+        for successors in adjacency.values_mut() {
+            successors.sort_unstable();
+            successors.dedup();
+        }
+        let walk = |log: &mut Vec<ReachStep>, sources: &[VId]| {
+            let mut reached = BTreeSet::new();
+            if reach.minimum > reach.maximum {
+                return reached;
+            }
+            if reach.minimum == 0 {
+                for &source in sources {
+                    log.push(Charge(ScratchEntry));
+                    reached.insert(source);
+                }
+            }
+            let mut expanded: BTreeSet<VId> = sources.iter().copied().collect();
+            let mut frontier = sources.to_vec();
+            let mut depth = 0;
+            while !frontier.is_empty() && depth < reach.maximum {
+                depth += 1;
+                let mut next = Vec::new();
+                for vertex in frontier {
+                    for &successor in adjacency.get(&vertex).map_or(&[][..], Vec::as_slice) {
+                        log.push(Charge(Work));
+                        if reached.insert(successor) {
+                            log.push(Charge(ScratchEntry));
+                        }
+                        if expanded.insert(successor) {
+                            next.push(successor);
+                        }
+                    }
+                }
+                frontier = next;
+            }
+            reached
+        };
+        let emit = |log: &mut Vec<ReachStep>, source: VId, target: VId| {
+            for predicates in &reach.target_predicates {
+                log.push(Test(target));
+                if !selects(target, predicates) {
+                    return;
+                }
+            }
+            log.push(Bind(source, target));
+        };
+        if reach.reads_source {
+            for &source in &sources {
+                for target in walk(&mut log, &[source]) {
+                    emit(&mut log, source, target);
+                }
+            }
+        } else if let Some(&witness) = sources.first() {
+            for target in walk(&mut log, &sources) {
+                emit(&mut log, witness, target);
+            }
+        }
+        log
+    }
+
+    /// The dense reach walk binds, tests and charges exactly what the ordered
+    /// walk did, in the same order, over random multigraphs whose identities
+    /// arrive out of order, with parallel arcs, self-loops, another relation,
+    /// endpoints outside the admitted vertices, isolated and repeated admitted
+    /// vertices, and both orientations, bounds from zero to unbounded, and
+    /// grouped and ungrouped sources.
+    #[test]
+    fn dense_reach_steps_equal_the_ordered_walk_event_for_event() {
+        let texts = [
+            "MATCH (a)-[:R]->{1,3}(b) RETURN COUNT(DISTINCT b) AS n",
+            "MATCH (a)<-[:R]-{0,2}(b) RETURN MIN(b.n) AS lo,MAX(b.n) AS hi",
+            "MATCH REPEATABLE ELEMENTS (a)-[:R]->{0,4}(b) RETURN a,COUNT(DISTINCT b) AS n GROUP BY a",
+            "MATCH (a)-[:R]->{1,}(b) RETURN COUNT(DISTINCT b) AS n",
+            "MATCH (a)<-[:R]-{1,2}(b) WHERE a.n=1 RETURN a,MAX(b.n) AS hi GROUP BY a",
+            "MATCH (a)-[:R]->{0,3}(b) WHERE b.n IS NOT NULL RETURN COUNT(DISTINCT b) AS n",
+        ];
+        let aggregates: Vec<_> = texts.iter().map(|text| query(text)).collect();
+        let reaches: Vec<_> = texts
+            .iter()
+            .zip(&aggregates)
+            .map(|(text, aggregate)| reach_shape(aggregate).unwrap_or_else(|| panic!("{text}")))
+            .collect();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut random = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let (mut checked, mut binds, mut tests) = (0, 0, 0);
+        for _ in 0..300 {
+            let count = 1 + random(14);
+            // Distinct identities whose order is unrelated to their arrival.
+            let ids: Vec<VId> = (0..count)
+                .map(|at| VId((u128::from(random(1 << 20)) << 8) | u128::from(at)))
+                .collect();
+            let mut properties = BTreeMap::new();
+            for &id in &ids {
+                if let Some(value) = [Some(0), Some(1), Some(2), None][random(4) as usize] {
+                    properties.insert(id, CanonicalScalar::Int(value));
+                } else if random(2) == 0 {
+                    properties.insert(id, CanonicalScalar::Null);
+                }
+            }
+            let pick = |random: &mut dyn FnMut(u64) -> u64| ids[random(count) as usize];
+            let edges: Vec<(VId, RelationId, VId)> = (0..random(3 * count))
+                .map(|_| {
+                    let relation = RelationId(if random(4) == 0 { 2 } else { 1 });
+                    (pick(&mut random), relation, pick(&mut random))
+                })
+                .collect();
+            let admitted: Vec<VId> = (0..random(count + 3)).map(|_| pick(&mut random)).collect();
+            let selects = |vertex: VId, predicates: &[VertexPredicate]| {
+                predicates.iter().all(|predicate| {
+                    predicate.matches_borrowed(
+                        None,
+                        properties
+                            .get(&vertex)
+                            .map(|value| (PropertyKeyId(1), value)),
+                    )
+                })
+            };
+            for (text, reach) in texts.iter().zip(&reaches) {
+                let log = std::cell::RefCell::new(Vec::new());
+                let dense = visit_reach_bindings::<(), (), _, _, _, _>(
+                    reach,
+                    admitted.iter().copied(),
+                    edges.iter().copied(),
+                    |vertex, predicates| {
+                        log.borrow_mut().push(ReachStep::Test(vertex));
+                        Ok(selects(vertex, predicates))
+                    },
+                    |_, _| Ok(None),
+                    |event| {
+                        log.borrow_mut().push(ReachStep::Charge(event));
+                        Ok(())
+                    },
+                    |_, bindings, _, _, _| {
+                        let (source, target) = (bindings[0].unwrap(), bindings[1].unwrap());
+                        log.borrow_mut().push(ReachStep::Bind(source, target));
+                        Ok(())
+                    },
+                );
+                assert!(dense.is_ok(), "{text}");
+                let dense = log.into_inner();
+                let ordered = ordered_reach(reach, &admitted, &edges, &selects);
+                assert_eq!(dense, ordered, "{text} over {edges:?} from {admitted:?}");
+                binds += dense
+                    .iter()
+                    .filter(|step| matches!(step, ReachStep::Bind(..)))
+                    .count();
+                tests += dense
+                    .iter()
+                    .filter(|step| matches!(step, ReachStep::Test(..)))
+                    .count();
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 300 * texts.len());
+        assert!(
+            binds > 1_000 && tests > 1_000,
+            "{binds} binds, {tests} tests"
+        );
     }
 
     #[test]
