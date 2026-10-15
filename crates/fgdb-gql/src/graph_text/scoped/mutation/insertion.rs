@@ -1224,8 +1224,7 @@ mod graph_row_source_tests {
 
     #[test]
     fn with_vertex_alias_feeds_an_existing_endpoint_without_a_new_identity() {
-        let template =
-            prepare("MATCH (n:Source) WITH n AS a CREATE (a)-[:R]->(c:Copy {p:7})");
+        let template = prepare("MATCH (n:Source) WITH n AS a CREATE (a)-[:R]->(c:Copy {p:7})");
         assert_eq!(template.vertices.len(), 1);
         assert_eq!(template.edges[0].source, GraphInsertEndpoint::Column(0));
         assert_eq!(
@@ -1261,7 +1260,9 @@ mod graph_row_source_tests {
             "MATCH (n:Source) UNWIND [1,2] AS x CREATE (n)-[:R]->(c:Copy {p:x})",
             "MATCH (n:Source) WITH n.p AS p WITH p+1 AS q INSERT (c:Copy {p:q})",
         ] {
-            let bound = prepare(text).bind_parameters(&GqlParameters::new()).unwrap();
+            let bound = prepare(text)
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
             assert!(bound.requires_read(), "{text}");
             assert!(bound.relational_selection().is_some(), "{text}");
             assert_eq!(bound.vertices_per_row(), 1, "{text}");
@@ -1272,14 +1273,9 @@ mod graph_row_source_tests {
     fn one_parameter_table_spans_match_with_create_and_return() {
         let text = "MATCH (n:Source {p:$value}) WITH n AS a,$value AS p \
                     CREATE (a)-[:R {p:p+$extra}]->(c:Copy {p:$value}) RETURN a,c,c.p";
-        let (template, returning) = PreparedGraphInsertText::prepare_definition(
-            text,
-            RelationId(7),
-            &[],
-            symbols,
-            true,
-        )
-        .unwrap();
+        let (template, returning) =
+            PreparedGraphInsertText::prepare_definition(text, RelationId(7), &[], symbols, true)
+                .unwrap();
         assert!(returning.is_some());
         assert_eq!(template.parameter_schema().len(), 2);
         assert_eq!(template.parameter_schema()[0].name, "value");
@@ -1308,10 +1304,11 @@ mod graph_row_source_tests {
             "MATCH (n:Source) WITH n AS a CREATE (c:Copy {p:a})",
         ] {
             let mut calls = 0;
-            let result = PreparedGraphInsertText::prepare(text, RelationId(7), |kind, name| {
-                calls += 1;
-                symbols(kind, name)
-            });
+            let result =
+                PreparedGraphInsertText::prepare(text, RelationId(7), |kind, name: &str| {
+                    calls += 1;
+                    symbols(kind, name)
+                });
             assert!(result.is_err(), "{text}");
             assert_eq!(calls, 0, "{text}");
         }
@@ -1321,8 +1318,14 @@ mod graph_row_source_tests {
     fn a_dropped_match_name_can_declare_a_new_vertex() {
         let template = prepare("MATCH (n:Source) WITH n AS a CREATE (n:Copy)-[:R]->(a)");
         assert_eq!(template.vertices.len(), 1);
-        assert_eq!(template.edges[0].source, GraphInsertEndpoint::CreatedVertex(0));
-        assert_eq!(template.edges[0].destination, GraphInsertEndpoint::Column(0));
+        assert_eq!(
+            template.edges[0].source,
+            GraphInsertEndpoint::CreatedVertex(0)
+        );
+        assert_eq!(
+            template.edges[0].destination,
+            GraphInsertEndpoint::Column(0)
+        );
     }
 
     #[test]
