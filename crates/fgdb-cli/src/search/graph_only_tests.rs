@@ -31,7 +31,10 @@ fn graph_only_defaults_need_no_properties_or_vector_index() {
     assert!(request.read.projection.text.is_none());
     assert!(request.read.projection.vector.is_empty());
     assert!(request.read.index.vector.is_none());
-    assert!(request.search().is_err(), "no synthetic index-backed search");
+    assert!(
+        request.search().is_err(),
+        "no synthetic index-backed search"
+    );
     let query = graph_query(&request);
     assert!(query.is_graph_only());
     assert!(query.graph_enabled());
@@ -225,18 +228,21 @@ fn graph_only_uses_native_exact_fusion_eligibility_and_work_refusal() {
             hops: 2,
         },
     ];
-    let eligible = |id| request.eligible.as_ref().unwrap().binary_search(&id).is_ok();
+    let eligible = |id| {
+        request
+            .eligible
+            .as_ref()
+            .unwrap()
+            .binary_search(&id)
+            .is_ok()
+    };
     let query = graph_query(&request);
     let hits = query
         .fuse_graph_only(&population, eligible, &mut WorkBudget::new(10_000))
         .unwrap();
     let oracle = GraphHybridQuery::graph_only(1, 3, 5, 60)
         .unwrap()
-        .fuse_graph_only(
-            &population,
-            |id| id == VId(4),
-            &mut WorkBudget::new(10_000),
-        )
+        .fuse_graph_only(&population, |id| id == VId(4), &mut WorkBudget::new(10_000))
         .unwrap();
     assert_eq!(hits, oracle);
     assert_eq!(hits.len(), 1);
