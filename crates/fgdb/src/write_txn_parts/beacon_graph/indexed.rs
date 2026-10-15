@@ -8,6 +8,9 @@ use fgdb_gql::{GlaExecutionEvent, algebra::GlaDirection};
 use std::collections::BTreeSet;
 use std::ops::Bound::{Excluded, Included};
 
+#[path = "demand.rs"]
+mod demand;
+
 impl WriteTxn {
     /// Seed-directed graph/text/vector retrieval over this transaction's
     /// pinned basis AND prepared writes. No whole edge graph is copied; only
@@ -79,10 +82,28 @@ struct Changes {
     incidence: BTreeSet<(VId, EId)>,
 }
 
-struct OverlayNeighbors<'a, 'cx> {
+/// Preparing changed-edge successors may prune with a complete directory,
+/// but a demand source must retain them without probing unrelated vertices.
+/// In both cases actual incidence admission checks effective membership.
+trait Selection {
+    fn retain_staged(&self, src: VId, dst: VId) -> bool;
+    fn contains_vertex(&self, id: VId, work: &mut dyn WorkControl) -> Result<bool, BeaconError>;
+}
+
+impl Selection for ExpansionGraph {
+    fn retain_staged(&self, src: VId, dst: VId) -> bool {
+        self.contains(src) && self.contains(dst)
+    }
+
+    fn contains_vertex(&self, id: VId, _: &mut dyn WorkControl) -> Result<bool, BeaconError> {
+        Ok(self.contains(id))
+    }
+}
+
+struct OverlayNeighbors<'a, 'cx, S> {
     txn: &'a WriteTxn,
     snapshot: &'a Snapshot,
-    selected: &'a ExpansionGraph,
+    selected: &'a S,
     relation: Option<RelationId>,
     direction: GlaDirection,
     edge_work: EdgeWork<'a, 'cx>,
@@ -95,7 +116,7 @@ fn tree_work(entries: usize) -> usize {
     1 + entries.checked_ilog2().unwrap_or(0) as usize
 }
 
-impl OverlayNeighbors<'_, '_> {
+impl<S: Selection> OverlayNeighbors<'_, '_, S> {
     fn prepare(&mut self) -> Result<(), BeaconError> {
         if self.changes.is_some() {
             return Ok(());
@@ -112,8 +133,7 @@ impl OverlayNeighbors<'_, '_> {
                 continue;
             };
             if self.relation.is_some_and(|wanted| wanted != relation)
-                || !self.selected.contains(src)
-                || !self.selected.contains(dst)
+                || !self.selected.retain_staged(src, dst)
             {
                 continue;
             }
@@ -159,7 +179,7 @@ impl OverlayNeighbors<'_, '_> {
     }
 }
 
-impl ExpansionNeighbors for OverlayNeighbors<'_, '_> {
+impl<S: Selection> ExpansionNeighbors for OverlayNeighbors<'_, '_, S> {
     fn visit_neighbors(
         &mut self,
         vertex: VId,
@@ -199,10 +219,12 @@ impl ExpansionNeighbors for OverlayNeighbors<'_, '_> {
                 // it again at its other endpoint. A tombstone hides all history.
                 Some(after) => *after,
                 None => {
-                    self.edge_work.source(SourceEvent::Work)?;
                     self.snapshot
                         .adjacency_index()
-                        .statement_at(&self.snapshot.blocks, eid, self.txn.basis)
+                        .statement_at_controlled(
+                            &self.snapshot.blocks, eid, self.txn.basis,
+                            &mut |event| self.edge_work.source(event),
+                        )?
                         .map(|(block, row)| {
                             let edge = &self.snapshot.blocks[block][row];
                             (edge.src, edge.relation, edge.dst)
@@ -223,8 +245,8 @@ impl ExpansionNeighbors for OverlayNeighbors<'_, '_> {
             self.edge_work.observe(self.txn, ElementId::Vertex(src))?;
             self.edge_work.shared.borrow_mut().record()?;
             if self.relation.is_some_and(|wanted| wanted != relation)
-                || !self.selected.contains(src)
-                || !self.selected.contains(dst)
+                || !self.selected.contains_vertex(src, work)?
+                || !self.selected.contains_vertex(dst, work)?
             {
                 continue;
             }
