@@ -2188,6 +2188,40 @@ pub(crate) fn bound_edges<'a, E, Row>(
         (None, Some(hops)) => hops,
         (None, None) => return Ok(None),
     };
+    // A directed lookup reaches each edge from one endpoint only, and a visit
+    // yields each incident identity once, so distinct roots reach each edge at
+    // most once. With no hop to follow, nothing reads the frontier either: a
+    // label root (every N vertex for (:N)-[r:E]->(:N)) made this an ordered
+    // map insert per edge and two set probes per endpoint, ~45% of a pokec
+    // count. The edges are sorted into the order the map gave.
+    if hops == 0
+        && lookup_direction != GlaDirection::Undirected
+        && roots.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        let mut edges = Vec::new();
+        for root in roots {
+            snapshot.adjacency_index().visit(
+                &snapshot.blocks,
+                root,
+                lookup_direction,
+                as_of,
+                control,
+                |entry, block, row, control| {
+                    if relation.matches(entry.relation) {
+                        control(SourceEvent::SnapshotRecord)?;
+                        control(SourceEvent::ScratchEntry)?;
+                        edges.push((
+                            (entry.eid, entry.src, entry.relation, entry.dst),
+                            edge_properties_at(&snapshot.block_props, block, row),
+                        ));
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        edges.sort_unstable_by_key(|((eid, ..), _)| *eid);
+        return Ok(Some(edges));
+    }
     for root in roots {
         snapshot.adjacency_index().visit(
             &snapshot.blocks,
