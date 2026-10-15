@@ -74,7 +74,7 @@ fn demand_bounds_probed_membership_not_the_committed_population() {
     let ((), report) = run_async_under_lab(0xbeac_7201, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let mut db = fixture(&c.commit(), 1024).await;
-        let mut txn = db.begin(&c.txn()).unwrap();
+        let txn = db.begin(&c.txn()).unwrap();
         let before = db.frontier().unwrap();
         let mut options = options();
         options.policy.max_staging_rows = 3;
@@ -335,7 +335,7 @@ fn reject_all_and_zero_k_keep_resource_refusals_without_finishing_the_transactio
         let c = PurposeContexts::narrow_runtime_root(&root);
         let mut db = fixture(&c.commit(), 0).await;
         let other = fixture(&c.commit(), 0).await;
-        let mut txn = db.begin(&c.txn()).unwrap();
+        let txn = db.begin(&c.txn()).unwrap();
         let before = db.frontier().unwrap();
         for k in [0, 1] {
             let query = GraphHybridQuery::graph_only(k, 1, 1, 60).unwrap();
