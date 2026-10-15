@@ -24,8 +24,11 @@ mod buffered;
 mod codec_tests;
 #[path = "aggregate_output.rs"]
 mod output;
+#[path = "aggregate_partition.rs"]
+mod partitioning;
 pub use buffered::PreparedBufferedAggregate;
 pub(super) use buffered::spool_group_stage;
+use partitioning::split_partition;
 
 type Result<T> = core::result::Result<T, NativeAggregateSpoolError>;
 
@@ -615,8 +618,11 @@ impl PreparedNativeRead {
     /// Three distinct append-only files should share one memory pool. At most
     /// group_capacity owned group states and max_partitions metadata entries
     /// are admitted, with conservative pool charges before decoded retention.
-    /// A partition that exceeds group/memory capacity is repartitioned. A single
-    /// group that cannot fit, hash-depth exhaustion, disk/run/work limits and
+    /// A partition that exceeds group/memory capacity is repartitioned at its
+    /// first varying hash bit; uniform prefixes create no empty scratch runs.
+    /// The existing partition limit still counts every run actually created.
+    /// With distinct key hashes, at most 2*g-1 partition runs separate g groups.
+    /// A single group that cannot fit, hash-depth exhaustion, disk/run/work limits and
     /// cancellation refuse without publishing a result. Completed-group clauses
     /// require one bounded sort per unique DISTINCT argument column per accepted
     /// partition, then up to three completed-group sort passes: canonical group
@@ -1050,97 +1056,6 @@ where
     Ok(())
 }
 
-fn key_hash(
-    row: &GraphValueRow,
-    definition: &SpillAggregateDefinition,
-    pool: &MemoryPool,
-    work: &mut Work<'_>,
-) -> Result<[u8; 32]> {
-    if row.len() != definition.input_width() {
-        return invalid();
-    }
-    let mut hash = fgdb_crypto::Hasher::new();
-    hash.update(b"fgdb.native-aggregate.partition.v1");
-    // The selected values' combined canonical bytes are no larger than the
-    // complete row. Reserve one codec workspace before allocating any key.
-    let (len, nodes) = account::encoded_shape(row, work.cx)?;
-    work.charge(len.checked_add(nodes).ok_or(SpillError::SizeOverflow)?)?;
-    let budget = len
-        .checked_mul(8)
-        .and_then(|bytes| {
-            nodes
-                .checked_mul(128)
-                .and_then(|node_bytes| bytes.checked_add(node_bytes))
-        })
-        .ok_or(SpillError::SizeOverflow)?;
-    let _codec = pool.reserve(work.cx, budget).map_err(SpillError::Memory)?;
-    for &key in definition.group_key_columns() {
-        let bytes = row.values()[key]
-            .canonical_bytes()
-            .map_err(NativeSpoolError::Encode)?;
-        work.charge(8)?;
-        hash.update(&(bytes.len() as u64).to_be_bytes());
-        for chunk in bytes.chunks(4096) {
-            work.charge(chunk.len())?;
-            hash.update(chunk);
-        }
-    }
-    Ok(hash.finalize().0)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn split_partition<A, B>(
-    parent: &Partition,
-    source: &mut SpillFile<A>,
-    destination: &mut SpillFile<B>,
-    definition: &SpillAggregateDefinition,
-    page_bytes: usize,
-    work: &mut Work<'_>,
-    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
-) -> Result<[NativeResultSpool; 2]>
-where
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-{
-    if parent.depth >= 256 {
-        return Err(NativeAggregateSpoolError::PartitionDepth);
-    }
-    let pool = source.memory_pool().clone();
-    let mut children = [None, None];
-    // PagedSpillWriter owns an exclusive file borrow. Two bounded read passes
-    // avoid an unbounded open-writer/file catalog and preserve source order.
-    for selected in [0_u8, 1] {
-        let mut reader = parent.spool.reader(source);
-        let mut writer = destination.paged_writer(work.cx, page_bytes)?;
-        let mut rows = 0_u64;
-        while let Some(bytes) = reader.next_row(work.cx).await? {
-            work.charge(bytes.len())?;
-            let _decoded = decoded_reservation(&pool, work.cx, bytes.as_ref(), 1)?;
-            let row = decode_row(bytes.as_ref(), resolver)?;
-            let hash = key_hash(&row, definition, &pool, work)?;
-            if (hash[parent.depth / 8] >> (parent.depth % 8)) & 1 == selected {
-                work.write(&mut writer, bytes.as_ref()).await?;
-                rows = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
-            }
-        }
-        if reader.state() != ScanState::Exhausted {
-            return Err(NativeSpoolError::IncompleteCursor.into());
-        }
-        let run = writer.finish(work.cx).await?;
-        let mut child = parent.spool.clone();
-        child.run = run;
-        child.rows.result_rows = rows;
-        children[usize::from(selected)] = Some(child);
-    }
-    let [Some(left), Some(right)] = children else {
-        return invalid();
-    };
-    if left.row_count().checked_add(right.row_count()) != Some(parent.spool.row_count()) {
-        return invalid();
-    }
-    Ok([left, right])
-}
-
 async fn copy_result<A, B>(
     spool: &NativeResultSpool,
     source: &mut SpillFile<A>,
@@ -1389,13 +1304,7 @@ where
             };
             partitions = required;
             for child in children {
-                if child.row_count() != 0 {
-                    pending.values.push(Partition {
-                        spool: child,
-                        in_source: !next.in_source,
-                        depth: next.depth + 1,
-                    });
-                }
+                pending.values.push(child);
             }
         }
     }
