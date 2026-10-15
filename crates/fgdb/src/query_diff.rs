@@ -422,8 +422,10 @@ mod relational_input_tests {
             let views = [&empty, &before, &after];
             for text in [
                 JOINED,
-                "MATCH (a) WITH a AS a OPTIONAL MATCH (a)-[:R]->(b) \
-                 WITH a.p AS p, b.p AS q \
+                // A carried vertex's property is projected before OPTIONAL
+                // MATCH, the spelling the pipeline grammar admits.
+                "MATCH (a) WITH a AS a, a.p AS ap OPTIONAL MATCH (a)-[:R]->(b) \
+                 WITH ap AS p, b.p AS q \
                  RETURN p AS first, COUNT(q) AS n, p AS again GROUP BY p ORDER BY n DESC, first",
                 "MATCH (a) WITH a.p AS x ORDER BY x DESC LIMIT 1 MATCH (b) \
                  WITH x, b.p AS y WHERE y < x RETURN SUM(y) AS total, COUNT(*) AS n",

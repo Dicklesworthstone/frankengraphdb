@@ -146,7 +146,9 @@ fn every_native_input_compares_both_masked_cuts_against_physically_removed_state
                 COLLECT(n.p) AS items, COLLECT(DISTINCT n.p) AS unique_items",
             "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS n, SUM(x) AS total",
             MULTI,
-            "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) WITH a.p AS x, b.p AS y \
+            // A carried vertex's property is projected before OPTIONAL MATCH,
+            // the spelling the pipeline grammar admits.
+            "MATCH (a) WITH a, a.p AS ap OPTIONAL MATCH (a)-[:R]->(b) WITH ap AS x, b.p AS y \
                 RETURN COUNT(*) AS n, COUNT(y) AS found, COLLECT(y) AS items",
             "MATCH (n) RETURN n.p AS p UNION ALL MATCH (m) RETURN m.p AS p",
             "MATCH (n) RETURN n.p AS p ORDER BY p DESC LIMIT 2",
