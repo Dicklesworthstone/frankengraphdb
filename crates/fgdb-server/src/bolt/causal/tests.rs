@@ -58,7 +58,12 @@ async fn write_vertex(cx: &Cx, client: &mut Connection<'_>) {
 }
 
 fn assert_markers(client: &Connection<'_>, count: usize) {
-    let rows = &client.pending.as_ref().expect("a read result").rows;
+    let pending = client
+        .pending
+        .as_ref()
+        .or_else(|| client.transaction.as_ref()?.cursors.latest())
+        .expect("a read result");
+    let rows = &pending.rows;
     assert_eq!(rows.len(), count);
     for row in rows {
         assert_eq!(row, &vec![Value::Int(7)]);
@@ -323,7 +328,7 @@ fn a_later_commit_cannot_satisfy_a_bookmark_for_an_already_pinned_transaction() 
             .unwrap();
         assert_markers(&reader, 1);
         reader.pull(&root, &mut io(), -1, true).await.unwrap();
-        let statements = reader.transaction.as_ref().unwrap().statements;
+        let last_qid = reader.transaction.as_ref().unwrap().cursors.last_qid();
         assert_eq!(
             reader
                 .run(&root, "MATCH (n) RETURN 7 AS marker", &vec![], &extra(2))
@@ -333,7 +338,7 @@ fn a_later_commit_cannot_satisfy_a_bookmark_for_an_already_pinned_transaction() 
             INVALID,
         );
         assert_eq!(reader.transaction.as_ref().unwrap().seq, CommitSeq(1));
-        assert_eq!(reader.transaction.as_ref().unwrap().statements, statements);
+        assert_eq!(reader.transaction.as_ref().unwrap().cursors.last_qid(), last_qid);
         assert!(reader.pending.is_none());
         assert_eq!(
             reader
@@ -507,7 +512,7 @@ fn cancelled_causal_session_admission_leaves_no_transaction_or_result_owner() {
         assert!(reader.transaction.is_none());
         assert!(reader.pending.is_none());
         drop(held);
-        reader.begin(&root, &input).await.unwrap();
+        reader.begin(&root, &extra(0)).await.unwrap();
         assert_eq!(reader.transaction.as_ref().unwrap().seq, CommitSeq(0));
         server.join_database_workers(&root).await;
     });

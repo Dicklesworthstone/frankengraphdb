@@ -41,6 +41,7 @@
 
 mod autocommit;
 mod causal;
+mod cursors;
 
 use crate::execute::{ReadSession, Refusal, SessionError, query_refusal, read_session};
 use crate::recovery::Generation;
@@ -332,7 +333,7 @@ struct Transaction<'s> {
     db: &'s Served,
     session: ReadSession<'s>,
     seq: CommitSeq,
-    statements: i64,
+    cursors: cursors::Cursors<Pending<'s>>,
 }
 /// Serve one Bolt connection until GOODBYE, disconnect or drain.
 pub(crate) async fn run(
@@ -433,7 +434,18 @@ impl<'s> Connection<'s> {
         self.output_database = None;
         self.output_generation = None;
         match request {
-            Request::Goodbye => return true,
+            Request::Goodbye => {
+                self.pending = None;
+                self.transaction = None;
+                return true;
+            }
+            Request::Reset if self.token.is_none() => {
+                io.respond(&failure(Failure::new(
+                    "Neo.ClientError.Security.Unauthorized",
+                    "HELLO must authenticate before RESET",
+                )));
+                return true;
+            }
             Request::Reset => {
                 self.failed = false;
                 self.pending = None;
@@ -474,20 +486,20 @@ impl<'s> Connection<'s> {
                 parameters,
                 extra,
             } => self.run(cx, &query, &parameters, &extra).await,
-            Request::Pull { n, qid } | Request::Discard { n, qid }
-                if self
-                    .pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.write.is_some())
-                    && (n == 0 || n < -1 || qid != -1) =>
-            {
-                Err(Failure::invalid(
-                    "invalid autocommit result identifier or row count",
-                ))
-            }
-            Request::Pull { n, .. } => self.pull(cx, io, n, false).await,
-            Request::Discard { n, .. } => self.pull(cx, io, n, true).await,
+            Request::Pull { n, qid: -1 } => self.pull(cx, io, n, false).await,
+            Request::Discard { n, qid: -1 } => self.pull(cx, io, n, true).await,
+            Request::Pull { n, qid } => self.pull_selected(cx, io, n, qid, false).await,
+            Request::Discard { n, qid } => self.pull_selected(cx, io, n, qid, true).await,
             Request::Begin { extra } => self.begin(cx, &extra).await,
+            Request::Commit
+                if self.pending.is_some()
+                    || self
+                        .transaction
+                        .as_ref()
+                        .is_some_and(|transaction| !transaction.cursors.is_empty()) =>
+            {
+                Err(Failure::invalid("PULL or DISCARD every result before COMMIT"))
+            }
             Request::Commit => match self.transaction.take() {
                 Some(transaction) => {
                     self.output_database = Some(transaction.db);
@@ -613,7 +625,7 @@ impl<'s> Connection<'s> {
             db,
             session,
             seq,
-            statements: 0,
+            cursors: cursors::Cursors::new(),
         });
         Ok(Vec::new())
     }
@@ -638,6 +650,7 @@ impl<'s> Connection<'s> {
                 .map_err(|error| Failure::from_refusal(error.into()))?;
             self.output_generation = Some(generation);
             causal::in_transaction(extra, &transaction.name, transaction.seq)?;
+            transaction.cursors.check_admission()?;
         }
         if let Some((column, kind)) = schema_procedure(query) {
             return self.schema_rows(cx, extra, column, kind).await;
@@ -652,13 +665,11 @@ impl<'s> Connection<'s> {
         // An autocommit statement pins its own generation; one inside a
         // transaction reads the transaction's.
         let mut autocommit = None;
-        let (name, db, seq, qid) = if let Some(transaction) = self.transaction.as_mut() {
-            transaction.statements += 1;
+        let (name, db, seq) = if let Some(transaction) = self.transaction.as_mut() {
             (
                 transaction.name.clone(),
                 transaction.db,
                 transaction.seq,
-                Some(transaction.statements - 1),
             )
         } else {
             let (name, db) = self.database(extra)?;
@@ -666,7 +677,7 @@ impl<'s> Connection<'s> {
             let token = self.token.as_ref().expect("authenticated");
             let (session, seq) = causal::session(cx, db, token, &name, extra).await?;
             autocommit = Some(session);
-            (name, db, seq, None)
+            (name, db, seq)
         };
         self.output_database = Some(db);
         let session = match autocommit.as_mut() {
@@ -700,14 +711,17 @@ impl<'s> Connection<'s> {
                     .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<VecDeque<_>, _>>()?;
-        self.pending = Some(Pending {
-            rows,
-            database: name,
-            db,
-            seq: Some(seq),
-            generation,
-            write: None,
-        });
+        let qid = self.buffer_result(
+            cx,
+            Pending {
+                rows,
+                database: name,
+                db,
+                seq: Some(seq),
+                generation,
+                write: None,
+            },
+        )?;
         let mut metadata = vec![
             (
                 "fields".to_owned(),
@@ -721,7 +735,13 @@ impl<'s> Connection<'s> {
         Ok(metadata)
     }
 
-    async fn pull(&mut self, cx: &Cx, io: &mut Io, n: i64, discard: bool) -> Result<Map, Failure> {
+    async fn pull_pending(
+        &mut self,
+        cx: &Cx,
+        io: &mut Io,
+        n: i64,
+        discard: bool,
+    ) -> Result<Map, Failure> {
         if self
             .pending
             .as_ref()
@@ -751,6 +771,11 @@ impl<'s> Connection<'s> {
                 .min(usize::try_from(n).unwrap_or(usize::MAX))
         };
         for (index, row) in pending.rows.drain(..count).enumerate() {
+            // DISCARD has no socket awaits: it needs the same bounded
+            // cancellation cadence as delivery, before skipping each batch.
+            if index % RECORDS_PER_WRITE == 0 {
+                cursors::checkpoint(cx)?;
+            }
             if discard {
                 continue;
             }
@@ -824,24 +849,31 @@ impl<'s> Connection<'s> {
             SchemaKind::Relations => schema.relations,
             SchemaKind::Properties => schema.properties,
         };
-        self.pending = Some(Pending {
-            rows: names
-                .into_iter()
-                .map(|name| vec![Value::String(name)])
-                .collect(),
-            database: name,
-            db,
-            seq,
-            generation,
-            write: None,
-        });
-        Ok(vec![
+        let qid = self.buffer_result(
+            cx,
+            Pending {
+                rows: names
+                    .into_iter()
+                    .map(|name| vec![Value::String(name)])
+                    .collect(),
+                database: name,
+                db,
+                seq,
+                generation,
+                write: None,
+            },
+        )?;
+        let mut metadata = vec![
             (
                 "fields".to_owned(),
                 Value::List(vec![Value::string(column)]),
             ),
             ("t_first".to_owned(), Value::Int(0)),
-        ])
+        ];
+        if let Some(qid) = qid {
+            metadata.push(("qid".to_owned(), Value::Int(qid)));
+        }
+        Ok(metadata)
     }
 
     /// A single-server routing table, so `neo4j://` URIs work: this server
