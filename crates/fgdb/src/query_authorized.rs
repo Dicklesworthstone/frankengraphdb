@@ -511,10 +511,10 @@ impl<'a> Tables<'a> {
                 Step::Edge => charge_edge(control),
                 Step::Checkpoint => Ok(()),
             })?;
-            // A reader of triples alone takes a core's sealed inline
-            // identities in place instead of copying every edge.
+            // A reader of triples alone takes a core's positioned edges or
+            // sealed inline identities in place instead of copying every edge.
             let in_place = triples_only
-                && core.identities.is_some()
+                && (core.positioned.is_some() || core.identities.is_some())
                 && !plan.projects_types()
                 && !plan.projects_edge_property_maps();
             tables.refill(snapshot, &core, !in_place);
@@ -553,10 +553,13 @@ impl<'a> Tables<'a> {
                     &mut scan,
                     |edge, properties, block, row_at, _| {
                         let identity = (edge.eid, edge.src, edge.relation, edge.dst);
-                        if tables.admit_edge((identity, properties), predicates, control)?
+                        if let Some(positions) =
+                            tables.admit_edge((identity, properties), predicates, control)?
                             && let Some(recording) = &recording
                         {
-                            recording.borrow_mut().edge(identity, block, row_at);
+                            recording
+                                .borrow_mut()
+                                .edge(identity, block, row_at, positions);
                         }
                         Ok(())
                     },
@@ -591,10 +594,14 @@ impl<'a> Tables<'a> {
                 .iter()
                 .map(|&(vid, patch, row)| (vid, &snapshot.patches[patch as usize][row as usize])),
         );
-        if !edges {
-            self.records = core.records;
-            return;
+        self.records = core.records;
+        if edges {
+            self.refill_edges(snapshot, core);
         }
+    }
+
+    /// Copy the core's edges into `edges`, as a refill that reads them does.
+    fn refill_edges(&mut self, snapshot: &'a Snapshot, core: &AdmittedCore) {
         let properties = |block: u32, row: u32| {
             source::edge_properties_at(&snapshot.block_props, block as usize, row as usize)
         };
@@ -614,7 +621,17 @@ impl<'a> Tables<'a> {
                     )
                 })),
         }
-        self.records = core.records;
+    }
+
+    /// The edge table for a reader that cannot take the refilled core's
+    /// positioned edges after all (they did not validate against this
+    /// table, which every refill seals alike, so this is a guard only):
+    /// without inline identities to read in place, copy the edges.
+    fn settle_unpositioned(&mut self, snapshot: &'a Snapshot) {
+        if let Some(core) = self.edge_core.take_if(|core| core.identities.is_none()) {
+            self.refill_edges(snapshot, &core);
+            seal_by_key(&mut self.edges, |&((eid, ..), _)| eid);
+        }
     }
 
     /// The owner source's index-bound selection, for a capability that hides
@@ -715,6 +732,15 @@ impl<'a> Tables<'a> {
             .and_then(|core| core.identities.as_deref())
     }
 
+    /// The refilled core's edges by position in this sealed vertex table,
+    /// when this table took them in place of `edges`. The core's positions
+    /// name the table its recording scan sealed, which is this one: every
+    /// refill seals the same admitted vertices in the same order.
+    fn positioned_graph(&self) -> Option<fgdb_gql::PositionedGraph<'_, &'a VertexRow>> {
+        let positioned = self.edge_core.as_ref()?.positioned.as_ref()?;
+        fgdb_gql::PositionedGraph::new(&self.vertices, &positioned.relations, &positioned.edges)
+    }
+
     /// Sort both tables by identity. A repeated identity keeps its last
     /// admission, as the ordered-map insert this replaces did. Charges nothing:
     /// every record was charged when it was admitted.
@@ -752,6 +778,11 @@ impl<'a> Tables<'a> {
     }
 
     fn vertex(&self, vid: VId) -> Option<&'a VertexRow> {
+        self.position(vid).map(|at| self.vertices[at].1)
+    }
+
+    /// Where `vid` is in the sealed vertex table.
+    fn position(&self, vid: VId) -> Option<usize> {
         match &self.positions {
             Some(positions) => positions.find(&self.vertices, vid),
             None => self
@@ -759,7 +790,6 @@ impl<'a> Tables<'a> {
                 .binary_search_by_key(&vid, |&(vid, _)| vid)
                 .ok(),
         }
-        .map(|at| self.vertices[at].1)
     }
 
     fn edge(&self, eid: EId) -> Option<&Edge<'a>> {
@@ -798,13 +828,13 @@ impl<'a> Tables<'a> {
 
     /// Endpoint admission is checked against the sealed vertex table; an edge
     /// phase seals it first (a no-op pass when the visitor already sorted it).
-    /// Returns whether the edge was admitted.
+    /// Returns the positions of an admitted edge's endpoints in that table.
     fn admit_edge(
         &mut self,
         edge: Edge<'a>,
         predicates: &PlannerPredicates,
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
-    ) -> Result<bool, Fault> {
+    ) -> Result<Option<[usize; 2]>, Fault> {
         let ((_, src, relation, dst), _) = edge;
         if !self.vertices_sealed {
             seal_by_key(&mut self.vertices, |&(vid, _)| vid);
@@ -816,16 +846,16 @@ impl<'a> Tables<'a> {
         if self.positions.is_none() && self.vertices.len() >= POSITIONED_VERTICES {
             self.positions = positions::VertexPositions::build(&self.vertices).map(Arc::new);
         }
-        if !(predicates.allows_relation(relation)
-            && self.vertex(src).is_some()
-            && self.vertex(dst).is_some())
-        {
-            return Ok(false);
+        if !predicates.allows_relation(relation) {
+            return Ok(None);
         }
+        let (Some(source), Some(destination)) = (self.position(src), self.position(dst)) else {
+            return Ok(None);
+        };
         charge_edge(control)?;
         self.records += 1;
         self.edges.push(edge);
-        Ok(true)
+        Ok(Some([source, destination]))
     }
 
     fn metadata<Row: GlaOutput>(
@@ -909,6 +939,14 @@ impl<'a> Tables<'a> {
 
     fn matches(&self, vid: VId, required: &[VertexPredicate], scope: &PlannerPredicates) -> bool {
         Self::row_matches(self.vertex(vid), required, scope)
+    }
+    /// `matches` for the vertex at `at` of the sealed table.
+    fn matches_at(&self, at: u32, required: &[VertexPredicate], scope: &PlannerPredicates) -> bool {
+        Self::row_matches(
+            self.vertices.get(at as usize).map(|&(_, row)| row),
+            required,
+            scope,
+        )
     }
     /// `matches` through `vertex_after`, for a vertex-only scan.
     #[inline(never)]

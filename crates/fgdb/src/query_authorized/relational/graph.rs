@@ -74,7 +74,7 @@ fn visit_at<Clock: FnMut() -> u64>(
     work_runs(execution, GqlQueryError::Interrupted, || {
         let mut usage = AdmissionUsage::default();
         // A graph aggregate reads its edges as triples alone.
-        let tables = Tables::admit(
+        let mut tables = Tables::admit(
             snapshot,
             query.input_pattern().plan(),
             at,
@@ -101,12 +101,6 @@ fn visit_at<Clock: FnMut() -> u64>(
             },
         )
         .map_err(|error| error.map_source(GraphAggregateError::Source))?;
-        let owned_edges = || {
-            tables
-                .edges
-                .iter()
-                .map(|&((_, from, relation, to), _)| (from, relation, to))
-        };
         let remaining = usage.remaining(policy);
         let checkpoint = WorkCheckpoint(execution);
         // A vertex-only aggregate tests and reads the vertex its scan has just
@@ -117,39 +111,62 @@ fn visit_at<Clock: FnMut() -> u64>(
         // Each source of triples gets its own call, so the evaluator's
         // hottest loop reads one plain iterator (a chained one cost a
         // compact-core count 6-15%).
-        let result = if let Some(inline) = tables.inline_triples() {
-            query.execute_governed(
+        let result = match tables.positioned_graph() {
+            // Edges by position: the evaluator keeps per-vertex state in
+            // arrays. Every reader is a pure table lookup.
+            Some(graph) => query.execute_governed_positioned(
                 tables.records,
-                tables.vertices.iter().map(|&(vid, _)| vid),
-                inline
-                    .iter()
-                    .map(|&(_, from, relation, to)| (from, relation, to)),
+                &graph,
                 |vid, required| Ok(tables.matches(vid, required, scope)),
+                |at, required| Ok(tables.matches_at(at, required, scope)),
                 |vid, key| Ok(tables.property(vid, key, scope)),
                 remaining,
                 checkpoint,
-            )
-        } else if query.input_pattern().plan().reads_edges() {
-            query.execute_governed(
-                tables.records,
-                tables.vertices.iter().map(|&(vid, _)| vid),
-                owned_edges(),
-                |vid, required| Ok(tables.matches(vid, required, scope)),
-                |vid, key| Ok(tables.property(vid, key, scope)),
-                remaining,
-                checkpoint,
-            )
-        } else {
-            let last = std::cell::Cell::new(None);
-            query.execute_governed(
-                tables.records,
-                tables.scan(&last),
-                owned_edges(),
-                |vid, required| Ok(tables.matches_after(&last, vid, required, scope)),
-                |vid, key| Ok(tables.property_after(&last, vid, key, scope)),
-                remaining,
-                checkpoint,
-            )
+            ),
+            None => {
+                tables.settle_unpositioned(snapshot);
+                let tables = &tables;
+                let owned_edges = || {
+                    tables
+                        .edges
+                        .iter()
+                        .map(|&((_, from, relation, to), _)| (from, relation, to))
+                };
+                if let Some(inline) = tables.inline_triples() {
+                    query.execute_governed(
+                        tables.records,
+                        tables.vertices.iter().map(|&(vid, _)| vid),
+                        inline
+                            .iter()
+                            .map(|&(_, from, relation, to)| (from, relation, to)),
+                        |vid, required| Ok(tables.matches(vid, required, scope)),
+                        |vid, key| Ok(tables.property(vid, key, scope)),
+                        remaining,
+                        checkpoint,
+                    )
+                } else if query.input_pattern().plan().reads_edges() {
+                    query.execute_governed(
+                        tables.records,
+                        tables.vertices.iter().map(|&(vid, _)| vid),
+                        owned_edges(),
+                        |vid, required| Ok(tables.matches(vid, required, scope)),
+                        |vid, key| Ok(tables.property(vid, key, scope)),
+                        remaining,
+                        checkpoint,
+                    )
+                } else {
+                    let last = std::cell::Cell::new(None);
+                    query.execute_governed(
+                        tables.records,
+                        tables.scan(&last),
+                        owned_edges(),
+                        |vid, required| Ok(tables.matches_after(&last, vid, required, scope)),
+                        |vid, key| Ok(tables.property_after(&last, vid, key, scope)),
+                        remaining,
+                        checkpoint,
+                    )
+                }
+            }
         };
         usage.finish(policy, result)
     })

@@ -488,6 +488,185 @@ where
     Ok(())
 }
 
+/// A positioned graph and its position-keyed vertex test, for a visitor
+/// that keeps per-vertex state by position. The host's readers are pure:
+/// the same answer for the same input, with no effect.
+pub(super) struct Positioned<'r, 'g, T, A> {
+    pub(super) graph: &'r PositionedGraph<'g, T>,
+    pub(super) test_at: A,
+}
+
+/// `visit_single_scan` over a positioned graph, event for event: the same
+/// arrivals, tests at the same first arrivals, the same entries, visits and
+/// multiplicities. A position stands for its identity in every comparison
+/// (the vertex table ascends strictly), so verdicts and anchors live in
+/// arrays by position instead of identity-keyed maps, and anchors are
+/// visited in ascending position, which is ascending identity. The readers
+/// are pure, so of an anchor's repeated property re-reads only the first
+/// is made; each still charges its Work.
+fn visit_positioned_single_scan<'a, E, C, T, A, R, M, P>(
+    scan: &SingleScan<'_>,
+    plan: &crate::algebra::GlaPlan<GraphValueRow>,
+    positioned: Positioned<'_, '_, T, A>,
+    mut property: R,
+    mut control: M,
+    mut visit: P,
+) -> Result<(), VisitError<E, C>>
+where
+    A: FnMut(u32, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+    P: FnMut(
+        &[ValueProjection],
+        &[Option<VId>],
+        &mut R,
+        &mut M,
+        Multiplicity,
+    ) -> Result<(), VisitError<E, C>>,
+{
+    let Positioned { graph, mut test_at } = positioned;
+    let filters = endpoint_filters(plan.operators(), core::slice::from_ref(&scan.access));
+    let (from, to) = filters
+        .as_ref()
+        .and_then(|filters| filters.get(&scan.access.relation))
+        .map_or((&[][..], &[][..]), |(from, to)| {
+            (from.as_slice(), to.as_slice())
+        });
+    let shared = from == to;
+    // A relation the graph does not hold matches no edge; each still arrives.
+    let relation = graph.relation(scan.access.relation);
+    // Each side's verdicts by position: 0 untested, 1 fails, 2 passes. One
+    // table when both sides share their predicates, none for a side without.
+    let table = |predicates: &[VertexPredicate]| {
+        if predicates.is_empty() {
+            Vec::new()
+        } else {
+            vec![0_u8; graph.len()]
+        }
+    };
+    let mut tested = [table(from), if shared { Vec::new() } else { table(to) }];
+    let mut newest: [Option<(u32, bool)>; 2] = [None; 2];
+    let constant = scan.columns.is_empty() || scan.counts_only;
+    let anchored = scan.anchored && !constant;
+    // Anchor -> passing edges and the first partner, by position.
+    let mut counts = if anchored {
+        vec![0_u64; graph.len()]
+    } else {
+        Vec::new()
+    };
+    let mut partners = if anchored {
+        vec![0_u32; graph.len()]
+    } else {
+        Vec::new()
+    };
+    let mut run: Option<(u32, u64)> = None;
+    let mut total: Option<(u64, u32, u32)> = None;
+    for edge in graph.edges() {
+        control(GlaExecutionEvent::Work)?;
+        if Some(edge.relation) != relation {
+            continue;
+        }
+        let mut passes = |side: usize, at: u32, predicates: &[VertexPredicate]| {
+            if predicates.is_empty() {
+                return Ok(true);
+            }
+            if let Some((known, verdict)) = newest[side]
+                && known == at
+            {
+                return Ok(verdict);
+            }
+            let verdicts = &mut tested[if shared { 0 } else { side }];
+            let verdict = match verdicts[at as usize] {
+                0 => {
+                    let result = test_at(at, predicates)?;
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    verdicts[at as usize] = 1 + u8::from(result);
+                    result
+                }
+                known => known == 2,
+            };
+            newest[side] = Some((at, verdict));
+            Ok::<_, VisitError<E, C>>(verdict)
+        };
+        if !passes(0, edge.source, from)? || !passes(1, edge.destination, to)? {
+            continue;
+        }
+        let (anchor, partner) = match scan.access.direction {
+            GlaDirection::Forward => (edge.source, edge.destination),
+            _ => (edge.destination, edge.source),
+        };
+        if constant {
+            match &mut total {
+                Some((count, ..)) => *count += 1,
+                None => total = Some((1, anchor, partner)),
+            }
+            continue;
+        }
+        if scan.anchored {
+            match &mut run {
+                Some((last, more)) if *last == anchor => *more += 1,
+                _ => {
+                    if let Some((last, more)) = run.take() {
+                        counts[last as usize] += more;
+                    }
+                    if counts[anchor as usize] == 0 {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        counts[anchor as usize] = 1;
+                        partners[anchor as usize] = partner;
+                    } else {
+                        counts[anchor as usize] += 1;
+                    }
+                    run = Some((anchor, 0));
+                }
+            }
+            continue;
+        }
+        visit(
+            scan.columns,
+            &[Some(graph.vertex(anchor)), Some(graph.vertex(partner))],
+            &mut property,
+            &mut control,
+            Multiplicity::ONE,
+        )?;
+    }
+    if let Some((count, anchor, partner)) = total {
+        return visit(
+            scan.columns,
+            &[Some(graph.vertex(anchor)), Some(graph.vertex(partner))],
+            &mut property,
+            &mut control,
+            Multiplicity(NonZeroU64::new(count)),
+        );
+    }
+    if let Some((last, more)) = run {
+        counts[last as usize] += more;
+    }
+    for (at, &count) in counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let anchor = graph.vertex(at as u32);
+        for further in 1..count {
+            for column in scan.columns {
+                if let ValueProjection::Property { key, .. } = column {
+                    control(GlaExecutionEvent::Work)?;
+                    if further == 1 {
+                        property(anchor, *key)?;
+                    }
+                }
+            }
+        }
+        visit(
+            scan.columns,
+            &[Some(anchor), Some(graph.vertex(partners[at]))],
+            &mut property,
+            &mut control,
+            Multiplicity(NonZeroU64::new(count)),
+        )?;
+    }
+    Ok(())
+}
+
 fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
     let operators = aggregate.input.plan().operators();
     // A mixed-type atom must retain each concrete relationship's multiplicity.
@@ -1766,16 +1945,19 @@ fn endpoint_filters(operators: &[GlaOperator], accesses: &[EdgeAccess]) -> Optio
         .then_some(filters)
 }
 
-pub(super) fn visit_bindings<'a, E, C, F, R, M, P>(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn visit_bindings<'a, 'g, E, C, T, A, F, R, M, P>(
     aggregate: &PreparedGraphAggregate,
     vertices: impl IntoIterator<Item = VId>,
     edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+    positioned: Option<Positioned<'_, 'g, T, A>>,
     mut test_vertex: F,
     property: R,
     mut control: M,
     mut visit: P,
 ) -> Result<(), VisitError<E, C>>
 where
+    A: FnMut(u32, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
     R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
@@ -1826,6 +2008,9 @@ where
         );
     }
     if let Some(scan) = single_scan(aggregate) {
+        if let Some(positioned) = positioned {
+            return visit_positioned_single_scan(&scan, plan, positioned, property, control, visit);
+        }
         return visit_single_scan(&scan, plan, edges, test_vertex, property, control, visit);
     }
 
@@ -2022,6 +2207,134 @@ mod tests {
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap()
+    }
+
+    /// **A POSITIONED SINGLE SCAN IS THE IDENTITY SCAN, EVENT FOR EVENT.**
+    /// Over a sparse-identity multigraph with two relations, parallel edges,
+    /// loops and arrivals in no endpoint order, every single-scan shape
+    /// (shared, one-sided and absent endpoint predicates; forward and
+    /// reverse; counted, anchored with and without a property column, and
+    /// unanchored) answers with the same value and statistics, makes the same
+    /// vertex tests, stops at every host checkpoint with the same count and
+    /// refuses at every sampled work and scratch limit as the identity-keyed
+    /// visitor does.
+    #[test]
+    fn positioned_single_scans_answer_and_refuse_as_identity_scans() {
+        use core::cell::Cell;
+        let mut vertices: Vec<(VId, ())> = (0..40_u128)
+            .map(|at| (VId(at * 7_919 + (at % 5) * (1 << 70)), ()))
+            .collect();
+        vertices.sort_unstable_by_key(|&(vid, _)| vid);
+        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % bound
+        };
+        let edges: Vec<PositionedEdge> = (0..300)
+            .map(|_| PositionedEdge {
+                source: next(40) as u32,
+                destination: next(40) as u32,
+                relation: next(2) as u32,
+            })
+            .collect();
+        let relations = [RelationId(1), RelationId(2)];
+        let graph = PositionedGraph::new(&vertices, &relations, &edges).unwrap();
+        let triples: Vec<_> = graph.triples().collect();
+        let values: Vec<CanonicalScalar> = (0..40).map(|at| CanonicalScalar::Int(at % 7)).collect();
+        let passes = |vid: VId| vid.0 % 3 != 1;
+        let value = |vid: VId| {
+            vertices
+                .binary_search_by_key(&vid, |&(known, _)| known)
+                .ok()
+                .map(|at| &values[at])
+        };
+        let wide = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        for text in [
+            "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS n",
+            "MATCH (a:L)-[:R]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b:L) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a:L)-[:R]->(b) RETURN a.n AS id, COUNT(*) AS d ORDER BY d DESC, id ASC LIMIT 3",
+            "MATCH (a:L)<-[:R]-(b) RETURN a, COUNT(*) AS c GROUP BY a",
+            "MATCH (a)-[:R]->(b:L) RETURN a, COUNT(*) AS c GROUP BY a",
+            "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(b) AS n, MIN(b) AS lo, MAX(a) AS hi",
+        ] {
+            let q = query(text);
+            assert!(single_scan(&q).is_some(), "{text}");
+            let run = |positioned: bool, policy, stop: Option<usize>| {
+                let (mut at, tests) = (0, Cell::new(0));
+                let checkpoint = || {
+                    at += 1;
+                    if Some(at) == stop { Err(at) } else { Ok(()) }
+                };
+                let test = |vid: VId| {
+                    tests.set(tests.get() + 1);
+                    Ok::<_, ()>(passes(vid))
+                };
+                let result = if positioned {
+                    q.execute_governed_positioned(
+                        edges.len() as u64,
+                        &graph,
+                        |vid, _| test(vid),
+                        |position, _| test(graph.vertex(position)),
+                        |vid, _| Ok(value(vid)),
+                        policy,
+                        checkpoint,
+                    )
+                } else {
+                    q.execute_governed(
+                        edges.len() as u64,
+                        graph.vertices(),
+                        triples.iter().copied(),
+                        |vid, _| test(vid),
+                        |vid, _| Ok(value(vid)),
+                        policy,
+                        checkpoint,
+                    )
+                };
+                (format!("{result:?}"), at, tests.get())
+            };
+            let expected = run(false, wide, None);
+            assert!(expected.0.starts_with("Ok("), "{text}: {expected:?}");
+            assert_eq!(run(true, wide, None), expected, "{text}");
+            for stop in 1..=expected.1 {
+                assert_eq!(
+                    run(true, wide, Some(stop)),
+                    run(false, wide, Some(stop)),
+                    "{text} stop {stop}"
+                );
+            }
+            let completed = q
+                .execute_governed(
+                    edges.len() as u64,
+                    graph.vertices(),
+                    triples.iter().copied(),
+                    |vid, _| Ok::<_, ()>(passes(vid)),
+                    |vid, _| Ok(value(vid)),
+                    wide,
+                    || Ok::<_, usize>(()),
+                )
+                .unwrap();
+            let sampled = |total: u64| (0..=total).filter(move |at| at % 7 == 0 || total - at <= 3);
+            for limit in sampled(completed.evaluator.work_units) {
+                let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, limit, u64::MAX);
+                assert_eq!(
+                    run(true, policy, None),
+                    run(false, policy, None),
+                    "{text} work {limit}"
+                );
+            }
+            for limit in sampled(completed.evaluator.scratch_entries) {
+                let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, limit);
+                assert_eq!(
+                    run(true, policy, None),
+                    run(false, policy, None),
+                    "{text} scratch {limit}"
+                );
+            }
+        }
     }
 
     #[test]

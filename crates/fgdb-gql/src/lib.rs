@@ -100,7 +100,8 @@ pub use aggregation::{
     GraphAggregateError, GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder,
     GraphAggregateRow, GraphAggregateTest, GraphAggregateValue, GraphExactAverage,
     GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
-    MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PreparedGraphAggregate,
+    MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PositionedEdge, PositionedGraph,
+    PreparedGraphAggregate,
 };
 pub use algebra::GraphMatchMode;
 pub use algebra_exec::{
