@@ -24,8 +24,12 @@ use std::sync::{Arc, Mutex, Weak};
 const CACHE_ENTRIES: usize = 8;
 // A conservative sum of the builder's charged vector-workspace peaks, not a
 // process RSS claim. Snapshot data, caller-held graphs, concurrent builders and
-// allocator metadata remain outside this retained-cache allowance.
-pub(crate) const CACHE_BYTES: usize = 64 * 1024 * 1024;
+// allocator metadata remain outside this retained-cache allowance. It is the
+// default projection admission, so whatever a default CALL may build can be
+// kept: at 64 MiB no Tier-1 projection fit (a directed web-google one charges
+// about 490 MB), and every PageRank and WCC rebuilt its own (fgdb-62mzm).
+pub(crate) const CACHE_BYTES: usize =
+    fgdb_prism::FnxReadOptions::DEFAULT_PROJECTION_LIMITS.max_workspace_bytes;
 static CACHE: ProjectionCache<crate::Snapshot> = ProjectionCache::new(CACHE_BYTES);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
