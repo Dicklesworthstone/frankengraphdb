@@ -2,8 +2,9 @@
 //! No result rescans MATCH, reconstructs a graph, or obtains a second permit.
 
 use super::{Batch, Database, Execution, Vfs, WriteTxnError, apply_all, event, invalid, staging};
-use crate::write_txn::authorized::Workspace;
-use crate::write_txn::{edge_upsert_property, edge_upsert_query_selection_policy};
+use crate::write_txn::authorized::{Workspace, selection};
+use crate::write_txn::edge_upsert_query_selection_policy;
+use fgdb_delta_types::ElementId;
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GlaExecutionEvent, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GraphEdgeReturnBinding,
@@ -12,6 +13,7 @@ use fgdb_gql::{
 };
 use fgdb_types::{CanonicalScalar, CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::{Authority, CapabilityToken, Error};
+use std::cell::RefCell;
 
 type Fault = GqlQueryError<GraphEdgeUpsertQueryError<WriteTxnError, WriteTxnError>, WriteTxnError>;
 type Receipt = (
@@ -152,10 +154,11 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut evaluator = stats.evaluator;
                 let rows = query_cx
                     .with_restriction(|| {
+                        let controls = RefCell::new(&mut execution);
                         let mut control = |kind| {
                             event(
                                 query_cx,
-                                &mut execution,
+                                &mut controls.borrow_mut(),
                                 policy.merge.query,
                                 &mut evaluator,
                                 kind,
@@ -173,12 +176,24 @@ impl<V: Vfs + Clone> Database<V> {
                                     GraphEdgeReturnBinding::Edge => GraphValue::Edge(edge),
                                     GraphEdgeReturnBinding::Property(key) => {
                                         let value = if verified.predicates().allows_property(key) {
-                                            edge_upsert_property(
+                                            selection::property(
                                                 workspace.transaction(),
                                                 self,
-                                                edge,
+                                                ElementId::Edge(edge),
                                                 key,
+                                                verified.predicates(),
+                                                || {
+                                                    query_cx
+                                                        .checkpoint()
+                                                        .map_err(WriteTxnError::Interrupted)
+                                                        .map_err(GqlQueryError::Interrupted)?;
+                                                    controls
+                                                        .borrow_mut()
+                                                        .poll()
+                                                        .map_err(GqlQueryError::Interrupted)
+                                                },
                                                 &mut control,
+                                                staging,
                                             )?
                                         } else {
                                             control(GlaExecutionEvent::Work)?;
