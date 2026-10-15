@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="Explore your local FrankenGraphDB with a private, read-only graph workspace.">
+  <title>FrankenGraph Studio</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./studio.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <a class="skip-link" href="#query-editor">Skip to query editor</a>
+  <noscript><div class="noscript">Studio requires JavaScript. The database HTTP API remains available at /v1/health.</div></noscript>
+  <aside class="sidebar" aria-label="Workspace navigation">
+    <a class="brand" href="./" aria-label="FrankenGraph Studio home">
+      <svg class="brand-mark" viewBox="0 0 36 36" fill="none" aria-hidden="true"><path d="M9 9 27 18 9 27V9Z" stroke="currentColor" stroke-width="1.5"/><circle cx="9" cy="9" r="4" fill="currentColor"/><circle cx="27" cy="18" r="4" fill="currentColor"/><circle cx="9" cy="27" r="4" fill="currentColor"/></svg>
+      <span class="brand-name">frankengraph<span class="brand-sub">STUDIO <span>LOCAL WORKSPACE</span></span></span>
+    </a>
+    <div class="sidebar-inner">
+      <div class="section-label nav-caption">WORKSPACE</div>
+      <nav class="navigation">
+        <button id="nav-explore" class="nav-item active" aria-current="page" data-page="explore" title="Graph explorer"><span data-icon="graph"></span><span class="nav-label">Graph explorer</span><span class="nav-end">⌘ 1</span></button>
+        <button id="nav-schema" class="nav-item" data-page="schema" title="Schema browser"><span data-icon="layers"></span><span class="nav-label">Schema browser</span></button>
+        <button id="nav-history" class="nav-item" data-page="history" title="Session history"><span data-icon="clock"></span><span class="nav-label">Query history</span><span id="history-count" class="nav-count">0</span></button>
+      </nav>
+      <div class="sidebar-section">
+        <div class="section-label">QUICK START <span data-icon="spark"></span></div>
+        <button class="query-link" data-template="edges"><span data-icon="code"></span>Explore relationships</button>
+        <button class="query-link" data-template="nodes"><span data-icon="code"></span>Browse nodes</button>
+        <button class="query-link" data-template="counts"><span data-icon="code"></span>Count nodes</button>
+      </div>
+      <div class="sidebar-section legend-section">
+        <div class="section-label">LABELS IN RESULT <button id="reset-filters" class="text-button" title="Show every label">Reset</button></div>
+        <div id="label-list" class="label-list"></div>
+        <p class="sidebar-note">Toggle a label to filter the canvas. Your query result stays unchanged.</p>
+      </div>
+    </div>
+    <div class="sidebar-bottom">
+      <div class="local-card"><span class="local-symbol" data-icon="shield"></span><div><strong>Your graph. Your machine.</strong><p>No cloud. No telemetry.</p></div></div>
+      <button id="load-sample" class="query-link"><span data-icon="spark"></span><span class="nav-label">Open sample workspace</span></button>
+      <div class="sidebar-footer"><span class="sidebar-version">FRANKENGRAPHDB</span><button id="theme-toggle" class="icon-button" aria-label="Switch to light theme" title="Switch theme"><span data-icon="sun"></span></button><button id="help-button" class="icon-button" aria-label="Help and keyboard shortcuts" title="Help and shortcuts"><span data-icon="help"></span></button></div>
+    </div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div class="breadcrumb"><span data-icon="workspace"></span><span id="workspace-name">Sample workspace</span><span class="slash">/</span><span id="breadcrumb-page">Explorer</span></div>
+      <div class="topbar-actions"><button id="command-button" class="command-button"><span data-icon="search"></span><span>Search or jump to…</span><kbd>⌘ K</kbd></button><span class="topbar-divider"></span><button id="connect-button" class="connection-button"><span class="status-dot" id="connection-dot"></span><span id="connection-label">Connect database</span><span data-icon="chevron"></span></button></div>
+    </header>
+    <main id="main-content" class="content">
+      <div class="page-heading"><div><div class="eyebrow">DISCOVER WHAT CONNECTS</div><h1 id="page-title">Graph explorer<span class="heading-dot">.</span></h1><p id="page-subtitle">A different perspective on your data. Follow an idea, find a connection.</p></div><button id="export-button" class="secondary-button"><span data-icon="download"></span><span>Export</span></button></div>
+      <section class="metrics" aria-label="Current result statistics">
+        <div class="metric"><span class="metric-icon mint" data-icon="node"></span><div><span class="metric-label">Nodes in result</span><strong id="metric-nodes">—</strong></div><span class="metric-caption">visible</span></div>
+        <div class="metric"><span class="metric-icon lilac" data-icon="link"></span><div><span class="metric-label">Relationships</span><strong id="metric-edges">—</strong></div><span class="metric-caption">mapped</span></div>
+        <div class="metric"><span class="metric-icon amber" data-icon="tag"></span><div><span class="metric-label">Node labels</span><strong id="metric-labels">—</strong></div><span class="metric-caption">in result</span></div>
+        <div class="metric"><span class="metric-icon blue" data-icon="activity"></span><div><span class="metric-label">Round-trip time</span><strong id="metric-time">—</strong></div><span id="metric-time-caption" class="metric-caption">sample data</span></div>
+      </section>
+      <section id="explore-page" class="workbench" aria-label="Graph and query workspace">
+        <div class="visual-shell">
+          <div class="visual-main">
+            <div class="visual-header"><div class="tabs" role="tablist" aria-label="Result views"><button id="tab-graph" class="tab active" role="tab" aria-selected="true" aria-controls="view-graph" data-view="graph"><span data-icon="graph"></span>Graph</button><button id="tab-table" class="tab" role="tab" aria-selected="false" aria-controls="view-table" data-view="table" tabindex="-1"><span data-icon="table"></span>Table</button><button id="tab-json" class="tab" role="tab" aria-selected="false" aria-controls="view-json" data-view="json" tabindex="-1"><span data-icon="code"></span>JSON</button></div><div class="visual-tools"><label class="sr-only" for="layout-mode">Graph layout</label><select id="layout-mode" title="Graph layout"><option value="force">Force layout</option><option value="clusters">By label</option><option value="radial">Radial</option></select><button id="toggle-labels" class="icon-button pressed" aria-pressed="true" title="Toggle node labels" aria-label="Show node labels"><span data-icon="type"></span></button><button id="toggle-inspector" class="icon-button" title="Toggle inspector" aria-label="Toggle inspector" aria-expanded="true"><span data-icon="panel"></span></button></div></div>
+            <div id="view-graph" class="canvas-wrap result-view" role="tabpanel" aria-labelledby="tab-graph">
+              <canvas id="graph" tabindex="0" aria-label="Interactive graph. Drag to pan, scroll to zoom. Use arrow keys to pan, plus or minus to zoom, F to fit. Use the inspector node list for accessible selection."></canvas>
+              <div class="graph-caption"><span id="dataset-badge" class="badge sample">SAMPLE DATA</span><span id="graph-context">Research atlas</span></div>
+              <div id="layout-status" class="layout-status" role="status" hidden><span class="spinner"></span>Arranging graph</div>
+              <div id="empty-state" class="empty-state" hidden><span class="empty-icon" data-icon="graph"></span><h2>No graph elements yet</h2><p>Run a query returning vertices or paths. For directed edges, return source, relationship, and target.</p><button class="secondary-button" data-template="edges">Load an exploration query</button></div>
+              <div class="canvas-bottom"><div class="canvas-controls"><button id="zoom-in" class="icon-button" title="Zoom in (+)" aria-label="Zoom in"><span data-icon="plus"></span></button><button id="zoom-out" class="icon-button" title="Zoom out (−)" aria-label="Zoom out"><span data-icon="minus"></span></button><span class="control-divider"></span><button id="fit" class="icon-button" title="Fit graph (F)" aria-label="Fit graph to screen"><span data-icon="fit"></span></button><button id="arrange" class="icon-button" title="Rearrange graph" aria-label="Rearrange graph"><span data-icon="refresh"></span></button><button id="layout-stop" class="icon-button" title="Stop layout" aria-label="Stop layout"><span data-icon="pause"></span></button></div><span class="canvas-hint">Drag to explore <span>·</span> Scroll to zoom</span><canvas id="minimap" aria-hidden="true" title="Click to navigate the graph"></canvas></div>
+            </div>
+            <div id="view-table" class="table-view result-view" role="tabpanel" aria-labelledby="tab-table" hidden><div class="table-toolbar"><label class="search-input"><span data-icon="search"></span><input id="table-filter" placeholder="Filter result rows…" aria-label="Filter result rows"></label><span id="table-count"></span></div><div class="table-scroll"><table id="result-table"><thead></thead><tbody></tbody></table><div id="table-empty" class="table-empty" hidden>No rows match this filter.</div></div><div class="pagination"><span id="page-info"></span><div><button id="previous-page" class="secondary-button">Previous</button><button id="next-page" class="secondary-button">Next</button></div></div></div>
+            <div id="view-json" class="json-view result-view" role="tabpanel" aria-labelledby="tab-json" hidden><div class="table-toolbar"><span>Original response · exact typed values</span><button id="copy-json" class="text-button"><span data-icon="copy"></span>Copy JSON</button></div><pre id="json-output" tabindex="0"></pre></div>
+            <div id="graph-notice" class="notice" role="status" hidden></div>
+          </div>
+          <aside id="inspector" class="inspector" aria-label="Element inspector">
+            <div class="inspector-header"><h2>Inspector</h2><button id="clear-selection" class="icon-button" title="Clear selection" aria-label="Clear selection"><span data-icon="close"></span></button></div>
+            <div id="inspector-detail" class="inspector-detail"></div>
+            <div class="node-directory"><div class="section-label">NODES IN THIS RESULT <span id="directory-count"></span></div><label class="search-input"><span data-icon="search"></span><input id="node-search" placeholder="Find a node…" aria-label="Find a node by name or identity"></label><div id="node-list" class="node-list" aria-label="Selectable graph nodes"></div></div>
+          </aside>
+        </div>
+        <section class="editor-panel" aria-label="Read-only query editor">
+          <div class="editor-heading"><div class="editor-title"><span data-icon="terminal"></span><h2>Query workbench</h2><span class="read-only"><span data-icon="shield"></span>Read only</span></div><div class="editor-actions"><label class="sample-limit">Sample <select id="sample-limit" aria-label="Exploration query row limit"><option>50</option><option selected>150</option><option>300</option><option>500</option></select></label><button id="cancel-query" class="secondary-button" hidden><span data-icon="stop"></span>Cancel</button><button id="run-query" class="primary-button"><span data-icon="play"></span><span id="run-label">Connect to run</span></button></div></div>
+          <div class="editor-body"><pre id="line-numbers" class="line-numbers" aria-hidden="true">1</pre><div class="editor-code"><pre id="query-highlight" aria-hidden="true"></pre><textarea id="query-editor" aria-label="GQL query" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" wrap="off"></textarea></div></div>
+          <div id="parameters-panel" class="parameters-panel" hidden><label for="query-parameters">JSON parameters <span>Sent without numeric rounding.</span></label><textarea id="query-parameters" rows="3" spellcheck="false" aria-label="JSON query parameters">{}</textarea></div>
+          <div class="editor-footer"><button id="parameters-toggle" class="text-button" aria-expanded="false" aria-controls="parameters-panel"><span data-icon="braces"></span>Parameters<span id="parameters-count" class="tiny-badge">{ }</span></button><span id="query-status" role="status">Sample workspace · connect a database to execute queries.</span><span class="run-hint"><kbd>⌘</kbd><kbd>↵</kbd> to run</span></div>
+        </section>
+      </section>
+      <section id="schema-page" class="secondary-page" aria-label="Schema browser" hidden><div class="page-callout"><span data-icon="shield"></span><p id="schema-note">Sample schema. Connect to see the label, relationship, and property names your capability permits.</p></div><div id="schema-content" class="schema-grid"></div></section>
+      <section id="history-page" class="secondary-page" aria-label="Query history" hidden><div class="page-callout"><span data-icon="clock"></span><p>Only this tab's queries. Credentials, queries, and results are never saved to browser storage. Select an entry to load it without executing.</p><button id="clear-history" class="text-button">Clear history</button></div><div id="history-list"></div></section>
+    </main>
+    <footer class="statusbar"><span><span class="status-dot"></span> <span id="footer-status">Sample workspace · not connected</span></span><span>READ-ONLY <span class="footer-separator">/</span> <span id="snapshot-status">No database selected</span></span></footer>
+  </div>
+  <dialog id="connect-dialog" class="dialog"><form id="connect-form"><div class="dialog-heading"><span class="dialog-symbol" data-icon="database"></span><button class="icon-button" type="button" data-close="connect-dialog" aria-label="Close connection dialog"><span data-icon="close"></span></button></div><div class="eyebrow">YOUR LOCAL INSTANCE</div><h2>Connect your graph.</h2><p>Explore through the existing authenticated, read-only query API.</p><label>Server origin<output id="connection-origin" class="origin-output"></output></label><label for="database-name">Database name<input id="database-name" value="graph" required maxlength="128" pattern="[A-Za-z0-9_.-]+" autocomplete="off" spellcheck="false" placeholder="graph"></label><label for="capability-token">Capability token<input id="capability-token" type="password" required maxlength="16384" autocomplete="off" spellcheck="false" placeholder="Paste a read-only hex token"></label><div class="security-note"><span data-icon="shield"></span><span>Your token stays in this tab's memory. It is sent only to this server, never stored or included in exports.</span></div><p id="connection-error" class="error-message" role="alert" hidden></p><div class="dialog-footer"><button id="disconnect-button" class="secondary-button" type="button" hidden>Disconnect</button><button type="button" class="secondary-button" data-close="connect-dialog">Cancel</button><button id="connect-submit" class="primary-button" type="submit">Connect & explore<span data-icon="arrow"></span></button></div></form></dialog>
+  <dialog id="command-dialog" class="dialog command-dialog"><div class="command-search"><span data-icon="search"></span><input id="command-search" aria-label="Search commands and graph nodes" placeholder="Search commands or nodes…" autocomplete="off"><button class="text-button" data-close="command-dialog">Esc</button></div><div id="command-results" class="command-results"></div><div class="command-footer">Commands and nodes in the current result. <kbd>Tab</kbd> to navigate · <kbd>Enter</kbd> to select</div></dialog>
+  <dialog id="help-dialog" class="dialog"><div class="dialog-heading"><span class="dialog-symbol" data-icon="help"></span><button class="icon-button" data-close="help-dialog" aria-label="Close help"><span data-icon="close"></span></button></div><h2>A few useful shortcuts.</h2><dl class="shortcuts"><dt>Run a query</dt><dd>⌘ / Ctrl + Enter</dd><dt>Find a command or node</dt><dd>⌘ / Ctrl + K</dd><dt>Find a node</dt><dd>/</dd><dt>Fit the graph</dt><dd>F</dd><dt>Pan the focused canvas</dt><dd>Arrow keys</dd><dt>Zoom the focused canvas</dt><dd>+ / −</dd><dt>Clear selection</dt><dd>Escape</dd></dl><p>All counts describe the current result, not your entire database. Use the table for values and the schema browser for permitted names.</p><p>Canvas bounds: 750 nodes and 2,000 relationships. Results: 10,000 rows and 8 MiB. A small LIMIT does not limit the server's upstream query work; configure server and capability budgets.</p><p>Cancel stops this browser request. It does not prove that server-side execution has already stopped.</p><div class="dialog-footer"><button class="primary-button" data-close="help-dialog">Got it</button></div></dialog>
+  <dialog id="export-dialog" class="dialog"><div class="dialog-heading"><span class="dialog-symbol" data-icon="download"></span><button class="icon-button" data-close="export-dialog" aria-label="Close export"><span data-icon="close"></span></button></div><h2>Take the insight with you.</h2><p>Exports contain the current result and may include sensitive graph data. Credentials are never included.</p><div class="export-options"><button id="export-json"><span data-icon="code"></span><span><strong>Original JSON</strong><small>Exact response, all received rows</small></span><span data-icon="arrow"></span></button><button id="export-csv"><span data-icon="table"></span><span><strong>Table as CSV</strong><small>All received rows, formula-safe cells</small></span><span data-icon="arrow"></span></button><button id="export-png"><span data-icon="image"></span><span><strong>Graph as PNG</strong><small>The current canvas and selection</small></span><span data-icon="arrow"></span></button></div></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
