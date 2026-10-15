@@ -266,7 +266,9 @@ pub enum GraphWriteScriptBatchError {
 impl core::fmt::Display for GraphWriteScriptBatchError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Empty => f.write_str("graph write script batch requires at least one argument set"),
+            Self::Empty => {
+                f.write_str("graph write script batch requires at least one argument set")
+            }
             Self::TooManyStatements { limit, observed } => write!(
                 f,
                 "graph write script batch expands to {observed} statements; limit {limit}"

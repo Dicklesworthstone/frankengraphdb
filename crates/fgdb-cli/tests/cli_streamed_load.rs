@@ -332,9 +332,7 @@ fn json_array_grammar_shape_and_logical_row_limits_refuse_before_any_chunk() {
         assert!(!fixture.home.join("checkpoint").exists());
         assert_eq!(fixture.frontier(), basis);
         assert_eq!(fixture.inspect(|db| db.vertices().unwrap().len()), 0);
-        assert!(
-            !String::from_utf8_lossy(&failed.stdout).contains("\"event\":\"progress\"")
-        );
+        assert!(!String::from_utf8_lossy(&failed.stdout).contains("\"event\":\"progress\""));
     }
 }
 
@@ -344,7 +342,11 @@ fn json_array_whitespace_changes_cannot_relabel_an_existing_resume() {
     let source = fixture.array_source();
     success(&fixture.load().output().unwrap());
     let before = fixture.inspect(|db| {
-        (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap())
+        (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        )
     });
     let checkpoint = std::fs::read(fixture.home.join("checkpoint")).unwrap();
     // Identical graph rows, different authenticated raw source identity.
@@ -354,7 +356,11 @@ fn json_array_whitespace_changes_cannot_relabel_an_existing_resume() {
     assert!(String::from_utf8_lossy(&failed.stdout).contains("InvalidResume"));
     assert_eq!(
         fixture.inspect(|db| {
-            (db.frontier().unwrap(), db.vertices().unwrap(), db.edges().unwrap())
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            )
         }),
         before
     );
@@ -377,7 +383,12 @@ fn json_array_vertex_and_edge_properties_are_queryable_after_reopen() {
     ]"#;
     std::fs::write(fixture.home.join("input"), source).unwrap();
     let bindings = [
-        "--label", "Person=1", "--property", "name=1", "--property", "weight=2",
+        "--label",
+        "Person=1",
+        "--property",
+        "name=1",
+        "--property",
+        "weight=2",
     ];
     success(&fixture.load().args(bindings).output().unwrap());
     let answer = fixture

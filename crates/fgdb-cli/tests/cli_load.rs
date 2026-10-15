@@ -1,4 +1,7 @@
 //! Real subprocess ingestion, checkpoint recovery, and caller-keyed engine differential.
+// The binary root (src/main.rs) takes the same limit: proving `Send` for
+// an in-process open here descends the whole verified-reopen future.
+#![recursion_limit = "256"]
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{
     BulkEdge, BulkLoadCheckpoint, BulkLoadPolicy, BulkRow, BulkVertex, Database, DatabaseKeys,

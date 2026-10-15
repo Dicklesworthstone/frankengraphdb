@@ -83,7 +83,10 @@ fn is_array(
         check_length(file, len)?;
         let size = remaining.min(buffer.len() as u64) as usize;
         read_exact_controlled(file, &mut buffer[..size], control)?;
-        if let Some(&byte) = buffer[..size].iter().find(|&&byte| !array::whitespace(byte)) {
+        if let Some(&byte) = buffer[..size]
+            .iter()
+            .find(|&&byte| !array::whitespace(byte))
+        {
             array = byte == b'[';
             break;
         }
@@ -322,7 +325,10 @@ impl Reader {
         loop {
             control()?;
             if self.offset == self.image.len {
-                check_length(&self.file()?, self.image.len)?;
+                {
+                    let file = self.file()?;
+                    check_length(&file, self.image.len)?;
+                }
                 self.array.as_ref().expect("array reader").finish()?;
                 return Ok(None);
             }

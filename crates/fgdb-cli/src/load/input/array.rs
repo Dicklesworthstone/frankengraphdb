@@ -90,7 +90,11 @@ impl Array {
                     self.bytes = 1;
                     return Ok(Piece::Byte);
                 }
-                _ => return Err(refused("MalformedArray: expected an object, separator or end")),
+                _ => {
+                    return Err(refused(
+                        "MalformedArray: expected an object, separator or end",
+                    ));
+                }
             }
             return Ok(Piece::Skip);
         }
@@ -184,8 +188,20 @@ mod tests {
     #[test]
     fn outer_grammar_and_every_incomplete_prefix_refuse() {
         for source in [
-            "", "[", "[{}", "[{},]", "[,{}]", "[{}{}]", "[{}]{}", "[[{}]]",
-            "[null]", "[1]", "[\"text\"]", "[{]", "[{\"x\":[}]", "[{\"x\":\"\n\"}]",
+            "",
+            "[",
+            "[{}",
+            "[{},]",
+            "[,{}]",
+            "[{}{}]",
+            "[{}]{}",
+            "[[{}]]",
+            "[null]",
+            "[1]",
+            "[\"text\"]",
+            "[{]",
+            "[{\"x\":[}]",
+            "[{\"x\":\"\n\"}]",
         ] {
             assert!(decode(source.as_bytes(), 1024, 10).is_err(), "{source:?}");
         }
@@ -201,15 +217,35 @@ mod tests {
     fn exact_record_and_row_limits_admit_before_buffering_and_nesting_is_bounded() {
         let source = b" [ {} , {} ] ";
         assert_eq!(decode(source, 2, 2).unwrap().len(), 2);
-        assert!(decode(source, 1, 2).unwrap_err().to_string().contains("record_bytes"));
-        assert!(decode(source, 2, 1).unwrap_err().to_string().contains("source_rows"));
+        assert!(
+            decode(source, 1, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("record_bytes")
+        );
+        assert!(
+            decode(source, 2, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("source_rows")
+        );
         let mut framer = Array::new(1024, 0);
         assert!(framer.push(b'[').is_ok());
-        assert!(framer.push(b'{').unwrap_err().to_string().contains("source_rows"));
+        assert!(
+            framer
+                .push(b'{')
+                .unwrap_err()
+                .to_string()
+                .contains("source_rows")
+        );
         assert_eq!(framer.records(), 0);
         let deeply_nested = format!("[{{\"x\":{}0{}}}]", "[".repeat(64), "]".repeat(64));
-        assert!(decode(deeply_nested.as_bytes(), 1024, 1)
-            .unwrap_err().to_string().contains("nesting"));
+        assert!(
+            decode(deeply_nested.as_bytes(), 1024, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("nesting")
+        );
     }
 }
 
@@ -238,7 +274,12 @@ mod reader_tests {
 
     fn open(path: &Path, record_limit: usize, records: usize) -> io::Result<Input> {
         Input::open_controlled(
-            path, b"bindings", MAX_INPUT_BYTES, record_limit, records, &mut || Ok(()),
+            path,
+            b"bindings",
+            MAX_INPUT_BYTES,
+            record_limit,
+            records,
+            &mut || Ok(()),
         )
     }
 
@@ -251,7 +292,10 @@ mod reader_tests {
     #[test]
     fn array_replay_clones_and_hashes_preserve_objects_across_block_boundaries() {
         for padding in [BLOCK_BYTES - 1, BLOCK_BYTES, BLOCK_BYTES + 1] {
-            let first = format!("{{\n\"value\":\"{}λ😀\",\n\"end\":true\n}}", "x".repeat(padding));
+            let first = format!(
+                "{{\n\"value\":\"{}λ😀\",\n\"end\":true\n}}",
+                "x".repeat(padding)
+            );
             let second = r#"{"value":"escaped \" , ] } \\","end":false}"#;
             let source = format!("{}[\n{first},\r\n{second}\n] \n", " ".repeat(padding));
             let path = fixture(source.as_bytes());
@@ -273,7 +317,12 @@ mod reader_tests {
             assert_eq!(next(&mut beginning).as_deref(), Some(second));
             for reader in [&mut reader, &mut remaining, &mut beginning] {
                 assert!(next(reader).is_none());
-                assert!(reader.next_controlled(&mut || panic!("terminal")).unwrap().is_none());
+                assert!(
+                    reader
+                        .next_controlled(&mut || panic!("terminal"))
+                        .unwrap()
+                        .is_none()
+                );
             }
         }
     }
@@ -282,8 +331,20 @@ mod reader_tests {
     fn array_limits_count_logical_objects_not_physical_lines_or_whole_array_bytes() {
         let path = fixture(b"[\n{\n}\n,\n{\n}\n]\n");
         assert_eq!(open(&path, 3, 2).unwrap().records(), 2);
-        assert!(open(&path, 2, 2).err().unwrap().to_string().contains("record_bytes"));
-        assert!(open(&path, 3, 1).err().unwrap().to_string().contains("source_rows"));
+        assert!(
+            open(&path, 2, 2)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("record_bytes")
+        );
+        assert!(
+            open(&path, 3, 1)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("source_rows")
+        );
         for bytes in [b"[{},]".as_slice(), b"[{}", b"[{}] false", b"[[],{}]"] {
             assert!(open(&fixture(bytes), MAX_RECORD_BYTES, 10).is_err());
         }
@@ -297,9 +358,19 @@ mod reader_tests {
         assert_eq!(next(&mut reader).as_deref(), Some(r#"{"x":1}"#));
         let mut cloned = reader.clone();
         std::fs::write(&path, br#"[{"x":1},{"x":3}]"#).unwrap();
-        assert!(cloned.next_controlled(&mut || Ok(())).unwrap_err()
-            .to_string().contains("SourceChanged"));
-        assert!(cloned.next_controlled(&mut || panic!("fused")).unwrap().is_none());
+        assert!(
+            cloned
+                .next_controlled(&mut || Ok(()))
+                .unwrap_err()
+                .to_string()
+                .contains("SourceChanged")
+        );
+        assert!(
+            cloned
+                .next_controlled(&mut || panic!("fused"))
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(next(&mut reader).as_deref(), Some(r#"{"x":2}"#));
     }
 
@@ -308,16 +379,37 @@ mod reader_tests {
         let path = fixture(b"[{\"x\":\"\xff\"}]");
         let input = open(&path, MAX_RECORD_BYTES, 1).unwrap();
         let mut reader = input.reader();
-        assert!(reader.next_controlled(&mut || Ok(())).unwrap_err().to_string().contains("UTF-8"));
+        assert!(
+            reader
+                .next_controlled(&mut || Ok(()))
+                .unwrap_err()
+                .to_string()
+                .contains("UTF-8")
+        );
         assert_eq!(reader.line(), 1);
-        assert!(reader.next_controlled(&mut || panic!("fused")).unwrap().is_none());
+        assert!(
+            reader
+                .next_controlled(&mut || panic!("fused"))
+                .unwrap()
+                .is_none()
+        );
         let path = fixture(b"[{}]");
         let input = open(&path, MAX_RECORD_BYTES, 1).unwrap();
         let mut reader = input.reader();
         assert_eq!(next(&mut reader).as_deref(), Some("{}"));
-        std::fs::OpenOptions::new().append(true).open(path).unwrap().write_all(b" ").unwrap();
-        assert!(reader.next_controlled(&mut || Ok(())).unwrap_err()
-            .to_string().contains("length changed"));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(b" ")
+            .unwrap();
+        assert!(
+            reader
+                .next_controlled(&mut || Ok(()))
+                .unwrap_err()
+                .to_string()
+                .contains("length changed")
+        );
     }
 
     #[test]
@@ -326,26 +418,50 @@ mod reader_tests {
         let path = fixture(source.as_bytes());
         let input = open(&path, MAX_RECORD_BYTES, 1).unwrap();
         let mut calls = 0;
-        input.reader().next_controlled(&mut || { calls += 1; Ok(()) }).unwrap();
+        input
+            .reader()
+            .next_controlled(&mut || {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
         for stop in 1..=calls {
             let mut seen = 0;
             let mut reader = input.reader();
-            assert!(reader.next_controlled(&mut || {
-                seen += 1;
-                if seen == stop { Err(io::ErrorKind::Interrupted.into()) } else { Ok(()) }
-            }).is_err());
+            assert!(
+                reader
+                    .next_controlled(&mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(io::ErrorKind::Interrupted.into())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .is_err()
+            );
             assert_eq!(seen, stop);
-            assert!(reader.next_controlled(&mut || panic!("fused")).unwrap().is_none());
+            assert!(
+                reader
+                    .next_controlled(&mut || panic!("fused"))
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 
     #[test]
     fn a_large_single_line_array_keeps_one_record_and_one_block_cache() {
         let path = fixture(b"[");
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         let row = format!("{{\"x\":\"{}\"}}", "x".repeat(8000));
         for index in 0..1000 {
-            if index != 0 { file.write_all(b",").unwrap(); }
+            if index != 0 {
+                file.write_all(b",").unwrap();
+            }
             file.write_all(row.as_bytes()).unwrap();
         }
         file.write_all(b"]").unwrap();
@@ -357,6 +473,9 @@ mod reader_tests {
             assert_eq!(next(&mut reader).as_deref(), Some(row.as_str()));
         }
         assert!(next(&mut reader).is_none());
-        assert_eq!(input.image.blocks.len(), (input.image.len as usize).div_ceil(BLOCK_BYTES));
+        assert_eq!(
+            input.image.blocks.len(),
+            (input.image.len as usize).div_ceil(BLOCK_BYTES)
+        );
     }
 }
