@@ -17,6 +17,9 @@
 //!   bytes must contain exactly one finite little-endian f32 per query
 //!   coordinate. `--vector-encoding coordinates` is the default. The CLI
 //!   never guesses an encoding from dimensions or the first stored value;
+//! - `--vector-encoding coordinates-rounded` explicitly rounds finite stored
+//!   integers, floats and decimals to f32. Distances describe that projection,
+//!   not the original numbers; overflow refuses and underflow is permitted.
 //! - both lanes together run the exact reciprocal-rank fusion of the two
 //!   candidate sets (`--candidates <n>` per lane, default `--k`), which is
 //!   NOT an exhaustive hybrid answer;
@@ -175,9 +178,12 @@ impl SearchFlags {
             "--vector-encoding" => {
                 let encoding = match value {
                     "coordinates" => VectorEncoding::Coordinates,
+                    "coordinates-rounded" => VectorEncoding::CoordinatesRoundedF32,
                     "packed" => VectorEncoding::PackedF32Le,
                     _ => {
-                        return Err(Failure::usage("--vector-encoding is coordinates or packed"));
+                        return Err(Failure::usage(
+                            "--vector-encoding is coordinates, coordinates-rounded or packed",
+                        ));
                     }
                 };
                 once(&mut self.vector_encoding, encoding, flag)
@@ -343,7 +349,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     let vector = match (&flags.vector, flags.vector_properties.is_empty()) {
         (Some(coordinates), false) => {
             match encoding {
-                VectorEncoding::Coordinates
+                VectorEncoding::Coordinates | VectorEncoding::CoordinatesRoundedF32
                     if coordinates.len() != flags.vector_properties.len() =>
                 {
                     return Err(Failure::usage(
@@ -1123,5 +1129,59 @@ mod tests {
         assert_eq!(flags.eligible, Some(vec![VId(7)]));
         let too_many = format!("{at_limit},7");
         assert!(SearchFlags::default().set("--eligible", &too_many).is_err());
+    }
+
+    #[test]
+    fn rounded_encoding_reaches_the_projection_and_retains_exact_search_options() {
+        for ann in [false, true] {
+            let mut parts = vec![
+                "--vector", "0.1,0.2", "--vector-property", "x",
+                "--vector-property", "y", "--vector-encoding", "coordinates-rounded",
+                "--as-of", "7", "--eligible", "2,1", "--vertex-label", "Document",
+            ];
+            if ann {
+                parts.extend_from_slice(&["--ann", "32"]);
+            }
+            let request = prepare(&options(&parts)).unwrap();
+            assert_eq!(request.read.projection.encoding, VectorEncoding::CoordinatesRoundedF32);
+            assert_eq!(request.read.projection.vector, [PropertyKeyId(1), PropertyKeyId(2)]);
+            assert_eq!(request.read.as_of, Some(CommitSeq(7)));
+            assert_eq!(request.eligible, Some(vec![VId(1), VId(2)]));
+            assert_eq!(request.read.vertex_label, Some(LabelId(1)));
+            let Search::Vector { query, mode, .. } = request.search() else {
+                panic!("vector search");
+            };
+            assert_eq!(query, [0.1_f32, 0.2_f32]);
+            assert_eq!(matches!(mode, VectorSearch::Approximate { ef_search: 32 }), ann);
+            let config = request.read.config_for(request.search()).unwrap();
+            let value = CanonicalScalar::Float(fgdb_types::CanonicalF64::new(0.1));
+            let document = request.read.projection.project(
+                VId(1), &config, |_| Some(&value), &mut WorkBudget::new(1000),
+            ).unwrap();
+            assert_eq!(document.vector, Some(vec![0.1_f32, 0.1_f32]));
+        }
+        for metric in ["l2", "cosine", "dot"] {
+            assert_eq!(
+                native_hits(&vector_request("coordinates-rounded", metric)),
+                native_hits(&vector_request("coordinates", metric)),
+            );
+        }
+    }
+
+    #[test]
+    fn rounded_encoding_checks_dimensions_and_cannot_be_a_text_only_option() {
+        for parts in [
+            vec!["--vector", "1,2", "--vector-property", "x",
+                 "--vector-encoding", "coordinates-rounded"],
+            vec!["--vector", "1", "--vector-property", "x", "--vector-property", "y",
+                 "--vector-encoding", "coordinates-rounded"],
+            vec!["--text", "graph", "--text-property", "bio",
+                 "--vector-encoding", "coordinates-rounded"],
+        ] {
+            assert_eq!(prepare(&options(&parts)).err().expect("invalid shape").code, 2);
+        }
+        let mut flags = SearchFlags::default();
+        flags.set("--vector-encoding", "coordinates-rounded").unwrap();
+        assert!(flags.set("--vector-encoding", "packed").is_err());
     }
 }

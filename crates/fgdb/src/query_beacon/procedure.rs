@@ -10,7 +10,10 @@
 //! `vector_property` holding the whole embedding as packed little-endian f32
 //! bytes (`metric`
 //! l2/cosine/dot, exact unless `ann` gives the HNSW `ef_search`), restricted
-//! to `label` when given. `seeds` with an explicit nonnegative `max_hops`
+//! to `label` when given. Numeric properties require exact f32 by default;
+//! `vector_encoding => 'coordinates-rounded'` explicitly rounds finite
+//! integers, floats and decimals to f32. The original properties are unchanged.
+//! `seeds` with an explicit nonnegative `max_hops`
 //! enable the graph lane (`relation`, `direction` out/in/both, `include_seeds`,
 //! `graph_candidates`, `graph_weight`). Seeds may be the ONLY retrieval input:
 //! that path reads topology without projecting properties or creating an index.
@@ -273,6 +276,7 @@ impl HybridSearch {
         let mut vector = None;
         let mut vector_properties = None;
         let mut vector_property = None;
+        let mut vector_encoding = None;
         let mut metric = None;
         let mut ann = None;
         let mut label = None;
@@ -362,6 +366,19 @@ impl HybridSearch {
                     }
                     vector_properties = Some(keys);
                 }
+                "vector_encoding" => {
+                    vector_encoding = Some(match text_value("vector_encoding", value)? {
+                        "coordinates" => VectorEncoding::Coordinates,
+                        "coordinates-rounded" => VectorEncoding::CoordinatesRoundedF32,
+                        "packed" => VectorEncoding::PackedF32Le,
+                        _ => {
+                            return Err(domain(
+                                "vector_encoding",
+                                "'coordinates', 'coordinates-rounded' or 'packed'",
+                            ));
+                        }
+                    });
+                }
                 "metric" => {
                     metric = Some(match text_value("metric", value)? {
                         "l2" => DistanceMetric::SquaredEuclidean,
@@ -435,6 +452,7 @@ impl HybridSearch {
         };
         // A vector is projected either one property per coordinate, or from
         // one property holding the whole embedding as packed f32 bytes.
+        // An explicit encoding may not reinterpret the other declaration shape.
         let vector = match (vector, vector_properties, vector_property) {
             (Some(coordinates), Some(keys), None) => {
                 if coordinates.len() != keys.len() || keys.is_empty() {
@@ -442,9 +460,19 @@ impl HybridSearch {
                         "vector needs exactly one vector_properties entry per coordinate",
                     ));
                 }
-                Some((coordinates, keys, VectorEncoding::Coordinates))
+                if vector_encoding == Some(VectorEncoding::PackedF32Le) {
+                    return Err(HybridCallError::Combination(
+                        "packed vector_encoding requires vector_property, not vector_properties",
+                    ));
+                }
+                Some((coordinates, keys, vector_encoding.unwrap_or_default()))
             }
             (Some(coordinates), None, Some(key)) if !coordinates.is_empty() => {
+                if vector_encoding.is_some_and(|mode| mode != VectorEncoding::PackedF32Le) {
+                    return Err(HybridCallError::Combination(
+                        "numeric vector_encoding requires vector_properties, not vector_property",
+                    ));
+                }
                 Some((coordinates, vec![key], VectorEncoding::PackedF32Le))
             }
             (None, None, None) => None,
@@ -459,6 +487,9 @@ impl HybridSearch {
                 ));
             }
         };
+        if vector.is_none() && vector_encoding.is_some() {
+            return Err(HybridCallError::Combination("vector_encoding needs vector"));
+        }
         if text.is_none() && vector.is_none() && seeds.is_none() {
             return Err(HybridCallError::Combination(
                 "a search needs text, a vector, or seeds with an explicit max_hops",
