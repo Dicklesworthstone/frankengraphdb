@@ -319,7 +319,12 @@ impl HybridSearch {
                         "materialized" => GraphAccess::Materialized,
                         "indexed" => GraphAccess::Indexed,
                         "demand" => GraphAccess::Demand,
-                        _ => return Err(domain("graph_access", "'materialized', 'indexed' or 'demand'")),
+                        _ => {
+                            return Err(domain(
+                                "graph_access",
+                                "'materialized', 'indexed' or 'demand'",
+                            ));
+                        }
                     });
                 }
                 "text" => text = Some(text_value("text", value)?.to_owned()),
@@ -825,7 +830,9 @@ impl HybridSearch {
                 // the reported exact allowance must not leave less source room.
                 let output = u64::try_from(self.k)
                     .map_err(|_| BeaconError::InvalidQuery("demand result capacity exceeds u64"))?;
-                let available = remaining.evaluator.max_scratch_entries
+                let available = remaining
+                    .evaluator
+                    .max_scratch_entries
                     .checked_sub(filter.scratch_entries())
                     .and_then(|entries| entries.checked_sub(output))
                     .ok_or(BeaconError::ResourceLimit {
@@ -834,7 +841,9 @@ impl HybridSearch {
                             .unwrap_or(usize::MAX),
                     })?;
                 let mut options = self.options.clone();
-                options.policy.max_source_scratch = options.policy.max_source_scratch
+                options.policy.max_source_scratch = options
+                    .policy
+                    .max_source_scratch
                     .min(usize::try_from(available).unwrap_or(usize::MAX));
                 demand::evaluate_filtered(
                     snapshot,
@@ -849,10 +858,12 @@ impl HybridSearch {
                     relation_allowed,
                     || Ok(()),
                     |id| filter.admits(id, work),
-                ).and_then(|(hits, admissions)| {
+                )
+                .and_then(|(hits, admissions)| {
                     let delivered = u64::try_from(hits.len())
                         .map_err(|_| BeaconError::Invariant("demand result count exceeds u64"))?;
-                    let retained = output.checked_sub(delivered)
+                    let retained = output
+                        .checked_sub(delivered)
                         .and_then(|unused| admissions.checked_add(unused))
                         .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
                     source_entries.set(retained);
@@ -861,7 +872,9 @@ impl HybridSearch {
             }
         };
         filter.finish(result).and_then(|hits| {
-            let scratch = filter.scratch_entries().checked_add(source_entries.get())
+            let scratch = filter
+                .scratch_entries()
+                .checked_add(source_entries.get())
                 .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
             Ok((hits, scratch))
         })

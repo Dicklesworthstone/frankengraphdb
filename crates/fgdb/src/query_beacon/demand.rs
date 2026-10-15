@@ -99,9 +99,8 @@ where
             let mut allowed = self.label_allowed.borrow_mut();
             let visible_labels = row.labels.iter().filter(|&&label| allowed(label)).count();
             work.charge(1 + visible_labels)?;
-            self.label.is_none_or(|label| {
-                allowed(label) && row.labels.binary_search(&label).is_ok()
-            })
+            self.label
+                .is_none_or(|label| allowed(label) && row.labels.binary_search(&label).is_ok())
         };
         if count >= self.limit {
             return Err(BeaconError::ResourceLimit {
@@ -140,7 +139,10 @@ where
         work: &mut dyn WorkControl,
         visit: &mut dyn FnMut(VId, &mut dyn WorkControl) -> Result<(), BeaconError>,
     ) -> Result<(), BeaconError> {
-        if self.relation.is_some_and(|relation| !(self.relation_allowed)(relation)) {
+        if self
+            .relation
+            .is_some_and(|relation| !(self.relation_allowed)(relation))
+        {
             return Ok(());
         }
         let mut after = None;
@@ -162,7 +164,8 @@ where
                 eid,
                 self.at,
                 &mut |event| self.source.event(event, work),
-            )? else {
+            )?
+            else {
                 continue;
             };
             let edge = &self.snapshot.blocks[block][row];
@@ -173,7 +176,9 @@ where
                 GlaDirection::Undirected if edge.dst == vertex => edge.src,
                 _ => continue,
             };
-            if self.relation.is_some_and(|relation| relation != edge.relation)
+            if self
+                .relation
+                .is_some_and(|relation| relation != edge.relation)
                 || !(self.relation_allowed)(edge.relation)
             {
                 continue;
@@ -227,7 +232,10 @@ pub(crate) fn evaluate_filtered(
     let source = SourceControl {
         scan: RefCell::new(scan),
         used: Cell::new(0),
-        limit: options.policy.max_source_scratch.min(expansion.limits.max_source_scratch),
+        limit: options
+            .policy
+            .max_source_scratch
+            .min(expansion.limits.max_source_scratch),
     };
     let membership = Membership {
         snapshot,
@@ -237,7 +245,9 @@ pub(crate) fn evaluate_filtered(
         admit: RefCell::new(admit),
         label_allowed: RefCell::new(label_allowed),
         admitted: RefCell::new(BTreeMap::new()),
-        limit: options.policy.max_staging_rows
+        limit: options
+            .policy
+            .max_staging_rows
             .min(options.index.max_documents)
             .min(expansion.limits.max_vertices),
     };
@@ -292,7 +302,8 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Vec<GraphHybridHit>, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
-            self.read_session().map_err(Error::Read)?
+            self.read_session()
+                .map_err(Error::Read)?
                 .beacon_search_graph_demand_filtered(cx, options, query, expansion, eligible)
         })
     }
@@ -325,10 +336,22 @@ impl EmbeddedReadView {
             cx.checkpoint().map_err(Error::Interrupted)?;
             let at = options.as_of.unwrap_or(self.frontier());
             self.snapshot.check_frontier(at).map_err(Error::Read)?;
-            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| cx.checkpoint()));
+            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
+                cx.checkpoint()
+            }));
             let result = evaluate_filtered(
-                &self.snapshot, at, options, query, expansion, &work, Scan::Metered,
-                |_| Ok(true), |_| true, |_| true, || Ok(()), eligible,
+                &self.snapshot,
+                at,
+                options,
+                query,
+                expansion,
+                &work,
+                Scan::Metered,
+                |_| Ok(true),
+                |_| true,
+                |_| true,
+                || Ok(()),
+                eligible,
             );
             work.into_inner().finish(result.map(|(rows, _)| rows))
         })

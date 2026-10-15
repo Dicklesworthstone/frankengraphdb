@@ -41,7 +41,11 @@ fn expansion(seeds: &[VId]) -> ExpansionSpec<'_, RelationId> {
 async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx, disconnected: usize, hidden: bool) {
     let mut batch = WriteBatch::new(R);
     for id in [VId(0), VId(2), VId(9), HIGH] {
-        batch.create_vertex(id, vec![LabelId(1)], vec![(PropertyKeyId(9), CanonicalScalar::Bool(true))]);
+        batch.create_vertex(
+            id,
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(9), CanonicalScalar::Bool(true))],
+        );
     }
     for (eid, src, dst) in [
         (0, VId(0), VId(2)),
@@ -71,7 +75,9 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx, disconnected: usize, hid
 }
 
 fn endpoints(rows: &[GraphHybridHit]) -> Vec<(VId, u32)> {
-    rows.iter().map(|row| (row.id, row.graph_hops.unwrap())).collect()
+    rows.iter()
+        .map(|row| (row.id, row.graph_hops.unwrap()))
+        .collect()
 }
 
 #[test]
@@ -82,33 +88,38 @@ fn reached_membership_replaces_the_full_directory_without_changing_ranks() {
         seed(&mut db, &c.commit(), 1_024, false).await;
         let q = GraphHybridQuery::graph_only(1, 1, 100, 60).unwrap();
         let spec = expansion(&[VId(0)]);
-        let expected = db.beacon_search_graph_indexed_filtered(
-            &c.query(), &options(), q, spec, |id| id == HIGH,
-        ).unwrap();
+        let expected = db
+            .beacon_search_graph_indexed_filtered(&c.query(), &options(), q, spec, |id| id == HIGH)
+            .unwrap();
         let mut limited = options();
         limited.policy.max_staging_rows = 3;
         limited.index.max_documents = 3;
         let mut spec = spec;
         spec.limits.max_vertices = 3;
         spec.limits.max_input_edges = 4;
-        let actual = db.beacon_search_graph_demand_filtered(
-            &c.query(), &limited, q, spec, |id| id == HIGH,
-        ).unwrap();
+        let actual = db
+            .beacon_search_graph_demand_filtered(&c.query(), &limited, q, spec, |id| id == HIGH)
+            .unwrap();
         assert_eq!(actual, expected);
         assert_eq!(endpoints(&actual), [(HIGH, 2)]);
         assert_eq!(actual[0].graph_rank.unwrap().get(), 1);
-        assert_eq!((actual[0].score.numerator(), actual[0].score.denominator()), (100, 61));
+        assert_eq!(
+            (actual[0].score.numerator(), actual[0].score.denominator()),
+            (100, 61)
+        );
         assert_eq!(actual[0].vector_rank, None);
         assert_eq!(actual[0].text_rank, None);
         assert!(db.beacon_search_graph_indexed_filtered(
             &c.query(), &limited, q, spec, |id| id == HIGH,
         ).is_err(), "the complete-directory source must not fit a three-vertex allowance");
         spec.limits.max_input_edges = 3;
-        assert!(matches!(db.beacon_search_graph_demand_filtered(
-            &c.query(), &limited, q, spec, |_| false,
-        ), Err(Error::Index(BeaconError::ResourceLimit {
-            resource: "demand graph incidence visits", limit: 3,
-        }))));
+        assert!(matches!(
+            db.beacon_search_graph_demand_filtered(&c.query(), &limited, q, spec, |_| false,),
+            Err(Error::Index(BeaconError::ResourceLimit {
+                resource: "demand graph incidence visits",
+                limit: 3,
+            }))
+        ));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -127,13 +138,15 @@ fn directions_zero_hops_and_full_width_ids_have_literal_expected_answers() {
         ] {
             let mut spec = expansion(&[VId(0), VId(0), VId(999)]);
             spec.direction = direction;
-            let rows = db.beacon_search_graph_demand_filtered(
-                &c.query(), &options(), q, spec, |_| true,
-            ).unwrap();
+            let rows = db
+                .beacon_search_graph_demand_filtered(&c.query(), &options(), q, spec, |_| true)
+                .unwrap();
             assert_eq!(endpoints(&rows), expected);
-            assert_eq!(rows, db.beacon_search_graph_indexed(
-                &c.query(), &options(), q, spec,
-            ).unwrap());
+            assert_eq!(
+                rows,
+                db.beacon_search_graph_indexed(&c.query(), &options(), q, spec,)
+                    .unwrap()
+            );
         }
         let mut spec = expansion(&[VId(9), HIGH, VId(9), VId(999)]);
         spec.max_hops = 0;
@@ -142,18 +155,39 @@ fn directions_zero_hops_and_full_width_ids_have_literal_expected_answers() {
         let work = RefCell::new(WorkBudget::new(100_000));
         let nodes = Cell::new(0);
         let (rows, scratch) = evaluate_filtered(
-            &db.snapshot, db.frontier().unwrap(), &options(), q, spec,
-            &work, Scan::Metered,
-            |_| { nodes.set(nodes.get() + 1); Ok(true) }, |_| true, |_| true,
-            || panic!("zero-hop retrieval admitted an incidence"), |_| true,
-        ).unwrap();
+            &db.snapshot,
+            db.frontier().unwrap(),
+            &options(),
+            q,
+            spec,
+            &work,
+            Scan::Metered,
+            |_| {
+                nodes.set(nodes.get() + 1);
+                Ok(true)
+            },
+            |_| true,
+            |_| true,
+            || panic!("zero-hop retrieval admitted an incidence"),
+            |_| true,
+        )
+        .unwrap();
         assert_eq!(endpoints(&rows), [(VId(9), 0), (HIGH, 0)]);
-        assert_eq!(nodes.get(), 2, "duplicates and missing seeds cannot become extra nodes");
-        assert_eq!(scratch, 2, "only the two admitted cache entries are retained");
+        assert_eq!(
+            nodes.get(),
+            2,
+            "duplicates and missing seeds cannot become extra nodes"
+        );
+        assert_eq!(
+            scratch, 2,
+            "only the two admitted cache entries are retained"
+        );
         spec.seeds = &[];
-        assert!(db.beacon_search_graph_demand_filtered(
-            &c.query(), &options(), q, spec, |_| true,
-        ).unwrap().is_empty());
+        assert!(
+            db.beacon_search_graph_demand_filtered(&c.query(), &options(), q, spec, |_| true,)
+                .unwrap()
+                .is_empty()
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -164,28 +198,37 @@ fn pinned_winners_survive_retirement_label_changes_compaction_reopen_and_writer_
         let c = PurposeContexts::narrow_runtime_root(&root);
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&c.commit(), vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&c.commit(), vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         seed(&mut db, &c.commit(), 0, false).await;
         let at = db.frontier().unwrap();
         let pin = db.read_session().unwrap();
         let q = GraphHybridQuery::graph_only(1, 1, 1, 60).unwrap();
         let spec = expansion(&[VId(0)]);
-        let before = pin.beacon_search_graph_demand_filtered(
-            &c.query(), &options(), q, spec, |id| id == HIGH,
-        ).unwrap();
+        let before = pin
+            .beacon_search_graph_demand_filtered(&c.query(), &options(), q, spec, |id| id == HIGH)
+            .unwrap();
         assert_eq!(endpoints(&before), [(HIGH, 2)]);
         let mut edit = WriteBatch::new(R);
         edit.delete_edge(EId(0)); // The parallel survivor still carries the path.
         db.write(&c.commit(), edit).await.unwrap();
-        assert_eq!(db.beacon_search_graph_demand_filtered(
-            &c.query(), &options(), q, spec, |id| id == HIGH,
-        ).unwrap(), before);
+        assert_eq!(
+            db.beacon_search_graph_demand_filtered(&c.query(), &options(), q, spec, |id| id
+                == HIGH,)
+                .unwrap(),
+            before
+        );
         let mut edit = WriteBatch::new(R);
         edit.set_vertex_label(VId(2), LabelId(1), false);
         db.write(&c.commit(), edit).await.unwrap();
-        assert!(db.beacon_search_graph_demand_filtered(
-            &c.query(), &options(), q, spec, |id| id == HIGH,
-        ).unwrap().is_empty(), "excluded source labels remove transit, not merely results");
+        assert!(
+            db.beacon_search_graph_demand_filtered(&c.query(), &options(), q, spec, |id| id
+                == HIGH,)
+                .unwrap()
+                .is_empty(),
+            "excluded source labels remove transit, not merely results"
+        );
         let mut edit = WriteBatch::new(R);
         edit.delete_edge(EId(2));
         db.write(&c.commit(), edit).await.unwrap();
@@ -196,14 +239,20 @@ fn pinned_winners_survive_retirement_label_changes_compaction_reopen_and_writer_
             &c.query(), &historic, q, spec, |id| id == HIGH,
         ).unwrap(), before);
         historic.as_of = Some(CommitSeq(at.0 + 1));
-        assert!(matches!(pin.beacon_search_graph_demand_filtered(
-            &c.query(), &historic, q, spec, |_| true,
-        ), Err(Error::Read(ReadError::BeyondFrontier { .. }))));
+        assert!(matches!(
+            pin.beacon_search_graph_demand_filtered(&c.query(), &historic, q, spec, |_| true,),
+            Err(Error::Read(ReadError::BeyondFrontier { .. }))
+        ));
         drop(db);
-        assert_eq!(pin.beacon_search_graph_demand_filtered(
-            &c.query(), &options(), q, spec, |id| id == HIGH,
-        ).unwrap(), before);
-        let db = Database::open_with_vfs(&c.commit(), vfs, &path, keys()).await.unwrap();
+        assert_eq!(
+            pin.beacon_search_graph_demand_filtered(&c.query(), &options(), q, spec, |id| id
+                == HIGH,)
+                .unwrap(),
+            before
+        );
+        let db = Database::open_with_vfs(&c.commit(), vfs, &path, keys())
+            .await
+            .unwrap();
         historic.as_of = Some(at);
         assert_eq!(db.beacon_search_graph_demand_filtered(
             &c.query(), &historic, q, spec, |id| id == HIGH,
@@ -228,17 +277,35 @@ fn hidden_sources_do_not_change_visible_work_scratch_or_node_admissions() {
             let nodes = Cell::new(0);
             let mut poll = || Ok(());
             let (rows, scratch) = evaluate_filtered(
-                &db.snapshot, db.frontier().unwrap(), &options(), q, spec,
-                &work, Scan::Unmetered(&mut poll),
+                &db.snapshot,
+                db.frontier().unwrap(),
+                &options(),
+                q,
+                spec,
+                &work,
+                Scan::Unmetered(&mut poll),
                 |row| {
-                    if row.labels.binary_search(&LabelId(1)).is_err() { return Ok(false); }
+                    if row.labels.binary_search(&LabelId(1)).is_err() {
+                        return Ok(false);
+                    }
                     nodes.set(nodes.get() + 1);
                     Ok(true)
                 },
-                |label| label == LabelId(1), |relation| relation == R, || Ok(()),
-                |id| { assert_ne!(id, VId(90), "hidden endpoint escaped admission"); true },
-            ).unwrap();
-            (rows, scratch, nodes.get(), 100_000 - work.into_inner().remaining())
+                |label| label == LabelId(1),
+                |relation| relation == R,
+                || Ok(()),
+                |id| {
+                    assert_ne!(id, VId(90), "hidden endpoint escaped admission");
+                    true
+                },
+            )
+            .unwrap();
+            (
+                rows,
+                scratch,
+                nodes.get(),
+                100_000 - work.into_inner().remaining(),
+            )
         };
         let expected = run(&clean);
         assert_eq!(endpoints(&expected.0), [(VId(2), 1), (HIGH, 2)]);
@@ -246,10 +313,13 @@ fn hidden_sources_do_not_change_visible_work_scratch_or_node_admissions() {
         assert_eq!(run(&full), expected);
         let mut unscoped = options();
         unscoped.vertex_label = None;
-        let actual = full.beacon_search_graph_demand_filtered(
-            &c.query(), &unscoped, q, spec, |_| true,
-        ).unwrap();
-        assert_ne!(actual, expected.0, "the hidden fixture must affect an unrestricted read");
+        let actual = full
+            .beacon_search_graph_demand_filtered(&c.query(), &unscoped, q, spec, |_| true)
+            .unwrap();
+        assert_ne!(
+            actual, expected.0,
+            "the hidden fixture must affect an unrestricted read"
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -257,12 +327,21 @@ fn hidden_sources_do_not_change_visible_work_scratch_or_node_admissions() {
 #[test]
 fn work_and_shared_scratch_boundaries_refuse_without_partial_results() {
     #[derive(Default)]
-    struct Cut { calls: usize, stop: usize }
+    struct Cut {
+        calls: usize,
+        stop: usize,
+    }
     impl WorkControl for Cut {
         fn charge(&mut self, _: usize) -> Result<(), BeaconError> {
-            if self.calls >= self.stop { return Err(BeaconError::Cancelled); }
+            if self.calls >= self.stop {
+                return Err(BeaconError::Cancelled);
+            }
             self.calls += 1;
-            if self.calls == self.stop { Err(BeaconError::Cancelled) } else { Ok(()) }
+            if self.calls == self.stop {
+                Err(BeaconError::Cancelled)
+            } else {
+                Ok(())
+            }
         }
     }
     let ((), report) = run_async_under_lab(0xbeac_5105, |root| async move {
@@ -277,8 +356,18 @@ fn work_and_shared_scratch_boundaries_refuse_without_partial_results() {
                 let run = |stop| {
                     let work = RefCell::new(Cut { calls: 0, stop });
                     let result = evaluate_filtered(
-                        &db.snapshot, at, &options(), q, spec, &work, Scan::Metered,
-                        |_| Ok(true), |_| true, |_| true, || Ok(()), |id| accept && id == HIGH,
+                        &db.snapshot,
+                        at,
+                        &options(),
+                        q,
+                        spec,
+                        &work,
+                        Scan::Metered,
+                        |_| Ok(true),
+                        |_| true,
+                        |_| true,
+                        || Ok(()),
+                        |id| accept && id == HIGH,
                     );
                     (result, work.into_inner().calls)
                 };
@@ -286,30 +375,54 @@ fn work_and_shared_scratch_boundaries_refuse_without_partial_results() {
                 assert_eq!(expected.unwrap().0.len(), usize::from(accept) * k);
                 for stop in 1..=calls {
                     let (result, seen) = run(stop);
-                    assert!(matches!(result, Err(BeaconError::Cancelled)), "k={k} cut={stop}");
+                    assert!(
+                        matches!(result, Err(BeaconError::Cancelled)),
+                        "k={k} cut={stop}"
+                    );
                     assert_eq!(seen, stop);
                 }
                 let work = RefCell::new(WorkBudget::new(100_000));
                 let (expected, scratch) = evaluate_filtered(
-                    &db.snapshot, at, &options(), q, spec, &work, Scan::Metered,
-                    |_| Ok(true), |_| true, |_| true, || Ok(()), |id| accept && id == HIGH,
-                ).unwrap();
+                    &db.snapshot,
+                    at,
+                    &options(),
+                    q,
+                    spec,
+                    &work,
+                    Scan::Metered,
+                    |_| Ok(true),
+                    |_| true,
+                    |_| true,
+                    || Ok(()),
+                    |id| accept && id == HIGH,
+                )
+                .unwrap();
                 let units = 100_000 - work.into_inner().remaining();
                 let mut limited = options();
                 limited.policy.max_source_scratch = usize::try_from(scratch).unwrap();
                 limited.policy.max_work_units = units;
-                assert_eq!(db.beacon_search_graph_demand_filtered(
-                    &c.query(), &limited, q, spec, |id| accept && id == HIGH,
-                ).unwrap(), expected);
+                assert_eq!(
+                    db.beacon_search_graph_demand_filtered(&c.query(), &limited, q, spec, |id| {
+                        accept && id == HIGH
+                    },)
+                        .unwrap(),
+                    expected
+                );
                 limited.policy.max_source_scratch -= 1;
-                assert!(db.beacon_search_graph_demand_filtered(
-                    &c.query(), &limited, q, spec, |_| false,
-                ).is_err());
+                assert!(
+                    db.beacon_search_graph_demand_filtered(&c.query(), &limited, q, spec, |_| {
+                        false
+                    },)
+                        .is_err()
+                );
                 limited.policy.max_source_scratch += 1;
                 limited.policy.max_work_units -= 1;
-                assert!(db.beacon_search_graph_demand_filtered(
-                    &c.query(), &limited, q, spec, |id| accept && id == HIGH,
-                ).is_err());
+                assert!(
+                    db.beacon_search_graph_demand_filtered(&c.query(), &limited, q, spec, |id| {
+                        accept && id == HIGH
+                    },)
+                        .is_err()
+                );
             }
         }
         assert_eq!(db.frontier().unwrap(), at);
@@ -326,23 +439,38 @@ fn invalid_requests_and_visitation_limits_are_not_hidden_by_empty_outputs() {
         let mut q = GraphHybridQuery::graph_only(0, 1, 1, 60).unwrap();
         let mut spec = expansion(&[VId(0)]);
         spec.limits.max_visited_vertices = 2;
-        assert!(matches!(db.beacon_search_graph_demand_filtered(
-            &c.query(), &options(), q, spec, |_| false,
-        ), Err(Error::Index(BeaconError::ResourceLimit {
-            resource: "expansion visited vertices", limit: 2,
-        }))));
+        assert!(matches!(
+            db.beacon_search_graph_demand_filtered(&c.query(), &options(), q, spec, |_| false,),
+            Err(Error::Index(BeaconError::ResourceLimit {
+                resource: "expansion visited vertices",
+                limit: 2,
+            }))
+        ));
         q.retrieval.profile = ExactRrfProfile::default();
         let work = RefCell::new(WorkBudget::new(100_000));
-        assert!(matches!(evaluate_filtered(
-            &db.snapshot, db.frontier().unwrap(), &options(), q, spec, &work,
-            Scan::Metered, |_| panic!("mixed request accessed a source"),
-            |_| true, |_| true, || Ok(()), |_| false,
-        ), Err(BeaconError::InvalidQuery(_))));
+        assert!(matches!(
+            evaluate_filtered(
+                &db.snapshot,
+                db.frontier().unwrap(),
+                &options(),
+                q,
+                spec,
+                &work,
+                Scan::Metered,
+                |_| panic!("mixed request accessed a source"),
+                |_| true,
+                |_| true,
+                || Ok(()),
+                |_| false,
+            ),
+            Err(BeaconError::InvalidQuery(_))
+        ));
         q = GraphHybridQuery::graph_only(0, 1, 1, 60).unwrap();
         q.graph_weight = 0;
-        assert!(db.beacon_search_graph_demand_filtered(
-            &c.query(), &options(), q, spec, |_| false,
-        ).is_err());
+        assert!(
+            db.beacon_search_graph_demand_filtered(&c.query(), &options(), q, spec, |_| false,)
+                .is_err()
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

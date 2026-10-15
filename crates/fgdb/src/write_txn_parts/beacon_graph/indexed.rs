@@ -218,18 +218,19 @@ impl<S: Selection> ExpansionNeighbors for OverlayNeighbors<'_, '_, S> {
                 // Do NOT consume a replacement: undirected traversal may need
                 // it again at its other endpoint. A tombstone hides all history.
                 Some(after) => *after,
-                None => {
-                    self.snapshot
-                        .adjacency_index()
-                        .statement_at_controlled(
-                            &self.snapshot.blocks, eid, self.txn.basis,
-                            &mut |event| self.edge_work.source(event),
-                        )?
-                        .map(|(block, row)| {
-                            let edge = &self.snapshot.blocks[block][row];
-                            (edge.src, edge.relation, edge.dst)
-                        })
-                }
+                None => self
+                    .snapshot
+                    .adjacency_index()
+                    .statement_at_controlled(
+                        &self.snapshot.blocks,
+                        eid,
+                        self.txn.basis,
+                        &mut |event| self.edge_work.source(event),
+                    )?
+                    .map(|(block, row)| {
+                        let edge = &self.snapshot.blocks[block][row];
+                        (edge.src, edge.relation, edge.dst)
+                    }),
             };
             let Some((src, relation, dst)) = incidence else {
                 continue;

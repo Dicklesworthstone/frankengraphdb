@@ -2,8 +2,8 @@
 //! Prepared membership effects are borrowed once; native histories are resolved
 //! only for probed identities. The indexed source still owns the edge merge.
 
-use super::*;
 use super::super::super::{Overlay, candidate};
+use super::*;
 use fgdb_beacon::WorkBudget;
 use fgdb_beacon::expansion::{ExpansionMembership, expand_from_membership_filtered};
 use fgdb_delta_types::LabelId;
@@ -67,9 +67,11 @@ impl<'a, 'cx> Membership<'a, 'cx> {
                         DeltaRow::CreateEdge { .. }
                         | DeltaRow::DeleteEdge { .. }
                         | DeltaRow::Property { .. } => continue,
-                        _ => return Err(BeaconError::InvalidQuery(
-                            "transaction demand search has no membership law for this delta",
-                        )),
+                        _ => {
+                            return Err(BeaconError::InvalidQuery(
+                                "transaction demand search has no membership law for this delta",
+                            ));
+                        }
                     };
                     observe(txn, id, work)?;
                     candidate(&mut overlay, id, work)?.apply(effect, work)?;
@@ -83,7 +85,9 @@ impl<'a, 'cx> Membership<'a, 'cx> {
             label: options.vertex_label,
             overlay,
             cache: RefCell::new(BTreeMap::new()),
-            limit: options.policy.max_staging_rows
+            limit: options
+                .policy
+                .max_staging_rows
                 .min(options.index.max_documents)
                 .min(expansion.limits.max_vertices),
         })
@@ -92,7 +96,9 @@ impl<'a, 'cx> Membership<'a, 'cx> {
     fn selected(&self, id: VId) -> Result<bool, BeaconError> {
         // Read the original basis, never the writer's latest row. Creation and
         // retirement in the prepared net override it; only labels are touched.
-        self.work.borrow_mut().charge(tree_work(self.overlay.len()))?;
+        self.work
+            .borrow_mut()
+            .charge(tree_work(self.overlay.len()))?;
         let overlay = self.overlay.get(&id);
         if overlay.is_some_and(|row| row.deleted) {
             return Ok(false);
@@ -108,9 +114,13 @@ impl<'a, 'cx> Membership<'a, 'cx> {
         };
         self.work.borrow_mut().record()?;
         self.work.borrow_mut().charge(labels.len())?;
-        let Some(label) = self.label else { return Ok(true) };
+        let Some(label) = self.label else {
+            return Ok(true);
+        };
         if let Some(overlay) = overlay {
-            self.work.borrow_mut().charge(tree_work(overlay.labels.len()))?;
+            self.work
+                .borrow_mut()
+                .charge(tree_work(overlay.labels.len()))?;
             if let Some(selected) = overlay.labels.get(&label) {
                 return Ok(*selected);
             }
@@ -189,8 +199,15 @@ impl WriteTxn {
         eligible: impl Fn(VId) -> bool,
     ) -> Result<Vec<GraphHybridHit>, ReadError<WriteTxnError, Cancel>> {
         self.beacon_search_graph_demand_observed(
-            database, cx, options, query, expansion, None, |_| Ok(()),
-            |id, _| eligible(id), |result| result,
+            database,
+            cx,
+            options,
+            query,
+            expansion,
+            None,
+            |_| Ok(()),
+            |id, _| eligible(id),
+            |result| result,
         )
     }
 
@@ -218,15 +235,20 @@ impl WriteTxn {
                     "transaction search must use the pinned transaction basis",
                 )));
             }
-            let view = database.read_session()
+            let view = database
+                .read_session()
                 .map_err(|error| ReadError::Read(error.into()))?;
-            view.snapshot.check_frontier(self.basis)
+            view.snapshot
+                .check_frontier(self.basis)
                 .map_err(|error| ReadError::Read(error.into()))?;
             let work = RefCell::new(Control {
                 cx,
                 budget: WorkBudget::new(options.policy.max_work_units),
                 scratch: 0,
-                limit: options.policy.max_source_scratch.min(expansion.limits.max_source_scratch),
+                limit: options
+                    .policy
+                    .max_source_scratch
+                    .min(expansion.limits.max_source_scratch),
                 interrupted: None,
                 observer,
                 refusal: None,
@@ -236,12 +258,14 @@ impl WriteTxn {
                 options.validate_graph_only(query)?;
                 if expansion.seeds.len() > expansion.limits.max_seed_ids {
                     return Err(BeaconError::ResourceLimit {
-                        resource: "expansion seed IDs", limit: expansion.limits.max_seed_ids,
+                        resource: "expansion seed IDs",
+                        limit: expansion.limits.max_seed_ids,
                     });
                 }
                 prepare_filter(&work)?;
                 let result = (|| {
-                    let membership = Membership::prepare(self, &view.snapshot, options, expansion, &work)?;
+                    let membership =
+                        Membership::prepare(self, &view.snapshot, options, expansion, &work)?;
                     let mut neighbors = OverlayNeighbors {
                         txn: self,
                         snapshot: &view.snapshot,
@@ -262,12 +286,20 @@ impl WriteTxn {
                         limit: expansion.limits.max_input_edges,
                     };
                     let hits = expand_from_membership_filtered(
-                        expansion.seeds, expansion.max_hops, expansion.include_seeds,
-                        query.graph_candidates, expansion.limits, &membership, &mut neighbors,
-                        |id, _| Ok(eligible(id, &work)), &mut Shared(&work),
+                        expansion.seeds,
+                        expansion.max_hops,
+                        expansion.include_seeds,
+                        query.graph_candidates,
+                        expansion.limits,
+                        &membership,
+                        &mut neighbors,
+                        |id, _| Ok(eligible(id, &work)),
+                        &mut Shared(&work),
                     )?;
                     let rows = query.fuse_graph_only(
-                        &hits, |id| eligible(id, &work), &mut Shared(&work),
+                        &hits,
+                        |id| eligible(id, &work),
+                        &mut Shared(&work),
                     )?;
                     work.borrow_mut().charge(1)?;
                     Ok(rows)

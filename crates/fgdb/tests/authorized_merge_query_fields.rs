@@ -15,8 +15,8 @@ use fgdb_gql::{
     PreparedGraphVertexUpsertQueryText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion,
-    PurposeContexts, VId,
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts,
+    VId,
 };
 use fgdb_warden::{
     Authority, CapabilityToken, Error, Grant, LimitDimension, QueryLimits, Restriction, Rights,
@@ -33,8 +33,7 @@ const ABSENT: PropertyKeyId = PropertyKeyId(3);
 const SECRET: PropertyKeyId = PropertyKeyId(10);
 const NOW: u64 = 100;
 const EXPIRES: u64 = 10_000;
-const STATEMENT: &str =
-    "MERGE (n:Visible {p:7}) ON CREATE SET n.q=n.p+1 ON MATCH SET n.q=n.p+1 \
+const STATEMENT: &str = "MERGE (n:Visible {p:7}) ON CREATE SET n.q=n.p+1 ON MATCH SET n.q=n.p+1 \
      SET n.q=n.q+1 RETURN n AS node,n.p AS p,n.q AS q, \
      n.secret AS private_value,n.missing AS missing_value ORDER BY node";
 
@@ -224,7 +223,14 @@ fn vertex_scalar_actions_and_return_have_scope_stable_admission_boundaries() {
                     let mut db = vertex_database(&commit, count, 0).await;
                     let before = (db.frontier().unwrap(), db.vertices().unwrap());
                     match vertex_execute(
-                        &mut db, &contexts, &authority, &limited, plural, &query, policy, || NOW,
+                        &mut db,
+                        &contexts,
+                        &authority,
+                        &limited,
+                        plural,
+                        &query,
+                        policy,
+                        || NOW,
                     )
                     .await
                     {
@@ -299,7 +305,14 @@ fn vertex_query_late_refusals_rollback_and_limit_zero_does_not_skip_actions() {
                 "MERGE (n:Visible {p:7}) ON MATCH SET n.q=8 SET n.secret=99 RETURN n.q",
             );
             let error = vertex_execute(
-                &mut db, &contexts, &authority, &token, plural, &forbidden, vertex_policy(), || NOW,
+                &mut db,
+                &contexts,
+                &authority,
+                &token,
+                plural,
+                &forbidden,
+                vertex_policy(),
+                || NOW,
             )
             .await
             .unwrap_err();
@@ -331,7 +344,14 @@ fn vertex_query_late_refusals_rollback_and_limit_zero_does_not_skip_actions() {
             let query = vertex_query(STATEMENT);
             let no_rows = token.attenuate(Restriction::MaxRows(0)).unwrap();
             let error = vertex_execute(
-                &mut db, &contexts, &authority, &no_rows, plural, &query, vertex_policy(), || NOW,
+                &mut db,
+                &contexts,
+                &authority,
+                &no_rows,
+                plural,
+                &query,
+                vertex_policy(),
+                || NOW,
             )
             .await
             .unwrap_err();
@@ -386,7 +406,14 @@ fn vertex_query_late_refusals_rollback_and_limit_zero_does_not_skip_actions() {
 
             let empty = vertex_query(&format!("{STATEMENT} LIMIT 0"));
             let (_, rows, completion) = vertex_execute(
-                &mut db, &contexts, &authority, &no_rows, plural, &empty, vertex_policy(), || NOW,
+                &mut db,
+                &contexts,
+                &authority,
+                &no_rows,
+                plural,
+                &empty,
+                vertex_policy(),
+                || NOW,
             )
             .await
             .unwrap();

@@ -15,13 +15,27 @@ fn asset(path: &str) -> Option<(&'static str, &'static [u8])> {
     // Exact paths only: no filesystem, percent-decoding, path traversal,
     // user-selected file, directory listing or SPA catch-all over API routes.
     Some(match path {
-        "/studio/" | "/studio/index.html" => ("text/html; charset=utf-8", include_bytes!("index.html")),
+        "/studio/" | "/studio/index.html" => {
+            ("text/html; charset=utf-8", include_bytes!("index.html"))
+        }
         "/studio/studio.css" => ("text/css; charset=utf-8", include_bytes!("studio.css")),
         "/studio/app.mjs" => ("text/javascript; charset=utf-8", include_bytes!("app.mjs")),
-        "/studio/model.mjs" => ("text/javascript; charset=utf-8", include_bytes!("model.mjs")),
-        "/studio/experience.mjs" => ("text/javascript; charset=utf-8", include_bytes!("experience.mjs")),
-        "/studio/graph.mjs" => ("text/javascript; charset=utf-8", include_bytes!("graph.mjs")),
-        "/studio/layout.mjs" => ("text/javascript; charset=utf-8", include_bytes!("layout.mjs")),
+        "/studio/model.mjs" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("model.mjs"),
+        ),
+        "/studio/experience.mjs" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("experience.mjs"),
+        ),
+        "/studio/graph.mjs" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("graph.mjs"),
+        ),
+        "/studio/layout.mjs" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("layout.mjs"),
+        ),
         "/studio/force.wasm" => ("application/wasm", include_bytes!("wasm/force.wasm")),
         "/studio/demo.mjs" => ("text/javascript; charset=utf-8", include_bytes!("demo.mjs")),
         "/studio/favicon.svg" => ("image/svg+xml", include_bytes!("favicon.svg")),
@@ -77,7 +91,10 @@ pub(super) fn respond(path: &str, method: &Method) -> Option<Response> {
         .with_header("Referrer-Policy", "no-referrer")
         .with_header("Cross-Origin-Resource-Policy", "same-origin")
         .with_header("Cross-Origin-Opener-Policy", "same-origin")
-        .with_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+        .with_header(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=()",
+        );
     if page.redirect {
         response = response.with_header("Location", "/studio/");
     }
@@ -116,10 +133,24 @@ mod tests {
 
     #[test]
     fn api_and_other_namespaces_never_fall_back_to_the_studio_shell() {
-        for path in ["/v1/health", "/v1/databases/graph/query", "/v1/databases/graph/write", "/studio-other", "/favicon.ico", "https://other/studio/"] {
+        for path in [
+            "/v1/health",
+            "/v1/databases/graph/query",
+            "/v1/databases/graph/write",
+            "/studio-other",
+            "/favicon.ico",
+            "https://other/studio/",
+        ] {
             assert!(route(path, &Method::Get).is_none(), "{path}");
         }
-        for path in ["/studio/../http.rs", "/studio/%2e%2e/http.rs", "/studio/tests/model.test.mjs", "/studio/.git/config", "/studio/missing", "/studio//app.mjs"] {
+        for path in [
+            "/studio/../http.rs",
+            "/studio/%2e%2e/http.rs",
+            "/studio/tests/model.test.mjs",
+            "/studio/.git/config",
+            "/studio/missing",
+            "/studio//app.mjs",
+        ] {
             assert_eq!(route(path, &Method::Get).unwrap().status, 404, "{path}");
         }
     }
@@ -151,9 +182,16 @@ mod tests {
         assert_eq!(page.status, 200);
         assert_eq!(page.mime, "application/wasm");
         assert!(page.body.starts_with(b"\0asm\x01\0\0\0"));
-        for path in ["/studio/wasm/force.c", "/studio/wasm/build.sh", "/studio/wasm/force.wasm"] {
+        for path in [
+            "/studio/wasm/force.c",
+            "/studio/wasm/build.sh",
+            "/studio/wasm/force.wasm",
+        ] {
             assert_eq!(route(path, &Method::Get).unwrap().status, 404);
         }
-        assert_eq!(route("/studio/force.wasm", &Method::Post).unwrap().status, 405);
+        assert_eq!(
+            route("/studio/force.wasm", &Method::Post).unwrap().status,
+            405
+        );
     }
 }

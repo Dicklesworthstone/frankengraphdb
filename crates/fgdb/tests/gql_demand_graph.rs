@@ -8,7 +8,9 @@ use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphSetText};
-use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
 use std::cell::Cell;
 
@@ -31,10 +33,15 @@ fn policy() -> GqlQueryPolicy {
 
 async fn open(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
     let mut db = Database::open_memory(cx, DatabaseKeys::new([0x58; 32], NS, [0x5a; 32]))
-        .await.unwrap();
+        .await
+        .unwrap();
     let mut batch = WriteBatch::new(R);
     for id in [1, 2, 3, 9] {
-        batch.create_vertex(VId(id), vec![LabelId(1)], vec![(BODY, CanonicalScalar::Bool(true))]);
+        batch.create_vertex(
+            VId(id),
+            vec![LabelId(1)],
+            vec![(BODY, CanonicalScalar::Bool(true))],
+        );
     }
     batch.add_edge(EId(1), VId(1), VId(2), vec![]);
     batch.add_edge(EId(2), VId(2), VId(3), vec![]);
@@ -66,10 +73,17 @@ fn statement(access: &str) -> String {
 }
 
 fn params(source: i64, eligible: &[i64]) -> GqlParameters {
-    GqlParameters::new().with_int64("source", source).unwrap()
-        .with_list("eligible", eligible.iter().map(|&id| {
-            GraphValue::Scalar(CanonicalScalar::Int(id))
-        }).collect()).unwrap()
+    GqlParameters::new()
+        .with_int64("source", source)
+        .unwrap()
+        .with_list(
+            "eligible",
+            eligible
+                .iter()
+                .map(|&id| GraphValue::Scalar(CanonicalScalar::Int(id)))
+                .collect(),
+        )
+        .unwrap()
 }
 
 fn rows(result: QueryResult) -> Vec<Vec<QueryValue>> {
@@ -85,7 +99,9 @@ fn int(n: i64) -> QueryValue {
 
 fn expected(id: u128, hops: i64) -> Vec<Vec<QueryValue>> {
     vec![vec![
-        QueryValue::Value(GraphValue::Vertex(VId(id))), int(hops), int(1),
+        QueryValue::Value(GraphValue::Vertex(VId(id))),
+        int(hops),
+        int(1),
         QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
         QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
     ]]
@@ -103,23 +119,40 @@ fn native_demand_reads_only_reached_vertices_and_rebinds_one_template() {
         for source in [1, 2] {
             let parameters = params(source, &[3]);
             let bound = template.bind_parameters(&parameters).unwrap();
-            let result = db.execute_graph_set_governed(&c.query(), &bound, tight).unwrap();
+            let result = db
+                .execute_graph_set_governed(&c.query(), &bound, tight)
+                .unwrap();
             assert!(result.rows.snapshot_records <= 3);
-            assert_eq!(rows(db.query(&c.query(), &text, &parameters, symbols, tight).unwrap()),
-                expected(3, 3 - source));
+            assert_eq!(
+                rows(
+                    db.query(&c.query(), &text, &parameters, symbols, tight)
+                        .unwrap()
+                ),
+                expected(3, 3 - source)
+            );
             for mode in ["indexed", "materialized"] {
-                let reference = db.query(&c.query(), &statement(mode), &parameters, symbols, policy()).unwrap();
+                let reference = db
+                    .query(&c.query(), &statement(mode), &parameters, symbols, policy())
+                    .unwrap();
                 assert_eq!(rows(reference), expected(3, 3 - source));
-                assert!(db.query(&c.query(), &statement(mode), &parameters, symbols, tight).is_err(),
-                    "{mode} still prepares the full vertex directory");
+                assert!(
+                    db.query(&c.query(), &statement(mode), &parameters, symbols, tight)
+                        .is_err(),
+                    "{mode} still prepares the full vertex directory"
+                );
             }
         }
         let text = "CALL hybrid.search(seeds => [9,9,999], max_hops => 0, \
             include_seeds => true, graph_access => 'demand', k => 1) \
             YIELD node, graph_hops, graph_rank, text_rank, vector_rank \
             RETURN node, graph_hops, graph_rank, text_rank, vector_rank";
-        assert_eq!(rows(db.query(&c.query(), text, &GqlParameters::new(), symbols, tight).unwrap()),
-            expected(9, 0));
+        assert_eq!(
+            rows(
+                db.query(&c.query(), text, &GqlParameters::new(), symbols, tight)
+                    .unwrap()
+            ),
+            expected(9, 0)
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -132,26 +165,44 @@ fn reported_source_scratch_and_output_capacity_replay_at_exact_limits() {
         for eligible in [vec![3], vec![]] {
             // Capacity exceeds the actual result even for the nonempty case.
             // The report must retain that reservation on exact-budget replay.
-            let text = statement("demand").replace("candidates => 1, k => 1", "candidates => 4, k => 4");
+            let text =
+                statement("demand").replace("candidates => 1, k => 1", "candidates => 4, k => 4");
             let parameters = params(1, &eligible);
-            let bound = PreparedGraphSetText::prepare(&text, symbols).unwrap()
-                .bind_parameters(&parameters).unwrap();
-            let baseline = db.execute_graph_set_governed(&c.query(), &bound, policy()).unwrap();
+            let bound = PreparedGraphSetText::prepare(&text, symbols)
+                .unwrap()
+                .bind_parameters(&parameters)
+                .unwrap();
+            let baseline = db
+                .execute_graph_set_governed(&c.query(), &bound, policy())
+                .unwrap();
             assert_eq!(baseline.value.len(), usize::from(!eligible.is_empty()));
-            assert!(baseline.evaluator.scratch_entries >= 9, "source and output reservation are reported");
-            let exact = GqlQueryPolicy::new(
-                baseline.rows.snapshot_records, baseline.rows.result_rows,
-                baseline.evaluator.work_units, baseline.evaluator.scratch_entries,
+            assert!(
+                baseline.evaluator.scratch_entries >= 9,
+                "source and output reservation are reported"
             );
-            let replay = db.execute_graph_set_governed(&c.query(), &bound, exact).unwrap();
+            let exact = GqlQueryPolicy::new(
+                baseline.rows.snapshot_records,
+                baseline.rows.result_rows,
+                baseline.evaluator.work_units,
+                baseline.evaluator.scratch_entries,
+            );
+            let replay = db
+                .execute_graph_set_governed(&c.query(), &bound, exact)
+                .unwrap();
             assert_eq!(replay.value, baseline.value);
             assert_eq!(replay.evaluator, baseline.evaluator);
             let mut short = exact;
             short.evaluator.max_work_units -= 1;
-            assert!(db.execute_graph_set_governed(&c.query(), &bound, short).is_err());
+            assert!(
+                db.execute_graph_set_governed(&c.query(), &bound, short)
+                    .is_err()
+            );
             let mut short = exact;
             short.evaluator.max_scratch_entries -= 1;
-            assert!(db.execute_graph_set_governed(&c.query(), &bound, short).is_err());
+            assert!(
+                db.execute_graph_set_governed(&c.query(), &bound, short)
+                    .is_err()
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -165,15 +216,29 @@ fn retained_native_demand_reads_do_not_follow_a_writers_newer_topology() {
         let pin = db.read_session().unwrap();
         let text = statement("demand");
         let parameters = params(1, &[3]);
-        let before = pin.query(&c.query(), &text, &parameters, symbols, policy()).unwrap();
+        let before = pin
+            .query(&c.query(), &text, &parameters, symbols, policy())
+            .unwrap();
         assert_eq!(rows(before), expected(3, 2));
         let mut edit = WriteBatch::new(R);
         edit.delete_vertex(VId(2));
         db.write(&c.commit(), edit).await.unwrap();
         db.compact(&c.commit()).await.unwrap();
-        assert!(rows(db.query(&c.query(), &text, &parameters, symbols, policy()).unwrap()).is_empty());
+        assert!(
+            rows(
+                db.query(&c.query(), &text, &parameters, symbols, policy())
+                    .unwrap()
+            )
+            .is_empty()
+        );
         drop(db);
-        assert_eq!(rows(pin.query(&c.query(), &text, &parameters, symbols, policy()).unwrap()), expected(3, 2));
+        assert_eq!(
+            rows(
+                pin.query(&c.query(), &text, &parameters, symbols, policy())
+                    .unwrap()
+            ),
+            expected(3, 2)
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -184,30 +249,85 @@ fn authorized_prepared_demand_masks_before_expansion_and_retains_live_expiry() {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let full = open(&c.commit(), true).await;
         let clean = open(&c.commit(), false).await;
-        let authority = Authority::new(AuthKey::from_seed(5204), NS, "demand-host", SchemaEpoch(0), 1).unwrap();
-        let mut grant = Grant::read_only("main", 1_000, QueryLimits {
-            max_nodes: 3, max_work: 1_000_000, max_rows: 10,
-        });
+        let authority = Authority::new(
+            AuthKey::from_seed(5204),
+            NS,
+            "demand-host",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1_000,
+            QueryLimits {
+                max_nodes: 3,
+                max_work: 1_000_000,
+                max_rows: 10,
+            },
+        );
         grant.labels = Scope::only([LabelId(1)]);
         grant.relations = Scope::only([R]);
         grant.properties = Scope::only([]);
         let token = authority.issue_at(&grant, 100).unwrap();
         let text = statement("demand");
-        let parameters = params(1, &[3,90]);
-        let reference = rows(clean.query(&c.query(), &text, &parameters, symbols, policy()).unwrap());
+        let parameters = params(1, &[3, 90]);
+        let reference = rows(
+            clean
+                .query(&c.query(), &text, &parameters, symbols, policy())
+                .unwrap(),
+        );
         assert_eq!(reference, expected(3, 2));
-        assert_ne!(rows(full.query(&c.query(), &text, &parameters, symbols, policy()).unwrap()), reference,
-            "the forbidden direct edge must be an active negative control");
-        assert_eq!(rows(full.query_authorized(
-            &c.query(), &authority, &token, "main", &text, &parameters, symbols, policy(), || 100,
-        ).unwrap()), reference);
+        assert_ne!(
+            rows(
+                full.query(&c.query(), &text, &parameters, symbols, policy())
+                    .unwrap()
+            ),
+            reference,
+            "the forbidden direct edge must be an active negative control"
+        );
+        assert_eq!(
+            rows(
+                full.query_authorized(
+                    &c.query(),
+                    &authority,
+                    &token,
+                    "main",
+                    &text,
+                    &parameters,
+                    symbols,
+                    policy(),
+                    || 100,
+                )
+                .unwrap()
+            ),
+            reference
+        );
         let now = Cell::new(100_u64);
-        let mut session = full.authorized_read_session(
-            &c.query(), &authority, &token, "main", symbols, policy(), || now.get(),
-        ).unwrap();
+        let mut session = full
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                symbols,
+                policy(),
+                || now.get(),
+            )
+            .unwrap();
         let prepared = session.prepare(&c.query(), &text, &parameters).unwrap();
-        assert_eq!(rows(session.execute(&c.query(), &prepared, &parameters).unwrap()), reference);
-        assert!(rows(session.execute(&c.query(), &prepared, &params(1, &[])).unwrap()).is_empty());
+        assert_eq!(
+            rows(session.execute(&c.query(), &prepared, &parameters).unwrap()),
+            reference
+        );
+        assert!(
+            rows(
+                session
+                    .execute(&c.query(), &prepared, &params(1, &[]))
+                    .unwrap()
+            )
+            .is_empty()
+        );
         now.set(1_001);
         assert!(session.execute(&c.query(), &prepared, &parameters).is_err());
         assert!(session.is_closed());
@@ -229,14 +349,36 @@ fn transaction_demand_observes_staged_writes_without_dropping_modalities() {
         let digest = txn.staged_effect_digest().unwrap();
         for tail in ["", " LIMIT 0"] {
             let text = format!("{}{tail}", statement("demand"));
-            let result = rows(txn.query(&db, &c.query(), &text, &params(1, &[11]), symbols, policy()).unwrap());
-            assert_eq!(result, if tail.is_empty() { expected(11, 2) } else { vec![] });
+            let result = rows(
+                txn.query(&db, &c.query(), &text, &params(1, &[11]), symbols, policy())
+                    .unwrap(),
+            );
+            assert_eq!(
+                result,
+                if tail.is_empty() {
+                    expected(11, 2)
+                } else {
+                    vec![]
+                }
+            );
             assert_eq!(txn.staged_effect_digest().unwrap(), digest);
             assert_eq!(db.frontier().unwrap(), basis);
         }
         for access in ["indexed", "materialized"] {
-            assert_eq!(rows(txn.query(&db, &c.query(), &statement(access), &params(1, &[11]), symbols, policy()).unwrap()),
-                expected(11, 2));
+            assert_eq!(
+                rows(
+                    txn.query(
+                        &db,
+                        &c.query(),
+                        &statement(access),
+                        &params(1, &[11]),
+                        symbols,
+                        policy()
+                    )
+                    .unwrap()
+                ),
+                expected(11, 2)
+            );
         }
         for modality in [
             "text => 'graph', text_property => 'body'",
@@ -246,10 +388,29 @@ fn transaction_demand_observes_staged_writes_without_dropping_modalities() {
                 "CALL hybrid.search(seeds => [1], max_hops => 2, \
                  graph_access => 'demand', {modality}) YIELD node RETURN node LIMIT 0"
             );
-            let error = db.query(&c.query(), &text, &GqlParameters::new(), symbols, policy()).unwrap_err();
-            assert!(error.to_string().contains("demand graph access requires a graph-only read"));
-            let error = txn.query(&db, &c.query(), &text, &GqlParameters::new(), symbols, policy()).unwrap_err();
-            assert!(error.to_string().contains("demand graph access requires a graph-only read"));
+            let error = db
+                .query(&c.query(), &text, &GqlParameters::new(), symbols, policy())
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("demand graph access requires a graph-only read")
+            );
+            let error = txn
+                .query(
+                    &db,
+                    &c.query(),
+                    &text,
+                    &GqlParameters::new(),
+                    symbols,
+                    policy(),
+                )
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("demand graph access requires a graph-only read")
+            );
             assert_eq!(txn.staged_effect_digest().unwrap(), digest);
             assert_eq!(db.frontier().unwrap(), basis);
         }
@@ -270,10 +431,25 @@ fn malformed_eligibility_and_late_expressions_refuse_even_under_limit_zero() {
             "CALL hybrid.search(seeds => [1], max_hops => 2, graph_access => 'demand', eligible => [-1]) YIELD node RETURN node LIMIT 0",
             "CALL hybrid.search(seeds => [1], max_hops => 2, graph_access => 'demand') YIELD node RETURN 1 / 0 AS fail LIMIT 0",
         ] {
-            assert!(db.query(&c.query(), text, &GqlParameters::new(), symbols, policy()).is_err(), "{text}");
+            assert!(
+                db.query(&c.query(), text, &GqlParameters::new(), symbols, policy())
+                    .is_err(),
+                "{text}"
+            );
         }
-        assert_eq!(rows(db.query(&c.query(), &statement("demand"), &params(1, &[3]), symbols, policy()).unwrap()),
-            expected(3, 2));
+        assert_eq!(
+            rows(
+                db.query(
+                    &c.query(),
+                    &statement("demand"),
+                    &params(1, &[3]),
+                    symbols,
+                    policy()
+                )
+                .unwrap()
+            ),
+            expected(3, 2)
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -299,14 +475,43 @@ fn transaction_native_demand_uses_a_bounded_reached_source_and_fresh_overlay_eac
         for source in [1, 2] {
             let parameters = params(source, &[11]);
             let bound = prepared.bind_parameters(&parameters).unwrap();
-            let result = txn.execute_graph_set_governed(&db, &c.query(), &bound, tight).unwrap();
+            let result = txn
+                .execute_graph_set_governed(&db, &c.query(), &bound, tight)
+                .unwrap();
             assert!(result.rows.snapshot_records <= 8);
-            assert_eq!(rows(txn.query(&db, &c.query(), &text, &parameters, symbols, tight).unwrap()),
-                expected(11, 3 - source));
+            assert_eq!(
+                rows(
+                    txn.query(&db, &c.query(), &text, &parameters, symbols, tight)
+                        .unwrap()
+                ),
+                expected(11, 3 - source)
+            );
             for mode in ["indexed", "materialized"] {
-                assert!(txn.query(&db, &c.query(), &statement(mode), &parameters, symbols, tight).is_err());
-                assert_eq!(rows(txn.query(&db, &c.query(), &statement(mode), &parameters, symbols, policy()).unwrap()),
-                    expected(11, 3 - source));
+                assert!(
+                    txn.query(
+                        &db,
+                        &c.query(),
+                        &statement(mode),
+                        &parameters,
+                        symbols,
+                        tight
+                    )
+                    .is_err()
+                );
+                assert_eq!(
+                    rows(
+                        txn.query(
+                            &db,
+                            &c.query(),
+                            &statement(mode),
+                            &parameters,
+                            symbols,
+                            policy()
+                        )
+                        .unwrap()
+                    ),
+                    expected(11, 3 - source)
+                );
             }
         }
         assert_eq!(txn.staged_effect_digest().unwrap(), digest);
@@ -314,11 +519,29 @@ fn transaction_native_demand_uses_a_bounded_reached_source_and_fresh_overlay_eac
         let mut unlabel = WriteBatch::new(R);
         unlabel.set_vertex_label(VId(2), LabelId(1), false);
         txn.write(&mut db, unlabel).unwrap();
-        assert!(rows(txn.query(&db, &c.query(), &text, &params(1, &[11]), symbols, tight).unwrap()).is_empty());
+        assert!(
+            rows(
+                txn.query(&db, &c.query(), &text, &params(1, &[11]), symbols, tight)
+                    .unwrap()
+            )
+            .is_empty()
+        );
         txn.rollback_to_savepoint(&db, "linked").unwrap();
-        assert_eq!(rows(txn.query(&db, &c.query(), &text, &params(1, &[11]), symbols, tight).unwrap()), expected(11, 2));
+        assert_eq!(
+            rows(
+                txn.query(&db, &c.query(), &text, &params(1, &[11]), symbols, tight)
+                    .unwrap()
+            ),
+            expected(11, 2)
+        );
         txn.commit(&mut db, &c.commit()).await.unwrap();
-        assert_eq!(rows(db.query(&c.query(), &text, &params(1, &[11]), symbols, policy()).unwrap()), expected(11, 2));
+        assert_eq!(
+            rows(
+                db.query(&c.query(), &text, &params(1, &[11]), symbols, policy())
+                    .unwrap()
+            ),
+            expected(11, 2)
+        );
         assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -331,8 +554,10 @@ fn transaction_demand_exact_allowances_cover_missing_seeds_without_fabricated_re
         let db = open(&c.commit(), false).await;
         for (source, eligible) in [(1, vec![3]), (9, vec![]), (999, vec![])] {
             let text = statement("demand");
-            let bound = PreparedGraphSetText::prepare(&text, symbols).unwrap()
-                .bind_parameters(&params(source, &eligible)).unwrap();
+            let bound = PreparedGraphSetText::prepare(&text, symbols)
+                .unwrap()
+                .bind_parameters(&params(source, &eligible))
+                .unwrap();
             // Fresh transactions, so an earlier read cannot warm the witness
             // set and make a deliberately short allowance spuriously succeed.
             let execute = |allowance| {
@@ -349,8 +574,10 @@ fn transaction_demand_exact_allowances_cover_missing_seeds_without_fabricated_re
             assert!(baseline.evaluator.work_units > 0);
             assert!(baseline.evaluator.scratch_entries > 0);
             let exact = GqlQueryPolicy::new(
-                baseline.rows.snapshot_records, baseline.rows.result_rows,
-                baseline.evaluator.work_units, baseline.evaluator.scratch_entries,
+                baseline.rows.snapshot_records,
+                baseline.rows.result_rows,
+                baseline.evaluator.work_units,
+                baseline.evaluator.scratch_entries,
             );
             let actual = execute(exact).unwrap();
             assert_eq!(actual.value, baseline.value);
@@ -385,8 +612,11 @@ fn transaction_demand_empty_and_failed_native_reads_retain_dependencies_after_ro
             );
             let parameters = GqlParameters::new().with_int64("source", source).unwrap();
             let result = txn.query(&db, &c.query(), &text, &parameters, symbols, policy());
-            if case == 3 { assert!(result.is_err()); }
-            else { assert!(rows(result.unwrap()).is_empty()); }
+            if case == 3 {
+                assert!(result.is_err());
+            } else {
+                assert!(rows(result.unwrap()).is_empty());
+            }
             txn.rollback_to_savepoint(&db, "before-read").unwrap();
             let mut concurrent = WriteBatch::new(R);
             match case {
@@ -397,11 +627,23 @@ fn transaction_demand_empty_and_failed_native_reads_retain_dependencies_after_ro
             db.write(&c.commit(), concurrent).await.unwrap();
             let result = txn.finish(&mut db, &c.commit()).await;
             if case == 0 {
-                assert!(result.is_ok(), "zero-hop demand must not register an all-vertex scan: {result:?}");
+                assert!(
+                    result.is_ok(),
+                    "zero-hop demand must not register an all-vertex scan: {result:?}"
+                );
             } else {
-                assert!(matches!(result, Err(fgdb::WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins {
-                    law: "FG-LAW-FCW-READ-01", ..
-                }))), "case {case}: {result:?}");
+                assert!(
+                    matches!(
+                        result,
+                        Err(fgdb::WriteTxnError::Write(
+                            fgdb::WriteError::FirstCommitterWins {
+                                law: "FG-LAW-FCW-READ-01",
+                                ..
+                            }
+                        ))
+                    ),
+                    "case {case}: {result:?}"
+                );
             }
         }
         assert_eq!(c.outstanding_obligations(), 0);

@@ -282,8 +282,7 @@ impl WriteTxn {
             let prepare_filter = |work: &RefCell<Control<'_>>| {
                 let source_scratch = {
                     let control = work.borrow();
-                    u64::try_from(control.limit.saturating_sub(control.scratch))
-                        .unwrap_or(u64::MAX)
+                    u64::try_from(control.limit.saturating_sub(control.scratch)).unwrap_or(u64::MAX)
                 };
                 let prepared = EndpointFilter::prepare_with_admission(
                     eligible,
