@@ -437,6 +437,51 @@ fn signed_refusal_points_of_a_hit_match_a_fresh_build() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// Kernel units charged in runs (fgdb-62mzm) admit and refuse exactly where
+/// charging every unit alone does: the same smallest admitting MaxWork, the
+/// same refusal one unit below it and the same admitted rows, with no more
+/// query-context polls.
+#[test]
+fn kernel_runs_admit_and_refuse_at_the_per_unit_threshold() {
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x0b7b_0009, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let token = issuer().issue_at(&open(), 100).unwrap();
+        for (text, direction) in CALLS {
+            let options = options(direction);
+            let threshold = |runs: bool| {
+                super::super::KERNEL_RUNS.with(|cell| cell.set(runs));
+                let attenuated = |value| token.attenuate(Restriction::MaxWork(value)).unwrap();
+                let (mut low, mut high) = (0, 10_000_000);
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    if call(&db, &cx, &attenuated(middle), text, options, || 100).is_ok() {
+                        high = middle;
+                    } else {
+                        low = middle + 1;
+                    }
+                }
+                assert!(low > 0, "{text}");
+                let refused = footprint(&db, &cx, &attenuated(low - 1), text, options);
+                let admitted = footprint(&db, &cx, &attenuated(low), text, options);
+                super::super::KERNEL_RUNS.with(|cell| cell.set(true));
+                (low, refused, admitted)
+            };
+            let (unit_low, unit_refused, unit_admitted) = threshold(false);
+            let (run_low, run_refused, run_admitted) = threshold(true);
+            assert_eq!(run_low, unit_low, "{text}: admitting MaxWork");
+            assert!(run_refused.0.starts_with("Err("), "{run_refused:?}");
+            assert_eq!(run_refused.0, unit_refused.0, "{text}: refusal");
+            assert_eq!(run_admitted.0, unit_admitted.0, "{text}: rows");
+            assert!(run_admitted.1 <= unit_admitted.1, "{text}: polls");
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// A capability with any label, relation or property scope builds its own
 /// projection every time: it never sees the unrestricted projection cached
 /// before it, and leaves nothing for an unrestricted caller. A database that

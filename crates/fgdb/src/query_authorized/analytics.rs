@@ -19,9 +19,9 @@ use crate::query::prism::{
 use crate::{Database, QueryError, ReadError, Snapshot};
 use asupersync::fs::Vfs;
 use fgdb_prism::{
-    Directedness, FnxCallSpec, FnxExecutionError, FnxGraphKind, FnxParameters, FnxReadError,
-    FnxReadOptions, FnxValue, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge,
-    ProjectionError, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
+    Directedness, FnxCallSpec, FnxExecutionError, FnxGraphKind, FnxMeter, FnxParameters,
+    FnxReadError, FnxReadOptions, FnxValue, ParallelEdgePolicy, ProjectionBuildError,
+    ProjectionEdge, ProjectionError, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
 };
 use fgdb_types::{QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, PlannerPredicates};
@@ -253,7 +253,24 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
     limits.max_result_rows = limits
         .max_result_rows
         .min(usize::try_from(signed_rows).unwrap_or(usize::MAX));
-    let result = call.execute(&graph, limits, checkpoint);
+    // The kernel's units are charged to the signed permit in runs, and the
+    // caller meter still sees each one. Nothing else borrows either while the
+    // kernel runs.
+    let result = call.execute(
+        &graph,
+        limits,
+        KernelMeter {
+            execution: &mut execution.borrow_mut(),
+            observe: &mut *observe.borrow_mut(),
+        },
+    );
+    // Every unit the kernel spent is charged before its result or its own
+    // error is judged, as it was when each was charged on the spot. A kernel
+    // our control stopped keeps that refusal.
+    let settled = execution.borrow_mut().settle();
+    if !matches!(result, Err(FnxExecutionError::Cancelled(_))) {
+        settled.map_err(control_error)?;
+    }
     // Translate a signed-row refusal back to Warden, without allocating a
     // forbidden result first. The shared delivery gate still checks successful
     // results with fresh time; zero rows do not bypass retirement or expiry.
@@ -398,6 +415,30 @@ fn build(
         ProjectionBuildError::Cancelled(error) => error,
         ProjectionBuildError::Projection(error) => Error::Projection(error),
     })
+}
+
+/// A Prism kernel's meter over the live execution: work units charged in runs
+/// (fgdb-62mzm), each still observed by the caller meter in order.
+struct KernelMeter<'m, 'cx, 'permit, Clock, Observe> {
+    execution: &'m mut Execution<'cx, 'permit, Clock>,
+    observe: &'m mut Observe,
+}
+
+impl<Clock, Observe> FnxMeter<QueryError> for KernelMeter<'_, '_, '_, Clock, Observe>
+where
+    Clock: FnMut() -> u64,
+    Observe: FnMut(SourceEvent) -> Result<(), QueryError>,
+{
+    fn unit(&mut self) -> Result<(), QueryError> {
+        self.units(1)
+    }
+    fn units(&mut self, n: usize) -> Result<(), QueryError> {
+        self.execution.kernel_units(n as u64)?;
+        for _ in 0..n {
+            (self.observe)(SourceEvent::Work)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

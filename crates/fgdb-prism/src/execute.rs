@@ -272,6 +272,51 @@ impl KernelValues {
     }
 }
 
+/// A kernel's cancellable work meter. `units(n)` spends n units at once and
+/// by default is n calls of `unit`, so a plain closure meters exactly as one
+/// checkpoint per unit. A host may charge a run in one call, with the same
+/// unit total and refusal ordinal. A kernel asks for at most
+/// [`FNX_METER_RUN`] units at a time, so cancellation is observed at least
+/// that often.
+pub trait FnxMeter<C> {
+    fn unit(&mut self) -> Result<(), C>;
+    fn units(&mut self, n: usize) -> Result<(), C> {
+        for _ in 0..n {
+            self.unit()?;
+        }
+        Ok(())
+    }
+}
+
+/// The most units a kernel requests in one [`FnxMeter::units`] call.
+pub const FNX_METER_RUN: usize = 64;
+
+impl<C, F: FnMut() -> Result<(), C>> FnxMeter<C> for F {
+    fn unit(&mut self) -> Result<(), C> {
+        self()
+    }
+}
+
+/// `units` over `0..len` in runs, then `visit` each index of the run.
+fn metered<C>(
+    len: usize,
+    meter: &mut impl FnxMeter<C>,
+    mut visit: impl FnMut(usize) -> Result<(), FnxExecutionError<C>>,
+) -> Result<(), FnxExecutionError<C>> {
+    let mut start = 0;
+    while start < len {
+        let end = len.min(start + FNX_METER_RUN);
+        meter
+            .units(end - start)
+            .map_err(FnxExecutionError::Cancelled)?;
+        for index in start..end {
+            visit(index)?;
+        }
+        start = end;
+    }
+    Ok(())
+}
+
 /// Preserve the pinned fnx scalar evaluation order exactly: ascending fixed-
 /// width vertex names, ascending targets, division before multiplication,
 /// dangling-mass redistribution, then an ordered L1 convergence test. Repeating
@@ -281,7 +326,7 @@ fn pagerank<C>(
     graph: &SnapshotGraphView,
     options: crate::PageRankOptions,
     arcs: usize,
-    checkpoint: &mut impl FnMut() -> Result<(), C>,
+    meter: &mut impl FnxMeter<C>,
 ) -> Result<(Vec<f64>, ComplexityWitness), FnxExecutionError<C>> {
     let n = graph.node_count();
     let mut witness = ComplexityWitness {
@@ -299,14 +344,14 @@ fn pagerank<C>(
     let mut next = reserve(n)?;
     let population = n as f64;
     for source in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        meter.unit().map_err(FnxExecutionError::Cancelled)?;
         let (targets, weights) = graph
             .projected_row(source)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
         let mut sum = 0.0;
         if options.weighted() {
             for &weight in weights {
-                checkpoint().map_err(FnxExecutionError::Cancelled)?;
+                meter.unit().map_err(FnxExecutionError::Cancelled)?;
                 if weight < 0.0 {
                     return Err(FnxExecutionError::NegativeWeight);
                 }
@@ -324,49 +369,64 @@ fn pagerank<C>(
     }
     let base = (1.0 - options.alpha()) / population;
     for _ in 0..options.max_iter() {
+        // Each pass spends one unit per vertex or arc, as before, but asks
+        // the meter for up to FNX_METER_RUN of them at once; the arithmetic
+        // and its order are unchanged.
         let mut dangling_mass = 0.0;
-        for source in 0..n {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        metered(n, meter, |source| {
             if sums[source] == 0.0 {
                 dangling_mass += ranks[source];
             }
-        }
+            Ok(())
+        })?;
         let initial = base + options.alpha() * dangling_mass / population;
-        for value in &mut next {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
-            *value = initial;
-        }
+        metered(n, meter, |index| {
+            next[index] = initial;
+            Ok(())
+        })?;
         for source in 0..n {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
             let (targets, weights) = graph
                 .projected_row(source)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
             let push = options.alpha() * ranks[source];
             let sum = sums[source];
-            for (offset, &target) in targets.iter().enumerate() {
-                checkpoint().map_err(FnxExecutionError::Cancelled)?;
-                let share = if options.weighted() {
-                    if sum > 0.0 {
-                        weights[offset] / sum
+            // The row's own unit leads its first run of arcs.
+            let mut lead = 1;
+            let mut offset = 0;
+            loop {
+                let end = targets.len().min(offset + FNX_METER_RUN - lead);
+                meter
+                    .units(lead + end - offset)
+                    .map_err(FnxExecutionError::Cancelled)?;
+                lead = 0;
+                for at in offset..end {
+                    let share = if options.weighted() {
+                        if sum > 0.0 {
+                            weights[at] / sum
+                        } else {
+                            weights[at]
+                        }
+                    } else if sum > 0.0 {
+                        1.0 / sum
                     } else {
-                        weights[offset]
-                    }
-                } else if sum > 0.0 {
-                    1.0 / sum
-                } else {
-                    0.0
-                };
-                next[target] += push * share;
+                        0.0
+                    };
+                    next[targets[at]] += push * share;
+                }
+                offset = end;
+                if offset == targets.len() {
+                    break;
+                }
             }
         }
         let mut delta = 0.0;
-        for index in 0..n {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        metered(n, meter, |index| {
             if !next[index].is_finite() || next[index] < 0.0 {
                 return Err(FnxExecutionError::InvalidNumericResult);
             }
             delta += (next[index] - ranks[index]).abs();
-        }
+            Ok(())
+        })?;
         // Swapping changes no arithmetic and avoids an uncheckpointed O(n)
         // copy. The old ranks buffer is overwritten during the next pass.
         std::mem::swap(&mut ranks, &mut next);
@@ -398,9 +458,9 @@ impl FnxCallSpec {
         &self,
         graph: &SnapshotGraphView,
         limits: FnxExecutionLimits,
-        mut checkpoint: impl FnMut() -> Result<(), C>,
+        mut checkpoint: impl FnxMeter<C>,
     ) -> Result<FnxResult, FnxExecutionError<C>> {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let algorithm = self.algorithm();
         let signature = self.signature();
         let numeric_profile = self.numeric_profile();
@@ -430,7 +490,7 @@ impl FnxCallSpec {
         }
         let mut arcs = 0usize;
         for source in 0..n {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
             let neighbors = graph
                 .neighbors_indices(source)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
@@ -455,7 +515,9 @@ impl FnxCallSpec {
                 Some(crate::shortest_path::estimated_work::<C>(n, arcs)?)
             }
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
-                Some(crate::clustering::estimated_work(graph, &mut checkpoint)?)
+                Some(crate::clustering::estimated_work(graph, &mut || {
+                    checkpoint.unit()
+                })?)
             }
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs)
@@ -500,12 +562,10 @@ impl FnxCallSpec {
                 }
             }
             FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
-                let output = crate::shortest_path::run(
-                    graph,
-                    options,
-                    limits.max_result_rows,
-                    &mut checkpoint,
-                )?;
+                let output =
+                    crate::shortest_path::run(graph, options, limits.max_result_rows, &mut || {
+                        checkpoint.unit()
+                    })?;
                 KernelOutput {
                     values: KernelValues::WeightedDistances(output.distances),
                     row_count: output.row_count,
@@ -513,7 +573,7 @@ impl FnxCallSpec {
                 }
             }
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
-                let output = crate::clustering::run(graph, &mut checkpoint)?;
+                let output = crate::clustering::run(graph, &mut || checkpoint.unit())?;
                 let values = if matches!(algorithm, FnxAlgorithm::Triangles) {
                     KernelValues::Counts(output.triangles)
                 } else {
@@ -526,18 +586,20 @@ impl FnxCallSpec {
                 }
             }
             FnxAlgorithm::Foundation(algorithm) => {
-                crate::foundation::run(graph, algorithm, &mut checkpoint)?
+                crate::foundation::run(graph, algorithm, &mut || checkpoint.unit())?
             }
-            _ => crate::traversal::run(graph, algorithm, limits.max_result_rows, &mut checkpoint)?,
+            _ => crate::traversal::run(graph, algorithm, limits.max_result_rows, &mut || {
+                checkpoint.unit()
+            })?,
         };
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let mut rows = reserve(output.row_count)?;
         let mut result_hash = Hasher::new();
         result_hash.update(b"fgdb:prism:result-rows:v3");
         result_hash.update(&(output.row_count as u128).to_le_bytes());
         result_hash.update(&self.digest().0);
         for index in 0..n {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
             if !output.values.contains(index) {
                 continue;
             }
@@ -616,7 +678,7 @@ impl FnxCallSpec {
             witness,
             digest: hash.finalize(),
         };
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         Ok(FnxResult {
             columns: self
                 .outputs()

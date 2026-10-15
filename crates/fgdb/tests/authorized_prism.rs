@@ -446,9 +446,35 @@ fn signed_limits_and_native_limits_are_cumulative_and_independent() {
             },
         )
         .unwrap();
-        // Every clock sample is a work charge except authentication, four
-        // admitted-node charges, and the final row charge. No stage resets it.
-        let work = clocks - 6;
+        // The exact signed work is the smallest MaxWork that admits the call;
+        // no stage resets it. Every clock sample beside authentication, four
+        // admitted-node charges and the final row charge charges at least one
+        // unit. Kernel units are charged in runs (fgdb-62mzm), so a sample may
+        // charge more than one and the total is found by bisection.
+        let admits = |work| {
+            db.call_fnx_authorized(
+                &cx,
+                &issuer,
+                &token.attenuate(Restriction::MaxWork(work)).unwrap(),
+                BRANCH,
+                CC,
+                &FnxParameters::new(),
+                opt,
+                || 100,
+            )
+            .is_ok()
+        };
+        let (mut low, mut high) = (0, clocks * 64);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if admits(middle) {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        let work = low;
+        assert!(work >= clocks - 6, "work {work}, clock samples {clocks}");
         let exact_work = token.attenuate(Restriction::MaxWork(work)).unwrap();
         read(&db, &cx, &issuer, &exact_work, CC, opt);
         let short = token.attenuate(Restriction::MaxWork(work - 1)).unwrap();
