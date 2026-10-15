@@ -252,6 +252,10 @@ struct SingleScan<'p> {
     /// vertex order (the root order `RootGroups` requires). Otherwise only
     /// an ungrouped aggregate of vertex columns qualifies, edge by edge.
     anchored: bool,
+    /// The aggregate is ungrouped COUNT(*) over vertex columns: every passing
+    /// edge is the same input, whatever its endpoints, and no column read
+    /// can refuse, so the scan only counts them.
+    counts_only: bool,
 }
 
 fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
@@ -294,6 +298,14 @@ fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
     if !anchored && !(vertices && aggregate.keys.is_empty()) {
         return None;
     }
+    let counts_only = aggregate.keys.is_empty()
+        && aggregate
+            .aggregates
+            .iter()
+            .all(|bound| bound.function == GraphAggregateFunction::CountRows)
+        && columns
+            .iter()
+            .all(|column| matches!(column, ValueProjection::Vertex { .. }));
     Some(SingleScan {
         access: EdgeAccess {
             source: 0,
@@ -303,6 +315,7 @@ fn single_scan(aggregate: &PreparedGraphAggregate) -> Option<SingleScan<'_>> {
         },
         columns,
         anchored,
+        counts_only,
     })
 }
 
@@ -362,9 +375,10 @@ where
     // The anchor of the newest passing edge and how many passing edges
     // followed its run's first, not yet added to its count.
     let mut run: Option<(VId, u64)> = None;
-    // No column reads a binding (COUNT(*) alone): every passing edge is the
-    // same input, so the scan only counts them, keeping the first binding.
-    let constant = scan.columns.is_empty();
+    // No column reads a binding, or an ungrouped COUNT(*) reads only vertex
+    // columns it never uses: every passing edge is the same input, so the
+    // scan only counts them, keeping the first binding.
+    let constant = scan.columns.is_empty() || scan.counts_only;
     let mut total: Option<(u64, VId, VId)> = None;
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
