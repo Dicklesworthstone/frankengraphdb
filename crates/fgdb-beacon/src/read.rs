@@ -12,12 +12,14 @@ use crate::{
     Neighbor, TextHit, TextMatch, VectorSearch, WorkControl,
 };
 
+mod numeric;
+
 /// Explicit scalar-property projection. Missing/null text omits that lane;
 /// ANY missing/null coordinate omits the vector lane. A present wrong-typed
 /// value refuses the read. Absent lanes are never filled with synthetic zeros.
 ///
-/// Numeric coordinates must be finite and exactly representable as f32. This
-/// never silently rounds a stored f64, integer or Decimal128. Repeated keys
+/// Numeric coordinates are exact f32 by default; rounding requires the explicit
+/// `CoordinatesRoundedF32` encoding. Stored values are never changed. Repeated keys
 /// deliberately repeat coordinates. A caller must mask keys BEFORE resolving
 /// their values. `encoding` says how the vector keys hold coordinates.
 #[derive(Clone, Debug)]
@@ -40,6 +42,12 @@ pub enum VectorEncoding {
     /// finite: an embedding stored as one property. Any other length or a
     /// non-byte value refuses the read rather than truncating or padding.
     PackedF32Le,
+    /// One key per coordinate, rounded explicitly to binary32. Integers and
+    /// finite binary64 values use Rust's numeric cast; exact decimals parse
+    /// directly to f32, without an intervening binary64 rounding. Overflow and
+    /// nonfinite input refuse. Underflow to a subnormal or signed zero is allowed.
+    /// Search distances are over these projected f32s, not the original values.
+    CoordinatesRoundedF32,
 }
 
 impl<K> Projection<K> {
@@ -47,7 +55,9 @@ impl<K> Projection<K> {
     #[must_use]
     pub fn fits(&self, dimensions: usize) -> bool {
         match self.encoding {
-            VectorEncoding::Coordinates => self.vector.len() == dimensions,
+            VectorEncoding::Coordinates | VectorEncoding::CoordinatesRoundedF32 => {
+                self.vector.len() == dimensions
+            }
             VectorEncoding::PackedF32Le => self.vector.len() == 1 && dimensions > 0,
         }
     }
@@ -382,6 +392,9 @@ impl<K: Copy> Projection<K> {
                 for &key in &self.vector {
                     work.charge(1)?;
                     let value = match property(key) {
+                        Some(value) if self.encoding == VectorEncoding::CoordinatesRoundedF32 => {
+                            numeric::rounded(value, work)?
+                        }
                         Some(CanonicalScalar::Int(value)) => {
                             let narrowed = *value as f32;
                             if narrowed as i128 != i128::from(*value) {
