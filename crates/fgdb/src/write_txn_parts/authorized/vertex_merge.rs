@@ -7,8 +7,9 @@ use crate::write_txn::authorized::{
 };
 use crate::write_txn::{
     collect_vertex_merge, vertex_upsert_actions, vertex_upsert_labels, vertex_upsert_properties,
-    vertex_upsert_property, vertex_upsert_query_selection_policy, vertex_upsert_returning,
+    vertex_upsert_query_selection_policy, vertex_upsert_returning,
 };
+use fgdb_delta_types::ElementId;
 use fgdb_gql::insertion::GraphInsertIntent;
 use fgdb_gql::{
     GqlQueryError, GraphVertexMergeError, GraphVertexMergeOutcome, GraphVertexMergePolicy,
@@ -171,12 +172,24 @@ impl<V: Vfs + Clone> Database<V> {
                                 control(fgdb_gql::GlaExecutionEvent::ScratchEntry)?;
                                 return Ok(fgdb_types::CanonicalScalar::Null);
                             }
-                            vertex_upsert_property(
+                            selection::property(
                                 transaction,
                                 self,
-                                outcome.vertex(),
+                                ElementId::Vertex(outcome.vertex()),
                                 key,
+                                verified.predicates(),
+                                || {
+                                    query_cx
+                                        .checkpoint()
+                                        .map_err(WriteTxnError::Interrupted)
+                                        .map_err(GqlQueryError::Interrupted)?;
+                                    controls
+                                        .borrow_mut()
+                                        .poll()
+                                        .map_err(GqlQueryError::Interrupted)
+                                },
                                 control,
+                                source,
                             )
                         },
                         |control| {
@@ -365,7 +378,24 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     return Ok(fgdb_types::CanonicalScalar::Null);
                 }
                 let state = state.borrow();
-                vertex_upsert_property(state.0, state.1, outcome.vertex(), key, control)
+                selection::property(
+                    state.0,
+                    state.1,
+                    ElementId::Vertex(outcome.vertex()),
+                    key,
+                    scope,
+                    || {
+                        cx.checkpoint()
+                            .map_err(WriteTxnError::Interrupted)
+                            .map_err(GqlQueryError::Interrupted)?;
+                        controls
+                            .borrow_mut()
+                            .poll()
+                            .map_err(GqlQueryError::Interrupted)
+                    },
+                    control,
+                    |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)),
+                )
             },
             |batch| {
                 let mut state = state.borrow_mut();
@@ -704,7 +734,24 @@ mod all_targets {
                         return Ok(fgdb_types::CanonicalScalar::Null);
                     }
                     let state = state.borrow();
-                    vertex_upsert_property(state.0, state.1, outcome.vertex(), key, control)
+                    selection::property(
+                        state.0,
+                        state.1,
+                        ElementId::Vertex(outcome.vertex()),
+                        key,
+                        scope,
+                        || {
+                            cx.checkpoint()
+                                .map_err(WriteTxnError::Interrupted)
+                                .map_err(GqlQueryError::Interrupted)?;
+                            controls
+                                .borrow_mut()
+                                .poll()
+                                .map_err(GqlQueryError::Interrupted)
+                        },
+                        control,
+                        staging,
+                    )
                 },
                 |batch| {
                     let mut state = state.borrow_mut();
@@ -756,12 +803,15 @@ mod all_targets {
                         GraphVertexReturnBinding::Vertex => GraphValue::Vertex(outcome.vertex()),
                         GraphVertexReturnBinding::Property(key) => {
                             let value = if scope.allows_property(key) {
-                                vertex_upsert_property(
+                                selection::property(
                                     transaction,
                                     database,
-                                    outcome.vertex(),
+                                    ElementId::Vertex(outcome.vertex()),
                                     key,
+                                    scope,
+                                    &mut poll,
                                     &mut control,
+                                    staging,
                                 )?
                             } else {
                                 // Match the singular masked reader's logical charge.
