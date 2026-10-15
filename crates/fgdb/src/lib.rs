@@ -1691,9 +1691,8 @@ pub struct EdgeRecord {
 struct Snapshot {
     blocks: Vec<Arc<[AdjacencyEntry]>>,
     /// The derived adjacency index, read through [`Snapshot::adjacency_index`].
-    /// Every writable path builds it with the generation (commits extend it
-    /// incrementally); a read-only view builds it on first use, because a
-    /// point read by property never touches adjacency.
+    /// Built on first use, because a point read by property never touches
+    /// adjacency; a commit extends it incrementally once it is built.
     adjacency: std::sync::OnceLock<Arc<gql_exec::source::AdjacencyIndex>>,
     property_index: Arc<gql_exec::source::PropertyEqualityIndex>,
     /// The root's block references, aligned with `blocks`. Retained so the
@@ -5044,6 +5043,10 @@ impl<V: Vfs + Clone> Database<V> {
         // compaction then costs only its root and manifest. The handle gives up
         // its receipts here; if compaction fails, its next commit re-earns them
         // from disk, the pre-ibbuq behaviour.
+        // A handle that has not read adjacency yet (the CLI's compact, which
+        // exits next) does not pay for an index: road-ny spent 295 of its
+        // 3,269 compaction samples building one nothing read. A serving
+        // handle keeps its index warm across the compaction.
         let (mut snapshot, writer, receipts) = publish_and_snapshot(
             cx,
             &self.store,
@@ -5052,6 +5055,7 @@ impl<V: Vfs + Clone> Database<V> {
             frontier,
             published_chain_hash,
             std::mem::take(&mut self.receipts),
+            self.snapshot.adjacency.get().is_some(),
         )
         .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
@@ -5710,6 +5714,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             frontier,
             published_chain_hash,
             PublishReceipts::default(),
+            true,
         )
         .await?;
         return Ok((snapshot, writer, heads, receipts));
@@ -6100,6 +6105,7 @@ async fn rebuild<V: Vfs>(
         frontier,
         published_chain_hash,
         PublishReceipts::default(),
+        true,
     )
     .await?;
     Ok((
@@ -6593,6 +6599,9 @@ async fn fold_stream<V: Vfs>(
 /// Type-erased because open, recovery and compaction all end here: a caller's
 /// `Send` proof stops at `dyn Future + Send` instead of descending through
 /// Strata publication (fgdb-a5y6m).
+/// `build_adjacency` builds the snapshot's adjacency index with the
+/// generation; otherwise it is built on first use, as after a checkpoint open.
+#[allow(clippy::too_many_arguments)]
 fn publish_and_snapshot<'a, V: Vfs>(
     cx: &'a CommitCx,
     store: &'a BlockStore<V>,
@@ -6601,6 +6610,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
     frontier: CommitSeq,
     published_chain_hash: Digest,
     receipts: PublishReceipts,
+    build_adjacency: bool,
 ) -> SendFuture<'a, Result<PublishedGeneration, RebuildError>> {
     Box::pin(publish_and_snapshot_inner(
         cx,
@@ -6610,9 +6620,11 @@ fn publish_and_snapshot<'a, V: Vfs>(
         frontier,
         published_chain_hash,
         receipts,
+        build_adjacency,
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_and_snapshot_inner<V: Vfs>(
     cx: &CommitCx,
     store: &BlockStore<V>,
@@ -6621,6 +6633,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     frontier: CommitSeq,
     published_chain_hash: Digest,
     receipts: PublishReceipts,
+    build_adjacency: bool,
 ) -> Result<PublishedGeneration, RebuildError> {
     // Publish from a clone and hand the fold state back: the caller retains it
     // so later commits fold only their own template (fgdb-fujt). The strata
@@ -6671,9 +6684,13 @@ async fn publish_and_snapshot_inner<V: Vfs>(
 
     Ok((
         Snapshot {
-            adjacency: std::sync::OnceLock::from(Arc::new(
-                gql_exec::source::AdjacencyIndex::build(&decoded),
-            )),
+            adjacency: if build_adjacency {
+                std::sync::OnceLock::from(Arc::new(gql_exec::source::AdjacencyIndex::build(
+                    &decoded,
+                )))
+            } else {
+                std::sync::OnceLock::new()
+            },
             property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(
                 &decoded_patches,
             )),
@@ -9052,6 +9069,49 @@ mod lazy_writable_adjacency_laws {
         assert_eq!(
             db.neighbours(VId(1), RelationId(1)).unwrap(),
             vec![VId(2), VId(3), VId(4)]
+        );
+        assert!(db.verify_snapshot_indexes().unwrap());
+    }
+
+    /// Compaction leaves a handle's adjacency index as it found it: unbuilt
+    /// on a handle nothing has traversed (the CLI's compact, which exits
+    /// next), rebuilt with the generation on one that serves reads.
+    #[test]
+    fn compaction_builds_adjacency_only_for_a_handle_that_had_built_it() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let mut db = runtime
+            .block_on(Database::create_with_vfs(&cx, vfs.clone(), &dir, keys()))
+            .unwrap();
+        let mut origin = WriteBatch::new(RelationId(1));
+        for vid in 1..=3 {
+            origin.create_vertex(VId(vid), vec![], vec![]);
+        }
+        origin.add_edge(EId(1), VId(1), VId(2), vec![]);
+        origin.add_edge(EId(2), VId(1), VId(3), vec![]);
+        runtime.block_on(db.write(&cx, origin)).unwrap();
+        drop(db);
+
+        let mut db = runtime
+            .block_on(Database::open_with_vfs(&cx, vfs, &dir, keys()))
+            .unwrap();
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            db.snapshot.adjacency.get().is_none(),
+            "an untraversed handle compacts without building it"
+        );
+        assert_eq!(
+            db.neighbours(VId(1), RelationId(1)).unwrap(),
+            vec![VId(2), VId(3)]
+        );
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(
+            db.snapshot.adjacency.get().is_some(),
+            "a serving handle keeps its index across a compaction"
         );
         assert!(db.verify_snapshot_indexes().unwrap());
     }
