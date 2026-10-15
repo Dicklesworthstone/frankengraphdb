@@ -11,9 +11,14 @@ use fgdb_beacon::{BeaconError, IndexSnapshot};
 use fgdb_types::{CommitSeq, VId};
 use std::sync::Arc;
 
+#[path = "prepared_graph.rs"]
+mod graph;
+
 /// An immutable resident search generation owned by exactly one authorized
 /// session. Obtain it through `AuthorizedReadSession::prepare_beacon_index`;
 /// its concrete type may be inferred. Only that session can search it.
+/// `search_beacon_graph_index` pairs its saved search lanes with the session's
+/// native topology at this same source sequence, without another index build.
 ///
 /// Cloning shares the same private index, definition and session identity.
 /// No corpus statistics, document values, raw snapshot or authority escape.
@@ -43,6 +48,52 @@ impl AuthorizedBeaconIndex {
     pub fn source_sequence(&self) -> CommitSeq {
         self.sequence
     }
+}
+
+// Every reused retrieval lane crosses the SAME exact-session, historical-cut
+// and source-population gates. In particular, a graph-only request cannot use
+// the source of another prepared handle or evade the original node allowance.
+fn admit_prepared(
+    owner: &Arc<()>,
+    prepared: &AuthorizedBeaconIndex,
+    view: &crate::EmbeddedReadView,
+    scope: &fgdb_warden::PlannerPredicates,
+    host: fgdb_gql::GqlQueryPolicy,
+    execution: &super::Live<'_, '_, '_>,
+    query: Search<'_>,
+) -> Result<(), QueryError> {
+    // run checks current credentials before even an owner diagnostic.
+    if !Arc::ptr_eq(owner, &prepared.owner) {
+        return Err(QueryError::Authorization(WardenError::ScopeDenied));
+    }
+    admit_query(query, scope, host, execution)?;
+    view.snapshot
+        .check_frontier(prepared.sequence)
+        .map_err(QueryError::Read)?;
+    host.rows
+        .check(GqlBudgetDimension::SnapshotRecords, prepared.admitted)
+        .map_err(|error| QueryError::Pattern(GqlQueryError::Rows(error)))?;
+    let mut live = execution.borrow_mut();
+    live.checkpoint()?;
+    live.settle()?;
+    let now = (live.clock)();
+    let charged = live.permit.charge_nodes_at(now, prepared.admitted);
+    charged.map_err(|error| live.refusal(error))
+}
+
+fn prepared_policy(
+    prepared: &AuthorizedBeaconIndex,
+    request: ReadPolicy,
+    host: fgdb_gql::GqlQueryPolicy,
+) -> ReadPolicy {
+    let mut allowance = policy(request, host);
+    allowance.max_work_units = allowance
+        .max_work_units
+        .min(prepared.definition.policy.max_work_units);
+    allowance.max_result_rows = allowance
+        .max_result_rows
+        .min(prepared.definition.policy.max_result_rows);
+    allowance
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
@@ -154,33 +205,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     ) -> Result<Rows, Error> {
         let owner = Arc::clone(&self.owner);
         finish(self.run(cx, |view, _, scope, _, host, execution| {
-            // Current credentials are checked by run BEFORE even an owner
-            // refusal. Keep the old owner's corpus/definition unobserved.
-            if !Arc::ptr_eq(&owner, &prepared.owner) {
-                return Err(QueryError::Authorization(WardenError::ScopeDenied));
-            }
-            admit_query(query, scope, host, execution)?;
-            view.snapshot
-                .check_frontier(prepared.sequence)
-                .map_err(QueryError::Read)?;
-            host.rows
-                .check(GqlBudgetDimension::SnapshotRecords, prepared.admitted)
-                .map_err(|error| QueryError::Pattern(GqlQueryError::Rows(error)))?;
-            {
-                let mut live = execution.borrow_mut();
-                live.checkpoint()?;
-                live.settle()?;
-                let now = (live.clock)();
-                let charged = live.permit.charge_nodes_at(now, prepared.admitted);
-                charged.map_err(|error| live.refusal(error))?;
-            }
-            let mut allowance = policy(request, host);
-            allowance.max_work_units = allowance
-                .max_work_units
-                .min(prepared.definition.policy.max_work_units);
-            allowance.max_result_rows = allowance
-                .max_result_rows
-                .min(prepared.definition.policy.max_result_rows);
+            admit_prepared(&owner, prepared, view, scope, host, execution, query)?;
+            let allowance = prepared_policy(prepared, request, host);
             let work = RefCell::new(Meter::new(allowance.max_work_units, |units| {
                 charge(execution, units)
             }));
