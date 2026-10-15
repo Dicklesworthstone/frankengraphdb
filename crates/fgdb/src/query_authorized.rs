@@ -637,20 +637,20 @@ impl<'a> Tables<'a> {
                 return Ok(None);
             };
             // The owner source hydrates only the endpoint rows a plan reads;
-            // an authorized edge also needs both endpoints admitted.
-            let mut admitted = std::collections::BTreeSet::new();
-            for &((_, src, _, dst), _) in &edges {
-                for vid in [src, dst] {
-                    if admitted.contains(&vid) {
-                        continue;
-                    }
-                    if let Some(row) = source::find_vertex(snapshot, vid, at, scan)?
-                        && tables
-                            .admit_vertex(row, predicates, node, control)?
-                            .is_some()
-                    {
-                        admitted.insert(vid);
-                    }
+            // an authorized edge also needs both endpoints admitted. Each
+            // distinct endpoint is found and admitted once, in identity order:
+            // the same vertices and charges as admitting them in edge order,
+            // with no ordered-set probe and insert per endpoint (a third of a
+            // pokec hub two-hop) and the table already sealed (fgdb-61p1n).
+            let mut endpoints: Vec<VId> = edges
+                .iter()
+                .flat_map(|&((_, src, _, dst), _)| [src, dst])
+                .collect();
+            endpoints.sort_unstable();
+            endpoints.dedup();
+            for vid in endpoints {
+                if let Some(row) = source::find_vertex(snapshot, vid, at, scan)? {
+                    tables.admit_vertex(row, predicates, node, control)?;
                 }
             }
             for edge in edges {
