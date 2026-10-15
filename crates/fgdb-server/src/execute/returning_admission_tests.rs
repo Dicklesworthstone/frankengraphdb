@@ -46,7 +46,10 @@ fn representation_refusal_rolls_back_the_complete_native_write() {
                         vec![WireValue::Int(3)],
                     ]
                 );
-                Err::<(), _>(Refusal::new(ErrorCode::Execution, "representation rejected"))
+                Err::<(), _>(Refusal::new(
+                    ErrorCode::Execution,
+                    "representation rejected",
+                ))
             },
         )
         .await;
@@ -73,31 +76,37 @@ fn converted_output_and_empty_output_both_precede_one_completion() {
         ] {
             let (before_seq, before_count) = state(&root, db).await;
             let mut calls = 0;
-            let answer = accepted(write_returning_checked(
-                &root,
-                db,
-                &token,
-                prepare(db, text),
-                None,
-                |columns, rows, work| {
-                    calls += 1;
-                    work(1).map_err(|error| write_refusal(&error))?;
-                    assert_eq!(columns, &[String::from("value")]);
-                    assert_eq!(rows.len(), expected_rows);
-                    // A different owned representation proves that adapters
-                    // need not convert/lookup a cell after the commit.
-                    Ok(rows
-                        .into_iter()
-                        .map(|_| String::from("seven"))
-                        .collect::<Vec<_>>())
-                },
-            ).await);
+            let answer = accepted(
+                write_returning_checked(
+                    &root,
+                    db,
+                    &token,
+                    prepare(db, text),
+                    None,
+                    |columns, rows, work| {
+                        calls += 1;
+                        work(1).map_err(|error| write_refusal(&error))?;
+                        assert_eq!(columns, &[String::from("value")]);
+                        assert_eq!(rows.len(), expected_rows);
+                        // A different owned representation proves that adapters
+                        // need not convert/lookup a cell after the commit.
+                        Ok(rows
+                            .into_iter()
+                            .map(|_| String::from("seven"))
+                            .collect::<Vec<_>>())
+                    },
+                )
+                .await,
+            );
             assert_eq!(calls, 1, "empty output still requires schema admission");
             assert_eq!(answer.rows, vec![String::from("seven"); expected_rows]);
             assert_eq!(answer.columns, vec![String::from("value")]);
             assert_eq!(
                 answer.outcome,
-                Outcome::WriteCommitted { seq: before_seq.0 + 1, statements: 1 },
+                Outcome::WriteCommitted {
+                    seq: before_seq.0 + 1,
+                    statements: 1
+                },
             );
             assert_eq!(
                 state(&root, db).await,
@@ -126,7 +135,8 @@ fn representation_work_uses_the_native_signed_allowance() {
                 charged = true;
                 work(u64::MAX).map_err(|error| write_refusal(&error))
             },
-        ).await;
+        )
+        .await;
         assert!(charged);
         assert!(result.is_err());
         assert_eq!(state(&root, db).await, before);
@@ -148,7 +158,8 @@ fn deferred_returning_checks_its_floor_and_never_crosses_recovery_generations() 
             prepare(db, "CREATE (n) RETURN 7 AS value"),
             Some((&generation, CommitSeq(1))),
             |_, _, _| -> Result<(), Refusal> { panic!("unmet floor must not reach output") },
-        ).await;
+        )
+        .await;
         assert_eq!(result.err().expect("unmet floor").code, ErrorCode::Busy);
         assert_eq!(state(&root, db).await, (CommitSeq(0), 0));
         let definition = prepare(db, "CREATE (n) RETURN 7 AS value");
@@ -159,9 +170,14 @@ fn deferred_returning_checks_its_floor_and_never_crosses_recovery_generations() 
         ));
         let before = state(&root, db).await;
         let result = write_returning_checked(
-            &root, db, &token, definition, Some((&generation, CommitSeq(0))),
+            &root,
+            db,
+            &token,
+            definition,
+            Some((&generation, CommitSeq(0))),
             |_, _, _| -> Result<(), Refusal> { panic!("stale generation must not execute") },
-        ).await;
+        )
+        .await;
         assert_eq!(
             result.err().expect("stale generation").code,
             ErrorCode::DatabaseRecovering,
@@ -186,9 +202,14 @@ fn retained_returning_definitions_are_not_authority_or_an_identity_bypass() {
         let definition = prepare(db, "CREATE (n) RETURN 7 AS value");
         db.authority.retire();
         let result = write_returning_checked(
-            &root, db, &token, definition, None,
+            &root,
+            db,
+            &token,
+            definition,
+            None,
             |_, _, _| -> Result<(), Refusal> { panic!("retired authority must not produce rows") },
-        ).await;
+        )
+        .await;
         assert!(result.is_err());
         assert_eq!(state(&root, db).await, (CommitSeq(0), 0));
         server.join_database_workers(&root).await;

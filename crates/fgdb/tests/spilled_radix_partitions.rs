@@ -4,7 +4,9 @@
 
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, NativeAggregateSpoolError, PreparedNativeRead, WriteBatch};
+use fgdb::{
+    Database, DatabaseKeys, MemVfs, NativeAggregateSpoolError, PreparedNativeRead, WriteBatch,
+};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{

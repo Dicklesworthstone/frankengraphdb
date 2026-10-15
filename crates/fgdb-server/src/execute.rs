@@ -716,11 +716,12 @@ pub(crate) async fn write_returning_checked<R: Send>(
     let policy = db.write_policy;
     let mut admitted_rows = None;
     let mut output_refusal = None;
-    let mut output = |rows: &[fgdb_gql::algebra::GraphValueRow],
-                      work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>| {
-        let rows = edge_upsert_output::collect(&columns, rows, work)?;
-        collect(&columns, rows, work)
-    };
+    let mut output =
+        |rows: &[fgdb_gql::algebra::GraphValueRow],
+         work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>| {
+            let rows = edge_upsert_output::collect(&columns, rows, work)?;
+            collect(&columns, rows, work)
+        };
     let result = match &prepared {
         Returning::Insert(prepared) => guard
             .execute_graph_insert_query_authorized_checked(
