@@ -45,3 +45,46 @@ fn sealing_equals_the_ordered_map_it_replaced() {
         "{sorted_inputs} {repeated}"
     );
 }
+
+/// A scan's remembered row answers every lookup sequence as the table does:
+/// the vertex just yielded, a missing identity, and identities the scan has
+/// passed or not reached, in any interleaving.
+#[test]
+fn a_remembered_row_answers_every_lookup_as_the_table_does() {
+    use super::Tables;
+    use crate::VertexRow;
+    use fgdb_types::{CommitSeq, VId};
+    use std::cell::Cell;
+    let rows: Vec<VertexRow> = (0..50_u128)
+        .map(|at| VertexRow {
+            vid: VId(at * 3 + 1),
+            birth_ordinal: at as u64,
+            created_at: CommitSeq(1),
+            retired_at: None,
+            labels: Vec::new(),
+            props: Vec::new(),
+        })
+        .collect();
+    let mut tables = Tables::new();
+    tables.vertices = rows.iter().map(|row| (row.vid, row)).collect();
+    let mut state = 0x7ab1_e5ca_9a11_0001;
+    for _ in 0..200 {
+        let last = Cell::new(None);
+        let mut scan = tables.scan(&last);
+        for _ in 0..40 {
+            let vid = match next(&mut state) % 3 {
+                0 => match scan.next() {
+                    Some(vid) => vid,
+                    None => break,
+                },
+                1 => last.get().map_or(VId(0), |(vid, _)| vid),
+                _ => VId(u128::from(next(&mut state) % 160)),
+            };
+            let expected = tables.vertex(vid).map(|row| row as *const VertexRow);
+            let found = tables
+                .vertex_after(&last, vid)
+                .map(|row| row as *const VertexRow);
+            assert_eq!(found, expected, "{vid:?}");
+        }
+    }
+}

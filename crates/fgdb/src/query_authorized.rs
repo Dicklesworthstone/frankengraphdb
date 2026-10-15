@@ -24,7 +24,7 @@ use fgdb_gql::algebra::{GlaOutput, GlaPlan, GraphValue, PreparedGraphPattern, Ve
 use fgdb_gql::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, ExecutionPermit, PlannerPredicates, ReadAccess};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -559,6 +559,33 @@ impl<'a> Tables<'a> {
         seal_by_key(&mut self.edges, |&((eid, ..), _)| eid);
     }
 
+    /// The admitted vertex identities in table order. Each one yielded is
+    /// kept in `last`, so testing or reading the vertex a scan has just
+    /// yielded takes its row instead of finding it again (`vertex_after`).
+    fn scan<'s>(
+        &'s self,
+        last: &'s Cell<Option<(VId, &'a VertexRow)>>,
+    ) -> impl Iterator<Item = VId> + 's {
+        self.vertices.iter().map(move |&(vid, row)| {
+            last.set(Some((vid, row)));
+            vid
+        })
+    }
+
+    /// `vertex`, answered by the row `scan` last yielded when that row is
+    /// `vid`'s. A sealed table holds each identity once, so it is the row
+    /// `vertex` would find.
+    fn vertex_after(
+        &self,
+        last: &Cell<Option<(VId, &'a VertexRow)>>,
+        vid: VId,
+    ) -> Option<&'a VertexRow> {
+        match last.get() {
+            Some((at, row)) if at == vid && self.vertices_sealed => Some(row),
+            _ => self.vertex(vid),
+        }
+    }
+
     fn vertex(&self, vid: VId) -> Option<&'a VertexRow> {
         match &self.positions {
             Some(positions) => positions.find(&self.vertices, vid),
@@ -716,7 +743,44 @@ impl<'a> Tables<'a> {
     }
 
     fn matches(&self, vid: VId, required: &[VertexPredicate], scope: &PlannerPredicates) -> bool {
-        self.vertex(vid).is_some_and(|row| {
+        Self::row_matches(self.vertex(vid), required, scope)
+    }
+    /// `matches` through `vertex_after`, for a vertex-only scan.
+    #[inline(never)]
+    fn matches_after(
+        &self,
+        last: &Cell<Option<(VId, &'a VertexRow)>>,
+        vid: VId,
+        required: &[VertexPredicate],
+        scope: &PlannerPredicates,
+    ) -> bool {
+        Self::row_matches(self.vertex_after(last, vid), required, scope)
+    }
+    fn property(
+        &self,
+        vid: VId,
+        key: PropertyKeyId,
+        scope: &PlannerPredicates,
+    ) -> Option<&'a CanonicalScalar> {
+        Self::row_property(self.vertex(vid), key, scope)
+    }
+    /// `property` through `vertex_after`, for a vertex-only scan.
+    #[inline(never)]
+    fn property_after(
+        &self,
+        last: &Cell<Option<(VId, &'a VertexRow)>>,
+        vid: VId,
+        key: PropertyKeyId,
+        scope: &PlannerPredicates,
+    ) -> Option<&'a CanonicalScalar> {
+        Self::row_property(self.vertex_after(last, vid), key, scope)
+    }
+    fn row_matches(
+        row: Option<&VertexRow>,
+        required: &[VertexPredicate],
+        scope: &PlannerPredicates,
+    ) -> bool {
+        row.is_some_and(|row| {
             required.iter().all(|predicate| {
                 predicate.matches_borrowed(
                     row.labels
@@ -731,16 +795,15 @@ impl<'a> Tables<'a> {
             })
         })
     }
-    fn property(
-        &self,
-        vid: VId,
+    fn row_property<'r>(
+        row: Option<&'r VertexRow>,
         key: PropertyKeyId,
         scope: &PlannerPredicates,
-    ) -> Option<&CanonicalScalar> {
+    ) -> Option<&'r CanonicalScalar> {
         if !scope.allows_property(key) {
             return None;
         }
-        let row = self.vertex(vid)?;
+        let row = row?;
         row.props
             .binary_search_by_key(&key, |(key, _)| *key)
             .ok()
