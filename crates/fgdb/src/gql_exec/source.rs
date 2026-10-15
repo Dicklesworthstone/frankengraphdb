@@ -3075,10 +3075,10 @@ fn slot_closure<'a, E>(
     steps: &[BoundStep<'_>],
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<Closure<'a>>, E> {
-    // Probed sets and maps: every frontier is sorted before it is walked and
-    // the selected edges are sorted by EId once, so visit order, admission
-    // order and every charge are those of ordered sets.
-    use fgdb_gql::id_hash::{IdMap, IdSet};
+    // Probed sets: every frontier is sorted before it is walked and the
+    // selected edges are sorted by EId once, so visit order, admission order
+    // and every charge are those of ordered sets.
+    use fgdb_gql::id_hash::IdSet;
     let index = snapshot.adjacency_index();
     let edges = index.edge_count();
     let mean = (edges / snapshot.property_index().vertex_count().max(1)).max(1);
@@ -3104,27 +3104,40 @@ fn slot_closure<'a, E>(
             || admitted.saturating_add(incidences) <= trial)
     };
     let width = if root.is_some() { 2 } else { 1 };
-    let mut selected = IdMap::<EId, BorrowedEdge<'a>>::default();
+    // The admitted edges, each once, in admission order. One directed step
+    // from a vertex root visits each edge at most once: it expands each vertex
+    // at most once, and a directed visit yields an edge only from its own end.
+    // A root lookup, a second step or an undirected step can meet an edge
+    // again, so those closures keep the identities they admitted. Pushing
+    // instead of keeping every edge in a map by identity was a sixth of a
+    // pokec three-hop reach (fgdb-61p1n).
+    let mut selected: Vec<BorrowedEdge<'a>> = Vec::new();
+    let mut seen = (root.is_some()
+        || steps.len() != 1
+        || steps
+            .iter()
+            .any(|step| matches!(step.direction, fgdb_gql::algebra::GlaDirection::Undirected)))
+    .then(IdSet::<EId>::default);
     let mut slots = vec![IdSet::<VId>::default(); width + steps.len()];
     let admit = |entry: &AdjacencyEntry,
                  block: usize,
                  row: usize,
-                 selected: &mut IdMap<EId, BorrowedEdge<'a>>,
+                 selected: &mut Vec<BorrowedEdge<'a>>,
+                 seen: &mut Option<IdSet<EId>>,
                  target: &mut IdSet<VId>,
                  far: VId,
                  control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
      -> Result<(), E> {
-        if let std::collections::hash_map::Entry::Vacant(slot) = selected.entry(entry.eid) {
+        if seen.as_mut().is_none_or(|seen| seen.insert(entry.eid)) {
             // Its SnapshotRecord is charged when the closure commits.
             control(SourceEvent::ScratchEntry)?;
-            slot.insert((
+            selected.push((
                 (entry.eid, entry.src, entry.relation, entry.dst),
                 edge_properties_at(&snapshot.block_props, block, row),
             ));
         }
-        if !target.contains(&far) {
+        if target.insert(far) {
             control(SourceEvent::ScratchEntry)?;
-            target.insert(far);
         }
         Ok(())
     };
@@ -3147,7 +3160,16 @@ fn slot_closure<'a, E>(
                 |entry, block, row, control| {
                     if relation.matches(entry.relation) {
                         let far = far_endpoint(entry, root, lookup_direction);
-                        admit(entry, block, row, &mut selected, target, far, control)?;
+                        admit(
+                            entry,
+                            block,
+                            row,
+                            &mut selected,
+                            &mut seen,
+                            target,
+                            far,
+                            control,
+                        )?;
                     }
                     Ok(())
                 },
@@ -3198,10 +3220,18 @@ fn slot_closure<'a, E>(
                     |entry, block, row, control| {
                         if step.relation.matches(entry.relation) {
                             let far = far_endpoint(entry, vertex, step.direction);
-                            admit(entry, block, row, &mut selected, &mut target, far, control)?;
-                            if step.walk.is_some() && !expanded.contains(&far) {
+                            admit(
+                                entry,
+                                block,
+                                row,
+                                &mut selected,
+                                &mut seen,
+                                &mut target,
+                                far,
+                                control,
+                            )?;
+                            if step.walk.is_some() && expanded.insert(far) {
                                 control(SourceEvent::ScratchEntry)?;
-                                expanded.insert(far);
                                 next.push(far);
                             }
                         }
@@ -3221,8 +3251,11 @@ fn slot_closure<'a, E>(
         control(SourceEvent::SnapshotRecord)?;
     }
     let reached = slots.into_iter().flatten().collect();
-    let mut selected: Vec<_> = selected.into_values().collect();
     selected.sort_unstable_by_key(|((eid, ..), _)| *eid);
+    debug_assert!(
+        selected.windows(2).all(|pair| pair[0].0.0 != pair[1].0.0),
+        "a closure admitted an edge twice"
+    );
     Ok(Some((selected, reached)))
 }
 
