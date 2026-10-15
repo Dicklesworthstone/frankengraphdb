@@ -49,12 +49,22 @@
 //! Both transaction profiles retain conservative global edge-scan witnesses.
 //! Omitted/null access retains the host's default; a nonnull choice needs seeds.
 //!
+//! `graph_access => 'demand'` is an explicit immutable graph-only profile. It
+//! resolves only probed vertex histories and reached incidences, without a full
+//! vertex directory, property projection or index build. Visible membership
+//! entries and incidences share the source allowance; native scratch also
+//! reserves the output capacity. Node admission counts unique visible probes,
+//! not the whole corpus. Mixed-modality and transaction demand requests refuse;
+//! neither can silently drop an index lane or staged changes. Existing source
+//! defaults and indexed/materialized accounting are unchanged. Storage itself
+//! remains resident; this does not claim spill or physical timing isolation.
+//!
 //! Requested indexes are built for this one execution from the read's snapshot.
 //! This is exact fusion of selected candidates, not an exhaustive hybrid
 //! top-k; `ann` remains approximate. It is not a durable index definition.
 
 use super::{Meter, Options, Scan, SharedWork};
-use super::{graph, indexed};
+use super::{demand, graph, indexed};
 use crate::query::ProcedureError;
 use crate::{GqlError, ReadError, Snapshot, VertexRow};
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
@@ -162,6 +172,7 @@ pub(crate) fn refuse<C>(error: HybridCallError) -> GqlQueryError<GqlError, C> {
 enum GraphAccess {
     Materialized,
     Indexed,
+    Demand,
 }
 
 /// A bound `hybrid.search`: the frozen corpus definition and query inputs.
@@ -305,7 +316,8 @@ impl HybridSearch {
                     graph_access = Some(match text_value("graph_access", value)? {
                         "materialized" => GraphAccess::Materialized,
                         "indexed" => GraphAccess::Indexed,
-                        _ => return Err(domain("graph_access", "'materialized' or 'indexed'")),
+                        "demand" => GraphAccess::Demand,
+                        _ => return Err(domain("graph_access", "'materialized', 'indexed' or 'demand'")),
                     });
                 }
                 "text" => text = Some(text_value("text", value)?.to_owned()),
@@ -536,6 +548,13 @@ impl HybridSearch {
         } else {
             GraphAccess::Materialized
         });
+        if graph_access == GraphAccess::Demand
+            && (!indexed_default || text.is_some() || vector.is_some())
+        {
+            return Err(HybridCallError::Combination(
+                "demand graph access requires an immutable graph-only read",
+            ));
+        }
         if !graph
             && (max_hops.is_some()
                 || relation.is_some()
@@ -752,6 +771,7 @@ impl HybridSearch {
             remaining.evaluator.max_scratch_entries,
             &mut SharedWork(work),
         )?;
+        let source_entries = Cell::new(0_u64);
         let result = match self.graph_access {
             GraphAccess::Materialized => graph::evaluate_filtered(
                 snapshot,
@@ -783,10 +803,53 @@ impl HybridSearch {
                 || Ok(()),
                 |id| filter.admits(id, work),
             ),
+            GraphAccess::Demand => {
+                // Bound source retention before any point lookup. The parent
+                // owns output rows, so reserve their maximum capacity here and
+                // report unused reserved slots below as well. Replaying with
+                // the reported exact allowance must not leave less source room.
+                let output = u64::try_from(self.k)
+                    .map_err(|_| BeaconError::InvalidQuery("demand result capacity exceeds u64"))?;
+                let available = remaining.evaluator.max_scratch_entries
+                    .checked_sub(filter.scratch_entries())
+                    .and_then(|entries| entries.checked_sub(output))
+                    .ok_or(BeaconError::ResourceLimit {
+                        resource: "demand graph scratch entries",
+                        limit: usize::try_from(remaining.evaluator.max_scratch_entries)
+                            .unwrap_or(usize::MAX),
+                    })?;
+                let mut options = self.options.clone();
+                options.policy.max_source_scratch = options.policy.max_source_scratch
+                    .min(usize::try_from(available).unwrap_or(usize::MAX));
+                demand::evaluate_filtered(
+                    snapshot,
+                    at,
+                    &options,
+                    self.query(),
+                    self.expansion(),
+                    work,
+                    scan,
+                    admit,
+                    label_allowed,
+                    relation_allowed,
+                    || Ok(()),
+                    |id| filter.admits(id, work),
+                ).and_then(|(hits, admissions)| {
+                    let delivered = u64::try_from(hits.len())
+                        .map_err(|_| BeaconError::Invariant("demand result count exceeds u64"))?;
+                    let retained = output.checked_sub(delivered)
+                        .and_then(|unused| admissions.checked_add(unused))
+                        .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
+                    source_entries.set(retained);
+                    Ok(hits)
+                })
+            }
         };
-        filter
-            .finish(result)
-            .map(|hits| (hits, filter.scratch_entries()))
+        filter.finish(result).and_then(|hits| {
+            let scratch = filter.scratch_entries().checked_add(source_entries.get())
+                .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
+            Ok((hits, scratch))
+        })
     }
 
     /// Fused hits as rows of exactly the YIELD columns, best first.
