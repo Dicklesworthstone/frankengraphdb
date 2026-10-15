@@ -452,7 +452,7 @@ fn kernel_runs_admit_and_refuse_at_the_per_unit_threshold() {
         for (text, direction) in CALLS {
             let options = options(direction);
             let threshold = |runs: bool| {
-                super::super::KERNEL_RUNS.with(|cell| cell.set(runs));
+                super::super::WORK_RUNS.with(|cell| cell.set(runs));
                 let attenuated = |value| token.attenuate(Restriction::MaxWork(value)).unwrap();
                 let (mut low, mut high) = (0, 10_000_000);
                 while low < high {
@@ -466,7 +466,7 @@ fn kernel_runs_admit_and_refuse_at_the_per_unit_threshold() {
                 assert!(low > 0, "{text}");
                 let refused = footprint(&db, &cx, &attenuated(low - 1), text, options);
                 let admitted = footprint(&db, &cx, &attenuated(low), text, options);
-                super::super::KERNEL_RUNS.with(|cell| cell.set(true));
+                super::super::WORK_RUNS.with(|cell| cell.set(true));
                 (low, refused, admitted)
             };
             let (unit_low, unit_refused, unit_admitted) = threshold(false);

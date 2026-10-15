@@ -52,6 +52,7 @@ fn charge(execution: &Live<'_, '_, '_>, units: usize) -> Result<(), QueryError> 
     let mut live = execution.borrow_mut();
     live.checkpoint()?;
     let units = u64::try_from(units).map_err(|_| live.refusal(WardenError::TooLarge))?;
+    live.settle()?;
     let now = (live.clock)();
     let charged = live.permit.charge_work_at(now, units);
     charged.map_err(|error| live.refusal(error))

@@ -4,7 +4,7 @@
 //! admitted set share it; scoped capabilities never reuse or populate; and a
 //! commit never serves the previous generation's records.
 
-use super::super::SCANS;
+use super::super::{SCANS, WORK_RUNS};
 use super::{ADMITTED, AdmissionKey, INLINE_IDENTITIES};
 use crate::{Database, DatabaseKeys, MemVfs, QueryError, QueryResult, WriteBatch};
 use asupersync::lab::run_async_under_lab;
@@ -368,6 +368,60 @@ fn signed_refusal_points_of_a_hit_match_a_fresh_scan() {
                 let admitted = footprint(&cold, &cx, &attenuated(low), text);
                 assert_eq!(scans(), before + 1, "{text}: the cold statement scanned");
                 assert_eq!(footprint(&warm, &cx, &attenuated(low), text), admitted);
+            }
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Signed work charged in runs (fgdb-62mzm) admits and refuses native reads
+/// exactly where charging every unit alone does: for MaxWork, MaxNodes and
+/// MaxRows, the same smallest admitting limit, the same refusal one below it
+/// and the same admitted rows, with no more query-context polls.
+#[test]
+fn work_runs_admit_and_refuse_native_reads_at_the_per_unit_thresholds() {
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x61b1_0009, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let token = issuer().issue_at(&open(), 100).unwrap();
+        let limits: [fn(u64) -> Restriction; 3] = [
+            Restriction::MaxWork,
+            Restriction::MaxNodes,
+            Restriction::MaxRows,
+        ];
+        for text in EDGE_READS.into_iter().chain([VERTEX_READ]) {
+            for limit in limits {
+                let threshold = |runs: bool| {
+                    WORK_RUNS.with(|cell| cell.set(runs));
+                    let attenuated = |value| token.attenuate(limit(value)).unwrap();
+                    let (mut low, mut high) = (0, 10_000_000);
+                    while low < high {
+                        let middle = low + (high - low) / 2;
+                        if read(&db, &cx, &attenuated(middle), text, || 100).is_ok() {
+                            high = middle;
+                        } else {
+                            low = middle + 1;
+                        }
+                    }
+                    let refused =
+                        (low > 0).then(|| footprint(&db, &cx, &attenuated(low - 1), text));
+                    let admitted = footprint(&db, &cx, &attenuated(low), text);
+                    WORK_RUNS.with(|cell| cell.set(true));
+                    (low, refused, admitted)
+                };
+                let (unit_low, unit_refused, unit_admitted) = threshold(false);
+                let (run_low, run_refused, run_admitted) = threshold(true);
+                assert_eq!(run_low, unit_low, "{text}: admitting limit");
+                assert_eq!(
+                    run_refused.map(|footprint| footprint.0),
+                    unit_refused.map(|footprint| footprint.0),
+                    "{text}: refusal"
+                );
+                assert_eq!(run_admitted.0, unit_admitted.0, "{text}: rows");
+                assert!(run_admitted.1 <= unit_admitted.1, "{text}: polls");
             }
         }
         assert_eq!(c.outstanding_obligations(), 0);

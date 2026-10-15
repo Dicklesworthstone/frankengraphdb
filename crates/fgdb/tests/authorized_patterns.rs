@@ -611,38 +611,52 @@ fn every_clock_boundary_observes_expiry_and_final_delivery_observes_retirement()
         let db = database(&contexts.commit()).await;
         let p = pattern("MATCH (a)-[:R]->(b) RETURN a, b");
         let issuer = authority(98, NS);
-        let token = issuer.issue_at(&grant(), 100).unwrap();
-        let mut calls = 0;
-        let expected = db
-            .execute_graph_pattern_authorized(&cx, &issuer, &token, BRANCH, &p, policy(), || {
-                calls += 1;
-                100
-            })
-            .unwrap();
-        assert!(!expected.is_empty());
-        assert!(calls > 10);
-        for stop in 1..=calls {
-            let mut seen = 0;
-            assert!(
-                matches!(
-                    db.execute_graph_pattern_authorized(
-                        &cx,
-                        &issuer,
-                        &token,
-                        BRANCH,
-                        &p,
-                        policy(),
-                        || {
-                            seen += 1;
-                            if seen == stop { 1000 } else { 100 }
-                        }
+        let wide = issuer.issue_at(&grant(), 100).unwrap();
+        // Below two 64-unit runs every unit is charged alone, on its own
+        // clock boundary; the wide token charges work in runs (fgdb-62mzm),
+        // which cross fewer boundaries. Expiry is observed at every boundary
+        // of both.
+        let narrow = wide.attenuate(Restriction::MaxWork(127)).unwrap();
+        for (token, least) in [(&narrow, 10), (&wide, 1)] {
+            let mut calls = 0;
+            let expected = db
+                .execute_graph_pattern_authorized(&cx, &issuer, token, BRANCH, &p, policy(), || {
+                    calls += 1;
+                    100
+                })
+                .unwrap();
+            assert!(!expected.is_empty());
+            assert!(calls > least, "{calls} clock boundaries");
+            for stop in 1..=calls {
+                let mut seen = 0;
+                assert!(
+                    matches!(
+                        db.execute_graph_pattern_authorized(
+                            &cx,
+                            &issuer,
+                            token,
+                            BRANCH,
+                            &p,
+                            policy(),
+                            || {
+                                seen += 1;
+                                if seen == stop { 1000 } else { 100 }
+                            }
+                        ),
+                        Err(QueryError::Authorization(Error::Expired))
                     ),
-                    Err(QueryError::Authorization(Error::Expired))
-                ),
-                "stop={stop}"
-            );
-            assert_eq!(seen, stop);
+                    "stop={stop}"
+                );
+                assert_eq!(seen, stop);
+            }
         }
+        let token = wide;
+        let mut calls = 0;
+        db.execute_graph_pattern_authorized(&cx, &issuer, &token, BRANCH, &p, policy(), || {
+            calls += 1;
+            100
+        })
+        .unwrap();
         let mut seen = 0;
         assert!(matches!(
             db.execute_graph_pattern_authorized(&cx, &issuer, &token, BRANCH, &p, policy(), || {
@@ -1222,9 +1236,34 @@ fn compound_work_and_expiry_and_final_group_delivery_use_one_live_permit() {
             )
             .unwrap();
         assert_eq!(expected.len(), 1);
-        // Four admitted vertices, one row-delivery charge and one verification
-        // sample are the six clock calls that are not work checkpoints.
-        let work = calls - 6;
+        // The exact signed work is the smallest MaxWork that admits the
+        // statement. Every clock call beside four admitted vertices, one
+        // row-delivery charge and one verification sample charges at least
+        // one unit; work charged in runs (fgdb-62mzm) may charge more on one
+        // call, so the total is found by bisection.
+        let admits = |work| {
+            db.execute_graph_set_aggregate_authorized(
+                &cx,
+                &issuer,
+                &token.attenuate(Restriction::MaxWork(work)).unwrap(),
+                BRANCH,
+                &query,
+                policy(),
+                || 100,
+            )
+            .is_ok()
+        };
+        let (mut low, mut high) = (0, calls * 64);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if admits(middle) {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        let work = low;
+        assert!(work >= calls - 6, "work {work}, clock calls {calls}");
         let exact = token.attenuate(Restriction::MaxWork(work)).unwrap();
         assert_eq!(
             db.execute_graph_set_aggregate_authorized(

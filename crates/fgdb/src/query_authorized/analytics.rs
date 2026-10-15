@@ -224,30 +224,36 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
         source_limits: options.source_limits,
     };
     let reusable = scope.sees_all_incidence() && scope.sees_all_fields();
-    let graph = match reusable.then(|| REUSE.lookup(snapshot, request)).flatten() {
-        Some((graph, tape)) => {
-            tape.replay(poll, spend)?;
-            graph
-        }
-        None => {
-            let tape = reusable.then(|| RefCell::new(Tape::default()));
-            let graph = build(
-                snapshot,
-                binding,
-                options,
-                scope,
-                tape.as_ref(),
-                poll,
-                spend,
-            )?;
-            if let Some(tape) = tape {
-                let tape = tape.into_inner().finish();
-                let bytes = tape.bytes();
-                REUSE.remember_graph(snapshot, request, &graph, Arc::new(tape), bytes);
-            }
-            graph
-        }
-    };
+    // Admission and the projection's replay or build are one phase: their
+    // signed work is charged in runs.
+    let graph = super::work_runs(execution, control_error, || {
+        Ok::<_, Error>(
+            match reusable.then(|| REUSE.lookup(snapshot, request)).flatten() {
+                Some((graph, tape)) => {
+                    tape.replay(poll, spend)?;
+                    graph
+                }
+                None => {
+                    let tape = reusable.then(|| RefCell::new(Tape::default()));
+                    let graph = build(
+                        snapshot,
+                        binding,
+                        options,
+                        scope,
+                        tape.as_ref(),
+                        poll,
+                        spend,
+                    )?;
+                    if let Some(tape) = tape {
+                        let tape = tape.into_inner().finish();
+                        let bytes = tape.bytes();
+                        REUSE.remember_graph(snapshot, request, &graph, Arc::new(tape), bytes);
+                    }
+                    graph
+                }
+            },
+        )
+    })?;
     let signed_rows = scope.limits().max_rows;
     let mut limits = options.execution_limits;
     limits.max_result_rows = limits
@@ -256,6 +262,7 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
     // The kernel's units are charged to the signed permit in runs, and the
     // caller meter still sees each one. Nothing else borrows either while the
     // kernel runs.
+    let outer = std::mem::replace(&mut execution.borrow_mut().in_runs, true);
     let result = call.execute(
         &graph,
         limits,
@@ -266,10 +273,15 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
     );
     // Every unit the kernel spent is charged before its result or its own
     // error is judged, as it was when each was charged on the spot. A kernel
-    // our control stopped keeps that refusal.
-    let settled = execution.borrow_mut().settle();
-    if !matches!(result, Err(FnxExecutionError::Cancelled(_))) {
-        settled.map_err(control_error)?;
+    // our control stopped keeps that refusal and charges nothing more.
+    {
+        let mut live = execution.borrow_mut();
+        live.in_runs = outer;
+        if matches!(result, Err(FnxExecutionError::Cancelled(_))) {
+            live.discard_runs();
+        } else {
+            live.settle().map_err(control_error)?;
+        }
     }
     // Translate a signed-row refusal back to Warden, without allocating a
     // forbidden result first. The shared delivery gate still checks successful
@@ -433,7 +445,7 @@ where
         self.units(1)
     }
     fn units(&mut self, n: usize) -> Result<(), QueryError> {
-        self.execution.kernel_units(n as u64)?;
+        self.execution.work_units(n as u64)?;
         for _ in 0..n {
             (self.observe)(SourceEvent::Work)?;
         }

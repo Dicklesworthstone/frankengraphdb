@@ -69,67 +69,71 @@ fn visit_at<Clock: FnMut() -> u64>(
     fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
     GqlQueryError<GraphAggregateError<ReadError>, QueryError>,
 > {
-    let mut usage = AdmissionUsage::default();
-    let tables = Tables::admit(
-        snapshot,
-        query.input_pattern().plan(),
-        at,
-        scope,
-        || {
-            execution
-                .borrow_mut()
-                .node()
-                .map_err(GqlQueryError::Interrupted)
-        },
-        &mut || {
-            execution
-                .borrow_mut()
-                .poll()
-                .map_err(GqlQueryError::Interrupted)
-        },
-        &mut |event| {
-            execution
-                .borrow_mut()
-                .checkpoint()
-                .map_err(GqlQueryError::Interrupted)?;
-            usage.observe::<ReadError, QueryError>(policy, event)
-        },
-    )
-    .map_err(|error| error.map_source(GraphAggregateError::Source))?;
-    let edges = tables
-        .edges
-        .iter()
-        .map(|&((_, from, relation, to), _)| (from, relation, to));
-    let remaining = usage.remaining(policy);
-    let checkpoint = || execution.borrow_mut().checkpoint();
-    // A vertex-only aggregate tests and reads the vertex its scan has just
-    // yielded: `scan` remembers it, so neither finds it again (count_vertices
-    // 1.9-2.3x). An edge-reading one keeps the plain lookups. Its endpoint
-    // tests run in the evaluator's hottest loop, and the remembering
-    // closures measured 5-13% slower there.
-    let result = if query.input_pattern().plan().reads_edges() {
-        query.execute_governed(
-            tables.records,
-            tables.vertices.iter().map(|&(vid, _)| vid),
-            edges,
-            |vid, required| Ok(tables.matches(vid, required, scope)),
-            |vid, key| Ok(tables.property(vid, key, scope)),
-            remaining,
-            checkpoint,
+    // Admission and evaluation are one phase: their signed work is charged
+    // in runs.
+    work_runs(execution, GqlQueryError::Interrupted, || {
+        let mut usage = AdmissionUsage::default();
+        let tables = Tables::admit(
+            snapshot,
+            query.input_pattern().plan(),
+            at,
+            scope,
+            || {
+                execution
+                    .borrow_mut()
+                    .node()
+                    .map_err(GqlQueryError::Interrupted)
+            },
+            &mut || {
+                execution
+                    .borrow_mut()
+                    .poll()
+                    .map_err(GqlQueryError::Interrupted)
+            },
+            &mut |event| {
+                execution
+                    .borrow_mut()
+                    .checkpoint()
+                    .map_err(GqlQueryError::Interrupted)?;
+                usage.observe::<ReadError, QueryError>(policy, event)
+            },
         )
-    } else {
-        let last = std::cell::Cell::new(None);
-        query.execute_governed(
-            tables.records,
-            tables.scan(&last),
-            edges,
-            |vid, required| Ok(tables.matches_after(&last, vid, required, scope)),
-            |vid, key| Ok(tables.property_after(&last, vid, key, scope)),
-            remaining,
-            checkpoint,
-        )
-    };
-    usage.finish(policy, result)
+        .map_err(|error| error.map_source(GraphAggregateError::Source))?;
+        let edges = tables
+            .edges
+            .iter()
+            .map(|&((_, from, relation, to), _)| (from, relation, to));
+        let remaining = usage.remaining(policy);
+        let checkpoint = || execution.borrow_mut().checkpoint();
+        // A vertex-only aggregate tests and reads the vertex its scan has just
+        // yielded: `scan` remembers it, so neither finds it again (count_vertices
+        // 1.9-2.3x). An edge-reading one keeps the plain lookups. Its endpoint
+        // tests run in the evaluator's hottest loop, and the remembering
+        // closures measured 5-13% slower there.
+        let result = if query.input_pattern().plan().reads_edges() {
+            query.execute_governed(
+                tables.records,
+                tables.vertices.iter().map(|&(vid, _)| vid),
+                edges,
+                |vid, required| Ok(tables.matches(vid, required, scope)),
+                |vid, key| Ok(tables.property(vid, key, scope)),
+                remaining,
+                checkpoint,
+            )
+        } else {
+            let last = std::cell::Cell::new(None);
+            query.execute_governed(
+                tables.records,
+                tables.scan(&last),
+                edges,
+                |vid, required| Ok(tables.matches_after(&last, vid, required, scope)),
+                |vid, key| Ok(tables.property_after(&last, vid, key, scope)),
+                remaining,
+                checkpoint,
+            )
+        };
+        usage.finish(policy, result)
+    })
 }
 
 impl<V: Vfs + Clone> Database<V> {

@@ -131,6 +131,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             {
                 let mut live = execution.borrow_mut();
                 live.checkpoint()?;
+                live.settle()?;
                 let now = (live.clock)();
                 let charged = live.permit.charge_nodes_at(now, prepared.admitted);
                 charged.map_err(|error| live.refusal(error))?;

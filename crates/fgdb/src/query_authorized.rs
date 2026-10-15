@@ -87,20 +87,22 @@ struct Execution<'cx, 'permit, Clock> {
     // (QueryCx::host_clock_interval, fgdb-er71y). None until the first charge.
     sampled: Option<u64>,
     until_sample: u32,
-    // Prism kernel work units spent but not yet charged, and how many more
-    // the current run may defer before the next charge (`kernel_units`).
+    // Signed work units spent but not yet charged, and how many more the
+    // current run may defer before the next charge (`work_units`).
     deferred: u64,
     run_left: u64,
+    // Inside a `work_runs` phase: only there may work be deferred.
+    in_runs: bool,
 }
 
-/// Kernel work units charged in one Warden call while the allowance covers
+/// Signed work units charged in one Warden call while the allowance covers
 /// them (fgdb-62mzm option 1).
-const KERNEL_RUN: u64 = 64;
+const WORK_RUN: u64 = 64;
 
 #[cfg(test)]
 thread_local! {
-    /// Off: every kernel unit is charged alone, the per-unit oracle.
-    static KERNEL_RUNS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Off: every work unit is charged alone, the per-unit oracle.
+    static WORK_RUNS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
@@ -116,6 +118,7 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             until_sample: 0,
             deferred: 0,
             run_left: 0,
+            in_runs: false,
         }
     }
     fn tracking(
@@ -153,53 +156,62 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
     fn refusal(&mut self, error: fgdb_warden::Error) -> QueryError {
         QueryError::Authorization(*self.failure.get_or_insert(error))
     }
+    /// One unit of signed work, charged in runs (`work_units`).
     fn checkpoint(&mut self) -> Result<(), QueryError> {
-        self.reserve_work(1)
+        self.work_units(1)
     }
     /// Work units the signed allowance still admits.
     fn remaining_work(&self) -> u64 {
         let limit = self.permit.predicates().limits().max_work;
         limit.saturating_sub(self.permit.usage().work)
     }
-    /// `n` Prism kernel work units, metered like `n` checkpoints but charged
-    /// in runs. A run starts only while the allowance covers two whole runs,
-    /// so its up to KERNEL_RUN units are deferred and then charged in one
-    /// Warden call with one cancellation poll. Below that, every unit is
-    /// charged alone. So the unit that exhausts the allowance refuses at its
-    /// own ordinal, and the total charged is the per-unit total.
+    /// `n` units of signed work, metered like `n` checkpoints but charged in
+    /// runs (fgdb-62mzm option 1). A run starts only while the allowance
+    /// covers two whole runs, so its up to WORK_RUN units are deferred and
+    /// then charged in one Warden call with one cancellation poll. Below that,
+    /// every unit is charged alone. Every other charge, reservation and
+    /// delivery settles the run first, so charges reach the permit in their
+    /// per-unit order. The unit that exhausts any allowance therefore refuses
+    /// at its own ordinal, and the totals are the per-unit totals.
     /// Cancellation, retirement and expiry are observed at least once per
-    /// run; `settle` charges the rest before results.
-    fn kernel_units(&mut self, n: u64) -> Result<(), QueryError> {
+    /// run instead of once per unit.
+    fn work_units(&mut self, n: u64) -> Result<(), QueryError> {
         if n <= self.run_left {
             self.run_left -= n;
             self.deferred += n;
             return Ok(());
         }
-        self.next_kernel_run(n)
+        self.next_run(n)
     }
     #[inline(never)]
-    fn next_kernel_run(&mut self, n: u64) -> Result<(), QueryError> {
+    fn next_run(&mut self, n: u64) -> Result<(), QueryError> {
         self.settle()?;
         #[cfg(test)]
-        let runs = KERNEL_RUNS.with(std::cell::Cell::get);
+        let runs = WORK_RUNS.with(std::cell::Cell::get);
         #[cfg(not(test))]
         let runs = true;
         if runs
-            && n <= KERNEL_RUN
+            && self.in_runs
+            && n <= WORK_RUN
             && self.failure.is_none()
-            && self.remaining_work() >= 2 * KERNEL_RUN
+            && self.remaining_work() >= 2 * WORK_RUN
         {
             self.deferred = n;
-            self.run_left = KERNEL_RUN - n;
+            self.run_left = WORK_RUN - n;
             return Ok(());
         }
         for _ in 0..n {
-            self.checkpoint()?;
+            self.charge_work(1)?;
         }
         Ok(())
     }
-    /// Charge the deferred kernel units: in one call when the allowance
-    /// covers them all, else one at a time so a refusal keeps its ordinal.
+    /// Drop the deferred units of a stopped phase uncharged.
+    fn discard_runs(&mut self) {
+        self.deferred = 0;
+        self.run_left = 0;
+    }
+    /// Charge the deferred units: in one call when the allowance covers them
+    /// all, else one at a time so a refusal keeps its ordinal.
     fn settle(&mut self) -> Result<(), QueryError> {
         self.run_left = 0;
         let deferred = std::mem::take(&mut self.deferred);
@@ -207,16 +219,21 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             return Ok(());
         }
         if self.remaining_work() >= deferred {
-            return self.reserve_work(deferred);
+            return self.charge_work(deferred);
         }
         for _ in 0..deferred {
-            self.checkpoint()?;
+            self.charge_work(1)?;
         }
         Ok(())
     }
-    // Reserve a bounded private physical phase on this same signed permit.
-    // Reservations are never refunded after failure, cancellation or drop.
+    // Reserve a bounded private physical phase on this same signed permit,
+    // after any deferred run. Reservations are never refunded after failure,
+    // cancellation or drop.
     fn reserve_work(&mut self, units: u64) -> Result<(), QueryError> {
+        self.settle()?;
+        self.charge_work(units)
+    }
+    fn charge_work(&mut self, units: u64) -> Result<(), QueryError> {
         self.poll()?;
         let now = self.now();
         let charged = self.permit.charge_work_at(now, units);
@@ -233,6 +250,7 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
     }
     fn node(&mut self) -> Result<(), QueryError> {
         self.checkpoint()?;
+        self.settle()?;
         let now = self.now();
         let charged = self.permit.charge_nodes_at(now, 1);
         charged.map_err(|error| self.refusal(error))
@@ -255,15 +273,47 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
     }
     fn deliver(&mut self, rows: usize) -> Result<(), QueryError> {
         self.checkpoint()?;
+        self.settle()?;
         let rows = u64::try_from(rows).map_err(|_| self.refusal(fgdb_warden::Error::TooLarge))?;
         // Delivery is never judged on a shared sample: nothing is released
         // after expiry, however the host paces its clock.
         let now = self.sample();
         let charged = self.permit.charge_rows_at(now, rows);
         charged.map_err(|error| self.refusal(error))?;
-        self.checkpoint()
+        self.checkpoint()?;
+        self.settle()
     }
 }
+/// Run `phase` with its signed work charged in runs (`Execution::work_units`),
+/// then settle. The permit therefore holds the per-unit totals again whenever
+/// control leaves the phase. A phase is one engine call over admitted data:
+/// admission, evaluation, a Prism projection or kernel. Session callbacks,
+/// clock boundaries and deliveries stay outside phases and keep per-unit
+/// observation; a delivery or node charge inside one settles first.
+fn work_runs<Clock: FnMut() -> u64, T, E>(
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    settle_error: impl FnOnce(QueryError) -> E,
+    phase: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let outer = std::mem::replace(&mut execution.borrow_mut().in_runs, true);
+    let result = phase();
+    let mut live = execution.borrow_mut();
+    live.in_runs = outer;
+    match result {
+        Ok(value) => {
+            live.settle().map_err(settle_error)?;
+            Ok(value)
+        }
+        // A stopped phase stops as a per-unit one does, with no further
+        // poll or charge: its permit ends with the statement, so work it
+        // spent but had not yet charged is observable nowhere.
+        Err(error) => {
+            live.discard_runs();
+            Err(error)
+        }
+    }
+}
+
 fn interrupted(error: Cancel) -> QueryError {
     QueryError::Pattern(GqlQueryError::Interrupted(error))
 }
@@ -964,16 +1014,20 @@ fn pattern_at<Row: GlaOutput, Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Governed<Row> {
-    pattern_at_controlled(
-        snapshot,
-        at,
-        pattern,
-        scope,
-        policy,
-        &mut || execution.borrow_mut().node(),
-        &mut || execution.borrow_mut().poll(),
-        &mut || execution.borrow_mut().checkpoint(),
-    )
+    // Admission and evaluation are one phase: their signed work is charged
+    // in runs.
+    work_runs(execution, GqlQueryError::Interrupted, || {
+        pattern_at_controlled(
+            snapshot,
+            at,
+            pattern,
+            scope,
+            policy,
+            &mut || execution.borrow_mut().node(),
+            &mut || execution.borrow_mut().poll(),
+            &mut || execution.borrow_mut().checkpoint(),
+        )
+    })
 }
 
 // One source-admission and GLA body serves both reads and INSERT selection.
