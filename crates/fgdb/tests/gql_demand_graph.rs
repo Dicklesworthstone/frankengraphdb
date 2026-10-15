@@ -551,7 +551,7 @@ fn transaction_native_demand_uses_a_bounded_reached_source_and_fresh_overlay_eac
 fn transaction_demand_exact_allowances_cover_missing_seeds_without_fabricated_records() {
     let ((), report) = run_async_under_lab(0xbeac_5402, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
-        let db = open(&c.commit(), false).await;
+        let mut db = open(&c.commit(), false).await;
         for (source, eligible) in [(1, vec![3]), (9, vec![]), (999, vec![])] {
             let text = statement("demand");
             let bound = PreparedGraphSetText::prepare(&text, symbols)
@@ -560,8 +560,8 @@ fn transaction_demand_exact_allowances_cover_missing_seeds_without_fabricated_re
                 .unwrap();
             // Fresh transactions, so an earlier read cannot warm the witness
             // set and make a deliberately short allowance spuriously succeed.
-            let execute = |allowance| {
-                let mut txn = db.begin(&c.txn()).unwrap();
+            let mut execute = |allowance| {
+                let txn = db.begin(&c.txn()).unwrap();
                 let result = txn.execute_graph_set_governed(&db, &c.query(), &bound, allowance);
                 txn.abort();
                 result
@@ -623,7 +623,7 @@ fn transaction_demand_empty_and_failed_native_reads_retain_dependencies_after_ro
                 0 | 1 => concurrent.create_vertex(VId(77), vec![LabelId(1)], vec![]),
                 2 => concurrent.add_edge(EId(77), VId(9), VId(3), vec![]),
                 _ => concurrent.delete_vertex(VId(9)),
-            }
+            };
             db.write(&c.commit(), concurrent).await.unwrap();
             let result = txn.finish(&mut db, &c.commit()).await;
             if case == 0 {
