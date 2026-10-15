@@ -373,6 +373,68 @@ async fn prove_off_task<T: Send + 'static>(
     }
 }
 
+/// Blocks an unmetered root walk reads ahead and proves together. A road
+/// graph's blocks are ~450 bytes, far below [`INLINE_PROOF_BYTES`], so every
+/// proof of an open ran on the walk's one task: about a quarter of a
+/// compacted road-ny CLI open. A window's proofs go to the blocking pool
+/// [`PROOF_CHUNK`] objects at a time, one hand-off per chunk.
+const PROOF_WINDOW: usize = 256;
+
+/// Objects one blocking-pool task proves.
+const PROOF_CHUNK: usize = 32;
+
+/// `proof` applied to every item on the blocking pool, [`PROOF_CHUNK`] items
+/// per task with every task in flight at once; the results in item order.
+/// Without a pool (the lab runtime) each task completes inline, in order.
+async fn prove_chunks<I: Send + 'static, T: Send + 'static>(
+    items: Vec<I>,
+    proof: impl Fn(I) -> T + Clone + Send + 'static,
+) -> Vec<T> {
+    let mut tasks = OrderedReads::new();
+    let mut items = items.into_iter().peekable();
+    while items.peek().is_some() {
+        let chunk: Vec<I> = items.by_ref().take(PROOF_CHUNK).collect();
+        let proof = proof.clone();
+        tasks.push(asupersync::runtime::spawn_blocking(move || {
+            chunk.into_iter().map(proof).collect::<Vec<T>>()
+        }));
+    }
+    let mut proven = Vec::new();
+    while let Some(chunk) = tasks.next().await {
+        proven.extend(chunk);
+    }
+    proven
+}
+
+/// A root walk's next window, polled while the current one is admitted so
+/// its reads and pool proofs run meanwhile; its result is kept once ready.
+enum Ahead<F: Future> {
+    Running(std::pin::Pin<Box<F>>),
+    Done(F::Output),
+}
+
+impl<F: Future> Ahead<F> {
+    /// Poll once without waiting.
+    async fn advance(&mut self) {
+        std::future::poll_fn(|task| {
+            if let Self::Running(read) = self
+                && let std::task::Poll::Ready(output) = read.as_mut().poll(task)
+            {
+                *self = Self::Done(output);
+            }
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
+    async fn finish(self) -> F::Output {
+        match self {
+            Self::Running(read) => read.await,
+            Self::Done(output) => output,
+        }
+    }
+}
+
 /// The patch half of a propertied block's admission, once its bytes are in
 /// hand: the patch's identity and format, the joint locator bijection, and
 /// the joint logical digest (V5) the block's header declares. A propertied
@@ -1699,6 +1761,121 @@ impl<V: Vfs> BlockStore<V> {
         .await)
     }
 
+    /// [`Self::read_block_decoded`] with the hosted patch prefetched, for
+    /// every block in `ids`, in order and with the same results. Reads
+    /// overlap as a root walk's do; block proofs, then hosted-patch proofs,
+    /// run on the blocking pool through [`prove_chunks`].
+    async fn read_block_window(
+        &self,
+        cx: &impl StorageReadCx,
+        ids: Vec<ObjectId>,
+    ) -> Vec<Result<BlockRead, StoreError>> {
+        let mut fetched = Vec::with_capacity(ids.len());
+        let mut reads = OrderedReads::new();
+        let mut issued = 0;
+        while fetched.len() < ids.len() {
+            while issued < ids.len() && reads.len() < OPEN_READS_IN_FLIGHT {
+                reads.push(self.read_object_bytes(cx, ids[issued], MAX_STORED_OBJECT_BYTES));
+                issued += 1;
+            }
+            fetched.push(reads.next().await.expect("a read is in flight"));
+        }
+        let k_oid = self.k_oid.clone();
+        let namespace = self.namespace;
+        let blocks = prove_chunks(
+            ids.iter().copied().zip(fetched).collect(),
+            move |(id, bytes): (ObjectId, Result<Vec<u8>, StoreError>)| {
+                let bytes = bytes?;
+                let actual = block_id(k_oid.expose(), namespace, &bytes);
+                if actual != id {
+                    return Err(StoreError::IdentityMismatch {
+                        expected: id,
+                        actual,
+                    });
+                }
+                let decoded = crate::decode_block_with_properties(&bytes);
+                Ok((bytes, decoded))
+            },
+        )
+        .await;
+        let mut done: Vec<Option<Result<BlockRead, StoreError>>> = Vec::with_capacity(ids.len());
+        let mut hosting = Vec::new();
+        for (at, block) in blocks.into_iter().enumerate() {
+            match block {
+                Ok((bytes, Ok((entries, Some((patch_id, locators)))))) => {
+                    hosting.push((at, bytes, entries, patch_id, locators));
+                    done.push(None);
+                }
+                Ok(read) => done.push(Some(Ok((read, None)))),
+                Err(error) => done.push(Some(Err(error))),
+            }
+        }
+        let mut patches = Vec::with_capacity(hosting.len());
+        let mut reads = OrderedReads::new();
+        let mut issued = 0;
+        while patches.len() < hosting.len() {
+            while issued < hosting.len() && reads.len() < OPEN_READS_IN_FLIGHT {
+                reads.push(self.read_object_bytes(cx, hosting[issued].3, MAX_STORED_OBJECT_BYTES));
+                issued += 1;
+            }
+            patches.push(reads.next().await.expect("a read is in flight"));
+        }
+        let mut proving = Vec::with_capacity(hosting.len());
+        for ((at, bytes, entries, patch_id, locators), patch) in hosting.into_iter().zip(patches) {
+            match patch {
+                Ok(patch_bytes) => {
+                    proving.push((at, bytes, entries, patch_id, locators, patch_bytes))
+                }
+                Err(error) => {
+                    let decoded = Ok((entries, Some((patch_id, locators))));
+                    done[at] = Some(Ok(((bytes, decoded), Some(PrefetchedPatch::Unread(error)))));
+                }
+            }
+        }
+        let k_oid = self.k_oid.clone();
+        let resolver = self.scalar_resolver.clone();
+        let proven = prove_chunks(
+            proving,
+            move |(at, bytes, entries, patch_id, locators, patch_bytes): (
+                usize,
+                Vec<u8>,
+                Vec<crate::AdjacencyEntry>,
+                ObjectId,
+                Vec<u8>,
+                Vec<u8>,
+            )| {
+                let (_, declared_digest) = crate::header_partition_and_digest(&bytes);
+                let proof = prove_block_patch(
+                    k_oid.expose(),
+                    namespace,
+                    resolver
+                        .as_deref()
+                        .map(|resolver| resolver as &dyn CanonicalScalarResolver),
+                    patch_id,
+                    &patch_bytes,
+                    &locators,
+                    &entries,
+                    declared_digest,
+                );
+                let decoded = Ok((entries, Some((patch_id, locators))));
+                (
+                    at,
+                    (
+                        (bytes, decoded),
+                        Some(PrefetchedPatch::Read(patch_bytes, proof)),
+                    ),
+                )
+            },
+        )
+        .await;
+        for (at, read) in proven {
+            done[at] = Some(Ok(read));
+        }
+        done.into_iter()
+            .map(|read| read.expect("every block in the window was read"))
+            .collect()
+    }
+
     /// Store a vertex patch's bytes — the same derived-identity discipline and
     /// durable path as [`BlockStore::put`], under the patch object kind.
     pub async fn put_patch(
@@ -2014,17 +2191,48 @@ impl<V: Vfs> BlockStore<V> {
         } = walk;
         let mut reads = OrderedReads::new();
         let mut issued = 0;
+        // An unmetered walk reads and proves PROOF_WINDOW blocks at a time,
+        // the next window running ahead while this one is admitted; a
+        // metering walk (in_flight 1) reads each block after its event.
+        let window_ids = |start: usize| -> Vec<ObjectId> {
+            root.blocks[start..root.blocks.len().min(start + PROOF_WINDOW)]
+                .iter()
+                .map(|block| block.block_id)
+                .collect()
+        };
+        let mut window = std::collections::VecDeque::new();
+        let mut ahead = None;
         for (at, reference) in root.blocks.iter().enumerate() {
             observe(RootReadEvent::ObjectStart)?;
-            // Block `at` is always issued by now; later ones only up to the
-            // window.
-            while let Some(next) = root.blocks.get(issued)
-                && (issued <= at || reads.len() < in_flight)
-            {
-                reads.push(self.read_block_decoded(cx, next.block_id, in_flight > 1));
-                issued += 1;
+            let fetched = if in_flight > 1 {
+                if window.is_empty() {
+                    window = match ahead.take() {
+                        Some(next) => Ahead::finish(next).await,
+                        None => self.read_block_window(cx, window_ids(at)).await,
+                    }
+                    .into();
+                    let next = at + window.len();
+                    if next < root.blocks.len() {
+                        let mut running =
+                            Ahead::Running(Box::pin(self.read_block_window(cx, window_ids(next))));
+                        running.advance().await;
+                        ahead = Some(running);
+                    }
+                } else if let Some(running) = ahead.as_mut() {
+                    running.advance().await;
+                }
+                window.pop_front()
+            } else {
+                // Block `at` is always issued by now.
+                while let Some(next) = root.blocks.get(issued)
+                    && issued <= at
+                {
+                    reads.push(self.read_block_decoded(cx, next.block_id, false));
+                    issued += 1;
+                }
+                reads.next().await
             }
-            let fetched = reads.next().await.ok_or_else(|| {
+            .ok_or_else(|| {
                 StoreError::Io(std::io::Error::other(
                     "root block walk consumed a read it never issued",
                 ))
