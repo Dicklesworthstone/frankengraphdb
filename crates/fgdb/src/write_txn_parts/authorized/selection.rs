@@ -4,13 +4,81 @@
 use super::{Database, Error, Execution, Vfs, WriteTxn, WriteTxnError};
 use crate::query::QueryError;
 use crate::write_txn::overlay_scan::OverlayRows;
+use crate::write_txn::{PointReadField, ProjectionReadAttempt, point_payload_admission};
+use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_gql::algebra::{GlaOutput, PreparedGraphPattern};
-use fgdb_gql::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
-use fgdb_types::QueryCx;
+use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
+use fgdb_types::{CanonicalScalar, QueryCx};
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
 type Selected<Row> = Result<GqlQueryExecution<Row>, GqlQueryError<WriteTxnError, WriteTxnError>>;
+
+/// Read one field of an ALREADY admitted target in the private write workspace.
+/// The caller owns target/endpoint authorization and supplies its SAME live
+/// signed/native evaluator control. This helper grants no identity authority.
+///
+/// History, directory and field-search comparisons depend on hidden records and
+/// fields. They poll the host's cancellation context, never the holder's work
+/// allowance. Only the logical lookup, selected payload, witness and returned
+/// scalar are charged. In particular an unrelated hidden key must not move the
+/// refusal threshold of an allowed-key binary search (FG-INV-20).
+///
+/// The native point projector still selects the pinned historical winner and
+/// canonical staged effects. No masked row copy or alternate overlay is built.
+/// Hidden keys become NULL before lookup or observation; admitted keys retain
+/// the original point-read/refused-read witnesses, including absence. Physical
+/// scan cost remains the host's responsibility, not a timing or byte-memory
+/// isolation claim. Privileged point-read accounting is deliberately unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn property<V: Vfs + Clone, E>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    element: ElementId,
+    key: PropertyKeyId,
+    scope: &PlannerPredicates,
+    mut poll: impl FnMut() -> Result<(), E>,
+    control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E>,
+    source_error: impl Fn(WriteTxnError) -> E,
+) -> Result<CanonicalScalar, E> {
+    use crate::gql_exec::source::SourceEvent;
+
+    if !scope.allows_property(key) {
+        control(GlaExecutionEvent::ScratchEntry)?;
+        return Ok(CanonicalScalar::Null);
+    }
+    control(GlaExecutionEvent::Work)?;
+    let field = PointReadField::Property(key);
+    let mut attempt = ProjectionReadAttempt {
+        reads: &transaction.point_reads,
+        element,
+        accepted: false,
+    };
+    let projected = transaction.point_projection_with_control(
+        database,
+        element,
+        field,
+        &mut |_| poll(),
+        &source_error,
+    )?;
+    if let Some(value) = projected.property {
+        point_payload_admission(value, &mut |event| {
+            control(match event {
+                SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+            })
+        })?;
+    }
+    // Reserve on EVERY lookup, even when this exact witness is already warm.
+    // These live checks also revalidate the permit after physical traversal.
+    control(GlaExecutionEvent::ScratchEntry)?;
+    control(GlaExecutionEvent::ScratchEntry)?;
+    transaction.point_reads.borrow_mut().record(element, field);
+    control(GlaExecutionEvent::ScratchEntry)?;
+    let value = projected.property.cloned().unwrap_or(CanonicalScalar::Null);
+    attempt.accepted = true;
+    Ok(value)
+}
 
 fn query_control(error: WriteTxnError) -> QueryError {
     match error {
@@ -157,3 +225,7 @@ fn controlled<Row, Clock: FnMut() -> u64>(
     )
     .map_err(selection_error)
 }
+
+#[cfg(test)]
+#[path = "selection_tests.rs"]
+mod tests;

@@ -217,7 +217,8 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
 ) -> Result<(fgdb_gql::GraphWriteStepStats, Option<GraphWriteStepReceipt>), UpsertFault> {
-    use crate::write_txn::{vertex_upsert_actions, vertex_upsert_property};
+    use crate::write_txn::vertex_upsert_actions;
+    use fgdb_delta_types::ElementId;
     use fgdb_gql::{GraphVertexUpsertBranch, GraphVertexUpsertError, GraphVertexUpsertStats};
     cx.with_restriction(|| {
         let proposal = select(
@@ -290,14 +291,22 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     controls.borrow_mut().checkpoint()
                 },
                 |key, control| {
-                    // Hidden input is NULL before lookup, payload inspection,
-                    // logical charges or field witnesses; writes are NOT masked.
-                    if !scope.allows_property(key) {
-                        control(GlaExecutionEvent::ScratchEntry)?;
-                        return Ok(fgdb_types::CanonicalScalar::Null);
-                    }
                     let state = state.borrow();
-                    vertex_upsert_property(state.0, state.1, outcome.vertex(), key, control)
+                    selection::property(
+                        state.0,
+                        state.1,
+                        ElementId::Vertex(outcome.vertex()),
+                        key,
+                        scope,
+                        || {
+                            cx.checkpoint()
+                                .map_err(WriteTxnError::Interrupted)
+                                .map_err(GqlQueryError::Interrupted)?;
+                            controls.borrow_mut().poll().map_err(GqlQueryError::Interrupted)
+                        },
+                        control,
+                        upsert_staging,
+                    )
                 },
                 |batch| {
                     let mut state = state.borrow_mut();
