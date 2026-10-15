@@ -169,6 +169,125 @@ fn sorted<E, C>(
     Ok(Topology::from_sorted(topology))
 }
 
+/// `sorted` over a positioned graph's edges, event for event: the same
+/// arrival order, the same endpoint tests at the same first arrivals and the
+/// same entry per retained key. Positions order exactly as identities, and
+/// relation positions as relations, so the 16-byte position runs sort into
+/// the order of `sorted`'s 48-byte identity runs; endpoint verdicts are kept
+/// per (side, relation, position) in arrays. Every kept key also records its
+/// endpoint positions. `None` when arrival ordinals do not fit 32 bits.
+pub(super) fn weigh_positioned<T, E, C>(
+    graph: &PositionedGraph<'_, T>,
+    filters: Option<&EndpointFilters>,
+    test_at: &mut impl FnMut(u32, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+) -> Option<Result<Topology, VisitError<E, C>>> {
+    let edges = graph.edges();
+    u32::try_from(edges.len()).ok()?;
+    let mut runs: Vec<(u32, u32, u32, u32)> = edges
+        .iter()
+        .enumerate()
+        .map(|(at, edge)| (edge.source, edge.relation, edge.destination, at as u32))
+        .collect();
+    runs.sort_unstable();
+    let mut first = vec![false; runs.len()];
+    let mut previous = None;
+    for &(source, relation, destination, at) in &runs {
+        let key = (source, relation, destination);
+        if previous != Some(key) {
+            first[at as usize] = true;
+            previous = Some(key);
+        }
+    }
+    // Each relation's predicates on each side, by relation position, and
+    // their verdicts by vertex position: 0 untested, 1 fails, 2 passes.
+    let relations = graph.relations();
+    let mut sides: Vec<[(&[VertexPredicate], Vec<u8>); 2]> = relations
+        .iter()
+        .map(|relation| {
+            let (from, to) = filters
+                .and_then(|filters| filters.get(relation))
+                .map_or((&[][..], &[][..]), |(from, to)| {
+                    (from.as_slice(), to.as_slice())
+                });
+            let table = |predicates: &[VertexPredicate]| {
+                if predicates.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![0_u8; graph.len()]
+                }
+            };
+            [(from, table(from)), (to, table(to))]
+        })
+        .collect();
+    let filtered: Vec<bool> = relations
+        .iter()
+        .map(|relation| filters.is_some_and(|filters| filters.contains_key(relation)))
+        .collect();
+    let result = (|| {
+        for (at, edge) in edges.iter().enumerate() {
+            control(GlaExecutionEvent::Work)?;
+            if filtered[edge.relation as usize] {
+                let [source, destination] = &mut sides[edge.relation as usize];
+                let mut passes = |(predicates, verdicts): &mut (&[VertexPredicate], Vec<u8>),
+                                  vertex: u32| {
+                    if predicates.is_empty() {
+                        return Ok(true);
+                    }
+                    match verdicts[vertex as usize] {
+                        0 => {
+                            let result = test_at(vertex, predicates)?;
+                            control(GlaExecutionEvent::ScratchEntry)?;
+                            verdicts[vertex as usize] = 1 + u8::from(result);
+                            Ok::<_, VisitError<E, C>>(result)
+                        }
+                        known => Ok(known == 2),
+                    }
+                };
+                if !(passes(source, edge.source)? && passes(destination, edge.destination)?) {
+                    // A first arrival that fails rejects its whole key.
+                    first[at] = false;
+                    continue;
+                }
+            }
+            if first[at] {
+                // One key/weight entry, as in `online`.
+                control(GlaExecutionEvent::ScratchEntry)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        return Some(Err(error));
+    }
+    drop(sides);
+    let mut topology = Vec::new();
+    let mut positions = Vec::new();
+    let mut start = 0;
+    while start < runs.len() {
+        let (source, relation, destination, arrival) = runs[start];
+        let mut end = start + 1;
+        while end < runs.len()
+            && (runs[end].0, runs[end].1, runs[end].2) == (source, relation, destination)
+        {
+            end += 1;
+        }
+        if first[arrival as usize] {
+            topology.push((
+                (
+                    graph.vertex(source),
+                    relations[relation as usize],
+                    graph.vertex(destination),
+                ),
+                Multiplicity(NonZeroU64::new((end - start) as u64)),
+            ));
+            positions.push([source, destination]);
+        }
+        start = end;
+    }
+    Some(Ok(Topology::from_sorted_positioned(topology, positions)))
+}
+
 /// Endpoint verdicts for `sorted`, one per (vertex, relation) group and side:
 /// exactly what `Endpoints` caches per (side, relation, vertex), without a
 /// tree search per edge (22% of a 730k-edge grouped count with a source

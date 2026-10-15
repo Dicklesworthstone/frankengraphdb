@@ -31,30 +31,57 @@ type VisitError<E, C> = GqlQueryError<GraphAggregateError<E>, C>;
 /// order or look a key up, so the array answers exactly as the map did,
 /// without a node allocation per key (a quarter of a 730k-edge triangle
 /// count was building and walking the map).
+///
+/// A topology weighed from a positioned graph also keeps each key's endpoint
+/// positions, in key order, for the visitors that index vertices by position.
 #[derive(Clone, Default, PartialEq, Eq)]
-pub(super) struct Topology(Vec<(TopologyKey, Multiplicity)>);
+pub(super) struct Topology {
+    entries: Vec<(TopologyKey, Multiplicity)>,
+    positions: Option<Vec<[u32; 2]>>,
+}
 
 impl Topology {
     /// From keys that are already ascending and distinct.
     fn from_sorted(entries: Vec<(TopologyKey, Multiplicity)>) -> Self {
         debug_assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
-        Self(entries)
+        Self {
+            entries,
+            positions: None,
+        }
+    }
+    /// From ascending distinct keys and each one's endpoint positions.
+    fn from_sorted_positioned(
+        entries: Vec<(TopologyKey, Multiplicity)>,
+        positions: Vec<[u32; 2]>,
+    ) -> Self {
+        debug_assert_eq!(entries.len(), positions.len());
+        Self {
+            positions: Some(positions),
+            ..Self::from_sorted(entries)
+        }
     }
     fn get(&self, key: &TopologyKey) -> Option<&Multiplicity> {
-        self.0
+        self.entries
             .binary_search_by(|(known, _)| known.cmp(key))
             .ok()
-            .map(|at| &self.0[at].1)
+            .map(|at| &self.entries[at].1)
     }
     #[cfg(test)]
     fn contains_key(&self, key: &TopologyKey) -> bool {
         self.get(key).is_some()
     }
     fn keys(&self) -> impl Iterator<Item = &TopologyKey> + '_ {
-        self.0.iter().map(|(key, _)| key)
+        self.entries.iter().map(|(key, _)| key)
     }
     fn values(&self) -> impl Iterator<Item = &Multiplicity> + '_ {
-        self.0.iter().map(|(_, weight)| weight)
+        self.entries.iter().map(|(_, weight)| weight)
+    }
+    /// The keys with their endpoints by position, when weighed positioned.
+    fn positioned_keys(&self) -> Option<impl Iterator<Item = (u32, RelationId, u32)> + '_> {
+        let positions = self.positions.as_ref()?;
+        Some(self.entries.iter().zip(positions).map(
+            |(&((_, relation, _), _), &[source, destination])| (source, relation, destination),
+        ))
     }
 }
 
@@ -63,7 +90,7 @@ impl IntoIterator for Topology {
     type IntoIter = std::vec::IntoIter<(TopologyKey, Multiplicity)>;
     /// Ascending by key, as the ordered map's owned iteration.
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        self.entries.into_iter()
     }
 }
 
@@ -75,13 +102,13 @@ impl<'t> IntoIterator for &'t Topology {
     >;
     /// Ascending by key, as the ordered map iterated.
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter().map(|(key, weight)| (key, weight))
+        self.entries.iter().map(|(key, weight)| (key, weight))
     }
 }
 
 impl From<BTreeMap<TopologyKey, Multiplicity>> for Topology {
     fn from(map: BTreeMap<TopologyKey, Multiplicity>) -> Self {
-        Self(map.into_iter().collect())
+        Self::from_sorted(map.into_iter().collect())
     }
 }
 
@@ -2058,13 +2085,29 @@ where
     }
 
     let filters = endpoint_filters(plan.operators(), &accesses);
-    let topology = topology::weigh(
-        edges,
-        &undirected,
-        filters.as_ref(),
-        &mut test_vertex,
-        &mut control,
-    )?;
+    // A positioned graph weighs by position unless an undirected relation
+    // needs the online normalization.
+    let mut positioned = positioned.filter(|_| undirected.is_empty());
+    let weighed = match &mut positioned {
+        Some(Positioned { graph, test_at }) => {
+            topology::weigh_positioned(graph, filters.as_ref(), test_at, &mut control)
+        }
+        None => None,
+    };
+    let topology = match weighed {
+        Some(weighed) => weighed?,
+        None => topology::weigh(
+            edges,
+            &undirected,
+            filters.as_ref(),
+            &mut test_vertex,
+            &mut control,
+        )?,
+    };
+    // A topology weighed by position is searched by position.
+    let graph = positioned.as_ref().map(|positioned| positioned.graph);
+    let vertex = |at: u32| graph.map_or(VId(0), |graph| graph.vertex(at));
+    let positioned = graph.map(|graph| (graph.len(), &vertex as &dyn Fn(u32) -> VId));
 
     // Properties and positive predicates depend on vertex bindings, not edge
     // occurrences. Keep the original plan and ALL slots whenever either is
@@ -2105,6 +2148,7 @@ where
             plan,
             vertices,
             &topology,
+            positioned,
             test_vertex,
             property,
             control,
@@ -2184,6 +2228,7 @@ where
         execution_plan,
         vertices,
         &topology,
+        positioned,
         &accesses,
         &forest,
         test_vertex,
@@ -2209,19 +2254,21 @@ mod tests {
         .unwrap()
     }
 
-    /// **A POSITIONED SINGLE SCAN IS THE IDENTITY SCAN, EVENT FOR EVENT.**
-    /// Over a sparse-identity multigraph with two relations, parallel edges,
-    /// loops and arrivals in no endpoint order, every single-scan shape
-    /// (shared, one-sided and absent endpoint predicates; forward and
-    /// reverse; counted, anchored with and without a property column, and
-    /// unanchored) answers with the same value and statistics, makes the same
-    /// vertex tests, stops at every host checkpoint with the same count and
-    /// refuses at every sampled work and scratch limit as the identity-keyed
-    /// visitor does.
-    #[test]
-    fn positioned_single_scans_answer_and_refuse_as_identity_scans() {
+    /// Every `text` over a sparse-identity multigraph of `width` vertices
+    /// and `arcs` edges in two relations (parallel edges, loops, arrivals in
+    /// no endpoint order) answers positioned with the identity evaluator's
+    /// value and statistics, makes the same vertex tests, stops at every
+    /// `every`th host checkpoint (and the first and last 40) with the same
+    /// count, and refuses at every sampled work and scratch limit alike.
+    fn positioned_matches_identity(
+        texts: &[&str],
+        width: u32,
+        arcs: usize,
+        every: usize,
+        single: bool,
+    ) {
         use core::cell::Cell;
-        let mut vertices: Vec<(VId, ())> = (0..40_u128)
+        let mut vertices: Vec<(VId, ())> = (0..u128::from(width))
             .map(|at| (VId(at * 7_919 + (at % 5) * (1 << 70)), ()))
             .collect();
         vertices.sort_unstable_by_key(|&(vid, _)| vid);
@@ -2232,17 +2279,19 @@ mod tests {
             x ^= x << 17;
             x % bound
         };
-        let edges: Vec<PositionedEdge> = (0..300)
+        let edges: Vec<PositionedEdge> = (0..arcs)
             .map(|_| PositionedEdge {
-                source: next(40) as u32,
-                destination: next(40) as u32,
+                source: next(u64::from(width)) as u32,
+                destination: next(u64::from(width)) as u32,
                 relation: next(2) as u32,
             })
             .collect();
         let relations = [RelationId(1), RelationId(2)];
         let graph = PositionedGraph::new(&vertices, &relations, &edges).unwrap();
         let triples: Vec<_> = graph.triples().collect();
-        let values: Vec<CanonicalScalar> = (0..40).map(|at| CanonicalScalar::Int(at % 7)).collect();
+        let values: Vec<CanonicalScalar> = (0..width)
+            .map(|at| CanonicalScalar::Int(i64::from(at % 7)))
+            .collect();
         let passes = |vid: VId| vid.0 % 3 != 1;
         let value = |vid: VId| {
             vertices
@@ -2251,18 +2300,9 @@ mod tests {
                 .map(|at| &values[at])
         };
         let wide = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
-        for text in [
-            "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS n",
-            "MATCH (a:L)-[:R]->(b) RETURN COUNT(*) AS n",
-            "MATCH (a)-[:R]->(b:L) RETURN COUNT(*) AS n",
-            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
-            "MATCH (a:L)-[:R]->(b) RETURN a.n AS id, COUNT(*) AS d ORDER BY d DESC, id ASC LIMIT 3",
-            "MATCH (a:L)<-[:R]-(b) RETURN a, COUNT(*) AS c GROUP BY a",
-            "MATCH (a)-[:R]->(b:L) RETURN a, COUNT(*) AS c GROUP BY a",
-            "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(b) AS n, MIN(b) AS lo, MAX(a) AS hi",
-        ] {
+        for text in texts {
             let q = query(text);
-            assert!(single_scan(&q).is_some(), "{text}");
+            assert_eq!(single_scan(&q).is_some(), single, "{text}");
             let run = |positioned: bool, policy, stop: Option<usize>| {
                 let (mut at, tests) = (0, Cell::new(0));
                 let checkpoint = || {
@@ -2299,7 +2339,10 @@ mod tests {
             let expected = run(false, wide, None);
             assert!(expected.0.starts_with("Ok("), "{text}: {expected:?}");
             assert_eq!(run(true, wide, None), expected, "{text}");
-            for stop in 1..=expected.1 {
+            let total = expected.1;
+            for stop in
+                (1..=total).filter(|stop| stop % every == 0 || *stop <= 40 || total - stop < 40)
+            {
                 assert_eq!(
                     run(true, wide, Some(stop)),
                     run(false, wide, Some(stop)),
@@ -2317,7 +2360,9 @@ mod tests {
                     || Ok::<_, usize>(()),
                 )
                 .unwrap();
-            let sampled = |total: u64| (0..=total).filter(move |at| at % 7 == 0 || total - at <= 3);
+            let step = every as u64;
+            let sampled =
+                move |total: u64| (0..=total).filter(move |at| at % step == 0 || total - at <= 3);
             for limit in sampled(completed.evaluator.work_units) {
                 let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, limit, u64::MAX);
                 assert_eq!(
@@ -2335,6 +2380,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A POSITIONED SINGLE SCAN IS THE IDENTITY SCAN, EVENT FOR EVENT.**
+    /// Shared, one-sided and absent endpoint predicates; forward and
+    /// reverse; counted, anchored with and without a property column, and
+    /// unanchored: every host checkpoint stop is compared.
+    #[test]
+    fn positioned_single_scans_answer_and_refuse_as_identity_scans() {
+        positioned_matches_identity(
+            &[
+                "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS n",
+                "MATCH (a:L)-[:R]->(b) RETURN COUNT(*) AS n",
+                "MATCH (a)-[:R]->(b:L) RETURN COUNT(*) AS n",
+                "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+                "MATCH (a:L)-[:R]->(b) RETURN a.n AS id, COUNT(*) AS d ORDER BY d DESC, id ASC LIMIT 3",
+                "MATCH (a:L)<-[:R]-(b) RETURN a, COUNT(*) AS c GROUP BY a",
+                "MATCH (a)-[:R]->(b:L) RETURN a, COUNT(*) AS c GROUP BY a",
+                "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(b) AS n, MIN(b) AS lo, MAX(a) AS hi",
+            ],
+            40,
+            300,
+            1,
+            true,
+        );
+    }
+
+    /// **A POSITIONED TOPOLOGY IS THE IDENTITY TOPOLOGY, EVENT FOR EVENT.**
+    /// Triangles and four-cycles (distinct and repeatable edges, labelled,
+    /// grouped, with a trailing property selection), a chain, a wedge with an
+    /// identity test and an undirected cycle (weighed by identity) answer and
+    /// refuse alike, whether their tries are keyed by position or identity.
+    #[test]
+    fn positioned_topologies_answer_and_refuse_as_identity_topologies() {
+        positioned_matches_identity(
+            &[
+                "MATCH (a:L)-[:R]->(b:L)-[:R]->(c:L)-[:R]->(a) RETURN COUNT(*) AS n",
+                "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN COUNT(*) AS n",
+                "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN a, COUNT(*) AS n GROUP BY a",
+                "MATCH REPEATABLE ELEMENTS (a:L)-[:R]->(b)-[:R]->(c)-[:R]->(d)-[:R]->(a) RETURN COUNT(*) AS n",
+                "MATCH REPEATABLE ELEMENTS (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) WHERE a.n = c.n RETURN COUNT(*) AS n",
+                "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS n",
+                "MATCH (a)-[:R]->(b)<-[:R]-(c) WHERE a<>c RETURN COUNT(*) AS n",
+                "MATCH REPEATABLE ELEMENTS (a)-[:R]-(b)-[:R]-(c)-[:R]-(a) RETURN COUNT(*) AS n",
+            ],
+            24,
+            120,
+            9,
+            false,
+        );
     }
 
     #[test]

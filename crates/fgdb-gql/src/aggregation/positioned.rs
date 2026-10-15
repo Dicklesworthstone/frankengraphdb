@@ -71,6 +71,10 @@ impl<'g, T> PositionedGraph<'g, T> {
         self.edges
     }
 
+    pub(crate) fn relations(&self) -> &'g [RelationId] {
+        self.relations
+    }
+
     /// The position of `relation` in the relation table, if it is there.
     pub(crate) fn relation(&self, relation: RelationId) -> Option<u32> {
         self.relations

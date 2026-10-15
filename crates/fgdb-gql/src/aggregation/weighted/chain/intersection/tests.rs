@@ -723,13 +723,60 @@ fn flat_tries_charge_and_hold_what_the_tree_build_did() {
                 let mut expected = Vec::new();
                 let rows = tree_build(atom, &topology, &mut expected);
                 let mut events = Vec::new();
-                let trie = Trie::build(atom, &topology, &mut |event| {
+                let trie = Trie::build(atom, topology.keys().copied(), 0, &mut |event| {
                     events.push(event);
                     Ok::<_, ()>(())
                 })
                 .unwrap();
                 assert_eq!(events, expected, "{round} {direction:?} {left} {right}");
                 assert!(trie.roots.iter().eq(rows.keys()));
+                // Keyed by position in the ascending endpoint table, the
+                // trie charges the same events and holds the same rows.
+                let mut table: Vec<VId> = topology
+                    .keys()
+                    .flat_map(|&(source, _, destination)| [source, destination])
+                    .collect();
+                table.sort_unstable();
+                table.dedup();
+                let position = |vid: VId| table.binary_search(&vid).unwrap() as u32;
+                let mut positioned_events = Vec::new();
+                let positioned = Trie::<u32>::build(
+                    atom,
+                    topology.keys().map(|&(source, relation, destination)| {
+                        (position(source), relation, position(destination))
+                    }),
+                    table.len(),
+                    &mut |event| {
+                        positioned_events.push(event);
+                        Ok::<_, ()>(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    positioned_events, expected,
+                    "{round} {direction:?} {left} {right}"
+                );
+                assert!(
+                    positioned
+                        .roots
+                        .iter()
+                        .map(|&at| table[at as usize])
+                        .eq(trie.roots.iter().copied())
+                );
+                for vid in &table {
+                    let mut by_identity = [None; MAX_PATTERN_VERTICES];
+                    let mut by_position = [None; MAX_PATTERN_VERTICES];
+                    by_identity[trie.low] = Some(*vid);
+                    by_position[trie.low] = Some(position(*vid));
+                    let identity_domain = trie.domain(trie.high, &by_identity).unwrap_or(&[]);
+                    let position_domain = positioned.domain(trie.high, &by_position).unwrap_or(&[]);
+                    assert!(
+                        position_domain
+                            .iter()
+                            .map(|&at| table[at as usize])
+                            .eq(identity_domain.iter().copied())
+                    );
+                }
                 // A loop atom's one variable ranges over its roots alone.
                 if trie.low != trie.high {
                     let mut assigned = [None; MAX_PATTERN_VERTICES];
@@ -744,7 +791,7 @@ fn flat_tries_charge_and_hold_what_the_tree_build_did() {
                 // A refusal at any charge stops the build there.
                 for stop in 1..=expected.len() {
                     let mut at = 0;
-                    let result = Trie::build(atom, &topology, &mut |_| {
+                    let result = Trie::build(atom, topology.keys().copied(), 0, &mut |_| {
                         at += 1;
                         if at == stop { Err(at) } else { Ok(()) }
                     });

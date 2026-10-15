@@ -17,7 +17,7 @@
 
 mod cycle;
 mod intersection;
-pub(super) use intersection::visit_bindings as visit_original_bindings;
+pub(super) use intersection::{VertexAt, visit_positioned_bindings as visit_original_bindings};
 
 use super::*;
 use crate::algebra::{
@@ -287,6 +287,7 @@ pub(super) fn visit_bindings<'a, E, C, F, R, M, P>(
     plan: &GlaPlan<GraphValueRow>,
     vertices: impl IntoIterator<Item = VId>,
     topology: &Topology,
+    positioned: Option<VertexAt<'_>>,
     accesses: &[EdgeAccess],
     forest: &tree::Forest,
     test_vertex: F,
@@ -353,10 +354,11 @@ where
     // Reused by every binding: the slots a binding writes are the same for
     // all of them, so the rest stay empty, as in a fresh array.
     let mut original = [None; MAX_PATTERN_VERTICES];
-    intersection::visit_bindings(
+    intersection::visit_positioned_bindings(
         execution,
         vertices,
         topology,
+        positioned,
         test_vertex,
         property,
         control,

@@ -208,6 +208,79 @@ impl<'a> Shape<'a> {
     }
 }
 
+/// What a trie is keyed by: engine identities, or positions in a positioned
+/// graph's vertex table. Positions order and equate exactly as the
+/// identities they stand for (the table ascends strictly), so every
+/// comparison below takes the same branch on either, and a search over
+/// positions makes the same charges in the same order; positions index
+/// their rows and seen-sets by array instead of by hash.
+pub(in crate::aggregation::weighted) trait Key:
+    Copy + Ord + core::hash::Hash
+{
+    /// Root -> its row: probed, never iterated.
+    type Rows;
+    /// Keys seen: probed, never iterated.
+    type Seen;
+    /// Over keys below `bound` (positions); identities ignore it.
+    fn rows(bound: usize) -> Self::Rows;
+    fn set_row(rows: &mut Self::Rows, key: Self, row: usize);
+    fn row(rows: &Self::Rows, key: Self) -> Option<usize>;
+    fn seen(bound: usize) -> Self::Seen;
+    fn was_seen(seen: &Self::Seen, key: Self) -> bool;
+    fn see(seen: &mut Self::Seen, key: Self);
+}
+
+impl Key for VId {
+    type Rows = crate::id_hash::IdMap<VId, usize>;
+    type Seen = crate::id_hash::IdSet<VId>;
+    fn rows(_: usize) -> Self::Rows {
+        Self::Rows::default()
+    }
+    fn set_row(rows: &mut Self::Rows, key: Self, row: usize) {
+        rows.insert(key, row);
+    }
+    fn row(rows: &Self::Rows, key: Self) -> Option<usize> {
+        rows.get(&key).copied()
+    }
+    fn seen(_: usize) -> Self::Seen {
+        Self::Seen::default()
+    }
+    fn was_seen(seen: &Self::Seen, key: Self) -> bool {
+        seen.contains(&key)
+    }
+    fn see(seen: &mut Self::Seen, key: Self) {
+        seen.insert(key);
+    }
+}
+
+/// A position's row, `u32::MAX` while unrooted (a row is below the vertex
+/// count, which fits a position), and one seen bit per position.
+impl Key for u32 {
+    type Rows = Vec<u32>;
+    type Seen = Vec<u64>;
+    fn rows(bound: usize) -> Self::Rows {
+        vec![u32::MAX; bound]
+    }
+    fn set_row(rows: &mut Self::Rows, key: Self, row: usize) {
+        rows[key as usize] = row as u32;
+    }
+    fn row(rows: &Self::Rows, key: Self) -> Option<usize> {
+        match rows[key as usize] {
+            u32::MAX => None,
+            row => Some(row as usize),
+        }
+    }
+    fn seen(bound: usize) -> Self::Seen {
+        vec![0; bound.div_ceil(64)]
+    }
+    fn was_seen(seen: &Self::Seen, key: Self) -> bool {
+        seen[key as usize / 64] >> (key % 64) & 1 == 1
+    }
+    fn see(seen: &mut Self::Seen, key: Self) {
+        seen[key as usize / 64] |= 1 << (key % 64);
+    }
+}
+
 /// Binary trie in canonical variable order, not stored edge orientation.
 /// Unary loops contain only diagonal values. Parallel edge support is unique
 /// here; its exact weight remains in the parent's unchanged topology table.
@@ -217,30 +290,32 @@ impl<'a> Shape<'a> {
 /// two random descents per topology key to build and one per domain lookup
 /// (38% of a 730K-edge triangle count). The build charges exactly what that
 /// tree build charged, in the same order (pinned by a law against it).
-struct Trie {
+struct Trie<K: Key> {
     low: usize,
     high: usize,
-    roots: Vec<VId>,
+    roots: Vec<K>,
     /// Probed, never iterated: root -> its row.
-    rows: crate::id_hash::IdMap<VId, usize>,
+    rows: K::Rows,
     /// Row `r`'s children are `children[offsets[r]..offsets[r + 1]]`.
     offsets: Vec<usize>,
-    children: Vec<VId>,
+    children: Vec<K>,
 }
-impl Trie {
+impl<K: Key> Trie<K> {
+    /// From the topology's keys in key order; positions are below `bound`.
     fn build<E>(
         atom: Atom,
-        topology: &Topology,
+        keys: impl Iterator<Item = (K, RelationId, K)>,
+        bound: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         use crate::id_hash::IdSet;
         // A key is unique per (left, relation, right), so one orientation per
         // key never repeats a pair; only the undirected doubling can.
         let mut repeated =
-            (atom.direction == GlaDirection::Undirected).then(IdSet::<(VId, VId)>::default);
-        let mut lows = IdSet::<VId>::default();
+            (atom.direction == GlaDirection::Undirected).then(IdSet::<(K, K)>::default);
+        let mut lows = K::seen(bound);
         let mut pairs = Vec::new();
-        for &(left, relation, right) in topology.keys() {
+        for (left, relation, right) in keys {
             control(GlaExecutionEvent::Work)?;
             if relation != atom.relation {
                 continue;
@@ -265,7 +340,7 @@ impl Trie {
                 } else {
                     (to, from)
                 };
-                let new_low = !lows.contains(&low);
+                let new_low = !K::was_seen(&lows, low);
                 if new_low {
                     control(GlaExecutionEvent::ScratchEntry)?;
                 }
@@ -275,7 +350,7 @@ impl Trie {
                         .is_none_or(|seen| !seen.contains(&(low, high)));
                 if new_pair {
                     control(GlaExecutionEvent::ScratchEntry)?;
-                    lows.insert(low);
+                    K::see(&mut lows, low);
                     if let Some(seen) = &mut repeated {
                         seen.insert((low, high));
                     }
@@ -287,7 +362,7 @@ impl Trie {
         drop(repeated);
         pairs.sort_unstable();
         let mut roots = Vec::new();
-        let mut rows = crate::id_hash::IdMap::default();
+        let mut rows = K::rows(bound);
         let mut offsets = vec![0];
         let mut children = Vec::with_capacity(pairs.len());
         let mut at = 0;
@@ -295,7 +370,7 @@ impl Trie {
             let low = pairs[at].0;
             control(GlaExecutionEvent::Work)?;
             control(GlaExecutionEvent::ScratchEntry)?;
-            rows.insert(low, roots.len());
+            K::set_row(&mut rows, low, roots.len());
             roots.push(low);
             control(GlaExecutionEvent::ScratchEntry)?;
             while let Some(&(_, value)) = pairs.get(at).filter(|(row, _)| *row == low) {
@@ -315,14 +390,14 @@ impl Trie {
             children,
         })
     }
-    fn domain(&self, variable: usize, assigned: &[Option<VId>]) -> Option<&[VId]> {
+    fn domain(&self, variable: usize, assigned: &[Option<K>]) -> Option<&[K]> {
         if variable == self.low {
             Some(&self.roots)
         } else if variable == self.high {
             Some(
                 assigned[self.low]
-                    .and_then(|low| self.rows.get(&low))
-                    .map_or(&[][..], |&row| {
+                    .and_then(|low| K::row(&self.rows, low))
+                    .map_or(&[][..], |row| {
                         &self.children[self.offsets[row]..self.offsets[row + 1]]
                     }),
             )
@@ -334,13 +409,18 @@ impl Trie {
 
 /// One variable's candidates from one trie: all of its roots, or the
 /// children of its low variable's assignment.
-#[derive(Clone, Copy)]
-enum Domain<'t> {
-    Roots(&'t Trie),
-    Children(&'t [VId]),
+enum Domain<'t, K: Key> {
+    Roots(&'t Trie<K>),
+    Children(&'t [K]),
 }
-impl<'t> Domain<'t> {
-    fn values(self) -> &'t [VId] {
+impl<K: Key> Clone for Domain<'_, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<K: Key> Copy for Domain<'_, K> {}
+impl<'t, K: Key> Domain<'t, K> {
+    fn values(self) -> &'t [K] {
         match self {
             Self::Roots(trie) => &trie.roots,
             Self::Children(values) => values,
@@ -351,13 +431,13 @@ impl<'t> Domain<'t> {
     /// binary search of a child list, each comparison charged.
     fn contains<E>(
         self,
-        value: VId,
+        value: K,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
         match self {
             Self::Roots(trie) => {
                 control(GlaExecutionEvent::Work)?;
-                Ok(trie.rows.contains_key(&value))
+                Ok(K::row(&trie.rows, value).is_some())
             }
             Self::Children(values) => {
                 let at = lower_bound(values, Some(value), false, control)?;
@@ -370,9 +450,9 @@ impl<'t> Domain<'t> {
 /// The first position at or after (strictly after, when `exclusive`)
 /// `bound`; every comparison is charged and no identity is incremented, so
 /// the full u128 domain includes both endpoints.
-fn lower_bound<E>(
-    values: &[VId],
-    bound: Option<VId>,
+fn lower_bound<K: Ord, E>(
+    values: &[K],
+    bound: Option<K>,
     exclusive: bool,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<usize, E> {
@@ -403,15 +483,15 @@ type Resume = Option<(usize, usize, usize)>;
 /// a binary search repeated for every candidate, which was most of a
 /// 730K-edge triangle count's comparisons. The next call for the same
 /// variable resumes after its previous answer instead of searching again.
-fn intersect<'t, E>(
-    tries: &'t [Trie],
+fn intersect<'t, K: Key, E>(
+    tries: &'t [Trie<K>],
     variable: usize,
-    assigned: &[Option<VId>],
-    after: Option<VId>,
+    assigned: &[Option<K>],
+    after: Option<K>,
     resume: &mut Resume,
-    domains: &mut [Option<Domain<'t>>; crate::algebra::MAX_PATTERN_EDGES],
+    domains: &mut [Option<Domain<'t, K>>; crate::algebra::MAX_PATTERN_EDGES],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-) -> Result<Option<VId>, E> {
+) -> Result<Option<K>, E> {
     let mut count = 0;
     for trie in tries {
         control(GlaExecutionEvent::Work)?;
@@ -462,15 +542,51 @@ fn intersect<'t, E>(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The vertex count of a positioned graph and its identity at a position,
+/// for a topology weighed with positions.
+pub(in crate::aggregation::weighted) type VertexAt<'v> = (usize, &'v dyn Fn(u32) -> VId);
+
+/// `visit_positioned_bindings` over identities alone.
 pub(in crate::aggregation::weighted) fn visit_bindings<'a, E, C, F, R, M, P>(
     plan: &GlaPlan<GraphValueRow>,
     vertices: impl IntoIterator<Item = VId>,
     topology: &Topology,
     test_vertex: F,
-    mut property: R,
+    property: R,
+    control: M,
+    visit: P,
+) -> Result<(), VisitError<E, C>>
+where
+    F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+    P: FnMut(&[ValueProjection], &[Option<VId>], &mut R, &mut M) -> Result<(), VisitError<E, C>>,
+{
+    visit_positioned_bindings(
+        plan,
+        vertices,
+        topology,
+        None,
+        test_vertex,
+        property,
+        control,
+        visit,
+    )
+}
+
+/// Every complete support binding of a cyclic plan, by ordered multiway
+/// intersection. A topology weighed with positions, given its graph's
+/// `positioned` vertices, is searched by position.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::aggregation::weighted) fn visit_positioned_bindings<'a, E, C, F, R, M, P>(
+    plan: &GlaPlan<GraphValueRow>,
+    vertices: impl IntoIterator<Item = VId>,
+    topology: &Topology,
+    positioned: Option<VertexAt<'_>>,
+    test_vertex: F,
+    property: R,
     mut control: M,
-    mut visit: P,
+    visit: P,
 ) -> Result<(), VisitError<E, C>>
 where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
@@ -491,14 +607,49 @@ where
     // Definition-bounded frames live on the stack. Heap arrangements reserve
     // every retained entry before allocation. Counters are cumulative, not a
     // claim about peak bytes or BTreeMap's internal comparison count.
+    if let (Some((bound, vertex)), Some(_)) = (positioned, topology.positioned_keys()) {
+        let mut tries = Vec::new();
+        for atom in shape.atoms[..shape.edges].iter().flatten() {
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            let keys = topology
+                .positioned_keys()
+                .expect("a positioned topology keeps its positions");
+            tries.push(Trie::build(*atom, keys, bound, &mut control)?);
+        }
+        return search(&shape, &tries, vertex, property, control, visit);
+    }
     let mut tries = Vec::new();
     for atom in shape.atoms[..shape.edges].iter().flatten() {
         control(GlaExecutionEvent::Work)?;
         control(GlaExecutionEvent::ScratchEntry)?;
-        tries.push(Trie::build(*atom, topology, &mut control)?);
+        tries.push(Trie::build(
+            *atom,
+            topology.keys().copied(),
+            0,
+            &mut control,
+        )?);
     }
-    let mut assigned = [None; MAX_PATTERN_VERTICES];
-    let mut after = [None; MAX_PATTERN_VERTICES];
+    search(&shape, &tries, |vid| vid, property, control, visit)
+}
+
+/// The ordered search over built tries; each complete binding reaches the
+/// selections and `visit` by identity.
+fn search<'a, K: Key, E, C, R, M, P>(
+    shape: &Shape<'_>,
+    tries: &[Trie<K>],
+    vertex: impl Fn(K) -> VId,
+    mut property: R,
+    mut control: M,
+    mut visit: P,
+) -> Result<(), VisitError<E, C>>
+where
+    R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
+    M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
+    P: FnMut(&[ValueProjection], &[Option<VId>], &mut R, &mut M) -> Result<(), VisitError<E, C>>,
+{
+    let mut assigned: [Option<K>; MAX_PATTERN_VERTICES] = [None; MAX_PATTERN_VERTICES];
+    let mut after: [Option<K>; MAX_PATTERN_VERTICES] = [None; MAX_PATTERN_VERTICES];
     let mut resume: [Resume; MAX_PATTERN_VERTICES] = [None; MAX_PATTERN_VERTICES];
     let mut bindings = [None; MAX_PATTERN_VERTICES];
     // Every search's domains, filled afresh by each `intersect` up to its
@@ -510,7 +661,7 @@ where
         if depth == shape.variables {
             for at in 0..shape.width {
                 control(GlaExecutionEvent::Work)?;
-                bindings[at] = assigned[shape.representatives[at]];
+                bindings[at] = assigned[shape.representatives[at]].map(&vertex);
             }
             // The guard proves every ordinary topology/identity test has
             // already succeeded before these reads would occur. Do not cache,
@@ -542,7 +693,7 @@ where
         }
         let variable = shape.order[depth];
         let Some(value) = intersect(
-            &tries,
+            tries,
             variable,
             &assigned,
             after[depth],
