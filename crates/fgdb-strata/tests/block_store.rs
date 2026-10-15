@@ -2745,6 +2745,111 @@ fn a_two_level_root_publishes_its_segments_and_reopens_through_them() {
     });
 }
 
+/// **A ROOT PUBLICATION PACKS A BULK COMMIT'S NEW SEGMENTS AND KEEPS ITS ROOT
+/// AND MANIFEST LOOSE.** A root naming seven new segments publishes them as
+/// loose files, as a small transaction's objects are. The next root, eight
+/// segments longer, publishes those eight as one pack beside the loose seven,
+/// while its root and the manifest naming it stay loose files, which slot
+/// recovery and the damage tooling address by path. A fresh handle resolves
+/// the manifest and reopens every block through both kinds of segment.
+#[test]
+fn a_root_publication_packs_a_bulk_commits_segments_and_keeps_its_root_loose() {
+    use fgdb_strata::manifest::ManifestRecord;
+    use fgdb_strata::store::{PACK_DIR, ROOT_SEGMENT_PACK_MIN};
+    let dir = scratch_dir("root-segment-pack");
+    under_lab(0xd9, move |cx| async move {
+        let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("opens");
+        let (loose, packed) = (ROOT_SEGMENT_PACK_MIN - 1, ROOT_SEGMENT_PACK_MIN);
+        let grown = batch_of_blocks(&cx, &store, (loose + packed) * SEGMENT_REFS + 1).await;
+        let mut small = grown.clone();
+        small.blocks.truncate(loose * SEGMENT_REFS + 1);
+        let segments: Vec<ObjectId> =
+            encode_root_v5(&grown, &K_OID, NAMESPACE, &mut SegmentCache::default())
+                .expect("encodes")
+                .new_segments
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+        assert_eq!(segments.len(), loose + packed);
+        let packs = || {
+            std::fs::read_dir(dir.join(BLOCK_DIR).join(PACK_DIR))
+                .expect("the blocks were packed")
+                .map(|entry| entry.expect("entry").file_name())
+                .filter(|name| !name.to_string_lossy().starts_with('.'))
+                .count()
+        };
+        let block_packs = packs();
+
+        let mut receipts = PublishReceipts::new();
+        let mut manifest = None;
+        for (root, new, packs_after) in [
+            (&small, &segments[..loose], block_packs),
+            (&grown, &segments[loose..], block_packs + 1),
+        ] {
+            let verified = store
+                .verify_root(&cx, root, &mut receipts)
+                .await
+                .expect("verifies");
+            let root_id = verified.id();
+            let records = [ManifestRecord {
+                graph: root.graph,
+                branch: root.branch,
+                partition: root.partition,
+                root: root_id,
+                published_chain_hash: fgdb_crypto::Digest([0xa1; 32]),
+            }];
+            let (manifest_id, _) = store
+                .publish_root_and_manifest(&cx, verified, &records, &mut receipts)
+                .await
+                .expect("publishes");
+            assert_eq!(packs(), packs_after, "{} new segments", new.len());
+            for segment in new {
+                assert_eq!(
+                    store.path(*segment).is_file(),
+                    new.len() < ROOT_SEGMENT_PACK_MIN,
+                    "a segment is loose exactly when its root names fewer than the minimum new"
+                );
+            }
+            assert!(store.path(root_id.0).is_file(), "the root is loose");
+            assert!(store.path(manifest_id.0).is_file(), "the manifest is loose");
+            manifest = Some((manifest_id, root_id));
+        }
+        for segment in &segments[..loose] {
+            assert!(
+                store.path(*segment).is_file(),
+                "an earlier root's segments stay put"
+            );
+        }
+
+        let (manifest_id, root_id) = manifest.expect("published");
+        let reopened = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
+            .await
+            .expect("reopens");
+        let resolved = reopened
+            .resolve_manifest(&cx, manifest_id)
+            .await
+            .expect("resolves through packed segments");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0.root, root_id);
+        assert_eq!(resolved[0].1, grown);
+        let (_, blocks, _, _) = reopened
+            .reopen(&cx, root_id)
+            .await
+            .expect("reopens the whole partition");
+        assert_eq!(blocks.len(), grown.blocks.len());
+        for (k, entries) in blocks.iter().enumerate() {
+            let k = k as u128;
+            assert_eq!(
+                entries,
+                &vec![entry(1_000 + k, 500_000 + k, 1)],
+                "block {k}"
+            );
+        }
+    });
+}
+
 /// **RECEIPTS SEEDED FROM A REOPEN ARE THE RECEIPTS ITS PUBLISHER HELD**
 /// (fgdb-ibbuq). A 767-block root is two full segments plus a 255-reference
 /// tail, and the next root adds one block, which fills a third segment. Three

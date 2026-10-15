@@ -86,6 +86,10 @@ use bounded_read::RootReadEvent;
 pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
 mod pack;
 pub use pack::{PACK_DIR, PACK_MIN_OBJECTS};
+
+/// The fewest new root segments (with index segments) a root publication
+/// packs together; fewer stay loose, as a small transaction's objects do.
+pub const ROOT_SEGMENT_PACK_MIN: usize = 8;
 mod buffered_read;
 #[cfg(test)]
 mod pack_tests;
@@ -2862,6 +2866,14 @@ impl<V: Vfs> BlockStore<V> {
                 batch.put_object(cx, kind, *segment_id, segment).await?;
             }
         }
+        // A bulk commit fills about 16 segments. One pack makes them one
+        // inode sync instead of one each, and one file an open reads instead
+        // of one per 256 references (2,905 files on a web-google root). The
+        // root and manifest stay loose, where slot recovery and the damage
+        // tooling address them by path.
+        if segments.len() + index_segments.len() >= ROOT_SEGMENT_PACK_MIN {
+            batch.flush_as_pack(cx).await?;
+        }
         batch
             .put_object(cx, StoredObjectKind::Root, id.0, &bytes)
             .await?;
@@ -3491,6 +3503,20 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         self.check_live()?;
         self.failed = true;
         self.flush_staged(cx).await?;
+        self.failed = false;
+        Ok(())
+    }
+
+    /// Publish everything staged so far as one pack, however few objects
+    /// it is; the root publication packs a bulk commit's segments this way.
+    async fn flush_as_pack(&mut self, cx: &CommitCx) -> Result<(), StoreError> {
+        self.check_live()?;
+        self.failed = true;
+        let objects = std::mem::take(&mut self.unflushed);
+        self.unflushed_bytes = 0;
+        if !objects.is_empty() {
+            self.flush_pack(cx, &objects).await?;
+        }
         self.failed = false;
         Ok(())
     }
