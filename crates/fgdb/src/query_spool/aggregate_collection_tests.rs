@@ -95,7 +95,12 @@ impl GroupInput for Meter {
 
 fn opened(text: &str, stop: Option<usize>) -> Opened<'static> {
     let parameters = GqlParameters::new();
-    let prepared = PreparedNativeRead::prepare(text, &parameters, |_, _| None).unwrap();
+    let prepared = PreparedNativeRead::prepare(
+        text,
+        &parameters,
+        |_: fgdb_gql::GraphSymbolKind, _: &str| None,
+    )
+    .unwrap();
     // This also exercises the public buffered compiler's class selection.
     prepared.prepare_buffered_aggregate(&parameters).unwrap();
     let PreparedNativeRead::PipelineAggregate(template) = prepared else {
@@ -453,7 +458,7 @@ fn direct_graph_collection_still_requires_its_own_order_proof() {
     let prepared = PreparedNativeRead::prepare(
         "MATCH (n) RETURN COLLECT(n) AS nodes",
         &parameters,
-        |_, _| None,
+        |_: fgdb_gql::GraphSymbolKind, _: &str| None,
     )
     .unwrap();
     let PreparedNativeRead::Aggregate(template) = prepared else {
