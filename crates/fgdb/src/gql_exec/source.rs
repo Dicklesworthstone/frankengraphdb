@@ -749,18 +749,19 @@ impl PropertyEqualityIndex {
     }
 
     /// Build a generation from scratch bottom-up, with the same contents as
-    /// folding every row through `apply_added`.
+    /// folding every row through `apply_added`. Statements and property
+    /// values are each one sorted vector, grouped in place, as the adjacency
+    /// index's statements are: an ordered-map insert per row, and a shared
+    /// key allocated per row only to be dropped when the key existed, were
+    /// about a fifth of opening a compacted road-ny.
     pub(crate) fn build(patches: &[VertexPatchRows]) -> Self {
         let mut work = 0;
-        let mut histories = BTreeMap::<VId, Vec<(CommitSeq, usize, usize)>>::new();
-        let mut candidates = BTreeMap::<(PropertyKeyId, std::sync::Arc<[u8]>), Vec<VId>>::new();
+        let mut statements = Vec::with_capacity(patches.iter().map(|rows| rows.len()).sum());
+        let mut values = Vec::new();
         for (patch, rows) in patches.iter().enumerate() {
             for (row_at, row) in rows.iter().enumerate() {
                 work += 1;
-                histories
-                    .entry(row.vid)
-                    .or_default()
-                    .push((row.created_at, patch, row_at));
+                statements.push((row.vid, row.created_at, patch, row_at));
                 for (key, value) in &row.props {
                     work += 1;
                     if matches!(value, CanonicalScalar::Null) {
@@ -770,20 +771,29 @@ impl PropertyEqualityIndex {
                         continue;
                     };
                     work += encoded.len() as u64;
-                    candidates
-                        .entry((*key, std::sync::Arc::from(encoded)))
-                        .or_default()
-                        .push(row.vid);
+                    values.push((*key, encoded, row.vid));
                 }
             }
         }
-        let histories = histories
-            .into_iter()
-            .map(|(vid, versions)| (vid, unit_set(versions, &mut work)))
+        // `unit_set` charges only the set it builds, so grouping order leaves
+        // every `work` count as the per-row maps gave it.
+        statements.sort_unstable();
+        let histories = statements
+            .chunk_by(|a, b| a.0 == b.0)
+            .map(|group| {
+                let versions = group.iter().map(|&(_, at, patch, row)| (at, patch, row));
+                (group[0].0, unit_set(versions.collect(), &mut work))
+            })
             .collect();
-        let candidates = candidates
-            .into_iter()
-            .map(|(key, vids)| (key, unit_set(vids, &mut work)))
+        drop(statements);
+        values.sort_unstable();
+        let candidates = values
+            .chunk_by(|a, b| a.0 == b.0 && a.1 == b.1)
+            .map(|group| {
+                let key = (group[0].0, std::sync::Arc::from(group[0].1.as_slice()));
+                let vids = group.iter().map(|&(_, _, vid)| vid).collect();
+                (key, unit_set(vids, &mut work))
+            })
             .collect();
         Self {
             candidates: IndexMap::from_sorted(candidates, &mut work),
