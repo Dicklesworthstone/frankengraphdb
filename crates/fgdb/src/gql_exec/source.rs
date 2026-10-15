@@ -31,14 +31,18 @@ type EqualityCandidates = IndexMap<(PropertyKeyId, std::sync::Arc<[u8]>), IndexM
 #[derive(Clone, Debug)]
 struct IndexMap<K, V>(Option<std::sync::Arc<IndexNode<K, V>>>);
 
+/// `height` and `len` are narrow so that a node keyed by a 16-byte identity
+/// with a root-sized value, or by a statement coordinate, fits the 64-byte
+/// allocation with its Arc counts rather than 80: four such nodes per edge
+/// are most of what an adjacency index costs.
 #[derive(Clone, Debug)]
 struct IndexNode<K, V> {
     key: K,
     value: V,
     left: IndexMap<K, V>,
     right: IndexMap<K, V>,
-    height: u16,
-    len: usize,
+    height: u8,
+    len: u32,
 }
 
 impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
@@ -46,15 +50,17 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
         Self(None)
     }
     fn height(&self) -> u16 {
-        self.0.as_ref().map_or(0, |n| n.height)
+        self.0.as_ref().map_or(0, |n| u16::from(n.height))
     }
     fn len(&self) -> usize {
-        self.0.as_ref().map_or(0, |n| n.len)
+        self.0.as_ref().map_or(0, |n| n.len as usize)
     }
     fn node(key: K, value: V, left: Self, right: Self, work: &mut u64) -> Self {
         *work += 1;
-        let height = 1 + left.height().max(right.height());
-        let len = 1 + left.len() + right.len();
+        // An AVL tree of fewer than 2^32 nodes is under 47 levels high.
+        let height = u8::try_from(1 + left.height().max(right.height())).expect("AVL height");
+        let len = u32::try_from(1 + left.len() + right.len())
+            .expect("an index tree holds fewer than 2^32 entries");
         Self(Some(std::sync::Arc::new(IndexNode {
             key,
             value,
@@ -1481,14 +1487,25 @@ mod indexed_tests {
             "unbalanced at {:?}",
             node.key
         );
-        assert_eq!(node.height, 1 + left_height.max(right_height));
-        assert_eq!(node.len, 1 + left_len + right_len);
+        assert_eq!(u16::from(node.height), 1 + left_height.max(right_height));
+        assert_eq!(node.len as usize, 1 + left_len + right_len);
         let keys: Vec<&K> = map.iter().map(|(key, _)| key).collect();
         assert!(
             keys.windows(2).all(|pair| pair[0] < pair[1]),
             "keys out of order"
         );
-        (node.height, node.len)
+        (u16::from(node.height), node.len as usize)
+    }
+
+    /// Each node kind of the adjacency and property indexes fits a 64-byte
+    /// allocation with its two Arc counts.
+    #[test]
+    fn index_nodes_fit_the_64_byte_class() {
+        let arc = 2 * std::mem::size_of::<usize>();
+        assert!(arc + std::mem::size_of::<IndexNode<EId, History>>() <= 64);
+        assert!(arc + std::mem::size_of::<IndexNode<VId, Incidence>>() <= 64);
+        assert!(arc + std::mem::size_of::<IndexNode<(CommitSeq, usize, usize), ()>>() <= 64);
+        assert!(arc + std::mem::size_of::<IndexNode<VId, ()>>() <= 64);
     }
 
     fn assert_nested_avl<
