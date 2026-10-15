@@ -72,7 +72,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         eligible: &[VId],
     ) -> Result<Vec<GraphHybridHit>, Error> {
         self.search_beacon_graph_index_with_eligibility(
-            cx, prepared, query, expansion, request, Some(eligible),
+            cx,
+            prepared,
+            query,
+            expansion,
+            request,
+            Some(eligible),
         )
     }
 
@@ -305,15 +310,12 @@ where
             )?;
             let Some(eid) = next else { break };
             after = Some(eid); // ordered successor, including EId(u128::MAX)
-            let Some((block, row)) = self
-                .snapshot
-                .adjacency_index()
-                .statement_at_controlled(
-                    &self.snapshot.blocks,
-                    eid,
-                    self.at,
-                    &mut |_| (membership.poll.borrow_mut())(),
-                )?
+            let Some((block, row)) = self.snapshot.adjacency_index().statement_at_controlled(
+                &self.snapshot.blocks,
+                eid,
+                self.at,
+                &mut |_| (membership.poll.borrow_mut())(),
+            )?
             else {
                 continue;
             };
@@ -325,7 +327,9 @@ where
                 GlaDirection::Undirected if edge.dst == vertex => edge.src,
                 _ => continue,
             };
-            if self.relation.is_some_and(|relation| relation != edge.relation)
+            if self
+                .relation
+                .is_some_and(|relation| relation != edge.relation)
                 || !membership.scope.allows_relation(edge.relation)
             {
                 continue;
