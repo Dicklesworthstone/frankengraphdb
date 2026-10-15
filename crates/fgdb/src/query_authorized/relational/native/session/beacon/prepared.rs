@@ -4,10 +4,11 @@
 use super::{
     AuthorizedReadSession, Error, GqlBudgetDimension, GqlQueryError, GraphSymbolResolver, Meter,
     Options, QueryCx, QueryError, ReadPolicy, RefCell, Rows, Search, SharedWork, WardenError,
-    WorkControl, admit_query, build, charge, definition, finish, policy, settle,
+    WorkControl, admit_query, allows, build, charge, definition, finish, policy, settle,
+    validate_eligibility,
 };
 use fgdb_beacon::{BeaconError, IndexSnapshot};
-use fgdb_types::CommitSeq;
+use fgdb_types::{CommitSeq, VId};
 use std::sync::Arc;
 
 /// An immutable resident search generation owned by exactly one authorized
@@ -114,6 +115,43 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         query: Search<'_>,
         request: ReadPolicy,
     ) -> Result<Rows, Error> {
+        self.search_beacon_index_with_eligibility(cx, prepared, query, request, None)
+    }
+
+    /// Reuse this exact session's index with per-execution endpoint eligibility.
+    /// Filtering precedes text/vector top-k and hybrid candidate depths, not
+    /// just final delivery. Ineligible documents remain in corpus statistics
+    /// and ANN routing; no graph scan, projection or index rebuild is performed.
+    ///
+    /// This is NOT a new authorization mechanism. The normal live session,
+    /// exact owner, source-population, query and budget checks all still run;
+    /// the same permit admits final results. Reject-all does not waive these
+    /// checks or the final live admission. No caller callback receives IDs.
+    ///
+    /// Supply at most 100,000 strictly ascending, unique IDs; an empty slice
+    /// allows none. Validation charges one work unit per supplied ID and
+    /// retains no selector copy. Unknown/hidden IDs are simply nonmatches.
+    /// Derive graph-dependent eligibility at the prepared source sequence,
+    /// not a newer writer frontier. ANN keeps its approximation boundary.
+    pub fn search_beacon_index_filtered(
+        &mut self,
+        cx: &QueryCx,
+        prepared: &super::AuthorizedBeaconIndex,
+        query: Search<'_>,
+        request: ReadPolicy,
+        eligible: &[VId],
+    ) -> Result<Rows, Error> {
+        self.search_beacon_index_with_eligibility(cx, prepared, query, request, Some(eligible))
+    }
+
+    fn search_beacon_index_with_eligibility(
+        &mut self,
+        cx: &QueryCx,
+        prepared: &super::AuthorizedBeaconIndex,
+        query: Search<'_>,
+        request: ReadPolicy,
+        eligible: Option<&[VId]>,
+    ) -> Result<Rows, Error> {
         let owner = Arc::clone(&self.owner);
         finish(self.run(cx, |view, _, scope, _, host, execution| {
             // Current credentials are checked by run BEFORE even an owner
@@ -163,7 +201,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     return Err(BeaconError::Disabled("text"));
                 }
                 query.validate(config, &mut SharedWork(&work))?;
-                let rows = query.execute(&prepared.index, &mut SharedWork(&work))?;
+                validate_eligibility(eligible, &mut SharedWork(&work))?;
+                let rows = query.execute_filtered(
+                    &prepared.index,
+                    |id| allows(eligible, id),
+                    &mut SharedWork(&work),
+                )?;
                 work.borrow_mut().charge(1)?;
                 Ok(rows)
             })();

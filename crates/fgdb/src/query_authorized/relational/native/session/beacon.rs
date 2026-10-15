@@ -7,7 +7,7 @@ use crate::{EmbeddedReadView, QueryError, ReadError};
 use fgdb_beacon::read::{Projection, ReadError as SearchError, ReadPolicy, Rows, Search};
 use fgdb_beacon::{BeaconError, BeaconIndex, IndexConfig, WorkControl};
 use fgdb_gql::{GqlBudgetDimension, GqlQueryError, GqlQueryPolicy, GraphSymbolResolver};
-use fgdb_types::{CommitSeq, QueryCx};
+use fgdb_types::{CommitSeq, QueryCx, VId};
 use fgdb_warden::{Error as WardenError, LimitDimension, PlannerPredicates};
 use std::cell::RefCell;
 
@@ -19,6 +19,38 @@ pub use prepared::AuthorizedBeaconIndex;
 mod graph;
 
 type Error = SearchError<ReadError, QueryError>;
+
+// A public callback here could observe candidates before signed row delivery.
+// Authorized entrypoints accept only caller-known, canonical IDs instead.
+const MAX_ELIGIBLE_IDS: usize = 100_000;
+
+fn validate_eligibility(
+    eligible: Option<&[VId]>,
+    work: &mut impl WorkControl,
+) -> Result<(), BeaconError> {
+    let Some(ids) = eligible else {
+        return Ok(());
+    };
+    if ids.len() > MAX_ELIGIBLE_IDS {
+        return Err(BeaconError::ResourceLimit {
+            resource: "eligible identities",
+            limit: MAX_ELIGIBLE_IDS,
+        });
+    }
+    for (at, id) in ids.iter().enumerate() {
+        work.charge(1)?;
+        if at != 0 && ids[at - 1] >= *id {
+            return Err(BeaconError::InvalidQuery(
+                "eligible identities must be strictly ascending",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn allows(eligible: Option<&[VId]>, id: VId) -> bool {
+    eligible.is_none_or(|ids| ids.binary_search(&id).is_ok())
+}
 
 #[cfg(test)]
 #[path = "beacon_tests.rs"]
@@ -239,6 +271,38 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         options: &Options,
         query: Search<'_>,
     ) -> Result<Rows, Error> {
+        self.beacon_search_with_eligibility(cx, options, query, None)
+    }
+
+    /// Restrict result endpoints before every lane's candidate limit. Scope
+    /// and property masking STILL precede projection and corpus construction;
+    /// eligibility neither grants authority nor changes BM25 statistics/ANN
+    /// routing within the authorized corpus. Signed source/node budgets are
+    /// unchanged, and reject-all still performs source and final live checks.
+    ///
+    /// `eligible` contains at most 100,000 strictly ascending, unique IDs;
+    /// an empty slice allows no endpoint. Validation spends one work unit per
+    /// ID under this execution's live permit and retains no selector copy.
+    /// There is no caller callback that could observe candidates before signed
+    /// row delivery. Unknown/hidden IDs are ordinary nonmatches, not diagnostics.
+    /// Derive graph-dependent eligibility at this session's selected cut.
+    pub fn beacon_search_filtered(
+        &mut self,
+        cx: &QueryCx,
+        options: &Options,
+        query: Search<'_>,
+        eligible: &[VId],
+    ) -> Result<Rows, Error> {
+        self.beacon_search_with_eligibility(cx, options, query, Some(eligible))
+    }
+
+    fn beacon_search_with_eligibility(
+        &mut self,
+        cx: &QueryCx,
+        options: &Options,
+        query: Search<'_>,
+        eligible: Option<&[VId]>,
+    ) -> Result<Rows, Error> {
         finish(self.run(cx, |view, _, scope, _, host, execution| {
             admit_query(query, scope, host, execution)?;
             let at = options.as_of.unwrap_or(view.frontier());
@@ -251,9 +315,14 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 work.borrow_mut().charge(1)?;
                 let config = options.config_for(query)?;
                 query.validate(&config, &mut SharedWork(&work))?;
+                validate_eligibility(eligible, &mut SharedWork(&work))?;
                 let options = definition(options, config, host, &mut SharedWork(&work))?;
                 let (index, _) = build(view, at, scope, host, execution, &options, &work)?;
-                let rows = query.execute(&index.snapshot(), &mut SharedWork(&work))?;
+                let rows = query.execute_filtered(
+                    &index.snapshot(),
+                    |id| allows(eligible, id),
+                    &mut SharedWork(&work),
+                )?;
                 work.borrow_mut().charge(1)?;
                 Ok(rows)
             })();
