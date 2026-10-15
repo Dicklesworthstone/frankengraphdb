@@ -302,7 +302,10 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                             cx.checkpoint()
                                 .map_err(WriteTxnError::Interrupted)
                                 .map_err(GqlQueryError::Interrupted)?;
-                            controls.borrow_mut().poll().map_err(GqlQueryError::Interrupted)
+                            controls
+                                .borrow_mut()
+                                .poll()
+                                .map_err(GqlQueryError::Interrupted)
                         },
                         control,
                         upsert_staging,

@@ -16,8 +16,8 @@ const R: RelationId = RelationId(1);
 const VISIBLE: LabelId = LabelId(1);
 
 fn predicates() -> PlannerPredicates {
-    let authority = Authority::new(AuthKey::from_seed(7127), NS, "graph", SchemaEpoch(1), 1)
-        .unwrap();
+    let authority =
+        Authority::new(AuthKey::from_seed(7127), NS, "graph", SchemaEpoch(1), 1).unwrap();
     let grant = Grant {
         branch: "main".into(),
         labels: Scope::only([VISIBLE]),

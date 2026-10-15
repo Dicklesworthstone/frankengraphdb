@@ -61,8 +61,8 @@ fn policy() -> GraphWriteProgramPolicy {
 }
 
 fn authority() -> (Authority, fgdb_warden::CapabilityToken) {
-    let authority = Authority::new(AuthKey::from_seed(8157), NS, "graph", SchemaEpoch(1), 1)
-        .unwrap();
+    let authority =
+        Authority::new(AuthKey::from_seed(8157), NS, "graph", SchemaEpoch(1), 1).unwrap();
     let grant = Grant {
         branch: "main".into(),
         labels: Scope::only([L]),
@@ -161,16 +161,16 @@ fn authorized_program_expressions_have_identical_work_floors_and_preserve_privat
                             assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
                         }
                         Err(_) => {
-                            assert_eq!(
-                                (db.frontier().unwrap(), db.vertices().unwrap()),
-                                before
-                            );
+                            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
                             low = allowance + 1;
                         }
                     }
                     assert_eq!(txn.outstanding_obligations(), 0);
                 }
-                assert!(low > 0 && low < 8192, "a real admission boundary must exist");
+                assert!(
+                    low > 0 && low < 8192,
+                    "a real admission boundary must exist"
+                );
                 floors.push(low);
                 // The immediately insufficient budget must refuse identically,
                 // not merely fail at two coincidentally equal thresholds.
