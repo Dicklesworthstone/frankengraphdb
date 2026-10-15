@@ -29,7 +29,10 @@
 //!   `--expand-direction out|in|both`, default out; `--include-seeds
 //!   true|false`, default false), fused as a third reciprocal-rank lane
 //!   (`--graph-candidates`, default `--candidates`; `--graph-weight`,
-//!   default 1) with the text and/or vector lanes it needs. The expansion
+//!   default 1) with any requested text/vector lanes. With neither, it runs
+//!   graph-only retrieval without projecting properties or creating an index.
+//!   Zero hops plus `--include-seeds true` returns admitted seeds, including
+//!   isolates, without opening edge cursors. The expansion
 //!   reads the indexed incidence of the vertices it reaches, so its cost
 //!   follows the reached neighbourhood, not the whole selected edge set;
 //! - `--k <n>` bounds the hits (default 10), `--vertex-label <label>`
@@ -38,8 +41,9 @@
 //!   Omission is unrestricted; an empty string selects no results. Corpus
 //!   statistics and graph/ANN transit still use the whole selected corpus.
 //!
-//! The index is built for this one call from the selected generation, so a
-//! result always describes exactly the reported `seq`.
+//! Requested text/vector indexes are built for this one call. Graph-only
+//! retrieval uses topology at the same cut; every result describes the reported
+//! `seq`. All modes retain native work, staging and output limits.
 use super::{Failure, Options, float_text, render_rows};
 use fgdb::EmbeddedReadView;
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
@@ -291,6 +295,9 @@ impl SearchFlags {
 
 /// The lane(s) requested, owning the query text and coordinates.
 enum Lanes {
+    /// Only GraphHybridQuery may construct this neutral text/vector input.
+    /// The complete graph request is validated before opening storage.
+    GraphOnly(ExactHybridQuery<'static>),
     Text(String, TextMatch),
     Vector(Vec<f32>, VectorSearch),
     Hybrid {
@@ -389,11 +396,6 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     }
     let graph = match (&flags.expand_from, flags.max_hops) {
         (Some(seeds), Some(max_hops)) => {
-            if text.is_none() && vector.is_none() {
-                return Err(Failure::usage(
-                    "the graph lane fuses with --text and/or --vector",
-                ));
-            }
             let relation = flags
                 .expand_relation
                 .as_ref()
@@ -525,9 +527,16 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
         (Some((text, _)), None) => Lanes::Text(text, text_mode),
         (None, Some((vector, _))) => Lanes::Vector(vector, vector_mode),
         (None, None) => {
-            return Err(Failure::usage(
-                "search needs --text with --text-property, --vector with --vector-property, or both",
-            ));
+            let graph = graph.as_ref().ok_or_else(|| {
+                Failure::usage(
+                    "search needs --text with --text-property, --vector with --vector-property, \
+                     or --expand-from with an explicit --max-hops",
+                )
+            })?;
+            let query = GraphHybridQuery::graph_only(k, graph.candidates, graph.weight, 60)
+                .map_err(Failure::usage)?;
+            read.validate_graph_only(query).map_err(Failure::usage)?;
+            Lanes::GraphOnly(query.retrieval)
         }
     };
     Ok(Prepared {
@@ -541,8 +550,13 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
 }
 
 impl Prepared {
-    fn search(&self) -> Search<'_> {
-        match &self.lanes {
+    /// Only index-backed lanes can become a Search. Never manufacture an
+    /// empty text/vector query to make topology-only input fit that interface.
+    fn search(&self) -> Result<Search<'_>, Failure> {
+        Ok(match &self.lanes {
+            Lanes::GraphOnly(_) => {
+                return Err(Failure::usage("graph-only search requires graph expansion"));
+            }
             Lanes::Text(query, mode) => Search::Text {
                 query,
                 k: self.k,
@@ -569,7 +583,7 @@ impl Prepared {
                 text_mode: *text_mode,
                 profile: ExactRrfProfile::default(),
             }),
-        }
+        })
     }
 
     /// The text/vector part of a graph-fused search. A lane that was not
@@ -578,6 +592,7 @@ impl Prepared {
         let profile =
             |vector: u16, text: u16| ExactRrfProfile::new(60, vector, text).map_err(Failure::usage);
         Ok(match &self.lanes {
+            Lanes::GraphOnly(query) => *query,
             Lanes::Text(query, mode) => ExactHybridQuery {
                 vector: &[],
                 text: query,
@@ -687,7 +702,7 @@ pub(super) fn run(
         return render_rows(&columns, cells, seq.0, "searched", robot, out);
     }
     let rows = view
-        .beacon_search_filtered(cx, &read, prepared.search(), eligible)
+        .beacon_search_filtered(cx, &read, prepared.search()?, eligible)
         .map_err(Failure::query)?;
     let (columns, cells): (&[&str], Vec<Vec<String>>) = match &rows {
         Rows::Text(hits) => (
@@ -849,7 +864,7 @@ mod tests {
             assert_eq!(request.read.as_of, Some(CommitSeq(7)));
             assert_eq!(request.read.vertex_label, Some(LabelId(1)));
             assert_eq!(request.eligible, Some(vec![VId(1), VId(2)]));
-            let vector = match request.search() {
+            let vector = match request.search().unwrap() {
                 Search::Vector { query, mode, .. } => Some((query, mode)),
                 _ => None,
             };
@@ -859,7 +874,7 @@ mod tests {
                 matches!(mode, VectorSearch::Approximate { ef_search: 32 }),
                 ann
             );
-            assert!(request.read.config_for(request.search()).is_ok());
+            assert!(request.read.config_for(request.search().unwrap()).is_ok());
         }
     }
 
@@ -934,7 +949,7 @@ mod tests {
     #[test]
     fn packed_projection_uses_native_finite_exact_length_admission() {
         let request = vector_request("packed", "l2");
-        let config = request.read.config_for(request.search()).unwrap();
+        let config = request.read.config_for(request.search().unwrap()).unwrap();
         for value in [
             CanonicalScalar::Int(1),
             bytes(vec![]),
@@ -982,7 +997,7 @@ mod tests {
     }
 
     fn native_hits(request: &Prepared) -> Rows {
-        let config = request.read.config_for(request.search()).unwrap();
+        let config = request.read.config_for(request.search().unwrap()).unwrap();
         let documents: Vec<IndexDocument> = [[6_i16, 0], [2, 0], [3, 2], [2, 0]]
             .into_iter()
             .enumerate()
@@ -1023,6 +1038,7 @@ mod tests {
             .snapshot();
         request
             .search()
+            .unwrap()
             .execute(&snapshot, &mut WorkBudget::new(100_000))
             .unwrap()
     }
@@ -1079,7 +1095,7 @@ mod tests {
                 VectorEncoding::PackedF32Le
             );
             assert_eq!(request.graph.is_some(), graph);
-            assert!(request.read.config_for(request.search()).is_ok());
+            assert!(request.read.config_for(request.search().unwrap()).is_ok());
             let query = request.retrieval().unwrap();
             assert_eq!(query.vector, [1.0, 0.0]);
             assert_eq!(query.text, "graph");
@@ -1165,7 +1181,7 @@ mod tests {
             assert_eq!(request.read.as_of, Some(CommitSeq(7)));
             assert_eq!(request.eligible, Some(vec![VId(1), VId(2)]));
             assert_eq!(request.read.vertex_label, Some(LabelId(1)));
-            let Search::Vector { query, mode, .. } = request.search() else {
+            let Search::Vector { query, mode, .. } = request.search().unwrap() else {
                 panic!("vector search");
             };
             assert_eq!(query, [0.1_f32, 0.2_f32]);
@@ -1173,7 +1189,7 @@ mod tests {
                 matches!(mode, VectorSearch::Approximate { ef_search: 32 }),
                 ann
             );
-            let config = request.read.config_for(request.search()).unwrap();
+            let config = request.read.config_for(request.search().unwrap()).unwrap();
             let value = CanonicalScalar::Float(fgdb_types::CanonicalF64::new(0.1));
             let document = request
                 .read
@@ -1237,3 +1253,7 @@ mod tests {
         assert!(flags.set("--vector-encoding", "packed").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "search/graph_only_tests.rs"]
+mod graph_only_tests;
