@@ -17,10 +17,12 @@ export class GraphCanvas {
       this.worker.onmessage=({data})=>{
         if(data.id!==this.id)return;
         if(data.error){this.running=false;this.onBusy(false);this.onError(data.error);this.publish({engine:'unavailable',done:true});return;}
+        // A frame queued before pause cannot resume the visible simulation.
+        if(this.paused)return;
         if(!this.reduced||data.done||this.drag){
           for(let i=0;i<this.simulationNodes.length;i++){
             const id=this.simulationNodes[i].id;
-            if(this.drag?.hit?.id===id&&this.drag.moved)continue;
+            if(this.pinned.has(id)||this.drag?.hit?.id===id&&this.drag.moved)continue;
             const x=data.coordinates[i*2],y=data.coordinates[i*2+1];
             if(Number.isFinite(x)&&Number.isFinite(y))this.points.set(id,{id,x,y,pinned:this.pinned.has(id)});
           }
@@ -94,9 +96,9 @@ export class GraphCanvas {
   zoom(factor){this.interacted=true;this.zoomAt(this.width/2,this.height/2,factor);}
   zoomAt(x,y,factor){const k=Math.max(0.08,Math.min(6,this.view.k*factor)),r=k/this.view.k;this.view={x:x-(x-this.view.x)*r,y:y-(y-this.view.y)*r,k};this.drawSoon();}
   select(selection,center=false){this.selection=selection;if(center&&selection?.kind==='node'){const p=this.points.get(selection.id);if(p){this.interacted=true;this.view.x=this.width/2-p.x*this.view.k;this.view.y=this.height/2-p.y*this.view.k;}}this.onSelect(selection);this.drawSoon();}
-  togglePin(id){const p=this.points.get(id);if(!p)return;this.pinned.has(id)?this.pinned.delete(id):this.pinned.add(id);p.pinned=this.pinned.has(id);this.worker?.postMessage({action:'pin',id:this.id,node:id,x:p.x,y:p.y,fixed:p.pinned});this.onSelect(this.selection);this.drawSoon();}
+  togglePin(id){const p=this.points.get(id);if(!p)return;this.paused=false;this.pinned.has(id)?this.pinned.delete(id):this.pinned.add(id);p.pinned=this.pinned.has(id);this.worker?.postMessage({action:'pin',id:this.id,node:id,x:p.x,y:p.y,fixed:p.pinned});this.onSelect(this.selection);this.drawSoon();}
   unpin(){for(const id of [...this.pinned])this.togglePin(id);}
-  radius(node){return 7+Math.min(9,Math.sqrt(node?.degree||0)*2);}
+  radius(node){const base=node?.analysis?8+node.analysis.normalized*13:8+Math.min(10,Math.sqrt(node?.degree||0)*2);return base*Math.max(1,0.72/this.view.k);}
   geometry(edge){
     const a=this.points.get(edge.source),b=this.points.get(edge.target);if(!a||!b)return null;
     if(a.id===b.id)return{loop:true,x:a.x+12,y:a.y-23,r:23+(this.lanes.get(edge.id)||0)};
@@ -107,7 +109,7 @@ export class GraphCanvas {
   }
   hit(point){const p=this.world(point);for(let i=this.graph.nodes.length-1;i>=0;i--){const n=this.graph.nodes[i],a=this.points.get(n.id);if(a&&Math.hypot(p.x-a.x,p.y-a.y)<this.radius(n)+6/this.view.k)return{kind:'node',id:n.id};}
     for(const e of this.graph.edges){const g=this.geometry(e);if(!g)continue;if(g.loop){if(Math.abs(Math.hypot(p.x-g.x,p.y-g.y)-g.r)<5/this.view.k)return{kind:'edge',id:e.id};}else{let a=g.a;for(let i=1;i<=12;i++){const b=pointOn(g,i/12);if(segmentDistance(p,a,b)<4/this.view.k)return{kind:'edge',id:e.id};a=b;}}}return null;}
-  pointerDown(event){if(event.button!==0)return;const p=this.local(event);this.pointers.set(event.pointerId,p);this.canvas.setPointerCapture(event.pointerId);if(this.pointers.size>1){if(this.drag)this.releaseDrag();const[a,b]=[...this.pointers.values()];this.pinch=Math.hypot(a.x-b.x,a.y-b.y);return;}const hit=this.hit(p);this.interacted=true;this.drag={start:p,last:p,hit,moved:false,persist:event.shiftKey};if(hit?.kind==='node'){const v=this.points.get(hit.id);this.worker?.postMessage({action:'pin',id:this.id,node:hit.id,x:v.x,y:v.y,fixed:true});}}
+  pointerDown(event){if(event.button!==0)return;const p=this.local(event);this.pointers.set(event.pointerId,p);this.canvas.setPointerCapture(event.pointerId);if(this.pointers.size>1){if(this.drag)this.releaseDrag();const[a,b]=[...this.pointers.values()];this.pinch=Math.hypot(a.x-b.x,a.y-b.y);return;}const hit=this.hit(p);this.interacted=true;this.drag={start:p,last:p,hit,moved:false,persist:event.shiftKey};if(hit?.kind==='node'){this.paused=false;const v=this.points.get(hit.id);this.worker?.postMessage({action:'pin',id:this.id,node:hit.id,x:v.x,y:v.y,fixed:true});}}
   pointerMove(event){const p=this.local(event);if(this.pointers.has(event.pointerId))this.pointers.set(event.pointerId,p);if(this.pointers.size>1){const[a,b]=[...this.pointers.values()],d=Math.max(1,Math.hypot(a.x-b.x,a.y-b.y));this.zoomAt((a.x+b.x)/2,(a.y+b.y)/2,d/(this.pinch||d));this.pinch=d;return;}if(this.drag){const dx=p.x-this.drag.last.x,dy=p.y-this.drag.last.y;if(Math.hypot(p.x-this.drag.start.x,p.y-this.drag.start.y)>3)this.drag.moved=true;if(this.drag.hit?.kind==='node'){const v=this.points.get(this.drag.hit.id);v.x+=dx/this.view.k;v.y+=dy/this.view.k;this.worker?.postMessage({action:'pin',id:this.id,node:v.id,x:v.x,y:v.y,fixed:true});}else{this.view.x+=dx;this.view.y+=dy;}this.drag.last=p;this.drawSoon();}else{const hit=this.hit(p);if(hit?.id!==this.hover?.id||hit?.kind!==this.hover?.kind){this.hover=hit;this.drawSoon();}this.canvas.style.cursor=hit?'pointer':'grab';}}
   releaseDrag(){if(this.drag?.hit?.kind==='node'){const p=this.points.get(this.drag.hit.id);if(this.drag.persist&&this.drag.moved)this.pinned.add(p.id);this.worker?.postMessage({action:'pin',id:this.id,node:p.id,x:p.x,y:p.y,fixed:this.pinned.has(p.id)});}this.drag=null;}
   pointerUp(event,cancel=false){this.pointers.delete(event.pointerId);if(!cancel&&this.drag&&!this.drag.moved)this.select(this.drag.hit);this.releaseDrag();this.pinch=null;this.drawSoon();}
@@ -131,7 +133,7 @@ export class GraphCanvas {
       c.strokeStyle=stroke;c.fillStyle=stroke;c.lineWidth=(active?1.8:0.85)/Math.max(0.7,this.view.k);c.setLineDash(e.change==='removed'?[5,5]:[]);
       c.beginPath();if(g.loop)c.arc(g.x,g.y,g.r,0.2,TAU-0.45);else{c.moveTo(g.a.x,g.a.y);c.quadraticCurveTo(g.c.x,g.c.y,g.b.x,g.b.y);}c.stroke();c.setLineDash([]);
       if(e.directed){const p=g.loop?{x:g.x+Math.cos(0.2)*g.r,y:g.y+Math.sin(0.2)*g.r}:g.b;const a=g.loop?Math.PI/2+.2:Math.atan2(g.b.y-g.c.y,g.b.x-g.c.x);c.save();c.translate(p.x,p.y);c.rotate(a);c.beginPath();c.moveTo(0,0);c.lineTo(-5.5,-2.8);c.lineTo(-5.5,2.8);c.closePath();c.fill();c.restore();}
-      if(active&&e.label){const p=g.loop?{x:g.x,y:g.y-g.r}:pointOn(g,.5);this.caption(c,clip(e.label,25),p.x,p.y-5/this.view.k,light,true,stroke);}
+      if((chosen||this.hover?.kind==='edge'&&this.hover.id===e.id)&&e.label){const p=g.loop?{x:g.x,y:g.y-g.r}:pointOn(g,.5);this.caption(c,clip(e.label,25),p.x,p.y-5/this.view.k,light,true,stroke);}
     }
     const captions=[],occupied=[];
     for(const n of this.graph.nodes){

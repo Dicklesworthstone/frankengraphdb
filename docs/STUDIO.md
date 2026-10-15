@@ -158,7 +158,6 @@ or full Neo4j Browser compatibility layer.
 | --- | --- |
 | Execute read | Ctrl/Cmd + Enter |
 | Command palette | Ctrl/Cmd + K |
-| Explorer | Ctrl/Cmd + 1 |
 | Find node | / |
 | Fit graph | F |
 | Pan focused canvas | Arrow keys |
@@ -197,3 +196,101 @@ raw parameter precision, safe text rendering, cancellation/stale-response fences
 connection cleanup, schema-changing results and history behavior. They do not
 validate production CSP, module-worker loading, native authorization or `fgdbd`.
 Neither Playwright nor Python is needed to run Studio itself.
+
+## WebAssembly workspace
+
+Studio now runs genuine force integration in a WebAssembly worker: Barnes–Hut
+repulsion, spring attraction, collision separation, damping and cooling. Force,
+label-constellation and radial modes use the same physical kernel; the latter
+modes add target forces rather than substituting a static diagram. The simulation
+settles and stops. Pause, reheat, repulsion, link-length and gravity controls work
+without a database request. Shift-drag, double-click, or P on a selected node pins
+it; neighboring nodes continue responding. Coordinate continuity is preserved
+between reads in one connection, while switching sessions clears it.
+
+The checked-in `src/studio/wasm/force.wasm` is a 5.8 KiB freestanding module built
+from the adjacent owned C11 source. It has no imports, allocator, WASI runtime,
+external package or network access. It receives numeric display indices and
+coordinates, not identity strings, credentials or property payloads. Its linear
+memory is fixed at 4 MiB; tree depth, capacities, integration batches and settling
+are bounded. Coincident points or a full spatial tree use a bounded exact leaf
+fallback. Browser canvas caps remain 750 nodes / 2,000 edges. This is an isolated
+presentation kernel, not native Rust code, a database algorithm, a query result,
+or a deterministic plan certificate.
+
+No build tool is needed to run the bundled module. To rebuild it as a developer:
+
+```bash
+bash crates/fgdb-server/src/studio/wasm/build.sh
+node --test crates/fgdb-server/src/studio/tests/*.test.mjs
+```
+
+The build requires clang with the wasm32 target and wasm-ld (built here with
+clang 17), and links no standard library. Source and binary ship together. The
+server serves its exact asset path as `application/wasm`. CSP permits Wasm
+compilation with `wasm-unsafe-eval`; JavaScript string evaluation and inline script
+remain disallowed. The renderer does not pretend to run JS physics if Wasm fails:
+an explicit failure appears and initial positions remain interactive.
+
+### Chronicle: explore and compare returned snapshots
+
+The native lens generates `FOR SYSTEM_TIME AS OF SEQ <u64>` after MATCH, before
+RETURN. Input retains the entire unsigned 64-bit range without Number coercion.
+Loading a lens never executes it, and never rewrites an arbitrary editor query.
+Press Run query to invoke the existing authorized native read path.
+
+Pin a received result as baseline A, run another read, then choose Compare.
+The canvas distinguishes elements only in A, only in B, and changed returned
+metadata. Comparison includes original type tags: an integer `1` is not silently
+made equal to text `"1"` or decimal `1.0`. Node positions are retained by exact
+identity, and baseline-only edges are drawn as ghosts. The original table, JSON
+and CSV remain the current result, without comparison ghosts.
+
+These are comparisons of **returned samples**, not complete commit-stream diffs.
+A LIMIT, different query or changed projection can explain an omitted element;
+omission does not establish deletion. The interface marks differing query inputs
+and capped comparison canvases. One baseline is retained in tab memory only and
+is cleared on session changes, permission denial, disconnect or page exit. It is
+not a durable snapshot lease. Retaining a baseline and current result may retain
+two individually admitted responses plus decoded presentation state; 8 MiB is a
+per-response bound, not a total browser-memory ceiling.
+
+The agent-atlas sample has four explicitly illustrative cuts (101–104). They let
+you exercise additions, omitted edges and property changes without claiming to
+read a database. The classic 32-node sample remains available separately.
+
+### Prism and Beacon: use native capabilities
+
+Query lenses include native PageRank and connected-components calls through
+Prism, plus Beacon graph-neighborhood retrieval with `graph_access => 'demand'`.
+They load editor contents; they do not fabricate algorithm results. Replace sample
+parameters with known values, then execute with your capability. The server's
+implemented procedure profiles, source projection, scope and budgets remain
+independently authoritative. Loading a recipe does not prove native execution
+will be admitted for every database or capability.
+
+For a PageRank overlay, first pin an exploration result containing topology.
+Run native PageRank and return a `vertex`, `id`, or `node` identity column plus a
+finite float `score` or `rank` column. When the reported sequences match, Score
+overlay sizes those already-observed vertices by their returned score. Exact
+score text remains in the inspector and raw result; normalization is visual only.
+Unmatched scored vertices are counted, not invented as new topology. Matching
+sequences and connection ownership are prerequisites, not a signed source or
+plan-certificate check. Re-pin topology when the database has advanced.
+
+The inspector's Start trace / Trace here action follows only the returned
+subgraph. It honors known stored direction and treats direction-unknown path
+adjacency as undirected. It makes no HTTP request and is not presented as a
+Prism query over the whole database.
+
+### Verification boundary
+
+The Node tests instantiate and execute the actual Wasm binary, including force,
+collision, pinning, quadtree visits, limits and deterministic replay checks.
+Browser fixtures also execute that same binary while testing interaction,
+exact-value handling, client cancellation, permission cleanup, temporal lenses
+and analytics overlays. Their isolated loader adapts worker packaging and origin;
+they still do **not** validate production CSP/module-worker loading or native
+HTTP/database integration. Rust route tests and the full native repository gates
+remain separate. UI capability submission is restricted to HTTPS or explicit
+loopback hosts; use an SSH tunnel for a remote plaintext server.
