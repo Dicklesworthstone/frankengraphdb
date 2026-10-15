@@ -12,12 +12,14 @@
 
 use super::tape::{Step, Tape};
 use super::{Execution, authorized_with_errors};
+use crate::gql_exec::AdmissionUsage;
 use crate::gql_exec::source::{self, SourceEvent};
 use crate::query::prism::{
     PROJECTION_CACHE_BYTES, ProjectionCache, ProjectionRequest, push_staged, source_admit,
 };
 use crate::{Database, QueryError, ReadError, Snapshot};
 use asupersync::fs::Vfs;
+use fgdb_gql::GqlQueryPolicy;
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxExecutionError, FnxGraphKind, FnxMeter, FnxParameters,
     FnxReadError, FnxReadOptions, FnxValue, ParallelEdgePolicy, ProjectionBuildError,
@@ -166,17 +168,17 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
     options: FnxReadOptions,
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,
-    observe: impl FnMut(SourceEvent) -> Result<(), QueryError>,
+    observe: impl Observe,
 ) -> Result<Vec<Vec<FnxValue>>, Error> {
     let observe = RefCell::new(observe);
     let checkpoint = || {
         execution.borrow_mut().checkpoint()?;
-        observe.borrow_mut()(SourceEvent::Work)
+        observe.borrow_mut().event(SourceEvent::Work)
     };
     let (work, scratch) = (Cell::new(0u64), Cell::new(0u64));
     let control = |event: SourceEvent| -> Result<(), Error> {
         execution.borrow_mut().checkpoint().map_err(control_error)?;
-        observe.borrow_mut()(event).map_err(control_error)?;
+        observe.borrow_mut().event(event).map_err(control_error)?;
         let (counter, limit, resource) = match event {
             SourceEvent::Work | SourceEvent::SnapshotRecord => {
                 (&work, options.source_limits.max_work_units, "work units")
@@ -210,8 +212,14 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
             Step::Edge => control(SourceEvent::Work)?,
             Step::Checkpoint => return checkpoint().map_err(control_error),
         }
-        observe.borrow_mut()(SourceEvent::SnapshotRecord).map_err(control_error)?;
-        observe.borrow_mut()(SourceEvent::ScratchEntry).map_err(control_error)
+        observe
+            .borrow_mut()
+            .event(SourceEvent::SnapshotRecord)
+            .map_err(control_error)?;
+        observe
+            .borrow_mut()
+            .event(SourceEvent::ScratchEntry)
+            .map_err(control_error)
     };
     // An unrestricted scope sees the whole snapshot, so its projection and
     // live call sequence depend only on the snapshot and this request. A
@@ -429,27 +437,59 @@ fn build(
     })
 }
 
-/// A Prism kernel's meter over the live execution: work units charged in runs
-/// (fgdb-62mzm), each still observed by the caller meter in order.
-struct KernelMeter<'m, 'cx, 'permit, Clock, Observe> {
-    execution: &'m mut Execution<'cx, 'permit, Clock>,
-    observe: &'m mut Observe,
+/// The caller meter an analytics call reports to, every event in order.
+/// `work(n)` is n Work events, with the same total and refusal ordinal; a
+/// counting meter answers it in one step.
+pub(super) trait Observe {
+    fn event(&mut self, event: SourceEvent) -> Result<(), QueryError>;
+    fn work(&mut self, n: usize) -> Result<(), QueryError> {
+        (0..n).try_for_each(|_| self.event(SourceEvent::Work))
+    }
 }
 
-impl<Clock, Observe> FnxMeter<QueryError> for KernelMeter<'_, '_, '_, Clock, Observe>
+impl<F: FnMut(SourceEvent) -> Result<(), QueryError>> Observe for F {
+    fn event(&mut self, event: SourceEvent) -> Result<(), QueryError> {
+        self(event)
+    }
+}
+
+/// A caller meter over one [`AdmissionUsage`] allowance.
+pub(super) struct UsageObserver<'u> {
+    pub(super) usage: &'u mut AdmissionUsage,
+    pub(super) policy: GqlQueryPolicy,
+}
+
+impl Observe for UsageObserver<'_> {
+    fn event(&mut self, event: SourceEvent) -> Result<(), QueryError> {
+        self.usage
+            .observe::<ReadError, QueryError>(self.policy, event)
+            .map_err(super::query_error)
+    }
+    fn work(&mut self, n: usize) -> Result<(), QueryError> {
+        self.usage
+            .observe_work::<ReadError, QueryError>(self.policy, n as u64)
+            .map_err(super::query_error)
+    }
+}
+
+/// A Prism kernel's meter over the live execution: work units charged in runs
+/// (fgdb-62mzm), and observed by the caller meter as the same run.
+struct KernelMeter<'m, 'cx, 'permit, Clock, O> {
+    execution: &'m mut Execution<'cx, 'permit, Clock>,
+    observe: &'m mut O,
+}
+
+impl<Clock, O> FnxMeter<QueryError> for KernelMeter<'_, '_, '_, Clock, O>
 where
     Clock: FnMut() -> u64,
-    Observe: FnMut(SourceEvent) -> Result<(), QueryError>,
+    O: Observe,
 {
     fn unit(&mut self) -> Result<(), QueryError> {
         self.units(1)
     }
     fn units(&mut self, n: usize) -> Result<(), QueryError> {
         self.execution.work_units(n as u64)?;
-        for _ in 0..n {
-            (self.observe)(SourceEvent::Work)?;
-        }
-        Ok(())
+        self.observe.work(n)
     }
 }
 

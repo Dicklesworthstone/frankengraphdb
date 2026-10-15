@@ -146,7 +146,10 @@ fn procedure_at<Clock: FnMut() -> u64>(
         options,
         scope,
         execution,
-        |event| usage.observe(remaining, event).map_err(query_error),
+        super::analytics::UsageObserver {
+            usage: &mut usage,
+            policy: remaining,
+        },
     )
     .map_err(crate::query::procedure_failure)?;
     let value = crate::query::procedure_rows(rows)?;

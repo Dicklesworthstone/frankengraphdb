@@ -710,6 +710,30 @@ impl AdmissionUsage {
         Ok(())
     }
 
+    /// `n` Work events in one step: the same admitted total, and the same
+    /// refusal, as `n` calls of [`Self::observe`]. Every unit up to the
+    /// limit is admitted and the first past it refuses, observing limit + 1.
+    pub(crate) fn observe_work<E, C>(
+        &mut self,
+        policy: fgdb_gql::GqlQueryPolicy,
+        n: u64,
+    ) -> Result<(), fgdb_gql::GqlQueryError<E, C>> {
+        let limit = policy.evaluator.max_work_units;
+        let observed = u128::from(self.work_units) + u128::from(n);
+        if n > 0 && observed > u128::from(limit) {
+            self.work_units = self.work_units.max(limit);
+            return Err(fgdb_gql::GqlQueryError::Evaluator(
+                fgdb_gql::GlaLimitExceeded {
+                    dimension: fgdb_gql::GlaLimitDimension::WorkUnits,
+                    limit,
+                    observed: u128::from(self.work_units) + 1,
+                },
+            ));
+        }
+        self.work_units = observed as u64;
+        Ok(())
+    }
+
     pub(crate) fn observe<E, C>(
         &mut self,
         policy: fgdb_gql::GqlQueryPolicy,
@@ -807,6 +831,36 @@ mod admission_meter_tests {
         GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats, GqlQueryError,
         GqlQueryExecution, GqlQueryPolicy,
     };
+
+    /// **N WORK UNITS IN ONE STEP ARE N WORK EVENTS.** From every starting
+    /// count around the limit, `observe_work(n)` leaves the usage and returns
+    /// the result that `n` single Work events would: everything up to the
+    /// limit is admitted, and the refusal observes limit + 1.
+    #[test]
+    fn work_in_one_step_admits_and_refuses_as_single_events() {
+        type Outcome = (AdmissionUsage, Result<(), GqlQueryError<(), ()>>);
+        for limit in [0, 1, 5, 64, 130] {
+            let policy = GqlQueryPolicy::new(1_000, 1_000, limit, 1_000);
+            for start in 0..=limit {
+                for n in [0, 1, 2, 3, 63, 64, 65, 129, 200] {
+                    let mut base = AdmissionUsage::default();
+                    base.charge_work::<(), ()>(policy, start).unwrap();
+                    let single: Outcome = {
+                        let mut usage = base;
+                        let result = (0..n)
+                            .try_for_each(|_| usage.observe::<(), ()>(policy, SourceEvent::Work));
+                        (usage, result)
+                    };
+                    let batched: Outcome = {
+                        let mut usage = base;
+                        let result = usage.observe_work::<(), ()>(policy, n);
+                        (usage, result)
+                    };
+                    assert_eq!(batched, single, "limit {limit} start {start} n {n}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn row_only_admission_ignores_work_and_does_not_charge_a_refused_record() {

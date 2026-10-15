@@ -343,11 +343,16 @@ fn pagerank<C>(
     let mut ranks = reserve(n)?;
     let mut next = reserve(n)?;
     let population = n as f64;
+    // Every pass's row-and-arc walk spends one unit per row plus one per arc.
+    let mut row_units = 0usize;
     for source in 0..n {
         meter.unit().map_err(FnxExecutionError::Cancelled)?;
         let (targets, weights) = graph
             .projected_row(source)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        row_units = row_units
+            .checked_add(1 + targets.len())
+            .ok_or(FnxExecutionError::SizeOverflow)?;
         let mut sum = 0.0;
         if options.weighted() {
             for &weight in weights {
@@ -384,39 +389,43 @@ fn pagerank<C>(
             next[index] = initial;
             Ok(())
         })?;
+        // The walk's units are one stream: a row's unit, then its arcs, row
+        // after row. It is charged in runs of FNX_METER_RUN across row
+        // boundaries, each before the arithmetic it pays for, so the meter
+        // sees the same units in the same order as one row at a time, in
+        // n + m over 64 calls instead of at least one per row.
+        let mut paid = 0usize;
+        let mut unpaid = row_units;
         for source in 0..n {
             let (targets, weights) = graph
                 .projected_row(source)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
             let push = options.alpha() * ranks[source];
             let sum = sums[source];
-            // The row's own unit leads its first run of arcs.
-            let mut lead = 1;
-            let mut offset = 0;
-            loop {
-                let end = targets.len().min(offset + FNX_METER_RUN - lead);
-                meter
-                    .units(lead + end - offset)
-                    .map_err(FnxExecutionError::Cancelled)?;
-                lead = 0;
-                for at in offset..end {
-                    let share = if options.weighted() {
-                        if sum > 0.0 {
-                            weights[at] / sum
-                        } else {
-                            weights[at]
-                        }
-                    } else if sum > 0.0 {
-                        1.0 / sum
+            let row = 1 + targets.len();
+            while paid < row {
+                let run = FNX_METER_RUN.min(unpaid);
+                if run == 0 {
+                    return Err(FnxExecutionError::InvalidUpstreamResult);
+                }
+                meter.units(run).map_err(FnxExecutionError::Cancelled)?;
+                paid += run;
+                unpaid -= run;
+            }
+            paid -= row;
+            for at in 0..targets.len() {
+                let share = if options.weighted() {
+                    if sum > 0.0 {
+                        weights[at] / sum
                     } else {
-                        0.0
-                    };
-                    next[targets[at]] += push * share;
-                }
-                offset = end;
-                if offset == targets.len() {
-                    break;
-                }
+                        weights[at]
+                    }
+                } else if sum > 0.0 {
+                    1.0 / sum
+                } else {
+                    0.0
+                };
+                next[targets[at]] += push * share;
             }
         }
         let mut delta = 0.0;
@@ -754,6 +763,119 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// A meter that records each call's size and refuses at one ordinal,
+    /// exactly: it sees every unit before the refused one.
+    struct Recording {
+        calls: Vec<usize>,
+        stop: Option<usize>,
+        seen: usize,
+    }
+
+    impl FnxMeter<&'static str> for Recording {
+        fn unit(&mut self) -> Result<(), &'static str> {
+            self.units(1)
+        }
+        fn units(&mut self, n: usize) -> Result<(), &'static str> {
+            self.calls.push(n);
+            if let Some(stop) = self.stop
+                && self.seen + n >= stop
+            {
+                self.seen = stop;
+                return Err("stop");
+            }
+            self.seen += n;
+            Ok(())
+        }
+    }
+
+    /// **PAGERANK'S ARC WALK IS ONE STREAM OF RUNS ACROSS ROWS.** On a
+    /// 300-vertex graph of short rows plus a 150-arc hub, the kernel stays
+    /// bit-identical to fnx. Every meter call is at most FNX_METER_RUN units,
+    /// the walk makes about (n + m) / 64 calls per pass instead of one per row,
+    /// and the total is unchanged: n, then 4n + m per pass. Refusing at any
+    /// ordinal cancels there, with every earlier unit seen.
+    #[test]
+    fn pagerank_charges_its_arc_walk_in_runs_across_rows() {
+        let n = 300usize;
+        let vertices: Vec<VId> = (0..n as u128).map(VId).collect();
+        let mut edges = Vec::new();
+        for at in 0..n {
+            for step in 1..=(at % 3) {
+                edges.push((at, (at + step * 7) % n));
+            }
+        }
+        for target in 1..=150 {
+            edges.push((0, target));
+        }
+        let edges: Vec<ProjectionEdge> = edges
+            .into_iter()
+            .enumerate()
+            .map(|(eid, (source, target))| ProjectionEdge {
+                eid: EId(eid as u128),
+                source: vertices[source],
+                target: vertices[target],
+                weight: 1.0,
+            })
+            .collect();
+        let graph = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([2; 32]),
+                as_of: CommitSeq(3),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: Directedness::Directed,
+                parallel_edges: ParallelEdgePolicy::Sum,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: n,
+                max_input_edges: edges.len(),
+                max_adjacency_entries: 2 * edges.len(),
+                max_workspace_bytes: 1 << 24,
+            },
+        )
+        .unwrap();
+        let m: usize = (0..n)
+            .map(|node| graph.neighbors_indices(node).unwrap().len())
+            .sum();
+        let options = PageRankOptions::new(0.85, 1000, 1e-12, false).unwrap();
+        let oracle = fnx_algorithms::pagerank_with_weight(&graph, 0.85, 1000, 1e-12, None::<&str>);
+        let mut meter = Recording {
+            calls: Vec::new(),
+            stop: None,
+            seen: 0,
+        };
+        let (scores, witness) = pagerank(&graph, options, m, &mut meter).unwrap();
+        for score in &oracle.scores {
+            let ordinal = graph.get_node_index(&score.node).unwrap();
+            assert_eq!(scores[ordinal].to_bits(), score.score.to_bits());
+        }
+        assert_eq!(witness, oracle.witness);
+        let passes = witness.nodes_touched / n;
+        assert!(passes > 3, "{passes}");
+        assert_eq!(meter.seen, n + passes * (4 * n + m));
+        assert!(meter.calls.iter().all(|&run| run <= FNX_METER_RUN));
+        // Four metered passes per iteration, each about (units / 64) calls.
+        let per_pass = |units: usize| units.div_ceil(FNX_METER_RUN);
+        assert_eq!(
+            meter.calls.len(),
+            n + passes * (3 * per_pass(n) + per_pass(n + m)),
+            "the arc walk is one stream of runs"
+        );
+        for stop in (1..=meter.seen).step_by(97) {
+            let mut refusing = Recording {
+                calls: Vec::new(),
+                stop: Some(stop),
+                seen: 0,
+            };
+            let result = pagerank(&graph, options, m, &mut refusing);
+            assert!(matches!(result, Err(FnxExecutionError::Cancelled("stop"))));
+            assert_eq!(refusing.seen, stop);
+        }
     }
 
     #[test]
