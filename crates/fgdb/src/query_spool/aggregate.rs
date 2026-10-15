@@ -19,6 +19,8 @@ use fgdb_types::{CanonicalScalar, CanonicalScalarResolver};
 mod account;
 #[path = "aggregate_buffered.rs"]
 mod buffered;
+#[path = "aggregate_collection.rs"]
+mod collection;
 #[cfg(test)]
 #[path = "aggregate_codec_tests.rs"]
 mod codec_tests;
@@ -69,7 +71,7 @@ impl core::fmt::Display for NativeAggregateSpoolError {
             Self::BufferedExecute(error) => error.fmt(f),
             Self::Spool(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
-            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG (including DISTINCT arguments) or MIN/MAX, without collection"),
+            Self::Unsupported => f.write_str("aggregate spill requires native COUNT/SUM/AVG, MIN/MAX, or COLLECT over a complete relational input"),
             Self::PartitionLimit { required, limit } => write!(f, "ResourceExhausted: aggregate spill needs {required} partitions, limit {limit}"),
             Self::PartitionDepth => f.write_str("ResourceExhausted: aggregate radix partition cannot separate its remaining groups"),
             Self::InputRows { attempted, limit } => write!(f, "aggregate spill needs {attempted} input rows, limit {limit}"),
@@ -885,7 +887,24 @@ async fn reduce_partition<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
         }
         if let Some(at) = existing {
             let largest = groups.values[at].largest.max(resident);
-            if largest > groups.values[at].largest {
+            if largest > groups.values[at].largest && definition.has_collections() {
+                // Widen only the fixed/exemplar portion. Replacing this guard
+                // would refund the still-live collection's accumulated credit.
+                let delta = group_charge_bytes(definition, largest)?
+                    .checked_sub(group_charge_bytes(
+                        definition,
+                        groups.values[at].largest,
+                    )?)
+                    .ok_or(SpillError::SizeOverflow)?;
+                match groups.values[at]._charge.grow(work.cx, delta) {
+                    Ok(()) => {}
+                    Err(MemoryError::ResourceExhausted { .. }) if groups.values.len() > 1 => {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(SpillError::Memory(error).into()),
+                }
+                groups.values[at].largest = largest;
+            } else if largest > groups.values[at].largest {
                 // The replacement charge overlaps the predecessor until the
                 // stronger reservation exists. There is no uncharged interval.
                 let charge = match pool.reserve(work.cx, group_charge_bytes(definition, largest)?) {
@@ -898,28 +917,43 @@ async fn reduce_partition<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
                 groups.values[at]._charge = charge;
                 groups.values[at].largest = largest;
             }
-            definition
-                .update(&mut groups.values[at].state, &row, &mut |event| {
-                    input.charge(event)
-                })
-                .map_err(execute_error)?;
+            let group = &mut groups.values[at];
+            if let Err(error) = collection::update(
+                definition,
+                &mut group.state,
+                &row,
+                input,
+                &mut group._charge,
+                work.cx,
+            ) {
+                if collection::capacity_refusal(&error) && groups.values.len() > 1 {
+                    return Ok(None);
+                }
+                return Err(error);
+            }
         } else {
             if groups.values.len() == capacity {
                 return Ok(None);
             }
-            let charge = match pool.reserve(work.cx, group_charge_bytes(definition, resident)?) {
+            let mut charge = match pool.reserve(work.cx, group_charge_bytes(definition, resident)?) {
                 Ok(charge) => charge,
                 Err(MemoryError::ResourceExhausted { .. }) if !groups.values.is_empty() => {
                     return Ok(None);
                 }
                 Err(error) => return Err(SpillError::Memory(error).into()),
             };
-            let mut state = definition
-                .new_state(&mut |event| input.charge(event))
-                .map_err(execute_error)?;
-            definition
-                .update(&mut state, &row, &mut |event| input.charge(event))
-                .map_err(execute_error)?;
+            let state: Result<SpillAggregateState> = (|| {
+                let mut state = collection::new_state(definition, input, &mut charge, work.cx)?;
+                collection::update(definition, &mut state, &row, input, &mut charge, work.cx)?;
+                Ok(state)
+            })();
+            let state = match state {
+                Ok(state) => state,
+                Err(error) if collection::capacity_refusal(&error) && !groups.values.is_empty() => {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
             groups.values.push(Group {
                 exemplar: row,
                 state,
@@ -1157,7 +1191,7 @@ where
     let mut completed_rows = 0_u64;
     let mut result_writer = destination.paged_writer(cx, page_bytes)?;
     if initial.row_count() == 0 && opened.definition.group_key_columns().is_empty() {
-        let _charge = pool
+        let mut charge = pool
             .reserve(
                 cx,
                 opened
@@ -1167,14 +1201,20 @@ where
                     .ok_or(SpillError::SizeOverflow)?,
             )
             .map_err(SpillError::Memory)?;
-        let state = opened
-            .definition
-            .new_state(&mut |event| opened.input.charge(event))
-            .map_err(execute_error)?;
-        let row = opened
-            .definition
-            .finish(Vec::new(), state, &mut |event| opened.input.charge(event))
-            .map_err(execute_error)?;
+        let state = collection::new_state(
+            &opened.definition,
+            opened.input.as_mut(),
+            &mut charge,
+            cx,
+        )?;
+        let row = collection::finish(
+            &opened.definition,
+            Vec::new(),
+            state,
+            opened.input.as_mut(),
+            &mut charge,
+            cx,
+        )?;
         if !opened.definition.has_output_stage() {
             opened.input.finish_result().map_err(execute_error)?;
         }
@@ -1248,7 +1288,7 @@ where
                 )
                 .await?;
             }
-            for group in groups.values.drain(..) {
+            for mut group in groups.values.drain(..) {
                 work.charge(group.largest)?;
                 let keys = opened
                     .definition
@@ -1256,10 +1296,14 @@ where
                     .iter()
                     .map(|&at| group.exemplar.values()[at].clone())
                     .collect();
-                let row = opened
-                    .definition
-                    .finish(keys, group.state, &mut |event| opened.input.charge(event))
-                    .map_err(execute_error)?;
+                let row = collection::finish(
+                    &opened.definition,
+                    keys,
+                    group.state,
+                    opened.input.as_mut(),
+                    &mut group._charge,
+                    cx,
+                )?;
                 if !opened.definition.has_output_stage() {
                     opened.input.finish_result().map_err(execute_error)?;
                 }
