@@ -13,7 +13,7 @@ use fgdb_beacon::expansion::ExpansionSpec;
 use fgdb_beacon::read::{ReadPolicy, Rows, Search};
 use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, WorkControl};
 use fgdb_delta_types::{LogicalDeltaBatch, RelationId};
-use fgdb_types::{CommitCx, CommitSeq, QueryCx};
+use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -393,6 +393,24 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Rows, MaintainedBeaconError> {
         self.beacon_index_snapshot(cx, handle)?
             .search(cx, query, policy)
+            .map_err(Into::into)
+    }
+
+    /// Restrict a current maintained generation's endpoints before candidate
+    /// limits. Owner, health and exact-frontier checks precede the predicate;
+    /// reject-all cannot hide a failed maintenance tick or select a stale pin.
+    /// No implicit rebuild occurs. This API remains privileged, as does
+    /// [`PinnedIndex::search_filtered`]; eligibility grants no capability.
+    pub fn search_beacon_index_filtered(
+        &self,
+        cx: &QueryCx,
+        handle: &MaintainedBeaconIndex,
+        query: Search<'_>,
+        policy: ReadPolicy,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Rows, MaintainedBeaconError> {
+        self.beacon_index_snapshot(cx, handle)?
+            .search_filtered(cx, query, policy, eligible)
             .map_err(Into::into)
     }
 

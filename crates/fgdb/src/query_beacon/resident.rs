@@ -213,6 +213,17 @@ fn search(
     query: Search<'_>,
     policy: ReadPolicy,
 ) -> Result<Rows, Error> {
+    search_filtered(index, definition, cx, query, policy, |_| true)
+}
+
+fn search_filtered(
+    index: &IndexSnapshot,
+    definition: &Options,
+    cx: &QueryCx,
+    query: Search<'_>,
+    policy: ReadPolicy,
+    eligible: impl Fn(VId) -> bool,
+) -> Result<Rows, Error> {
     cx.with_restriction(|| {
         cx.checkpoint().map_err(Error::Interrupted)?;
         let work = RefCell::new(Meter::new(policy.max_work_units, |_| cx.checkpoint()));
@@ -233,7 +244,7 @@ fn search(
                 return Err(BeaconError::Disabled("text").into());
             }
             query.validate(&definition.index, &mut SharedWork(&work))?;
-            let rows = query.execute(index, &mut SharedWork(&work))?;
+            let rows = query.execute_filtered(index, eligible, &mut SharedWork(&work))?;
             // Empty and zero-k searches still pass final live admission.
             work.borrow_mut().charge(1)?;
             Ok(rows)
@@ -272,6 +283,26 @@ impl ResidentIndex {
         policy: ReadPolicy,
     ) -> Result<Rows, Error> {
         search(&self.index.snapshot(), &self.definition, cx, query, policy)
+    }
+
+    /// Restrict result endpoints before each lane's candidate limit without
+    /// rebuilding this generation. See [`PinnedIndex::search_filtered`] for
+    /// the predicate, source-sequence and authority contract.
+    pub fn search_filtered(
+        &self,
+        cx: &QueryCx,
+        query: Search<'_>,
+        policy: ReadPolicy,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Rows, Error> {
+        search_filtered(
+            &self.index.snapshot(),
+            &self.definition,
+            cx,
+            query,
+            policy,
+            eligible,
+        )
     }
 
     /// Catch up through one explicitly selected native sequence (None = live).
@@ -542,6 +573,26 @@ impl PinnedIndex {
         policy: ReadPolicy,
     ) -> Result<Rows, Error> {
         search(&self.index, &self.definition, cx, query, policy)
+    }
+
+    /// Restrict endpoints BEFORE text/vector top-k and each hybrid candidate
+    /// depth. BM25 statistics and ANN routing retain the entire frozen corpus;
+    /// an ineligible document may still route an approximate search. Filtering
+    /// a previously truncated answer is not equivalent to this operation.
+    ///
+    /// Supply a stable, bounded, side-effect-free ID predicate. Derive any
+    /// graph-dependent eligibility at [`Self::source_sequence`], not at a
+    /// writer's newer head. The predicate is NOT authorization: this index
+    /// remains privileged. Work/result limits and final cancellation checks
+    /// apply even when no endpoint is eligible; ANN remains approximate.
+    pub fn search_filtered(
+        &self,
+        cx: &QueryCx,
+        query: Search<'_>,
+        policy: ReadPolicy,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Rows, Error> {
+        search_filtered(&self.index, &self.definition, cx, query, policy, eligible)
     }
 }
 
