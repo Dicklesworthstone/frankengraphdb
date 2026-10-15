@@ -103,10 +103,13 @@ async fn vertex_database(cx: &CommitCx, count: u128, hidden: u64) -> Database<Me
         let mut batch = WriteBatch::new(R);
         for id in 1..=count {
             let mut properties = vec![(P, CanonicalScalar::Int(7))];
+            // Hidden values stay small, so even 255 of them fit one row's 16
+            // KiB storage bound: only how many keys there are moves a
+            // physical lookup.
             for offset in 0..hidden {
                 properties.push((
                     PropertyKeyId(SECRET.0 + offset),
-                    CanonicalScalar::bytes(vec![0x39; 65]).unwrap(),
+                    CanonicalScalar::bytes(vec![0x39; 16]).unwrap(),
                 ));
             }
             batch.create_vertex(VId(id), vec![L], properties);
