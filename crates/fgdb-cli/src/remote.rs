@@ -430,7 +430,10 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
             )
             .await?;
             let mut client = connect(&cx, &options).await?;
-            client.select(&cx, &options.database).await.map_err(failure)?;
+            client
+                .select(&cx, &options.database)
+                .await
+                .map_err(failure)?;
             batch.execute(&cx, &mut client, robot, out).await?;
             let _ = client.close(&cx).await;
             Ok(())

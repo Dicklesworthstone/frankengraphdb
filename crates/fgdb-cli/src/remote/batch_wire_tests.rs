@@ -9,8 +9,8 @@ const BATCH_ROWS: &str = r#"[{"name":"text:Ada"},{"name":"text:Bob"}]"#;
 
 fn prepared_batch(csv: bool) -> PreparedBatch {
     let result = if csv {
-        let schema = CsvSchema::parse("name=text")
-            .unwrap_or_else(|error| panic!("{}", error.message));
+        let schema =
+            CsvSchema::parse("name=text").unwrap_or_else(|error| panic!("{}", error.message));
         PreparedBatch::parse_csv(BATCH_QUERY, "name\nAda\nBob\n", &schema, || Ok(()))
     } else {
         PreparedBatch::parse(BATCH_QUERY, BATCH_ROWS, || Ok(()))
@@ -143,7 +143,7 @@ fn batch_refusal_or_lost_terminal_never_emits_success_or_retries() {
                 (Some(refusal(4, ErrorCode::Conflict)), 3),
                 (Some(refusal(4, ErrorCode::OutcomeUnknown)), 5),
                 (Some(end(4, 0)), 5), // A query terminal is not a write completion.
-                (None, 5),           // EOF after columns is not successful completion.
+                (None, 5),            // EOF after columns is not successful completion.
             ] {
                 let flushes = Arc::new(AtomicUsize::new(0));
                 let mut replies = vec![(chunk(4, Some(vec![]), vec![]), 0)];
@@ -249,12 +249,9 @@ fn a_smaller_negotiated_frame_refuses_without_sending_a_batch_prefix() {
             let prepared = if csv {
                 let schema = CsvSchema::parse("name=text")
                     .unwrap_or_else(|error| panic!("{}", error.message));
-                PreparedBatch::parse_csv(
-                    BATCH_QUERY,
-                    &format!("name\n{value}\n"),
-                    &schema,
-                    || Ok(()),
-                )
+                PreparedBatch::parse_csv(BATCH_QUERY, &format!("name\n{value}\n"), &schema, || {
+                    Ok(())
+                })
             } else {
                 PreparedBatch::parse(
                     BATCH_QUERY,

@@ -10,8 +10,7 @@ use fgdb_gql::csv_parameters::{CsvParameterLimits, decode_csv_parameters};
 use fgdb_gql::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters};
 use fgdb_protocol::MAX_HEADER_LEN;
 use fgdb_protocol::body::{
-    Body, ExecuteBatch, MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS, Outcome,
-    WireValue,
+    Body, ExecuteBatch, MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS, Outcome, WireValue,
 };
 use fgdb_protocol::client::{CLIENT_MAX_FRAME, Client, ClientError};
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
@@ -105,7 +104,9 @@ impl PreparedBatch {
             checkpoint()?;
             let at = index + 1;
             let Json::Object(fields) = record else {
-                return Err(Failure::usage(format!("argument set {at} must be an object")));
+                return Err(Failure::usage(format!(
+                    "argument set {at} must be an object"
+                )));
             };
             if fields.len() > MAX_PARAMETERS {
                 return Err(Failure::usage(format!(
@@ -366,7 +367,10 @@ mod tests {
             prepared.body.argument_sets[0],
             vec![
                 ("a".into(), WireValue::Null),
-                ("name".into(), WireValue::Text("'); DETACH DELETE n; //".into())),
+                (
+                    "name".into(),
+                    WireValue::Text("'); DETACH DELETE n; //".into())
+                ),
                 ("z".into(), WireValue::Count(u64::MAX)),
             ]
         );
@@ -474,9 +478,12 @@ mod csv_tests {
     }
 
     fn prepare(input: &str, types: &str) -> Result<PreparedBatch, Failure> {
-        PreparedBatch::parse_csv("CREATE (:Person {name:$name})", input, &schema(types), || {
-            Ok(())
-        })
+        PreparedBatch::parse_csv(
+            "CREATE (:Person {name:$name})",
+            input,
+            &schema(types),
+            || Ok(()),
+        )
     }
 
     #[test]
@@ -604,7 +611,10 @@ mod csv_tests {
             .unwrap();
         assert!(error.message.contains("Records"), "{}", error.message);
         assert!(prepare(&"x".repeat(MAX_INPUT_BYTES + 1), "name=text").is_err());
-        let field = format!("name\n{}", "x".repeat(super::super::MAX_JSON_TOKEN_BYTES + 1));
+        let field = format!(
+            "name\n{}",
+            "x".repeat(super::super::MAX_JSON_TOKEN_BYTES + 1)
+        );
         assert!(prepare(&field, "name=text").is_err());
     }
 
@@ -620,19 +630,15 @@ mod csv_tests {
         .unwrap_or_else(|error| panic!("{}", error.message));
         for stop in 1..=total {
             let mut seen = 0;
-            let result = PreparedBatch::parse_csv(
-                "CREATE (:Person {name:$name})",
-                input,
-                &schema,
-                || {
+            let result =
+                PreparedBatch::parse_csv("CREATE (:Person {name:$name})", input, &schema, || {
                     seen += 1;
                     if seen == stop {
                         Err(Failure::io("stopped"))
                     } else {
                         Ok(())
                     }
-                },
-            );
+                });
             assert_eq!(result.err().expect("no admitted request").code, 5);
             assert_eq!(seen, stop);
         }
@@ -673,10 +679,20 @@ mod csv_tests {
             vec!["--csv-types", "name=text"],
             vec!["--rows-file", "a", "--csv-types"],
             vec![
-                "--rows-file", "a", "--csv-types", "name=text", "--csv-types", "name=int",
+                "--rows-file",
+                "a",
+                "--csv-types",
+                "name=text",
+                "--csv-types",
+                "name=int",
             ],
             vec![
-                "--rows-file", "a", "--csv-types", "name=text", "--param", "name=text:Ada",
+                "--rows-file",
+                "a",
+                "--csv-types",
+                "name=text",
+                "--param",
+                "name=text:Ada",
             ],
         ] {
             assert_eq!(options("write", &bad).err().unwrap().code, 2);
