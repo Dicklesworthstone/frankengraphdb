@@ -114,20 +114,17 @@ impl Store {
     }
 
     #[track_caller]
-    fn search(
-        &self,
-        seq: u64,
-        k: usize,
-        weight: u16,
-        args: &[&str],
-        expected: &[(VId, u32)],
-    ) {
+    fn search(&self, seq: u64, k: usize, weight: u16, args: &[&str], expected: &[(VId, u32)]) {
         let k_text = k.to_string();
         let weight_text = weight.to_string();
         let mut flags = vec!["--k", &k_text, "--graph-weight", &weight_text];
         flags.extend_from_slice(args);
         let actual = success(self.command("search", &flags));
-        assert_eq!(actual, expected_search(seq, k, weight, expected), "{args:?}");
+        assert_eq!(
+            actual,
+            expected_search(seq, k, weight, expected),
+            "{args:?}"
+        );
     }
 }
 
@@ -209,16 +206,14 @@ impl Fixture {
         let created = store.create();
         // No text or embedding properties exist. Parallel edges, a self-loop
         // and a cycle must not duplicate endpoints or change minimum hops.
-        let inserted = store.write(&[
-            "INSERT (a:Doc {name:'a'}), (b:Doc {name:'b'}), \
+        let inserted = store.write(&["INSERT (a:Doc {name:'a'}), (b:Doc {name:'b'}), \
              (c:Doc {name:'c'}), (d:Doc {name:'d'}), \
              (x:Other {name:'bridge'}), (t:Doc {name:'target'}), \
              (z:Doc {name:'isolate'}), \
              (a)-[:CITES]->(b), (a)-[:CITES]->(b), \
              (b)-[:CITES]->(c), (c)-[:CITES]->(d), \
              (d)-[:CITES]->(a), (b)-[:CITES]->(b), \
-             (a)-[:CITES]->(x), (x)-[:CITES]->(t)",
-        ]);
+             (a)-[:CITES]->(x), (x)-[:CITES]->(t)"]);
         assert_eq!(inserted, created + 1);
         let seq = store.write(&[
             "--write-relation",
@@ -258,7 +253,8 @@ fn graph_only_reopens_topology_and_preserves_selection_direction_and_endpoint_fi
     let mut selected = cites.clone();
     selected.extend(["--vertex-label", "Doc"]);
     // Label selection constrains transit: target is a Doc but its bridge is not.
-    f.store.search(f.seq, 10, 1, &selected, &[(f.b, 1), (f.c, 2)]);
+    f.store
+        .search(f.seq, 10, 1, &selected, &[(f.b, 1), (f.c, 2)]);
     f.store.search(
         f.seq,
         10,
@@ -355,19 +351,14 @@ fn graph_only_historical_reopen_keeps_the_old_cut_after_parallel_edge_deletion()
         "--expand-relation",
         "CITES",
     ];
-    let old_hits = [
-        (f.b, 1),
-        (f.bridge, 1),
-        (f.c, 2),
-        (f.target, 2),
-        (f.d, 3),
-    ];
+    let old_hits = [(f.b, 1), (f.bridge, 1), (f.c, 2), (f.target, 2), (f.d, 3)];
     f.store.search(f.seq, 10, 1, &current, &old_hits);
-    let changed = f.store.write(&[
-        "MATCH (a)-[e:CITES]->(b) WHERE a.name='a' AND b.name='b' DELETE e",
-    ]);
+    let changed = f
+        .store
+        .write(&["MATCH (a)-[e:CITES]->(b) WHERE a.name='a' AND b.name='b' DELETE e"]);
     assert_eq!(changed, f.seq + 1);
-    f.store.search(changed, 10, 1, &current, &[(f.bridge, 1), (f.target, 2)]);
+    f.store
+        .search(changed, 10, 1, &current, &[(f.bridge, 1), (f.target, 2)]);
     let before = f.seq.to_string();
     let mut historical = current.to_vec();
     historical.extend(["--as-of", &before]);
@@ -405,20 +396,17 @@ fn graph_only_refuses_invalid_budgets_and_seed_overflow_before_storage_open() {
             "--include-seeds",
             "true",
         ],
-        vec![
-            "--expand-from",
-            &seeds,
-            "--max-hops",
-            "0",
-            "--eligible",
-            "",
-        ],
+        vec!["--expand-from", &seeds, "--max-hops", "0", "--eligible", ""],
     ] {
         let output = store.command("search", &args);
         assert_eq!(output.status.code(), Some(2), "{:?}", output);
         let text = String::from_utf8(output.stdout).unwrap();
         let diagnostic = text.strip_prefix(INVOCATION).expect("invocation first");
-        assert_eq!(diagnostic.lines().count(), 1, "one refusal, no partial rows");
+        assert_eq!(
+            diagnostic.lines().count(),
+            1,
+            "one refusal, no partial rows"
+        );
         assert!(diagnostic.starts_with(concat!(
             "{\"v\":1,\"event\":\"error\",\"class\":\"usage\",",
             "\"diagnostics\":[",
@@ -431,11 +419,10 @@ fn graph_only_refuses_invalid_budgets_and_seed_overflow_before_storage_open() {
         }
         assert!(!store.db.exists(), "invalid input must not create storage");
     }
-    let at_limit = std::iter::repeat_n("1", limit).collect::<Vec<_>>().join(",");
-    let admitted = store.command(
-        "search",
-        &["--expand-from", &at_limit, "--max-hops", "0"],
-    );
+    let at_limit = std::iter::repeat_n("1", limit)
+        .collect::<Vec<_>>()
+        .join(",");
+    let admitted = store.command("search", &["--expand-from", &at_limit, "--max-hops", "0"]);
     assert_eq!(
         admitted.status.code(),
         Some(4),
