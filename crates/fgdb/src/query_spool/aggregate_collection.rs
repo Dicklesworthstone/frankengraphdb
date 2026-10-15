@@ -4,10 +4,8 @@
 
 use super::*;
 
-type CellError = GqlQueryError<
-    fgdb_gql::GraphAggregateError<ScanError<ReadError>>,
-    NativeAggregateSpoolError,
->;
+type CellError =
+    GqlQueryError<fgdb_gql::GraphAggregateError<ScanError<ReadError>>, NativeAggregateSpoolError>;
 
 fn refusal(error: CellError) -> NativeAggregateSpoolError {
     match error {
@@ -41,11 +39,11 @@ fn control<'a>(
             // growth, membership nodes, boxing and the final envelope copy.
             // Keep this conservative reservation until the group's final
             // encoded append completes; do not refund it when a row gets wider.
-            let bytes = 8 * size_of::<GraphValue>()
-                .max(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
-            charge.grow(cx, bytes).map_err(|error| {
-                GqlQueryError::Interrupted(SpillError::Memory(error).into())
-            })?;
+            let bytes =
+                8 * size_of::<GraphValue>().max(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+            charge
+                .grow(cx, bytes)
+                .map_err(|error| GqlQueryError::Interrupted(SpillError::Memory(error).into()))?;
         }
         Ok(())
     }
@@ -54,9 +52,9 @@ fn control<'a>(
 pub(super) fn capacity_refusal(error: &NativeAggregateSpoolError) -> bool {
     matches!(
         error,
-        NativeAggregateSpoolError::Spool(NativeSpoolError::Spill(
-            SpillError::Memory(MemoryError::ResourceExhausted { .. })
-        ))
+        NativeAggregateSpoolError::Spool(NativeSpoolError::Spill(SpillError::Memory(
+            MemoryError::ResourceExhausted { .. }
+        )))
     )
 }
 

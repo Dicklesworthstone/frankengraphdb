@@ -95,10 +95,10 @@ fn expected_distances(result: &QueryResult) -> Vec<(VId, f64)> {
     };
     rows.iter()
         .map(|row| match row.as_slice() {
-            [QueryValue::Value(GraphValue::Vertex(id)),
-             QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(distance)))] => {
-                (*id, distance.get())
-            }
+            [
+                QueryValue::Value(GraphValue::Vertex(id)),
+                QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(distance))),
+            ] => (*id, distance.get()),
             _ => panic!("unexpected result shape: {row:?}"),
         })
         .collect()
@@ -110,7 +110,11 @@ fn options(encoding: VectorEncoding) -> ReadOptions<PropertyKeyId, LabelId> {
         vertex_label: Some(DOC),
         projection: Projection {
             text: None,
-            vector: vec![if encoding == VectorEncoding::PackedF32Le { EMB } else { X }],
+            vector: vec![if encoding == VectorEncoding::PackedF32Le {
+                EMB
+            } else {
+                X
+            }],
             encoding,
         },
         index: IndexConfig {
@@ -123,7 +127,11 @@ fn options(encoding: VectorEncoding) -> ReadOptions<PropertyKeyId, LabelId> {
 }
 
 fn search() -> Search<'static> {
-    Search::Vector { query: &[0.0], k: 3, mode: VectorSearch::Exact }
+    Search::Vector {
+        query: &[0.0],
+        k: 3,
+        mode: VectorSearch::Exact,
+    }
 }
 
 #[test]
@@ -133,8 +141,12 @@ fn native_and_staged_calls_match_fixed_packed_bits_without_mutating_storage() {
         let mut db = database(&c.commit(), false).await;
         let before = (db.frontier().unwrap(), db.vertices().unwrap());
         let params = GqlParameters::new();
-        let packed_result = db.query(&c.query(), &packed_call(), &params, symbols, host()).unwrap();
-        let rounded = db.query(&c.query(), &rounded_call(), &params, symbols, host()).unwrap();
+        let packed_result = db
+            .query(&c.query(), &packed_call(), &params, symbols, host())
+            .unwrap();
+        let rounded = db
+            .query(&c.query(), &rounded_call(), &params, symbols, host())
+            .unwrap();
         assert_eq!(rounded, packed_result);
         let expected: Vec<_> = [0x3dcc_cccd, 0x3f80_0001, 0x4b80_0000]
             .into_iter()
@@ -147,19 +159,34 @@ fn native_and_staged_calls_match_fixed_packed_bits_without_mutating_storage() {
         assert_eq!(expected_distances(&rounded), expected);
         for mode in ["", ", vector_encoding => 'coordinates'"] {
             let exact = call(&format!("vector_properties => ['x']{mode}"));
-            assert!(db.query(&c.query(), &exact, &params, symbols, host()).is_err());
+            assert!(
+                db.query(&c.query(), &exact, &params, symbols, host())
+                    .is_err()
+            );
         }
         // The encoding is an ordinary typed operand; no source-text rewrite.
         let parameterized = call("vector_properties => ['x'], vector_encoding => $encoding");
-        let args = GqlParameters::new().with_text("encoding", "coordinates-rounded").unwrap();
-        assert_eq!(db.query(&c.query(), &parameterized, &args, symbols, host()).unwrap(), rounded);
+        let args = GqlParameters::new()
+            .with_text("encoding", "coordinates-rounded")
+            .unwrap();
+        assert_eq!(
+            db.query(&c.query(), &parameterized, &args, symbols, host())
+                .unwrap(),
+            rounded
+        );
         let mut txn = db.begin(&c.txn()).unwrap();
         let mut update = WriteBatch::new(REL);
         update.set_vertex_property(VId(1), X, Some(float(0.2)));
         update.set_vertex_property(VId(1), EMB, Some(packed(0x3e4c_cccd)));
         txn.write_ordered(&mut db, vec![update]).unwrap();
-        let staged = txn.query(&db, &c.query(), &rounded_call(), &params, symbols, host()).unwrap();
-        assert_eq!(staged, txn.query(&db, &c.query(), &packed_call(), &params, symbols, host()).unwrap());
+        let staged = txn
+            .query(&db, &c.query(), &rounded_call(), &params, symbols, host())
+            .unwrap();
+        assert_eq!(
+            staged,
+            txn.query(&db, &c.query(), &packed_call(), &params, symbols, host())
+                .unwrap()
+        );
         assert_ne!(staged, rounded);
         txn.abort();
         assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
@@ -181,17 +208,46 @@ fn incompatible_and_unknown_encoding_declarations_refuse_without_effects() {
             "vector_properties => ['x'], vector_encoding => 1",
             "vector_properties => [], vector_encoding => 'coordinates-rounded'",
         ] {
-            let error = db.query(&c.query(), &call(arguments), &GqlParameters::new(), symbols, host());
+            let error = db.query(
+                &c.query(),
+                &call(arguments),
+                &GqlParameters::new(),
+                symbols,
+                host(),
+            );
             assert!(error.is_err(), "{arguments}");
         }
         let without_vector = "CALL hybrid.search(seeds => [1], max_hops => 0, \
             include_seeds => true, vector_encoding => 'coordinates-rounded', k => 1) \
             YIELD node RETURN node";
-        assert!(db.query(&c.query(), without_vector, &GqlParameters::new(), symbols, host()).is_err());
+        assert!(
+            db.query(
+                &c.query(),
+                without_vector,
+                &GqlParameters::new(),
+                symbols,
+                host()
+            )
+            .is_err()
+        );
         let explicit_packed = call("vector_property => 'embedding', vector_encoding => 'packed'");
         assert_eq!(
-            db.query(&c.query(), &explicit_packed, &GqlParameters::new(), symbols, host()).unwrap(),
-            db.query(&c.query(), &packed_call(), &GqlParameters::new(), symbols, host()).unwrap(),
+            db.query(
+                &c.query(),
+                &explicit_packed,
+                &GqlParameters::new(),
+                symbols,
+                host()
+            )
+            .unwrap(),
+            db.query(
+                &c.query(),
+                &packed_call(),
+                &GqlParameters::new(),
+                symbols,
+                host()
+            )
+            .unwrap(),
         );
         assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
     });
@@ -204,33 +260,82 @@ fn authorization_masks_invalid_coordinates_before_rounding_and_reuse() {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let db = database(&c.commit(), true).await;
         let clean = database(&c.commit(), false).await;
-        let authority = Authority::new(AuthKey::from_seed(7103), NS, "main", SchemaEpoch(0), 1).unwrap();
-        let mut grant = Grant::read_only("main", 1000, QueryLimits {
-            max_nodes: 1000, max_work: 10_000_000, max_rows: 100,
-        });
+        let authority =
+            Authority::new(AuthKey::from_seed(7103), NS, "main", SchemaEpoch(0), 1).unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 1000,
+                max_work: 10_000_000,
+                max_rows: 100,
+            },
+        );
         grant.labels = Scope::only([DOC]);
         grant.properties = Scope::only([X, EMB]);
         let token = authority.issue_at(&grant, 100).unwrap();
         let params = GqlParameters::new();
-        let expected = clean.query(&c.query(), &rounded_call(), &params, symbols, host()).unwrap();
-        assert!(db.query(&c.query(), &rounded_call(), &params, symbols, host()).is_err());
-        let mut session = db.authorized_read_session(
-            &c.query(), &authority, &token, "main", symbols, host(), || 100,
-        ).unwrap();
-        assert_eq!(session.query(&c.query(), &rounded_call(), &params).unwrap(), expected);
+        let expected = clean
+            .query(&c.query(), &rounded_call(), &params, symbols, host())
+            .unwrap();
+        assert!(
+            db.query(&c.query(), &rounded_call(), &params, symbols, host())
+                .is_err()
+        );
+        let mut session = db
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                symbols,
+                host(),
+                || 100,
+            )
+            .unwrap();
+        assert_eq!(
+            session.query(&c.query(), &rounded_call(), &params).unwrap(),
+            expected
+        );
         let definition = options(VectorEncoding::CoordinatesRoundedF32);
-        let prepared = session.prepare_beacon_index(&c.query(), &definition).unwrap();
-        let want = clean.beacon_search(&c.query(), &definition, search()).unwrap();
-        assert_eq!(session.search_beacon_index(&c.query(), &prepared, search(), ReadPolicy::default()).unwrap(), want);
+        let prepared = session
+            .prepare_beacon_index(&c.query(), &definition)
+            .unwrap();
+        let want = clean
+            .beacon_search(&c.query(), &definition, search())
+            .unwrap();
+        assert_eq!(
+            session
+                .search_beacon_index(&c.query(), &prepared, search(), ReadPolicy::default())
+                .unwrap(),
+            want
+        );
         session.close();
-        assert!(session.search_beacon_index(&c.query(), &prepared, search(), ReadPolicy::default()).is_err());
+        assert!(
+            session
+                .search_beacon_index(&c.query(), &prepared, search(), ReadPolicy::default())
+                .is_err()
+        );
         // A forbidden component is absent before any numeric type inspection.
         grant.properties = Scope::only([EMB]);
         let token = authority.issue_at(&grant, 100).unwrap();
-        let mut masked = db.authorized_read_session(
-            &c.query(), &authority, &token, "main", symbols, host(), || 100,
-        ).unwrap();
-        assert!(masked.beacon_search(&c.query(), &definition, search()).unwrap().is_empty());
+        let mut masked = db
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                symbols,
+                host(),
+                || 100,
+            )
+            .unwrap();
+        assert!(
+            masked
+                .beacon_search(&c.query(), &definition, search())
+                .unwrap()
+                .is_empty()
+        );
         masked.close();
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -244,8 +349,12 @@ fn maintained_and_historical_indexes_keep_their_frozen_rounding_definition() {
         let mut definition = options(VectorEncoding::CoordinatesRoundedF32);
         let resident = db.prepare_beacon_index(&c.query(), &definition).unwrap();
         let pin = resident.snapshot();
-        let handle = db.register_beacon_index(&c.query(), &definition, ReadPolicy::default()).unwrap();
-        let before = pin.search(&c.query(), search(), ReadPolicy::default()).unwrap();
+        let handle = db
+            .register_beacon_index(&c.query(), &definition, ReadPolicy::default())
+            .unwrap();
+        let before = pin
+            .search(&c.query(), search(), ReadPolicy::default())
+            .unwrap();
         // Mutating the caller's options cannot switch a retained index to exact.
         definition.projection.encoding = VectorEncoding::Coordinates;
         assert!(db.prepare_beacon_index(&c.query(), &definition).is_err());
@@ -253,11 +362,26 @@ fn maintained_and_historical_indexes_keep_their_frozen_rounding_definition() {
         update.set_vertex_property(VId(1), X, Some(float(0.2)));
         update.set_vertex_property(VId(1), EMB, Some(packed(0x3e4c_cccd)));
         let through = db.write(&c.commit(), update).await.unwrap();
-        let after = db.search_beacon_index(&c.query(), &handle, search(), ReadPolicy::default()).unwrap();
+        let after = db
+            .search_beacon_index(&c.query(), &handle, search(), ReadPolicy::default())
+            .unwrap();
         assert_ne!(after, before);
-        assert_eq!(after, db.beacon_search(&c.query(), &options(VectorEncoding::PackedF32Le), search()).unwrap());
-        assert_eq!(pin.search(&c.query(), search(), ReadPolicy::default()).unwrap(), before);
-        assert_eq!(resident.search(&c.query(), search(), ReadPolicy::default()).unwrap(), before);
+        assert_eq!(
+            after,
+            db.beacon_search(&c.query(), &options(VectorEncoding::PackedF32Le), search())
+                .unwrap()
+        );
+        assert_eq!(
+            pin.search(&c.query(), search(), ReadPolicy::default())
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            resident
+                .search(&c.query(), search(), ReadPolicy::default())
+                .unwrap(),
+            before
+        );
         let status = db.beacon_index_status(&c.query(), &handle).unwrap();
         assert_eq!(status.source_sequence, through);
         assert!(status.failure.is_none());

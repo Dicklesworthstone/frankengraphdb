@@ -301,15 +301,12 @@ impl SpillAggregateDefinition {
             || aggregate.input_pattern().columns().len(),
             |relation| relation.columns().len(),
         );
-        let collections = aggregate
-            .aggregates()
-            .iter()
-            .any(|spec| {
-                matches!(
-                    spec.function(),
-                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
-                )
-            });
+        let collections = aggregate.aggregates().iter().any(|spec| {
+            matches!(
+                spec.function(),
+                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+            )
+        });
         // Direct graph cursors have separate visitation-order proofs. Only a
         // complete relational owner establishes the order this profile needs;
         // do not silently sort collected values or select a graph-only leaf.

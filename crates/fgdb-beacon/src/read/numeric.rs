@@ -7,9 +7,8 @@ pub(super) fn rounded(
     value: &CanonicalScalar,
     work: &mut dyn WorkControl,
 ) -> Result<f32, BeaconError> {
-    let invalid = || {
-        BeaconError::InvalidQuery("rounded vector coordinate must be finite numeric f32")
-    };
+    let invalid =
+        || BeaconError::InvalidQuery("rounded vector coordinate must be finite numeric f32");
     let projected = match value {
         CanonicalScalar::Int(value) => *value as f32,
         CanonicalScalar::Float(value) if value.get().is_finite() => value.get() as f32,
@@ -57,7 +56,10 @@ mod tests {
             VId(1),
             &IndexConfig {
                 text: None,
-                vector: Some(HnswConfig::new(values.len(), DistanceMetric::SquaredEuclidean)),
+                vector: Some(HnswConfig::new(
+                    values.len(),
+                    DistanceMetric::SquaredEuclidean,
+                )),
                 ..IndexConfig::default()
             },
             |key| values[key].as_ref(),
@@ -76,8 +78,12 @@ mod tests {
         ] {
             let values = [Some(value)];
             assert!(
-                project(&values, VectorEncoding::Coordinates, &mut WorkBudget::new(1000))
-                    .is_err()
+                project(
+                    &values,
+                    VectorEncoding::Coordinates,
+                    &mut WorkBudget::new(1000)
+                )
+                .is_err()
             );
             let rounded = project(
                 &values,
@@ -234,8 +240,7 @@ mod tests {
             Some(CanonicalScalar::Int(16_777_217)),
         ];
         let mut count = Count(0);
-        let expected = project(&values, VectorEncoding::CoordinatesRoundedF32, &mut count)
-            .unwrap();
+        let expected = project(&values, VectorEncoding::CoordinatesRoundedF32, &mut count).unwrap();
         for limit in 0..count.0 {
             assert!(matches!(
                 project(

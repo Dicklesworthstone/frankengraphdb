@@ -1135,16 +1135,33 @@ mod tests {
     fn rounded_encoding_reaches_the_projection_and_retains_exact_search_options() {
         for ann in [false, true] {
             let mut parts = vec![
-                "--vector", "0.1,0.2", "--vector-property", "x",
-                "--vector-property", "y", "--vector-encoding", "coordinates-rounded",
-                "--as-of", "7", "--eligible", "2,1", "--vertex-label", "Document",
+                "--vector",
+                "0.1,0.2",
+                "--vector-property",
+                "x",
+                "--vector-property",
+                "y",
+                "--vector-encoding",
+                "coordinates-rounded",
+                "--as-of",
+                "7",
+                "--eligible",
+                "2,1",
+                "--vertex-label",
+                "Document",
             ];
             if ann {
                 parts.extend_from_slice(&["--ann", "32"]);
             }
             let request = prepare(&options(&parts)).unwrap();
-            assert_eq!(request.read.projection.encoding, VectorEncoding::CoordinatesRoundedF32);
-            assert_eq!(request.read.projection.vector, [PropertyKeyId(1), PropertyKeyId(2)]);
+            assert_eq!(
+                request.read.projection.encoding,
+                VectorEncoding::CoordinatesRoundedF32
+            );
+            assert_eq!(
+                request.read.projection.vector,
+                [PropertyKeyId(1), PropertyKeyId(2)]
+            );
             assert_eq!(request.read.as_of, Some(CommitSeq(7)));
             assert_eq!(request.eligible, Some(vec![VId(1), VId(2)]));
             assert_eq!(request.read.vertex_label, Some(LabelId(1)));
@@ -1152,12 +1169,22 @@ mod tests {
                 panic!("vector search");
             };
             assert_eq!(query, [0.1_f32, 0.2_f32]);
-            assert_eq!(matches!(mode, VectorSearch::Approximate { ef_search: 32 }), ann);
+            assert_eq!(
+                matches!(mode, VectorSearch::Approximate { ef_search: 32 }),
+                ann
+            );
             let config = request.read.config_for(request.search()).unwrap();
             let value = CanonicalScalar::Float(fgdb_types::CanonicalF64::new(0.1));
-            let document = request.read.projection.project(
-                VId(1), &config, |_| Some(&value), &mut WorkBudget::new(1000),
-            ).unwrap();
+            let document = request
+                .read
+                .projection
+                .project(
+                    VId(1),
+                    &config,
+                    |_| Some(&value),
+                    &mut WorkBudget::new(1000),
+                )
+                .unwrap();
             assert_eq!(document.vector, Some(vec![0.1_f32, 0.1_f32]));
         }
         for metric in ["l2", "cosine", "dot"] {
@@ -1171,17 +1198,42 @@ mod tests {
     #[test]
     fn rounded_encoding_checks_dimensions_and_cannot_be_a_text_only_option() {
         for parts in [
-            vec!["--vector", "1,2", "--vector-property", "x",
-                 "--vector-encoding", "coordinates-rounded"],
-            vec!["--vector", "1", "--vector-property", "x", "--vector-property", "y",
-                 "--vector-encoding", "coordinates-rounded"],
-            vec!["--text", "graph", "--text-property", "bio",
-                 "--vector-encoding", "coordinates-rounded"],
+            vec![
+                "--vector",
+                "1,2",
+                "--vector-property",
+                "x",
+                "--vector-encoding",
+                "coordinates-rounded",
+            ],
+            vec![
+                "--vector",
+                "1",
+                "--vector-property",
+                "x",
+                "--vector-property",
+                "y",
+                "--vector-encoding",
+                "coordinates-rounded",
+            ],
+            vec![
+                "--text",
+                "graph",
+                "--text-property",
+                "bio",
+                "--vector-encoding",
+                "coordinates-rounded",
+            ],
         ] {
-            assert_eq!(prepare(&options(&parts)).err().expect("invalid shape").code, 2);
+            assert_eq!(
+                prepare(&options(&parts)).err().expect("invalid shape").code,
+                2
+            );
         }
         let mut flags = SearchFlags::default();
-        flags.set("--vector-encoding", "coordinates-rounded").unwrap();
+        flags
+            .set("--vector-encoding", "coordinates-rounded")
+            .unwrap();
         assert!(flags.set("--vector-encoding", "packed").is_err());
     }
 }

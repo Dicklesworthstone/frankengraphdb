@@ -19,11 +19,11 @@ use fgdb_types::{CanonicalScalar, CanonicalScalarResolver};
 mod account;
 #[path = "aggregate_buffered.rs"]
 mod buffered;
-#[path = "aggregate_collection.rs"]
-mod collection;
 #[cfg(test)]
 #[path = "aggregate_codec_tests.rs"]
 mod codec_tests;
+#[path = "aggregate_collection.rs"]
+mod collection;
 #[path = "aggregate_output.rs"]
 mod output;
 #[path = "aggregate_partition.rs"]
@@ -891,10 +891,7 @@ async fn reduce_partition<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
                 // Widen only the fixed/exemplar portion. Replacing this guard
                 // would refund the still-live collection's accumulated credit.
                 let delta = group_charge_bytes(definition, largest)?
-                    .checked_sub(group_charge_bytes(
-                        definition,
-                        groups.values[at].largest,
-                    )?)
+                    .checked_sub(group_charge_bytes(definition, groups.values[at].largest)?)
                     .ok_or(SpillError::SizeOverflow)?;
                 match groups.values[at]._charge.grow(work.cx, delta) {
                     Ok(()) => {}
@@ -935,7 +932,8 @@ async fn reduce_partition<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
             if groups.values.len() == capacity {
                 return Ok(None);
             }
-            let mut charge = match pool.reserve(work.cx, group_charge_bytes(definition, resident)?) {
+            let mut charge = match pool.reserve(work.cx, group_charge_bytes(definition, resident)?)
+            {
                 Ok(charge) => charge,
                 Err(MemoryError::ResourceExhausted { .. }) if !groups.values.is_empty() => {
                     return Ok(None);
@@ -1201,12 +1199,8 @@ where
                     .ok_or(SpillError::SizeOverflow)?,
             )
             .map_err(SpillError::Memory)?;
-        let state = collection::new_state(
-            &opened.definition,
-            opened.input.as_mut(),
-            &mut charge,
-            cx,
-        )?;
+        let state =
+            collection::new_state(&opened.definition, opened.input.as_mut(), &mut charge, cx)?;
         let row = collection::finish(
             &opened.definition,
             Vec::new(),
