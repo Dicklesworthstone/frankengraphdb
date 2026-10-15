@@ -46,6 +46,7 @@
 pub mod coalesced;
 pub mod compact;
 pub mod edge_props;
+pub mod id_map;
 pub mod manifest;
 pub mod root;
 pub mod root_segment;

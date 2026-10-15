@@ -31,6 +31,7 @@ use crate::edge_props::{
     EdgePropertyPatchError, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS, PROPERTY_PATCH_HEADER_BYTES,
     admitted_row_bytes, encode_property_patch, property_patch_id,
 };
+use crate::id_map::{IdMap, IdSet};
 use crate::root::{BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root};
 use crate::vertex::{
     VertexPatchError, VertexPatchRows, VertexRow, encode_patch, span_of_rows, vertex_patch_id,
@@ -292,14 +293,14 @@ pub struct BlockWriter {
     /// AND properties, because a tombstone must RESTATE the properties so a
     /// pre-retirement snapshot keeps answering them (fgdb-yqor), exactly as
     /// the vertex live map remembers rows for the same reason.
-    live: BTreeMap<EId, LiveEdge>,
+    live: IdMap<EId, LiveEdge>,
     /// Every EId admitted while replaying this partition-local writer.
     ///
     /// The graph-wide allocator is enforced before partition routing; this is a
     /// defense-in-depth check over the history visible to this fold. Shared
     /// copy-on-write so the engine allocator can probe it without a copy
     /// ([`BlockWriter::spent_edges`]).
-    spent: Arc<BTreeSet<EId>>,
+    spent: Arc<IdSet<EId>>,
     sealed: Vec<SealedBlock>,
     /// The newest sealed block per descriptor family — the predecessor each
     /// family's NEXT block links (V6, fgdb-4391). Rebuilt deterministically by
@@ -318,10 +319,10 @@ pub struct BlockWriter {
     /// `DeleteVertex` names only the VId, while the tombstone that retires a
     /// SEALED row must restate the exact birth — ordinal, labels, properties —
     /// and only the creation carried those.
-    live_vertices: BTreeMap<VId, VertexRow>,
+    live_vertices: IdMap<VId, VertexRow>,
     /// Every VId admitted while replaying this partition-local writer, shared
     /// copy-on-write like `spent`.
-    spent_vertices: Arc<BTreeSet<VId>>,
+    spent_vertices: Arc<IdSet<VId>>,
     sealed_patches: Vec<SealedPatch>,
     /// Live identities whose same-seq creation has already been sealed in
     /// this run. A later same-seq delete cannot fold those away — the
@@ -411,31 +412,30 @@ impl BlockWriter {
         patches: &[VertexPatchRows],
         frontier: CommitSeq,
     ) -> Self {
-        let live = last_wins(
-            live_edges
-                .into_iter()
-                .map(|(entry, props)| {
-                    (
-                        entry.eid,
-                        LiveEdge {
-                            src: entry.src,
-                            relation: entry.relation,
-                            dst: entry.dst,
-                            created_at: entry.created_at,
-                            props,
-                        },
-                    )
-                })
-                .collect(),
-        );
-        let spent: BTreeSet<EId> = blocks.iter().flatten().map(|entry| entry.eid).collect();
-        let live_vertices = last_wins(
+        // Collecting an identity map keeps the last pair of a repeated key,
+        // as inserting in order does.
+        let live: IdMap<EId, LiveEdge> = live_edges
+            .into_iter()
+            .map(|(entry, props)| {
+                (
+                    entry.eid,
+                    LiveEdge {
+                        src: entry.src,
+                        relation: entry.relation,
+                        dst: entry.dst,
+                        created_at: entry.created_at,
+                        props,
+                    },
+                )
+            })
+            .collect();
+        let spent: IdSet<EId> = blocks.iter().flatten().map(|entry| entry.eid).collect();
+        let live_vertices: IdMap<VId, VertexRow> =
             crate::vertex::merge_all_vertices(patches, frontier)
                 .into_iter()
                 .map(|row| (row.vid, row))
-                .collect(),
-        );
-        let spent_vertices: BTreeSet<VId> = patches.iter().flatten().map(|row| row.vid).collect();
+                .collect();
+        let spent_vertices: IdSet<VId> = patches.iter().flatten().map(|row| row.vid).collect();
         // The chain head per family is the LAST published block of that
         // family — publication order IS the chain (fgdb-4391).
         let chain_heads = last_wins(
@@ -477,12 +477,12 @@ impl BlockWriter {
             branch,
             partition,
             pending: BTreeMap::new(),
-            live: BTreeMap::new(),
+            live: IdMap::new(),
             spent: Arc::default(),
             sealed: Vec::new(),
             chain_heads: BTreeMap::new(),
             pending_vertices: BTreeMap::new(),
-            live_vertices: BTreeMap::new(),
+            live_vertices: IdMap::new(),
             spent_vertices: Arc::default(),
             sealed_patches: Vec::new(),
             sealed_live_edges: BTreeSet::new(),
@@ -548,12 +548,12 @@ impl BlockWriter {
     /// reader. A caller that may outlive that admission keeps an
     /// `Arc::downgrade` instead: the fold then mutates in place, and the weak
     /// handle stops upgrading.
-    pub fn spent_edges(&self) -> Arc<BTreeSet<EId>> {
+    pub fn spent_edges(&self) -> Arc<IdSet<EId>> {
         Arc::clone(&self.spent)
     }
 
     /// The vertex counterpart of [`BlockWriter::spent_edges`].
-    pub fn spent_vertices(&self) -> Arc<BTreeSet<VId>> {
+    pub fn spent_vertices(&self) -> Arc<IdSet<VId>> {
         Arc::clone(&self.spent_vertices)
     }
 
@@ -589,11 +589,15 @@ impl BlockWriter {
     /// the exact set a vertex deletion's cascade before-image must equal
     /// (both directions, the reference semantics).
     pub fn live_incident_edges(&self, vid: VId) -> Vec<EId> {
-        self.live
+        // The identity map holds no order: sort the incident identities.
+        let mut incident: Vec<EId> = self
+            .live
             .iter()
             .filter(|(_, edge)| edge.src == vid || edge.dst == vid)
             .map(|(eid, _)| *eid)
-            .collect()
+            .collect();
+        incident.sort_unstable();
+        incident
     }
 
     /// How many vertex rows are pending — the vertex half of the seal signal.
@@ -1324,9 +1328,9 @@ impl BlockWriter {
                         props: successor_row.clone(),
                     },
                 );
-                self.live
-                    .entry(eid)
-                    .and_modify(|live| live.props = successor_row);
+                if let Some(live) = self.live.get_mut(&eid) {
+                    live.props = successor_row;
+                }
                 return Ok(());
             }
             // The same-commit creation already sealed (format ceiling).
