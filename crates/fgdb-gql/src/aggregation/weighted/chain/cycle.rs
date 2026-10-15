@@ -495,6 +495,9 @@ impl Reduced {
             Multiplicity,
         ) -> Result<(), VisitError<E, C>>,
     {
+        // Reused by every binding: the slots a binding writes are the same
+        // for all of them, so the rest stay empty, as in a fresh array.
+        let mut original = [None; MAX_PATTERN_VERTICES];
         super::intersection::visit_bindings(
             self.pattern.plan(),
             vertices,
@@ -503,7 +506,6 @@ impl Reduced {
             property,
             control,
             |_, bindings, property, control| {
-                let mut original = [None; MAX_PATTERN_VERTICES];
                 for (old, slot) in self.slots[..self.width].iter().enumerate() {
                     if let Some(slot) = slot {
                         control(GlaExecutionEvent::Work)?;

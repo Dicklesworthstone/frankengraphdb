@@ -433,9 +433,15 @@ impl PreparedGraphAggregate {
             control(GlaExecutionEvent::ScratchEntry)?;
             groups.insert(Vec::new(), new_group(&self.aggregates, control)?);
         }
+        // One row's values and group key, reused by every row (see
+        // `execute_governed`); a column past the row's own is null.
+        let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+        let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+        let mut written = 0;
         for row in input {
             control(GlaExecutionEvent::Work)?;
-            let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+            values[row.len()..written.max(row.len())].fill(ValueRef::Scalar(&NULL));
+            written = row.len();
             for (at, value) in row.values().iter().enumerate() {
                 control(GlaExecutionEvent::Work)?;
                 values[at] = match value {
@@ -452,7 +458,6 @@ impl PreparedGraphAggregate {
                     control(GlaExecutionEvent::Work)?;
                 }
             }
-            let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
             for (at, column) in self.keys.iter().enumerate() {
                 control(GlaExecutionEvent::Work)?;
                 key[at] = values[*column];

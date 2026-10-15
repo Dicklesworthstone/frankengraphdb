@@ -1120,6 +1120,13 @@ impl PreparedGraphAggregate {
             control(GlaExecutionEvent::ScratchEntry)?;
             groups.insert(Vec::new(), new_group(&self.aggregates, &mut control)?);
         }
+        // One binding's values and group key, reused by every binding. A
+        // fresh pair of pattern-wide arrays per binding was about 5 KB of
+        // stores each, most of a vertex count's time. A column past the
+        // binding's own is null, as in a fresh array.
+        let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+        let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+        let mut written = 0;
         weighted::visit_bindings(
             self,
             vertices,
@@ -1134,7 +1141,8 @@ impl PreparedGraphAggregate {
             },
             &mut control,
             |columns, bindings, property, control, multiplicity| {
-                let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+                values[columns.len()..written.max(columns.len())].fill(ValueRef::Scalar(&NULL));
+                written = columns.len();
                 for (at, column) in columns.iter().enumerate() {
                     control(GlaExecutionEvent::Work)?;
                     values[at] = match column {
@@ -1163,7 +1171,6 @@ impl PreparedGraphAggregate {
                 if let Some(streaming) = &mut streaming {
                     return streaming.push(&values[..columns.len()], multiplicity, control);
                 }
-                let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
                 for (at, column) in self.keys.iter().enumerate() {
                     control(GlaExecutionEvent::Work)?;
                     key[at] = values[*column];

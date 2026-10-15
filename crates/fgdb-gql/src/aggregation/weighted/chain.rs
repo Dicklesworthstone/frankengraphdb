@@ -349,6 +349,9 @@ where
     } else {
         (plan, topology, accesses)
     };
+    // Reused by every binding: the slots a binding writes are the same for
+    // all of them, so the rest stay empty, as in a fresh array.
+    let mut original = [None; MAX_PATTERN_VERTICES];
     intersection::visit_bindings(
         execution,
         vertices,
@@ -357,7 +360,6 @@ where
         property,
         control,
         |columns, bindings, property, control| {
-            let mut original = [None; MAX_PATTERN_VERTICES];
             let forest_bindings = if let Some(reduced) = &reduced {
                 for (old, slot) in reduced.slots[..reduced.width].iter().enumerate() {
                     if let Some(slot) = slot {
