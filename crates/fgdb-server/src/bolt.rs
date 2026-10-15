@@ -498,7 +498,9 @@ impl<'s> Connection<'s> {
                         .as_ref()
                         .is_some_and(|transaction| !transaction.cursors.is_empty()) =>
             {
-                Err(Failure::invalid("PULL or DISCARD every result before COMMIT"))
+                Err(Failure::invalid(
+                    "PULL or DISCARD every result before COMMIT",
+                ))
             }
             Request::Commit => match self.transaction.take() {
                 Some(transaction) => {
@@ -666,11 +668,7 @@ impl<'s> Connection<'s> {
         // transaction reads the transaction's.
         let mut autocommit = None;
         let (name, db, seq) = if let Some(transaction) = self.transaction.as_mut() {
-            (
-                transaction.name.clone(),
-                transaction.db,
-                transaction.seq,
-            )
+            (transaction.name.clone(), transaction.db, transaction.seq)
         } else {
             let (name, db) = self.database(extra)?;
             self.output_database = Some(db);

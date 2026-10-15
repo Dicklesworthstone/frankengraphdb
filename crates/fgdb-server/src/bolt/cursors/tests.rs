@@ -110,10 +110,18 @@ fn restoring_an_existing_cursor_cannot_replace_its_owner() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut cursors = Cursors::new();
     cursors.insert(DropProbe(Arc::clone(&drops)), 3).unwrap();
-    assert!(cursors.restore(0, DropProbe(Arc::clone(&drops)), 4).is_err());
+    assert!(
+        cursors
+            .restore(0, DropProbe(Arc::clone(&drops)), 4)
+            .is_err()
+    );
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert_eq!(cursors.retained_bytes, 3);
-    assert!(cursors.restore(1, DropProbe(Arc::clone(&drops)), 4).is_err());
+    assert!(
+        cursors
+            .restore(1, DropProbe(Arc::clone(&drops)), 4)
+            .is_err()
+    );
     assert_eq!(drops.load(Ordering::SeqCst), 2);
     drop(cursors);
     assert_eq!(drops.load(Ordering::SeqCst), 3);
@@ -180,7 +188,12 @@ fn retained_payload_counts_nested_maps_lists_bytes_and_graph_structures() {
 fn scalar_values_do_not_double_charge_their_enclosing_slots() {
     with_cx(|cx| {
         let mut total = 17;
-        for value in [Value::Null, Value::Bool(true), Value::Int(4), Value::Float(0.5)] {
+        for value in [
+            Value::Null,
+            Value::Bool(true),
+            Value::Int(4),
+            Value::Float(0.5),
+        ] {
             value_bytes(cx, &value, 0, &mut total).unwrap();
         }
         assert_eq!(total, 17);

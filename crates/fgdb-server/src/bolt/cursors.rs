@@ -105,7 +105,9 @@ impl<T> Cursors<T> {
         }
         .ok_or_else(|| Failure::invalid("invalid Bolt transaction result identifier"))?;
         if !self.results.contains_key(&qid) {
-            return Err(Failure::invalid("unknown or consumed Bolt transaction result"));
+            return Err(Failure::invalid(
+                "unknown or consumed Bolt transaction result",
+            ));
         }
         Ok(qid)
     }
@@ -191,7 +193,9 @@ impl<'s> Connection<'s> {
             return self.pull_pending(cx, io, n, discard).await;
         };
         if self.pending.is_some() {
-            return Err(Failure::invalid("interrupted Bolt cursor delivery; RESET required"));
+            return Err(Failure::invalid(
+                "interrupted Bolt cursor delivery; RESET required",
+            ));
         }
         let (id, pending, bytes) = transaction.cursors.take(qid)?;
         self.pending = Some(pending);

@@ -338,7 +338,10 @@ fn a_later_commit_cannot_satisfy_a_bookmark_for_an_already_pinned_transaction() 
             INVALID,
         );
         assert_eq!(reader.transaction.as_ref().unwrap().seq, CommitSeq(1));
-        assert_eq!(reader.transaction.as_ref().unwrap().cursors.last_qid(), last_qid);
+        assert_eq!(
+            reader.transaction.as_ref().unwrap().cursors.last_qid(),
+            last_qid
+        );
         assert!(reader.pending.is_none());
         assert_eq!(
             reader

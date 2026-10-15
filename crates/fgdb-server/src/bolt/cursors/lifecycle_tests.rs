@@ -75,7 +75,10 @@ fn records(replies: &[Value]) -> Vec<Vec<Value>> {
 fn buffer(cx: &Cx, client: &mut Connection<'_>, values: &[i64]) -> i64 {
     let transaction = client.transaction.as_ref().unwrap();
     let pending = Pending {
-        rows: values.iter().map(|value| vec![Value::Int(*value)]).collect(),
+        rows: values
+            .iter()
+            .map(|value| vec![Value::Int(*value)])
+            .collect(),
         database: transaction.name.clone(),
         db: transaction.db,
         seq: Some(transaction.seq),
@@ -102,15 +105,45 @@ fn partial_pull_and_discard_interleave_without_crossing_result_boundaries() {
         let mut io = io();
         let first = send(&root, &mut client, &mut io, Request::Pull { n: 1, qid: 0 }).await;
         assert_eq!(records(&first), vec![vec![Value::Int(1)]]);
-        assert_eq!(get(summary(&first, 0x70), "has_more"), Some(&Value::Bool(true)));
-        let skipped = send(&root, &mut client, &mut io, Request::Discard { n: 1, qid: 1 }).await;
+        assert_eq!(
+            get(summary(&first, 0x70), "has_more"),
+            Some(&Value::Bool(true))
+        );
+        let skipped = send(
+            &root,
+            &mut client,
+            &mut io,
+            Request::Discard { n: 1, qid: 1 },
+        )
+        .await;
         assert!(records(&skipped).is_empty());
-        assert_eq!(get(summary(&skipped, 0x70), "has_more"), Some(&Value::Bool(true)));
-        let latest = send(&root, &mut client, &mut io, Request::Pull { n: -1, qid: -1 }).await;
+        assert_eq!(
+            get(summary(&skipped, 0x70), "has_more"),
+            Some(&Value::Bool(true))
+        );
+        let latest = send(
+            &root,
+            &mut client,
+            &mut io,
+            Request::Pull { n: -1, qid: -1 },
+        )
+        .await;
         assert_eq!(records(&latest), vec![vec![Value::Int(11)]]);
         assert!(get(summary(&latest, 0x70), "bookmark").is_none());
-        let older = send(&root, &mut client, &mut io, Request::Pull { n: i64::MAX, qid: 0 }).await;
-        assert_eq!(records(&older), vec![vec![Value::Int(2)], vec![Value::Int(3)]]);
+        let older = send(
+            &root,
+            &mut client,
+            &mut io,
+            Request::Pull {
+                n: i64::MAX,
+                qid: 0,
+            },
+        )
+        .await;
+        assert_eq!(
+            records(&older),
+            vec![vec![Value::Int(2)], vec![Value::Int(3)]]
+        );
         assert!(get(summary(&older, 0x70), "has_more").is_none());
         let committed = send(&root, &mut client, &mut io, Request::Commit).await;
         assert_eq!(
@@ -160,9 +193,21 @@ fn consumed_latest_id_does_not_alias_an_older_live_cursor() {
         buffer(&root, &mut client, &[7]);
         buffer(&root, &mut client, &[8]);
         let mut io = io();
-        let done = send(&root, &mut client, &mut io, Request::Discard { n: -1, qid: -1 }).await;
+        let done = send(
+            &root,
+            &mut client,
+            &mut io,
+            Request::Discard { n: -1, qid: -1 },
+        )
+        .await;
         summary(&done, 0x70);
-        let refused = send(&root, &mut client, &mut io, Request::Pull { n: -1, qid: -1 }).await;
+        let refused = send(
+            &root,
+            &mut client,
+            &mut io,
+            Request::Pull { n: -1, qid: -1 },
+        )
+        .await;
         summary(&refused, 0x7f);
         assert!(records(&refused).is_empty());
         assert!(client.failed);
@@ -181,16 +226,34 @@ fn explicit_snapshot_does_not_advance_when_another_connection_commits() {
         let mut writer = connection(&server, token);
         reader.begin(&root, &extra()).await.unwrap();
         assert_eq!(reader.transaction.as_ref().unwrap().seq, CommitSeq(0));
-        reader.run(&root, "MATCH (n) RETURN n", &vec![], &extra()).await.unwrap();
-        writer.run(&root, "CREATE (n)", &vec![], &extra()).await.unwrap();
+        reader
+            .run(&root, "MATCH (n) RETURN n", &vec![], &extra())
+            .await
+            .unwrap();
+        writer
+            .run(&root, "CREATE (n)", &vec![], &extra())
+            .await
+            .unwrap();
         let mut write_io = io();
         let written = writer.pull(&root, &mut write_io, -1, true).await.unwrap();
-        assert_eq!(get(&written, "bookmark").and_then(Value::as_str), Some("fgdb:test:1"));
-        let next = reader.run(&root, "MATCH (n) RETURN n", &vec![], &extra()).await.unwrap();
+        assert_eq!(
+            get(&written, "bookmark").and_then(Value::as_str),
+            Some("fgdb:test:1")
+        );
+        let next = reader
+            .run(&root, "MATCH (n) RETURN n", &vec![], &extra())
+            .await
+            .unwrap();
         assert_eq!(get(&next, "qid"), Some(&Value::Int(1)));
         let mut read_io = io();
         for qid in [1, 0] {
-            let rows = send(&root, &mut reader, &mut read_io, Request::Pull { n: -1, qid }).await;
+            let rows = send(
+                &root,
+                &mut reader,
+                &mut read_io,
+                Request::Pull { n: -1, qid },
+            )
+            .await;
             assert!(records(&rows).is_empty());
             summary(&rows, 0x70);
         }
@@ -224,10 +287,20 @@ fn commit_with_unread_results_fails_and_reset_releases_the_failed_transaction() 
             Request::Pull { n: -1, qid: 0 },
             Request::Discard { n: -1, qid: -1 },
             Request::Begin { extra: extra() },
-            Request::Run { query: "CREATE (n)".into(), parameters: vec![], extra: extra() },
+            Request::Run {
+                query: "CREATE (n)".into(),
+                parameters: vec![],
+                extra: extra(),
+            },
         ] {
             let ignored = send(&root, &mut client, &mut io, request).await;
-            assert_eq!(ignored, vec![Value::Struct { tag: 0x7e, fields: vec![] }]);
+            assert_eq!(
+                ignored,
+                vec![Value::Struct {
+                    tag: 0x7e,
+                    fields: vec![]
+                }]
+            );
         }
         let reset = send(&root, &mut client, &mut io, Request::Reset).await;
         summary(&reset, 0x70);
@@ -237,7 +310,16 @@ fn commit_with_unread_results_fails_and_reset_releases_the_failed_transaction() 
         let rolled_back = send(&root, &mut client, &mut io, Request::Rollback).await;
         summary(&rolled_back, 0x70);
         assert!(client.transaction.is_none());
-        assert_eq!(server.databases["test"].db.read(&root).await.unwrap().frontier().unwrap(), CommitSeq(0));
+        assert_eq!(
+            server.databases["test"]
+                .db
+                .read(&root)
+                .await
+                .unwrap()
+                .frontier()
+                .unwrap(),
+            CommitSeq(0)
+        );
         server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -252,7 +334,10 @@ fn malformed_read_and_write_windows_do_not_consume_or_publish_anything() {
                 Request::Pull { n: 0, qid: -1 },
                 Request::Discard { n: -2, qid: -1 },
                 Request::Pull { n: -1, qid: 0 },
-                Request::Discard { n: -1, qid: i64::MAX },
+                Request::Discard {
+                    n: -1,
+                    qid: i64::MAX,
+                },
                 Request::Pull { n: 1, qid: -2 },
             ] {
                 let mut client = connection(&server, token.clone());
@@ -265,7 +350,16 @@ fn malformed_read_and_write_windows_do_not_consume_or_publish_anything() {
                 assert!(client.pending.is_none());
             }
         }
-        assert_eq!(server.databases["test"].db.read(&root).await.unwrap().frontier().unwrap(), CommitSeq(0));
+        assert_eq!(
+            server.databases["test"]
+                .db
+                .read(&root)
+                .await
+                .unwrap()
+                .frontier()
+                .unwrap(),
+            CommitSeq(0)
+        );
         server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -347,11 +441,21 @@ fn dropping_partial_delivery_cannot_reassign_its_id_or_restart_the_wire() {
             failed: false,
         };
         let mut delivery = Box::pin(client.pull_selected(&root, &mut io, -1, 0, false));
-        assert!(delivery.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert!(
+            delivery
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
         drop(delivery);
         assert!(io.failed);
         assert!(client.pending.is_some());
-        assert!(client.pull_selected(&root, &mut io, -1, 1, false).await.is_err());
+        assert!(
+            client
+                .pull_selected(&root, &mut io, -1, 1, false)
+                .await
+                .is_err()
+        );
         assert!(wire.bytes().is_empty());
         assert!(!client.handle(&root, &mut io, Request::Reset).await);
         assert!(client.pending.is_none());
