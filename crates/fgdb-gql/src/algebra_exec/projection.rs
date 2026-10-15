@@ -231,6 +231,7 @@ impl super::GlaExecutionStats {
     /// or an external materialization barrier. The caller retains these exact
     /// accumulated counters and the original limits; this operation never
     /// resets either counter and leaves both unchanged when admission fails.
+    #[inline]
     pub fn charge_event(
         &mut self,
         limits: super::GlaExecutionLimits,

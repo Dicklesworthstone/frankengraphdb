@@ -403,15 +403,15 @@ type Resume = Option<(usize, usize, usize)>;
 /// a binary search repeated for every candidate, which was most of a
 /// 730K-edge triangle count's comparisons. The next call for the same
 /// variable resumes after its previous answer instead of searching again.
-fn intersect<E>(
-    tries: &[Trie],
+fn intersect<'t, E>(
+    tries: &'t [Trie],
     variable: usize,
     assigned: &[Option<VId>],
     after: Option<VId>,
     resume: &mut Resume,
+    domains: &mut [Option<Domain<'t>>; crate::algebra::MAX_PATTERN_EDGES],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<VId>, E> {
-    let mut domains = [None; crate::algebra::MAX_PATTERN_EDGES];
     let mut count = 0;
     for trie in tries {
         control(GlaExecutionEvent::Work)?;
@@ -501,6 +501,9 @@ where
     let mut after = [None; MAX_PATTERN_VERTICES];
     let mut resume: [Resume; MAX_PATTERN_VERTICES] = [None; MAX_PATTERN_VERTICES];
     let mut bindings = [None; MAX_PATTERN_VERTICES];
+    // Every search's domains, filled afresh by each `intersect` up to its
+    // own count: one pattern-wide array for the execution, not one per search.
+    let mut domains = [None; crate::algebra::MAX_PATTERN_EDGES];
     let mut depth = 0;
     loop {
         control(GlaExecutionEvent::Work)?;
@@ -544,6 +547,7 @@ where
             &assigned,
             after[depth],
             &mut resume[depth],
+            &mut domains,
             &mut control,
         )?
         else {

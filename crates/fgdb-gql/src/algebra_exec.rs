@@ -115,6 +115,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GlaExecutionError<E
     }
 }
 
+#[inline]
 fn increment(
     value: u64,
     limit: u64,
@@ -131,6 +132,7 @@ fn increment(
     Ok(observed as u64)
 }
 
+#[inline]
 fn charge(
     stats: &mut GlaExecutionStats,
     limits: GlaExecutionLimits,
