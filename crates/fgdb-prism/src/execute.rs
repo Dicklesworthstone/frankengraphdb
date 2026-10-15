@@ -297,6 +297,82 @@ impl<C, F: FnMut() -> Result<(), C>> FnxMeter<C> for F {
     }
 }
 
+/// Walks of at least this many arcs gather on scoped threads.
+const PARALLEL_GATHER_ARCS: usize = 1 << 18;
+/// The most threads one gather uses.
+const MAX_GATHER_THREADS: usize = 8;
+
+/// The threads a gather over `arcs` arcs uses.
+fn gather_threads(arcs: usize) -> usize {
+    if arcs < PARALLEL_GATHER_ARCS {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_GATHER_THREADS)
+}
+
+/// One PageRank pass as a gather: each target adds what every arc into it
+/// carries, its sources ascending. That is the order a source-ascending
+/// scatter adds them in, and each arc's value is the scatter's `push * share`
+/// (`contrib[source]` alone when unweighted, `contrib[source] * shares[arc]`
+/// when weighted), so every sum is the scatter's floating-point sequence.
+/// Several threads each own a contiguous range of targets with about equal
+/// incoming arcs; the result is bit-identical on every thread count.
+fn gather_pass(
+    offsets: &[usize],
+    sources: &[usize],
+    contrib: &[f64],
+    shares: Option<&[f64]>,
+    next: &mut [f64],
+    threads: usize,
+) {
+    let n = next.len();
+    let arcs = sources.len();
+    let gather = |low: usize, rows: &mut [f64]| {
+        for (at, slot) in rows.iter_mut().enumerate() {
+            let target = low + at;
+            let mut sum = *slot;
+            let (start, end) = (offsets[target], offsets[target + 1]);
+            match shares {
+                None => {
+                    for &source in &sources[start..end] {
+                        sum += contrib[source];
+                    }
+                }
+                Some(shares) => {
+                    for arc in start..end {
+                        sum += contrib[sources[arc]] * shares[arc];
+                    }
+                }
+            }
+            *slot = sum;
+        }
+    };
+    if threads <= 1 {
+        gather(0, next);
+        return;
+    }
+    std::thread::scope(|scope| {
+        let mut rest = next;
+        let mut low = 0;
+        for chunk in 1..=threads {
+            let high = if chunk == threads {
+                n
+            } else {
+                offsets[..n]
+                    .partition_point(|&offset| offset < chunk * arcs / threads)
+                    .max(low)
+            };
+            let (rows, tail) = rest.split_at_mut(high - low);
+            let start = low;
+            scope.spawn(move || gather(start, rows));
+            rest = tail;
+            low = high;
+        }
+    });
+}
+
 /// `units` over `0..len` in runs, then `visit` each index of the run.
 fn metered<C>(
     len: usize,
@@ -342,6 +418,21 @@ fn pagerank<C>(
     let mut sums = reserve(n)?;
     let mut ranks = reserve(n)?;
     let mut next = reserve(n)?;
+    // The pass gathers over the incoming face. A weighted arc's share is the
+    // scatter's, placed at the arc's incoming position during the charged
+    // walk below; the face is checked there row by row.
+    let (in_offsets, in_sources) = graph.incoming_face();
+    let mut face_ok = in_offsets.len() == n + 1 && in_offsets[n] == in_sources.len();
+    let threads = gather_threads(in_sources.len());
+    let mut contrib = reserve(n)?;
+    let mut shares: Vec<f64> = Vec::new();
+    let mut cursor: Vec<usize> = Vec::new();
+    if options.weighted() && face_ok {
+        shares = reserve(in_sources.len())?;
+        shares.resize(in_sources.len(), 0.0);
+        cursor = reserve(n)?;
+        cursor.extend_from_slice(&in_offsets[..n]);
+    }
     let population = n as f64;
     // Every pass's row-and-arc walk spends one unit per row plus one per arc.
     let mut row_units = 0usize;
@@ -368,10 +459,34 @@ fn pagerank<C>(
         } else {
             sum = targets.len() as f64;
         }
+        if face_ok {
+            face_ok = in_offsets[source] <= in_offsets[source + 1];
+        }
+        if options.weighted() && face_ok {
+            for (at, &target) in targets.iter().enumerate() {
+                let share = if sum > 0.0 {
+                    weights[at] / sum
+                } else {
+                    weights[at]
+                };
+                let slot = cursor[target];
+                if slot >= in_offsets[target + 1] || in_sources[slot] != source {
+                    face_ok = false;
+                    break;
+                }
+                shares[slot] = share;
+                cursor[target] = slot + 1;
+            }
+        }
         sums.push(sum);
         ranks.push(1.0 / population);
         next.push(0.0);
+        contrib.push(0.0);
     }
+    if !face_ok {
+        return Err(FnxExecutionError::InvalidUpstreamResult);
+    }
+    drop(cursor);
     let base = (1.0 - options.alpha()) / population;
     for _ in 0..options.max_iter() {
         // Each pass spends one unit per vertex or arc, as before, but asks
@@ -387,47 +502,38 @@ fn pagerank<C>(
         let initial = base + options.alpha() * dangling_mass / population;
         metered(n, meter, |index| {
             next[index] = initial;
+            // The scatter's per-arc value is push * share, push this alpha
+            // times rank; unweighted, every arc's share is 1 / sum.
+            let push = options.alpha() * ranks[index];
+            contrib[index] = if options.weighted() {
+                push
+            } else if sums[index] > 0.0 {
+                push * (1.0 / sums[index])
+            } else {
+                0.0
+            };
             Ok(())
         })?;
         // The walk's units are one stream: a row's unit, then its arcs, row
-        // after row. It is charged in runs of FNX_METER_RUN across row
-        // boundaries, each before the arithmetic it pays for, so the meter
-        // sees the same units in the same order as one row at a time, in
-        // n + m over 64 calls instead of at least one per row.
-        let mut paid = 0usize;
+        // after row, n + m in all. They are charged first, in runs of
+        // FNX_METER_RUN across rows, so the meter sees exactly the calls a
+        // row-at-a-time walk makes and a refusal stops before any of this
+        // pass's arithmetic; the gather then needs no meter and may run on
+        // several threads.
         let mut unpaid = row_units;
-        for source in 0..n {
-            let (targets, weights) = graph
-                .projected_row(source)
-                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-            let push = options.alpha() * ranks[source];
-            let sum = sums[source];
-            let row = 1 + targets.len();
-            while paid < row {
-                let run = FNX_METER_RUN.min(unpaid);
-                if run == 0 {
-                    return Err(FnxExecutionError::InvalidUpstreamResult);
-                }
-                meter.units(run).map_err(FnxExecutionError::Cancelled)?;
-                paid += run;
-                unpaid -= run;
-            }
-            paid -= row;
-            for at in 0..targets.len() {
-                let share = if options.weighted() {
-                    if sum > 0.0 {
-                        weights[at] / sum
-                    } else {
-                        weights[at]
-                    }
-                } else if sum > 0.0 {
-                    1.0 / sum
-                } else {
-                    0.0
-                };
-                next[targets[at]] += push * share;
-            }
+        while unpaid > 0 {
+            let run = FNX_METER_RUN.min(unpaid);
+            meter.units(run).map_err(FnxExecutionError::Cancelled)?;
+            unpaid -= run;
         }
+        gather_pass(
+            in_offsets,
+            in_sources,
+            &contrib,
+            options.weighted().then_some(shares.as_slice()),
+            &mut next,
+            threads,
+        );
         let mut delta = 0.0;
         metered(n, meter, |index| {
             if !next[index].is_finite() || next[index] < 0.0 {
@@ -875,6 +981,84 @@ mod tests {
             let result = pagerank(&graph, options, m, &mut refusing);
             assert!(matches!(result, Err(FnxExecutionError::Cancelled("stop"))));
             assert_eq!(refusing.seen, stop);
+        }
+    }
+
+    /// **A GATHER'S SUMS DO NOT DEPEND ON ITS THREADS.** Over a 2,000-vertex
+    /// graph with a hub, with and without per-arc shares, every thread count
+    /// from 1 to 8 leaves every target's sum bit-identical to one thread's,
+    /// whatever the chunk boundaries.
+    #[test]
+    fn gather_is_bit_identical_on_every_thread_count() {
+        let n = 2_000usize;
+        let vertices: Vec<VId> = (0..n as u128).map(VId).collect();
+        let mut state = 0x9e37_79b9_u64;
+        let mut next_random = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut pairs = Vec::new();
+        for source in 0..n {
+            for _ in 0..(next_random() % 9) {
+                pairs.push((source, (next_random() % n as u64) as usize));
+            }
+        }
+        for target in 0..n / 2 {
+            pairs.push((target, 7));
+        }
+        let edges: Vec<ProjectionEdge> = pairs
+            .iter()
+            .enumerate()
+            .map(|(eid, &(source, target))| ProjectionEdge {
+                eid: EId(eid as u128),
+                source: vertices[source],
+                target: vertices[target],
+                weight: [0.0, 0.5, 1.0, 3.25, 7.0][eid % 5],
+            })
+            .collect();
+        let graph = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([2; 32]),
+                as_of: CommitSeq(3),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: Directedness::Directed,
+                parallel_edges: ParallelEdgePolicy::Sum,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: n,
+                max_input_edges: edges.len(),
+                max_adjacency_entries: 2 * edges.len(),
+                max_workspace_bytes: 1 << 26,
+            },
+        )
+        .unwrap();
+        let (offsets, sources) = graph.incoming_face();
+        let contrib: Vec<f64> = (0..n).map(|at| 1.0 / (at as f64 + 3.0)).collect();
+        let shares: Vec<f64> = (0..sources.len())
+            .map(|arc| ((arc % 13) as f64 + 0.5) / 7.0)
+            .collect();
+        let start: Vec<f64> = (0..n).map(|at| (at as f64).sqrt() * 1e-3).collect();
+        for weighted in [false, true] {
+            let shares = weighted.then_some(shares.as_slice());
+            let mut one = start.clone();
+            gather_pass(offsets, sources, &contrib, shares, &mut one, 1);
+            assert_ne!(one, start, "the gather added something");
+            for threads in 2..=8 {
+                let mut many = start.clone();
+                gather_pass(offsets, sources, &contrib, shares, &mut many, threads);
+                assert!(
+                    one.iter()
+                        .zip(&many)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "weighted={weighted} {threads} threads"
+                );
+            }
         }
     }
 

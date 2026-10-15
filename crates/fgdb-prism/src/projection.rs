@@ -793,6 +793,14 @@ impl SnapshotGraphView {
         ))
     }
 
+    /// The incoming face as one array of sources beside row offsets: target
+    /// `t`'s sources, ascending, are `sources[offsets[t]..offsets[t + 1]]`.
+    /// An undirected view's incoming face is its outgoing one.
+    pub fn incoming_face(&self) -> (&[usize], &[usize]) {
+        let rows = self.0.incoming.as_ref().unwrap_or(&self.0.outgoing);
+        (&rows.offsets, &rows.neighbors)
+    }
+
     pub fn projected_weight(&self, source: usize, target: usize) -> Option<f64> {
         let row = self.0.outgoing.row(source)?;
         let index = row.binary_search(&target).ok()?;
