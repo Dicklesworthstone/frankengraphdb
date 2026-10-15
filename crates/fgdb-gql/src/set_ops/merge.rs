@@ -82,8 +82,16 @@ where
 
 /// Resumable form of the same in-place heapsort used by blocking consumers.
 /// Only indices survive a yield; rows and payloads stay in their original
-/// allocation. Each quantum unit permits one heap descent or extraction swap.
-/// Comparisons remain indivisible governed calls, not wall-clock-bounded work.
+/// allocation. Each quantum unit permits one ascent comparison, heap descent
+/// or extraction swap. Comparisons remain indivisible governed calls, not
+/// wall-clock-bounded work.
+///
+/// The heap is entered only after the input is found not to be strictly
+/// ascending. A strictly ascending input is the one sorted order of pairwise
+/// distinct rows, exactly what the heap would leave, so its n - 1 ascent
+/// comparisons are the whole sort and nothing moves. Any other input then runs
+/// the former kernel unchanged, tied occurrences included: the comparisons
+/// spent finding its first non-ascending pair are the only addition.
 ///
 /// The owner must supply the same, otherwise unchanged slice on every advance
 /// and discard both state and rows on failure. Pending never admits output.
@@ -91,6 +99,8 @@ where
 /// synchronous and cooperative paths have identical cumulative transcripts.
 pub(crate) struct InPlaceSort {
     len: usize,
+    // Leading adjacent pairs proved strictly ascending, while still checking.
+    ascending: Option<usize>,
     build: usize,
     end: usize,
     root: Option<usize>,
@@ -100,6 +110,7 @@ impl InPlaceSort {
     pub(crate) fn new(len: usize) -> Self {
         Self {
             len,
+            ascending: Some(0),
             build: len / 2,
             end: len,
             root: None,
@@ -118,6 +129,17 @@ impl InPlaceSort {
         F: FnMut(&T, &T, &mut C) -> Result<Ordering, E>,
     {
         assert_eq!(rows.len(), self.len, "sort input changed across suspension");
+        while let Some(pairs) = self.ascending {
+            if pairs + 1 >= self.len {
+                return Ok(core::task::Poll::Ready(()));
+            }
+            if *remaining == 0 {
+                return Ok(core::task::Poll::Pending);
+            }
+            *remaining -= 1;
+            self.ascending = (compare(&rows[pairs], &rows[pairs + 1], control)? == Ordering::Less)
+                .then_some(pairs + 1);
+        }
         loop {
             if let Some(root) = self.root {
                 if root >= self.end / 2 {
@@ -209,13 +231,17 @@ mod tests {
         Work,
     }
 
-    // The former blocking kernel is an independent transcript oracle. Equal
-    // keys carry distinct occurrence IDs to expose any changed swap/tie order.
+    // An ascent scan, then the former blocking kernel, is an independent
+    // transcript oracle. Equal keys carry distinct occurrence IDs to expose
+    // any changed swap/tie order.
     fn reference_sort(rows: &mut [(i32, usize)], events: &mut Vec<SortEvent>) {
         fn compare(a: (i32, usize), b: (i32, usize), events: &mut Vec<SortEvent>) -> Ordering {
             events.push(SortEvent::Compare(a, b));
             events.push(SortEvent::Work);
             a.0.cmp(&b.0)
+        }
+        if (1..rows.len()).all(|at| compare(rows[at - 1], rows[at], events) == Ordering::Less) {
+            return;
         }
         fn sift(
             rows: &mut [(i32, usize)],
@@ -309,6 +335,46 @@ mod tests {
                     let mut zero = 0;
                     assert!(advance_traced(&mut sort, &mut actual, &mut zero, &events).is_ready());
                     assert_eq!(*events.borrow(), expected_events);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_strictly_ascending_input_is_sorted_by_its_ascent_comparisons_alone() {
+        for len in 0..64_usize {
+            let input: Vec<_> = (0..len).map(|at| (at as i32, at)).collect();
+            for tie in [None, Some(len / 2)] {
+                let mut input = input.clone();
+                if let Some(at) = tie.filter(|&at| at > 0) {
+                    input[at].0 = input[at - 1].0;
+                }
+                let mut rows = input.clone();
+                let (mut comparisons, mut events) = (0, 0);
+                sort(
+                    &mut rows,
+                    &mut |_| {
+                        events += 1;
+                        Ok::<_, ()>(())
+                    },
+                    &mut |a: &(i32, usize), b: &(i32, usize), control| {
+                        comparisons += 1;
+                        control(GlaExecutionEvent::Work)?;
+                        Ok(a.0.cmp(&b.0))
+                    },
+                )
+                .unwrap();
+                let mut expected = input.clone();
+                let mut oracle = Vec::new();
+                reference_sort(&mut expected, &mut oracle);
+                assert_eq!(rows, expected);
+                if tie.is_some_and(|at| at > 0) {
+                    // One tie sends the input through the former heap.
+                    assert!(comparisons > len - 1, "{len}");
+                } else {
+                    assert_eq!(comparisons, len.saturating_sub(1));
+                    assert_eq!(events, comparisons, "no move");
+                    assert_eq!(rows, input);
                 }
             }
         }

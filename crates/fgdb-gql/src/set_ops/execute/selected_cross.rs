@@ -146,20 +146,47 @@ fn compare_keys<E>(
     Ok(Ordering::Equal)
 }
 
+/// The count of indexed rows that order before `row` (or, for `upper`, before
+/// or with it). `hint` is a likely answer, such as the previous left row's:
+/// the probe tries it and its neighbour first, so a left side that ascends
+/// through dense keys costs two comparisons a boundary, not log2(right). Any
+/// other answer is found by bisecting the side of `hint` it lies on, so a
+/// wrong hint costs at most two comparisons more than plain bisection. Every
+/// hint yields the same boundary.
 fn boundary<E>(
     row: &GraphValueRow,
     right: &[GraphValueRow],
     index: &[usize],
     keys: &[Key],
     upper: bool,
+    hint: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<usize, E> {
-    let (mut lo, mut hi) = (0, index.len());
-    while lo < hi {
+    // Whether `row` orders after the indexed row at `at`: true on a prefix.
+    let mut after = |at: usize| -> Result<bool, E> {
         control(GlaExecutionEvent::Work)?;
+        let order = compare_keys(row, false, &right[index[at]], keys, control)?;
+        Ok(order == Ordering::Greater || (upper && order == Ordering::Equal))
+    };
+    let hint = hint.min(index.len());
+    let (mut lo, mut hi) = (0, index.len());
+    if hint < index.len() && after(hint)? {
+        lo = hint + 1;
+        if lo == index.len() || !after(lo)? {
+            return Ok(lo);
+        }
+        lo += 1;
+    } else if hint > 0 {
+        hi = hint - 1;
+        if after(hi)? {
+            return Ok(hint);
+        }
+    } else if hint < index.len() {
+        return Ok(0);
+    }
+    while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let order = compare_keys(row, false, &right[index[mid]], keys, control)?;
-        if order == Ordering::Greater || (upper && order == Ordering::Equal) {
+        if after(mid)? {
             lo = mid + 1;
         } else {
             hi = mid;
@@ -200,19 +227,31 @@ impl Index {
         Ok(Self { keys, ordinals })
     }
 
+    /// The indexed rows whose keys equal `row`'s. `hint` carries the previous
+    /// probe's lower boundary to the next, as canonically ordered left rows
+    /// usually ascend through the same keys.
     fn range<E>(
         &self,
         row: &GraphValueRow,
         right: &[GraphValueRow],
+        hint: &mut usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<core::ops::Range<usize>, E> {
         if self.keys.is_empty() {
             Ok(0..right.len())
         } else if eligible(row, &self.keys, false, control)? {
-            Ok(
-                boundary(row, right, &self.ordinals, &self.keys, false, control)?
-                    ..boundary(row, right, &self.ordinals, &self.keys, true, control)?,
-            )
+            let lower = boundary(
+                row,
+                right,
+                &self.ordinals,
+                &self.keys,
+                false,
+                *hint,
+                control,
+            )?;
+            let upper = boundary(row, right, &self.ordinals, &self.keys, true, lower, control)?;
+            *hint = lower;
+            Ok(lower..upper)
         } else {
             Ok(0..0)
         }
@@ -279,9 +318,10 @@ pub(super) fn visit_with_context<E, Context>(
     let index = Index::build(first.len(), right, code, columns, &mut |value| {
         event(context, value)
     })?;
+    let mut hint = 0;
     for row in left {
         event(context, GlaExecutionEvent::Work)?;
-        let range = index.range(row, right, &mut |value| event(context, value))?;
+        let range = index.range(row, right, &mut hint, &mut |value| event(context, value))?;
         for at in range {
             event(context, GlaExecutionEvent::Work)?;
             let other = index.row(right, at);
@@ -344,9 +384,10 @@ pub(super) fn count_with_context<E, Context>(
     let index = Index::build(first.len(), right, code, columns, &mut |value| {
         event(context, value)
     })?;
+    let mut hint = 0;
     for row in left {
         event(context, GlaExecutionEvent::Work)?;
-        let range = index.range(row, right, &mut |value| event(context, value))?;
+        let range = index.range(row, right, &mut hint, &mut |value| event(context, value))?;
         if !range.is_empty() {
             consume(range.len(), context)?;
         }

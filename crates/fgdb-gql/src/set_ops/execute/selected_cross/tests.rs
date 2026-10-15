@@ -736,3 +736,63 @@ fn leading_unwind_match_with_star_carries_leading_columns_and_named_bindings() {
         ]
     );
 }
+
+#[test]
+fn a_hinted_boundary_is_the_bisected_one_and_an_ascending_left_probes_twice() {
+    // Duplicate and missing keys; every probe key and every hint, including
+    // ones past the end, find the boundary that counting finds.
+    let data = [0, 1, 1, 3, 4, 4, 4, 6];
+    let right: Vec<_> = data.iter().map(|&key| row(&[Some(key)])).collect();
+    let index: Vec<usize> = (0..right.len()).collect();
+    for key in -1..=8 {
+        let probe = row(&[Some(key)]);
+        let below = data.iter().filter(|&&at| at < key).count();
+        let through = data.iter().filter(|&&at| at <= key).count();
+        for hint in 0..=right.len() + 1 {
+            let keys = [(0, 0)];
+            assert_eq!(
+                boundary(&probe, &right, &index, &keys, false, hint, &mut allow),
+                Ok(below),
+                "lower {key} from {hint}"
+            );
+            assert_eq!(
+                boundary(&probe, &right, &index, &keys, true, hint, &mut allow),
+                Ok(through),
+                "upper {key} from {hint}"
+            );
+        }
+    }
+    // Left rows ascending through 1024 dense keys: each range costs its
+    // eligibility check and four key comparisons, where bisection takes ~20.
+    let right: Vec<_> = (0..1024).map(|key| row(&[Some(key)])).collect();
+    let index = Index {
+        keys: vec![(0, 0)],
+        ordinals: (0..right.len()).collect(),
+    };
+    let mut comparison = 0;
+    boundary(
+        &row(&[Some(0)]),
+        &right,
+        &index.ordinals,
+        &index.keys,
+        false,
+        0,
+        &mut |_| {
+            comparison += 1;
+            Ok::<_, usize>(())
+        },
+    )
+    .unwrap();
+    let mut hint = 0;
+    for key in 0..1024 {
+        let mut events = 0;
+        let range = index
+            .range(&row(&[Some(key)]), &right, &mut hint, &mut |_| {
+                events += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+        assert_eq!(range, key as usize..key as usize + 1);
+        assert!(events <= 1 + 4 * comparison, "{key}: {events} events");
+    }
+}
