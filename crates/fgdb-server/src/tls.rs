@@ -364,11 +364,9 @@ mod tests {
             let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .unwrap();
-            let peer = std::net::TcpStream::connect_timeout(
-                &listener.local_addr().unwrap(),
-                SOCKET_WAIT,
-            )
-            .unwrap();
+            let peer =
+                std::net::TcpStream::connect_timeout(&listener.local_addr().unwrap(), SOCKET_WAIT)
+                    .unwrap();
             peer.set_read_timeout(Some(SOCKET_WAIT)).unwrap();
             peer.set_write_timeout(Some(SOCKET_WAIT)).unwrap();
             let (stream, _) = listener.accept().await.unwrap();
@@ -404,7 +402,10 @@ mod tests {
         let mut byte = [0];
         let mut buffer = ReadBuf::new(&mut byte);
         loop {
-            assert!(Instant::now() < deadline, "socket read exceeded its deadline");
+            assert!(
+                Instant::now() < deadline,
+                "socket read exceeded its deadline"
+            );
             match Pin::new(&mut *io).poll_read(&mut Context::from_waker(waker), &mut buffer) {
                 Poll::Ready(Ok(())) => {
                     assert_eq!(buffer.filled().len(), 1, "unexpected EOF");

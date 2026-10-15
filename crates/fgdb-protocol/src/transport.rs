@@ -46,38 +46,26 @@ impl DuplexWake {
     fn register(&self, lane: usize, task: &Waker) {
         // User-supplied clone/drop/wake callbacks never run under this mutex.
         let task = task.clone();
-        let previous = self
-            .tasks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)[lane]
-            .replace(task);
+        let previous =
+            self.tasks.lock().unwrap_or_else(PoisonError::into_inner)[lane].replace(task);
         drop(previous);
     }
 
     fn clear(&self, lane: usize) {
-        let previous = self
-            .tasks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)[lane]
-            .take();
+        let previous = self.tasks.lock().unwrap_or_else(PoisonError::into_inner)[lane].take();
         drop(previous);
     }
 
     fn wake_lane(&self, lane: usize) {
-        let task = self
-            .tasks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)[lane]
-            .take();
+        let task = self.tasks.lock().unwrap_or_else(PoisonError::into_inner)[lane].take();
         if let Some(task) = task {
             task.wake();
         }
     }
 
     fn wake_tasks(&self) {
-        let [reader, writer] = core::mem::take(
-            &mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner),
-        );
+        let [reader, writer] =
+            core::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
         match (reader, writer) {
             (Some(reader), Some(writer)) if reader.will_wake(&writer) => reader.wake(),
             (reader, writer) => {
@@ -612,17 +600,16 @@ mod duplex_tests {
             Poll::Ready(Ok(()))
         }
 
-        fn poll_shutdown(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
             self.poll_flush(task)
         }
     }
 
     fn with_duplex(
-        test: impl FnOnce(
-            Arc<OneRegistration>,
-            DuplexReader<OneWakerIo>,
-            DuplexWriter<OneWakerIo>,
-        ),
+        test: impl FnOnce(Arc<OneRegistration>, DuplexReader<OneWakerIo>, DuplexWriter<OneWakerIo>),
     ) {
         let runtime = RuntimeBuilder::new().build().unwrap();
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);
