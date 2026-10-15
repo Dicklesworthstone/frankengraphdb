@@ -995,3 +995,32 @@ fn cancellation_through_source_sealing_projection_kernel_and_result_never_publis
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
+
+/// A composed CALL takes its source admission from what its statement has
+/// left, past a standalone call's defaults (a Tier-1 PageRank, fgdb-avyqt)
+/// as well as below them, and stages up to the workspace its projection
+/// builder will charge for the staged rows.
+#[test]
+fn a_composed_call_takes_its_source_limits_from_the_statement() {
+    let call = FnxCallSpec::bind("CALL fnx.pagerank() YIELD vertex", &FnxParameters::new())
+        .expect("binds");
+    for (records, scratch) in [(4_000_000_000, 4_000_000_000), (3, 0)] {
+        let options = kernel_options(
+            &call,
+            CommitSeq(7),
+            GqlQueryPolicy::new(records, 100_000, 1_000_000, scratch),
+        );
+        assert_eq!(
+            (
+                options.source_limits.max_work_units,
+                options.source_limits.max_scratch_entries,
+                options.source_limits.max_staging_bytes,
+            ),
+            (
+                records,
+                scratch,
+                options.projection_limits.max_workspace_bytes
+            )
+        );
+    }
+}

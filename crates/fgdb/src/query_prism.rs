@@ -166,7 +166,15 @@ fn bind_kernel<C>(
 }
 
 /// The canonical whole-graph projection at the read's sequence, admitted
-/// within what the read has left. Explicit projections retain these ceilings.
+/// within what the read has left: the statement's snapshot-record budget
+/// bounds the source's work units and its scratch budget the source's scratch
+/// entries, in place of a standalone call's fixed defaults. Under those
+/// defaults a pokec PageRank refused at 10M scratch entries whatever budget
+/// its statement carried (fgdb-avyqt). The staged vertices and weighted edges
+/// become the projection builder's input, whose capacities it charges again
+/// against its workspace, so they are staged up to that workspace: the 1 GiB
+/// staging default refused pokec's 1.6 GB under a 4 GiB workspace. Explicit
+/// projections retain these ceilings.
 fn kernel_options(
     spec: &FnxCallSpec,
     as_of: CommitSeq,
@@ -174,8 +182,10 @@ fn kernel_options(
 ) -> FnxReadOptions {
     let mut options = FnxReadOptions::whole_graph_for(spec, Some(as_of));
     if let Some(records) = remaining.rows.max_snapshot_records() {
-        options.source_limits.max_work_units = options.source_limits.max_work_units.min(records);
+        options.source_limits.max_work_units = records;
     }
+    options.source_limits.max_scratch_entries = remaining.evaluator.max_scratch_entries;
+    options.source_limits.max_staging_bytes = options.projection_limits.max_workspace_bytes;
     options.execution_limits.max_estimated_work = options
         .execution_limits
         .max_estimated_work

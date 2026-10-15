@@ -635,6 +635,43 @@ fn the_read_budget_caps_the_projection() {
     });
 }
 
+/// The statement's scratch budget, not a fixed default, admits the
+/// procedure's source scratch: at zero the source refuses at zero, and a
+/// budget past the default lifts it (fgdb-avyqt: a pokec PageRank refused at
+/// 10M scratch entries under a 4e9 budget).
+#[test]
+fn the_statement_scratch_budget_admits_the_procedure_source() {
+    run(async |commit, cx| {
+        let db = open(commit).await;
+        let text = "CALL fnx.pagerank() YIELD vertex RETURN vertex";
+        let none = GqlQueryPolicy::new(1_000_000, 100_000, 100_000_000, 0);
+        let error = db
+            .query(cx, text, &GqlParameters::new(), symbols, none)
+            .unwrap_err();
+        match procedure_error(error) {
+            Ok(ProcedureError::Read(read)) => assert!(
+                matches!(
+                    *read,
+                    FnxReadError::SourceLimit {
+                        resource: "scratch entries",
+                        limit: 0,
+                        requested: 1,
+                    }
+                ),
+                "the source refuses its first scratch entry: {read:?}"
+            ),
+            other => panic!("expected the source's scratch refusal, got {other:?}"),
+        }
+        let past_default = GqlQueryPolicy::new(4_000_000_000, 100_000, 100_000_000, 4_000_000_000);
+        assert_eq!(
+            db.query(cx, text, &GqlParameters::new(), symbols, past_default)
+                .unwrap(),
+            db.query(cx, text, &GqlParameters::new(), symbols, policy())
+                .unwrap()
+        );
+    });
+}
+
 #[test]
 fn a_yielded_vertex_joins_its_own_graph_properties() {
     run(async |commit, cx| {
