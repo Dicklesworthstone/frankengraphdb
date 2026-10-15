@@ -1755,7 +1755,10 @@ struct WriteHeads {
 #[derive(Clone, Debug, Default)]
 struct VersionHeads {
     checkpoint: Option<Arc<CheckpointVersionBasis>>,
-    changed: std::collections::BTreeMap<ElementId, Option<ObjectId>>,
+    /// Probed per element and folded into `complete` by key, never iterated
+    /// in order: hashed, since a load grows it to every element it creates
+    /// (6M on web-google) and an ordered insert each was ~2% of a load.
+    changed: std::collections::HashMap<ElementId, Option<ObjectId>>,
     /// Only the diagnostic API requests the full map. Sharing an initialized
     /// result keeps historical preparation from copying every diagnostic head.
     complete: std::sync::OnceLock<
@@ -4218,7 +4221,9 @@ impl<V: Vfs + Clone> Database<V> {
         let mut folded =
             std::mem::replace(&mut self.writer, BlockWriter::new(GRAPH, BRANCH, PARTITION));
         let mut next_birth_ordinal = self.heads.next_birth_ordinal;
-        let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
+        // Collected, then sorted and deduplicated once: an ordered-set insert
+        // per row was most of a load commit's tree inserts (fgdb-79kyi).
+        let mut touched: Vec<ElementId> = Vec::new();
         for coordinate in template.coordinate_entries() {
             if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {
                 continue;
@@ -4239,6 +4244,8 @@ impl<V: Vfs + Clone> Database<V> {
                 touched_elements(row, &mut touched);
             }
         }
+        touched.sort_unstable();
+        touched.dedup();
         fold_statement_versions(&mut new_versions, &touched, &folded).map_err(|error| {
             WriteError::CommittedNeedsRecovery {
                 recovery,
@@ -5321,32 +5328,36 @@ pub(crate) fn adjacency_endpoints(
     }
 }
 
-fn touched_elements(row: &DeltaRow, touched: &mut std::collections::BTreeSet<ElementId>) {
+/// Add every element `row` mutates to `touched`: a set, or a vector the caller
+/// sorts and deduplicates once per commit.
+fn touched_elements(row: &DeltaRow, touched: &mut impl Extend<ElementId>) {
     match row {
         DeltaRow::CreateVertex { vid, .. } => {
-            touched.insert(ElementId::Vertex(*vid));
+            touched.extend([ElementId::Vertex(*vid)]);
         }
         DeltaRow::CreateEdge { eid, .. } => {
-            touched.insert(ElementId::Edge(*eid));
+            touched.extend([ElementId::Edge(*eid)]);
         }
         DeltaRow::DeleteVertex {
             vid,
             sorted_retired_incident_edges,
             ..
         } => {
-            touched.insert(ElementId::Vertex(*vid));
-            for eid in sorted_retired_incident_edges {
-                touched.insert(ElementId::Edge(*eid));
-            }
+            touched.extend([ElementId::Vertex(*vid)]);
+            touched.extend(
+                sorted_retired_incident_edges
+                    .iter()
+                    .map(|eid| ElementId::Edge(*eid)),
+            );
         }
         DeltaRow::DeleteEdge { eid, .. } => {
-            touched.insert(ElementId::Edge(*eid));
+            touched.extend([ElementId::Edge(*eid)]);
         }
         DeltaRow::LabelMembership { vid, .. } => {
-            touched.insert(ElementId::Vertex(*vid));
+            touched.extend([ElementId::Vertex(*vid)]);
         }
         DeltaRow::Property { elem, .. } => {
-            touched.insert(*elem);
+            touched.extend([*elem]);
         }
         _ => {}
     }
@@ -5359,7 +5370,7 @@ fn touched_elements(row: &DeltaRow, touched: &mut std::collections::BTreeSet<Ele
 /// visited once, so `prev` is exactly the durable chain's predecessor.
 fn fold_statement_versions(
     versions: &mut VersionHeads,
-    touched: &std::collections::BTreeSet<ElementId>,
+    touched: &[ElementId],
     writer: &BlockWriter,
 ) -> Result<(), CanonicalError> {
     for elem in touched {
@@ -6524,7 +6535,7 @@ async fn fold_stream<V: Vfs>(
     capacity: ReplayRootCapacity,
 ) -> Result<CommitSeq, RebuildError> {
     let mut frontier = after;
-    let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
+    let mut touched: Vec<ElementId> = Vec::new();
 
     for entry in coordinator.chain().entries() {
         let commit_seq = CommitSeq(entry.marker.commit_seq);
@@ -6588,6 +6599,8 @@ async fn fold_stream<V: Vfs>(
                 touched_elements(row, &mut touched);
             }
         }
+        touched.sort_unstable();
+        touched.dedup();
         fold_statement_versions(state.versions, &touched, state.writer).map_err(|error| {
             RebuildError::Decode {
                 commit_seq: commit_seq.0,

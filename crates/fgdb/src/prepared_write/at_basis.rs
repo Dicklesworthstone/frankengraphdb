@@ -13,7 +13,6 @@ use crate::{
 use asupersync::fs::Vfs;
 use fgdb_strata::writer::BlockWriter;
 use fgdb_types::CommitSeq;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// An exact native fold at this writer lifetime's lazy-open cut. Keep the
@@ -209,7 +208,7 @@ impl<V: Vfs + Clone> Database<V> {
                 .delta_index
                 .since(after)
                 .map_err(WriteError::PreparedHistory)?;
-            let mut touched = BTreeSet::new();
+            let mut touched = Vec::new();
             for batch in history.take_while(|batch| batch.commit_seq().0 <= basis.0) {
                 checkpoint()?;
                 let at = batch.commit_seq();
@@ -230,6 +229,8 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                 }
                 checkpoint()?;
+                touched.sort_unstable();
+                touched.dedup();
                 crate::fold_statement_versions(&mut versions, &touched, &writer).map_err(
                     |error| {
                         WriteTxnError::BasisRebuild(Box::new(RebuildError::Version {
