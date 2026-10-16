@@ -73,11 +73,8 @@ where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
-    let mut order = ChargedVec::<GraphValueOrder>::new(
-        destination.memory_pool(),
-        work.cx,
-        plan.keys().len(),
-    )?;
+    let mut order =
+        ChargedVec::<GraphValueOrder>::new(destination.memory_pool(), work.cx, plan.keys().len())?;
     for &(left, right) in plan.keys() {
         work.charge(1)?;
         let column = if side == 0 { left } else { right };

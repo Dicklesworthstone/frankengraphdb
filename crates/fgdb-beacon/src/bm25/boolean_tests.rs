@@ -14,7 +14,9 @@ fn tokens(text: &str) -> BTreeSet<String> {
 }
 
 fn bits(hits: &[TextHit]) -> Vec<(VId, u64)> {
-    hits.iter().map(|hit| (hit.id, hit.score.to_bits())).collect()
+    hits.iter()
+        .map(|hit| (hit.id, hit.score.to_bits()))
+        .collect()
 }
 
 fn documents() -> Vec<(VId, String)> {
@@ -75,7 +77,11 @@ fn boolean_matches_scan_oracle_and_bm25_bits() {
     for k1 in [0.1, 1.2, f64::MAX] {
         for b in [0.0, 0.75, 1.0] {
             let index = Bm25::build(
-                Bm25Config { k1, b, ..Bm25Config::default() },
+                Bm25Config {
+                    k1,
+                    b,
+                    ..Bm25Config::default()
+                },
                 documents.clone(),
                 &mut unlimited(),
             )
@@ -100,7 +106,8 @@ fn boolean_matches_scan_oracle_and_bm25_bits() {
                                             &mut unlimited(),
                                         )
                                         .unwrap();
-                                    let expected = reference(&index, &documents, query, k, filtered);
+                                    let expected =
+                                        reference(&index, &documents, query, k, filtered);
                                     assert_eq!(bits(&actual), bits(&expected), "{query:?}, k={k}");
                                 }
                             }
@@ -116,7 +123,10 @@ fn boolean_matches_scan_oracle_and_bm25_bits() {
 fn exclusions_and_optional_minimum_precede_top_k() {
     let index = Bm25::build(
         Bm25Config::default(),
-        [(VId(1), "red banned".into()), (VId(2), "red blue green filler filler".into())],
+        [
+            (VId(1), "red banned".into()),
+            (VId(2), "red blue green filler filler".into()),
+        ],
         &mut unlimited(),
     )
     .unwrap();
@@ -126,7 +136,9 @@ fn exclusions_and_optional_minimum_precede_top_k() {
         excluded: "banned",
         minimum_optional: 2,
     };
-    let hits = index.search_boolean(query, 1, |_| true, &mut unlimited()).unwrap();
+    let hits = index
+        .search_boolean(query, 1, |_| true, &mut unlimited())
+        .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, VId(2));
 }
@@ -168,7 +180,11 @@ fn clauses_share_limits_even_with_no_requested_results() {
         optional: "blue",
         ..BooleanTextQuery::default()
     };
-    assert!(index.search_boolean(accepted, 10, |_| true, &mut unlimited()).is_ok());
+    assert!(
+        index
+            .search_boolean(accepted, 10, |_| true, &mut unlimited())
+            .is_ok()
+    );
 }
 
 #[test]
@@ -190,11 +206,17 @@ fn every_insufficient_work_prefix_refuses_without_partial_success() {
             }
         }
         let mut count = Count(0);
-        let expected = index.search_boolean(query, 3, |_| true, &mut count).unwrap();
+        let expected = index
+            .search_boolean(query, 3, |_| true, &mut count)
+            .unwrap();
         for allowance in 0..count.0 {
-            assert!(index
-                .search_boolean(query, 3, |_| true, &mut WorkBudget::new(allowance))
-                .is_err(), "allowance {allowance} of {}", count.0);
+            assert!(
+                index
+                    .search_boolean(query, 3, |_| true, &mut WorkBudget::new(allowance))
+                    .is_err(),
+                "allowance {allowance} of {}",
+                count.0
+            );
         }
         let actual = index
             .search_boolean(query, 3, |_| true, &mut WorkBudget::new(count.0))
@@ -208,23 +230,46 @@ fn empty_negative_only_and_impossible_queries_do_not_match() {
     let index = Bm25::build(Bm25Config::default(), documents(), &mut unlimited()).unwrap();
     for query in [
         BooleanTextQuery::default(),
-        BooleanTextQuery { excluded: "banned", ..BooleanTextQuery::default() },
-        BooleanTextQuery { optional: "red red", minimum_optional: 2, ..BooleanTextQuery::default() },
-        BooleanTextQuery { required: "red", excluded: "RED", ..BooleanTextQuery::default() },
-        BooleanTextQuery { required: "---", optional: "!!!", ..BooleanTextQuery::default() },
+        BooleanTextQuery {
+            excluded: "banned",
+            ..BooleanTextQuery::default()
+        },
+        BooleanTextQuery {
+            optional: "red red",
+            minimum_optional: 2,
+            ..BooleanTextQuery::default()
+        },
+        BooleanTextQuery {
+            required: "red",
+            excluded: "RED",
+            ..BooleanTextQuery::default()
+        },
+        BooleanTextQuery {
+            required: "---",
+            optional: "!!!",
+            ..BooleanTextQuery::default()
+        },
     ] {
-        assert!(index.search_boolean(query, 10, |_| true, &mut unlimited()).unwrap().is_empty());
+        assert!(
+            index
+                .search_boolean(query, 10, |_| true, &mut unlimited())
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 
 #[test]
 fn debug_does_not_disclose_clause_text() {
-    let debug = format!("{:?}", BooleanTextQuery {
-        required: "private-required",
-        optional: "private-optional",
-        excluded: "private-excluded",
-        minimum_optional: 2,
-    });
+    let debug = format!(
+        "{:?}",
+        BooleanTextQuery {
+            required: "private-required",
+            optional: "private-optional",
+            excluded: "private-excluded",
+            minimum_optional: 2,
+        }
+    );
     assert!(!debug.contains("private"));
     assert!(debug.contains("minimum_optional: 2"));
 }
@@ -237,7 +282,10 @@ fn caller_scratch_refusal_and_cancellation_are_not_empty_successes() {
             Ok(())
         }
         fn reserve_scratch(&mut self, _: usize) -> Result<(), BeaconError> {
-            Err(BeaconError::ResourceLimit { resource: "test scratch", limit: 0 })
+            Err(BeaconError::ResourceLimit {
+                resource: "test scratch",
+                limit: 0,
+            })
         }
     }
     struct Cancel;
@@ -247,10 +295,16 @@ fn caller_scratch_refusal_and_cancellation_are_not_empty_successes() {
         }
     }
     let index = Bm25::build(Bm25Config::default(), documents(), &mut unlimited()).unwrap();
-    let query = BooleanTextQuery { required: "red", ..BooleanTextQuery::default() };
+    let query = BooleanTextQuery {
+        required: "red",
+        ..BooleanTextQuery::default()
+    };
     assert!(matches!(
         index.search_boolean(query, 3, |_| true, &mut RefuseScratch),
-        Err(BeaconError::ResourceLimit { resource: "test scratch", limit: 0 })
+        Err(BeaconError::ResourceLimit {
+            resource: "test scratch",
+            limit: 0
+        })
     ));
     assert_eq!(
         index.search_boolean(query, 0, |_| true, &mut Cancel),

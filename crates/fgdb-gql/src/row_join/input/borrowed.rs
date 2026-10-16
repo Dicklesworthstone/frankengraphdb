@@ -278,11 +278,7 @@ mod key_order_tests {
             let result = spec.compare_keys_with_control(&left, &right, &mut |_| {
                 let current = visited;
                 visited += 1;
-                if current == stop {
-                    Err(stop)
-                } else {
-                    Ok(())
-                }
+                if current == stop { Err(stop) } else { Ok(()) }
             });
             assert!(matches!(
                 result,

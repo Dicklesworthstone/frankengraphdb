@@ -334,13 +334,11 @@ fn merge_presence_selection_accounts_for_both_sorts_without_admitting_residuals(
                 let AsyncSpillSetSourcePlan::RowJoin(join) = compiled.source() else {
                     panic!("expected a relational join");
                 };
-                let eligible = matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti)
-                    && keyed
-                    && !residual;
+                let eligible =
+                    matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti) && keyed && !residual;
                 assert_eq!(join.supports_merge_presence(), eligible);
-                let pairs = !matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti)
-                    && keyed
-                    && !residual;
+                let pairs =
+                    !matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti) && keyed && !residual;
                 assert_eq!(join.supports_merge_pairs(), pairs);
                 let barriers = if eligible || pairs { 3 } else { 2 };
                 assert_eq!(
@@ -389,10 +387,9 @@ fn merge_presence_preserves_duplicate_left_occurrences_and_parent_pagination() {
                     .unwrap();
                 let value = if kind == RowJoinKind::Semi { 1 } else { 3 };
                 let expected = presence_frames(&[[value], [value]]);
-                let (actual, _, _, _) =
-                    execute(&query, cut, &mut view, &cx, policy(100), 8, WORK)
-                        .await
-                        .unwrap();
+                let (actual, _, _, _) = execute(&query, cut, &mut view, &cx, policy(100), 8, WORK)
+                    .await
+                    .unwrap();
                 assert_eq!(actual, expected);
                 let page = query.clone().with_page(1, Some(1));
                 assert_eq!(

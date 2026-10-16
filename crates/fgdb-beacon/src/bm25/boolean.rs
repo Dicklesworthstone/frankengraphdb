@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use fgdb_types::VId;
 
-use super::{AnalyzedText, Bm25, Bm25Config, CorpusStats, TextHit, TextSegment, analyze, saturation};
+use super::{
+    AnalyzedText, Bm25, Bm25Config, CorpusStats, TextHit, TextSegment, analyze, saturation,
+};
 use crate::ranking::{Ranked, retain_best};
 use crate::{BeaconError, WorkControl};
 
@@ -73,8 +75,8 @@ impl AnalyzedBooleanQuery {
         }
         let mut remaining = config.max_query_terms;
         let mut clause = |text: &str| -> Result<AnalyzedText, BeaconError> {
-            let analyzed = analyze(text, config.max_query_bytes, remaining, work).map_err(|error| {
-                match error {
+            let analyzed = analyze(text, config.max_query_bytes, remaining, work).map_err(
+                |error| match error {
                     BeaconError::ResourceLimit {
                         resource: "distinct analyzed terms",
                         ..
@@ -83,8 +85,8 @@ impl AnalyzedBooleanQuery {
                         limit: config.max_query_terms,
                     },
                     other => other,
-                }
-            })?;
+                },
+            )?;
             remaining -= analyzed.frequencies.len();
             Ok(analyzed)
         };
