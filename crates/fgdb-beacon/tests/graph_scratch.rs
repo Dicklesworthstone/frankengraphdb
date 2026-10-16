@@ -84,9 +84,7 @@ impl ExpansionNeighbors for Source {
 fn corpus(ids: &[VId]) -> ExpansionGraph {
     let mut graph = ExpansionGraph::new(ExpansionLimits::default());
     for &id in ids {
-        graph
-            .insert_vertex(id, &mut WorkBudget::new(1000))
-            .unwrap();
+        graph.insert_vertex(id, &mut WorkBudget::new(1000)).unwrap();
     }
     graph
 }
@@ -119,7 +117,10 @@ fn visits_and_both_rankers_share_the_same_allowance() {
                 assert_eq!(
                     hits,
                     [
-                        GraphHit { id: VId(1), hops: 1 },
+                        GraphHit {
+                            id: VId(1),
+                            hops: 1
+                        },
                         GraphHit { id: high, hops: 2 },
                     ]
                 );
@@ -148,7 +149,10 @@ fn visits_and_both_rankers_share_the_same_allowance() {
         assert!(
             matches!(
                 result,
-                Err(BeaconError::ResourceLimit { resource: "test scratch", .. })
+                Err(BeaconError::ResourceLimit {
+                    resource: "test scratch",
+                    ..
+                })
             ),
             "{limit}"
         );
@@ -167,11 +171,7 @@ fn visits_and_both_rankers_share_the_same_allowance() {
 #[test]
 fn heap_replacements_reuse_slots_in_expansion_and_fusion() {
     let graph = corpus(&[VId(0), VId(7), VId(8), VId(9)]);
-    let mut source = Source::new([
-        (VId(9), VId(8)),
-        (VId(8), VId(0)),
-        (VId(9), VId(7)),
-    ]);
+    let mut source = Source::new([(VId(9), VId(8)), (VId(8), VId(0)), (VId(9), VId(7))]);
     let mut work = Control::new(10);
     let hits = expand_from_membership_filtered(
         &[VId(9)],
@@ -186,12 +186,27 @@ fn heap_replacements_reuse_slots_in_expansion_and_fusion() {
     )
     .unwrap();
     // VId order ranks (0,2) first; (7,1) replaces it in the one-slot heap.
-    assert_eq!(hits, [GraphHit { id: VId(7), hops: 1 }]);
+    assert_eq!(
+        hits,
+        [GraphHit {
+            id: VId(7),
+            hops: 1
+        }]
+    );
     assert_eq!(work.used, 2 * 4 + 1 + 1);
     let population = [
-        GraphHit { id: VId(9), hops: 0 },
-        GraphHit { id: VId(0), hops: 1 },
-        GraphHit { id: VId(7), hops: 1 },
+        GraphHit {
+            id: VId(9),
+            hops: 0,
+        },
+        GraphHit {
+            id: VId(0),
+            hops: 1,
+        },
+        GraphHit {
+            id: VId(7),
+            hops: 1,
+        },
     ];
     let mut work = Control::new(11);
     let rows = GraphHybridQuery::graph_only(1, 3, 100, 60)
@@ -223,7 +238,10 @@ fn a_swallowed_allocation_refusal_cannot_resume_traversal() {
     .unwrap_err();
     assert_eq!(
         error,
-        BeaconError::ResourceLimit { resource: "test scratch", limit: 3 }
+        BeaconError::ResourceLimit {
+            resource: "test scratch",
+            limit: 3
+        }
     );
     assert_eq!(work.used, 2);
     assert_eq!(work.calls, 2, "no reservation for the later neighbor");
@@ -235,10 +253,9 @@ fn reservation_refusal_and_unwind_precede_distance_retention() {
     for unwind in [false, true] {
         let seeds = [VId(0)];
         let mut work = Control::new(1);
-        let mut cursor = ExpansionCursor::new(
-            &seeds, 0, true, 1, ExpansionLimits::default(), &mut work,
-        )
-        .unwrap();
+        let mut cursor =
+            ExpansionCursor::new(&seeds, 0, true, 1, ExpansionLimits::default(), &mut work)
+                .unwrap();
         assert_eq!(
             cursor.request(&mut work).unwrap(),
             ExpansionRequest::Seed(VId(0))
@@ -348,9 +365,10 @@ fn scratch_bounded_execution_matches_independent_min_plus_oracle() {
                     &graph,
                     &mut source,
                     |id, _| {
-                        Ok(ids.iter().enumerate().any(|(i, &v)| {
-                            v == id && mask & (1 << i) != 0
-                        }))
+                        Ok(ids
+                            .iter()
+                            .enumerate()
+                            .any(|(i, &v)| v == id && mask & (1 << i) != 0))
                     },
                     &mut work,
                 )

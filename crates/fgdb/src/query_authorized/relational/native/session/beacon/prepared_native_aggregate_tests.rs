@@ -8,7 +8,9 @@ use fgdb_beacon::{DistanceMetric, HnswConfig, TextMatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::{GraphExactAverage, GraphSymbol, GraphSymbolKind};
 use fgdb_types::context::SimulationCheckpointProbe;
-use fgdb_types::{CanonicalF64, CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts};
+use fgdb_types::{
+    CanonicalF64, CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts,
+};
 use fgdb_warden::{Authority, Grant, QueryLimits, Scope};
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x91; 32]);
@@ -47,9 +49,15 @@ fn host() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100, 16, 10_000_000, 100_000)
 }
 fn grant() -> Grant {
-    let mut grant = Grant::read_only("main", EXPIRES, QueryLimits {
-        max_nodes: 100, max_work: 100_000_000, max_rows: 16,
-    });
+    let mut grant = Grant::read_only(
+        "main",
+        EXPIRES,
+        QueryLimits {
+            max_nodes: 100,
+            max_work: 100_000_000,
+            max_rows: 16,
+        },
+    );
     grant.labels = Scope::only([L]);
     grant.properties = Scope::only([BODY, X, NUMBER]);
     grant.relations = Scope::only([RelationId(1)]);
@@ -59,9 +67,12 @@ fn authority() -> Authority {
     Authority::new(AuthKey::from_seed(0x91), NS, "graph", SchemaEpoch(0), 1).unwrap()
 }
 fn parameters(ids: &[VId]) -> GqlParameters {
-    GqlParameters::new().with_list(
-        "eligible", ids.iter().copied().map(GraphValue::Vertex).collect(),
-    ).unwrap()
+    GqlParameters::new()
+        .with_list(
+            "eligible",
+            ids.iter().copied().map(GraphValue::Vertex).collect(),
+        )
+        .unwrap()
 }
 fn call(lane: &str) -> String {
     let (text, vector, graph) = match lane {
@@ -73,15 +84,30 @@ fn call(lane: &str) -> String {
     format!(
         "CALL hybrid.search({}{}{}{}label => 'Node', eligible => $eligible, \
          candidates => 2, k => 2) YIELD node, graph_hops ",
-        if text { "text => 'red', text_property => 'body', " } else { "" },
-        if vector { "vector => [0], vector_properties => ['x'], " } else { "" },
+        if text {
+            "text => 'red', text_property => 'body', "
+        } else {
+            ""
+        },
+        if vector {
+            "vector => [0], vector_properties => ['x'], "
+        } else {
+            ""
+        },
         if lane == "ann" { "ann => 16, " } else { "" },
-        if graph { "seeds => [1], relation => 'R', max_hops => 2, graph_candidates => 2, " } else { "" },
+        if graph {
+            "seeds => [1], relation => 'R', max_hops => 2, graph_candidates => 2, "
+        } else {
+            ""
+        },
     )
 }
 fn summary(lane: &str) -> String {
-    format!("{}WITH node.x AS value RETURN COUNT(*) AS n, SUM(value) AS total, \
-        AVG(value) AS mean, MIN(value) AS low, MAX(value) AS high", call(lane))
+    format!(
+        "{}WITH node.x AS value RETURN COUNT(*) AS n, SUM(value) AS total, \
+        AVG(value) AS mean, MIN(value) AS low, MAX(value) AS high",
+        call(lane)
+    )
 }
 fn rows(result: QueryResult) -> Vec<Vec<QueryValue>> {
     match result {
@@ -91,7 +117,8 @@ fn rows(result: QueryResult) -> Vec<Vec<QueryValue>> {
 }
 fn expected() -> Vec<Vec<QueryValue>> {
     vec![vec![
-        QueryValue::Count(2), QueryValue::Integer(9),
+        QueryValue::Count(2),
+        QueryValue::Integer(9),
         QueryValue::Average(GraphExactAverage::new(9, 2).unwrap()),
         QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2))),
         QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(7))),
@@ -99,19 +126,34 @@ fn expected() -> Vec<Vec<QueryValue>> {
 }
 async fn database(cx: &CommitCx) -> Database<MemVfs> {
     let mut db = Database::open_memory(cx, DatabaseKeys::new([0x92; 32], NS, [0x93; 32]))
-        .await.unwrap();
+        .await
+        .unwrap();
     let mut batch = WriteBatch::new(RelationId(1));
     for (id, x, number) in [(VId(1), 0, 1e16), (VId(2), 2, 1.0), (HIGH, 7, -1e16)] {
-        batch.create_vertex(id, vec![L], vec![
-            (BODY, text("red")), (X, CanonicalScalar::Int(x)),
-            (SECRET, text("never an aggregate input")),
-            (NUMBER, CanonicalScalar::Float(CanonicalF64::new(number))),
-        ]);
+        batch.create_vertex(
+            id,
+            vec![L],
+            vec![
+                (BODY, text("red")),
+                (X, CanonicalScalar::Int(x)),
+                (SECRET, text("never an aggregate input")),
+                (NUMBER, CanonicalScalar::Float(CanonicalF64::new(number))),
+            ],
+        );
     }
     batch.create_vertex(TRANSIT, vec![L], vec![]);
-    batch.create_vertex(VId(90), vec![LabelId(99)], vec![(BODY, CanonicalScalar::Bool(true))]);
-    for (eid, from, to) in [(1, VId(1), TRANSIT), (2, TRANSIT, VId(2)), (3, TRANSIT, HIGH),
-        (4, VId(1), VId(90)), (5, VId(90), HIGH)] {
+    batch.create_vertex(
+        VId(90),
+        vec![LabelId(99)],
+        vec![(BODY, CanonicalScalar::Bool(true))],
+    );
+    for (eid, from, to) in [
+        (1, VId(1), TRANSIT),
+        (2, TRANSIT, VId(2)),
+        (3, TRANSIT, HIGH),
+        (4, VId(1), VId(90)),
+        (5, VId(90), HIGH),
+    ] {
         batch.add_edge(EId(eid), from, to, vec![]);
     }
     db.write(cx, batch).await.unwrap();
@@ -127,30 +169,89 @@ fn every_retrieval_lane_feeds_exact_aggregates_and_only_final_rows_are_delivered
         let mut allowed = grant();
         allowed.limits.max_rows = 1;
         let token = issuer.issue_at(&allowed, NOW).unwrap();
-        let mut session = db.authorized_read_session(
-            &c.query(), &issuer, &token, "main", catalog,
-            GqlQueryPolicy::new(100, 1, 10_000_000, 100_000), || NOW,
-        ).unwrap();
-        let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+        let mut session = db
+            .authorized_read_session(
+                &c.query(),
+                &issuer,
+                &token,
+                "main",
+                catalog,
+                GqlQueryPolicy::new(100, 1, 10_000_000, 100_000),
+                || NOW,
+            )
+            .unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
         let params = parameters(&[VId(2), HIGH]);
         for lane in ["text", "vector", "ann", "graph", "mixed"] {
-            let prepared = session.prepare(&c.query(), &summary(lane), &params).unwrap();
-            assert!(matches!(prepared.native.as_ref(), PreparedNativeRead::PipelineAggregate(_)));
-            assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap()), expected());
-            let page = session.prepare(&c.query(), &format!("{}RETURN node LIMIT 1", call(lane)), &params).unwrap();
-            assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &page, &params).unwrap()).len(), 1);
-            let unpaged = session.prepare(&c.query(), &format!("{}RETURN node", call(lane)), &params).unwrap();
-            assert!(session.execute_beacon_index(&c.query(), &index, &unpaged, &params).is_err());
+            let prepared = session
+                .prepare(&c.query(), &summary(lane), &params)
+                .unwrap();
+            assert!(matches!(
+                prepared.native.as_ref(),
+                PreparedNativeRead::PipelineAggregate(_)
+            ));
+            assert_eq!(
+                rows(
+                    session
+                        .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                        .unwrap()
+                ),
+                expected()
+            );
+            let page = session
+                .prepare(
+                    &c.query(),
+                    &format!("{}RETURN node LIMIT 1", call(lane)),
+                    &params,
+                )
+                .unwrap();
+            assert_eq!(
+                rows(
+                    session
+                        .execute_beacon_index(&c.query(), &index, &page, &params)
+                        .unwrap()
+                )
+                .len(),
+                1
+            );
+            let unpaged = session
+                .prepare(&c.query(), &format!("{}RETURN node", call(lane)), &params)
+                .unwrap();
+            assert!(
+                session
+                    .execute_beacon_index(&c.query(), &index, &unpaged, &params)
+                    .is_err()
+            );
         }
-        assert!(session.search_beacon_index(&c.query(), &index, Search::Text {
-            query: "red", k: 2, mode: TextMatch::Any,
-        }, ReadPolicy::default()).is_err(), "direct hit delivery must keep its signed row limit");
+        assert!(
+            session
+                .search_beacon_index(
+                    &c.query(),
+                    &index,
+                    Search::Text {
+                        query: "red",
+                        k: 2,
+                        mode: TextMatch::Any,
+                    },
+                    ReadPolicy::default()
+                )
+                .is_err(),
+            "direct hit delivery must keep its signed row limit"
+        );
         let mut narrow = options();
         narrow.policy.max_result_rows = 1;
         let narrow = session.prepare_beacon_index(&c.query(), &narrow).unwrap();
-        let query = session.prepare(&c.query(), &summary("mixed"), &params).unwrap();
-        assert!(session.execute_beacon_index(&c.query(), &narrow, &query, &params).is_err(),
-            "an aggregate cannot widen the explicitly frozen native source ceiling");
+        let query = session
+            .prepare(&c.query(), &summary("mixed"), &params)
+            .unwrap();
+        assert!(
+            session
+                .execute_beacon_index(&c.query(), &narrow, &query, &params)
+                .is_err(),
+            "an aggregate cannot widen the explicitly frozen native source ceiling"
+        );
         assert!(!session.is_closed());
         session.close();
         assert_eq!(c.outstanding_obligations(), 0);
@@ -165,25 +266,55 @@ fn grouping_distinct_collection_and_float_summaries_keep_native_value_domains() 
         let db = database(&c.commit()).await;
         let issuer = authority();
         let token = issuer.issue_at(&grant(), NOW).unwrap();
-        let mut session = db.authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || NOW).unwrap();
-        let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+        let mut session = db
+            .authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || NOW)
+            .unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
         let params = parameters(&[VId(2), HIGH]);
-        let text = format!("{}UNWIND [0,0] AS occurrence WITH node.x AS x \
+        let text = format!(
+            "{}UNWIND [0,0] AS occurrence WITH node.x AS x \
             RETURN x, COUNT(*) AS n, SUM(DISTINCT x) AS total, COLLECT(x) AS values \
-            HAVING n = 2 ORDER BY x DESC SKIP 1 LIMIT 1", call("mixed"));
+            HAVING n = 2 ORDER BY x DESC SKIP 1 LIMIT 1",
+            call("mixed")
+        );
         let prepared = session.prepare(&c.query(), &text, &params).unwrap();
-        assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap()), vec![vec![
-            QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2))),
-            QueryValue::Count(2), QueryValue::Integer(2),
-            QueryValue::Value(GraphValue::List([2,2].map(|n| GraphValue::Scalar(CanonicalScalar::Int(n))).into())),
-        ]]);
-        let text = format!("{}WITH node.number AS n RETURN SUM(n) AS total, AVG(n) AS mean",
-            call("text").replace("candidates => 2, k => 2", "candidates => 3, k => 3"));
+        assert_eq!(
+            rows(
+                session
+                    .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                    .unwrap()
+            ),
+            vec![vec![
+                QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2))),
+                QueryValue::Count(2),
+                QueryValue::Integer(2),
+                QueryValue::Value(GraphValue::List(
+                    [2, 2]
+                        .map(|n| GraphValue::Scalar(CanonicalScalar::Int(n)))
+                        .into()
+                )),
+            ]]
+        );
+        let text = format!(
+            "{}WITH node.number AS n RETURN SUM(n) AS total, AVG(n) AS mean",
+            call("text").replace("candidates => 2, k => 2", "candidates => 3, k => 3")
+        );
         let params = parameters(&[VId(1), VId(2), HIGH]);
         let prepared = session.prepare(&c.query(), &text, &params).unwrap();
-        let actual = rows(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap());
+        let actual = rows(
+            session
+                .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                .unwrap(),
+        );
         for (cell, expected) in actual[0].iter().zip([1.0, 1.0 / 3.0]) {
-            assert_eq!(cell, &QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(expected)))));
+            assert_eq!(
+                cell,
+                &QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                    CanonicalF64::new(expected)
+                )))
+            );
         }
         session.close();
     });
@@ -202,19 +333,45 @@ fn aggregates_preserve_the_prepared_graph_and_property_cut_after_compaction_and_
         db.write(&c.commit(), edit).await.unwrap();
         let issuer = authority();
         let token = issuer.issue_at(&grant(), NOW).unwrap();
-        let mut session = db.authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || NOW).unwrap();
+        let mut session = db
+            .authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || NOW)
+            .unwrap();
         let mut historical = options();
         historical.as_of = Some(old);
-        let index = session.prepare_beacon_index(&c.query(), &historical).unwrap();
-        let current = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &historical)
+            .unwrap();
+        let current = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
         let params = parameters(&[VId(2), HIGH]);
-        let prepared = session.prepare(&c.query(), &summary("graph"), &params).unwrap();
-        assert_ne!(rows(session.execute_beacon_index(&c.query(), &current, &prepared, &params).unwrap()), expected());
+        let prepared = session
+            .prepare(&c.query(), &summary("graph"), &params)
+            .unwrap();
+        assert_ne!(
+            rows(
+                session
+                    .execute_beacon_index(&c.query(), &current, &prepared, &params)
+                    .unwrap()
+            ),
+            expected()
+        );
         db.compact(&c.commit()).await.unwrap();
         drop(db);
-        assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap()), expected());
+        assert_eq!(
+            rows(
+                session
+                    .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                    .unwrap()
+            ),
+            expected()
+        );
         let empty = parameters(&[]);
-        let result = rows(session.execute_beacon_index(&c.query(), &index, &prepared, &empty).unwrap());
+        let result = rows(
+            session
+                .execute_beacon_index(&c.query(), &index, &prepared, &empty)
+                .unwrap(),
+        );
         assert_eq!(result[0][0], QueryValue::Count(0));
         assert!(result[0][1..].iter().all(QueryValue::is_null));
         session.close();
@@ -229,26 +386,90 @@ fn aggregate_properties_require_retrieved_provenance_and_mask_before_reduction()
         let db = database(&c.commit()).await;
         let issuer = authority();
         let token = issuer.issue_at(&grant(), NOW).unwrap();
-        let mut session = db.authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || NOW).unwrap();
-        let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+        let mut session = db
+            .authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || NOW)
+            .unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
         let params = parameters(&[VId(2), HIGH]);
-        let masked = session.prepare(&c.query(), &format!("{}WITH node.secret AS s RETURN COUNT(s) AS n, SUM(s) AS total", call("mixed")), &params).unwrap();
-        let result = rows(session.execute_beacon_index(&c.query(), &index, &masked, &params).unwrap());
+        let masked = session
+            .prepare(
+                &c.query(),
+                &format!(
+                    "{}WITH node.secret AS s RETURN COUNT(s) AS n, SUM(s) AS total",
+                    call("mixed")
+                ),
+                &params,
+            )
+            .unwrap();
+        let result = rows(
+            session
+                .execute_beacon_index(&c.query(), &index, &masked, &params)
+                .unwrap(),
+        );
         assert_eq!(result[0][0], QueryValue::Count(0));
         assert!(result[0][1].is_null());
         for outside in [TRANSIT, VId(90)] {
-            let params = parameters(&[VId(2), HIGH]).with_list("outside", vec![GraphValue::Vertex(outside)]).unwrap();
-            let query = session.prepare(&c.query(), &format!("{}WITH $outside[0] AS n \
-                RETURN SUM(n.x) AS total LIMIT 0", call("mixed")), &params).unwrap();
-            assert!(session.execute_beacon_index(&c.query(), &index, &query, &params).is_err());
+            let params = parameters(&[VId(2), HIGH])
+                .with_list("outside", vec![GraphValue::Vertex(outside)])
+                .unwrap();
+            let query = session
+                .prepare(
+                    &c.query(),
+                    &format!(
+                        "{}WITH $outside[0] AS n \
+                RETURN SUM(n.x) AS total LIMIT 0",
+                        call("mixed")
+                    ),
+                    &params,
+                )
+                .unwrap();
+            assert!(
+                session
+                    .execute_beacon_index(&c.query(), &index, &query, &params)
+                    .is_err()
+            );
             assert!(!session.is_closed());
         }
-        let bad = session.prepare(&c.query(), &format!("{}WITH node.x / 0 AS x RETURN SUM(x) AS total LIMIT 0", call("mixed")), &params).unwrap();
-        assert!(session.execute_beacon_index(&c.query(), &index, &bad, &params).is_err());
-        let pattern = session.prepare(&c.query(), "MATCH (n:Node) WITH n.x AS x RETURN SUM(x) AS total", &GqlParameters::new()).unwrap();
-        assert!(session.execute_beacon_index(&c.query(), &index, &pattern, &GqlParameters::new()).is_err());
-        let good = session.prepare(&c.query(), &summary("mixed"), &params).unwrap();
-        assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &good, &params).unwrap()), expected());
+        let bad = session
+            .prepare(
+                &c.query(),
+                &format!(
+                    "{}WITH node.x / 0 AS x RETURN SUM(x) AS total LIMIT 0",
+                    call("mixed")
+                ),
+                &params,
+            )
+            .unwrap();
+        assert!(
+            session
+                .execute_beacon_index(&c.query(), &index, &bad, &params)
+                .is_err()
+        );
+        let pattern = session
+            .prepare(
+                &c.query(),
+                "MATCH (n:Node) WITH n.x AS x RETURN SUM(x) AS total",
+                &GqlParameters::new(),
+            )
+            .unwrap();
+        assert!(
+            session
+                .execute_beacon_index(&c.query(), &index, &pattern, &GqlParameters::new())
+                .is_err()
+        );
+        let good = session
+            .prepare(&c.query(), &summary("mixed"), &params)
+            .unwrap();
+        assert_eq!(
+            rows(
+                session
+                    .execute_beacon_index(&c.query(), &index, &good, &params)
+                    .unwrap()
+            ),
+            expected()
+        );
         session.close();
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -262,7 +483,10 @@ fn successive_aggregate_call_sources_share_records_and_signed_nodes() {
         let issuer = authority();
         let params = parameters(&[VId(2), HIGH]);
         let single = format!("{}RETURN COUNT(*) AS n", call("graph"));
-        let second = call("graph").replace("YIELD node, graph_hops", "YIELD node AS other, graph_hops AS other_hops");
+        let second = call("graph").replace(
+            "YIELD node, graph_hops",
+            "YIELD node AS other, graph_hops AS other_hops",
+        );
         let both = format!("{}WITH node {}RETURN COUNT(*) AS n", call("graph"), second);
         // Four saved vertices plus three admitted incidences per CALL. The
         // hidden shortcut contributes neither a source record nor a node.
@@ -271,12 +495,30 @@ fn successive_aggregate_call_sources_share_records_and_signed_nodes() {
             allowed.limits.max_nodes = nodes;
             allowed.limits.max_rows = 1;
             let token = issuer.issue_at(&allowed, NOW).unwrap();
-            let mut session = db.authorized_read_session(&c.query(), &issuer, &token, "main", catalog,
-                GqlQueryPolicy::new(records, 1, 10_000_000, 100_000), || NOW).unwrap();
-            let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+            let mut session = db
+                .authorized_read_session(
+                    &c.query(),
+                    &issuer,
+                    &token,
+                    "main",
+                    catalog,
+                    GqlQueryPolicy::new(records, 1, 10_000_000, 100_000),
+                    || NOW,
+                )
+                .unwrap();
+            let index = session
+                .prepare_beacon_index(&c.query(), &options())
+                .unwrap();
             let one = session.prepare(&c.query(), &single, &params).unwrap();
             let two = session.prepare(&c.query(), &both, &params).unwrap();
-            assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &one, &params).unwrap()), vec![vec![QueryValue::Count(2)]]);
+            assert_eq!(
+                rows(
+                    session
+                        .execute_beacon_index(&c.query(), &index, &one, &params)
+                        .unwrap()
+                ),
+                vec![vec![QueryValue::Count(2)]]
+            );
             let result = session.execute_beacon_index(&c.query(), &index, &two, &params);
             if succeeds {
                 assert_eq!(rows(result.unwrap()), vec![vec![QueryValue::Count(4)]]);
@@ -284,7 +526,11 @@ fn successive_aggregate_call_sources_share_records_and_signed_nodes() {
                 assert!(result.is_err());
                 assert!(!session.is_closed());
             }
-            assert!(session.execute_beacon_index(&c.query(), &index, &one, &params).is_ok());
+            assert!(
+                session
+                    .execute_beacon_index(&c.query(), &index, &one, &params)
+                    .is_ok()
+            );
             session.close();
         }
     });
@@ -298,36 +544,84 @@ fn cancellation_and_final_expiry_cannot_publish_even_an_empty_global_summary() {
         let db = database(&c.commit()).await;
         let issuer = authority();
         let token = issuer.issue_at(&grant(), NOW).unwrap();
-        let mut session = db.authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || NOW).unwrap();
-        let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+        let mut session = db
+            .authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || NOW)
+            .unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
         let params = parameters(&[VId(2), HIGH]);
-        let prepared = session.prepare(&c.query(), &summary("mixed"), &params).unwrap();
+        let prepared = session
+            .prepare(&c.query(), &summary("mixed"), &params)
+            .unwrap();
         for params in [params, parameters(&[])] {
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
-            let expected = rows(session.execute_beacon_index(&c.query().with_checkpoint_probe(probe.clone()), &index, &prepared, &params).unwrap());
+            let expected = rows(
+                session
+                    .execute_beacon_index(
+                        &c.query().with_checkpoint_probe(probe.clone()),
+                        &index,
+                        &prepared,
+                        &params,
+                    )
+                    .unwrap(),
+            );
             for cut in 1..=probe.calls() {
                 let stopped = Arc::new(SimulationCheckpointProbe::new(Some(cut)));
-                assert!(session.execute_beacon_index(&c.query().with_checkpoint_probe(stopped), &index, &prepared, &params).is_err(), "cut={cut}");
+                assert!(
+                    session
+                        .execute_beacon_index(
+                            &c.query().with_checkpoint_probe(stopped),
+                            &index,
+                            &prepared,
+                            &params
+                        )
+                        .is_err(),
+                    "cut={cut}"
+                );
                 assert!(!session.is_closed());
             }
-            assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap()), expected);
+            assert_eq!(
+                rows(
+                    session
+                        .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                        .unwrap()
+                ),
+                expected
+            );
         }
         session.close();
         let calls = Cell::new(0usize);
         let stop = Cell::new(usize::MAX);
-        let mut session = db.authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || {
-            let n = calls.get() + 1;
-            calls.set(n);
-            if n >= stop.get() { EXPIRES + 1 } else { NOW }
-        }).unwrap();
-        let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+        let mut session = db
+            .authorized_read_session(&c.query(), &issuer, &token, "main", catalog, host(), || {
+                let n = calls.get() + 1;
+                calls.set(n);
+                if n >= stop.get() { EXPIRES + 1 } else { NOW }
+            })
+            .unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
         let params = parameters(&[]);
-        let prepared = session.prepare(&c.query(), &summary("mixed"), &params).unwrap();
+        let prepared = session
+            .prepare(&c.query(), &summary("mixed"), &params)
+            .unwrap();
         calls.set(0);
-        assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap())[0][0], QueryValue::Count(0));
+        assert_eq!(
+            rows(
+                session
+                    .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                    .unwrap()
+            )[0][0],
+            QueryValue::Count(0)
+        );
         stop.set(calls.get());
         calls.set(0);
-        assert!(matches!(session.execute_beacon_index(&c.query(), &index, &prepared, &params), Err(QueryError::Authorization(WardenError::Expired))));
+        assert!(matches!(
+            session.execute_beacon_index(&c.query(), &index, &prepared, &params),
+            Err(QueryError::Authorization(WardenError::Expired))
+        ));
         assert!(session.is_closed());
         assert_eq!(c.outstanding_obligations(), 0);
     });

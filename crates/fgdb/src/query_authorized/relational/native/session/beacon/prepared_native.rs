@@ -185,9 +185,11 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     let result = bound
                         .execute_governed_with_elements(
                             policy,
-                            |_, _| Err(GqlQueryError::Source(source_refusal(
-                                "prepared index execution does not scan pattern sources",
-                            ))),
+                            |_, _| {
+                                Err(GqlQueryError::Source(source_refusal(
+                                    "prepared index execution does not scan pattern sources",
+                                )))
+                            },
                             &mut procedures,
                             &mut elements,
                             || execution.borrow_mut().checkpoint(),
@@ -209,9 +211,11 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     let result = bound
                         .execute_governed_with_elements(
                             policy,
-                            |_, _| Err(GqlQueryError::Source(source_refusal(
-                                "prepared index execution does not scan pattern sources",
-                            ))),
+                            |_, _| {
+                                Err(GqlQueryError::Source(source_refusal(
+                                    "prepared index execution does not scan pattern sources",
+                                )))
+                            },
                             &mut procedures,
                             &mut elements,
                             || execution.borrow_mut().checkpoint(),
@@ -220,7 +224,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     let count = result.value.len();
                     Ok((
                         crate::query::aggregates(
-                            template.columns().to_vec(), template.output_slots(), result.value,
+                            template.columns().to_vec(),
+                            template.output_slots(),
+                            result.value,
                         ),
                         count,
                     ))

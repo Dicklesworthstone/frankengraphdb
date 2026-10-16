@@ -47,17 +47,31 @@ fn procedure(
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, usize>> {
     assert_eq!((call.namespace(), call.name()), ("fixture", "rows"));
     assert_eq!(call.outputs(), ["node"]);
-    assert!(remaining.rows.max_result_rows().is_none_or(|limit| limit >= 3));
+    assert!(
+        remaining
+            .rows
+            .max_result_rows()
+            .is_none_or(|limit| limit >= 3)
+    );
     Ok(GqlQueryExecution {
         value: [VId(1), VId(1), HIGH]
             .map(|id| GraphValueRow::from_owned_values(vec![GraphValue::Vertex(id)]))
             .into(),
-        rows: GqlExecutionStats { snapshot_records: 3, result_rows: 3 },
-        evaluator: GlaExecutionStats { work_units: 7, scratch_entries: 3 },
+        rows: GqlExecutionStats {
+            snapshot_records: 3,
+            result_rows: 3,
+        },
+        evaluator: GlaExecutionStats {
+            work_units: 7,
+            scratch_entries: 3,
+        },
     })
 }
 
-fn property(element: ElementId, key: PropertyKeyId) -> Result<Option<CanonicalScalar>, &'static str> {
+fn property(
+    element: ElementId,
+    key: PropertyKeyId,
+) -> Result<Option<CanonicalScalar>, &'static str> {
     assert_eq!(key, VALUE);
     match element {
         ElementId::Vertex(VId(1)) => Ok(Some(CanonicalScalar::Int(2))),
@@ -76,7 +90,11 @@ fn run(
 #[test]
 fn folded_and_collection_inputs_read_elements_and_preserve_exact_occurrences() {
     for collect in [false, true] {
-        let suffix = if collect { ", COLLECT(value) AS values" } else { "" };
+        let suffix = if collect {
+            ", COLLECT(value) AS values"
+        } else {
+            ""
+        };
         let query = prepare(&format!(
             "RETURN COUNT(*) AS n, COUNT(DISTINCT value) AS unique_values, \
              SUM(value) AS total, AVG(value) AS mean{suffix}"
@@ -94,7 +112,9 @@ fn folded_and_collection_inputs_read_elements_and_preserve_exact_occurrences() {
             assert_eq!(
                 row.values()[4].as_value(),
                 Some(&GraphValue::List(
-                    [2, 2, 7].map(|n| GraphValue::Scalar(CanonicalScalar::Int(n))).into()
+                    [2, 2, 7]
+                        .map(|n| GraphValue::Scalar(CanonicalScalar::Int(n)))
+                        .into()
                 ))
             );
         }
@@ -105,16 +125,18 @@ fn folded_and_collection_inputs_read_elements_and_preserve_exact_occurrences() {
 #[test]
 fn missing_properties_are_null_but_an_unavailable_reader_is_not_null() {
     let query = prepare("RETURN COUNT(*) AS rows, COUNT(value) AS present, SUM(value) AS total");
-    let result = query.execute_governed_with_elements(
-        policy(), no_pattern, procedure, |_, _| Ok(None), || Ok(()),
-    ).unwrap();
+    let result = query
+        .execute_governed_with_elements(policy(), no_pattern, procedure, |_, _| Ok(None), || Ok(()))
+        .unwrap();
     let row = &result.value[0];
     assert_eq!(row.values()[0].as_count(), Some(3));
     assert_eq!(row.values()[1].as_count(), Some(0));
     assert!(row.values()[2].is_null());
-    assert!(query.execute_governed_with_procedures(
-        policy(), no_pattern, procedure, || Ok(()),
-    ).is_err());
+    assert!(
+        query
+            .execute_governed_with_procedures(policy(), no_pattern, procedure, || Ok(()),)
+            .is_err()
+    );
 }
 
 #[test]
@@ -122,27 +144,43 @@ fn late_reader_failure_and_every_checkpoint_refuse_even_under_limit_zero() {
     for suffix in ["", " LIMIT 0"] {
         let query = prepare(&format!("RETURN SUM(value) AS total{suffix}"));
         let calls = Cell::new(0);
-        let error = query.execute_governed_with_elements(
-            policy(), no_pattern, procedure,
-            |element, key| {
-                calls.set(calls.get() + 1);
-                if element == ElementId::Vertex(HIGH) { Err("last property refused") }
-                else { property(element, key) }
-            }, || Ok(()),
-        ).unwrap_err();
+        let error = query
+            .execute_governed_with_elements(
+                policy(),
+                no_pattern,
+                procedure,
+                |element, key| {
+                    calls.set(calls.get() + 1);
+                    if element == ElementId::Vertex(HIGH) {
+                        Err("last property refused")
+                    } else {
+                        property(element, key)
+                    }
+                },
+                || Ok(()),
+            )
+            .unwrap_err();
         assert!(calls.get() >= 2);
         assert!(format!("{error}").contains("last property refused"));
         let seen = Cell::new(0usize);
-        let expected = query.execute_governed_with_elements(
-            policy(), no_pattern, procedure, property,
-            || { seen.set(seen.get() + 1); Ok(()) },
-        ).unwrap();
+        let expected = query
+            .execute_governed_with_elements(policy(), no_pattern, procedure, property, || {
+                seen.set(seen.get() + 1);
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(expected.value.len(), usize::from(suffix.is_empty()));
         for cut in 1..=seen.get() {
             let mut at = 0;
             let result = query.execute_governed_with_elements(
-                policy(), no_pattern, procedure, property,
-                || { at += 1; if at == cut { Err(cut) } else { Ok(()) } },
+                policy(),
+                no_pattern,
+                procedure,
+                property,
+                || {
+                    at += 1;
+                    if at == cut { Err(cut) } else { Ok(()) }
+                },
             );
             assert!(matches!(result, Err(GqlQueryError::Interrupted(n)) if n == cut));
         }
@@ -156,8 +194,10 @@ fn source_expression_and_reducer_work_share_exact_and_short_allowances() {
         let query = prepare(&format!("RETURN SUM(value) AS total{suffix}"));
         let expected = run(&query, policy()).unwrap();
         let exact = GqlQueryPolicy::new(
-            expected.rows.snapshot_records, 1,
-            expected.evaluator.work_units, expected.evaluator.scratch_entries,
+            expected.rows.snapshot_records,
+            1,
+            expected.evaluator.work_units,
+            expected.evaluator.scratch_entries,
         );
         let replay = run(&query, exact).unwrap();
         assert_eq!(replay.value, expected.value);
