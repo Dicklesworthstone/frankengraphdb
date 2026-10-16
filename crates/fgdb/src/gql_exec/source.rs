@@ -1187,42 +1187,57 @@ impl AdjacencyIndex {
             GlaDirection::Reverse => (incoming(), None),
             GlaDirection::Undirected => (outgoing(), incoming()),
         };
+        // Each identity's statement is read a chunk ahead: pure reads of
+        // independent sealed rows, whose cache misses overlap, where one at a
+        // time each waited on the last. The chunk then replays in order, one
+        // Work per identity before its visit, as the walk always ran.
+        const CHUNK: usize = 32;
+        let mut ahead: [Option<(&'a AdjacencyEntry, usize, usize)>; CHUNK] = [None; CHUNK];
         loop {
-            // The lower identity of the two faces, with its history.
-            let next = match (&mut left, &mut right) {
-                (Some(a), Some(b)) => match (a.peek(), b.peek()) {
-                    (Some(&(x, hx)), Some(&(y, hy))) => {
-                        Some(if x <= y { (x, hx) } else { (y, hy) })
-                    }
-                    (Some(&pair), None) | (None, Some(&pair)) => Some(pair),
-                    (None, None) => break,
-                },
-                (Some(a), None) | (None, Some(a)) => a.peek().copied(),
-                (None, None) => break,
-            };
-            let Some((id, history)) = next else { break };
-            control(SourceEvent::Work)?;
-            if let Some(a) = left.as_mut()
-                && a.peek().is_some_and(|&(x, _)| x == id)
-            {
-                a.next();
+            let mut taken = 0;
+            while taken < CHUNK {
+                // The lower identity of the two faces, with its history.
+                let next = match (&mut left, &mut right) {
+                    (Some(a), Some(b)) => match (a.peek(), b.peek()) {
+                        (Some(&(x, hx)), Some(&(y, hy))) => {
+                            Some(if x <= y { (x, hx) } else { (y, hy) })
+                        }
+                        (Some(&pair), None) | (None, Some(&pair)) => Some(pair),
+                        (None, None) => None,
+                    },
+                    (Some(a), None) | (None, Some(a)) => a.peek().copied(),
+                    (None, None) => None,
+                };
+                let Some((id, history)) = next else { break };
+                if let Some(a) = left.as_mut()
+                    && a.peek().is_some_and(|&(x, _)| x == id)
+                {
+                    a.next();
+                }
+                if let Some(b) = right.as_mut()
+                    && b.peek().is_some_and(|&(x, _)| x == id)
+                {
+                    b.next();
+                }
+                ahead[taken] = history.latest(as_of).and_then(|(block, row)| {
+                    let entry = &blocks[block].as_ref()[row];
+                    let incident = match direction {
+                        GlaDirection::Forward => entry.src == endpoint,
+                        GlaDirection::Reverse => entry.dst == endpoint,
+                        GlaDirection::Undirected => entry.src == endpoint || entry.dst == endpoint,
+                    };
+                    (incident && entry.visible_at(as_of)).then_some((entry, block, row))
+                });
+                taken += 1;
             }
-            if let Some(b) = right.as_mut()
-                && b.peek().is_some_and(|&(x, _)| x == id)
-            {
-                b.next();
+            for &step in &ahead[..taken] {
+                control(SourceEvent::Work)?;
+                if let Some((entry, block, row)) = step {
+                    visit(entry, block, row, control)?;
+                }
             }
-            let Some((block, row)) = history.latest(as_of) else {
-                continue;
-            };
-            let entry = &blocks[block].as_ref()[row];
-            let incident = match direction {
-                GlaDirection::Forward => entry.src == endpoint,
-                GlaDirection::Reverse => entry.dst == endpoint,
-                GlaDirection::Undirected => entry.src == endpoint || entry.dst == endpoint,
-            };
-            if incident && entry.visible_at(as_of) {
-                visit(entry, block, row, control)?;
+            if taken < CHUNK {
+                break;
             }
         }
         Ok(())
