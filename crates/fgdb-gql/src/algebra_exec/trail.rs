@@ -3,9 +3,8 @@
 mod captured_shortest;
 
 use super::{EId, GlaExecutionEvent, GraphPath, GraphWalkSearch, VId};
-use crate::{GraphTrailCursor, GraphWalkBounds};
+use crate::{GraphTrailCursor, GraphWalkBounds, IdentifiedNeighbors};
 use captured_shortest::{CaptureMode, CapturedPathCursor};
-use std::collections::BTreeMap;
 
 pub(super) enum IdentifiedExpansion<'a> {
     Path(crate::walk::GraphPathCursor<'a>),
@@ -24,7 +23,7 @@ impl<'a> IdentifiedExpansion<'a> {
         source: VId,
         bounds: GraphWalkBounds,
         search: GraphWalkSearch,
-        adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+        adjacency: Option<&'a dyn IdentifiedNeighbors>,
         forbidden: Vec<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
@@ -50,7 +49,7 @@ impl<'a> IdentifiedExpansion<'a> {
         source: VId,
         bounds: GraphWalkBounds,
         search: GraphWalkSearch,
-        adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+        adjacency: Option<&'a dyn IdentifiedNeighbors>,
         capture: bool,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {

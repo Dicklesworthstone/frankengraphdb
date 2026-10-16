@@ -16,8 +16,6 @@
 use super::{EId, GlaExecutionEvent, GraphPath, GraphWalkBounds, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
-type Adjacency = BTreeMap<VId, Vec<(EId, VId)>>;
-
 struct Frame {
     vertex: VId,
     next: usize,
@@ -33,7 +31,7 @@ pub(super) enum CaptureMode {
 }
 
 pub(crate) struct CapturedPathCursor<'a> {
-    adjacency: Option<&'a Adjacency>,
+    adjacency: Option<&'a dyn crate::IdentifiedNeighbors>,
     source: VId,
     bounds: GraphWalkBounds,
     mode: CaptureMode,
@@ -57,7 +55,7 @@ impl<'a> CapturedPathCursor<'a> {
         source: VId,
         bounds: GraphWalkBounds,
         mode: CaptureMode,
-        adjacency: Option<&'a Adjacency>,
+        adjacency: Option<&'a dyn crate::IdentifiedNeighbors>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         control(GlaExecutionEvent::Work)?;
@@ -159,7 +157,7 @@ impl<'a> CapturedPathCursor<'a> {
         let mut next = BTreeSet::new();
         for &vertex in self.layers.last().expect("an active cursor has a layer") {
             control(GlaExecutionEvent::Work)?;
-            if let Some(neighbors) = self.adjacency.and_then(|map| map.get(&vertex)) {
+            if let Some(neighbors) = self.adjacency.and_then(|map| map.neighbors(&vertex)) {
                 for &(_, destination) in neighbors {
                     control(GlaExecutionEvent::Work)?;
                     if (self.mode == CaptureMode::AllShortest
@@ -206,7 +204,7 @@ impl<'a> CapturedPathCursor<'a> {
                 control(GlaExecutionEvent::Work)?;
                 let mut reaches = self.viable.is_empty();
                 if let Some(suffix) = self.viable.last()
-                    && let Some(neighbors) = self.adjacency.and_then(|map| map.get(&vertex))
+                    && let Some(neighbors) = self.adjacency.and_then(|map| map.neighbors(&vertex))
                 {
                     for &(_, destination) in neighbors {
                         control(GlaExecutionEvent::Work)?;
@@ -336,7 +334,7 @@ impl<'a> CapturedPathCursor<'a> {
             let frame = &mut self.frames[at];
             let step = self
                 .adjacency
-                .and_then(|map| map.get(&frame.vertex))
+                .and_then(|map| map.neighbors(&frame.vertex))
                 .and_then(|neighbors| neighbors.get(frame.next))
                 .copied();
             let Some(step) = step else {
@@ -364,6 +362,9 @@ mod tests {
     use super::super::{GraphWalkSearch, IdentifiedExpansion};
     use super::*;
 
+    /// The fixtures' ordered map; the cursors read it through the trait.
+    type Adjacency = BTreeMap<VId, Vec<(EId, VId)>>;
+
     const MODES: [CaptureMode; 4] = [
         CaptureMode::All,
         CaptureMode::AllShortest,
@@ -378,6 +379,7 @@ mod tests {
         adjacency: Option<&Adjacency>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<GraphPath>, E> {
+        let adjacency = adjacency.map(|map| map as &dyn crate::IdentifiedNeighbors);
         let mut cursor = CapturedPathCursor::new(source, bounds, mode, adjacency, control)?;
         let mut output = Vec::new();
         while let Some(path) = cursor.next_with_control(control)? {

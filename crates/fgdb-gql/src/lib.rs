@@ -28,6 +28,7 @@ mod evidence_page;
 pub mod free_join;
 mod graph_text;
 pub mod id_hash;
+mod identified;
 pub mod insertion;
 pub mod insertion_query;
 mod insertion_query_text;
@@ -233,6 +234,7 @@ pub use temporal_text::{
     BoundTemporalGraphQuery, GraphTemporalTextError, GraphTemporalTextErrorKind,
     PreparedTemporalGraphText,
 };
+pub use identified::IdentifiedNeighbors;
 pub use trail::GraphTrailCursor;
 pub use vertex_merge::{
     GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,

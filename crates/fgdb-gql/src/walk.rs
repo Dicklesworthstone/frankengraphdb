@@ -288,7 +288,7 @@ impl core::fmt::Debug for GraphWalkCursor<'_> {
 /// of adjacency input order. Duplicate input occurrences remain distinct.
 /// Unlike the endpoint cursors, every returned path contains real edge IDs.
 pub(crate) struct GraphPathCursor<'a> {
-    adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+    adjacency: Option<&'a dyn crate::IdentifiedNeighbors>,
     bounds: GraphWalkBounds,
     search: GraphWalkSearch,
     depth: u32,
@@ -306,7 +306,7 @@ impl<'a> GraphPathCursor<'a> {
         source: VId,
         bounds: GraphWalkBounds,
         search: GraphWalkSearch,
-        adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+        adjacency: Option<&'a dyn crate::IdentifiedNeighbors>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         control(GlaExecutionEvent::Work)?;
@@ -421,7 +421,7 @@ impl<'a> GraphPathCursor<'a> {
                 && endpoint == path.start();
             if !closed
                 && self.depth < self.bounds.maximum()
-                && let Some(neighbors) = self.adjacency.and_then(|map| map.get(&endpoint))
+                && let Some(neighbors) = self.adjacency.and_then(|map| map.neighbors(&endpoint))
             {
                 for &step in neighbors {
                     control(GlaExecutionEvent::Work)?;
