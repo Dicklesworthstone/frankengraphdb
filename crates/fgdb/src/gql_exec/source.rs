@@ -3426,20 +3426,30 @@ fn slot_closure<'a, E>(
             || admitted.saturating_add(incidences) <= trial)
     };
     let width = if root.is_some() { 2 } else { 1 };
-    // The admitted edges, each once, in admission order. One directed step
-    // from a vertex root visits each edge at most once: it expands each vertex
-    // at most once, and a directed visit yields an edge only from its own end.
-    // A root lookup, a second step or an undirected step can meet an edge
-    // again, so those closures keep the identities they admitted. Pushing
-    // instead of keeping every edge in a map by identity was a sixth of a
-    // pokec three-hop reach (fgdb-61p1n).
+    // The admitted edges, each once, in admission order. The root lookup and
+    // each step expand a vertex at most once, and a directed visit yields an
+    // edge only from its own end. So when they all have one relation and one
+    // direction, an edge is met again only from a vertex an earlier one
+    // expanded, which admitted every matching edge of it then: such a visit
+    // only records far ends. An undirected expansion, or expansions that
+    // differ, can meet an edge again any other way, so those closures keep
+    // the identities they admitted. Pushing instead of keeping every edge in
+    // a map by identity was a sixth of a pokec three-hop reach, and the
+    // identity set a fifth of a pokec two-hop (fgdb-61p1n).
     let mut selected: Vec<BorrowedEdge<'a>> = Vec::new();
-    let mut seen = (root.is_some()
-        || steps.len() != 1
-        || steps
-            .iter()
-            .any(|step| matches!(step.direction, fgdb_gql::algebra::GlaDirection::Undirected)))
-    .then(IdSet::<EId>::default);
+    let mut expansions = root
+        .map(|(relation, direction, _)| (relation, direction))
+        .into_iter()
+        .chain(steps.iter().map(|step| (step.relation, step.direction)));
+    let uniform = expansions.next().is_none_or(|(relation, direction)| {
+        direction != fgdb_gql::algebra::GlaDirection::Undirected
+            && expansions.all(|other| other == (relation, direction))
+    });
+    let mut seen = (!uniform).then(IdSet::<EId>::default);
+    // The vertices earlier expansions of a uniform closure expanded (a root
+    // lookup's own roots included, should one repeat).
+    let mut expanded_earlier =
+        (uniform && (root.is_some() || steps.len() > 1)).then(IdSet::<VId>::default);
     let mut slots = vec![IdSet::<VId>::default(); width + steps.len()];
     let admit = |entry: &AdjacencyEntry,
                  block: usize,
@@ -3473,6 +3483,9 @@ fn slot_closure<'a, E>(
         }
         for root in roots {
             let target = &mut slots[1 - root_slot];
+            let repeat = expanded_earlier
+                .as_mut()
+                .is_some_and(|earlier| !earlier.insert(root));
             index.visit(
                 &snapshot.blocks,
                 root,
@@ -3482,16 +3495,20 @@ fn slot_closure<'a, E>(
                 |entry, block, row, control| {
                     if relation.matches(entry.relation) {
                         let far = far_endpoint(entry, root, lookup_direction);
-                        admit(
-                            entry,
-                            block,
-                            row,
-                            &mut selected,
-                            &mut seen,
-                            target,
-                            far,
-                            control,
-                        )?;
+                        if !repeat {
+                            admit(
+                                entry,
+                                block,
+                                row,
+                                &mut selected,
+                                &mut seen,
+                                target,
+                                far,
+                                control,
+                            )?;
+                        } else if target.insert(far) {
+                            control(SourceEvent::ScratchEntry)?;
+                        }
                     }
                     Ok(())
                 },
@@ -3533,6 +3550,11 @@ fn slot_closure<'a, E>(
             let mut next = Vec::new();
             for vertex in frontier {
                 control(SourceEvent::Work)?;
+                // Every matching edge of a vertex an earlier step expanded
+                // is already admitted.
+                let repeat = expanded_earlier
+                    .as_mut()
+                    .is_some_and(|earlier| !earlier.insert(vertex));
                 index.visit(
                     &snapshot.blocks,
                     vertex,
@@ -3542,16 +3564,20 @@ fn slot_closure<'a, E>(
                     |entry, block, row, control| {
                         if step.relation.matches(entry.relation) {
                             let far = far_endpoint(entry, vertex, step.direction);
-                            admit(
-                                entry,
-                                block,
-                                row,
-                                &mut selected,
-                                &mut seen,
-                                &mut target,
-                                far,
-                                control,
-                            )?;
+                            if !repeat {
+                                admit(
+                                    entry,
+                                    block,
+                                    row,
+                                    &mut selected,
+                                    &mut seen,
+                                    &mut target,
+                                    far,
+                                    control,
+                                )?;
+                            } else if target.insert(far) {
+                                control(SourceEvent::ScratchEntry)?;
+                            }
                             if step.walk.is_some() && expanded.insert(far) {
                                 control(SourceEvent::ScratchEntry)?;
                                 next.push(far);
