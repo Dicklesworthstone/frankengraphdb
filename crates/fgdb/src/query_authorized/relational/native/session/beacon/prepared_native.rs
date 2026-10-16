@@ -3,7 +3,7 @@
 
 use super::super::super::{AuthorizedPreparedRead, check_branch, selector_error};
 use super::*;
-use crate::query::authorized::relational::set_error;
+use crate::query::authorized::relational::{aggregate_gql_error, set_error};
 use crate::query::{EndpointFilter, HybridCallError, HybridSearch, ProcedureError, hybrid_refusal};
 use crate::{EmbeddedReadView, GqlError, PreparedNativeRead, QueryResult};
 use fgdb_beacon::GraphHybridQuery;
@@ -96,8 +96,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// retrieved by a CALL in this execution may be dereferenced: caller-supplied
     /// element identities cannot turn an index handle into a raw snapshot reader.
     ///
-    /// This explicit source profile accepts the compiled Set/pipeline class and
-    /// hybrid.search sources, including graph-only and mixed graph expansion.
+    /// This explicit source profile accepts compiled row and terminal aggregate
+    /// pipelines over hybrid.search, including graph-only and mixed expansion.
     /// Graph membership and incidence use the typed prepared graph reader at
     /// the SAME saved sequence. Propertyless vertices remain traversable;
     /// rejecting an endpoint does not remove it from paths. No graph directory
@@ -106,8 +106,16 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// New visits, incidences and bounded ranking workspace are scratch-admitted
     /// before retention; these are logical counts, not a total byte-memory cap.
     ///
-    /// Pattern sources, other procedures, temporal wrappers and aggregate
-    /// classes refuse; there is no one-shot fallback. A nonnull graph_access
+    /// Terminal COUNT/SUM/AVG, DISTINCT, extrema, collections, grouping, HAVING
+    /// and output clauses use the existing native aggregate owner. Counts and
+    /// exact averages keep their aggregate domains, not narrowed scalar cells.
+    /// Private CALL hits and aggregate inputs spend source/work/scratch limits,
+    /// not the final signed row allowance. The frozen native source-result cap
+    /// still applies to every CALL; final group rows use normal session delivery.
+    /// A failed property read or aggregate input is not hidden by LIMIT 0.
+    ///
+    /// Pattern sources, other procedures and temporal wrappers still refuse;
+    /// there is no one-shot fallback. A nonnull graph_access
     /// override refuses: this explicit prepared source profile owns its native
     /// incidence path, rather than silently substituting a requested physical
     /// source. The normal execute method and its source choices are unchanged.
@@ -133,48 +141,97 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             if !Arc::ptr_eq(&owner, &index.owner) {
                 return Err(QueryError::Authorization(WardenError::ScopeDenied));
             }
-            let selected = prepared.selector.bind_parameters(params).map_err(selector_error)?;
+            let selected = prepared
+                .selector
+                .bind_parameters(params)
+                .map_err(selector_error)?;
             check_branch(&selected, branch)?;
-            let PreparedNativeRead::Set(template) = prepared.native.as_ref() else {
-                return Err(QueryError::Unsupported {
-                    diagnostics: vec![
-                        "prepared index execution requires a CALL pipeline".to_owned(),
-                    ],
-                });
-            };
-            view.snapshot.check_frontier(index.sequence).map_err(QueryError::Read)?;
-            let bound = template.bind_parameters(selected.parameters()).map_err(QueryError::SetText)?;
+            view.snapshot
+                .check_frontier(index.sequence)
+                .map_err(QueryError::Read)?;
             // This is a statement-local authorization provenance set, not an
             // eligibility predicate or a second source. Admit storage in call_at
             // before insertion, and discard it with the enclosing execution.
             let retrieved = RefCell::new(BTreeSet::new());
-            let result = bound.execute_governed_with_elements(
-                policy,
-                |_, _| Err(GqlQueryError::Source(source_refusal(
-                    "prepared index execution does not scan pattern sources",
-                ))),
-                |call, arguments, remaining| call_at(
-                    cx, &owner, index, view, scope, execution, call, arguments, remaining, &retrieved,
-                ),
-                |element, key| {
-                    if !scope.allows_property(key) {
-                        return Ok(None);
-                    }
-                    if !matches!(element, ElementId::Vertex(id) if retrieved.borrow().contains(&id)) {
-                        return Err(source_refusal(
-                            "prepared index property reads require a retrieved vertex",
-                        ));
-                    }
-                    crate::gql_exec::read_element_property(
-                        element, key,
-                        |id| view.snapshot.vertex_at(id, index.sequence),
-                        |id| view.snapshot.edge_at(id, index.sequence),
-                    )
-                },
-                || execution.borrow_mut().checkpoint(),
-            ).map_err(set_error)?;
-            let count = result.value.len();
-            Ok((crate::query::values(template.columns().to_vec(), result.value), count))
+            let mut procedures = |call: &PreparedProcedureCall,
+                                  arguments: &[GraphValue],
+                                  remaining: GqlQueryPolicy| {
+                call_at(
+                    cx, &owner, index, view, scope, execution, call, arguments, remaining,
+                    &retrieved,
+                )
+            };
+            let mut elements = |element, key| {
+                if !scope.allows_property(key) {
+                    return Ok(None);
+                }
+                if !matches!(element, ElementId::Vertex(id) if retrieved.borrow().contains(&id)) {
+                    return Err(source_refusal(
+                        "prepared index property reads require a retrieved vertex",
+                    ));
+                }
+                crate::gql_exec::read_element_property(
+                    element,
+                    key,
+                    |id| view.snapshot.vertex_at(id, index.sequence),
+                    |id| view.snapshot.edge_at(id, index.sequence),
+                )
+            };
+            match prepared.native.as_ref() {
+                PreparedNativeRead::Set(template) => {
+                    let bound = template
+                        .bind_parameters(selected.parameters())
+                        .map_err(QueryError::SetText)?;
+                    let result = bound
+                        .execute_governed_with_elements(
+                            policy,
+                            |_, _| Err(GqlQueryError::Source(source_refusal(
+                                "prepared index execution does not scan pattern sources",
+                            ))),
+                            &mut procedures,
+                            &mut elements,
+                            || execution.borrow_mut().checkpoint(),
+                        )
+                        .map_err(set_error)?;
+                    let count = result.value.len();
+                    Ok((
+                        crate::query::values(template.columns().to_vec(), result.value),
+                        count,
+                    ))
+                }
+                PreparedNativeRead::PipelineAggregate(template) => {
+                    // Bind the complete relational input, never a fabricated
+                    // first graph leaf. Both physical aggregate profiles keep
+                    // the same source/element owner and the original allowance.
+                    let bound = template
+                        .bind_relation_parameters(selected.parameters())
+                        .map_err(QueryError::PipelineText)?;
+                    let result = bound
+                        .execute_governed_with_elements(
+                            policy,
+                            |_, _| Err(GqlQueryError::Source(source_refusal(
+                                "prepared index execution does not scan pattern sources",
+                            ))),
+                            &mut procedures,
+                            &mut elements,
+                            || execution.borrow_mut().checkpoint(),
+                        )
+                        .map_err(aggregate_gql_error)?;
+                    let count = result.value.len();
+                    Ok((
+                        crate::query::aggregates(
+                            template.columns().to_vec(), template.output_slots(), result.value,
+                        ),
+                        count,
+                    ))
+                }
+                _ => Err(QueryError::Unsupported {
+                    diagnostics: vec![
+                        "prepared index execution requires a row or aggregate CALL pipeline"
+                            .to_owned(),
+                    ],
+                }),
+            }
         })
     }
 }
@@ -217,7 +274,12 @@ fn call_at(
         scope,
         remaining,
         execution,
-        Search::Hybrid(query.retrieval),
+        // The procedure's k is private input to the compiled row/group stages,
+        // not a delivered page. Admit owner, history and the saved population
+        // on this same permit, with zero delivered rows. Actual source k still
+        // meets candidate_depths and the frozen native ceiling below; the final
+        // statement result alone is charged by the enclosing session gate.
+        Search::Hybrid(query.source_query()),
     )
     .map_err(GqlQueryError::Interrupted)?;
     let allowance = prepared_policy(index, search.options().policy, remaining);
@@ -334,3 +396,7 @@ mod tests;
 #[cfg(test)]
 #[path = "prepared_native_graph_tests.rs"]
 mod graph_tests;
+
+#[cfg(test)]
+#[path = "prepared_native_aggregate_tests.rs"]
+mod aggregate_tests;

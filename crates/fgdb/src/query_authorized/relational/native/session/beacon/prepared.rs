@@ -112,6 +112,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// admits no result rows; it does not retain an execution permit. Source,
     /// staging and work budgets are checked during preparation. This is a
     /// bounded resident generation, not disk spill or commit-fed maintenance.
+    /// The explicit native result ceiling is frozen independently of the host's
+    /// final statement-row ceiling: a private CALL input may feed an aggregate.
+    /// Direct searches still intersect both ceilings before returning any hits.
     pub fn prepare_beacon_index(
         &mut self,
         cx: &QueryCx,
@@ -130,6 +133,11 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 let mut frozen =
                     definition(options, options.index.clone(), host, &mut SharedWork(&work))?;
                 frozen.as_of = Some(at);
+                // Building returns no hit rows. Keep the caller's native source
+                // capacity, not the session's final-output limit, in this pin.
+                // Direct search applies the host cap again in prepared_policy
+                // and admit_query; pipelines enforce it after their last stage.
+                frozen.policy.max_result_rows = options.policy.max_result_rows;
                 let (index, admitted) = build(view, at, scope, host, execution, &frozen, &work)?;
                 work.borrow_mut().charge(1)?;
                 Ok(AuthorizedBeaconIndex {
