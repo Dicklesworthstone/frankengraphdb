@@ -393,7 +393,7 @@ impl StatementHistoryIndex<VId> {
                 statements.push((row.vid, row.created_at, patch, row_at));
             }
         }
-        statements.sort_unstable();
+        sort_by_leading_identity(&mut statements, |&(vid, ..)| vid.0);
         let mut work = 0;
         let histories = statements
             .chunk_by(|a, b| a.0 == b.0)
@@ -431,8 +431,42 @@ fn edge_statements(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Vec<(EId, CommitS
             statements.push((entry.eid, entry.created_at, block, row));
         }
     }
-    statements.sort_unstable();
+    sort_by_leading_identity(&mut statements, |&(eid, ..)| eid.0);
     statements
+}
+
+/// [`edge_statements`] with each statement's endpoint that `end` picks, read
+/// while its block is scanned in order: `(identity, created_at, block, row,
+/// endpoint)`, 48 bytes like an unannotated statement. A generation's faces
+/// once read every statement's entry back in identity order, a random read
+/// per statement per face: about 1.8 s of a pokec server's first bound
+/// query. The statements order as [`edge_statements`] does, whichever
+/// endpoint they carry, since `(identity, created_at, block, row)` already
+/// names one statement.
+fn edge_statements_with_endpoint(
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    end: fn(&AdjacencyEntry) -> VId,
+) -> Vec<(EId, CommitSeq, u32, u32, VId)> {
+    let mut statements =
+        Vec::with_capacity(blocks.iter().map(|entries| entries.as_ref().len()).sum());
+    for (block, entries) in blocks.iter().enumerate() {
+        let block = u32::try_from(block).expect("a generation holds fewer than u32::MAX blocks");
+        for (row, entry) in entries.as_ref().iter().enumerate() {
+            let row = u32::try_from(row).expect("a block holds fewer than u32::MAX rows");
+            statements.push((entry.eid, entry.created_at, block, row, end(entry)));
+        }
+    }
+    sort_by_leading_identity(&mut statements, |&(eid, ..)| eid.0);
+    statements
+}
+
+/// Sorts `items`, whose order starts with an identity, exactly as
+/// `sort_unstable` does, by one bucket pass on the identity bits that vary
+/// (fgdb_gql::id_sort). A generation's lazy adjacency build sorts every
+/// statement and both faces' incidences this way: comparison-sorting them
+/// was about 3.2 s of a pokec server's 8.4 s first bound query.
+fn sort_by_leading_identity<T: Copy + Ord>(items: &mut Vec<T>, identity: impl Fn(&T) -> u128) {
+    fgdb_gql::id_sort::sort_by_leading_identity(items, identity, <[T]>::sort_unstable);
 }
 
 /// The history of one identity's run from [`edge_statements`].
@@ -500,7 +534,7 @@ impl FlatFace {
     fn build(mut incidences: Vec<(VId, EId, StatementRange)>) -> Self {
         // Every statement of an identity adds its endpoint: dedup them. An
         // identity has one range, so this dedups (endpoint, identity).
-        incidences.sort_unstable();
+        sort_by_leading_identity(&mut incidences, |&(vid, ..)| vid.0);
         incidences.dedup();
         let mut face = Self::default();
         face.ids.reserve_exact(incidences.len());
@@ -875,50 +909,48 @@ impl AdjacencyIndex {
     /// in place into the flat base. The contents equal folding every row
     /// through `apply_added`.
     pub(crate) fn build(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
-        let statements = edge_statements(blocks);
+        // Each face's endpoints are read while their blocks are scanned in
+        // order, once per face, so no face reads a block again and only one
+        // face's statements and incidences are held at a time.
+        let statements = edge_statements_with_endpoint(blocks, |entry| entry.src);
         let mut base = FlatIndex::default();
         base.statements.reserve_exact(statements.len());
         let position = |at: usize| {
             u32::try_from(at).expect("a generation holds fewer than u32::MAX edge statements")
         };
+        let mut outgoing = Vec::with_capacity(statements.len());
         for group in statements.chunk_by(|a, b| a.0 == b.0) {
-            base.ids.push(group[0].0);
-            base.starts.push(base.statements.len());
-            // `edge_statements` sorts each run by (created_at, block, row),
-            // and one block names a statement once.
-            for &(_, created_at, block, row) in group {
-                base.statements.push((
-                    created_at,
-                    u32::try_from(block).expect("a generation holds fewer than u32::MAX blocks"),
-                    u32::try_from(row).expect("a block holds fewer than u32::MAX rows"),
-                ));
+            let (eid, start) = (group[0].0, base.statements.len());
+            base.ids.push(eid);
+            base.starts.push(start);
+            // The statements sort each run by (created_at, block, row), and
+            // one block names a statement once.
+            for &(_, created_at, block, row, _) in group {
+                base.statements.push((created_at, block, row));
             }
+            let range = (position(start), position(base.statements.len()));
+            outgoing.extend(group.iter().map(|&(.., src)| (src, eid, range)));
         }
         base.starts.push(base.statements.len());
         let work = statements.len() as u64;
         drop(statements);
         base.ids.shrink_to_fit();
         base.starts.shrink_to_fit();
-        // One face at a time, from the finished base: the incidence vector a
-        // face is sorted from is the build's largest transient (40 bytes per
-        // statement), so only one is ever held.
-        let incidences = |base: &FlatIndex, end: fn(&AdjacencyEntry) -> VId| {
-            let mut incidences = Vec::with_capacity(base.statements.len());
-            for (at, &eid) in base.ids.iter().enumerate() {
-                let (start, end_at) = (base.starts[at], base.starts[at + 1]);
-                let range = (position(start), position(end_at));
-                for &(_, block, row) in &base.statements[start..end_at] {
-                    incidences.push((
-                        end(&blocks[block as usize].as_ref()[row as usize]),
-                        eid,
-                        range,
-                    ));
-                }
-            }
-            incidences
-        };
-        base.outgoing = FlatFace::build(incidences(&base, |entry| entry.src));
-        base.incoming = FlatFace::build(incidences(&base, |entry| entry.dst));
+        base.outgoing = FlatFace::build(outgoing);
+        // The same statements in the same order, now with their targets.
+        let statements = edge_statements_with_endpoint(blocks, |entry| entry.dst);
+        let mut incoming = Vec::with_capacity(statements.len());
+        for (at, &eid) in base.ids.iter().enumerate() {
+            let (start, end) = (base.starts[at], base.starts[at + 1]);
+            let range = (position(start), position(end));
+            incoming.extend(
+                statements[start..end]
+                    .iter()
+                    .map(|&(.., dst)| (dst, eid, range)),
+            );
+        }
+        drop(statements);
+        base.incoming = FlatFace::build(incoming);
         Self {
             base: std::sync::Arc::new(base),
             histories: IndexMap::new(),
@@ -1362,7 +1394,7 @@ impl PropertyEqualityIndex {
         }
         // `unit_set` charges only the set it builds, so grouping order leaves
         // every `work` count as the per-row maps gave it.
-        statements.sort_unstable();
+        sort_by_leading_identity(&mut statements, |&(vid, ..)| vid.0);
         let histories = statements
             .chunk_by(|a, b| a.0 == b.0)
             .map(|group| {
@@ -2256,6 +2288,66 @@ mod indexed_tests {
             );
             assert_nested_avl(&vertices.0);
         }
+    }
+
+    /// A generation large enough that its statements and both faces take the
+    /// identity bucket sort (more than 4,096 of each), with identities as
+    /// wide as a keyed permutation's, restatements, retirements and shared
+    /// endpoints, builds exactly what folding its blocks one at a time
+    /// builds: each face's endpoints, read per pass in block order, land on
+    /// their own identity's statement range.
+    #[test]
+    fn large_bulk_builds_with_wide_identities_equal_the_incremental_fold() {
+        let mut state = 0x0bad_5eed_0000_0001_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut wide = move || (u128::from(next()) << 64) | u128::from(next());
+        let vertices: Vec<VId> = (0..900).map(|_| VId(wide())).collect();
+        let edges: Vec<(EId, VId, VId, RelationId)> = (0..6_000)
+            .map(|_| {
+                let draw = wide();
+                (
+                    EId(wide()),
+                    vertices[(draw % 900) as usize],
+                    vertices[((draw >> 20) % 900) as usize],
+                    RelationId(1 + ((draw >> 40) % 2) as u64),
+                )
+            })
+            .collect();
+        let mut blocks = Vec::new();
+        for seq in 1..=4_u64 {
+            let mut block = Vec::new();
+            for &(eid, src, dst, relation) in &edges {
+                let draw = wide();
+                // Every edge first, then about a quarter restated per block.
+                if seq == 1 || draw % 4 == 0 {
+                    block.push(AdjacencyEntry {
+                        src,
+                        dst,
+                        relation,
+                        eid,
+                        created_at: CommitSeq(seq),
+                        retired_at: ((draw >> 8) % 9 == 0).then_some(CommitSeq(seq)),
+                    });
+                }
+            }
+            blocks.push(block);
+        }
+        let statements: usize = blocks.iter().map(Vec::len).sum();
+        assert!(statements > 9_000, "{statements}");
+        let built = AdjacencyIndex::build(&blocks);
+        let mut folded = AdjacencyIndex::build(&[] as &[Vec<AdjacencyEntry>]);
+        for carried in 0..blocks.len() {
+            folded = folded.extend(&blocks[..=carried], carried);
+        }
+        assert!(built.equivalent(&folded), "large adjacency build != fold");
+        assert_flat(&built);
+        assert_eq!(built.base.ids.len(), 6_000);
+        assert!(built.base.outgoing.ids.len() > 4_096 && built.base.incoming.ids.len() > 4_096);
     }
 
     /// A visit reads each incident identity's history from its face entry. It
