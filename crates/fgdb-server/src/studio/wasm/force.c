@@ -11,7 +11,7 @@
 #define EXPORT(name) __attribute__((export_name(name)))
 
 typedef struct { float x,y,vx,vy,fx,fy,mass,radius,tx,ty; int pinned; } Node;
-typedef struct { int a,b; } Edge;
+typedef struct { int a,b,directed; } Edge;
 typedef struct { float x,y,half,mass,mx,my,radius; int start,end,child[4]; } Quad;
 static Node nodes[NMAX];
 static Edge edges[EMAX];
@@ -20,6 +20,7 @@ static int order[NMAX], temporary[NMAX], n, m, qn, ticks;
 static float positions[NMAX*2];
 static float alpha=1, charge=850, length=90, gravity=0.006f, separation=1, grouping=0;
 static float energy;
+static float flow_strength;
 static unsigned long long visits;
 static int ready;
 static float absf(float v) { return v<0?-v:v; }
@@ -30,9 +31,9 @@ static float root(float v) { return __builtin_sqrtf(v); }
 
 EXPORT("init") int init(int count,int links) {
     if(count<0 || count>NMAX || links<0 || links>EMAX) return 0;
-    n=count; m=links; ticks=0; alpha=1; energy=0; visits=0; ready=0;
+    n=count; m=links; ticks=0; alpha=1; energy=0; visits=0; ready=0; flow_strength=0;
     for(int i=0;i<n;i++) { nodes[i]=(Node){0,0,0,0,0,0,1,8,0,0,0}; order[i]=i; }
-    for(int i=0;i<m;i++) edges[i]=(Edge){-1,-1};
+    for(int i=0;i<m;i++) edges[i]=(Edge){-1,-1,0};
     return 1;
 }
 EXPORT("node") int node(int i,float x,float y,float mass,float radius,float tx,float ty) {
@@ -43,7 +44,18 @@ EXPORT("node") int node(int i,float x,float y,float mass,float radius,float tx,f
 }
 EXPORT("edge") int edge(int i,int a,int b) {
     if(i<0||i>=m||a<0||a>=n||b<0||b>=n) return 0;
-    edges[i]=(Edge){a,b}; return 1;
+    edges[i]=(Edge){a,b,0}; return 1;
+}
+/* Direction is supplied only for explicit stored endpoints. A path's traversal
+ * order is not evidence of storage direction. These display forces preserve
+ * cycles and parallel edges; they never invent a DAG or change query topology. */
+EXPORT("direction") int direction(int i,int directed) {
+    if(i<0||i>=m||(directed!=0&&directed!=1)) return 0;
+    edges[i].directed=directed; return 1;
+}
+EXPORT("flow") int flow(float strength) {
+    if(!finite(strength)||strength<0||strength>0.3f) return 0;
+    flow_strength=strength; alpha=1; ticks=0; return 1;
 }
 EXPORT("configure") int configure(float repulsion,float distance,float center,float collision,float cluster) {
     if(!finite(repulsion)||!finite(distance)||!finite(center)||!finite(collision)||!finite(cluster)
@@ -143,6 +155,15 @@ static void step(void) {
         float d=maxf(root(dx*dx+dy*dy),0.1f);
         float f=(d-length)*0.055f*alpha/d;
         a->fx+=dx*f; a->fy+=dy*f; b->fx-=dx*f; b->fy-=dy*f;
+        if(e.directed) {
+            /* A soft left-to-right preference, not a hard rank constraint.
+             * Equal/opposite forces also handle cycles without a special case.
+             * The usual spring, repulsion and collision remain active. */
+            float along=(dx-length)*flow_strength*alpha;
+            a->fx+=along; b->fx-=along;
+            float cross=dy*flow_strength*0.2f*alpha;
+            a->fy+=cross; b->fy-=cross;
+        }
     }
     energy=0;
     for(int i=0;i<n;i++) {
