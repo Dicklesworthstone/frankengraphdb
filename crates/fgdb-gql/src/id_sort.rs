@@ -1,7 +1,7 @@
 //! Sorting by engine identities in about two moves per item.
 //!
 //! Identities are keyed permutations, so their high bits are well spread. A
-//! large array is first distributed into buckets by the (at most 16) most
+//! large array is first distributed into buckets by the (at most 20) most
 //! significant bits in which its leading keys differ, then each bucket is
 //! sorted. Each item moves about twice, not once per quicksort level:
 //! comparison-sorting a closure's 72-byte edges was a seventh of a pokec
@@ -32,10 +32,10 @@ pub fn sort_by_leading_identity<T: Copy>(
         .iter()
         .fold(0_u128, |differ, item| differ | (key(item) ^ first));
     let top = u128::BITS - differ.leading_zeros();
-    // About sixteen items per bucket.
+    // About sixteen items per bucket, in at most 2^20 buckets.
     let bits = (usize::BITS - items.len().leading_zeros())
         .saturating_sub(4)
-        .clamp(8, 16);
+        .clamp(8, 20);
     if items.len() <= DIRECT || top <= bits {
         sort(items);
         return;
@@ -133,5 +133,27 @@ mod tests {
             }
         }
         assert_eq!(checked, 36);
+    }
+
+    /// An array past 2^20 items takes more than sixteen bucket bits (a
+    /// generation's lazy adjacency build sorts tens of millions of
+    /// statements and incidences), and still sorts exactly as the
+    /// comparison sort does.
+    #[test]
+    fn arrays_past_a_million_items_take_wider_buckets_and_the_same_order() {
+        let mut state = 0x5eed_1d50_0000_0002_u64;
+        let mut random = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            u128::from(state)
+        };
+        let mut items: Vec<(u128, u32)> = (0..1_100_000_u32)
+            .map(|at| ((random() << 64) | random(), at))
+            .collect();
+        let mut expected = items.clone();
+        expected.sort_unstable();
+        sort_by_leading_identity(&mut items, |item| item.0, <[_]>::sort_unstable);
+        assert_eq!(items, expected);
     }
 }
