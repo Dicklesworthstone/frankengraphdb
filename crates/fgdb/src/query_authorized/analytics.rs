@@ -372,8 +372,10 @@ fn replay<Clock: FnMut() -> u64, O: Observe>(
                     if let Some(total) = units.checked_mul(n).filter(|_| polls == 0 && !node) {
                         let mut taken = 0;
                         let stretch = live.units_one_by_one(total, &mut taken);
-                        if units > 0 {
-                            (done, partial) = (taken / units, taken % units);
+                        if let (Some(items), Some(rest)) =
+                            (taken.checked_div(units), taken.checked_rem(units))
+                        {
+                            (done, partial) = (items, rest);
                         }
                         return stretch.map_err(control_error);
                     }
