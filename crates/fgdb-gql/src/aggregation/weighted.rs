@@ -1466,23 +1466,35 @@ fn chain_shape(aggregate: &PreparedGraphAggregate) -> Option<Chain<'_>> {
     })
 }
 
-/// Relation multiplicities oriented along the chain, and self-loop counts.
+/// Relation multiplicities oriented along the chain, and self-loop counts,
+/// in one sorted array per relation: each source's targets ascending, the
+/// sources ascending, so a source's targets read in the order the per-source
+/// ordered maps this replaces gave them. Building a map per source was most
+/// of a pokec two-hop's chain setup.
 #[derive(Default)]
 struct Hops {
-    out: BTreeMap<VId, BTreeMap<VId, u128>>,
-    loops: BTreeMap<VId, u128>,
+    sources: Vec<VId>,
+    /// `targets[starts[at]..starts[at + 1]]` are `sources[at]`'s.
+    starts: Vec<usize>,
+    targets: Vec<(VId, u128)>,
+    loops: Vec<(VId, u128)>,
 }
 
 impl Hops {
+    fn out(&self, from: VId) -> &[(VId, u128)] {
+        self.sources.binary_search(&from).map_or(&[], |at| {
+            &self.targets[self.starts[at]..self.starts[at + 1]]
+        })
+    }
     fn multiplicity(&self, from: VId, to: VId) -> u128 {
-        self.out
-            .get(&from)
-            .and_then(|out| out.get(&to))
-            .copied()
-            .unwrap_or(0)
+        let out = self.out(from);
+        out.binary_search_by_key(&to, |&(to, _)| to)
+            .map_or(0, |at| out[at].1)
     }
     fn loops(&self, vertex: VId) -> u128 {
-        self.loops.get(&vertex).copied().unwrap_or(0)
+        self.loops
+            .binary_search_by_key(&vertex, |&(vertex, _)| vertex)
+            .map_or(0, |at| self.loops[at].1)
     }
 }
 
@@ -1512,12 +1524,12 @@ fn chain_counts<E, C>(
         // Sized by the level's pairs, so the map never rehashes as it fills.
         let pairs = levels[at]
             .iter()
-            .map(|&(vertex, _)| hop(at).out.get(&vertex).map_or(0, BTreeMap::len))
+            .map(|&(vertex, _)| hop(at).out(vertex).len())
             .fold(0_usize, usize::saturating_add);
         let mut next =
             crate::id_hash::IdMap::<VId, u128>::with_capacity_and_hasher(pairs, Default::default());
         for &(vertex, walks) in &levels[at] {
-            for (&far, &multiplicity) in hop(at).out.get(&vertex).into_iter().flatten() {
+            for &(far, multiplicity) in hop(at).out(vertex) {
                 control(GlaExecutionEvent::Work)?;
                 let slot = next.entry(far).or_insert(0);
                 *slot = walks
@@ -1529,8 +1541,13 @@ fn chain_counts<E, C>(
         for _ in &next {
             control(GlaExecutionEvent::ScratchEntry)?;
         }
+        // Distinct vertices, so the bucket sort's order is the comparison's.
         let mut next: Vec<(VId, u128)> = next.into_iter().collect();
-        next.sort_unstable_by_key(|&(vertex, _)| vertex);
+        crate::id_sort::sort_by_leading_identity(
+            &mut next,
+            |&(vertex, _)| vertex.0,
+            |level| level.sort_unstable_by_key(|&(vertex, _)| vertex),
+        );
         levels.push(next);
     }
     let walks_into = |level: &[(VId, u128)], vertex: VId| {
@@ -1555,7 +1572,7 @@ fn chain_counts<E, C>(
         for &a in sources {
             let loops = hop(0).loops(a);
             if same(0, 1) && loops > 0 {
-                for (&end, &third) in hop(2).out.get(&a).into_iter().flatten() {
+                for &(end, third) in hop(2).out(a) {
                     control(GlaExecutionEvent::Work)?;
                     accumulate(
                         &mut n12,
@@ -1565,7 +1582,7 @@ fn chain_counts<E, C>(
                 }
             }
             if same(0, 2) {
-                for (&end, &first) in hop(0).out.get(&a).into_iter().flatten() {
+                for &(end, first) in hop(0).out(a) {
                     control(GlaExecutionEvent::Work)?;
                     let back = hop(1).multiplicity(end, a);
                     if back > 0 {
@@ -1707,12 +1724,13 @@ where
     let mut hops = BTreeMap::<RelationId, Hops>::new();
     for (relation, mut pairs) in arrivals {
         crate::id_sort::sort_by_leading_identity(&mut pairs, |pair| pair.0.0, <[_]>::sort_unstable);
-        let mut out = Vec::new();
-        let mut loops = Vec::new();
+        let mut hop = Hops {
+            starts: vec![0],
+            ..Hops::default()
+        };
         let mut at = 0;
         while at < pairs.len() {
             let from = pairs[at].0;
-            let mut targets = Vec::new();
             while at < pairs.len() && pairs[at].0 == from {
                 let to = pairs[at].1;
                 let start = at;
@@ -1721,19 +1739,14 @@ where
                 }
                 let count = (at - start) as u128;
                 if from == to {
-                    loops.push((from, count));
+                    hop.loops.push((from, count));
                 }
-                targets.push((to, count));
+                hop.targets.push((to, count));
             }
-            out.push((from, targets.into_iter().collect()));
+            hop.sources.push(from);
+            hop.starts.push(hop.targets.len());
         }
-        hops.insert(
-            relation,
-            Hops {
-                out: out.into_iter().collect(),
-                loops: loops.into_iter().collect(),
-            },
-        );
+        hops.insert(relation, hop);
     }
     // A fixed chain binds its source from its first atom's edges: an edge
     // scan admits no vertex table unless rows are read, so the admitted
@@ -1742,7 +1755,7 @@ where
         admitted.into_iter().collect()
     } else {
         hops.get(&chain.relations[0])
-            .map(|hop| hop.out.keys().copied().collect())
+            .map(|hop| hop.sources.clone())
             .unwrap_or_default()
     };
     let mut sources = Vec::new();
