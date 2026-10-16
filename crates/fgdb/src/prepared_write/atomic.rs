@@ -245,6 +245,17 @@ impl<V: Vfs + Clone> Database<V> {
                 .or_insert_with(|| WriteBatch::new(batch.relation))
                 .extend(batch)?;
         }
+        if groups.len() == 1 {
+            // One group's ordinals start at zero and its template is already
+            // canonical, so rebuilding it from its own coordinates (as below)
+            // reproduces it exactly: a bulk-load chunk of one relation
+            // canonicalized every row twice (fgdb-load-beats-memgraph-xf2n8).
+            let (relation, batch) = groups.pop_first().expect("one group");
+            let prepared = self.prepare_write_checked(batch)?;
+            let writes = written_elements(&prepared.template)?;
+            Independence::default().admit(relation, &prepared.dependencies.elements, &writes)?;
+            return Ok(prepared);
+        }
         let mut independence = Independence::default();
         let mut dependencies = PreparedDependencies::default();
         let mut coordinates = Vec::with_capacity(groups.len());
@@ -491,5 +502,100 @@ mod tests {
         assert!(SharedVertexPrefix::discover(&batches, |_| true).is_none());
         let prefix = SharedVertexPrefix::discover(&batches, |_| false).unwrap();
         assert_eq!(prefix.rows.len(), 2);
+    }
+
+    /// One relation group's preparation is returned as prepared: the same
+    /// template, basis and dependencies as rebuilding it from its own
+    /// coordinates through `finish_atomic_preparation` (the multi-group
+    /// path, and this path's own before), or the same refusal. The batches
+    /// are random single-relation mixes against a seeded graph: creates,
+    /// edges between live and missing vertices, property sets and removals,
+    /// edge and vertex deletes.
+    #[test]
+    fn one_group_is_prepared_once_and_equals_its_rebuild() {
+        use crate::{DatabaseKeys, MemVfs};
+        use asupersync::lab::run_async_under_lab;
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+        let ((), report) = run_async_under_lab(0x6174_6f01, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let keys = DatabaseKeys::new(
+                [0x51; 32],
+                DatabaseSecurityNamespaceId([0x52; 32]),
+                [0x53; 32],
+            );
+            let mut db = Database::create_with_vfs(&cx, vfs, &path, keys)
+                .await
+                .unwrap();
+            let p = PropertyKeyId(1);
+            let mut seed = WriteBatch::new(RelationId(1));
+            for id in 1..=8 {
+                seed.create_vertex(VId(id), vec![], vec![(p, CanonicalScalar::Int(id as i64))]);
+            }
+            for at in 0..6 {
+                seed.add_edge(EId(100 + at), VId(1 + at), VId(2 + at), vec![]);
+            }
+            db.write(&cx, seed).await.unwrap();
+            let mut state = 0x6174_6f01_0000_0001_u64;
+            let mut random = move |bound: u64| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state % bound
+            };
+            let (mut prepared, mut refused) = (0, 0);
+            for case in 0..300_u128 {
+                let relation = RelationId(1 + random(2));
+                let mut batch = WriteBatch::new(relation);
+                for _ in 0..1 + random(6) {
+                    let vertex = VId(1 + u128::from(random(10)));
+                    let value = Some(CanonicalScalar::Int(random(50) as i64));
+                    match random(6) {
+                        0 => batch.create_vertex(
+                            VId(1_000 + case * 10 + u128::from(random(10))),
+                            vec![],
+                            vec![(p, CanonicalScalar::Int(1))],
+                        ),
+                        1 => batch.add_edge(
+                            EId(5_000 + case * 10 + u128::from(random(10))),
+                            vertex,
+                            VId(1 + u128::from(random(10))),
+                            vec![(p, CanonicalScalar::Int(2))],
+                        ),
+                        2 => batch.set_vertex_property(vertex, p, value),
+                        3 => batch.set_vertex_property(vertex, p, None),
+                        4 => batch.delete_edge(EId(100 + u128::from(random(7)))),
+                        _ => batch.delete_vertex(vertex),
+                    };
+                }
+                let fast = db.prepare_atomic_writes(vec![batch.clone()]);
+                let rebuilt = (|| {
+                    let one = db.prepare_write_checked(batch)?;
+                    let writes = written_elements(&one.template)?;
+                    Independence::default().admit(relation, &one.dependencies.elements, &writes)?;
+                    let coordinates = one.template.coordinate_entries().to_vec();
+                    db.finish_atomic_preparation(coordinates, one.dependencies)
+                })();
+                match (fast, rebuilt) {
+                    (Ok(fast), Ok(rebuilt)) => {
+                        assert_eq!(fast.template, rebuilt.template, "case {case}");
+                        assert_eq!(fast.basis, rebuilt.basis);
+                        assert_eq!(fast.dependencies.elements, rebuilt.dependencies.elements);
+                        assert_eq!(fast.dependencies.adjacency, rebuilt.dependencies.adjacency);
+                        prepared += 1;
+                    }
+                    (Err(fast), Err(rebuilt)) => {
+                        assert_eq!(format!("{fast:?}"), format!("{rebuilt:?}"), "case {case}");
+                        refused += 1;
+                    }
+                    (fast, rebuilt) => panic!("case {case}: {fast:?} vs {rebuilt:?}"),
+                }
+            }
+            assert!(prepared > 60 && refused > 60, "{prepared} {refused}");
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
