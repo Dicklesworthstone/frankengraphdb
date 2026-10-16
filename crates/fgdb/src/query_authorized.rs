@@ -183,6 +183,27 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
         }
         self.next_run(n)
     }
+    /// Exactly `n` calls of `work_units(1)`, an open run's worth at a time:
+    /// a unit the open run admits is only counted, as `work_units` counts it,
+    /// and every other unit is that call itself. `done` counts the units it
+    /// completed, so a caller knows where a refusal stopped it.
+    fn units_one_by_one(&mut self, n: u64, done: &mut u64) -> Result<(), QueryError> {
+        let mut left = n;
+        while left > 0 {
+            if self.run_left > 0 {
+                let take = left.min(self.run_left);
+                self.run_left -= take;
+                self.deferred += take;
+                left -= take;
+                *done += take;
+            } else {
+                self.work_units(1)?;
+                left -= 1;
+                *done += 1;
+            }
+        }
+        Ok(())
+    }
     #[inline(never)]
     fn next_run(&mut self, n: u64) -> Result<(), QueryError> {
         self.settle()?;

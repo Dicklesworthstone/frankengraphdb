@@ -366,6 +366,17 @@ fn replay<Clock: FnMut() -> u64, O: Observe>(
                 let (mut done, mut partial) = (0_u64, 0_u64);
                 let ran = (|| {
                     let mut live = execution.borrow_mut();
+                    // Nothing comes between these items' live units, so they
+                    // are one stretch of units; a remainder is the units of
+                    // the item a refusal stopped.
+                    if let Some(total) = units.checked_mul(n).filter(|_| polls == 0 && !node) {
+                        let mut taken = 0;
+                        let stretch = live.units_one_by_one(total, &mut taken);
+                        if units > 0 {
+                            (done, partial) = (taken / units, taken % units);
+                        }
+                        return stretch.map_err(control_error);
+                    }
                     for _ in 0..count {
                         for _ in 0..polls {
                             live.poll().map_err(control_error)?;
