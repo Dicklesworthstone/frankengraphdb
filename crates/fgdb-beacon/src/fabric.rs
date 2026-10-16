@@ -837,6 +837,48 @@ impl IndexSnapshot {
             .collect())
     }
 
+    /// Boolean text retrieval over this exact immutable generation. All
+    /// clauses are analyzed once and all segments share live-corpus statistics,
+    /// one work/scratch control and one top-k heap. Obsolete versions and
+    /// tombstones are excluded before testing positive or negative clauses.
+    ///
+    /// Eligibility restricts results, not the scoring corpus or read authority.
+    /// A later-segment failure discards the entire result; retained snapshots
+    /// remain independent of subsequent updates, rebuilds and compaction.
+    pub fn text_search_boolean(
+        &self,
+        query: crate::BooleanTextQuery<'_>,
+        k: usize,
+        eligible: impl Fn(VId) -> bool,
+        work: &mut dyn WorkControl,
+    ) -> Result<Vec<TextHit>, BeaconError> {
+        use crate::bm25::boolean::{AnalyzedBooleanQuery, finish_boolean_hits};
+
+        let config = self
+            .generation
+            .config
+            .text
+            .as_ref()
+            .ok_or(BeaconError::Disabled("text"))?;
+        let query = AnalyzedBooleanQuery::prepare(query, config, work)?;
+        let limit = k.min(self.generation.corpus.documents);
+        let mut best = BinaryHeap::new();
+        for segment in &self.generation.segments {
+            work.charge(1)?;
+            let visible = |id| self.visible_in(id, segment.generation) && eligible(id);
+            segment.text.search_boolean_into(
+                &query,
+                config,
+                &self.generation.corpus,
+                limit,
+                &visible,
+                &mut best,
+                work,
+            )?;
+        }
+        finish_boolean_hits(best, work)
+    }
+
     fn visible_in(&self, id: VId, generation: u64) -> bool {
         self.generation
             .live
