@@ -27,6 +27,29 @@ impl SpillSetJoinPlan {
     pub fn kind(&self) -> RowJoinKind {
         self.spec.kind()
     }
+    /// Positional canonical equality keys; each side is sorted independently
+    /// in this tuple order. Repeated positions do not require duplicate sorts.
+    pub fn keys(&self) -> &[(usize, usize)] {
+        self.spec.keys()
+    }
+    /// Fixed eligibility, not an adaptive choice or a retry after refusal.
+    /// A residual ON needs per-occurrence witnesses and keeps the existing
+    /// general join path. Equal NULL tuples still do not establish presence.
+    pub fn supports_merge_presence(&self) -> bool {
+        matches!(self.kind(), RowJoinKind::Semi | RowJoinKind::Anti)
+            && !self.keys().is_empty()
+            && self.spec.predicate().is_none()
+    }
+    pub fn compare_keys_with_control<E>(
+        &self,
+        left: &GraphValueRow,
+        right: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<core::cmp::Ordering, SpillSetRowError<E>> {
+        self.spec
+            .compare_keys_with_control(left, right, control)
+            .map_err(failure)
+    }
     pub fn validate_row_with_control<E>(
         &self,
         row: &GraphValueRow,
