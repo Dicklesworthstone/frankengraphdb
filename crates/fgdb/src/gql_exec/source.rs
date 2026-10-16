@@ -3413,7 +3413,7 @@ fn slot_closure<'a, E>(
                  admitted: usize,
                  remaining: u64,
                  control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
-     -> Result<bool, E> {
+     -> Result<Option<usize>, E> {
         let mut incidences = 0_usize;
         for &vertex in frontier {
             control(SourceEvent::Work)?;
@@ -3423,8 +3423,9 @@ fn slot_closure<'a, E>(
         // no faster than the snapshot's: a hub root projects at the snapshot
         // mean, and an unrelated dense component never inflates a sparse walk.
         let growth = (incidences / frontier.len().max(1)).clamp(1, mean);
-        Ok(closure_fits(admitted, incidences, remaining, growth, cap)
+        Ok((closure_fits(admitted, incidences, remaining, growth, cap)
             || admitted.saturating_add(incidences) <= trial)
+            .then_some(incidences))
     };
     let width = if root.is_some() { 2 } else { 1 };
     // The admitted edges, each once, in admission order. The root lookup and
@@ -3482,7 +3483,7 @@ fn slot_closure<'a, E>(
     let root_slot = root.map_or(0, |(_, _, slot)| slot);
     slots[root_slot].extend(roots.iter().copied());
     if let Some((relation, lookup_direction, root_slot)) = root {
-        if !probe(&roots, lookup_direction, 0, later(0), control)? {
+        if probe(&roots, lookup_direction, 0, later(0), control)?.is_none() {
             return Ok(None);
         }
         for root in roots {
@@ -3536,14 +3537,22 @@ fn slot_closure<'a, E>(
         while depth < maximum && !frontier.is_empty() {
             depth += 1;
             let remaining = u64::from(maximum - depth) + later(at + 1);
-            if !probe(
+            let Some(incidences) = probe(
                 &frontier,
                 step.direction,
                 selected.len(),
                 remaining,
                 control,
-            )? {
+            )?
+            else {
                 return Ok(None);
+            };
+            // The level meets at most its frontier's incidences: room for
+            // them up front, so neither the edges nor an Expand's endpoints
+            // regrow as the level fills (a pokec two-hop's 410k).
+            selected.reserve(incidences);
+            if step.walk.is_none() {
+                target.reserve(incidences);
             }
             let mut next = Vec::new();
             for vertex in frontier {
