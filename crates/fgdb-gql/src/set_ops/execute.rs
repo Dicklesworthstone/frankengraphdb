@@ -315,11 +315,13 @@ where
         }
     }
     let mut rows = execution.value;
-    merge::sort(
-        &mut rows,
-        &mut |event| meter.event(event),
-        &mut |a, b, control| compare_rows(a, b, &[], control),
-    )?;
+    if !query.preserves_row_order() {
+        merge::sort(
+            &mut rows,
+            &mut |event| meter.event(event),
+            &mut |a, b, control| compare_rows(a, b, &[], control),
+        )?;
+    }
     Ok(rows)
 }
 

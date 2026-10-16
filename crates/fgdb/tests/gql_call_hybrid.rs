@@ -343,16 +343,19 @@ fn every_lane_combination_equals_the_library_search() {
                 .unwrap();
             assert!(hits.len() >= 3, "{arguments}: a thin oracle proves little");
             let best: Vec<GraphValue> = hits.iter().map(|hit| GraphValue::Vertex(hit.id)).collect();
-            let want = ordered((Vec::new(), expected(hits))).1;
+            let want_ranked = expected(hits);
+            let want = ordered((Vec::new(), want_ranked.clone())).1;
             let parameters = if arguments.contains("$q") {
                 parameters.clone()
             } else {
                 GqlParameters::new()
             };
             let text = format!("CALL hybrid.search({arguments}) {OUTPUTS}");
-            let (columns, actual) = ordered(rows(
+            let (columns, raw) = rows(
                 db.query(cx, &text, &parameters, symbols, policy()).unwrap(),
-            ));
+            );
+            assert_eq!(raw, want_ranked, "rank order without ORDER BY: {arguments}");
+            let (columns, actual) = ordered((columns, raw));
             assert_eq!(
                 columns,
                 [
@@ -365,10 +368,15 @@ fn every_lane_combination_equals_the_library_search() {
                 ]
             );
             assert_eq!(actual, want, "{arguments}");
-            let (_, actual) = ordered(rows(
+            let (_, txn_raw) = rows(
                 txn.query(&db, cx, &text, &parameters, symbols, policy())
                     .unwrap(),
-            ));
+            );
+            assert_eq!(
+                txn_raw, want_ranked,
+                "transaction rank order without ORDER BY: {arguments}"
+            );
+            let (_, actual) = ordered((Vec::new(), txn_raw));
             assert_eq!(actual, want, "transaction {arguments}");
             // Ordered by the fused score, the rows come best first, ties by
             // ascending vertex: the oracle's own order.
@@ -515,6 +523,21 @@ fn retrieval_composes_with_property_reads_ordering_and_limits() {
         );
         assert_eq!(columns, ["title", "score"]);
         assert_eq!(actual, want);
+        // Without an explicit ORDER BY, the procedure's rank order still
+        // survives implied vertex property reads and LIMIT (fgdb-euy8y).
+        let (unranked_cols, unranked) = rows(
+            db.query(
+                cx,
+                "CALL hybrid.search(text => 'analytical engine', text_property => 'body', \
+                 k => 4) YIELD node, score RETURN node.title AS title, score LIMIT 2",
+                &GqlParameters::new(),
+                symbols,
+                policy(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(unranked_cols, ["title", "score"]);
+        assert_eq!(unranked, want);
     });
 }
 

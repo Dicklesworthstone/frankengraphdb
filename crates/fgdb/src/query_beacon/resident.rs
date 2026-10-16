@@ -206,12 +206,36 @@ fn definition(options: &Options, work: &mut impl WorkControl) -> Result<Options,
     })
 }
 
+pub(crate) fn resident_to_read_error(
+    error: Error,
+) -> fgdb_beacon::read::ReadError<ReadError, Cancel> {
+    match error {
+        Error::Source(error) => fgdb_beacon::read::ReadError::Read(error),
+        Error::Interrupted(error) => fgdb_beacon::read::ReadError::Interrupted(error),
+        Error::Index(error) => fgdb_beacon::read::ReadError::Index(error),
+        _ => fgdb_beacon::read::ReadError::Index(BeaconError::Invariant(
+            "unexpected resident search error",
+        )),
+    }
+}
+
 fn search(
     index: &IndexSnapshot,
     definition: &Options,
     cx: &QueryCx,
     query: Search<'_>,
     policy: ReadPolicy,
+) -> Result<Rows, Error> {
+    search_filtered(index, definition, cx, query, policy, |_| true)
+}
+
+fn search_filtered(
+    index: &IndexSnapshot,
+    definition: &Options,
+    cx: &QueryCx,
+    query: Search<'_>,
+    policy: ReadPolicy,
+    eligible: impl Fn(VId) -> bool,
 ) -> Result<Rows, Error> {
     cx.with_restriction(|| {
         cx.checkpoint().map_err(Error::Interrupted)?;
@@ -233,7 +257,7 @@ fn search(
                 return Err(BeaconError::Disabled("text").into());
             }
             query.validate(&definition.index, &mut SharedWork(&work))?;
-            let rows = query.execute(index, &mut SharedWork(&work))?;
+            let rows = query.execute_filtered(index, eligible, &mut SharedWork(&work))?;
             // Empty and zero-k searches still pass final live admission.
             work.borrow_mut().charge(1)?;
             Ok(rows)
@@ -272,6 +296,23 @@ impl ResidentIndex {
         policy: ReadPolicy,
     ) -> Result<Rows, Error> {
         search(&self.index.snapshot(), &self.definition, cx, query, policy)
+    }
+
+    pub fn search_filtered(
+        &self,
+        cx: &QueryCx,
+        query: Search<'_>,
+        policy: ReadPolicy,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Rows, Error> {
+        search_filtered(
+            &self.index.snapshot(),
+            &self.definition,
+            cx,
+            query,
+            policy,
+            eligible,
+        )
     }
 
     /// Catch up through one explicitly selected native sequence (None = live).
@@ -542,6 +583,16 @@ impl PinnedIndex {
         policy: ReadPolicy,
     ) -> Result<Rows, Error> {
         search(&self.index, &self.definition, cx, query, policy)
+    }
+
+    pub fn search_filtered(
+        &self,
+        cx: &QueryCx,
+        query: Search<'_>,
+        policy: ReadPolicy,
+        eligible: impl Fn(VId) -> bool,
+    ) -> Result<Rows, Error> {
+        search_filtered(&self.index, &self.definition, cx, query, policy, eligible)
     }
 }
 

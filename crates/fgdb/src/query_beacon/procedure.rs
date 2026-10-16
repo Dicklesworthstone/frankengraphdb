@@ -758,6 +758,51 @@ impl HybridSearch {
             .map(|hits| (hits, filter.scratch_entries()))
     }
 
+    fn execute_pinned_filtered(
+        &self,
+        pin: &super::PinnedIndex,
+        eligible: Option<&[GraphValue]>,
+        remaining: GqlQueryPolicy,
+        cx: &QueryCx,
+        work: &RefCell<impl WorkControl>,
+        source_failure: &RefCell<Option<ReadError>>,
+    ) -> Result<(Vec<GraphHybridHit>, u64), BeaconError> {
+        let filter = EndpointFilter::prepare(
+            eligible,
+            self.k,
+            remaining.evaluator.max_scratch_entries,
+            &mut SharedWork(work),
+        )?;
+        let mut policy = self.options.policy;
+        let remaining_scratch = usize::try_from(
+            remaining
+                .evaluator
+                .max_scratch_entries
+                .saturating_sub(filter.scratch_entries()),
+        )
+        .unwrap_or(usize::MAX);
+        policy.max_source_scratch = policy.max_source_scratch.min(remaining_scratch);
+        let result = match pin.search_graph_filtered_with_work(
+            cx,
+            self.query(),
+            self.expansion(),
+            policy,
+            |id| filter.admits(id, work),
+            work,
+        ) {
+            Ok(hits) => Ok(hits),
+            Err(super::ResidentIndexError::Index(error)) => Err(error),
+            Err(super::ResidentIndexError::Source(error)) => {
+                *source_failure.borrow_mut() = Some(error);
+                Err(BeaconError::Cancelled)
+            }
+            Err(_) => Err(BeaconError::Cancelled),
+        };
+        filter
+            .finish(result)
+            .map(|hits| (hits, filter.scratch_entries()))
+    }
+
     /// Fused hits as rows of exactly the YIELD columns, best first.
     pub(crate) fn rows(&self, hits: Vec<GraphHybridHit>) -> Vec<GraphValueRow> {
         let rank = |rank: Option<core::num::NonZeroU32>| {
@@ -815,33 +860,60 @@ pub(crate) fn privileged(
     remaining: GqlQueryPolicy,
     cx: &QueryCx,
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
+    privileged_with_registry(snapshot, None, at, call, arguments, remaining, cx)
+}
+
+/// Privileged host with optional access to the opened database's maintained
+/// Beacon registry. Reuses a healthy current pin when one covers the bound
+/// definition and lanes; otherwise builds for this execution from `snapshot`.
+pub(crate) fn privileged_with_registry(
+    snapshot: &Snapshot,
+    maintained: Option<&super::BeaconRegistry>,
+    at: CommitSeq,
+    call: &PreparedProcedureCall,
+    arguments: &[GraphValue],
+    remaining: GqlQueryPolicy,
+    cx: &QueryCx,
+) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
     let (search, eligible) =
         HybridSearch::bind_snapshot_filtered(call, arguments, at, remaining).map_err(refuse)?;
     let spent = Cell::new(0_u64);
     let admitted = Cell::new(0_u64);
+    let source_failure = RefCell::new(None);
     let work = RefCell::new(Meter::new(search.options.policy.max_work_units, |units| {
         spent.set(spent.get().saturating_add(units as u64));
         cx.checkpoint()
     }));
-    let result = search.execute_filtered(
-        eligible,
-        remaining,
-        snapshot,
-        at,
-        &work,
-        Scan::Metered,
-        |_| {
-            admitted.set(admitted.get() + 1);
-            Ok(true)
-        },
-        |_| true,
-        |_| true,
-        |_| true,
-    );
-    let (hits, filter_entries) = work
-        .into_inner()
-        .finish::<ReadError, _>(result)
-        .map_err(failure)?;
+    let result = if search.uses_indexed_graph()
+        && let Some(pin) = maintained.and_then(|registry| {
+            registry.find_for_graph_search(at, &search.options, search.query())
+        }) {
+        search.execute_pinned_filtered(&pin, eligible, remaining, cx, &work, &source_failure)
+    } else {
+        search.execute_filtered(
+            eligible,
+            remaining,
+            snapshot,
+            at,
+            &work,
+            Scan::Metered,
+            |_| {
+                admitted.set(admitted.get() + 1);
+                Ok(true)
+            },
+            |_| true,
+            |_| true,
+            |_| true,
+        )
+    };
+    let finish = work.into_inner().finish::<ReadError, _>(result);
+    let (hits, filter_entries) = match (finish, source_failure.into_inner()) {
+        (Err(BeaconReadError::Interrupted(cancel)), _) => {
+            return Err(GqlQueryError::Interrupted(cancel));
+        }
+        (_, Some(error)) => return Err(GqlQueryError::Source(GqlError::Read(error))),
+        (other, None) => other.map_err(failure)?,
+    };
     let value = search.rows(hits);
     Ok(GqlQueryExecution {
         rows: GqlExecutionStats {

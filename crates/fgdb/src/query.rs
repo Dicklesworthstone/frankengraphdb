@@ -36,7 +36,7 @@ pub use authorized::{
 pub(crate) use beacon::BeaconRegistry;
 pub(crate) use beacon::procedure::{
     EndpointFilter, HybridSearch, is_hybrid, privileged as hybrid_procedure,
-    refuse as hybrid_refusal,
+    privileged_with_registry as hybrid_procedure_with_registry, refuse as hybrid_refusal,
 };
 pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
 pub use beacon::{

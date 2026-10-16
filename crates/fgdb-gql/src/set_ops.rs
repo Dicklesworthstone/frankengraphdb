@@ -621,10 +621,10 @@ impl PreparedGraphSet {
     fn preserves_row_order(&self) -> bool {
         match &self.node {
             SetNode::Values | SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
-            // Procedure rows are canonically sorted on arrival, like a pattern;
-            // so are a write head's owned rows.
+            // Procedure rows are canonically sorted on arrival, like a pattern,
+            // unless the procedure itself defines a ranked output order (`hybrid.*`).
+            SetNode::ProcedureCall(call) => call.preserves_row_order(),
             SetNode::Pattern(_)
-            | SetNode::ProcedureCall(_)
             | SetNode::Owned
             | SetNode::Aggregate(_)
             | SetNode::Join { .. } => false,

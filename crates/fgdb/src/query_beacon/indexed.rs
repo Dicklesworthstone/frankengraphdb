@@ -343,6 +343,17 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Vec<GraphHybridHit>, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
+            let frontier = self.frontier().map_err(Error::Read)?;
+            let at = options.as_of.unwrap_or(frontier);
+            self.snapshot.check_frontier(at).map_err(Error::Read)?;
+            if let Some(pin) = self
+                .maintained_beacon
+                .find_for_graph_search(at, options, query)
+            {
+                return pin
+                    .search_graph_filtered(cx, query, expansion, options.policy, eligible)
+                    .map_err(super::resident::resident_to_read_error);
+            }
             self.read_session()
                 .map_err(Error::Read)?
                 .beacon_search_graph_indexed_filtered(cx, options, query, expansion, eligible)
