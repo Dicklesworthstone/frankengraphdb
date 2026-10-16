@@ -673,6 +673,66 @@ fn canonicalize_is_atomic_on_error() {
     );
 }
 
+/// `LogicalDeltaTemplate::build` canonicalizes the entries it owns by moving
+/// their rows instead of cloning them. It must build exactly what
+/// canonicalizing a copy through the borrowed `canonicalize` gives: the same
+/// template, with the copy's entries, or the same first error. Rows of every
+/// family and field variant, unsorted embedded collections, rows that refuse
+/// and coordinates that repeat are shuffled across one to three entries.
+#[test]
+fn build_equals_canonicalizing_a_copy() {
+    let mut state = 0x0b11_d0c0_0000_0001_u64;
+    let mut random = move |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % bound as u64) as usize
+    };
+    let mut pool = every_family_populated();
+    pool.extend(field_variants_of_every_arm());
+    pool.extend(embedded_collection_rows(7, 2).map(|(_, row)| row));
+    let refusing: Vec<DeltaRow> = embedded_collection_rows(2, 2).map(|(_, row)| row).into();
+    let (mut built, mut refused) = (0, 0);
+    for _ in 0..400 {
+        // A random subset, without replacement: a repeated row would only
+        // ever test the duplicate-row refusal.
+        let mut order: Vec<usize> = (0..pool.len()).collect();
+        for at in (1..order.len()).rev() {
+            order.swap(at, random(at + 1));
+        }
+        let mut rows: Vec<DeltaRow> = order[..1 + random(pool.len())]
+            .iter()
+            .map(|&at| pool[at].clone())
+            .collect();
+        if random(4) == 0 {
+            rows.insert(
+                random(rows.len() + 1),
+                refusing[random(refusing.len())].clone(),
+            );
+        }
+        let width = 1 + random(3);
+        let mut entries: Vec<CoordinateEntry> = (0..width)
+            .map(|at| entry(1 + random(2) as u128, 1, 3 + (at % 2) as u64, Vec::new()))
+            .collect();
+        for row in rows {
+            entries[random(width)].rows.push(row);
+        }
+        let mut copy = entries.clone();
+        let expected = canonicalize(&mut copy)
+            .and_then(|()| LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], copy.clone()));
+        let got = LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], entries);
+        assert_eq!(got, expected);
+        match got {
+            Ok(template) => {
+                assert_eq!(template.coordinate_entries(), copy.as_slice());
+                built += 1;
+            }
+            Err(_) => refused += 1,
+        }
+    }
+    assert!(built > 100 && refused > 100, "{built} {refused}");
+}
+
 // ---------------------------------------------------------------------------
 // Refusals
 // ---------------------------------------------------------------------------
