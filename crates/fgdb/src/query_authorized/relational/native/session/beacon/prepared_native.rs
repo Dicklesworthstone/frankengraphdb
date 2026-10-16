@@ -358,18 +358,18 @@ fn call_at(
             } else {
                 Vec::new()
             };
+            let mut kernel = super::graph::ScratchWork {
+                work: &work,
+                admit: &admit_scratch,
+            };
             if query.is_graph_only() {
-                query.fuse_graph_only(
-                    &graph,
-                    |id| filter.admits(id, &work),
-                    &mut SharedWork(&work),
-                )
+                query.fuse_graph_only(&graph, |id| filter.admits(id, &work), &mut kernel)
             } else {
                 index.index.hybrid_search_graph_filtered(
                     query,
                     &graph,
                     |id| filter.admits(id, &work),
-                    &mut SharedWork(&work),
+                    &mut kernel,
                 )
             }
         })())?;

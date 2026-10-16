@@ -383,7 +383,7 @@ fn prepared_graph_limits_count_reached_incidence_and_cannot_be_evaded_by_filteri
             .unwrap();
         let mut e = expansion();
         e.limits.max_input_edges = 4; // parallel 0->1 twice, 1->HIGH, 1->1
-        e.limits.max_source_scratch = 4;
+        e.limits.max_source_scratch = 64;
         let expected = session
             .search_beacon_graph_index_filtered(
                 &c.query(),
@@ -507,6 +507,14 @@ fn prepared_graph_limits_count_reached_incidence_and_cannot_be_evaded_by_filteri
         zero.limits.max_input_edges = 0;
         zero.limits.max_source_scratch = 0;
         let only = GraphHybridQuery::graph_only(2, 2, 1, 60).unwrap();
+        assert!(matches!(
+            session.search_beacon_graph_index(&c.query(), &prepared, only, zero, no_staging()),
+            Err(Error::Index(BeaconError::ResourceLimit {
+                resource: "prepared graph scratch entries",
+                limit: 0
+            }))
+        ));
+        zero.limits.max_source_scratch = 64;
         let rows = session
             .search_beacon_graph_index(&c.query(), &prepared, only, zero, no_staging())
             .unwrap();

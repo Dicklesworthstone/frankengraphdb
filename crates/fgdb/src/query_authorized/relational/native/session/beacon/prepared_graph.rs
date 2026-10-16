@@ -15,6 +15,25 @@ use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::stream::{VertexScanSource, VertexScanSourceError};
 use fgdb_warden::PlannerPredicates;
 
+/// Forward kernel scratch reservations into the host's already-selected
+/// cumulative admission callback without creating a second work allowance.
+pub(super) struct ScratchWork<'a, W, A> {
+    pub(super) work: &'a RefCell<W>,
+    pub(super) admit: &'a A,
+}
+
+impl<W: WorkControl, A: Fn(usize) -> Result<(), BeaconError>> WorkControl
+    for ScratchWork<'_, W, A>
+{
+    fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+        self.work.borrow_mut().charge(units)
+    }
+
+    fn reserve_scratch(&mut self, entries: usize) -> Result<(), BeaconError> {
+        (self.admit)(entries)
+    }
+}
+
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
     /// Fuse this session's prepared text/vector generation with seed-directed
     /// graph expansion. Use an existing `prepare_beacon_index` handle; no
@@ -33,9 +52,10 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// population. The host's snapshot-record cap covers that population PLUS
     /// admitted incidence visits (parallel EIds separately, undirected edges
     /// at each expanded endpoint). Signed nodes count the saved population
-    /// once. Source scratch counts admitted incidences; graph visit/seed
-    /// bounds are additionally capped by the request, frozen and host scratch
-    /// limits. Staging rows are unused: neither documents nor a graph directory
+    /// once. One cumulative source-scratch allowance covers admitted incidences,
+    /// retained BFS distance/queue state, graph ranks, fusion evidence, heaps and
+    /// result buffers; graph visit/seed bounds remain additional count ceilings.
+    /// Staging rows are unused: neither documents nor a graph directory
     /// are staged. These are admission bounds, not a combined byte-memory cap.
     ///
     /// Hidden history is poll-only; no observable work/admission charge for an
@@ -128,6 +148,28 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     source.validate(config, &mut SharedWork(&work))?;
                 }
                 validate_eligibility(eligible, &mut SharedWork(&work))?;
+                let scratch_limit = expansion
+                    .limits
+                    .max_source_scratch
+                    .min(allowance.max_source_scratch)
+                    .min(prepared.definition.policy.max_source_scratch);
+                let scratch = Cell::new(0usize);
+                let admit_scratch = |entries: usize| {
+                    let next = scratch.get().checked_add(entries).ok_or(
+                        BeaconError::ResourceLimit {
+                            resource: "prepared graph scratch entries",
+                            limit: scratch_limit,
+                        },
+                    )?;
+                    if next > scratch_limit {
+                        return Err(BeaconError::ResourceLimit {
+                            resource: "prepared graph scratch entries",
+                            limit: scratch_limit,
+                        });
+                    }
+                    scratch.set(next);
+                    Ok(())
+                };
                 let graph = if query.graph_enabled() {
                     expand_at(
                         cx,
@@ -141,25 +183,25 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                         allowance,
                         &work,
                         |id, _| Ok(allows(eligible, id)),
-                        &|_| Ok(()),
+                        &admit_scratch,
                     )?
                     .0
                 } else {
                     // Disabled graph lanes never inspect seeds or graph limits.
                     Vec::new()
                 };
+                let mut kernel = ScratchWork {
+                    work: &work,
+                    admit: &admit_scratch,
+                };
                 let rows = if query.is_graph_only() {
-                    query.fuse_graph_only(
-                        &graph,
-                        |id| allows(eligible, id),
-                        &mut SharedWork(&work),
-                    )?
+                    query.fuse_graph_only(&graph, |id| allows(eligible, id), &mut kernel)?
                 } else {
                     prepared.index.hybrid_search_graph_filtered(
                         query,
                         &graph,
                         |id| allows(eligible, id),
-                        &mut SharedWork(&work),
+                        &mut kernel,
                     )?
                 };
                 work.borrow_mut().charge(1)?;
