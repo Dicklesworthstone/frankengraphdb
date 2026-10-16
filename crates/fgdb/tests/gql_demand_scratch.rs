@@ -19,8 +19,14 @@ fn policy() -> GqlQueryPolicy {
 async fn open(cx: &CommitCx) -> Database<MemVfs> {
     let mut db = Database::open_memory(
         cx,
-        DatabaseKeys::new([0x61; 32], DatabaseSecurityNamespaceId([0x62; 32]), [0x63; 32]),
-    ).await.unwrap();
+        DatabaseKeys::new(
+            [0x61; 32],
+            DatabaseSecurityNamespaceId([0x62; 32]),
+            [0x63; 32],
+        ),
+    )
+    .await
+    .unwrap();
     let mut batch = WriteBatch::new(RelationId(1));
     for id in [1, 2, 9] {
         batch.create_vertex(VId(id), vec![], vec![]);
@@ -38,11 +44,25 @@ fn rows(result: QueryResult) -> Vec<Vec<QueryValue>> {
 
 fn parameters(seeds: &[u128], empty: bool) -> GqlParameters {
     GqlParameters::new()
-        .with_list("seeds", seeds.iter().map(|&id| GraphValue::Vertex(VId(id))).collect())
+        .with_list(
+            "seeds",
+            seeds
+                .iter()
+                .map(|&id| GraphValue::Vertex(VId(id)))
+                .collect(),
+        )
         .unwrap()
-        .with_list("eligible", if empty { vec![] } else {
-            seeds.iter().map(|&id| GraphValue::Vertex(VId(id))).collect()
-        })
+        .with_list(
+            "eligible",
+            if empty {
+                vec![]
+            } else {
+                seeds
+                    .iter()
+                    .map(|&id| GraphValue::Vertex(VId(id)))
+                    .collect()
+            },
+        )
         .unwrap()
 }
 
@@ -62,16 +82,18 @@ fn native_exact_and_short_budgets_include_kernels_in_both_hosts() {
                         if limit_zero { " LIMIT 0" } else { "" },
                     );
                     let parameters = parameters(&[2, 1, 2, 99], empty);
-                    let bound = PreparedGraphSetText::prepare(&text, symbols).unwrap()
-                        .bind_parameters(&parameters).unwrap();
+                    let bound = PreparedGraphSetText::prepare(&text, symbols)
+                        .unwrap()
+                        .bind_parameters(&parameters)
+                        .unwrap();
                     // Fresh transaction witnesses for every invocation. A
                     // baseline call must not warm a short-budget attempt.
                     let execute = |allowance| {
                         if transaction {
                             let mut txn = db.begin(&c.txn()).unwrap();
-                            let result = txn.execute_graph_set_governed(
-                                &db, &c.query(), &bound, allowance,
-                            ).map_err(|error| error.to_string());
+                            let result = txn
+                                .execute_graph_set_governed(&db, &c.query(), &bound, allowance)
+                                .map_err(|error| error.to_string());
                             txn.abort();
                             result
                         } else {
@@ -80,7 +102,10 @@ fn native_exact_and_short_budgets_include_kernels_in_both_hosts() {
                         }
                     };
                     let baseline = execute(policy()).unwrap();
-                    assert_eq!(baseline.value.len(), if empty || limit_zero { 0 } else { 2 });
+                    assert_eq!(
+                        baseline.value.len(),
+                        if empty || limit_zero { 0 } else { 2 }
+                    );
                     // Source + distance/queue state survives an empty endpoint
                     // filter. Accepting two endpoints also retains both rankers.
                     assert!(baseline.evaluator.scratch_entries >= if empty { 6 } else { 20 });
@@ -102,21 +127,32 @@ fn native_exact_and_short_budgets_include_kernels_in_both_hosts() {
                     assert!(execute(short).is_err());
                     // Independently named identities verify native result
                     // conversion, not just equality with a metered baseline.
-                    let expected = if empty || limit_zero { vec![] } else {
-                        vec![1, 2].into_iter().map(|id| {
-                            vec![QueryValue::Value(GraphValue::Vertex(VId(id)))]
-                        }).collect()
+                    let expected = if empty || limit_zero {
+                        vec![]
+                    } else {
+                        vec![1, 2]
+                            .into_iter()
+                            .map(|id| vec![QueryValue::Value(GraphValue::Vertex(VId(id)))])
+                            .collect()
                     };
                     if transaction {
                         let mut txn = db.begin(&c.txn()).unwrap();
-                        assert_eq!(rows(txn.query(
-                            &db, &c.query(), &text, &parameters, symbols, policy(),
-                        ).unwrap()), expected);
+                        assert_eq!(
+                            rows(
+                                txn.query(&db, &c.query(), &text, &parameters, symbols, policy(),)
+                                    .unwrap()
+                            ),
+                            expected
+                        );
                         txn.abort();
                     } else {
-                        assert_eq!(rows(db.query(
-                            &c.query(), &text, &parameters, symbols, policy(),
-                        ).unwrap()), expected);
+                        assert_eq!(
+                            rows(
+                                db.query(&c.query(), &text, &parameters, symbols, policy(),)
+                                    .unwrap()
+                            ),
+                            expected
+                        );
                     }
                 }
             }
@@ -135,15 +171,17 @@ fn refused_native_scratch_preserves_staged_state_and_savepoints() {
         let text = "CALL hybrid.search(seeds => [3], max_hops => 0, \
             include_seeds => true, graph_access => 'demand', k => 1) \
             YIELD node RETURN node";
-        let bound = PreparedGraphSetText::prepare(text, symbols).unwrap()
-            .bind_parameters(&GqlParameters::new()).unwrap();
+        let bound = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
         let mut baseline = db.begin(&c.txn()).unwrap();
         let mut edit = WriteBatch::new(RelationId(1));
         edit.create_vertex(VId(3), vec![], vec![]);
         baseline.write(&mut db, edit.clone()).unwrap();
-        let counts = baseline.execute_graph_set_governed(
-            &db, &c.query(), &bound, policy(),
-        ).unwrap();
+        let counts = baseline
+            .execute_graph_set_governed(&db, &c.query(), &bound, policy())
+            .unwrap();
         baseline.abort();
         let mut txn = db.begin(&c.txn()).unwrap();
         txn.write(&mut db, edit).unwrap();
@@ -151,18 +189,36 @@ fn refused_native_scratch_preserves_staged_state_and_savepoints() {
         let digest = txn.staged_effect_digest().unwrap();
         let mut short = policy();
         short.evaluator.max_scratch_entries = counts.evaluator.scratch_entries - 1;
-        assert!(txn.execute_graph_set_governed(&db, &c.query(), &bound, short).is_err());
+        assert!(
+            txn.execute_graph_set_governed(&db, &c.query(), &bound, short)
+                .is_err()
+        );
         assert_eq!(txn.staged_effect_digest().unwrap(), digest);
         assert_eq!(db.frontier().unwrap(), basis);
         txn.rollback_to_savepoint(&db, "staged").unwrap();
         assert_eq!(txn.staged_effect_digest().unwrap(), digest);
-        assert_eq!(rows(txn.query(
-            &db, &c.query(), text, &GqlParameters::new(), symbols, policy(),
-        ).unwrap()), vec![vec![QueryValue::Value(GraphValue::Vertex(VId(3)))]]);
+        assert_eq!(
+            rows(
+                txn.query(
+                    &db,
+                    &c.query(),
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    policy(),
+                )
+                .unwrap()
+            ),
+            vec![vec![QueryValue::Value(GraphValue::Vertex(VId(3)))]]
+        );
         txn.abort();
-        assert!(rows(db.query(
-            &c.query(), text, &GqlParameters::new(), symbols, policy(),
-        ).unwrap()).is_empty());
+        assert!(
+            rows(
+                db.query(&c.query(), text, &GqlParameters::new(), symbols, policy(),)
+                    .unwrap()
+            )
+            .is_empty()
+        );
         assert_eq!(db.frontier().unwrap(), basis);
         assert_eq!(c.outstanding_obligations(), 0);
     });

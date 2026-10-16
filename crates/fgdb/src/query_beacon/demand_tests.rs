@@ -496,9 +496,9 @@ fn zero_hop_state_and_rankers_spend_one_independently_counted_allowance() {
             let q = GraphHybridQuery::graph_only(k, 2, 100, 60).unwrap();
             let mut bounded = options();
             bounded.policy.max_source_scratch = needed;
-            let rows = pin.beacon_search_graph_demand_filtered(
-                &c.query(), &bounded, q, spec, |_| accept,
-            ).unwrap();
+            let rows = pin
+                .beacon_search_graph_demand_filtered(&c.query(), &bounded, q, spec, |_| accept)
+                .unwrap();
             if accept && k != 0 {
                 assert_eq!(endpoints(&rows), [(VId(9), 0)]);
                 assert_eq!(
@@ -510,26 +510,49 @@ fn zero_hop_state_and_rankers_spend_one_independently_counted_allowance() {
             }
             for limit in 0..needed {
                 bounded.policy.max_source_scratch = limit;
-                assert!(matches!(
-                    db.beacon_search_graph_demand_filtered(
-                        &c.query(), &bounded, q, spec, |_| accept,
+                assert!(
+                    matches!(
+                        db.beacon_search_graph_demand_filtered(
+                            &c.query(),
+                            &bounded,
+                            q,
+                            spec,
+                            |_| accept,
+                        ),
+                        Err(Error::Index(BeaconError::ResourceLimit {
+                            resource: "demand graph source admissions",
+                            ..
+                        }))
                     ),
-                    Err(Error::Index(BeaconError::ResourceLimit {
-                        resource: "demand graph source admissions", ..
-                    }))
-                ), "accept={accept} k={k} limit={limit}");
+                    "accept={accept} k={k} limit={limit}"
+                );
             }
             // The expansion-side cap is the same allowance, not a second pool.
             bounded.policy.max_source_scratch = usize::MAX;
             let mut tight_spec = spec;
             tight_spec.limits.max_source_scratch = needed - 1;
-            assert!(pin.beacon_search_graph_demand_filtered(
-                &c.query(), &bounded, q, tight_spec, |_| accept,
-            ).is_err());
+            assert!(
+                pin.beacon_search_graph_demand_filtered(
+                    &c.query(),
+                    &bounded,
+                    q,
+                    tight_spec,
+                    |_| accept,
+                )
+                .is_err()
+            );
             tight_spec.limits.max_source_scratch = needed;
-            assert_eq!(pin.beacon_search_graph_demand_filtered(
-                &c.query(), &bounded, q, tight_spec, |_| accept,
-            ).unwrap(), rows);
+            assert_eq!(
+                pin.beacon_search_graph_demand_filtered(
+                    &c.query(),
+                    &bounded,
+                    q,
+                    tight_spec,
+                    |_| accept,
+                )
+                .unwrap(),
+                rows
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -552,27 +575,45 @@ fn refused_kernel_allocation_keeps_transaction_dependencies_after_retry_and_roll
         // Existence and label each reserve two witness slots, then membership
         // reserves one cache slot. The NEXT allocation is the kernel's visit.
         bounded.policy.max_source_scratch = 5;
-        assert!(matches!(txn.beacon_search_graph_demand_filtered(
-            &db, &c.query(), &bounded, q, spec, |_| false,
-        ), Err(Error::Index(BeaconError::ResourceLimit {
-            resource: "transaction search source scratch entries", limit: 5,
-        }))));
-        assert!(txn.beacon_search_graph_demand_filtered(
-            &db, &c.query(), &options(), q, spec, |_| false,
-        ).unwrap().is_empty());
+        assert!(matches!(
+            txn.beacon_search_graph_demand_filtered(&db, &c.query(), &bounded, q, spec, |_| false,),
+            Err(Error::Index(BeaconError::ResourceLimit {
+                resource: "transaction search source scratch entries",
+                limit: 5,
+            }))
+        ));
+        assert!(
+            txn.beacon_search_graph_demand_filtered(&db, &c.query(), &options(), q, spec, |_| {
+                false
+            },)
+                .unwrap()
+                .is_empty()
+        );
         txn.rollback_to_savepoint(&db, "before-read").unwrap();
-        assert!(control.beacon_search_graph_demand_filtered(
-            &db, &c.query(), &options(), q, spec, |_| false,
-        ).unwrap().is_empty());
+        assert!(
+            control
+                .beacon_search_graph_demand_filtered(&db, &c.query(), &options(), q, spec, |_| {
+                    false
+                },)
+                .unwrap()
+                .is_empty()
+        );
         let mut winner = WriteBatch::new(R);
         winner.set_vertex_property(VId(1000), PropertyKeyId(9), Some(CanonicalScalar::Int(7)));
         db.write(&c.commit(), winner).await.unwrap();
-        assert!(control.finish(&mut db, &c.commit()).await.is_ok(),
-            "successful local search does not observe the disconnected property");
-        assert!(matches!(txn.finish(&mut db, &c.commit()).await,
-            Err(crate::WriteTxnError::Write(crate::WriteError::FirstCommitterWins {
-                law: "FG-LAW-FCW-READ-01", ..
-            }))));
+        assert!(
+            control.finish(&mut db, &c.commit()).await.is_ok(),
+            "successful local search does not observe the disconnected property"
+        );
+        assert!(matches!(
+            txn.finish(&mut db, &c.commit()).await,
+            Err(crate::WriteTxnError::Write(
+                crate::WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }
+            ))
+        ));
         assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
