@@ -54,3 +54,13 @@ test('reusing one Wasm instance resets directional force on the next graph', asy
   const reused = settle(createSimulation(e, nodes, links, 'force', start));
   assert.deepEqual(reused, settle(createSimulation(await engine(), nodes, links, 'force', start)));
 });
+
+test('Studio exposes directed flow and forwards orientation with revision fencing', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const graph = readFileSync(new URL('../graph.mjs', import.meta.url), 'utf8');
+  assert.match(html, /<option value="flow">Directed flow<\/option>/);
+  assert.match(graph, /edges:this\.graph\.edges\.map\(\(\{source,target,directed\}\)=>\(\{source,target,directed\}\)\)/);
+  assert.match(graph, /data\.revision!==undefined&&data\.revision<this\.revision/);
+  for (const action of ['pause', 'reheat', 'configure', 'pin'])
+    assert.match(graph, new RegExp("action:'" + action + "'[^}]*revision"));
+});

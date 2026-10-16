@@ -9,13 +9,14 @@ export class GraphCanvas {
   constructor(canvas, minimap, { onSelect = () => {}, onBusy = () => {}, onError = () => {}, onTick = () => {} } = {}) {
     Object.assign(this, { canvas, minimap, onSelect, onBusy, onError, onTick });
     this.graph={nodes:[],edges:[]};this.points=new Map();this.pinned=new Set();this.view={x:0,y:0,k:1};
-    this.id=0;this.mode='force';this.labels=true;this.focus=false;this.selection=null;this.hover=null;
+    this.id=0;this.revision=0;this.mode='force';this.labels=true;this.focus=false;this.selection=null;this.hover=null;
     this.frame=null;this.running=false;this.paused=false;this.interacted=false;this.matches=null;this.pointers=new Map();
     this.settings={...DEFAULT_PHYSICS};this.reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
     try {
       this.worker=new Worker(new URL('./layout.mjs',import.meta.url),{type:'module'});
       this.worker.onmessage=({data})=>{
         if(data.id!==this.id)return;
+        if(data.revision!==undefined&&data.revision<this.revision)return;
         if(data.error){this.running=false;this.onBusy(false);this.onError(data.error);this.publish({engine:'unavailable',done:true});return;}
         // A frame queued before pause cannot resume the visible simulation.
         if(this.paused)return;
@@ -61,9 +62,9 @@ export class GraphCanvas {
   world(p){return{x:(p.x-this.view.x)/this.view.k,y:(p.y-this.view.y)/this.view.k};}
   resize(){const{width,height}=this.canvas.getBoundingClientRect();if(!width||!height)return;this.width=width;this.height=height;this.ratio=Math.min(devicePixelRatio||1,2);this.canvas.width=Math.round(width*this.ratio);this.canvas.height=Math.round(height*this.ratio);if(!this.interacted)this.fit(false);this.drawSoon();}
   stop(){this.id++;this.worker?.postMessage({stop:true});this.running=false;this.onBusy(false);}
-  pause(){this.worker?.postMessage({action:'pause',id:this.id});this.running=false;this.paused=true;this.onBusy(false);this.publish({engine:'wasm',paused:true});}
-  reheat(){if(!this.worker||!this.graph.nodes.length)return;this.paused=false;this.running=true;this.onBusy(true);this.worker.postMessage({action:'reheat',id:this.id});}
-  configure(settings){this.settings={...this.settings,...settings};this.paused=false;this.running=true;this.onBusy(true);this.worker?.postMessage({action:'configure',id:this.id,settings:this.settings});}
+  pause(){const revision=++this.revision;this.worker?.postMessage({action:'pause',id:this.id,revision});this.running=false;this.paused=true;this.onBusy(false);this.publish({engine:'wasm',paused:true,revision});}
+  reheat(){if(!this.worker||!this.graph.nodes.length)return;const revision=++this.revision;this.paused=false;this.running=true;this.onBusy(true);this.worker.postMessage({action:'reheat',id:this.id,revision});}
+  configure(settings){this.settings={...this.settings,...settings};const revision=++this.revision;this.paused=false;this.running=true;this.onBusy(true);this.worker?.postMessage({action:'configure',id:this.id,revision,settings:this.settings});}
   setData(graph,{preserve=true}={}){
     const previous=preserve?[...this.points.values()].map(p=>({...p,pinned:this.pinned.has(p.id)})):[];
     if(!preserve)this.pinned.clear();
@@ -84,7 +85,7 @@ export class GraphCanvas {
     this.simulationNodes=this.graph.nodes.map(({id,group,degree})=>({id,group,degree}));
     const previous=[...this.points.values()].map(p=>({...p,pinned:this.pinned.has(p.id)}));
     if(!keep)this.interacted=false;this.running=true;this.paused=false;this.onBusy(true);
-    this.worker.postMessage({id:this.id,nodes:this.simulationNodes,edges:this.graph.edges.map(({source,target})=>({source,target})),mode,previous,settings:this.settings});
+    const revision=++this.revision;this.worker.postMessage({id:this.id,revision,nodes:this.simulationNodes,edges:this.graph.edges.map(({source,target,directed})=>({source,target,directed})),mode,previous,settings:this.settings});
   }
   fit(interacted=true){
     if(!this.width||!this.height)return;const p=this.graph.nodes.map(n=>this.points.get(n.id)).filter(Boolean);
@@ -96,7 +97,7 @@ export class GraphCanvas {
   zoom(factor){this.interacted=true;this.zoomAt(this.width/2,this.height/2,factor);}
   zoomAt(x,y,factor){const k=Math.max(0.08,Math.min(6,this.view.k*factor)),r=k/this.view.k;this.view={x:x-(x-this.view.x)*r,y:y-(y-this.view.y)*r,k};this.drawSoon();}
   select(selection,center=false){this.selection=selection;if(center&&selection?.kind==='node'){const p=this.points.get(selection.id);if(p){this.interacted=true;this.view.x=this.width/2-p.x*this.view.k;this.view.y=this.height/2-p.y*this.view.k;}}this.onSelect(selection);this.drawSoon();}
-  togglePin(id){const p=this.points.get(id);if(!p)return;this.paused=false;this.pinned.has(id)?this.pinned.delete(id):this.pinned.add(id);p.pinned=this.pinned.has(id);this.worker?.postMessage({action:'pin',id:this.id,node:id,x:p.x,y:p.y,fixed:p.pinned});this.onSelect(this.selection);this.drawSoon();}
+  togglePin(id){const p=this.points.get(id);if(!p)return;this.paused=false;this.pinned.has(id)?this.pinned.delete(id):this.pinned.add(id);p.pinned=this.pinned.has(id);this.worker?.postMessage({action:'pin',id:this.id,revision:++this.revision,node:id,x:p.x,y:p.y,fixed:p.pinned});this.onSelect(this.selection);this.drawSoon();}
   unpin(){for(const id of [...this.pinned])this.togglePin(id);}
   radius(node){const base=node?.analysis?8+node.analysis.normalized*13:8+Math.min(10,Math.sqrt(node?.degree||0)*2);return base*Math.max(1,0.72/this.view.k);}
   geometry(edge){
@@ -109,9 +110,9 @@ export class GraphCanvas {
   }
   hit(point){const p=this.world(point);for(let i=this.graph.nodes.length-1;i>=0;i--){const n=this.graph.nodes[i],a=this.points.get(n.id);if(a&&Math.hypot(p.x-a.x,p.y-a.y)<this.radius(n)+6/this.view.k)return{kind:'node',id:n.id};}
     for(const e of this.graph.edges){const g=this.geometry(e);if(!g)continue;if(g.loop){if(Math.abs(Math.hypot(p.x-g.x,p.y-g.y)-g.r)<5/this.view.k)return{kind:'edge',id:e.id};}else{let a=g.a;for(let i=1;i<=12;i++){const b=pointOn(g,i/12);if(segmentDistance(p,a,b)<4/this.view.k)return{kind:'edge',id:e.id};a=b;}}}return null;}
-  pointerDown(event){if(event.button!==0)return;const p=this.local(event);this.pointers.set(event.pointerId,p);this.canvas.setPointerCapture(event.pointerId);if(this.pointers.size>1){if(this.drag)this.releaseDrag();const[a,b]=[...this.pointers.values()];this.pinch=Math.hypot(a.x-b.x,a.y-b.y);return;}const hit=this.hit(p);this.interacted=true;this.drag={start:p,last:p,hit,moved:false,persist:event.shiftKey};if(hit?.kind==='node'){this.paused=false;const v=this.points.get(hit.id);this.worker?.postMessage({action:'pin',id:this.id,node:hit.id,x:v.x,y:v.y,fixed:true});}}
-  pointerMove(event){const p=this.local(event);if(this.pointers.has(event.pointerId))this.pointers.set(event.pointerId,p);if(this.pointers.size>1){const[a,b]=[...this.pointers.values()],d=Math.max(1,Math.hypot(a.x-b.x,a.y-b.y));this.zoomAt((a.x+b.x)/2,(a.y+b.y)/2,d/(this.pinch||d));this.pinch=d;return;}if(this.drag){const dx=p.x-this.drag.last.x,dy=p.y-this.drag.last.y;if(Math.hypot(p.x-this.drag.start.x,p.y-this.drag.start.y)>3)this.drag.moved=true;if(this.drag.hit?.kind==='node'){const v=this.points.get(this.drag.hit.id);v.x+=dx/this.view.k;v.y+=dy/this.view.k;this.worker?.postMessage({action:'pin',id:this.id,node:v.id,x:v.x,y:v.y,fixed:true});}else{this.view.x+=dx;this.view.y+=dy;}this.drag.last=p;this.drawSoon();}else{const hit=this.hit(p);if(hit?.id!==this.hover?.id||hit?.kind!==this.hover?.kind){this.hover=hit;this.drawSoon();}this.canvas.style.cursor=hit?'pointer':'grab';}}
-  releaseDrag(){if(this.drag?.hit?.kind==='node'){const p=this.points.get(this.drag.hit.id);if(this.drag.persist&&this.drag.moved)this.pinned.add(p.id);this.worker?.postMessage({action:'pin',id:this.id,node:p.id,x:p.x,y:p.y,fixed:this.pinned.has(p.id)});}this.drag=null;}
+  pointerDown(event){if(event.button!==0)return;const p=this.local(event);this.pointers.set(event.pointerId,p);this.canvas.setPointerCapture(event.pointerId);if(this.pointers.size>1){if(this.drag)this.releaseDrag();const[a,b]=[...this.pointers.values()];this.pinch=Math.hypot(a.x-b.x,a.y-b.y);return;}const hit=this.hit(p);this.interacted=true;this.drag={start:p,last:p,hit,moved:false,persist:event.shiftKey};if(hit?.kind==='node'){this.paused=false;const v=this.points.get(hit.id);this.worker?.postMessage({action:'pin',id:this.id,revision:++this.revision,node:hit.id,x:v.x,y:v.y,fixed:true});}}
+  pointerMove(event){const p=this.local(event);if(this.pointers.has(event.pointerId))this.pointers.set(event.pointerId,p);if(this.pointers.size>1){const[a,b]=[...this.pointers.values()],d=Math.max(1,Math.hypot(a.x-b.x,a.y-b.y));this.zoomAt((a.x+b.x)/2,(a.y+b.y)/2,d/(this.pinch||d));this.pinch=d;return;}if(this.drag){const dx=p.x-this.drag.last.x,dy=p.y-this.drag.last.y;if(Math.hypot(p.x-this.drag.start.x,p.y-this.drag.start.y)>3)this.drag.moved=true;if(this.drag.hit?.kind==='node'){const v=this.points.get(this.drag.hit.id);v.x+=dx/this.view.k;v.y+=dy/this.view.k;this.worker?.postMessage({action:'pin',id:this.id,revision:++this.revision,node:v.id,x:v.x,y:v.y,fixed:true});}else{this.view.x+=dx;this.view.y+=dy;}this.drag.last=p;this.drawSoon();}else{const hit=this.hit(p);if(hit?.id!==this.hover?.id||hit?.kind!==this.hover?.kind){this.hover=hit;this.drawSoon();}this.canvas.style.cursor=hit?'pointer':'grab';}}
+  releaseDrag(){if(this.drag?.hit?.kind==='node'){const p=this.points.get(this.drag.hit.id);if(this.drag.persist&&this.drag.moved)this.pinned.add(p.id);this.worker?.postMessage({action:'pin',id:this.id,revision:++this.revision,node:p.id,x:p.x,y:p.y,fixed:this.pinned.has(p.id)});}this.drag=null;}
   pointerUp(event,cancel=false){this.pointers.delete(event.pointerId);if(!cancel&&this.drag&&!this.drag.moved)this.select(this.drag.hit);this.releaseDrag();this.pinch=null;this.drawSoon();}
   drawSoon(){if(this.frame!==null)return;this.frame=requestAnimationFrame(()=>{this.frame=null;this.draw();});}
   draw(){
