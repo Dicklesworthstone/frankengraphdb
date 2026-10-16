@@ -16,8 +16,8 @@ use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
-    PreparedGraphAggregateText,
+    GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphSymbol, GraphSymbolKind,
+    PreparedGraphAggregate, PreparedGraphAggregateText,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
@@ -278,8 +278,8 @@ fn a_far_target_admits_the_edges_both_searches_crossed_not_the_hub() {
                 fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(9))
             )]]
         );
-        // Nine chain edges and the ten vertices they join, against the
-        // 2,009 edges the source reaches.
+        // The walk's nine edges and the ten vertices they join, against the
+        // 2,008 edges the source reaches.
         let least = least_records(&db, &cx, &text);
         assert!(least <= 40, "least {least}");
         // Within eight hops there is no walk: no rows, and the search stops
@@ -298,6 +298,41 @@ fn a_far_target_admits_the_edges_both_searches_crossed_not_the_hub() {
         );
         assert_eq!(rows(&db, &cx, &reverse, 1_000_000), Some(answer));
         assert!(least_records(&db, &cx, &reverse) <= 40);
+        // The authorized admission (fgdbd's) takes the same closure: its one
+        // walk counted under as few records.
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let counted = prepare(&format!(
+            "MATCH p = SHORTEST (a {{p: 0}})-[:R]->{{1,12}}(b {{p: {target}}}) \
+             RETURN COUNT(*) AS n"
+        ));
+        let authorized = |records| {
+            db.execute_graph_aggregate_authorized(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                &counted,
+                policy(records),
+                || 100,
+            )
+            .ok()
+            .map(|rows| rows[0].values().to_vec())
+        };
+        assert_eq!(
+            authorized(1_000_000),
+            Some(vec![GraphAggregateValue::Count(1)])
+        );
+        let (mut low, mut high) = (0, 1_000_000);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if authorized(middle).is_some() {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        assert!(low <= 40, "authorized least {low}");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
