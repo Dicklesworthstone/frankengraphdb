@@ -3,6 +3,7 @@
 //! intents nor a writer's newer graph may replace the canonical overlay.
 
 use super::*;
+use crate::write_txn::PointReadField;
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionNeighbors, GraphHit};
 use fgdb_gql::{GlaExecutionEvent, algebra::GlaDirection};
 use std::collections::BTreeSet;
@@ -82,6 +83,40 @@ struct Changes {
     incidence: BTreeSet<(VId, EId)>,
 }
 
+/// A demand read observes only topology and membership. Complete-directory
+/// retrieval retains its original conservative scan and whole-row witnesses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Observation {
+    WholeSource,
+    ReachedTopology,
+}
+
+/// Reuse the transaction's point-read owner and original-basis validator.
+/// Reserve both the element and field slots on EVERY call, before insertion;
+/// warming a witness cannot make a later allowance silently cheaper. The
+/// enclosing demand attempt retains an allocation-free superset on refusal.
+fn observe_field(
+    txn: &WriteTxn,
+    element: ElementId,
+    field: PointReadField,
+    work: &RefCell<Control<'_>>,
+) -> Result<(), BeaconError> {
+    let elements = txn.point_reads.borrow().0.len();
+    work.borrow_mut().charge(2 * tree_work(elements))?;
+    let fields = txn
+        .point_reads
+        .borrow()
+        .0
+        .get(&element)
+        .map_or(0, BTreeSet::len);
+    work.borrow_mut().charge(2 * tree_work(fields))?;
+    work.borrow_mut().source(SourceEvent::ScratchEntry)?;
+    work.borrow_mut().source(SourceEvent::ScratchEntry)?;
+    // No control callback runs while the read-set RefCell is borrowed.
+    txn.point_reads.borrow_mut().record(element, field);
+    Ok(())
+}
+
 /// Preparing changed-edge successors may prune with a complete directory,
 /// but a demand source must retain them without probing unrelated vertices.
 /// In both cases actual incidence admission checks effective membership.
@@ -104,6 +139,7 @@ struct OverlayNeighbors<'a, 'cx, S> {
     txn: &'a WriteTxn,
     snapshot: &'a Snapshot,
     selected: &'a S,
+    observation: Observation,
     relation: Option<RelationId>,
     direction: GlaDirection,
     edge_work: EdgeWork<'a, 'cx>,
@@ -122,9 +158,12 @@ impl<S: Selection> OverlayNeighbors<'_, '_, S> {
             return Ok(());
         }
         self.edge_work.source(SourceEvent::Work)?;
-        // Includes an empty adjacency and failures while constructing changes.
-        // No predicate refinement is silently substituted for the FCW contract.
-        self.txn.scanned_edges.set(true);
+        // Existing complete-directory callers retain their original scan law.
+        // Demand has already retained this anchor's insertion gap, and its
+        // enclosing attempt covers failed preparation with an ALL-CHANGE read.
+        if self.observation == Observation::WholeSource {
+            self.txn.scanned_edges.set(true);
+        }
         let by_id = self.txn.beacon_graph_changes(&self.edge_work)?;
         let mut incidence = BTreeSet::new();
         for (&eid, &after) in &by_id {
@@ -161,6 +200,34 @@ impl<S: Selection> OverlayNeighbors<'_, '_, S> {
         Ok(())
     }
 
+    fn observe_adjacency(&self, vertex: VId) -> Result<(), BeaconError> {
+        if self.observation == Observation::WholeSource {
+            return Ok(());
+        }
+        // Record before the first historical or staged successor, INCLUDING
+        // empty adjacency. Last-hop vertices never open this source, so their
+        // unexamined edges do not become dependencies just by being reached.
+        for incoming in [false, true] {
+            if matches!(self.direction, GlaDirection::Forward) && incoming
+                || matches!(self.direction, GlaDirection::Reverse) && !incoming
+            {
+                continue;
+            }
+            let field = self
+                .relation
+                .map_or(PointReadField::AnyAdjacency { incoming }, |relation| {
+                    PointReadField::Adjacency { relation, incoming }
+                });
+            observe_field(
+                self.txn,
+                ElementId::Vertex(vertex),
+                field,
+                self.edge_work.shared,
+            )?;
+        }
+        Ok(())
+    }
+
     fn next_staged(&self, vertex: VId, after: Option<EId>) -> Result<Option<EId>, BeaconError> {
         let changes = self.changes.as_ref().ok_or(BeaconError::Invariant(
             "transaction incidence source was not prepared",
@@ -186,6 +253,7 @@ impl<S: Selection> ExpansionNeighbors for OverlayNeighbors<'_, '_, S> {
         work: &mut dyn WorkControl,
         visit: &mut dyn FnMut(VId, &mut dyn WorkControl) -> Result<(), BeaconError>,
     ) -> Result<(), BeaconError> {
+        self.observe_adjacency(vertex)?;
         self.prepare()?;
         let mut after = None;
         loop {
@@ -242,8 +310,23 @@ impl<S: Selection> ExpansionNeighbors for OverlayNeighbors<'_, '_, S> {
                 GlaDirection::Undirected if dst == vertex => src,
                 _ => continue,
             };
-            self.edge_work.observe(self.txn, ElementId::Edge(eid))?;
-            self.edge_work.observe(self.txn, ElementId::Vertex(src))?;
+            match self.observation {
+                Observation::WholeSource => {
+                    self.edge_work.observe(self.txn, ElementId::Edge(eid))?;
+                    self.edge_work.observe(self.txn, ElementId::Vertex(src))?;
+                }
+                Observation::ReachedTopology => {
+                    // Include every physical edge identity, not only a
+                    // distinct neighbor or a top-k winner. A cascade may
+                    // retire this edge without a standalone DeleteEdge row.
+                    observe_field(
+                        self.txn,
+                        ElementId::Edge(eid),
+                        PointReadField::EdgeTopology,
+                        self.edge_work.shared,
+                    )?;
+                }
+            }
             self.edge_work.shared.borrow_mut().record()?;
             if self.relation.is_some_and(|wanted| wanted != relation)
                 || !self.selected.contains_vertex(src, work)?
@@ -278,6 +361,7 @@ pub(super) fn expand(
         txn,
         snapshot,
         selected,
+        observation: Observation::WholeSource,
         relation: expansion.relation,
         direction: match expansion.direction {
             ExpansionDirection::Outgoing => GlaDirection::Forward,

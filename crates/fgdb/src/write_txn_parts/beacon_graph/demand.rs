@@ -4,6 +4,7 @@
 
 use super::super::super::{Overlay, candidate};
 use super::*;
+use crate::write_txn::ProjectionReadAttempt;
 use fgdb_beacon::WorkBudget;
 use fgdb_beacon::expansion::{ExpansionMembership, expand_from_membership_filtered};
 use fgdb_delta_types::LabelId;
@@ -139,9 +140,23 @@ impl ExpansionMembership for Membership<'_, '_> {
         if let Some(selected) = cached {
             return Ok(selected);
         }
-        // A failed or absent probe is a dependency too. Reserve its witness
-        // BEFORE resolving a native history or returning a cached omission.
-        observe(self.txn, id, self.work)?;
+        // Preserve both lifetime and requested label, including absence and
+        // rejected transit. Do not observe properties or unexamined adjacency.
+        // Raw/staged input dependencies in prepare() retain their broad law.
+        observe_field(
+            self.txn,
+            ElementId::Vertex(id),
+            PointReadField::VertexExistence,
+            self.work,
+        )?;
+        if let Some(label) = self.label {
+            observe_field(
+                self.txn,
+                ElementId::Vertex(id),
+                PointReadField::Label(label),
+                self.work,
+            )?;
+        }
         if count >= self.limit {
             return Err(BeaconError::ResourceLimit {
                 resource: "transaction demand membership entries",
@@ -178,9 +193,14 @@ impl WriteTxn {
     /// demand an edge source. Properties are neither projected nor cloned.
     ///
     /// Every probed identity, including absent seeds and rejected transit,
-    /// remains an FCW dependency after error or savepoint rollback. First
-    /// adjacency demand retains the conservative global edge-scan witness.
-    /// This is not full SSI or precise adjacency-range certification.
+    /// retains lifetime and selected-label dependencies. Every opened adjacency
+    /// retains its direction/relation insertion gap, even when empty; every
+    /// observed edge retains topology including cascade retirement. Unrelated
+    /// properties, components and unexpanded last-hop edges do not conflict
+    /// solely because this search ran. Prior broad reads are never narrowed.
+    /// Refusal or unwind after source admission retains the existing ALL-CHANGE
+    /// witness. Reads survive rollback and use the original-basis FCW validator
+    /// for finish/refresh/rebase; this is not full SSI or a new certificate.
     ///
     /// max_staging_rows/max_documents/max_vertices cap cached membership
     /// probes, including absences. Work and source scratch cover preparation,
@@ -263,6 +283,11 @@ impl WriteTxn {
                     });
                 }
                 prepare_filter(&work)?;
+                let mut attempt = ProjectionReadAttempt {
+                    reads: &self.point_reads,
+                    element: ElementId::Vertex(expansion.seeds.first().copied().unwrap_or(VId(0))),
+                    accepted: false,
+                };
                 let result = (|| {
                     let membership =
                         Membership::prepare(self, &view.snapshot, options, expansion, &work)?;
@@ -270,6 +295,7 @@ impl WriteTxn {
                         txn: self,
                         snapshot: &view.snapshot,
                         selected: &membership,
+                        observation: Observation::ReachedTopology,
                         relation: expansion.relation,
                         direction: match expansion.direction {
                             ExpansionDirection::Outgoing => GlaDirection::Forward,
@@ -304,7 +330,9 @@ impl WriteTxn {
                     work.borrow_mut().charge(1)?;
                     Ok(rows)
                 })();
-                finish_filter(result)
+                let result = finish_filter(result);
+                attempt.accepted = result.is_ok() && work.borrow().refusal.is_none();
+                result
             })();
             let control = work.into_inner();
             match control.interrupted {
