@@ -302,7 +302,7 @@ fn definitions_sources_and_raw_element_parameters_cannot_bypass_the_frozen_corpu
             ),
             CALL.replace(
                 "vector => [$x],",
-                "seeds => [1], max_hops => 0, vector => [$x],",
+                "seeds => [1], max_hops => 0, graph_access => 'materialized', vector => [$x],",
             ),
         ] {
             let prepared = session

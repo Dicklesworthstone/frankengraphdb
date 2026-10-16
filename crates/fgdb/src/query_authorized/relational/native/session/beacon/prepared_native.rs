@@ -34,11 +34,6 @@ fn matching_definition(
     requested: &Options,
     query: GraphHybridQuery<'_>,
 ) -> Result<(), BeaconError> {
-    if query.graph_enabled() {
-        return Err(BeaconError::InvalidQuery(
-            "prepared native index execution supports text/vector calls, not graph expansion",
-        ));
-    }
     if frozen.vertex_label != requested.vertex_label {
         return Err(BeaconError::InvalidQuery(
             "prepared index label selection must match the CALL",
@@ -102,10 +97,20 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// element identities cannot turn an index handle into a raw snapshot reader.
     ///
     /// This explicit source profile accepts the compiled Set/pipeline class and
-    /// text/vector hybrid.search sources. Pattern sources, other procedures,
-    /// graph expansion, temporal wrappers and aggregate classes refuse; there is
-    /// no one-shot fallback. Use the existing typed graph-index API for three-lane
-    /// reuse. The normal execute method and its supported sources are unchanged.
+    /// hybrid.search sources, including graph-only and mixed graph expansion.
+    /// Graph membership and incidence use the typed prepared graph reader at
+    /// the SAME saved sequence. Propertyless vertices remain traversable;
+    /// rejecting an endpoint does not remove it from paths. No graph directory
+    /// or text/vector index is rebuilt. Each CALL reports the saved population
+    /// plus admitted incidence visits to the enclosing source-record allowance.
+    /// New visits, incidences and bounded ranking workspace are scratch-admitted
+    /// before retention; these are logical counts, not a total byte-memory cap.
+    ///
+    /// Pattern sources, other procedures, temporal wrappers and aggregate
+    /// classes refuse; there is no one-shot fallback. A nonnull graph_access
+    /// override refuses: this explicit prepared source profile owns its native
+    /// incidence path, rather than silently substituting a requested physical
+    /// source. The normal execute method and its source choices are unchanged.
     ///
     /// Expiry, retirement and backwards time close the session, including on
     /// empty results or late errors. Other query/resource failures allow retry.
@@ -133,7 +138,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             let PreparedNativeRead::Set(template) = prepared.native.as_ref() else {
                 return Err(QueryError::Unsupported {
                     diagnostics: vec![
-                        "prepared index execution requires a CALL text/vector pipeline".to_owned(),
+                        "prepared index execution requires a CALL pipeline".to_owned(),
                     ],
                 });
             };
@@ -149,7 +154,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     "prepared index execution does not scan pattern sources",
                 ))),
                 |call, arguments, remaining| call_at(
-                    &owner, index, view, scope, execution, call, arguments, remaining, &retrieved,
+                    cx, &owner, index, view, scope, execution, call, arguments, remaining, &retrieved,
                 ),
                 |element, key| {
                     if !scope.allows_property(key) {
@@ -176,6 +181,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
 
 #[allow(clippy::too_many_arguments)]
 fn call_at(
+    cx: &QueryCx,
     owner: &Arc<()>,
     index: &AuthorizedBeaconIndex,
     view: &EmbeddedReadView,
@@ -189,6 +195,13 @@ fn call_at(
     if !crate::query::is_hybrid(call) {
         return Err(hybrid_refusal(HybridCallError::Combination(
             "prepared index execution accepts only hybrid.search sources",
+        )));
+    }
+    if call.argument_names().iter().zip(arguments).any(|(name, value)| {
+        name == "graph_access" && !matches!(value, GraphValue::Scalar(fgdb_types::CanonicalScalar::Null))
+    }) {
+        return Err(hybrid_refusal(HybridCallError::Combination(
+            "prepared index execution owns its graph source; omit graph_access",
         )));
     }
     let (search, eligible) =
@@ -209,6 +222,7 @@ fn call_at(
     .map_err(GqlQueryError::Interrupted)?;
     let allowance = prepared_policy(index, search.options().policy, remaining);
     let spent = Cell::new(0_u64);
+    let incidences = Cell::new(0_u64);
     let work = RefCell::new(Meter::new(allowance.max_work_units, |units| {
         charge(execution, units)?;
         spent.set(spent.get().saturating_add(units as u64));
@@ -223,26 +237,56 @@ fn call_at(
                 limit: allowance.max_result_rows,
             });
         }
-        Search::Hybrid(query.source_query())
-            .validate(&index.definition.index, &mut SharedWork(&work))?;
+        if !query.is_graph_only() {
+            Search::Hybrid(query.source_query())
+                .validate(&index.definition.index, &mut SharedWork(&work))?;
+        }
         let filter = EndpointFilter::prepare(
             eligible,
             query.retrieval.k,
             remaining.evaluator.max_scratch_entries,
             &mut SharedWork(&work),
         )?;
-        let hits = filter.finish(index.index.hybrid_search_graph_filtered(
-            query,
-            &[],
-            |id| filter.admits(id, &work),
-            &mut SharedWork(&work),
-        ))?;
+        let graph_scratch = Cell::new(filter.scratch_entries());
+        let admit_scratch = |entries: usize| {
+            let next = u64::try_from(entries).ok()
+                .and_then(|n| graph_scratch.get().checked_add(n))
+                .filter(|&n| n <= remaining.evaluator.max_scratch_entries)
+                .ok_or(BeaconError::ResourceLimit {
+                    resource: "prepared CALL graph scratch entries",
+                    limit: usize::try_from(remaining.evaluator.max_scratch_entries).unwrap_or(usize::MAX),
+                })?;
+            graph_scratch.set(next);
+            Ok(())
+        };
+        // The bool eligibility ABI retains its first refusal across BOTH
+        // expansion and fusion. No intermediate result or fresh permit escapes.
+        let hits = filter.finish((|| {
+            let graph = if query.graph_enabled() {
+                let (hits, visits) = super::graph::expand_at(
+                    cx, index, view, scope, remaining, execution, search.expansion(),
+                    query.graph_candidates, allowance, &work,
+                    |id, _| Ok(filter.admits(id, &work)), &admit_scratch,
+                )?;
+                incidences.set(visits);
+                hits
+            } else {
+                Vec::new()
+            };
+            if query.is_graph_only() {
+                query.fuse_graph_only(&graph, |id| filter.admits(id, &work), &mut SharedWork(&work))
+            } else {
+                index.index.hybrid_search_graph_filtered(
+                    query, &graph, |id| filter.admits(id, &work), &mut SharedWork(&work),
+                )
+            }
+        })())?;
         // Reserve a row, all YIELD cells and a provenance-set entry per hit
         // before allocating output. Repeated identities conservatively pay
         // again, so warming the private set cannot widen the query allowance.
         let scratch = (call.outputs().len() as u128 + 2)
             .checked_mul(hits.len() as u128)
-            .and_then(|count| count.checked_add(u128::from(filter.scratch_entries())))
+            .and_then(|count| count.checked_add(u128::from(graph_scratch.get())))
             .filter(|&count| count <= u128::from(remaining.evaluator.max_scratch_entries))
             .ok_or(BeaconError::ResourceLimit {
                 resource: "prepared CALL scratch entries",
@@ -266,7 +310,13 @@ fn call_at(
         .map_err(|error| hybrid_refusal(HybridCallError::Index(error)))?;
     Ok(GqlQueryExecution {
         rows: GqlExecutionStats {
-            snapshot_records: index.admitted,
+            // expand_at checks this same sum at each admitted incidence, before
+            // visiting it. Return it too, so UNION/CALL siblings cannot reset it.
+            snapshot_records: index.admitted.checked_add(incidences.get()).ok_or_else(|| {
+                hybrid_refusal(HybridCallError::Index(BeaconError::Invariant(
+                    "prepared source-record sum overflowed after admission",
+                )))
+            })?,
             result_rows: value.len() as u64,
         },
         evaluator: GlaExecutionStats {
@@ -280,3 +330,7 @@ fn call_at(
 #[cfg(test)]
 #[path = "prepared_native_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "prepared_native_graph_tests.rs"]
+mod graph_tests;
