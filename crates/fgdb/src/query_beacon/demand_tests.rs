@@ -179,8 +179,9 @@ fn directions_zero_hops_and_full_width_ids_have_literal_expected_answers() {
             "duplicates and missing seeds cannot become extra nodes"
         );
         assert_eq!(
-            scratch, 2,
-            "only the two admitted cache entries are retained"
+            scratch, 20,
+            "two cache entries, four distance/queue entries, four expansion \
+             heap/output entries and ten fusion entries share one allowance"
         );
         spec.seeds = &[];
         assert!(
@@ -410,8 +411,10 @@ fn work_and_shared_scratch_boundaries_refuse_without_partial_results() {
                 );
                 limited.policy.max_source_scratch -= 1;
                 assert!(
-                    db.beacon_search_graph_demand_filtered(&c.query(), &limited, q, spec, |_| {
-                        false
+                    // Replay the SAME predicate. Reject-all has a smaller
+                    // ranking footprint and is tested with its own baseline.
+                    db.beacon_search_graph_demand_filtered(&c.query(), &limited, q, spec, |id| {
+                        accept && id == HIGH
                     },)
                         .is_err()
                 );
@@ -471,6 +474,106 @@ fn invalid_requests_and_visitation_limits_are_not_hidden_by_empty_outputs() {
             db.beacon_search_graph_demand_filtered(&c.query(), &options(), q, spec, |_| false,)
                 .is_err()
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn zero_hop_state_and_rankers_spend_one_independently_counted_allowance() {
+    let ((), report) = run_async_under_lab(0xbeac_5301, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+        seed(&mut db, &c.commit(), 32, false).await;
+        let pin = db.read_session().unwrap();
+        let mut spec = expansion(&[VId(9), HIGH, VId(9), VId(999)]);
+        spec.max_hops = 0;
+        spec.include_seeds = true;
+        spec.limits.max_input_edges = 0;
+        // Two source cache entries and four distance/queue entries always.
+        // Accepted endpoints add two heap/two output entries in expansion.
+        // With k=1 fusion adds 2 seen + 2 rank + 2 evidence + 1 heap + 1 row.
+        for (accept, k, needed) in [(false, 1, 6), (true, 0, 10), (true, 1, 18)] {
+            let q = GraphHybridQuery::graph_only(k, 2, 100, 60).unwrap();
+            let mut bounded = options();
+            bounded.policy.max_source_scratch = needed;
+            let rows = pin.beacon_search_graph_demand_filtered(
+                &c.query(), &bounded, q, spec, |_| accept,
+            ).unwrap();
+            if accept && k != 0 {
+                assert_eq!(endpoints(&rows), [(VId(9), 0)]);
+                assert_eq!(
+                    (rows[0].score.numerator(), rows[0].score.denominator()),
+                    (100, 61)
+                );
+            } else {
+                assert!(rows.is_empty());
+            }
+            for limit in 0..needed {
+                bounded.policy.max_source_scratch = limit;
+                assert!(matches!(
+                    db.beacon_search_graph_demand_filtered(
+                        &c.query(), &bounded, q, spec, |_| accept,
+                    ),
+                    Err(Error::Index(BeaconError::ResourceLimit {
+                        resource: "demand graph source admissions", ..
+                    }))
+                ), "accept={accept} k={k} limit={limit}");
+            }
+            // The expansion-side cap is the same allowance, not a second pool.
+            bounded.policy.max_source_scratch = usize::MAX;
+            let mut tight_spec = spec;
+            tight_spec.limits.max_source_scratch = needed - 1;
+            assert!(pin.beacon_search_graph_demand_filtered(
+                &c.query(), &bounded, q, tight_spec, |_| accept,
+            ).is_err());
+            tight_spec.limits.max_source_scratch = needed;
+            assert_eq!(pin.beacon_search_graph_demand_filtered(
+                &c.query(), &bounded, q, tight_spec, |_| accept,
+            ).unwrap(), rows);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn refused_kernel_allocation_keeps_transaction_dependencies_after_retry_and_rollback() {
+    let ((), report) = run_async_under_lab(0xbeac_5302, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+        seed(&mut db, &c.commit(), 1, false).await;
+        let mut txn = db.begin(&c.txn()).unwrap();
+        let mut control = db.begin(&c.txn()).unwrap();
+        txn.savepoint(&db, "before-read").unwrap();
+        let mut spec = expansion(&[VId(9)]);
+        spec.max_hops = 0;
+        spec.include_seeds = true;
+        let q = GraphHybridQuery::graph_only(0, 1, 1, 60).unwrap();
+        let mut bounded = options();
+        // Existence and label each reserve two witness slots, then membership
+        // reserves one cache slot. The NEXT allocation is the kernel's visit.
+        bounded.policy.max_source_scratch = 5;
+        assert!(matches!(txn.beacon_search_graph_demand_filtered(
+            &db, &c.query(), &bounded, q, spec, |_| false,
+        ), Err(Error::Index(BeaconError::ResourceLimit {
+            resource: "transaction search source scratch entries", limit: 5,
+        }))));
+        assert!(txn.beacon_search_graph_demand_filtered(
+            &db, &c.query(), &options(), q, spec, |_| false,
+        ).unwrap().is_empty());
+        txn.rollback_to_savepoint(&db, "before-read").unwrap();
+        assert!(control.beacon_search_graph_demand_filtered(
+            &db, &c.query(), &options(), q, spec, |_| false,
+        ).unwrap().is_empty());
+        let mut winner = WriteBatch::new(R);
+        winner.set_vertex_property(VId(1000), PropertyKeyId(9), Some(CanonicalScalar::Int(7)));
+        db.write(&c.commit(), winner).await.unwrap();
+        assert!(control.finish(&mut db, &c.commit()).await.is_ok(),
+            "successful local search does not observe the disconnected property");
+        assert!(matches!(txn.finish(&mut db, &c.commit()).await,
+            Err(crate::WriteTxnError::Write(crate::WriteError::FirstCommitterWins {
+                law: "FG-LAW-FCW-READ-01", ..
+            }))));
+        assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

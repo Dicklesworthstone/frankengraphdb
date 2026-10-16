@@ -3,7 +3,7 @@
 //! Native historical indexes supply the same Beacon BFS and exact fusion used
 //! by other hosts. This is an explicit physical profile, never a fallback.
 
-use super::{Cancel, Meter, Options, Scan, SharedWork};
+use super::{Cancel, Meter, Options, Scan};
 use crate::gql_exec::source::{self, SourceEvent};
 use crate::{Database, EmbeddedReadView, ReadError, Snapshot, VertexRow};
 use asupersync::fs::Vfs;
@@ -19,7 +19,7 @@ use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
-/// Vertex and edge source admissions spend one shared scratch allowance.
+/// Source and traversal/fusion admissions spend one shared scratch allowance.
 /// Hidden histories poll the existing live gate, without changing observable
 /// work/scratch counters. No hidden or absent identity enters the cache.
 struct SourceControl<'a> {
@@ -52,6 +52,30 @@ impl SourceControl<'_> {
             }
             Scan::Unmetered(poll) => poll(),
         }
+    }
+}
+
+/// Kernel entries describe already-admitted visible traversal state. They must
+/// not use SourceControl::event: Unmetered masks hidden history work, not the
+/// distance map, queue, rank maps or output buffers of an authorized query.
+/// Keep this wrapper local to demand so other source profiles do not silently
+/// acquire a different accounting law. Each entry is cumulative, not refunded.
+struct ScratchWork<'a, 'p, W> {
+    work: &'a RefCell<W>,
+    source: &'a SourceControl<'p>,
+}
+
+impl<W: WorkControl> WorkControl for ScratchWork<'_, '_, W> {
+    fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+        self.work.borrow_mut().charge(units)
+    }
+
+    fn reserve_scratch(&mut self, entries: usize) -> Result<(), BeaconError> {
+        for _ in 0..entries {
+            self.work.borrow_mut().charge(1)?;
+            self.source.reserve()?;
+        }
+        Ok(())
     }
 }
 
@@ -211,7 +235,8 @@ where
 /// count unique probed visible vertices (before the user's label restriction),
 /// not the complete corpus. max_vertices additionally caps that cache; visited
 /// vertices remain bounded by the expansion kernel. No property is inspected.
-/// Return source admissions so a native CALL reports the scratch it consumed.
+/// Return source AND kernel admissions so native CALL reports all scratch:
+/// cached membership, incidence, distances/queue, ranking and fusion buffers.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_filtered(
     snapshot: &Snapshot,
@@ -269,6 +294,10 @@ pub(crate) fn evaluate_filtered(
     };
     // Complete bounded traversal even when k=0 or every endpoint is rejected.
     // Filtering can change ranks/results, never transit or refusal semantics.
+    let mut execution = ScratchWork {
+        work,
+        source: &source,
+    };
     let graph = expand_from_membership_filtered(
         expansion.seeds,
         expansion.max_hops,
@@ -278,9 +307,9 @@ pub(crate) fn evaluate_filtered(
         &membership,
         &mut neighbors,
         |id, _| Ok(eligible(id)),
-        &mut SharedWork(work),
+        &mut execution,
     )?;
-    let rows = query.fuse_graph_only(&graph, eligible, &mut SharedWork(work))?;
+    let rows = query.fuse_graph_only(&graph, eligible, &mut execution)?;
     work.borrow_mut().charge(1)?;
     let admissions = u64::try_from(source.used.get())
         .map_err(|_| BeaconError::Invariant("demand source admissions exceed u64"))?;
@@ -316,7 +345,10 @@ impl EmbeddedReadView {
     ///
     /// max_staging_rows, max_documents and max_vertices cap the unique visible
     /// membership cache; max_visited_vertices separately caps traversal. Shared
-    /// source admissions are capped by BOTH native and expansion scratch limits.
+    /// source and kernel admissions share BOTH native and expansion scratch
+    /// limits. Distances and queue entries, both ranking heaps, fusion maps and
+    /// output buffers are admitted before retention. Counts are cumulative
+    /// logical entries, not allocator capacities or bytes, and are not refunded.
     /// An incidence counts per expanded endpoint, with parallel EIds distinct.
     /// A rejected result endpoint remains a transit vertex. Empty/k=0 results
     /// retain complete bounded traversal and the final live checkpoint.

@@ -9,6 +9,25 @@ use fgdb_beacon::WorkBudget;
 use fgdb_beacon::expansion::{ExpansionMembership, expand_from_membership_filtered};
 use fgdb_delta_types::LabelId;
 
+/// Demand kernels reserve through the SAME source observer and sticky-refusal
+/// owner as membership/edges/witnesses. Every distance, queue, rank, evidence,
+/// heap and output entry is admitted before retention, with no per-phase reset.
+/// The ordinary Shared wrapper stays work-only for other physical profiles.
+struct ScratchWork<'a, 'cx>(&'a RefCell<Control<'cx>>);
+
+impl WorkControl for ScratchWork<'_, '_> {
+    fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+        self.0.borrow_mut().charge(units)
+    }
+
+    fn reserve_scratch(&mut self, entries: usize) -> Result<(), BeaconError> {
+        for _ in 0..entries {
+            self.0.borrow_mut().source(SourceEvent::ScratchEntry)?;
+        }
+        Ok(())
+    }
+}
+
 struct Membership<'a, 'cx> {
     txn: &'a WriteTxn,
     snapshot: &'a Snapshot,
@@ -204,7 +223,9 @@ impl WriteTxn {
     ///
     /// max_staging_rows/max_documents/max_vertices cap cached membership
     /// probes, including absences. Work and source scratch cover preparation,
-    /// probes, edge changes, witnesses, BFS and fusion without per-lane resets.
+    /// probes, edge changes, witnesses, BFS distances/queue, ranking heaps,
+    /// fusion maps and result buffers without per-lane resets. Kernel entries
+    /// reserve before retention; released entries do not refund admissions.
     /// The source cap is the minimum of read and expansion scratch limits.
     /// These are logical limits over decoded resident storage, not spill/RSS.
     /// The predicate is bounded, deterministic host computation, not authority.
@@ -320,12 +341,12 @@ impl WriteTxn {
                         &membership,
                         &mut neighbors,
                         |id, _| Ok(eligible(id, &work)),
-                        &mut Shared(&work),
+                        &mut ScratchWork(&work),
                     )?;
                     let rows = query.fuse_graph_only(
                         &hits,
                         |id| eligible(id, &work),
-                        &mut Shared(&work),
+                        &mut ScratchWork(&work),
                     )?;
                     work.borrow_mut().charge(1)?;
                     Ok(rows)
