@@ -665,13 +665,17 @@ impl<'a> Tables<'a> {
             else {
                 return Ok(None);
             };
+            let mut complete = true;
             for vid in reached {
-                if let Some(row) = source::find_vertex(snapshot, vid, at, scan)? {
-                    tables.admit_vertex(row, predicates, node, control)?;
-                }
+                complete &= match source::find_vertex(snapshot, vid, at, scan)? {
+                    Some(row) => tables
+                        .admit_vertex(row, predicates, node, control)?
+                        .is_some(),
+                    None => false,
+                };
             }
             for edge in edges {
-                tables.admit_edge(edge, predicates, control)?;
+                tables.admit_closure_edge(edge, predicates, complete, control)?;
             }
         } else if !plan.scans_edges() {
             let Some((rows, _)) = source::bound_vertices(snapshot, plan, at, scan)? else {
@@ -696,13 +700,17 @@ impl<'a> Tables<'a> {
                 .collect();
             endpoints.sort_unstable();
             endpoints.dedup();
+            let mut complete = true;
             for vid in endpoints {
-                if let Some(row) = source::find_vertex(snapshot, vid, at, scan)? {
-                    tables.admit_vertex(row, predicates, node, control)?;
-                }
+                complete &= match source::find_vertex(snapshot, vid, at, scan)? {
+                    Some(row) => tables
+                        .admit_vertex(row, predicates, node, control)?
+                        .is_some(),
+                    None => false,
+                };
             }
             for edge in edges {
-                tables.admit_edge(edge, predicates, control)?;
+                tables.admit_closure_edge(edge, predicates, complete, control)?;
             }
         }
         tables.seal();
@@ -836,16 +844,7 @@ impl<'a> Tables<'a> {
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
     ) -> Result<Option<[usize; 2]>, Fault> {
         let ((_, src, relation, dst), _) = edge;
-        if !self.vertices_sealed {
-            seal_by_key(&mut self.vertices, |&(vid, _)| vid);
-            self.vertices_sealed = true;
-        }
-        // Each admitted edge looks up both endpoints. In a large table a
-        // binary search is a chain of cache misses (30% of a web-google edge
-        // count), so the first edge indexes the sealed table once.
-        if self.positions.is_none() && self.vertices.len() >= POSITIONED_VERTICES {
-            self.positions = positions::VertexPositions::build(&self.vertices).map(Arc::new);
-        }
+        self.prepare_edges();
         if !predicates.allows_relation(relation) {
             return Ok(None);
         }
@@ -856,6 +855,51 @@ impl<'a> Tables<'a> {
         self.records += 1;
         self.edges.push(edge);
         Ok(Some([source, destination]))
+    }
+
+    /// Seal the vertex table before an edge phase (a no-op pass when the
+    /// visitor already sorted it). Each admitted edge's endpoints are looked
+    /// up in it, and in a large table a binary search is a chain of cache
+    /// misses (30% of a web-google edge count), so the first edge indexes the
+    /// sealed table once.
+    fn prepare_edges(&mut self) {
+        if !self.vertices_sealed {
+            seal_by_key(&mut self.vertices, |&(vid, _)| vid);
+            self.vertices_sealed = true;
+        }
+        if self.positions.is_none() && self.vertices.len() >= POSITIONED_VERTICES {
+            self.positions = positions::VertexPositions::build(&self.vertices).map(Arc::new);
+        }
+    }
+
+    /// `admit_edge` for an edge of a bound closure, whose endpoint positions
+    /// no caller reads. When the caller admitted every vertex the closure
+    /// holds, and so both ends of each of its edges, the two position lookups
+    /// would only confirm them: 17% of a pokec three-hop reach (fgdb-61p1n).
+    /// Debug builds still check them.
+    fn admit_closure_edge(
+        &mut self,
+        edge: Edge<'a>,
+        predicates: &PlannerPredicates,
+        endpoints_admitted: bool,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+    ) -> Result<(), Fault> {
+        if !endpoints_admitted {
+            return self.admit_edge(edge, predicates, control).map(drop);
+        }
+        let ((_, src, relation, dst), _) = edge;
+        self.prepare_edges();
+        debug_assert!(
+            self.position(src).is_some() && self.position(dst).is_some(),
+            "a closure edge whose endpoint was not admitted"
+        );
+        if !predicates.allows_relation(relation) {
+            return Ok(());
+        }
+        charge_edge(control)?;
+        self.records += 1;
+        self.edges.push(edge);
+        Ok(())
     }
 
     fn metadata<Row: GlaOutput>(
