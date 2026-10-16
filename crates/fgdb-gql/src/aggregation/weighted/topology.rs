@@ -229,22 +229,34 @@ pub(super) fn weigh_positioned<T, E, C>(
             control(GlaExecutionEvent::Work)?;
             if filtered[edge.relation as usize] {
                 let [source, destination] = &mut sides[edge.relation as usize];
-                let mut passes = |(predicates, verdicts): &mut (&[VertexPredicate], Vec<u8>),
-                                  vertex: u32| {
-                    if predicates.is_empty() {
-                        return Ok(true);
-                    }
-                    match verdicts[vertex as usize] {
-                        0 => {
-                            let result = test_at(vertex, predicates)?;
-                            control(GlaExecutionEvent::ScratchEntry)?;
-                            verdicts[vertex as usize] = 1 + u8::from(result);
-                            Ok::<_, VisitError<E, C>>(result)
+                // Both sides under one predicate list test a vertex alike.
+                // The readers are pure, so a side's first test of a vertex
+                // the other side has already tested reuses that answer; the
+                // side still charges its own entry, as `sorted` does.
+                let shared = source.0 == destination.0;
+                let mut passes =
+                    |own: &mut (&[VertexPredicate], Vec<u8>), other: &[u8], vertex: u32| {
+                        let (predicates, verdicts) = own;
+                        if predicates.is_empty() {
+                            return Ok(true);
                         }
-                        known => Ok(known == 2),
-                    }
-                };
-                if !(passes(source, edge.source)? && passes(destination, edge.destination)?) {
+                        match verdicts[vertex as usize] {
+                            0 => {
+                                let known = if shared { other[vertex as usize] } else { 0 };
+                                let result = match known {
+                                    0 => test_at(vertex, predicates)?,
+                                    known => known == 2,
+                                };
+                                control(GlaExecutionEvent::ScratchEntry)?;
+                                verdicts[vertex as usize] = 1 + u8::from(result);
+                                Ok::<_, VisitError<E, C>>(result)
+                            }
+                            known => Ok(known == 2),
+                        }
+                    };
+                if !(passes(source, &destination.1, edge.source)?
+                    && passes(destination, &source.1, edge.destination)?)
+                {
                     // A first arrival that fails rejects its whole key.
                     first[at] = false;
                     continue;

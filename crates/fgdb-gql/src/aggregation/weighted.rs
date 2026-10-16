@@ -2257,9 +2257,10 @@ mod tests {
     /// Every `text` over a sparse-identity multigraph of `width` vertices
     /// and `arcs` edges in two relations (parallel edges, loops, arrivals in
     /// no endpoint order) answers positioned with the identity evaluator's
-    /// value and statistics, makes the same vertex tests, stops at every
-    /// `every`th host checkpoint (and the first and last 40) with the same
-    /// count, and refuses at every sampled work and scratch limit alike.
+    /// value and statistics, makes no vertex test the identity run does not
+    /// (its pure readers may skip a repeat), stops at every `every`th host
+    /// checkpoint (and the first and last 40) with the same count, and
+    /// refuses at every sampled work and scratch limit alike.
     fn positioned_matches_identity(
         texts: &[&str],
         width: u32,
@@ -2336,18 +2337,24 @@ mod tests {
                 };
                 (format!("{result:?}"), at, tests.get())
             };
+            // The same outcome and host stops; pure readers let the
+            // positioned run skip a test that only repeats one it made.
+            let same = |positioned: (String, usize, usize), identity: (String, usize, usize)| {
+                (positioned.0 == identity.0 && positioned.1 == identity.1)
+                    .then_some(())
+                    .filter(|()| positioned.2 <= identity.2)
+                    .ok_or((positioned, identity))
+            };
             let expected = run(false, wide, None);
             assert!(expected.0.starts_with("Ok("), "{text}: {expected:?}");
-            assert_eq!(run(true, wide, None), expected, "{text}");
+            same(run(true, wide, None), expected.clone())
+                .unwrap_or_else(|pair| panic!("{text}: {pair:?}"));
             let total = expected.1;
             for stop in
                 (1..=total).filter(|stop| stop % every == 0 || *stop <= 40 || total - stop < 40)
             {
-                assert_eq!(
-                    run(true, wide, Some(stop)),
-                    run(false, wide, Some(stop)),
-                    "{text} stop {stop}"
-                );
+                same(run(true, wide, Some(stop)), run(false, wide, Some(stop)))
+                    .unwrap_or_else(|pair| panic!("{text} stop {stop}: {pair:?}"));
             }
             let completed = q
                 .execute_governed(
@@ -2365,19 +2372,13 @@ mod tests {
                 move |total: u64| (0..=total).filter(move |at| at % step == 0 || total - at <= 3);
             for limit in sampled(completed.evaluator.work_units) {
                 let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, limit, u64::MAX);
-                assert_eq!(
-                    run(true, policy, None),
-                    run(false, policy, None),
-                    "{text} work {limit}"
-                );
+                same(run(true, policy, None), run(false, policy, None))
+                    .unwrap_or_else(|pair| panic!("{text} work {limit}: {pair:?}"));
             }
             for limit in sampled(completed.evaluator.scratch_entries) {
                 let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, limit);
-                assert_eq!(
-                    run(true, policy, None),
-                    run(false, policy, None),
-                    "{text} scratch {limit}"
-                );
+                same(run(true, policy, None), run(false, policy, None))
+                    .unwrap_or_else(|pair| panic!("{text} scratch {limit}: {pair:?}"));
             }
         }
     }

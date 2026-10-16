@@ -217,29 +217,32 @@ impl<'a> Shape<'a> {
 pub(in crate::aggregation::weighted) trait Key:
     Copy + Ord + core::hash::Hash
 {
-    /// Root -> its row: probed, never iterated.
+    /// Root -> its children's range: probed, never iterated.
     type Rows;
     /// Keys seen: probed, never iterated.
     type Seen;
-    /// Over keys below `bound` (positions); identities ignore it.
-    fn rows(bound: usize) -> Self::Rows;
-    fn set_row(rows: &mut Self::Rows, key: Self, row: usize);
-    fn row(rows: &Self::Rows, key: Self) -> Option<usize>;
+    /// The index of ascending `roots`, root `r`'s children being
+    /// `offsets[r]..offsets[r + 1]`, over keys below `bound` (positions;
+    /// identities ignore it).
+    fn index(bound: usize, roots: &[Self], offsets: &[usize]) -> Self::Rows;
+    /// `key`'s children's range, if it is a root (a root has children).
+    fn children(rows: &Self::Rows, key: Self) -> Option<(usize, usize)>;
     fn seen(bound: usize) -> Self::Seen;
     fn was_seen(seen: &Self::Seen, key: Self) -> bool;
     fn see(seen: &mut Self::Seen, key: Self);
 }
 
 impl Key for VId {
-    type Rows = crate::id_hash::IdMap<VId, usize>;
+    type Rows = crate::id_hash::IdMap<VId, (usize, usize)>;
     type Seen = crate::id_hash::IdSet<VId>;
-    fn rows(_: usize) -> Self::Rows {
-        Self::Rows::default()
+    fn index(_: usize, roots: &[Self], offsets: &[usize]) -> Self::Rows {
+        roots
+            .iter()
+            .enumerate()
+            .map(|(row, &root)| (root, (offsets[row], offsets[row + 1])))
+            .collect()
     }
-    fn set_row(rows: &mut Self::Rows, key: Self, row: usize) {
-        rows.insert(key, row);
-    }
-    fn row(rows: &Self::Rows, key: Self) -> Option<usize> {
+    fn children(rows: &Self::Rows, key: Self) -> Option<(usize, usize)> {
         rows.get(&key).copied()
     }
     fn seen(_: usize) -> Self::Seen {
@@ -253,22 +256,28 @@ impl Key for VId {
     }
 }
 
-/// A position's row, `u32::MAX` while unrooted (a row is below the vertex
-/// count, which fits a position), and one seen bit per position.
+/// Every position's children start, so a position's children are
+/// `starts[at]..starts[at + 1]` (empty unless it is a root) with no row
+/// index between: one dependent load fewer per lookup. One seen bit per
+/// position. Children never exceed the edges a positioned graph holds,
+/// whose count fits 32 bits.
 impl Key for u32 {
     type Rows = Vec<u32>;
     type Seen = Vec<u64>;
-    fn rows(bound: usize) -> Self::Rows {
-        vec![u32::MAX; bound]
-    }
-    fn set_row(rows: &mut Self::Rows, key: Self, row: usize) {
-        rows[key as usize] = row as u32;
-    }
-    fn row(rows: &Self::Rows, key: Self) -> Option<usize> {
-        match rows[key as usize] {
-            u32::MAX => None,
-            row => Some(row as usize),
+    fn index(bound: usize, roots: &[Self], offsets: &[usize]) -> Self::Rows {
+        let mut starts = Vec::with_capacity(bound + 1);
+        let mut next = 0;
+        for at in 0..=bound {
+            while next < roots.len() && (roots[next] as usize) < at {
+                next += 1;
+            }
+            starts.push(offsets[next] as u32);
         }
+        starts
+    }
+    fn children(rows: &Self::Rows, key: Self) -> Option<(usize, usize)> {
+        let (start, end) = (rows[key as usize], rows[key as usize + 1]);
+        (start < end).then_some((start as usize, end as usize))
     }
     fn seen(bound: usize) -> Self::Seen {
         vec![0; bound.div_ceil(64)]
@@ -294,10 +303,8 @@ struct Trie<K: Key> {
     low: usize,
     high: usize,
     roots: Vec<K>,
-    /// Probed, never iterated: root -> its row.
+    /// Probed, never iterated: root -> its children's range in `children`.
     rows: K::Rows,
-    /// Row `r`'s children are `children[offsets[r]..offsets[r + 1]]`.
-    offsets: Vec<usize>,
     children: Vec<K>,
 }
 impl<K: Key> Trie<K> {
@@ -362,7 +369,6 @@ impl<K: Key> Trie<K> {
         drop(repeated);
         pairs.sort_unstable();
         let mut roots = Vec::new();
-        let mut rows = K::rows(bound);
         let mut offsets = vec![0];
         let mut children = Vec::with_capacity(pairs.len());
         let mut at = 0;
@@ -370,7 +376,6 @@ impl<K: Key> Trie<K> {
             let low = pairs[at].0;
             control(GlaExecutionEvent::Work)?;
             control(GlaExecutionEvent::ScratchEntry)?;
-            K::set_row(&mut rows, low, roots.len());
             roots.push(low);
             control(GlaExecutionEvent::ScratchEntry)?;
             while let Some(&(_, value)) = pairs.get(at).filter(|(row, _)| *row == low) {
@@ -381,12 +386,14 @@ impl<K: Key> Trie<K> {
             }
             offsets.push(children.len());
         }
+        // The index takes no event: the build's charges are the tree
+        // build's, in its order.
+        let rows = K::index(bound, &roots, &offsets);
         Ok(Self {
             low: atom.left.min(atom.right),
             high: atom.left.max(atom.right),
             roots,
             rows,
-            offsets,
             children,
         })
     }
@@ -396,10 +403,8 @@ impl<K: Key> Trie<K> {
         } else if variable == self.high {
             Some(
                 assigned[self.low]
-                    .and_then(|low| K::row(&self.rows, low))
-                    .map_or(&[][..], |row| {
-                        &self.children[self.offsets[row]..self.offsets[row + 1]]
-                    }),
+                    .and_then(|low| K::children(&self.rows, low))
+                    .map_or(&[][..], |(start, end)| &self.children[start..end]),
             )
         } else {
             None
@@ -437,7 +442,7 @@ impl<'t, K: Key> Domain<'t, K> {
         match self {
             Self::Roots(trie) => {
                 control(GlaExecutionEvent::Work)?;
-                Ok(K::row(&trie.rows, value).is_some())
+                Ok(K::children(&trie.rows, value).is_some())
             }
             Self::Children(values) => {
                 let at = lower_bound(values, Some(value), false, control)?;

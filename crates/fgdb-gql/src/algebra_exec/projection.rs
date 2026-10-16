@@ -260,6 +260,27 @@ impl super::GlaExecutionStats {
         self.work_units = observed as u64;
         Ok(())
     }
+
+    /// `n` scratch entries' scratch charge in one step: the same total and
+    /// refusal (every entry up to the limit admitted, the next observing
+    /// limit + 1) as the scratch half of `n` ScratchEntry charges.
+    pub fn charge_scratch_entries(
+        &mut self,
+        limits: super::GlaExecutionLimits,
+        n: u64,
+    ) -> Result<(), super::GlaLimitExceeded> {
+        let observed = u128::from(self.scratch_entries) + u128::from(n);
+        if n > 0 && observed > u128::from(limits.max_scratch_entries) {
+            self.scratch_entries = self.scratch_entries.max(limits.max_scratch_entries);
+            return Err(super::GlaLimitExceeded {
+                dimension: super::GlaLimitDimension::ScratchEntries,
+                limit: limits.max_scratch_entries,
+                observed: u128::from(self.scratch_entries) + 1,
+            });
+        }
+        self.scratch_entries = observed as u64;
+        Ok(())
+    }
 }
 
 /// A governed execution's host checkpoint: one unit per evaluator event.
