@@ -392,8 +392,10 @@ impl<'a> GraphPathCursor<'a> {
         let mut next = Vec::new();
         let mut pending = Vec::new();
         // Each endpoint's best path so far, with the generation number of
-        // the step that made it best.
-        let mut canonical = BTreeMap::<VId, (u64, GraphPath)>::new();
+        // the step that made it best. Probed per step, and read once at the
+        // layer's end only to be sorted by generation, so a hashed map holds
+        // what the ordered one did, in the order it left (fgdb-61p1n).
+        let mut canonical = crate::id_hash::IdMap::<VId, (u64, GraphPath)>::default();
         let mut generated = 0_u64;
         for path in core::mem::take(&mut self.frontier) {
             control(GlaExecutionEvent::Work)?;
@@ -1160,5 +1162,86 @@ mod shortest_path_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod path_cursor_charges {
+    use super::*;
+
+    /// Totals and a digest of every event and path of ANY and ALL SHORTEST
+    /// path cursors over random multigraphs, recorded with the ordered
+    /// per-layer canonical map (fgdb-61p1n): a change to the cursor that keeps
+    /// every charge, in order, and every path leaves them.
+    const PINNED: (u64, u64, u64) = (56_560, 27_148, 9_665_325_222_785_454_547);
+
+    #[test]
+    fn shortest_path_cursor_events_keep_their_pinned_digest() {
+        let mut state = 0x5a07_e5e7_0000_0001_u64;
+        let mut random = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let (mut work, mut scratch, mut digest) = (0_u64, 0_u64, 0xcbf2_9ce4_8422_2325_u64);
+        let fold = |digest: &mut u64, value: u64| {
+            *digest = (*digest ^ value).wrapping_mul(0x0100_0000_01b3);
+        };
+        for _ in 0..150 {
+            let vertices = 1 + random(16);
+            let mut adjacency: BTreeMap<VId, Vec<(EId, VId)>> = BTreeMap::new();
+            for eid in 0..random(4 * vertices) {
+                let (source, target) = (random(vertices), random(vertices));
+                adjacency
+                    .entry(VId(u128::from(source)))
+                    .or_default()
+                    .push((EId(u128::from(eid)), VId(u128::from(target))));
+            }
+            for neighbors in adjacency.values_mut() {
+                neighbors.sort_unstable();
+            }
+            for search in [GraphWalkSearch::AnyShortest, GraphWalkSearch::AllShortest] {
+                for (minimum, maximum) in [(1, 3), (0, 5), (2, 4)] {
+                    let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
+                    let source = VId(u128::from(random(vertices)));
+                    let mut events = Vec::new();
+                    let mut control = |event| {
+                        events.push(event);
+                        Ok::<_, ()>(())
+                    };
+                    let mut cursor = GraphPathCursor::new(
+                        source,
+                        bounds,
+                        search,
+                        Some(&adjacency),
+                        &mut control,
+                    )
+                    .unwrap();
+                    let mut paths = Vec::new();
+                    while let Some(path) = cursor.next_with_control(&mut control).unwrap() {
+                        paths.push(path);
+                    }
+                    for event in events {
+                        match event {
+                            GlaExecutionEvent::Work => work += 1,
+                            GlaExecutionEvent::ScratchEntry => scratch += 1,
+                            GlaExecutionEvent::ResultRow => {}
+                        }
+                        fold(&mut digest, event as u64);
+                    }
+                    for path in paths {
+                        fold(&mut digest, path.start().0 as u64);
+                        for &(edge, vertex) in path.steps() {
+                            fold(&mut digest, edge.0 as u64);
+                            fold(&mut digest, vertex.0 as u64);
+                        }
+                        fold(&mut digest, u64::MAX);
+                    }
+                }
+            }
+        }
+        assert!(work > 10_000 && scratch > 10_000, "{work} {scratch}");
+        assert_eq!((work, scratch, digest), PINNED);
     }
 }
