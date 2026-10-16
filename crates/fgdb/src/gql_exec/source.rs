@@ -783,6 +783,19 @@ impl AdjacencyIndex {
         }
     }
 
+    /// `endpoint`'s statement ranges in `face`'s base, in identity order,
+    /// when the overlay holds nothing there: then they are the whole face.
+    fn base_face(&self, face: Face, endpoint: VId) -> Option<&[StatementRange]> {
+        let (base, overlay) = match face {
+            Face::Outgoing => (&self.base.outgoing, &self.outgoing),
+            Face::Incoming => (&self.base.incoming, &self.incoming),
+        };
+        overlay
+            .get(&endpoint)
+            .is_none()
+            .then(|| base.members(endpoint).1)
+    }
+
     /// How many identities `face` holds at `endpoint`.
     fn face_len(&self, face: Face, endpoint: VId) -> usize {
         let (base, overlay) = match face {
@@ -1180,12 +1193,18 @@ impl AdjacencyIndex {
     {
         use fgdb_gql::algebra::GlaDirection;
         control(SourceEvent::Work)?;
-        let outgoing = || Some(self.face_entries(Face::Outgoing, endpoint).peekable());
-        let incoming = || Some(self.face_entries(Face::Incoming, endpoint).peekable());
-        let (mut left, mut right) = match direction {
-            GlaDirection::Forward => (outgoing(), None),
-            GlaDirection::Reverse => (incoming(), None),
-            GlaDirection::Undirected => (outgoing(), incoming()),
+        // An identity's statement at `as_of`, when it is an incident edge
+        // visible there.
+        let judge = |history: HistoryRef<'a>| {
+            history.latest(as_of).and_then(|(block, row)| {
+                let entry = &blocks[block].as_ref()[row];
+                let incident = match direction {
+                    GlaDirection::Forward => entry.src == endpoint,
+                    GlaDirection::Reverse => entry.dst == endpoint,
+                    GlaDirection::Undirected => entry.src == endpoint || entry.dst == endpoint,
+                };
+                (incident && entry.visible_at(as_of)).then_some((entry, block, row))
+            })
         };
         // Each identity's statement is read a chunk ahead: pure reads of
         // independent sealed rows, whose cache misses overlap, where one at a
@@ -1193,6 +1212,36 @@ impl AdjacencyIndex {
         // Work per identity before its visit, as the walk always ran.
         const CHUNK: usize = 32;
         let mut ahead: [Option<(&'a AdjacencyEntry, usize, usize)>; CHUNK] = [None; CHUNK];
+        // A directed visit of an endpoint the overlay never touched (every
+        // endpoint of a generation no commit extended) reads its base ranges
+        // as the slice they are: the same identities in the same order as the
+        // merging iterator, whose calls were a tenth of an epinions two-hop.
+        let face = match direction {
+            GlaDirection::Forward => Some(Face::Outgoing),
+            GlaDirection::Reverse => Some(Face::Incoming),
+            GlaDirection::Undirected => None,
+        };
+        if let Some(ranges) = face.and_then(|face| self.base_face(face, endpoint)) {
+            for ranges in ranges.chunks(CHUNK) {
+                for (slot, &range) in ahead.iter_mut().zip(ranges) {
+                    *slot = judge(HistoryRef::Flat(self.base.statements_in(range)));
+                }
+                for &step in &ahead[..ranges.len()] {
+                    control(SourceEvent::Work)?;
+                    if let Some((entry, block, row)) = step {
+                        visit(entry, block, row, control)?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        let outgoing = || Some(self.face_entries(Face::Outgoing, endpoint).peekable());
+        let incoming = || Some(self.face_entries(Face::Incoming, endpoint).peekable());
+        let (mut left, mut right) = match direction {
+            GlaDirection::Forward => (outgoing(), None),
+            GlaDirection::Reverse => (incoming(), None),
+            GlaDirection::Undirected => (outgoing(), incoming()),
+        };
         loop {
             let mut taken = 0;
             while taken < CHUNK {
@@ -1219,15 +1268,7 @@ impl AdjacencyIndex {
                 {
                     b.next();
                 }
-                ahead[taken] = history.latest(as_of).and_then(|(block, row)| {
-                    let entry = &blocks[block].as_ref()[row];
-                    let incident = match direction {
-                        GlaDirection::Forward => entry.src == endpoint,
-                        GlaDirection::Reverse => entry.dst == endpoint,
-                        GlaDirection::Undirected => entry.src == endpoint || entry.dst == endpoint,
-                    };
-                    (incident && entry.visible_at(as_of)).then_some((entry, block, row))
-                });
+                ahead[taken] = judge(history);
                 taken += 1;
             }
             for &step in &ahead[..taken] {
