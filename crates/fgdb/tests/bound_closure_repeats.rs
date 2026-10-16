@@ -225,3 +225,151 @@ fn uniform_chains_admit_each_edge_once_when_a_step_expands_a_vertex_again() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// Closure shapes whose admission charges a refactor of the closure must
+/// keep, as least budgets per dimension (snapshot records, evaluator work,
+/// evaluator scratch, the grant's signed work and nodes), recorded at
+/// 13e2c5fa (fgdb-61p1n): an edge-rooted uniform chain, walks with and
+/// without zero hops, an undirected chain, and chains that change relation
+/// or direction.
+const PINNED: [(&str, [u64; 5]); 6] = [
+    (
+        "MATCH (a {p: 0})-[:E]->(b)-[:E]->(c) RETURN COUNT(*) AS n",
+        [13, 101, 37, 109, 4],
+    ),
+    (
+        "MATCH (a {p: 0})-[:E]->{1,3}(b) RETURN COUNT(DISTINCT b) AS n",
+        [16, 121, 46, 130, 5],
+    ),
+    (
+        "MATCH (a {p: 0})-[:E]->{0,2}(b) RETURN COUNT(DISTINCT b) AS n",
+        [13, 99, 38, 107, 4],
+    ),
+    (
+        "MATCH (a {p: 0})-[:E]-(b)-[:E]-(c) RETURN COUNT(*) AS n",
+        [20, 333, 64, 343, 6],
+    ),
+    (
+        "MATCH (a {p: 0})-[:E]->(b)-[:F]->(c) RETURN COUNT(*) AS n",
+        [14, 98, 37, 108, 6],
+    ),
+    (
+        "MATCH (a {p: 0})<-[:E]-(b)-[:E]->(c) RETURN COUNT(*) AS n",
+        [19, 268, 67, 278, 6],
+    ),
+];
+
+/// A grant that hides nothing, with these signed-work and node limits.
+fn limited(max_work: u64, max_nodes: u64) -> Grant {
+    let mut grant = grant();
+    grant.limits.max_work = max_work;
+    grant.limits.max_nodes = max_nodes;
+    grant
+}
+
+#[test]
+fn closure_shapes_keep_their_pinned_budgets() {
+    let ((), report) = run_async_under_lab(0x5ec0_6102, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let db = database(&commit).await;
+        let issuer = authority();
+        let wide = 10_000_000;
+        let admitted = |query: &PreparedGraphAggregate, limits: [u64; 5]| {
+            let token = issuer
+                .issue_at(&limited(limits[3], limits[4]), 100)
+                .unwrap();
+            let policy = GqlQueryPolicy::new(limits[0], 1_000, limits[1], limits[2]);
+            db.execute_graph_aggregate_authorized(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                query,
+                policy,
+                || 100,
+            )
+            .is_ok()
+        };
+        // The least budget in one dimension, the others wide.
+        let least = |query: &PreparedGraphAggregate, dimension: usize| {
+            let at = |value| {
+                let mut limits = [wide; 5];
+                limits[dimension] = value;
+                limits
+            };
+            let (mut low, mut high) = (0, wide);
+            assert!(admitted(query, at(high)));
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if admitted(query, at(middle)) {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            low
+        };
+        let mut measured = Vec::new();
+        for (text, _) in PINNED {
+            let query = prepare(text);
+            measured.push([0, 1, 2, 3, 4].map(|dimension| least(&query, dimension)));
+        }
+        let pinned: Vec<[u64; 5]> = PINNED.iter().map(|&(_, limits)| limits).collect();
+        assert_eq!(measured, pinned);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// The same shapes read by the owner, whose closure charges its own walk:
+/// least snapshot records, evaluator work and evaluator scratch, recorded at
+/// 13e2c5fa (fgdb-61p1n).
+const OWNER_PINNED: [[u64; 3]; 6] = [
+    [9, 166, 48],
+    [16, 184, 58],
+    [13, 153, 48],
+    [14, 444, 83],
+    [8, 142, 42],
+    [13, 361, 86],
+];
+
+#[test]
+fn owner_closure_shapes_keep_their_pinned_budgets() {
+    let ((), report) = run_async_under_lab(0x5ec0_6103, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let db = database(&commit).await;
+        let wide = 10_000_000;
+        let admitted = |text: &str, limits: [u64; 3]| {
+            let policy = GqlQueryPolicy::new(limits[0], 1_000, limits[1], limits[2]);
+            db.query(&cx, text, &GqlParameters::new(), symbols, policy)
+                .is_ok()
+        };
+        let least = |text: &str, dimension: usize| {
+            let at = |value| {
+                let mut limits = [wide; 3];
+                limits[dimension] = value;
+                limits
+            };
+            let (mut low, mut high) = (0, wide);
+            assert!(admitted(text, at(high)), "{text}");
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if admitted(text, at(middle)) {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            low
+        };
+        let measured: Vec<[u64; 3]> = PINNED
+            .iter()
+            .map(|&(text, _)| [0, 1, 2].map(|dimension| least(text, dimension)))
+            .collect();
+        assert_eq!(measured, OWNER_PINNED);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
