@@ -410,7 +410,7 @@ where
             Some(resolver) => {
                 GraphValueRow::decode_canonical_with_resolver(bytes.as_ref(), resolver)
             }
-            None => GraphValueRow::decode_canonical(bytes.as_ref()),
+            None => GraphValueRow::decode_stored(bytes.as_ref()),
         }
         .map_err(NativeSpoolError::Decode)?;
         drop(bytes);

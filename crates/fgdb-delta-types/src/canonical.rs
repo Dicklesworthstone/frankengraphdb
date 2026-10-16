@@ -347,6 +347,7 @@ struct Reader<'a> {
     bytes: &'a [u8],
     position: usize,
     resolver: Option<&'a dyn CanonicalScalarResolver>,
+    allow_stored_zoned: bool,
 }
 
 impl core::fmt::Debug for Reader<'_> {
@@ -364,6 +365,16 @@ impl<'a> Reader<'a> {
             bytes,
             position: 0,
             resolver,
+            allow_stored_zoned: false,
+        }
+    }
+
+    fn new_stored(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            position: 0,
+            resolver: None,
+            allow_stored_zoned: true,
         }
     }
 
@@ -500,6 +511,7 @@ impl<'a> Reader<'a> {
 
     fn scalar(&mut self) -> Result<CanonicalScalar, CanonicalError> {
         let resolver = self.resolver;
+        let allow_stored_zoned = self.allow_stored_zoned;
         let len = self.count(1)?;
         let encoded = self.take(len)?;
         // This is the closed graph-value decoder; no JWT or signature state exists here.
@@ -509,6 +521,9 @@ impl<'a> Reader<'a> {
         match resolver {
             Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver)
                 .map_err(|_| CanonicalError::Scalar),
+            None if allow_stored_zoned => {
+                CanonicalScalar::decode_stored(encoded).map_err(|_| CanonicalError::Scalar)
+            }
             None => CanonicalScalar::decode(encoded).map_err(|_| CanonicalError::Scalar),
         }
     }
@@ -821,7 +836,13 @@ impl DeltaRow {
 
     /// Decode one row, requiring the input to be exactly one row.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CanonicalError> {
-        Self::read_with_dyn_resolver(bytes, None)
+        Self::read_with_dyn_resolver(bytes, None, false)
+    }
+
+    /// Decode one committed row from authenticated durable storage without a
+    /// live [`CanonicalScalarResolver`], preserving stored zoned timestamps.
+    pub fn decode_stored(bytes: &[u8]) -> Result<Self, CanonicalError> {
+        Self::read_with_dyn_resolver(bytes, None, true)
     }
 
     /// Decode one row under an explicit pinned-artifact resolver. Zoned
@@ -831,15 +852,20 @@ impl DeltaRow {
         bytes: &[u8],
         resolver: &dyn CanonicalScalarResolver,
     ) -> Result<Self, CanonicalError> {
-        Self::read_with_dyn_resolver(bytes, Some(resolver))
+        Self::read_with_dyn_resolver(bytes, Some(resolver), false)
     }
 
     /// Decode one already-length-bounded row from `bytes` under `resolver`.
     fn read_with_dyn_resolver(
         bytes: &[u8],
         resolver: Option<&dyn CanonicalScalarResolver>,
+        allow_stored_zoned: bool,
     ) -> Result<Self, CanonicalError> {
-        let mut r = Reader::new(bytes, resolver);
+        let mut r = if allow_stored_zoned && resolver.is_none() {
+            Reader::new_stored(bytes)
+        } else {
+            Reader::new(bytes, resolver)
+        };
         let row = Self::read(&mut r)?;
         if !r.is_exhausted() {
             return Err(CanonicalError::TrailingBytes {
@@ -1008,7 +1034,11 @@ impl CoordinateEntry {
         for _ in 0..row_count {
             let len = r.count(1)?;
             let encoded = r.take(len)?;
-            rows.push(DeltaRow::read_with_dyn_resolver(encoded, r.resolver)?);
+            rows.push(DeltaRow::read_with_dyn_resolver(
+                encoded,
+                r.resolver,
+                r.allow_stored_zoned,
+            )?);
         }
         Ok(CoordinateEntry {
             graph,
@@ -1041,7 +1071,13 @@ impl LogicalDeltaTemplate {
     /// stable digest, so admitting one would let the same logical change
     /// present two identities.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CanonicalError> {
-        Self::decode_inner(bytes, None)
+        Self::decode_from_reader(Reader::new(bytes, None))
+    }
+
+    /// Decode a committed template from authenticated durable storage without a
+    /// live [`CanonicalScalarResolver`], preserving stored zoned timestamps.
+    pub fn decode_stored(bytes: &[u8]) -> Result<Self, CanonicalError> {
+        Self::decode_from_reader(Reader::new_stored(bytes))
     }
 
     /// Decode a template under an explicit pinned-artifact resolver. Zoned
@@ -1051,14 +1087,10 @@ impl LogicalDeltaTemplate {
         bytes: &[u8],
         resolver: &dyn CanonicalScalarResolver,
     ) -> Result<Self, CanonicalError> {
-        Self::decode_inner(bytes, Some(resolver))
+        Self::decode_from_reader(Reader::new(bytes, Some(resolver)))
     }
 
-    fn decode_inner(
-        bytes: &[u8],
-        resolver: Option<&dyn CanonicalScalarResolver>,
-    ) -> Result<Self, CanonicalError> {
-        let mut r = Reader::new(bytes, resolver);
+    fn decode_from_reader(mut r: Reader<'_>) -> Result<Self, CanonicalError> {
         let format = r.u16()?;
         if !is_supported_delta_format(format) {
             return Err(CanonicalError::UnsupportedFormat { format });

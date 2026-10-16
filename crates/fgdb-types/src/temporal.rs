@@ -162,6 +162,29 @@ impl CanonicalTimestamp {
         })
     }
 
+    /// Reconstructs a stored zoned timestamp from its committed components
+    /// (`instant_utc_nanos`, `utc_offset_seconds`, `zone_identifier`, and
+    /// `tzdb_oid`), validating instant/offset ranges and canonical zone syntax
+    /// without consulting a live [`TzdbResolver`].
+    pub fn from_stored_zoned(
+        instant_utc_nanos: i128,
+        utc_offset_seconds: i32,
+        zone_identifier: &str,
+        tzdb_oid: ObjectId,
+    ) -> Result<Self, TimestampConstructionError> {
+        validate_instant(instant_utc_nanos)?;
+        validate_offset(utc_offset_seconds)?;
+        validate_zone_identifier(zone_identifier)?;
+        Ok(Self {
+            instant_utc_nanos,
+            utc_offset_seconds,
+            zone: Some(Box::new(TimestampZone {
+                identifier: zone_identifier.into(),
+                tzdb_oid,
+            })),
+        })
+    }
+
     /// Returns the exact stored UTC instant in nanoseconds.
     pub const fn instant_utc_nanos(&self) -> i128 {
         self.instant_utc_nanos

@@ -238,6 +238,63 @@ impl<'a, Access> ExecutionPermit<'a, Access> {
         self.usage
     }
 
+    /// Canonical, domain-separated byte transcript of the verified authority
+    /// and compiled capability predicates that admitted this permit
+    /// (`fgdb.warden.authz_decision.v1`, FG-INV-20).
+    ///
+    /// Never includes the macaroon's secret HMAC attenuation tag or mutable
+    /// execution usage/clock state, so identical capability + policy epoch
+    /// produces a byte-identical transcript while any caveat attenuation
+    /// changes it deterministically.
+    #[must_use]
+    pub fn canonical_decision_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::from(&b"fgdb.warden.authz_decision.v1\0"[..]);
+        let id = self.authority.identifier().as_bytes();
+        out.extend_from_slice(&(id.len() as u64).to_be_bytes());
+        out.extend_from_slice(id);
+        let branch = self.program.branch.as_bytes();
+        out.extend_from_slice(&(branch.len() as u64).to_be_bytes());
+        out.extend_from_slice(branch);
+        out.extend_from_slice(&self.program.rights.bits().to_be_bytes());
+        out.extend_from_slice(&self.program.limits.max_nodes.to_be_bytes());
+        out.extend_from_slice(&self.program.limits.max_work.to_be_bytes());
+        out.extend_from_slice(&self.program.limits.max_rows.to_be_bytes());
+        out.extend_from_slice(&self.program.not_before_ms.to_be_bytes());
+        out.extend_from_slice(&self.program.expires_at_ms.to_be_bytes());
+        out.extend_from_slice(&(self.program.label_clauses.len() as u64).to_be_bytes());
+        for clause in &self.program.label_clauses {
+            out.extend_from_slice(&(clause.len() as u64).to_be_bytes());
+            for label in clause {
+                out.extend_from_slice(&label.0.to_be_bytes());
+            }
+        }
+        match &self.program.relations {
+            Scope::All => out.push(0),
+            Scope::Only(set) => {
+                out.push(1);
+                out.extend_from_slice(&(set.len() as u64).to_be_bytes());
+                for relation in set {
+                    out.extend_from_slice(&relation.0.to_be_bytes());
+                }
+            }
+        }
+        match &self.program.properties {
+            Scope::All => out.push(0),
+            Scope::Only(set) => {
+                out.push(1);
+                out.extend_from_slice(&(set.len() as u64).to_be_bytes());
+                for property in set {
+                    out.extend_from_slice(&property.0.to_be_bytes());
+                }
+            }
+        }
+        out.extend_from_slice(&(self.program.denied_properties.len() as u64).to_be_bytes());
+        for property in &self.program.denied_properties {
+            out.extend_from_slice(&property.0.to_be_bytes());
+        }
+        out
+    }
+
     pub fn checkpoint_at(&mut self, now_ms: u64) -> Result<(), Error> {
         if self.stopped {
             return Err(Error::ExecutionStopped);

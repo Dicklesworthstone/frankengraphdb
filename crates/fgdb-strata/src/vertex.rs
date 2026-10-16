@@ -589,7 +589,7 @@ pub(crate) fn decode_patch_inner(
             // ubs:ignore -- exact false match is `CanonicalScalar::decode`, not a JWT decoder.
             let value = match resolver {
                 Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver),
-                None => CanonicalScalar::decode(encoded),
+                None => CanonicalScalar::decode_stored(encoded),
             }
             .map_err(|error| VertexPatchError::ScalarDecode { at, error })?;
             props.push((key, value));

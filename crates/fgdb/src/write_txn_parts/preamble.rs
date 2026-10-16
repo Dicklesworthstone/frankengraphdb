@@ -614,6 +614,7 @@ pub struct WriteTxn {
     /// creation in one of these relations could add a row. The plan reads no
     /// other relation's edges, so it is not the whole-table `scanned_edges`.
     scanned_edge_relations: std::cell::RefCell<std::collections::BTreeSet<RelationId>>,
+    pub(crate) authorization_decision_digest: Option<fgdb_crypto::Digest>,
     state: EmbeddedTxnState,
     pin: Option<PurposeObligation<Acquired>>,
 }

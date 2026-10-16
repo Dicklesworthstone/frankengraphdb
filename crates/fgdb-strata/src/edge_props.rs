@@ -339,7 +339,7 @@ fn decode_property_patch_inner(
             let encoded = &bytes[start..start + len];
             let value = match resolver {
                 Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver),
-                None => CanonicalScalar::decode(encoded),
+                None => CanonicalScalar::decode_stored(encoded),
             }
             .map_err(|error| EdgePropertyPatchError::ScalarDecode { at: row_at, error })?;
             row.push((key, value));

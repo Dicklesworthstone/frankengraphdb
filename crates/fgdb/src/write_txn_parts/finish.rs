@@ -296,7 +296,11 @@ impl WriteTxn {
         // The final validation checkpoint precedes BOTH kinds of acceptance.
         // Never return Interrupted after a marker or a successful read close.
         checkpoint()?;
-        let completion = if let Some(prepared) = attempt.transaction.prepared.take() {
+        let completion = if let Some(mut prepared) = attempt.transaction.prepared.take() {
+            if prepared.authorization_decision_digest.is_none() {
+                prepared.authorization_decision_digest =
+                    attempt.transaction.authorization_decision_digest;
+            }
             attempt.transaction.staged.clear();
             // Set before polling the cancellable publication future. Drop
             // consults its retained database fence, never guesses rollback.
@@ -328,6 +332,7 @@ impl WriteTxn {
     fn discard_terminal_workspace(&mut self) {
         self.staged.clear();
         self.prepared = None;
+        self.authorization_decision_digest = None;
         self.savepoints.clear();
         self.read_set.get_mut().clear();
         self.point_reads.get_mut().clear();

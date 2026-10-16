@@ -335,7 +335,7 @@ impl DatabaseKeys {
     ) -> Result<LogicalDeltaTemplate, fgdb_delta_types::CanonicalError> {
         match self.scalar_resolver.as_deref() {
             Some(resolver) => LogicalDeltaTemplate::decode_canonical_with_resolver(bytes, resolver),
-            None => LogicalDeltaTemplate::decode_canonical(bytes),
+            None => LogicalDeltaTemplate::decode_stored(bytes),
         }
     }
 
@@ -1293,6 +1293,7 @@ pub struct PreparedWrite {
     basis: CommitSeq,
     handle_owner: Arc<()>,
     dependencies: prepared_write::PreparedDependencies,
+    pub(crate) authorization_decision_digest: Option<Digest>,
 }
 
 impl PreparedWrite {
@@ -4005,6 +4006,27 @@ impl<V: Vfs + Clone> Database<V> {
     /// one boundary. A caller's `Send` proof then stops at `dyn Future + Send`
     /// instead of descending through Chronicle and Strata, which overflowed
     /// rustc's default recursion limit in every lab test root (fgdb-a5y6m).
+    /// Return the authenticated `CommitMarker`'s `authorization_decision_digest`
+    /// recorded for `commit_seq`, or `None` if `commit_seq` is not in the
+    /// recovered commit chain.
+    ///
+    /// Privileged owner commits record `Digest([0u8; 32])`; commits admitted
+    /// under a Warden capability token record the deterministic BLAKE3 digest
+    /// (`fgdb.warden.authz_decision.v1`) of the verified authority and
+    /// compiled capability predicates (FG-INV-20).
+    pub fn commit_authorization_decision_digest(
+        &self,
+        commit_seq: CommitSeq,
+    ) -> Result<Option<Digest>, ReadError> {
+        let _ = self.frontier()?;
+        let entries = self.coordinator.chain().entries();
+        let idx = entries.partition_point(|entry| entry.marker.commit_seq < commit_seq.0);
+        Ok(entries
+            .get(idx)
+            .filter(|entry| entry.marker.commit_seq == commit_seq.0)
+            .map(|entry| entry.marker.authorization_decision_digest))
+    }
+
     fn commit_template<'a>(
         &'a mut self,
         cx: &'a CommitCx,
@@ -4013,9 +4035,29 @@ impl<V: Vfs + Clone> Database<V> {
         publication_failure: Option<DerivedPublicationStage>,
         block_store_crash_at: Option<BlockStoreCrashPoint>,
     ) -> SendFuture<'a, Result<CommitSeq, WriteError>> {
+        self.commit_template_with_authz(
+            cx,
+            template,
+            Digest([0u8; 32]),
+            crash_at,
+            publication_failure,
+            block_store_crash_at,
+        )
+    }
+
+    fn commit_template_with_authz<'a>(
+        &'a mut self,
+        cx: &'a CommitCx,
+        template: LogicalDeltaTemplate,
+        authorization_decision_digest: Digest,
+        crash_at: Option<CrashPoint>,
+        publication_failure: Option<DerivedPublicationStage>,
+        block_store_crash_at: Option<BlockStoreCrashPoint>,
+    ) -> SendFuture<'a, Result<CommitSeq, WriteError>> {
         Box::pin(self.commit_template_inner(
             cx,
             template,
+            authorization_decision_digest,
             crash_at,
             publication_failure,
             block_store_crash_at,
@@ -4026,6 +4068,7 @@ impl<V: Vfs + Clone> Database<V> {
         &mut self,
         cx: &CommitCx,
         template: LogicalDeltaTemplate,
+        authorization_decision_digest: Digest,
         crash_at: Option<CrashPoint>,
         publication_failure: Option<DerivedPublicationStage>,
         mut block_store_crash_at: Option<BlockStoreCrashPoint>,
@@ -4070,8 +4113,10 @@ impl<V: Vfs + Clone> Database<V> {
                 cx,
                 &capsule.bytes,
                 |seq, oid| {
-                    marker_for_capsule(seq, oid, &capsule, Vec::new())
-                        .with_identity_counters(identity_counters)
+                    let mut marker = marker_for_capsule(seq, oid, &capsule, Vec::new())
+                        .with_identity_counters(identity_counters);
+                    marker.authorization_decision_digest = authorization_decision_digest;
+                    marker
                 },
                 crash_at,
             )

@@ -233,6 +233,11 @@ fn stage_native<V: Vfs + Clone, Clock: FnMut() -> u64>(
     row: PendingRow,
     execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<(), WriteTxnError> {
+    if transaction.authorization_decision_digest.is_none() {
+        transaction.authorization_decision_digest = Some(fgdb_crypto::hash(
+            &execution.permit.canonical_decision_bytes(),
+        ));
+    }
     // Native staging replays the entire intent prefix. Charge that logical
     // input work, not merely one unit for a growing quadratic preparation.
     let prefix = u64::try_from(transaction.staged.len())

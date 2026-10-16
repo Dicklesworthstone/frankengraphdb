@@ -20,6 +20,7 @@ impl WriteTxn {
             scanned_vertices: std::cell::Cell::new(false),
             scanned_edges: std::cell::Cell::new(false),
             scanned_edge_relations: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            authorization_decision_digest: None,
             state: EmbeddedTxnState::Active,
             pin: Some(pin),
         })

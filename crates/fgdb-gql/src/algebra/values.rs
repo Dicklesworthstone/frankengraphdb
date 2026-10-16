@@ -168,6 +168,7 @@ fn decode_graph_value(
     depth: usize,
     remaining: &mut usize,
     resolver: Option<&dyn fgdb_types::CanonicalScalarResolver>,
+    allow_stored_zoned: bool,
 ) -> Result<GraphValue, GraphValueDecodeError> {
     if depth > GraphValue::MAX_LIST_DEPTH {
         return Err(GraphValueDecodeError::DepthLimit);
@@ -181,6 +182,7 @@ fn decode_graph_value(
             let scalar = body.frame()?;
             let value = match resolver {
                 Some(resolver) => CanonicalScalar::decode_with_resolver(scalar.bytes, resolver),
+                None if allow_stored_zoned => CanonicalScalar::decode_stored(scalar.bytes),
                 None => CanonicalScalar::decode(scalar.bytes),
             }
             .map_err(GraphValueDecodeError::Scalar)?;
@@ -223,6 +225,7 @@ fn decode_graph_value(
                     depth + 1,
                     remaining,
                     resolver,
+                    allow_stored_zoned,
                 )?);
             }
             GraphValue::List(values.into_boxed_slice())
@@ -247,7 +250,13 @@ fn decode_graph_value(
                     .try_reserve_exact(key.len())
                     .map_err(|_| GraphValueDecodeError::AllocationFailed)?;
                 owned.push_str(key);
-                let value = decode_graph_value(&mut body, depth + 1, remaining, resolver)?;
+                let value = decode_graph_value(
+                    &mut body,
+                    depth + 1,
+                    remaining,
+                    resolver,
+                    allow_stored_zoned,
+                )?;
                 keys.push(owned.into_boxed_str());
                 values.push(value);
             }
@@ -829,7 +838,14 @@ impl GraphValueRow {
     /// The caller must bound the encoded row size and account for the owned
     /// decoded row separately from any spill-buffer memory pool.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, GraphValueDecodeError> {
-        Self::decode_canonical_inner(bytes, None)
+        Self::decode_canonical_inner(bytes, None, false)
+    }
+
+    /// Decode a spooled row from authenticated intermediate storage without a
+    /// live [`fgdb_types::CanonicalScalarResolver`], preserving stored zoned
+    /// timestamps.
+    pub fn decode_stored(bytes: &[u8]) -> Result<Self, GraphValueDecodeError> {
+        Self::decode_canonical_inner(bytes, None, true)
     }
 
     /// Decode using only the supplied content-addressed scalar artifacts.
@@ -839,12 +855,13 @@ impl GraphValueRow {
         bytes: &[u8],
         resolver: &dyn fgdb_types::CanonicalScalarResolver,
     ) -> Result<Self, GraphValueDecodeError> {
-        Self::decode_canonical_inner(bytes, Some(resolver))
+        Self::decode_canonical_inner(bytes, Some(resolver), false)
     }
 
     fn decode_canonical_inner(
         bytes: &[u8],
         resolver: Option<&dyn fgdb_types::CanonicalScalarResolver>,
+        allow_stored_zoned: bool,
     ) -> Result<Self, GraphValueDecodeError> {
         let mut row = CanonicalValueReader { bytes };
         row.domain(CANONICAL_GRAPH_ROW_DOMAIN)?;
@@ -868,6 +885,7 @@ impl GraphValueRow {
                 0,
                 &mut remaining,
                 resolver,
+                allow_stored_zoned,
             )?);
             column.finish()?;
         }

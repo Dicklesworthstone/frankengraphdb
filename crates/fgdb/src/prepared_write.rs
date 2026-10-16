@@ -127,6 +127,7 @@ impl<V: Vfs + Clone> Database<V> {
             basis: self.snapshot.frontier,
             handle_owner: Arc::clone(&self.handle_owner),
             dependencies,
+            authorization_decision_digest: None,
         })
     }
 
@@ -154,7 +155,16 @@ impl<V: Vfs + Clone> Database<V> {
         // Always install the validator for THIS basis, even if another prepared
         // write just committed or failed. Prior attempted drafts are not history.
         self.coordinator.set_validator(Box::new(validator));
-        self.commit_template(cx, prepared.template, crash_at, None, None)
-            .await
+        self.commit_template_with_authz(
+            cx,
+            prepared.template,
+            prepared
+                .authorization_decision_digest
+                .unwrap_or(fgdb_crypto::Digest([0u8; 32])),
+            crash_at,
+            None,
+            None,
+        )
+        .await
     }
 }

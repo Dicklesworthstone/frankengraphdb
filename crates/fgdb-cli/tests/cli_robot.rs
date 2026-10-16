@@ -2137,24 +2137,78 @@ fn cli_named_time_zone_constructs_through_every_read_front_end() {
         ],
     );
     assert_eq!(written.code, 0, "{create}: {}", written.stdout);
-    // Decoding a stored named-zone value needs the same tzdb (fgdb-zshkh).
-    let stored = db.command(
-        "query",
-        &[
+    // fgdb-zshkh: a database holding a stored named-zone timestamp opens and
+    // answers both unrelated reads and direct property reads without
+    // --tzdb-file, while operations that require zone transition rules refuse
+    // as query/TemporalConstruction rather than io/malformed.
+    let counted = db.command("query", &["MATCH (n) RETURN count(*) AS n"]);
+    assert_rows(&counted, r#"[[{"type":"count","value":"2"}]]"#);
+    for args in [
+        vec!["MATCH (e:Person) WHERE e.born IS NOT NULL RETURN e.born AS v"],
+        vec![
             "--tzdb-file",
             artifact_path.to_str().unwrap(),
             "MATCH (e:Person) WHERE e.born IS NOT NULL RETURN e.born AS v",
         ],
+    ] {
+        let stored = db.command("query", &args);
+        assert_eq!(stored.code, 0, "{}", stored.stdout);
+        assert!(
+            stored
+                .stdout
+                .contains(r#""instant_utc_nanos":"1735682400000000000""#)
+                && stored.stdout.contains(r#""utc_offset_seconds":7200"#),
+            "{}",
+            stored.stdout
+        );
+    }
+    let needs_rules = db.command(
+        "query",
+        &["MATCH (e:Person) WHERE e.born IS NOT NULL RETURN datetime.truncate('year', e.born) AS v"],
     );
-    assert_eq!(stored.code, 0, "{}", stored.stdout);
+    assert_eq!(needs_rules.code, 3, "{}", needs_rules.stdout);
     assert!(
-        stored
-            .stdout
-            .contains(r#""instant_utc_nanos":"1735682400000000000""#)
-            && stored.stdout.contains(r#""utc_offset_seconds":7200"#),
+        needs_rules.stdout.contains(r#""class":"query""#)
+            && needs_rules.stdout.contains("TemporalConstruction")
+            && !needs_rules.stdout.contains("malformed"),
         "{}",
-        stored.stdout
+        needs_rules.stdout
     );
+    // Embedded API equivalent: opening without with_scalar_resolver succeeds
+    // across open, open_rebuilding, and open_read_view.
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb::{Database, DatabaseKeys};
+    use fgdb_types::context::PurposeContexts;
+    use fgdb_types::ids::DatabaseSecurityNamespaceId;
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let commit = contexts.commit();
+    let query_cx = contexts.query();
+    let unpinned_keys = DatabaseKeys::new(
+        [0x5a; 32],
+        DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
+    );
+    let opened = runtime
+        .block_on(Database::open(&commit, &db.db, unpinned_keys.clone()))
+        .expect("embedded open without tzdb resolver succeeds");
+    assert_eq!(opened.vertices().unwrap().len(), 2);
+    drop(opened);
+    let rebuilt = runtime
+        .block_on(Database::open_rebuilding(
+            &commit,
+            &db.db,
+            unpinned_keys.clone(),
+        ))
+        .expect("embedded open_rebuilding without tzdb resolver succeeds");
+    assert_eq!(rebuilt.vertices().unwrap().len(), 2);
+    drop(rebuilt);
+    let view = runtime
+        .block_on(Database::open_read_view(&commit, &db.db, unpinned_keys))
+        .expect("embedded open_read_view without tzdb resolver succeeds");
+    assert_eq!(view.vertices().unwrap().len(), 2);
+    let _ = query_cx;
 }
 
 #[test]

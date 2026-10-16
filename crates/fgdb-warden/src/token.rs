@@ -139,6 +139,11 @@ impl Authority {
         self.namespace
     }
 
+    #[must_use]
+    pub(crate) fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
     /// Irreversibly stop this issuer incarnation, including all its borrowed
     /// capabilities and execution permits. Returns true only for the first
     /// retirement; repeated or concurrent retirement is idempotent.
