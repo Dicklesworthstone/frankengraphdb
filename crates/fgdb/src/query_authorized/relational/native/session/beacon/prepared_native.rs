@@ -254,9 +254,15 @@ fn call_at(
             "prepared index execution accepts only hybrid.search sources",
         )));
     }
-    if call.argument_names().iter().zip(arguments).any(|(name, value)| {
-        name == "graph_access" && !matches!(value, GraphValue::Scalar(fgdb_types::CanonicalScalar::Null))
-    }) {
+    if call
+        .argument_names()
+        .iter()
+        .zip(arguments)
+        .any(|(name, value)| {
+            name == "graph_access"
+                && !matches!(value, GraphValue::Scalar(fgdb_types::CanonicalScalar::Null))
+        })
+    {
         return Err(hybrid_refusal(HybridCallError::Combination(
             "prepared index execution owns its graph source; omit graph_access",
         )));
@@ -311,12 +317,14 @@ fn call_at(
         )?;
         let graph_scratch = Cell::new(filter.scratch_entries());
         let admit_scratch = |entries: usize| {
-            let next = u64::try_from(entries).ok()
+            let next = u64::try_from(entries)
+                .ok()
                 .and_then(|n| graph_scratch.get().checked_add(n))
                 .filter(|&n| n <= remaining.evaluator.max_scratch_entries)
                 .ok_or(BeaconError::ResourceLimit {
                     resource: "prepared CALL graph scratch entries",
-                    limit: usize::try_from(remaining.evaluator.max_scratch_entries).unwrap_or(usize::MAX),
+                    limit: usize::try_from(remaining.evaluator.max_scratch_entries)
+                        .unwrap_or(usize::MAX),
                 })?;
             graph_scratch.set(next);
             Ok(())
@@ -326,9 +334,18 @@ fn call_at(
         let hits = filter.finish((|| {
             let graph = if query.graph_enabled() {
                 let (hits, visits) = super::graph::expand_at(
-                    cx, index, view, scope, remaining, execution, search.expansion(),
-                    query.graph_candidates, allowance, &work,
-                    |id, _| Ok(filter.admits(id, &work)), &admit_scratch,
+                    cx,
+                    index,
+                    view,
+                    scope,
+                    remaining,
+                    execution,
+                    search.expansion(),
+                    query.graph_candidates,
+                    allowance,
+                    &work,
+                    |id, _| Ok(filter.admits(id, &work)),
+                    &admit_scratch,
                 )?;
                 incidences.set(visits);
                 hits
@@ -336,10 +353,17 @@ fn call_at(
                 Vec::new()
             };
             if query.is_graph_only() {
-                query.fuse_graph_only(&graph, |id| filter.admits(id, &work), &mut SharedWork(&work))
+                query.fuse_graph_only(
+                    &graph,
+                    |id| filter.admits(id, &work),
+                    &mut SharedWork(&work),
+                )
             } else {
                 index.index.hybrid_search_graph_filtered(
-                    query, &graph, |id| filter.admits(id, &work), &mut SharedWork(&work),
+                    query,
+                    &graph,
+                    |id| filter.admits(id, &work),
+                    &mut SharedWork(&work),
                 )
             }
         })())?;
@@ -374,11 +398,14 @@ fn call_at(
         rows: GqlExecutionStats {
             // expand_at checks this same sum at each admitted incidence, before
             // visiting it. Return it too, so UNION/CALL siblings cannot reset it.
-            snapshot_records: index.admitted.checked_add(incidences.get()).ok_or_else(|| {
-                hybrid_refusal(HybridCallError::Index(BeaconError::Invariant(
-                    "prepared source-record sum overflowed after admission",
-                )))
-            })?,
+            snapshot_records: index
+                .admitted
+                .checked_add(incidences.get())
+                .ok_or_else(|| {
+                    hybrid_refusal(HybridCallError::Index(BeaconError::Invariant(
+                        "prepared source-record sum overflowed after admission",
+                    )))
+                })?,
             result_rows: value.len() as u64,
         },
         evaluator: GlaExecutionStats {

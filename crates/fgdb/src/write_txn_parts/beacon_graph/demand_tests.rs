@@ -111,7 +111,10 @@ fn demand_bounds_probed_membership_not_the_committed_population() {
         assert!(
             !txn.point_reads.borrow().contains(
                 ElementId::Vertex(HIGH),
-                PointReadField::Adjacency { relation: R, incoming: false },
+                PointReadField::Adjacency {
+                    relation: R,
+                    incoming: false
+                },
             ),
             "the hop-boundary vertex's adjacency was not read"
         );
@@ -491,11 +494,16 @@ fn every_observer_cut_refuses_atomically_and_retry_preserves_staged_effects() {
 }
 
 fn assert_read_conflict<T: core::fmt::Debug>(result: Result<T, WriteTxnError>) {
-    assert!(matches!(&result,
-        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-            law: "FG-LAW-FCW-READ-01", ..
-        }))
-    ), "expected original-basis read conflict, got {result:?}");
+    assert!(
+        matches!(
+            &result,
+            Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                law: "FG-LAW-FCW-READ-01",
+                ..
+            }))
+        ),
+        "expected original-basis read conflict, got {result:?}"
+    );
 }
 
 #[test]
@@ -506,26 +514,56 @@ fn reached_topology_allows_disjoint_writes_ignored_fields_and_unexpanded_edges()
             let mut db = fixture(&c.commit(), 0).await;
             let mut txn = db.begin(&c.txn()).unwrap();
             let mut opts = options();
-            if case == 7 { opts.vertex_label = None; }
-            let baseline = txn.beacon_search_graph_demand_filtered(
-                &db, &c.query(), &opts, query(), expansion(), |id| id == HIGH,
-            ).unwrap();
-            assert_eq!((baseline.len(), baseline[0].id, baseline[0].graph_hops), (1, HIGH, Some(2)));
+            if case == 7 {
+                opts.vertex_label = None;
+            }
+            let baseline = txn
+                .beacon_search_graph_demand_filtered(
+                    &db,
+                    &c.query(),
+                    &opts,
+                    query(),
+                    expansion(),
+                    |id| id == HIGH,
+                )
+                .unwrap();
+            assert_eq!(
+                (baseline.len(), baseline[0].id, baseline[0].graph_hops),
+                (1, HIGH, Some(2))
+            );
             assert!(txn.read_set.borrow().is_empty());
             assert!(!txn.scanned_edges.get());
             // Live incumbent: the complete-directory profile still retains
             // its original graph-wide witness on the exact same database.
             let mut incumbent = (case == 0).then(|| db.begin(&c.txn()).unwrap());
             if let Some(incumbent) = &incumbent {
-                assert_eq!(incumbent.beacon_search_graph_indexed_filtered(
-                    &db, &c.query(), &opts, query(), expansion(), |id| id == HIGH,
-                ).unwrap(), baseline);
+                assert_eq!(
+                    incumbent
+                        .beacon_search_graph_indexed_filtered(
+                            &db,
+                            &c.query(),
+                            &opts,
+                            query(),
+                            expansion(),
+                            |id| id == HIGH,
+                        )
+                        .unwrap(),
+                    baseline
+                );
             }
             let mut write = WriteBatch::new(if case == 6 { RelationId(2) } else { R });
             match case {
                 0 => write.add_edge(EId(90), VId(9), VId(9), vec![]),
-                1 => write.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(99))),
-                2 => write.set_edge_property(EId(0), PropertyKeyId(1), Some(CanonicalScalar::Int(99))),
+                1 => write.set_vertex_property(
+                    VId(1),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(99)),
+                ),
+                2 => write.set_edge_property(
+                    EId(0),
+                    PropertyKeyId(1),
+                    Some(CanonicalScalar::Int(99)),
+                ),
                 3 => write.set_vertex_label(VId(1), LabelId(2), true),
                 4 => write.add_edge(EId(90), HIGH, VId(9), vec![]),
                 5 => write.add_edge(EId(90), VId(9), VId(0), vec![]),
@@ -533,13 +571,36 @@ fn reached_topology_allows_disjoint_writes_ignored_fields_and_unexpanded_edges()
                 _ => write.set_vertex_label(VId(1), L, false),
             }
             db.write(&c.commit(), write).await.unwrap();
-            assert_eq!(txn.beacon_search_graph_demand_filtered(
-                &db, &c.query(), &opts, query(), expansion(), |id| id == HIGH,
-            ).unwrap(), baseline, "case {case}: pinned result changed");
-            assert_eq!(txn.refresh_snapshot(&db, &c.txn()).unwrap(), db.frontier().unwrap());
-            assert_eq!(txn.beacon_search_graph_demand_filtered(
-                &db, &c.query(), &opts, query(), expansion(), |id| id == HIGH,
-            ).unwrap(), baseline, "case {case}: irrelevant write changed result");
+            assert_eq!(
+                txn.beacon_search_graph_demand_filtered(
+                    &db,
+                    &c.query(),
+                    &opts,
+                    query(),
+                    expansion(),
+                    |id| id == HIGH,
+                )
+                .unwrap(),
+                baseline,
+                "case {case}: pinned result changed"
+            );
+            assert_eq!(
+                txn.refresh_snapshot(&db, &c.txn()).unwrap(),
+                db.frontier().unwrap()
+            );
+            assert_eq!(
+                txn.beacon_search_graph_demand_filtered(
+                    &db,
+                    &c.query(),
+                    &opts,
+                    query(),
+                    expansion(),
+                    |id| id == HIGH,
+                )
+                .unwrap(),
+                baseline,
+                "case {case}: irrelevant write changed result"
+            );
             txn.finish(&mut db, &c.commit()).await.unwrap();
             if let Some(incumbent) = &mut incumbent {
                 assert_read_conflict(incumbent.finish(&mut db, &c.commit()).await);
@@ -554,12 +615,21 @@ fn reached_topology_allows_disjoint_writes_ignored_fields_and_unexpanded_edges()
 fn empty_adjacency_ranges_cover_both_directions_and_previously_unseen_relations() {
     let ((), report) = run_async_under_lab(0xbeac_7302, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
-        for direction in [ExpansionDirection::Outgoing, ExpansionDirection::Incoming, ExpansionDirection::Undirected] {
+        for direction in [
+            ExpansionDirection::Outgoing,
+            ExpansionDirection::Incoming,
+            ExpansionDirection::Undirected,
+        ] {
             for requested in [Some(R), None] {
                 for relation in [R, RelationId(2)] {
                     // All edges are new identities; relation 2 has NO initial
                     // edges. A set of observed relation IDs cannot pass this.
-                    for (src, dst) in [(VId(9), VId(0)), (VId(0), VId(9)), (VId(9), VId(9)), (VId(0), VId(1))] {
+                    for (src, dst) in [
+                        (VId(9), VId(0)),
+                        (VId(0), VId(9)),
+                        (VId(9), VId(9)),
+                        (VId(0), VId(1)),
+                    ] {
                         let mut db = fixture(&c.commit(), 0).await;
                         let mut txn = db.begin(&c.txn()).unwrap();
                         txn.savepoint(&db, "before").unwrap();
@@ -568,22 +638,38 @@ fn empty_adjacency_ranges_cover_both_directions_and_previously_unseen_relations(
                         spec.max_hops = 1;
                         spec.direction = direction;
                         spec.relation = requested;
-                        assert!(txn.beacon_search_graph_demand_filtered(
-                            &db, &c.query(), &options(), query(), spec, |_| false,
-                        ).unwrap().is_empty());
+                        assert!(
+                            txn.beacon_search_graph_demand_filtered(
+                                &db,
+                                &c.query(),
+                                &options(),
+                                query(),
+                                spec,
+                                |_| false,
+                            )
+                            .unwrap()
+                            .is_empty()
+                        );
                         assert!(!txn.scanned_edges.get());
                         txn.rollback_to_savepoint(&db, "before").unwrap();
                         let mut write = WriteBatch::new(relation);
                         write.add_edge(EId(u128::MAX), src, dst, vec![]);
                         db.write(&c.commit(), write).await.unwrap();
-                        let affected = requested.is_none_or(|wanted| wanted == relation) && match direction {
-                            ExpansionDirection::Outgoing => src == VId(9),
-                            ExpansionDirection::Incoming => dst == VId(9),
-                            ExpansionDirection::Undirected => src == VId(9) || dst == VId(9),
-                        };
+                        let affected = requested.is_none_or(|wanted| wanted == relation)
+                            && match direction {
+                                ExpansionDirection::Outgoing => src == VId(9),
+                                ExpansionDirection::Incoming => dst == VId(9),
+                                ExpansionDirection::Undirected => src == VId(9) || dst == VId(9),
+                            };
                         let result = txn.finish(&mut db, &c.commit()).await;
-                        if affected { assert_read_conflict(result); }
-                        else { assert!(result.is_ok(), "{direction:?} {requested:?} {relation:?} {src:?}->{dst:?}: {result:?}"); }
+                        if affected {
+                            assert_read_conflict(result);
+                        } else {
+                            assert!(
+                                result.is_ok(),
+                                "{direction:?} {requested:?} {relation:?} {src:?}->{dst:?}: {result:?}"
+                            );
+                        }
                     }
                 }
             }
@@ -608,9 +694,16 @@ fn parallel_retirement_cascades_and_selected_label_restoration_remain_conflicts(
             let mut txn = db.begin(&c.txn()).unwrap();
             txn.savepoint(&db, "before").unwrap();
             let target = if case == 6 { VId(9) } else { HIGH };
-            let baseline = txn.beacon_search_graph_demand_filtered(
-                &db, &c.query(), &options(), query(), expansion(), |id| id == target,
-            ).unwrap();
+            let baseline = txn
+                .beacon_search_graph_demand_filtered(
+                    &db,
+                    &c.query(),
+                    &options(),
+                    query(),
+                    expansion(),
+                    |id| id == target,
+                )
+                .unwrap();
             assert_eq!(baseline.len(), usize::from(case != 6));
             txn.rollback_to_savepoint(&db, "before").unwrap();
             let basis = txn.basis();
@@ -630,11 +723,24 @@ fn parallel_retirement_cascades_and_selected_label_restoration_remain_conflicts(
                 restore.set_vertex_label(VId(1), L, true);
                 db.write(&c.commit(), restore).await.unwrap();
             }
-            assert_eq!(txn.beacon_search_graph_demand_filtered(
-                &db, &c.query(), &options(), query(), expansion(), |id| id == target,
-            ).unwrap(), baseline);
+            assert_eq!(
+                txn.beacon_search_graph_demand_filtered(
+                    &db,
+                    &c.query(),
+                    &options(),
+                    query(),
+                    expansion(),
+                    |id| id == target,
+                )
+                .unwrap(),
+                baseline
+            );
             assert_read_conflict(txn.refresh_snapshot(&db, &c.txn()));
-            assert_eq!(txn.basis(), basis, "refused refresh preserves the old basis");
+            assert_eq!(
+                txn.basis(),
+                basis,
+                "refused refresh preserves the old basis"
+            );
             assert_read_conflict(txn.finish(&mut db, &c.commit()).await);
         }
         assert_eq!(c.outstanding_obligations(), 0);
@@ -652,22 +758,48 @@ fn source_refusal_unwind_and_retry_never_erase_the_conservative_failure_witness(
             let mut txn = db.begin(&c.txn()).unwrap();
             txn.savepoint(&db, "before").unwrap();
             if unwind {
-                assert!(catch_unwind(AssertUnwindSafe(|| {
-                    let _ = txn.beacon_search_graph_demand_filtered(
-                        &db, &c.query(), &options(), query(), expansion(), |_| panic!("endpoint predicate unwind"),
-                    );
-                })).is_err());
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| {
+                        let _ = txn.beacon_search_graph_demand_filtered(
+                            &db,
+                            &c.query(),
+                            &options(),
+                            query(),
+                            expansion(),
+                            |_| panic!("endpoint predicate unwind"),
+                        );
+                    }))
+                    .is_err()
+                );
             } else {
                 let mut short = options();
                 short.policy.max_source_scratch = 1; // only half of a point witness can fit
-                assert!(matches!(txn.beacon_search_graph_demand_filtered(
-                    &db, &c.query(), &short, query(), expansion(), |_| false,
-                ), Err(ReadError::Index(BeaconError::ResourceLimit { .. }))));
+                assert!(matches!(
+                    txn.beacon_search_graph_demand_filtered(
+                        &db,
+                        &c.query(),
+                        &short,
+                        query(),
+                        expansion(),
+                        |_| false,
+                    ),
+                    Err(ReadError::Index(BeaconError::ResourceLimit { .. }))
+                ));
             }
             assert!(txn.point_reads.borrow().1.is_some());
-            assert_eq!(txn.beacon_search_graph_demand_filtered(
-                &db, &c.query(), &options(), query(), expansion(), |id| id == HIGH,
-            ).unwrap().len(), 1);
+            assert_eq!(
+                txn.beacon_search_graph_demand_filtered(
+                    &db,
+                    &c.query(),
+                    &options(),
+                    query(),
+                    expansion(),
+                    |id| id == HIGH,
+                )
+                .unwrap()
+                .len(),
+                1
+            );
             txn.rollback_to_savepoint(&db, "before").unwrap();
             assert!(txn.point_reads.borrow().1.is_some());
             let mut write = WriteBatch::new(R);
@@ -679,9 +811,17 @@ fn source_refusal_unwind_and_retry_never_erase_the_conservative_failure_witness(
         let db = fixture(&c.commit(), 0).await;
         let other = fixture(&c.commit(), 0).await;
         let txn = db.begin(&c.txn()).unwrap();
-        assert!(matches!(txn.beacon_search_graph_demand_filtered(
-            &other, &c.query(), &options(), query(), expansion(), |_| false,
-        ), Err(ReadError::Read(WriteTxnError::WrongDatabase))));
+        assert!(matches!(
+            txn.beacon_search_graph_demand_filtered(
+                &other,
+                &c.query(),
+                &options(),
+                query(),
+                expansion(),
+                |_| false,
+            ),
+            Err(ReadError::Read(WriteTxnError::WrongDatabase))
+        ));
         assert!(txn.point_reads.borrow().is_empty());
         txn.abort();
         assert_eq!(c.outstanding_obligations(), 0);
@@ -697,18 +837,39 @@ fn demand_never_narrows_prior_full_getters_scans_or_explicit_property_reads() {
             let mut db = fixture(&c.commit(), 0).await;
             let mut txn = db.begin(&c.txn()).unwrap();
             match prior {
-                0 => { txn.vertex(&db, VId(1)).unwrap(); }
-                1 => { txn.beacon_search_graph_indexed_filtered(
-                    &db, &c.query(), &options(), query(), expansion(), |_| false,
-                ).unwrap(); }
-                _ => { txn.vertex_property(&db, VId(1), PropertyKeyId(1)).unwrap(); }
+                0 => {
+                    txn.vertex(&db, VId(1)).unwrap();
+                }
+                1 => {
+                    txn.beacon_search_graph_indexed_filtered(
+                        &db,
+                        &c.query(),
+                        &options(),
+                        query(),
+                        expansion(),
+                        |_| false,
+                    )
+                    .unwrap();
+                }
+                _ => {
+                    txn.vertex_property(&db, VId(1), PropertyKeyId(1)).unwrap();
+                }
             }
             txn.beacon_search_graph_demand_filtered(
-                &db, &c.query(), &options(), query(), expansion(), |id| id == HIGH,
-            ).unwrap();
+                &db,
+                &c.query(),
+                &options(),
+                query(),
+                expansion(),
+                |id| id == HIGH,
+            )
+            .unwrap();
             let mut write = WriteBatch::new(R);
-            if prior == 1 { write.add_edge(EId(90), VId(9), VId(9), vec![]); }
-            else { write.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(7))); }
+            if prior == 1 {
+                write.add_edge(EId(90), VId(9), VId(9), vec![]);
+            } else {
+                write.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
+            }
             db.write(&c.commit(), write).await.unwrap();
             assert_read_conflict(txn.finish(&mut db, &c.commit()).await);
         }

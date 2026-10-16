@@ -20,7 +20,9 @@ const HIGH: VId = VId(u128::MAX);
 const NOW: u64 = 100;
 const EXPIRES: u64 = 100_000;
 
-fn text(s: &str) -> CanonicalScalar { CanonicalScalar::ucs_basic_text(s).unwrap() }
+fn text(s: &str) -> CanonicalScalar {
+    CanonicalScalar::ucs_basic_text(s).unwrap()
+}
 fn catalog(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "Node") => Some(GraphSymbol::Label(L)),
@@ -30,14 +32,29 @@ fn catalog(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         _ => None,
     }
 }
-fn host() -> GqlQueryPolicy { GqlQueryPolicy::new(1000, 16, 1_000_000, 100_000) }
+fn host() -> GqlQueryPolicy {
+    GqlQueryPolicy::new(1000, 16, 1_000_000, 100_000)
+}
 fn authority() -> Authority {
-    Authority::new(AuthKey::from_seed(0x93), NS, "native-graph", SchemaEpoch(0), 1).unwrap()
+    Authority::new(
+        AuthKey::from_seed(0x93),
+        NS,
+        "native-graph",
+        SchemaEpoch(0),
+        1,
+    )
+    .unwrap()
 }
 fn grant() -> Grant {
-    let mut grant = Grant::read_only("main", EXPIRES, QueryLimits {
-        max_nodes: 100, max_work: 100_000_000, max_rows: 16,
-    });
+    let mut grant = Grant::read_only(
+        "main",
+        EXPIRES,
+        QueryLimits {
+            max_nodes: 100,
+            max_work: 100_000_000,
+            max_rows: 16,
+        },
+    );
     grant.labels = Scope::only([L]);
     grant.properties = Scope::only([BODY, X, NAME]);
     grant.relations = Scope::only([R]);
@@ -51,22 +68,44 @@ fn options() -> Options {
     options
 }
 fn parameters(seeds: &[VId], eligible: &[VId]) -> GqlParameters {
-    GqlParameters::new().with_int64("x", 0).unwrap()
-        .with_list("seeds", seeds.iter().copied().map(GraphValue::Vertex).collect()).unwrap()
-        .with_list("eligible", eligible.iter().copied().map(GraphValue::Vertex).collect()).unwrap()
+    GqlParameters::new()
+        .with_int64("x", 0)
+        .unwrap()
+        .with_list(
+            "seeds",
+            seeds.iter().copied().map(GraphValue::Vertex).collect(),
+        )
+        .unwrap()
+        .with_list(
+            "eligible",
+            eligible.iter().copied().map(GraphValue::Vertex).collect(),
+        )
+        .unwrap()
 }
 fn call(vector: bool, words: bool, ann: bool, direction: &str) -> String {
-    let v = if vector { "vector => [$x], vector_properties => ['x']," } else { "" };
-    let t = if words { "text => 'graph', text_property => 'body'," } else { "" };
+    let v = if vector {
+        "vector => [$x], vector_properties => ['x'],"
+    } else {
+        ""
+    };
+    let t = if words {
+        "text => 'graph', text_property => 'body',"
+    } else {
+        ""
+    };
     let ann = if vector && ann { "ann => 16," } else { "" };
-    format!("CALL hybrid.search({v}{t}{ann}label => 'Node', seeds => $seeds, \
+    format!(
+        "CALL hybrid.search({v}{t}{ann}label => 'Node', seeds => $seeds, \
         max_hops => 2, direction => '{direction}', graph_weight => 100, \
         graph_candidates => 1, candidates => 1, k => 1, eligible => $eligible) \
-        YIELD node, graph_hops, graph_rank, vector_rank, text_rank ")
+        YIELD node, graph_hops, graph_rank, vector_rank, text_rank "
+    )
 }
 fn statement(vector: bool, words: bool, ann: bool, direction: &str) -> String {
-    format!("{}RETURN node, node.name AS name, graph_hops, graph_rank, vector_rank, text_rank",
-        call(vector, words, ann, direction))
+    format!(
+        "{}RETURN node, node.name AS name, graph_hops, graph_rank, vector_rank, text_rank",
+        call(vector, words, ann, direction)
+    )
 }
 fn rows(result: QueryResult) -> Vec<Vec<QueryValue>> {
     match result {
@@ -79,36 +118,66 @@ fn integer(n: i64) -> QueryValue {
 }
 fn expected(id: VId, name: &str, hops: i64, vector: bool, words: bool) -> Vec<Vec<QueryValue>> {
     let null = QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
-    vec![vec![QueryValue::Value(GraphValue::Vertex(id)),
-        QueryValue::Value(GraphValue::Scalar(text(name))), integer(hops), integer(1),
+    vec![vec![
+        QueryValue::Value(GraphValue::Vertex(id)),
+        QueryValue::Value(GraphValue::Scalar(text(name))),
+        integer(hops),
+        integer(1),
         if vector { integer(1) } else { null.clone() },
         if words { integer(1) } else { null },
     ]]
 }
 async fn database(cx: &CommitCx, noisy: bool) -> Database<MemVfs> {
     let mut db = Database::open_memory(cx, DatabaseKeys::new([0x92; 32], NS, [0x94; 32]))
-        .await.unwrap();
+        .await
+        .unwrap();
     let mut batch = WriteBatch::new(R);
-    for (id, x, name) in [(VId(0), 0, "seed"), (HIGH, 9, "high"), (VId(9), 1, "isolate")] {
-        batch.create_vertex(id, vec![L], vec![
-            (BODY, text(&"graph ".repeat(1024))), (X, CanonicalScalar::Int(x)), (NAME, text(name)),
-        ]);
+    for (id, x, name) in [
+        (VId(0), 0, "seed"),
+        (HIGH, 9, "high"),
+        (VId(9), 1, "isolate"),
+    ] {
+        batch.create_vertex(
+            id,
+            vec![L],
+            vec![
+                (BODY, text(&"graph ".repeat(1024))),
+                (X, CanonicalScalar::Int(x)),
+                (NAME, text(name)),
+            ],
+        );
     }
     // Membership is not the set of documents with text/vector properties.
     batch.create_vertex(VId(1), vec![L], vec![(NAME, text("transit"))]);
-    for (eid, src, dst) in [(0, VId(0), VId(1)), (1, VId(0), VId(1)),
-        (2, VId(1), HIGH), (3, HIGH, VId(0)), (4, VId(1), VId(1))] {
+    for (eid, src, dst) in [
+        (0, VId(0), VId(1)),
+        (1, VId(0), VId(1)),
+        (2, VId(1), HIGH),
+        (3, HIGH, VId(0)),
+        (4, VId(1), VId(1)),
+    ] {
         batch.add_edge(EId(eid), src, dst, vec![]);
     }
     if noisy {
-        batch.create_vertex(VId(90), vec![LabelId(99)], vec![
-            (BODY, CanonicalScalar::Bool(true)), (X, text("not a vector")),
-        ]);
-        for (eid, src, dst) in [(10, VId(0), VId(90)), (11, VId(90), HIGH),
-            (12, VId(90), VId(0)), (13, HIGH, VId(90))] {
+        batch.create_vertex(
+            VId(90),
+            vec![LabelId(99)],
+            vec![
+                (BODY, CanonicalScalar::Bool(true)),
+                (X, text("not a vector")),
+            ],
+        );
+        for (eid, src, dst) in [
+            (10, VId(0), VId(90)),
+            (11, VId(90), HIGH),
+            (12, VId(90), VId(0)),
+            (13, HIGH, VId(90)),
+        ] {
             batch.add_edge(EId(eid), src, dst, vec![]);
         }
-        for id in 100..228 { batch.add_edge(EId(id), VId(9), VId(9), vec![]); }
+        for id in 100..228 {
+            batch.add_edge(EId(id), VId(9), VId(9), vec![]);
+        }
     }
     db.write(cx, batch).await.unwrap();
     let mut forbidden = WriteBatch::new(RelationId(99));
@@ -125,34 +194,86 @@ fn native_graph_calls_reuse_every_modality_and_rebind_full_width_seeds() {
         let authority = authority();
         let token = authority.issue_at(&grant(), NOW).unwrap();
         let resolved = Cell::new(0);
-        let mut session = db.authorized_read_session(&c.query(), &authority, &token, "main",
-            |kind, name: &str| { resolved.set(resolved.get() + 1); catalog(kind, name) },
-            host(), || NOW).unwrap();
-        let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+        let mut session = db
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                |kind, name: &str| {
+                    resolved.set(resolved.get() + 1);
+                    catalog(kind, name)
+                },
+                host(),
+                || NOW,
+            )
+            .unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
         for (v, t) in [(true, true), (true, false), (false, true), (false, false)] {
             for ann in [false, true] {
                 for direction in ["out", "in", "both"] {
                     let params = parameters(&[VId(0), VId(0), VId(90)], &[VId(90), HIGH, HIGH]);
-                    let prepared = session.prepare(&c.query(), &statement(v, t, ann, direction), &params).unwrap();
+                    let prepared = session
+                        .prepare(&c.query(), &statement(v, t, ann, direction), &params)
+                        .unwrap();
                     let count = resolved.get();
-                    let actual = rows(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap());
-                    assert_eq!(actual, expected(HIGH, "high", if direction == "out" { 2 } else { 1 }, v, t));
-                    assert!(rows(session.execute_beacon_index(&c.query(), &index, &prepared,
-                        &parameters(&[HIGH], &[])).unwrap()).is_empty());
+                    let actual = rows(
+                        session
+                            .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                            .unwrap(),
+                    );
+                    assert_eq!(
+                        actual,
+                        expected(HIGH, "high", if direction == "out" { 2 } else { 1 }, v, t)
+                    );
+                    assert!(
+                        rows(
+                            session
+                                .execute_beacon_index(
+                                    &c.query(),
+                                    &index,
+                                    &prepared,
+                                    &parameters(&[HIGH], &[])
+                                )
+                                .unwrap()
+                        )
+                        .is_empty()
+                    );
                     // A full-width seed really drives the reverse endpoint, not
                     // a truncated integer or a cached previous seed population.
                     if direction == "out" {
-                        assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &prepared,
-                            &parameters(&[HIGH], &[VId(0)])).unwrap()), expected(VId(0), "seed", 1, v, t));
+                        assert_eq!(
+                            rows(
+                                session
+                                    .execute_beacon_index(
+                                        &c.query(),
+                                        &index,
+                                        &prepared,
+                                        &parameters(&[HIGH], &[VId(0)])
+                                    )
+                                    .unwrap()
+                            ),
+                            expected(VId(0), "seed", 1, v, t)
+                        );
                     }
                     assert_eq!(resolved.get(), count);
                 }
             }
         }
         let params = parameters(&[VId(0)], &[VId(1)]);
-        let prepared = session.prepare(&c.query(), &statement(false, false, false, "out"), &params).unwrap();
-        assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap()),
-            expected(VId(1), "transit", 1, false, false));
+        let prepared = session
+            .prepare(&c.query(), &statement(false, false, false, "out"), &params)
+            .unwrap();
+        assert_eq!(
+            rows(
+                session
+                    .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                    .unwrap()
+            ),
+            expected(VId(1), "transit", 1, false, false)
+        );
         session.close();
         assert_eq!(c.outstanding_obligations(), 0);
     });
@@ -172,23 +293,62 @@ fn graph_and_return_values_keep_the_prepared_history_without_lending_transit_aut
         db.write(&c.commit(), change).await.unwrap();
         let authority = authority();
         let token = authority.issue_at(&grant(), NOW).unwrap();
-        let mut session = db.authorized_read_session(&c.query(), &authority, &token, "main",
-            catalog, host(), || NOW).unwrap();
-        let mut historical = options(); historical.as_of = Some(old);
-        let index = session.prepare_beacon_index(&c.query(), &historical).unwrap();
+        let mut session = db
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                catalog,
+                host(),
+                || NOW,
+            )
+            .unwrap();
+        let mut historical = options();
+        historical.as_of = Some(old);
+        let index = session
+            .prepare_beacon_index(&c.query(), &historical)
+            .unwrap();
         let params = parameters(&[VId(0)], &[HIGH]);
-        let prepared = session.prepare(&c.query(), &statement(true, true, false, "out"), &params).unwrap();
+        let prepared = session
+            .prepare(&c.query(), &statement(true, true, false, "out"), &params)
+            .unwrap();
         let old_rows = expected(HIGH, "high", 2, true, true);
-        assert_ne!(rows(session.execute(&c.query(), &prepared, &params).unwrap()), old_rows);
+        assert_ne!(
+            rows(session.execute(&c.query(), &prepared, &params).unwrap()),
+            old_rows
+        );
         // Merely traversing an identity does not authorize native property
         // dereference through the per-statement retrieved-result set.
-        let supplied = params.clone().with_list("supplied", vec![GraphValue::Vertex(VId(1))]).unwrap();
-        let attack = session.prepare(&c.query(), &format!("{}WITH $supplied[0] AS outside RETURN outside.name",
-            call(true, true, false, "out")), &supplied).unwrap();
-        assert!(session.execute_beacon_index(&c.query(), &index, &attack, &supplied).is_err());
+        let supplied = params
+            .clone()
+            .with_list("supplied", vec![GraphValue::Vertex(VId(1))])
+            .unwrap();
+        let attack = session
+            .prepare(
+                &c.query(),
+                &format!(
+                    "{}WITH $supplied[0] AS outside RETURN outside.name",
+                    call(true, true, false, "out")
+                ),
+                &supplied,
+            )
+            .unwrap();
+        assert!(
+            session
+                .execute_beacon_index(&c.query(), &index, &attack, &supplied)
+                .is_err()
+        );
         db.compact(&c.commit()).await.unwrap();
         drop(db);
-        assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap()), old_rows);
+        assert_eq!(
+            rows(
+                session
+                    .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                    .unwrap()
+            ),
+            old_rows
+        );
         assert!(!session.is_closed());
         session.close();
     });
@@ -204,30 +364,61 @@ fn graph_call_sources_and_set_siblings_share_exact_record_and_signed_node_admiss
         let params = parameters(&[VId(0)], &[HIGH]);
         let text = statement(true, true, false, "out");
         for nodes in [7, 8] {
-            let mut grant = grant(); grant.limits.max_nodes = nodes;
+            let mut grant = grant();
+            grant.limits.max_nodes = nodes;
             let token = authority.issue_at(&grant, NOW).unwrap();
-            let mut session = db.authorized_read_session(&c.query(), &authority, &token, "main",
-                catalog, host(), || NOW).unwrap();
-            let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+            let mut session = db
+                .authorized_read_session(
+                    &c.query(),
+                    &authority,
+                    &token,
+                    "main",
+                    catalog,
+                    host(),
+                    || NOW,
+                )
+                .unwrap();
+            let index = session
+                .prepare_beacon_index(&c.query(), &options())
+                .unwrap();
             let single = session.prepare(&c.query(), &text, &params).unwrap();
-            let both = session.prepare(&c.query(), &format!("{text} UNION ALL {text}"), &params).unwrap();
+            let both = session
+                .prepare(&c.query(), &format!("{text} UNION ALL {text}"), &params)
+                .unwrap();
             // Four saved visible vertices plus four reached incidence visits.
             for records in [7, 8] {
-                session.state.as_mut().unwrap().policy = GqlQueryPolicy::new(records, 16, 1_000_000, 100_000);
+                session.state.as_mut().unwrap().policy =
+                    GqlQueryPolicy::new(records, 16, 1_000_000, 100_000);
                 let result = session.execute_beacon_index(&c.query(), &index, &single, &params);
-                assert_eq!(result.is_ok(), records == 8, "records={records}: {result:?}");
+                assert_eq!(
+                    result.is_ok(),
+                    records == 8,
+                    "records={records}: {result:?}"
+                );
             }
-            session.state.as_mut().unwrap().policy = GqlQueryPolicy::new(15, 16, 1_000_000, 100_000);
-            assert!(session.execute_beacon_index(&c.query(), &index, &both, &params).is_err());
-            session.state.as_mut().unwrap().policy = GqlQueryPolicy::new(16, 16, 1_000_000, 100_000);
+            session.state.as_mut().unwrap().policy =
+                GqlQueryPolicy::new(15, 16, 1_000_000, 100_000);
+            assert!(
+                session
+                    .execute_beacon_index(&c.query(), &index, &both, &params)
+                    .is_err()
+            );
+            session.state.as_mut().unwrap().policy =
+                GqlQueryPolicy::new(16, 16, 1_000_000, 100_000);
             let result = session.execute_beacon_index(&c.query(), &index, &both, &params);
             assert_eq!(result.is_ok(), nodes == 8, "nodes={nodes}: {result:?}");
-            if let Ok(result) = result { assert_eq!(rows(result).len(), 2); }
+            if let Ok(result) = result {
+                assert_eq!(rows(result).len(), 2);
+            }
             // Even a filtered-empty first source spends the complete graph
             // admission, and cannot erase it before the next UNION operand.
-            session.state.as_mut().unwrap().policy = GqlQueryPolicy::new(15, 16, 1_000_000, 100_000);
-            assert!(session.execute_beacon_index(&c.query(), &index, &both,
-                &parameters(&[VId(0)], &[])).is_err());
+            session.state.as_mut().unwrap().policy =
+                GqlQueryPolicy::new(15, 16, 1_000_000, 100_000);
+            assert!(
+                session
+                    .execute_beacon_index(&c.query(), &index, &both, &parameters(&[VId(0)], &[]))
+                    .is_err()
+            );
             assert!(!session.is_closed());
             session.close();
         }
@@ -240,7 +431,11 @@ fn minimum(mut succeeds: impl FnMut(u64) -> bool, mut high: u64) -> u64 {
     let mut low = 0;
     while low < high {
         let middle = low + (high - low) / 2;
-        if succeeds(middle) { high = middle; } else { low = middle + 1; }
+        if succeeds(middle) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
     }
     assert!(succeeds(low));
     assert!(low > 0 && !succeeds(low - 1));
@@ -256,24 +451,55 @@ fn native_work_and_scratch_thresholds_ignore_hidden_and_disconnected_incidence()
         let mut thresholds = Vec::new();
         for noisy in [false, true] {
             let db = database(&c.commit(), noisy).await;
-            let mut session = db.authorized_read_session(&c.query(), &authority, &token, "main",
-                catalog, host(), || NOW).unwrap();
-            let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+            let mut session = db
+                .authorized_read_session(
+                    &c.query(),
+                    &authority,
+                    &token,
+                    "main",
+                    catalog,
+                    host(),
+                    || NOW,
+                )
+                .unwrap();
+            let index = session
+                .prepare_beacon_index(&c.query(), &options())
+                .unwrap();
             let params = parameters(&[VId(0)], &[HIGH]);
-            let prepared = session.prepare(&c.query(), &statement(true, true, false, "out"), &params).unwrap();
-            let work = minimum(|units| {
-                session.state.as_mut().unwrap().policy = GqlQueryPolicy::new(1000, 16, units, 100_000);
-                session.execute_beacon_index(&c.query(), &index, &prepared, &params).is_ok()
-            }, 1_000_000);
-            let scratch = minimum(|units| {
-                session.state.as_mut().unwrap().policy = GqlQueryPolicy::new(1000, 16, 1_000_000, units);
-                session.execute_beacon_index(&c.query(), &index, &prepared, &params).is_ok()
-            }, 100_000);
+            let prepared = session
+                .prepare(&c.query(), &statement(true, true, false, "out"), &params)
+                .unwrap();
+            let work = minimum(
+                |units| {
+                    session.state.as_mut().unwrap().policy =
+                        GqlQueryPolicy::new(1000, 16, units, 100_000);
+                    session
+                        .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                        .is_ok()
+                },
+                1_000_000,
+            );
+            let scratch = minimum(
+                |units| {
+                    session.state.as_mut().unwrap().policy =
+                        GqlQueryPolicy::new(1000, 16, 1_000_000, units);
+                    session
+                        .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                        .is_ok()
+                },
+                100_000,
+            );
             // This allowance must support reuse, not an implicit reconstruction
             // of the three 6KB documents on the ordinary native call path.
             session.state.as_mut().unwrap().policy = GqlQueryPolicy::new(1000, 16, work, scratch);
-            assert_eq!(rows(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap()),
-                expected(HIGH, "high", 2, true, true));
+            assert_eq!(
+                rows(
+                    session
+                        .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                        .unwrap()
+                ),
+                expected(HIGH, "high", 2, true, true)
+            );
             assert!(session.execute(&c.query(), &prepared, &params).is_err());
             thresholds.push((work, scratch));
             session.close();
@@ -291,37 +517,105 @@ fn graph_call_cancellation_and_late_errors_never_publish_a_prefix_or_poison_reus
         let db = database(&c.commit(), true).await;
         let authority = authority();
         let token = authority.issue_at(&grant(), NOW).unwrap();
-        let mut session = db.authorized_read_session(&c.query(), &authority, &token, "main",
-            catalog, host(), || NOW).unwrap();
-        let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+        let mut session = db
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                catalog,
+                host(),
+                || NOW,
+            )
+            .unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
         for mixed in [false, true] {
             for eligible in [vec![HIGH], vec![]] {
                 let params = parameters(&[VId(0)], &eligible);
-                let prepared = session.prepare(&c.query(), &statement(mixed, mixed, false, "out"), &params).unwrap();
+                let prepared = session
+                    .prepare(&c.query(), &statement(mixed, mixed, false, "out"), &params)
+                    .unwrap();
                 let probe = Arc::new(SimulationCheckpointProbe::new(None));
-                let expected = session.execute_beacon_index(&c.query().with_checkpoint_probe(probe.clone()),
-                    &index, &prepared, &params).unwrap();
+                let expected = session
+                    .execute_beacon_index(
+                        &c.query().with_checkpoint_probe(probe.clone()),
+                        &index,
+                        &prepared,
+                        &params,
+                    )
+                    .unwrap();
                 for cut in 1..=probe.calls() {
                     let stopped = Arc::new(SimulationCheckpointProbe::new(Some(cut)));
-                    assert!(session.execute_beacon_index(&c.query().with_checkpoint_probe(stopped.clone()),
-                        &index, &prepared, &params).is_err(), "cut={cut}, mixed={mixed}");
+                    assert!(
+                        session
+                            .execute_beacon_index(
+                                &c.query().with_checkpoint_probe(stopped.clone()),
+                                &index,
+                                &prepared,
+                                &params
+                            )
+                            .is_err(),
+                        "cut={cut}, mixed={mixed}"
+                    );
                     assert!(stopped.calls() >= cut);
                     assert!(!session.is_closed());
-                    assert_eq!(session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap(), expected);
+                    assert_eq!(
+                        session
+                            .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                            .unwrap(),
+                        expected
+                    );
                 }
             }
         }
         let params = parameters(&[VId(0)], &[HIGH]);
-        let bad = session.prepare(&c.query(), &format!("{}RETURN 1 / 0 AS bad LIMIT 0",
-            call(true, true, false, "out")), &params).unwrap();
-        assert!(session.execute_beacon_index(&c.query(), &index, &bad, &params).is_err());
-        let zero = session.prepare(&c.query(), &format!("{}RETURN node LIMIT 0",
-            call(false, false, false, "out")), &params).unwrap();
-        let invalid = GqlParameters::new().with_int64("x", 0).unwrap()
-            .with_list("seeds", vec![GraphValue::Vertex(VId(0))]).unwrap()
-            .with_list("eligible", vec![GraphValue::Scalar(CanonicalScalar::Int(-1))]).unwrap();
-        assert!(session.execute_beacon_index(&c.query(), &index, &zero, &invalid).is_err());
-        assert!(rows(session.execute_beacon_index(&c.query(), &index, &zero, &params).unwrap()).is_empty());
+        let bad = session
+            .prepare(
+                &c.query(),
+                &format!(
+                    "{}RETURN 1 / 0 AS bad LIMIT 0",
+                    call(true, true, false, "out")
+                ),
+                &params,
+            )
+            .unwrap();
+        assert!(
+            session
+                .execute_beacon_index(&c.query(), &index, &bad, &params)
+                .is_err()
+        );
+        let zero = session
+            .prepare(
+                &c.query(),
+                &format!("{}RETURN node LIMIT 0", call(false, false, false, "out")),
+                &params,
+            )
+            .unwrap();
+        let invalid = GqlParameters::new()
+            .with_int64("x", 0)
+            .unwrap()
+            .with_list("seeds", vec![GraphValue::Vertex(VId(0))])
+            .unwrap()
+            .with_list(
+                "eligible",
+                vec![GraphValue::Scalar(CanonicalScalar::Int(-1))],
+            )
+            .unwrap();
+        assert!(
+            session
+                .execute_beacon_index(&c.query(), &index, &zero, &invalid)
+                .is_err()
+        );
+        assert!(
+            rows(
+                session
+                    .execute_beacon_index(&c.query(), &index, &zero, &params)
+                    .unwrap()
+            )
+            .is_empty()
+        );
         session.close();
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -337,20 +631,40 @@ fn final_clock_gate_can_expire_graph_reuse_even_after_a_complete_empty_answer() 
         for eligible in [vec![HIGH], vec![]] {
             let samples = Cell::new(0_u64);
             let stop = Cell::new(u64::MAX);
-            let mut session = db.authorized_read_session(&c.query(), &authority, &token, "main",
-                catalog, host(), || {
-                    let at = samples.get(); samples.set(at + 1);
-                    if at >= stop.get() { EXPIRES } else { NOW }
-                }).unwrap();
-            let index = session.prepare_beacon_index(&c.query(), &options()).unwrap();
+            let mut session = db
+                .authorized_read_session(
+                    &c.query(),
+                    &authority,
+                    &token,
+                    "main",
+                    catalog,
+                    host(),
+                    || {
+                        let at = samples.get();
+                        samples.set(at + 1);
+                        if at >= stop.get() { EXPIRES } else { NOW }
+                    },
+                )
+                .unwrap();
+            let index = session
+                .prepare_beacon_index(&c.query(), &options())
+                .unwrap();
             let params = parameters(&[VId(0)], &eligible);
-            let prepared = session.prepare(&c.query(), &statement(true, true, false, "out"), &params).unwrap();
+            let prepared = session
+                .prepare(&c.query(), &statement(true, true, false, "out"), &params)
+                .unwrap();
             samples.set(0);
-            session.execute_beacon_index(&c.query(), &index, &prepared, &params).unwrap();
-            let calls = samples.get(); assert!(calls > 5);
-            samples.set(0); stop.set(calls - 1);
-            assert!(matches!(session.execute_beacon_index(&c.query(), &index, &prepared, &params),
-                Err(QueryError::Authorization(WardenError::Expired))));
+            session
+                .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                .unwrap();
+            let calls = samples.get();
+            assert!(calls > 5);
+            samples.set(0);
+            stop.set(calls - 1);
+            assert!(matches!(
+                session.execute_beacon_index(&c.query(), &index, &prepared, &params),
+                Err(QueryError::Authorization(WardenError::Expired))
+            ));
             assert!(session.is_closed());
         }
         assert_eq!(c.outstanding_obligations(), 0);

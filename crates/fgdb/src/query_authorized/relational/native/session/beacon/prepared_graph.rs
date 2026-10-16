@@ -5,8 +5,8 @@
 use super::*;
 use crate::{EmbeddedReadView, ReadError, Snapshot};
 use fgdb_beacon::expansion::{
-    ExpansionCursor, ExpansionDirection, ExpansionMembership, ExpansionNeighbors,
-    ExpansionRequest, ExpansionSpec, GraphHit,
+    ExpansionCursor, ExpansionDirection, ExpansionMembership, ExpansionNeighbors, ExpansionRequest,
+    ExpansionSpec, GraphHit,
 };
 use fgdb_beacon::{GraphHybridHit, GraphHybridQuery};
 use fgdb_delta_types::{LabelId, RelationId};
@@ -72,7 +72,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         eligible: &[VId],
     ) -> Result<Vec<GraphHybridHit>, Error> {
         self.search_beacon_graph_index_with_eligibility(
-            cx, prepared, query, expansion, request, Some(eligible),
+            cx,
+            prepared,
+            query,
+            expansion,
+            request,
+            Some(eligible),
         )
     }
 
@@ -125,11 +130,20 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 validate_eligibility(eligible, &mut SharedWork(&work))?;
                 let graph = if query.graph_enabled() {
                     expand_at(
-                        cx, prepared, view, scope, host, execution, expansion,
-                        query.graph_candidates, allowance, &work,
+                        cx,
+                        prepared,
+                        view,
+                        scope,
+                        host,
+                        execution,
+                        expansion,
+                        query.graph_candidates,
+                        allowance,
+                        &work,
                         |id, _| Ok(allows(eligible, id)),
                         &|_| Ok(()),
-                    )?.0
+                    )?
+                    .0
                 } else {
                     // Disabled graph lanes never inspect seeds or graph limits.
                     Vec::new()
@@ -182,18 +196,25 @@ pub(super) fn expand_at<F>(
 where
     F: FnMut(usize) -> Result<(), QueryError>,
 {
-    let cap = allowance.max_source_scratch.min(prepared.definition.policy.max_source_scratch);
+    let cap = allowance
+        .max_source_scratch
+        .min(prepared.definition.policy.max_source_scratch);
     expansion.limits.max_vertices = expansion.limits.max_vertices.min(cap);
     expansion.limits.max_visited_vertices = expansion.limits.max_visited_vertices.min(cap);
     expansion.limits.max_seed_ids = expansion.limits.max_seed_ids.min(cap);
     expansion.limits.max_input_edges = expansion.limits.max_input_edges.min(cap);
     expansion.limits.max_source_scratch = expansion.limits.max_source_scratch.min(cap);
     let refuse = |error| work.borrow_mut().refuse(error);
-    let source = view.vertex_scan_source(cx, prepared.sequence)
+    let source = view
+        .vertex_scan_source(cx, prepared.sequence)
         .map_err(|error| refuse(QueryError::Read(error)))?;
     let poll = RefCell::new(|| execution.borrow_mut().poll().map_err(&refuse));
     let membership = Membership {
-        source, scope, label: prepared.definition.vertex_label, poll: &poll, refuse: &refuse,
+        source,
+        scope,
+        label: prepared.definition.vertex_label,
+        poll: &poll,
+        refuse: &refuse,
     };
     let mut neighbors = Neighbors {
         snapshot: &view.snapshot,
@@ -205,15 +226,21 @@ where
             ExpansionDirection::Incoming => GlaDirection::Reverse,
             ExpansionDirection::Undirected => GlaDirection::Undirected,
         },
-        host, population: prepared.admitted, admitted: 0,
+        host,
+        population: prepared.admitted,
+        admitted: 0,
         limit: expansion.limits.max_input_edges,
         scratch_limit: expansion.limits.max_source_scratch,
         admit_scratch,
     };
     let mut control = SharedWork(work);
     let mut cursor = ExpansionCursor::new(
-        expansion.seeds, expansion.max_hops, expansion.include_seeds,
-        candidates, expansion.limits, &mut control,
+        expansion.seeds,
+        expansion.max_hops,
+        expansion.include_seeds,
+        candidates,
+        expansion.limits,
+        &mut control,
     )?;
     loop {
         match cursor.request(&mut control)? {
@@ -224,7 +251,8 @@ where
             ExpansionRequest::Neighbors(id) => {
                 let result = neighbors.visit_neighbors(id, &mut control, &mut |next, work| {
                     cursor.prepare_neighbor(next, work)?;
-                    let present = membership.contains_vertex(next, work)
+                    let present = membership
+                        .contains_vertex(next, work)
                         .map_err(|error| cursor.refuse(error))?;
                     cursor.resolve_membership(present, || admit_scratch(2))
                 });
@@ -239,10 +267,13 @@ where
     }
     // Reserve the maximum live rank heap and returned GraphHit vector BEFORE
     // finish allocates them. Rejected endpoints cannot waive traversal costs.
-    let capacity = cursor.visited_vertices().min(usize::try_from(candidates)
-        .map_err(|_| BeaconError::InvalidQuery("graph candidate depth exceeds usize"))?);
+    let capacity = cursor.visited_vertices().min(
+        usize::try_from(candidates)
+            .map_err(|_| BeaconError::InvalidQuery("graph candidate depth exceeds usize"))?,
+    );
     admit_scratch(capacity.checked_mul(2).ok_or(BeaconError::ResourceLimit {
-        resource: "prepared graph rank workspace", limit: cap,
+        resource: "prepared graph rank workspace",
+        limit: cap,
     })?)?;
     let hits = cursor.finish(eligible, &mut control)?;
     let incidences = u64::try_from(neighbors.admitted)
@@ -355,15 +386,12 @@ where
             )?;
             let Some(eid) = next else { break };
             after = Some(eid); // ordered successor, including EId(u128::MAX)
-            let Some((block, row)) = self
-                .snapshot
-                .adjacency_index()
-                .statement_at_controlled(
-                    &self.snapshot.blocks,
-                    eid,
-                    self.at,
-                    &mut |_| (membership.poll.borrow_mut())(),
-                )?
+            let Some((block, row)) = self.snapshot.adjacency_index().statement_at_controlled(
+                &self.snapshot.blocks,
+                eid,
+                self.at,
+                &mut |_| (membership.poll.borrow_mut())(),
+            )?
             else {
                 continue;
             };
@@ -375,7 +403,9 @@ where
                 GlaDirection::Undirected if edge.dst == vertex => edge.src,
                 _ => continue,
             };
-            if self.relation.is_some_and(|relation| relation != edge.relation)
+            if self
+                .relation
+                .is_some_and(|relation| relation != edge.relation)
                 || !membership.scope.allows_relation(edge.relation)
             {
                 continue;
