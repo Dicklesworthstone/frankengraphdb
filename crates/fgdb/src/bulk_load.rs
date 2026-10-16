@@ -154,8 +154,9 @@ const _: () = assert!(BulkLoadPolicy::MAX_ROWS_PER_CHUNK.is_power_of_two());
 /// [`BulkLoadPolicy::MAX_ROWS_PER_CHUNK`], under which every chunk carries at
 /// most `budget` bytes of source transcript, the same measure preflight
 /// refuses past `max_chunk_bytes`. Chunks start at row 0, as in preflight and
-/// on resume, so the answer is a function of the source alone and a resumed
-/// load recomputes it exactly.
+/// on resume, so the answer is a function of the source and these budgets
+/// alone. (The CLI resumes at its checkpoint's recorded chunk size, which a
+/// binary with other budgets would not refit.)
 ///
 /// Every chunk must also keep its capsule within [`Self::TEMPLATE_BUDGET`]:
 /// each row adds an exact upper bound of its template bytes, the capsule's
@@ -220,7 +221,7 @@ impl ChunkFit {
     }
 
     /// The fitted rows per chunk, or `None` when one row alone exceeds the
-    /// budget.
+    /// transcript budget or [`Self::TEMPLATE_BUDGET`].
     #[must_use]
     pub fn rows_per_chunk(&self) -> Option<usize> {
         self.fits.iter().rposition(|&fits| fits).map(|k| 1 << k)

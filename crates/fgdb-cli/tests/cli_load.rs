@@ -1296,6 +1296,55 @@ fn checkpoint_never_acknowledges_failed_chunk_before_capsule() {
     resume_scenario(true);
 }
 
+/// A resume without --rows-per-chunk continues at the chunk size its
+/// checkpoint recorded. These 256 rows alone fit one chunk, so refitting
+/// would refuse a load interrupted at 31 rows per chunk, as it refused every
+/// load an older binary with a smaller fit interrupted. A different explicit
+/// size is still refused, before anything commits.
+#[test]
+fn a_resume_without_a_chunk_size_continues_at_the_checkpoints() {
+    let rows = generated(0xcafe);
+    let source = ndjson(&rows);
+    let fixture = Fixture::new("resume-recorded", &source);
+    let uninterrupted = Fixture::new("resume-recorded-reference", &source);
+    let mut interrupted = fixture.load_command(Some(31));
+    interrupted
+        .env("FGDB_LOAD_CRASH_CHUNK", "2")
+        .env("FGDB_LOAD_CRASH_POINT", "before-capsule");
+    let interrupted = Outcome::new(interrupted.output().unwrap());
+    assert!(!interrupted.output.status.success());
+    assert_eq!(
+        interrupted.progress(),
+        vec![(31, fixture.basis + 1), (62, fixture.basis + 2)]
+    );
+    fixture.load(Some(32)).refusal("chunk policy changed", None);
+    let resumed = fixture.load(None);
+    resumed.loaded(256, 9, fixture.basis + 9);
+    let remaining: Vec<_> = (3..=9)
+        .map(|chunk| ((chunk * 31).min(256), fixture.basis + chunk))
+        .collect();
+    assert_eq!(resumed.progress(), remaining);
+    uninterrupted
+        .load(Some(31))
+        .loaded(256, 9, uninterrupted.basis + 9);
+    let completed = fixture.checkpoint();
+    runtime_check(async |contexts| {
+        let mut actual = open(&fixture.db, &contexts).await;
+        actual
+            .ensure_delta_window(&contexts.commit(), CommitSeq(fixture.basis))
+            .await
+            .unwrap();
+        let reference = open(&uninterrupted.db, &contexts).await;
+        assert_eq!(logical(&actual, &completed), expected(&rows));
+        for relation in [R, S] {
+            assert_eq!(
+                answers(&actual, &contexts.query(), relation),
+                answers(&reference, &contexts.query(), relation)
+            );
+        }
+    });
+}
+
 #[test]
 fn checkpoint_future_frontier_is_invalid_resume_and_atomic() {
     let fixture = Fixture::new("future", &ndjson(&generated(11)));

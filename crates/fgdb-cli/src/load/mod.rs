@@ -163,12 +163,6 @@ pub(super) async fn run<V: Vfs + Clone>(
         }
         key_bytes
     };
-    // A row past the fitted budget still loads alone when it fits the cap;
-    // past the cap, preflight refuses it with its typed chunk_bytes error.
-    let rows_per_chunk = options
-        .rows_per_chunk
-        .unwrap_or_else(|| fit.rows_per_chunk().unwrap_or(1));
-    policy.rows_per_chunk = rows_per_chunk;
     let checkpoint_limits =
         checkpoint::Limits::new(source.records(), key_bytes, policy.max_key_bytes)
             .map_err(invalid)?;
@@ -184,6 +178,18 @@ pub(super) async fn run<V: Vfs + Clone>(
     } else {
         None
     };
+    // A checkpoint's committed chunks were cut at its own rows_per_chunk, so
+    // a resume without --rows-per-chunk takes it rather than refitting: the
+    // fit may differ from the binary that wrote it (the template budget
+    // doubled road-ny's chunks). A row past the fitted budget still loads
+    // alone when it fits the cap; past the cap, preflight refuses it with its
+    // typed chunk_bytes error.
+    let rows_per_chunk = match (options.rows_per_chunk, &saved) {
+        (Some(rows), _) => rows,
+        (None, Some(saved)) => saved.rows_per_chunk,
+        (None, None) => fit.rows_per_chunk().unwrap_or(1),
+    };
+    policy.rows_per_chunk = rows_per_chunk;
     let base = if let Some(saved) = &saved {
         if saved.source_hash != source_hash || saved.rows_per_chunk != rows_per_chunk {
             return Err(invalid("source or chunk policy changed"));
