@@ -999,6 +999,9 @@ impl PreparedGraphAggregate {
         projection: &'g [crate::GraphSetProjection],
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<Vec<GraphAggregateRow>, QueryError<E, C>> {
+        let mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>> =
+            control;
+        let control = &mut control;
         let mut rows = Vec::new();
         // Complete every surviving group's expressions before selection, even
         // for an impossible page. No result-row charge or hidden payload copy.

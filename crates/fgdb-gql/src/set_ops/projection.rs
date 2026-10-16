@@ -1368,6 +1368,8 @@ pub(super) fn evaluate<E>(
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     read: &mut ElementRead<'_, E>,
 ) -> Result<GraphValueRow, ProjectionFailure<E>> {
+    let mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E> = control;
+    let control = &mut control;
     let mut values = Vec::new();
     for (column, output) in projection.iter().enumerate() {
         let value = evaluate_value_at(
@@ -1389,6 +1391,8 @@ pub(crate) fn evaluate_value<E>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<GraphValue, ProjectionFailure<E>> {
+    let mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E> = control;
+    let control = &mut control;
     evaluate_value_at(
         value,
         row,

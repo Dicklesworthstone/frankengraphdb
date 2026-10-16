@@ -649,6 +649,17 @@ impl GraphIntegerExpression {
         mut load_element: impl FnMut(usize) -> Result<Option<u128>, GraphIntegerErrorKind>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<E>> {
+        self.evaluate_loaded_dyn(width, &mut load, &mut load_element, control)
+    }
+
+    fn evaluate_loaded_dyn<'a, E>(
+        &'a self,
+        width: usize,
+        load: &mut dyn FnMut(usize) -> Result<ExpressionCell<'a>, GraphIntegerErrorKind>,
+        load_element: &mut dyn FnMut(usize) -> Result<Option<u128>, GraphIntegerErrorKind>,
+        mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<E>> {
+        let control = &mut control;
         for _ in 0..self.stack_entries {
             control(GlaExecutionEvent::ScratchEntry)
                 .map_err(GraphIntegerEvaluationError::Control)?;
