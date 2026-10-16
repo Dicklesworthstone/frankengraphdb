@@ -13,6 +13,45 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::cell::{Cell, RefCell};
 
+/// One cumulative logical scratch allowance for visible graph-source state and
+/// the expansion/fusion kernel. Admissions happen before retention and are not
+/// refunded when a heap slot or temporary entry is later released.
+struct ScratchWork<'a, W> {
+    work: &'a RefCell<W>,
+    used: &'a Cell<usize>,
+    limit: usize,
+}
+
+fn reserve_scratch(
+    used: &Cell<usize>,
+    limit: usize,
+    entries: usize,
+) -> Result<(), BeaconError> {
+    let next = used.get().checked_add(entries).ok_or(BeaconError::ResourceLimit {
+        resource: "graph query scratch entries",
+        limit,
+    })?;
+    if next > limit {
+        return Err(BeaconError::ResourceLimit {
+            resource: "graph query scratch entries",
+            limit,
+        });
+    }
+    used.set(next);
+    Ok(())
+}
+
+impl<W: WorkControl> WorkControl for ScratchWork<'_, W> {
+    fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+        self.work.borrow_mut().charge(units)
+    }
+
+    fn reserve_scratch(&mut self, entries: usize) -> Result<(), BeaconError> {
+        self.work.borrow_mut().charge(entries)?;
+        reserve_scratch(self.used, self.limit, entries)
+    }
+}
+
 /// Private common path for privileged and capability-governed consumers. No
 /// caller-supplied graph or hit list can assert that it belongs to this cut.
 /// `Scan` also covers the edge history walk: hidden history must not influence
@@ -150,6 +189,7 @@ pub(crate) fn evaluate_filtered(
             Ok(())
         },
     )?;
+    let scratch = Cell::new(0usize);
     let graph_hits = if let Some(mut graph) = graph {
         // Neither an empty seed set nor a zero-hop query can consume an edge.
         // In particular include_seeds with zero hops works at a zero edge cap.
@@ -157,24 +197,12 @@ pub(crate) fn evaluate_filtered(
             && !expansion.seeds.is_empty()
             && expansion.relation.is_none_or(&mut relation_allowed)
         {
-            let scratch = Cell::new(0usize);
             let metered = matches!(&scan, Scan::Metered);
-            let reserve = || -> Result<(), BeaconError> {
-                let count = scratch.get();
-                if count == expansion.limits.max_source_scratch {
-                    return Err(BeaconError::ResourceLimit {
-                        resource: "expansion source scratch entries",
-                        limit: expansion.limits.max_source_scratch,
-                    });
-                }
-                scratch.set(count + 1);
-                Ok(())
-            };
             let mut control = |event| match &mut scan {
                 Scan::Metered => {
                     work.borrow_mut().charge(1)?;
                     if matches!(event, SourceEvent::ScratchEntry) {
-                        reserve()?;
+                        reserve_scratch(&scratch, expansion.limits.max_source_scratch, 1)?;
                     }
                     Ok(())
                 }
@@ -197,7 +225,7 @@ pub(crate) fn evaluate_filtered(
                     // relation and BOTH endpoint checks, never hidden history.
                     if !metered {
                         work.borrow_mut().charge(1)?;
-                        reserve()?;
+                        reserve_scratch(&scratch, expansion.limits.max_source_scratch, 1)?;
                     }
                     // Charges each admitted logical edge before parallel-edge
                     // collapse, and admits direction-specific arcs atomically.
@@ -211,27 +239,34 @@ pub(crate) fn evaluate_filtered(
                 Ok(())
             })?;
         }
+        let mut kernel = ScratchWork {
+            work,
+            used: &scratch,
+            limit: expansion.limits.max_source_scratch,
+        };
         graph.expand_filtered(
             expansion.seeds,
             expansion.max_hops,
             expansion.include_seeds,
             query.graph_candidates,
             |id, _| Ok(eligible(id)),
-            &mut SharedWork(work),
+            &mut kernel,
         )?
     } else {
         Vec::new()
     };
     // Topology-only queries retain the same source and traversal, without
     // building or searching a dummy index. Both branches use one fusion owner.
+    let mut kernel = ScratchWork {
+        work,
+        used: &scratch,
+        limit: expansion.limits.max_source_scratch,
+    };
     let rows = match index {
-        Some(index) => index.snapshot().hybrid_search_graph_filtered(
-            query,
-            &graph_hits,
-            eligible,
-            &mut SharedWork(work),
-        )?,
-        None => query.fuse_graph_only(&graph_hits, eligible, &mut SharedWork(work))?,
+        Some(index) => index
+            .snapshot()
+            .hybrid_search_graph_filtered(query, &graph_hits, eligible, &mut kernel)?,
+        None => query.fuse_graph_only(&graph_hits, eligible, &mut kernel)?,
     };
     // No partial rows escape, even on empty/zero-k paths or final refusal.
     work.borrow_mut().charge(1)?;
@@ -1125,4 +1160,36 @@ mod tests {
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
+    #[test]
+    fn zero_hop_materialized_kernel_scratch_uses_the_expansion_source_allowance() {
+        let ((), report) = run_async_under_lab(0xbeac_2110, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            db.write(&commit, initial()).await.unwrap();
+            let options = options();
+            let q = GraphHybridQuery::graph_only(1, 1, 100, 60).unwrap();
+            let seeds = [VId(1)];
+            let mut spec = expansion(&seeds);
+            spec.max_hops = 0;
+            spec.include_seeds = true;
+            spec.limits.max_input_edges = 0;
+            spec.limits.max_source_scratch = 0;
+            assert!(
+                db.beacon_search_graph_filtered(&cx, &options, q, spec, |_| true)
+                    .is_err(),
+                "zero-hop BFS/ranking state must not bypass the shared scratch cap"
+            );
+            spec.limits.max_source_scratch = 32;
+            let rows = db
+                .beacon_search_graph_filtered(&cx, &options, q, spec, |_| true)
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, VId(1));
+            assert_eq!(rows[0].graph_hops, Some(0));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
 }

@@ -462,3 +462,39 @@ fn every_indexed_graph_only_work_cut_refuses_even_for_empty_output() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn zero_hop_indexed_kernel_scratch_uses_the_expansion_source_allowance() {
+    let ((), report) = run_async_under_lab(0xbeac_3808, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+        seed(&mut db, &c.commit(), false).await;
+        let options = options();
+        let q = GraphHybridQuery::graph_only(1, 1, 100, 60).unwrap();
+        let seeds = [VId(1)];
+        let mut spec = expansion(&seeds);
+        spec.max_hops = 0;
+        spec.include_seeds = true;
+        spec.limits.max_input_edges = 0;
+        spec.limits.max_source_scratch = 0;
+        assert!(
+            db.beacon_search_graph_indexed_filtered(
+                &c.query(),
+                &options,
+                q,
+                spec,
+                |_| true,
+            )
+            .is_err(),
+            "zero-hop BFS/ranking state must not bypass the shared scratch cap"
+        );
+        spec.limits.max_source_scratch = 32;
+        let rows = db
+            .beacon_search_graph_indexed_filtered(&c.query(), &options, q, spec, |_| true)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, VId(1));
+        assert_eq!(rows[0].graph_hops, Some(0));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
