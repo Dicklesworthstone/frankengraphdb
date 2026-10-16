@@ -9,6 +9,9 @@ use fgdb_gql::{
     PreparedGraphSetText, PreparedGraphText,
 };
 
+#[path = "buffered_relational_join_pair_tests.rs"]
+mod pair_tests;
+
 const KINDS: [RowJoinKind; 6] = [
     RowJoinKind::Inner,
     RowJoinKind::Left,
@@ -335,7 +338,11 @@ fn merge_presence_selection_accounts_for_both_sorts_without_admitting_residuals(
                     && keyed
                     && !residual;
                 assert_eq!(join.supports_merge_presence(), eligible);
-                let barriers = if eligible { 3 } else { 2 };
+                let pairs = !matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti)
+                    && keyed
+                    && !residual;
+                assert_eq!(join.supports_merge_pairs(), pairs);
+                let barriers = if eligible || pairs { 3 } else { 2 };
                 assert_eq!(
                     compiled.stage_count(),
                     compiled.stages().len()

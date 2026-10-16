@@ -9,6 +9,10 @@ use fgdb_gql::spill_set::{SpillSetJoinPlan, SpillSetRowError};
 use fgdb_strata::tiered::memory::{MemoryCharge, MemoryPool};
 use fgdb_types::CanonicalScalarResolver;
 use std::cmp::Ordering;
+
+#[path = "relational_join_pairs.rs"]
+mod pairs;
+
 fn failure(error: SpillSetRowError<NativeSpoolError>) -> NativeSpoolError {
     match error {
         SpillSetRowError::Control(error) => error,
@@ -374,6 +378,29 @@ where
     }
     if plan.supports_merge_presence() {
         let result = merge_presence(
+            &plan,
+            &left,
+            &right,
+            snapshot,
+            snapshot_records,
+            evaluator,
+            policy,
+            scratch,
+            destination,
+            auxiliary,
+            run_rows,
+            max_runs,
+            page_bytes,
+            max_row_bytes,
+            max_input_rows,
+            &mut work,
+            resolver,
+        )
+        .await?;
+        return Ok((result, work.used));
+    }
+    if plan.supports_merge_pairs() {
+        let result = pairs::execute(
             &plan,
             &left,
             &right,

@@ -40,6 +40,16 @@ impl SpillSetJoinPlan {
             && !self.keys().is_empty()
             && self.spec.predicate().is_none()
     }
+    /// Equality-only pair joins can replay one sorted key group instead of
+    /// rescanning the complete opposite relation. Residual ON predicates stay
+    /// on the general path: a group-level witness cannot prove their absence.
+    pub fn supports_merge_pairs(&self) -> bool {
+        matches!(
+            self.kind(),
+            RowJoinKind::Inner | RowJoinKind::Left | RowJoinKind::Right | RowJoinKind::Full
+        ) && !self.keys().is_empty()
+            && self.spec.predicate().is_none()
+    }
     pub fn compare_keys_with_control<E>(
         &self,
         left: &GraphValueRow,

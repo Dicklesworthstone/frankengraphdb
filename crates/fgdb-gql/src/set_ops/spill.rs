@@ -508,9 +508,15 @@ impl AsyncSpillSetPlan {
                 .left()
                 .stage_count()
                 .saturating_add(join.right().stage_count())
-                // Equality presence joins sort both children, then merge
+                // Equality joins sort both children, then merge
                 // directly into destination. General joins emit and copy.
-                .saturating_add(if join.supports_merge_presence() { 3 } else { 2 }),
+                .saturating_add(
+                    if join.supports_merge_presence() || join.supports_merge_pairs() {
+                        3
+                    } else {
+                        2
+                    },
+                ),
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => {
                 aggregate.input().stage_count().saturating_add(3)
             }
