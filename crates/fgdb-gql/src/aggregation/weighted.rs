@@ -1497,7 +1497,7 @@ fn chain_counts<E, C>(
     hops: &BTreeMap<RelationId, Hops>,
     sources: &[VId],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
-) -> Result<BTreeMap<VId, u128>, VisitError<E, C>> {
+) -> Result<Vec<(VId, u128)>, VisitError<E, C>> {
     let empty = Hops::default();
     let hop = |at: usize| hops.get(&chain.relations[at]).unwrap_or(&empty);
     // Each level accumulates in an id-hash map, pair by pair in the order the
@@ -1509,7 +1509,13 @@ fn chain_counts<E, C>(
     first.dedup_by_key(|&mut (vertex, _)| vertex);
     let mut levels: Vec<Vec<(VId, u128)>> = vec![first];
     for at in 0..chain.relations.len() {
-        let mut next = crate::id_hash::IdMap::<VId, u128>::default();
+        // Sized by the level's pairs, so the map never rehashes as it fills.
+        let pairs = levels[at]
+            .iter()
+            .map(|&(vertex, _)| hop(at).out.get(&vertex).map_or(0, BTreeMap::len))
+            .fold(0_usize, usize::saturating_add);
+        let mut next =
+            crate::id_hash::IdMap::<VId, u128>::with_capacity_and_hasher(pairs, Default::default());
         for &(vertex, walks) in &levels[at] {
             for (&far, &multiplicity) in hop(at).out.get(&vertex).into_iter().flatten() {
                 control(GlaExecutionEvent::Work)?;
@@ -1569,8 +1575,12 @@ fn chain_counts<E, C>(
             }
         }
     }
-    let mut counts = BTreeMap::<VId, u128>::new();
+    // Each endpoint's count, ascending by vertex. A length's level is
+    // distinct and sorted, so its new endpoints arrive in order and merge
+    // into the earlier lengths' afterwards; the charges are a map's.
+    let mut counts = Vec::<(VId, u128)>::new();
     for &length in &chain.lengths {
+        let mut fresh = Vec::<(VId, u128)>::new();
         for &(end, walks) in &levels[length] {
             control(GlaExecutionEvent::Work)?;
             let source = sources.binary_search(&end).is_ok();
@@ -1602,15 +1612,39 @@ fn chain_counts<E, C>(
                     .saturating_sub(reused);
             }
             if trails > 0 {
-                if !counts.contains_key(&end) {
-                    control(GlaExecutionEvent::ScratchEntry)?;
+                match counts.binary_search_by_key(&end, |&(vertex, _)| vertex) {
+                    Ok(at) => {
+                        let total = &mut counts[at].1;
+                        *total = total.checked_add(trails).ok_or_else(overflow)?;
+                    }
+                    Err(_) => {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        fresh.push((end, trails));
+                    }
                 }
-                let total = counts.entry(end).or_insert(0);
-                *total = total.checked_add(trails).ok_or_else(overflow)?;
             }
         }
+        counts = merge_disjoint(counts, fresh);
     }
     Ok(counts)
+}
+
+/// Two vectors ascending by vertex with no vertex in both, as one.
+fn merge_disjoint(a: Vec<(VId, u128)>, b: Vec<(VId, u128)>) -> Vec<(VId, u128)> {
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    let mut merged = Vec::with_capacity(a.len() + b.len());
+    let (mut a, mut b) = (a.into_iter().peekable(), b.into_iter().peekable());
+    while let (Some(&(x, _)), Some(&(y, _))) = (a.peek(), b.peek()) {
+        merged.extend(if x < y { a.next() } else { b.next() });
+    }
+    merged.extend(a);
+    merged.extend(b);
+    merged
 }
 
 /// Feed the aggregate one binding per (source, endpoint) pair of a short chain,
@@ -1724,6 +1758,7 @@ where
             sources.push(vertex);
         }
     }
+    let mut bindings = vec![None; chain.last + 1];
     let mut emit = |source: VId,
                     target: VId,
                     bindings_count: u128,
@@ -1735,8 +1770,8 @@ where
                 return Ok(());
             }
         }
-        // Only the source and endpoint slots are projected; transit slots stay unbound.
-        let mut bindings = vec![None; chain.last + 1];
+        // Only the source and endpoint slots are projected; transit slots stay
+        // unbound. Every pair writes both, so one buffer serves them all.
         bindings[0] = Some(source);
         bindings[chain.last] = Some(target);
         // One emitted binding carries all of this pair's bindings: None
