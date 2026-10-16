@@ -3400,7 +3400,7 @@ fn slot_closure<'a, E>(
     // Probed sets: every frontier is sorted before it is walked and the
     // selected edges are sorted by EId once, so visit order, admission order
     // and every charge are those of ordered sets.
-    use fgdb_gql::id_hash::IdSet;
+    use fgdb_gql::id_hash::{IdMap, IdSet};
     let index = snapshot.adjacency_index();
     let edges = index.edge_count();
     let mean = (edges / snapshot.property_index().vertex_count().max(1)).max(1);
@@ -3451,14 +3451,15 @@ fn slot_closure<'a, E>(
     let mut expanded_earlier =
         (uniform && (root.is_some() || steps.len() > 1)).then(IdSet::<VId>::default);
     let mut slots = vec![IdSet::<VId>::default(); width + steps.len()];
-    let admit = |entry: &AdjacencyEntry,
-                 block: usize,
-                 row: usize,
-                 selected: &mut Vec<BorrowedEdge<'a>>,
-                 seen: &mut Option<IdSet<EId>>,
-                 target: &mut IdSet<VId>,
-                 far: VId,
-                 control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
+    // An edge an expansion meets is admitted unless it already was; then
+    // its far end joins the expansion's slot, and then, for a walk, its
+    // frontier. Each is one scratch entry when new, in that order.
+    let select = |entry: &AdjacencyEntry,
+                  block: usize,
+                  row: usize,
+                  selected: &mut Vec<BorrowedEdge<'a>>,
+                  seen: &mut Option<IdSet<EId>>,
+                  control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
      -> Result<(), E> {
         if seen.as_mut().is_none_or(|seen| seen.insert(entry.eid)) {
             // Its SnapshotRecord is charged when the closure commits.
@@ -3468,11 +3469,13 @@ fn slot_closure<'a, E>(
                 edge_properties_at(&snapshot.block_props, block, row),
             ));
         }
-        if target.insert(far) {
-            control(SourceEvent::ScratchEntry)?;
-        }
         Ok(())
     };
+    // A walk keeps its slot and the vertices it expanded in one map of
+    // marks, so each edge it crosses probes once, not once per set: half of
+    // the probes that were a seventh of a pokec three-hop reach.
+    const TARGET: u8 = 1;
+    const EXPANDED: u8 = 2;
     // The roots were found (and are held) by the caller, uncharged there as
     // in the superset closure; this copy only lets a step expand from them.
     let root_slot = root.map_or(0, |(_, _, slot)| slot);
@@ -3496,17 +3499,9 @@ fn slot_closure<'a, E>(
                     if relation.matches(entry.relation) {
                         let far = far_endpoint(entry, root, lookup_direction);
                         if !repeat {
-                            admit(
-                                entry,
-                                block,
-                                row,
-                                &mut selected,
-                                &mut seen,
-                                target,
-                                far,
-                                control,
-                            )?;
-                        } else if target.insert(far) {
+                            select(entry, block, row, &mut selected, &mut seen, control)?;
+                        }
+                        if target.insert(far) {
                             control(SourceEvent::ScratchEntry)?;
                         }
                     }
@@ -3519,17 +3514,19 @@ fn slot_closure<'a, E>(
         let mut near = slots[step.source].iter().copied().collect::<Vec<_>>();
         near.sort_unstable();
         let (zero, maximum) = step.walk.unwrap_or((false, 1));
+        // An Expand's slot, or a walk's marks. A walk marks the vertices it
+        // expanded too: one that returns to a vertex reuses the edges it
+        // admitted when it first left it.
         let mut target = IdSet::default();
-        // Vertices already expanded by this step: a walk that returns to one
-        // reuses edges this step admitted when it first left it.
-        let mut expanded = IdSet::default();
+        let mut marks = IdMap::<VId, u8>::default();
         if step.walk.is_some() {
             for &vertex in &near {
+                let mark = marks.entry(vertex).or_insert(0);
                 control(SourceEvent::ScratchEntry)?;
-                expanded.insert(vertex);
-                if zero && !target.contains(&vertex) {
+                *mark |= EXPANDED;
+                if zero && *mark & TARGET == 0 {
                     control(SourceEvent::ScratchEntry)?;
-                    target.insert(vertex);
+                    *mark |= TARGET;
                 }
             }
         }
@@ -3565,22 +3562,23 @@ fn slot_closure<'a, E>(
                         if step.relation.matches(entry.relation) {
                             let far = far_endpoint(entry, vertex, step.direction);
                             if !repeat {
-                                admit(
-                                    entry,
-                                    block,
-                                    row,
-                                    &mut selected,
-                                    &mut seen,
-                                    &mut target,
-                                    far,
-                                    control,
-                                )?;
-                            } else if target.insert(far) {
-                                control(SourceEvent::ScratchEntry)?;
+                                select(entry, block, row, &mut selected, &mut seen, control)?;
                             }
-                            if step.walk.is_some() && expanded.insert(far) {
-                                control(SourceEvent::ScratchEntry)?;
-                                next.push(far);
+                            if step.walk.is_none() {
+                                if target.insert(far) {
+                                    control(SourceEvent::ScratchEntry)?;
+                                }
+                            } else {
+                                let mark = marks.entry(far).or_insert(0);
+                                if *mark & TARGET == 0 {
+                                    *mark |= TARGET;
+                                    control(SourceEvent::ScratchEntry)?;
+                                }
+                                if *mark & EXPANDED == 0 {
+                                    *mark |= EXPANDED;
+                                    control(SourceEvent::ScratchEntry)?;
+                                    next.push(far);
+                                }
                             }
                         }
                         Ok(())
@@ -3589,7 +3587,15 @@ fn slot_closure<'a, E>(
             }
             frontier = next;
         }
-        slots[width + at] = target;
+        slots[width + at] = if step.walk.is_none() {
+            target
+        } else {
+            marks
+                .into_iter()
+                .filter(|&(_, mark)| mark & TARGET != 0)
+                .map(|(vertex, _)| vertex)
+                .collect()
+        };
     }
     // Records are charged once the closure commits, so a fallback after an
     // admitted level never counts records the tables do not hold: the budget
