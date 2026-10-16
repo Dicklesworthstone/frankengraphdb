@@ -3652,7 +3652,201 @@ pub(crate) fn bound_vertex_closure<'a, E, Row>(
     let Some(roots) = root_candidates(snapshot, predicates, as_of, indexed_only, control)? else {
         return Ok(None);
     };
+    if let (&[source], Some(shortest)) = (roots.as_slice(), bound_shortest(prefix)) {
+        let targets = root_candidates(snapshot, shortest.targets, as_of, true, control)?;
+        if let Some(&[target]) = targets.as_deref()
+            && source != target
+        {
+            return shortest_closure(snapshot, as_of, source, target, &shortest, control);
+        }
+    }
     slot_closure(snapshot, as_of, None, roots, &steps, control)
+}
+
+/// A vertex-rooted plan's one SHORTEST walk from the root (slot 0) to the
+/// endpoint (slot 1) a Select names.
+struct BoundShortest<'p> {
+    relation: &'p fgdb_gql::algebra::EdgeRelation,
+    direction: fgdb_gql::algebra::GlaDirection,
+    maximum: u32,
+    targets: &'p [fgdb_gql::algebra::VertexPredicate],
+}
+
+/// The plan's SHORTEST walk, when it is the only expansion: ANY or ALL
+/// SHORTEST, directed, with a lower bound of at most one, and a Select on
+/// its endpoint. The caller's bound_edge_steps has checked that every other
+/// operator only filters, captures or projects.
+fn bound_shortest(prefix: &[fgdb_gql::algebra::GlaOperator]) -> Option<BoundShortest<'_>> {
+    use fgdb_gql::algebra::{GlaDirection, GlaOperator, GraphWalkSearch};
+    let mut walks = prefix.iter().filter(|op| {
+        matches!(
+            op,
+            GlaOperator::Expand { .. } | GlaOperator::VarLengthExpand { .. }
+        )
+    });
+    let Some(GlaOperator::VarLengthExpand {
+        source,
+        relation,
+        direction,
+        bounds,
+        search,
+    }) = walks.next()
+    else {
+        return None;
+    };
+    if walks.next().is_some()
+        || source.ordinal() != 0
+        || bounds.minimum() > 1
+        || bounds.minimum() > bounds.maximum()
+        || *direction == GlaDirection::Undirected
+        || !matches!(
+            search,
+            GraphWalkSearch::AnyShortest | GraphWalkSearch::AllShortest
+        )
+    {
+        return None;
+    }
+    let targets = prefix.iter().find_map(|op| match op {
+        GlaOperator::Select { slot, predicates } if slot.ordinal() == 1 => Some(predicates),
+        _ => None,
+    })?;
+    Some(BoundShortest {
+        relation,
+        direction: *direction,
+        maximum: bounds.maximum(),
+        targets,
+    })
+}
+
+/// The closure of a SHORTEST walk between one bound source and one bound
+/// target (fgdb-61p1n): breadth-first from both ends, a whole level at a
+/// time on the side whose frontier has fewer incidences, until the levels
+/// meet. A gauntlet target is the vertex farthest from its hub, so the
+/// source's own closure held nearly everything the source reaches: a pokec
+/// SHORTEST took 7.1 s, and takes 38 ms this way.
+///
+/// It admits every edge either search crossed: the out-edges of the forward
+/// levels it expanded and the in-edges of the backward ones. Say the
+/// searches first meet once the forward one has reached level a and the
+/// backward one level b. Before that last level their reached sets were
+/// disjoint, so no walk is shorter than a + b (a shorter one has a vertex
+/// both had reached), and a + b is the shortest length. On a shortest walk
+/// the vertex at position i is i hops from the source and a + b - i from
+/// the target. So each of its first a edges leaves a vertex the forward
+/// search expanded, and each later edge enters one the backward search
+/// expanded: every shortest walk lies in the closure, and none shorter can,
+/// since the closure holds only real edges. A SHORTEST over it finds the
+/// same walks to the target, and ANY chooses the same one; the
+/// bound_shortest_closure law compares both against the source's closure.
+/// Other endpoints may get other walks, but the target's Select drops them.
+/// When the searches cannot meet within the bound there is no walk, and the
+/// closure holds the two endpoints only. A search that grows past the
+/// closure cap leaves the caller's complete admission, as slot_closure does.
+fn shortest_closure<'a, E>(
+    snapshot: &'a Snapshot,
+    as_of: CommitSeq,
+    source: VId,
+    target: VId,
+    shortest: &BoundShortest<'_>,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<Closure<'a>>, E> {
+    use fgdb_gql::algebra::GlaDirection;
+    use fgdb_gql::id_hash::IdSet;
+    let backward = match shortest.direction {
+        GlaDirection::Forward => GlaDirection::Reverse,
+        GlaDirection::Reverse => GlaDirection::Forward,
+        GlaDirection::Undirected => return Ok(None),
+    };
+    let index = snapshot.adjacency_index();
+    let cap = (index.edge_count() / 2).max(4096);
+    let mut selected: Vec<BorrowedEdge<'a>> = Vec::new();
+    let mut seen = IdSet::<EId>::default();
+    // [forward, backward]: each side's direction, reached vertices and
+    // newest level.
+    let directions = [shortest.direction, backward];
+    let mut reached = [IdSet::<VId>::default(), IdSet::<VId>::default()];
+    reached[0].insert(source);
+    reached[1].insert(target);
+    let mut frontiers = [vec![source], vec![target]];
+    // Each frontier's incidences, which bound the edges its level can admit.
+    let mut incidences = [0_usize; 2];
+    let sum = |frontier: &[VId],
+               direction: GlaDirection,
+               control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
+     -> Result<usize, E> {
+        let mut total = 0_usize;
+        for &vertex in frontier {
+            control(SourceEvent::Work)?;
+            total = total.saturating_add(index.degree(vertex, direction));
+        }
+        Ok(total)
+    };
+    for side in 0..2 {
+        incidences[side] = sum(&frontiers[side], directions[side], control)?;
+    }
+    let mut depth = 0_u32;
+    let met = loop {
+        if frontiers[0].is_empty() || frontiers[1].is_empty() || depth >= shortest.maximum {
+            break false;
+        }
+        let side = usize::from(incidences[1] < incidences[0]);
+        if selected.len().saturating_add(incidences[side]) > cap {
+            return Ok(None);
+        }
+        let mut frontier = std::mem::take(&mut frontiers[side]);
+        frontier.sort_unstable();
+        let mut next = Vec::new();
+        for vertex in frontier {
+            control(SourceEvent::Work)?;
+            index.visit(
+                &snapshot.blocks,
+                vertex,
+                directions[side],
+                as_of,
+                control,
+                |entry, block, row, control| {
+                    if shortest.relation.matches(entry.relation) {
+                        if seen.insert(entry.eid) {
+                            // Its SnapshotRecord is charged when the closure
+                            // commits.
+                            control(SourceEvent::ScratchEntry)?;
+                            selected.push((
+                                (entry.eid, entry.src, entry.relation, entry.dst),
+                                edge_properties_at(&snapshot.block_props, block, row),
+                            ));
+                        }
+                        let far = far_endpoint(entry, vertex, directions[side]);
+                        if reached[side].insert(far) {
+                            control(SourceEvent::ScratchEntry)?;
+                            next.push(far);
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        depth += 1;
+        let other = &reached[1 - side];
+        if next.iter().any(|vertex| other.contains(vertex)) {
+            break true;
+        }
+        incidences[side] = sum(&next, directions[side], control)?;
+        frontiers[side] = next;
+    };
+    if !met {
+        selected.clear();
+    }
+    // Records are charged once the closure commits, as in slot_closure.
+    for _ in 0..selected.len() {
+        control(SourceEvent::SnapshotRecord)?;
+    }
+    let mut vertices = std::collections::BTreeSet::from([source, target]);
+    for &((_, src, _, dst), _) in &selected {
+        vertices.insert(src);
+        vertices.insert(dst);
+    }
+    selected.sort_unstable_by_key(|((eid, ..), _)| *eid);
+    Ok(Some((selected, vertices)))
 }
 
 /// The VIds of the visible vertices satisfying every root predicate, served
