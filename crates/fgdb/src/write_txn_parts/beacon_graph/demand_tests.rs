@@ -569,7 +569,7 @@ fn reached_topology_allows_disjoint_writes_ignored_fields_and_unexpanded_edges()
                 5 => write.add_edge(EId(90), VId(9), VId(0), vec![]),
                 6 => write.add_edge(EId(90), VId(0), VId(9), vec![]),
                 _ => write.set_vertex_label(VId(1), L, false),
-            }
+            };
             db.write(&c.commit(), write).await.unwrap();
             assert_eq!(
                 txn.beacon_search_graph_demand_filtered(
@@ -716,7 +716,7 @@ fn parallel_retirement_cascades_and_selected_label_restoration_remain_conflicts(
                 4 => write.set_vertex_label(VId(1), L, false),
                 5 => write.set_vertex_label(HIGH, L, false),
                 _ => write.set_vertex_label(VId(9), L, true), // rejected membership becomes present
-            }
+            };
             db.write(&c.commit(), write).await.unwrap();
             if case == 4 {
                 let mut restore = WriteBatch::new(R);
@@ -808,7 +808,7 @@ fn source_refusal_unwind_and_retry_never_erase_the_conservative_failure_witness(
             assert_read_conflict(txn.finish(&mut db, &c.commit()).await);
         }
         // Initial owner/cut refusal reveals no source and installs no witness.
-        let db = fixture(&c.commit(), 0).await;
+        let mut db = fixture(&c.commit(), 0).await;
         let other = fixture(&c.commit(), 0).await;
         let txn = db.begin(&c.txn()).unwrap();
         assert!(matches!(

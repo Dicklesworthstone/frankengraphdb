@@ -244,7 +244,7 @@ fn native_empty_and_late_failed_pages_keep_directional_insertion_gaps_after_roll
 fn native_projected_witnesses_replay_with_exact_and_one_unit_short_allowances() {
     let ((), report) = run_async_under_lab(0xbeac_7404, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
-        let db = fixture(&c.commit()).await;
+        let mut db = fixture(&c.commit()).await;
         for missing in [false, true] {
             let mut statement = query("demand", "node, graph_hops");
             if missing {
@@ -254,7 +254,7 @@ fn native_projected_witnesses_replay_with_exact_and_one_unit_short_allowances() 
                 .unwrap()
                 .bind_parameters(&GqlParameters::new())
                 .unwrap();
-            let run = |allowance| {
+            let mut run = |allowance| {
                 let txn = db.begin(&c.txn()).unwrap();
                 let result = txn.execute_graph_set_governed(&db, &c.query(), &bound, allowance);
                 txn.abort();

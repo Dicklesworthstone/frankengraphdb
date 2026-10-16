@@ -124,7 +124,7 @@ fn conjunctions_match_document_scan_bits_for_repetition_unicode_filters_and_ties
                         for filter in 0..3 {
                             let eligible = |id: VId| match filter {
                                 0 => true,
-                                1 => id.0 % 2 == 0,
+                                1 => id.0.is_multiple_of(2),
                                 _ => false,
                             };
                             let actual = index
