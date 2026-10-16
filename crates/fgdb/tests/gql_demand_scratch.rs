@@ -70,7 +70,7 @@ fn parameters(seeds: &[u128], empty: bool) -> GqlParameters {
 fn native_exact_and_short_budgets_include_kernels_in_both_hosts() {
     let ((), report) = run_async_under_lab(0xbeac_5501, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
-        let db = open(&c.commit()).await;
+        let mut db = open(&c.commit()).await;
         for transaction in [false, true] {
             for empty in [false, true] {
                 for limit_zero in [false, true] {
@@ -88,9 +88,9 @@ fn native_exact_and_short_budgets_include_kernels_in_both_hosts() {
                         .unwrap();
                     // Fresh transaction witnesses for every invocation. A
                     // baseline call must not warm a short-budget attempt.
-                    let execute = |allowance| {
+                    let mut execute = |allowance| {
                         if transaction {
-                            let mut txn = db.begin(&c.txn()).unwrap();
+                            let txn = db.begin(&c.txn()).unwrap();
                             let result = txn
                                 .execute_graph_set_governed(&db, &c.query(), &bound, allowance)
                                 .map_err(|error| error.to_string());
@@ -136,7 +136,7 @@ fn native_exact_and_short_budgets_include_kernels_in_both_hosts() {
                             .collect()
                     };
                     if transaction {
-                        let mut txn = db.begin(&c.txn()).unwrap();
+                        let txn = db.begin(&c.txn()).unwrap();
                         assert_eq!(
                             rows(
                                 txn.query(&db, &c.query(), &text, &parameters, symbols, policy(),)
