@@ -414,6 +414,9 @@ fn prepared_graph_limits_count_reached_incidence_and_cannot_be_evaded_by_filteri
             ));
             low = e;
             low.limits.max_source_scratch = 3;
+            // Three entries cannot hold the seeds' and kernel's state, which
+            // the shared allowance (5c4b4bac) reserves before the reached
+            // incidences, whatever the filter.
             assert!(matches!(
                 session.search_beacon_graph_index_filtered(
                     &c.query(),
@@ -424,7 +427,7 @@ fn prepared_graph_limits_count_reached_incidence_and_cannot_be_evaded_by_filteri
                     allowed,
                 ),
                 Err(Error::Index(BeaconError::ResourceLimit {
-                    resource: "prepared graph source admissions",
+                    resource: "prepared graph scratch entries",
                     limit: 3
                 }))
             ));

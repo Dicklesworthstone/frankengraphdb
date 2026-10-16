@@ -259,7 +259,15 @@ pub(crate) fn evaluate_filtered(
     let mut kernel = ScratchWork {
         work,
         used: &scratch,
-        limit: expansion.limits.max_source_scratch,
+        // Fusion state joins the graph's one allowance only while the lane
+        // runs: a disabled lane neither inspects seeds nor enforces graph
+        // limits, so text/vector fusion is charged work but never refused by
+        // the graph's scratch cap.
+        limit: if query.graph_enabled() {
+            expansion.limits.max_source_scratch
+        } else {
+            usize::MAX
+        },
     };
     let rows = match index {
         Some(index) => index.snapshot().hybrid_search_graph_filtered(
@@ -376,6 +384,30 @@ impl EmbeddedReadView {
 #[cfg(test)]
 #[path = "graph_tests.rs"]
 mod retrieval_tests;
+
+#[cfg(test)]
+/// The least expansion source-scratch allowance `run` succeeds with.
+/// Since 0b24aa88 the BFS, ranking and fusion state shares that one
+/// allowance with admitted edges, so even a zero-hop expansion needs some.
+/// Success is monotone in the allowance.
+pub(crate) fn least_source_scratch<'a>(
+    mut spec: ExpansionSpec<'a, RelationId>,
+    mut run: impl FnMut(ExpansionSpec<'a, RelationId>) -> bool,
+) -> usize {
+    let (mut low, mut high) = (0, 1_000_000);
+    spec.limits.max_source_scratch = high;
+    assert!(run(spec), "a million scratch entries suffice");
+    while low < high {
+        let middle = low + (high - low) / 2;
+        spec.limits.max_source_scratch = middle;
+        if run(spec) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low
+}
 
 #[cfg(test)]
 mod tests {
@@ -618,19 +650,46 @@ mod tests {
                 spec.direction = direction;
                 assert_eq!(graph_population(&db, &cx, &options, spec), expected);
             }
+            // Zero hops need no edge. Their retained seed, ranking and
+            // fusion state is scratch (0b24aa88): the least allowance answers,
+            // and one entry less refuses on that allowance.
             spec.max_hops = 0;
             spec.limits.max_input_edges = 0;
-            spec.limits.max_source_scratch = 0;
             spec.include_seeds = true;
-            assert_eq!(
-                graph_population(&db, &cx, &options, spec),
-                vec![(VId(2), 0)]
-            );
-            spec.include_seeds = false;
-            assert!(graph_population(&db, &cx, &options, spec).is_empty());
-            spec = expansion(&[]);
-            spec.limits.max_source_scratch = 0;
-            assert!(graph_population(&db, &cx, &options, spec).is_empty());
+            let mut q = query();
+            q.retrieval.k = 10;
+            let refuses_scratch = |spec| {
+                matches!(
+                    db.beacon_search_graph(&cx, &options, q, spec),
+                    Err(Error::Index(BeaconError::ResourceLimit {
+                        resource: "graph query scratch entries",
+                        ..
+                    }))
+                )
+            };
+            let empty = expansion(&[]);
+            for (spec, expected) in [
+                (spec, vec![(VId(2), 0)]),
+                (
+                    ExpansionSpec {
+                        include_seeds: false,
+                        ..spec
+                    },
+                    vec![],
+                ),
+                (empty, vec![]),
+            ] {
+                let mut spec = spec;
+                let least = least_source_scratch(spec, |spec| {
+                    db.beacon_search_graph(&cx, &options, q, spec).is_ok()
+                });
+                spec.limits.max_source_scratch = least;
+                assert_eq!(graph_population(&db, &cx, &options, spec), expected);
+                if least > 0 {
+                    spec.limits.max_source_scratch = least - 1;
+                    assert!(refuses_scratch(spec), "{:?}", spec.seeds);
+                }
+            }
             spec = expansion(&[VId(1)]);
             spec.relation = Some(RelationId(999));
             assert!(graph_population(&db, &cx, &options, spec).is_empty());
@@ -681,12 +740,15 @@ mod tests {
                     },
                     "expansion seed IDs",
                 ),
+                // The kernel reserves its state through the host's one
+                // allowance (0b24aa88), which refuses before the kernel's own
+                // count of the same cap would.
                 (
                     ExpansionLimits {
                         max_source_scratch: 0,
                         ..ExpansionLimits::default()
                     },
-                    "expansion source scratch entries",
+                    "graph query scratch entries",
                 ),
             ] {
                 let mut spec = expansion(&[VId(1)]);
@@ -1066,7 +1128,21 @@ mod tests {
             spec.max_hops = 0;
             spec.include_seeds = true;
             spec.limits.max_input_edges = 0;
-            spec.limits.max_source_scratch = 0;
+            // No edge is needed; the seeds' BFS, ranking and fusion state is
+            // the expansion's scratch (0b24aa88), and one entry less refuses.
+            let least = least_source_scratch(spec, |spec| {
+                db.beacon_search_graph(&cx, &options(), q, spec).is_ok()
+            });
+            assert!(least > 0, "retained zero-hop state is scratch");
+            spec.limits.max_source_scratch = least - 1;
+            assert!(matches!(
+                db.beacon_search_graph(&cx, &options(), q, spec),
+                Err(Error::Index(BeaconError::ResourceLimit {
+                    resource: "graph query scratch entries",
+                    ..
+                }))
+            ));
+            spec.limits.max_source_scratch = least;
             let rows = db.beacon_search_graph(&cx, &options(), q, spec).unwrap();
             assert_eq!(
                 rows.iter()

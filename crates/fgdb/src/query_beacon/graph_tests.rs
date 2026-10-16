@@ -186,7 +186,11 @@ fn directions_relations_cycles_and_excluded_transit_follow_the_declared_graph_la
         spec.max_hops = 0;
         spec.include_seeds = true;
         spec.limits.max_input_edges = 0;
-        spec.limits.max_source_scratch = 0;
+        // No edge is needed; the seed's retained state is scratch (0b24aa88).
+        spec.limits.max_source_scratch =
+            crate::query::beacon::graph::least_source_scratch(spec, |spec| {
+                db.beacon_search_graph(&cx, &opts, q, spec).is_ok()
+            });
         let hits = db.beacon_search_graph(&cx, &opts, q, spec).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!((hits[0].id, hits[0].graph_hops), (VId(0), Some(0)));
@@ -548,7 +552,10 @@ mod authorized {
                     assert_eq!(threshold(&full), before, "native dimension {dimension}");
                     match dimension {
                         1 => assert_eq!(before, 6),
-                        2 | 4 => assert_eq!(before, 2),
+                        2 => assert_eq!(before, 2),
+                        // Two admitted edges plus the BFS, ranking and fusion
+                        // state the same allowance holds since 0b24aa88.
+                        4 => assert_eq!(before, 25),
                         3 => assert_eq!(before, 3),
                         _ => assert!(before > 0),
                     }
@@ -659,19 +666,33 @@ mod authorized {
             let mut denied = expansion();
             denied.relation = Some(RelationId(2));
             denied.limits.max_input_edges = 0;
-            denied.limits.max_source_scratch = 0;
-            let current = db
-                .beacon_search_graph_authorized(
+            let search = |spec| {
+                db.beacon_search_graph_authorized(
                     &cx,
                     &authority,
                     &token,
                     BRANCH,
                     &options(),
                     q,
-                    denied,
+                    spec,
                     || NOW,
                 )
-                .unwrap();
+            };
+            // A denied relation admits no edge and costs no scratch beyond the
+            // seeds' and fusion's own state (0b24aa88): exactly what a
+            // relation with no edge at all costs.
+            let mut absent = denied;
+            absent.relation = Some(RelationId(999));
+            denied.limits.max_source_scratch =
+                crate::query::beacon::graph::least_source_scratch(denied, |spec| {
+                    search(spec).is_ok()
+                });
+            assert_eq!(
+                denied.limits.max_source_scratch,
+                crate::query::beacon::graph::least_source_scratch(absent, |spec| search(spec)
+                    .is_ok())
+            );
+            let current = search(denied).unwrap();
             assert!(current.iter().all(|h| h.graph_rank.is_none()));
         });
         assert!(report.lab_test_passed(), "{report:?}");

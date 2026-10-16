@@ -192,9 +192,19 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     // Disabled graph lanes never inspect seeds or graph limits.
                     Vec::new()
                 };
+                // Fusion state joins the graph's one allowance only while the
+                // lane runs; a disabled lane never meets a graph limit.
+                let enabled = query.graph_enabled();
+                let fusion_scratch = |entries: usize| {
+                    if enabled {
+                        admit_scratch(entries)
+                    } else {
+                        Ok(())
+                    }
+                };
                 let mut kernel = ScratchWork {
                     work: &work,
-                    admit: &admit_scratch,
+                    admit: &fusion_scratch,
                 };
                 let rows = if query.is_graph_only() {
                     query.fuse_graph_only(&graph, |id| allows(eligible, id), &mut kernel)?

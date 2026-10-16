@@ -438,8 +438,24 @@ fn graph_only_zero_hops_needs_no_edges_and_disabled_graph_limits_stay_unused() {
         e.max_hops = 0;
         e.include_seeds = true;
         e.limits.max_input_edges = 0;
-        e.limits.max_source_scratch = 0;
         let q = GraphHybridQuery::graph_only(2, 2, 1, 60).unwrap();
+        // No edge is needed; the seeds' BFS, ranking and fusion state is the
+        // expansion's scratch (0b24aa88), and one entry less refuses.
+        let least = crate::query::beacon::graph::least_source_scratch(e, |spec| {
+            session
+                .beacon_search_graph(&c.query(), &graph_options(), q, spec)
+                .is_ok()
+        });
+        assert!(least > 0, "retained zero-hop state is scratch");
+        e.limits.max_source_scratch = least - 1;
+        assert!(matches!(
+            session.beacon_search_graph(&c.query(), &graph_options(), q, e),
+            Err(Error::Index(BeaconError::ResourceLimit {
+                resource: "graph query scratch entries",
+                ..
+            }))
+        ));
+        e.limits.max_source_scratch = least;
         let rows = session
             .beacon_search_graph(&c.query(), &graph_options(), q, e)
             .unwrap();

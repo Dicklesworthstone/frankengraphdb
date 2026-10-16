@@ -308,7 +308,33 @@ fn vertices_and_parallel_edges_share_record_and_scratch_allowances() {
                     }
                 ))
             ));
+            // Eight admit the vertices and edges. The BFS, ranking and fusion
+            // state shares the same allowance (5c4b4bac) and refuses next; the
+            // least allowance that also holds it answers.
             o.policy.max_source_scratch = 8;
+            assert!(matches!(
+                session.beacon_search_graph(&c.query(), &o, query(), expansion(&[VId(1)])),
+                Err(super::super::SearchError::Index(
+                    BeaconError::ResourceLimit {
+                        resource: "graph query scratch entries",
+                        limit: 8,
+                    }
+                ))
+            ));
+            let (mut low, mut high) = (8, 1_000_000);
+            while low < high {
+                let middle = low + (high - low) / 2;
+                o.policy.max_source_scratch = middle;
+                if session
+                    .beacon_search_graph(&c.query(), &o, query(), expansion(&[VId(1)]))
+                    .is_ok()
+                {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            o.policy.max_source_scratch = low;
             assert_eq!(
                 session
                     .beacon_search_graph(&c.query(), &o, query(), expansion(&[VId(1)]))
@@ -316,6 +342,16 @@ fn vertices_and_parallel_edges_share_record_and_scratch_allowances() {
                     .len(),
                 4
             );
+            o.policy.max_source_scratch = low - 1;
+            assert!(matches!(
+                session.beacon_search_graph(&c.query(), &o, query(), expansion(&[VId(1)])),
+                Err(super::super::SearchError::Index(
+                    BeaconError::ResourceLimit {
+                        resource: "graph query scratch entries",
+                        ..
+                    }
+                ))
+            ));
             let mut e = expansion(&[VId(1)]);
             e.limits.max_input_edges = 3;
             assert!(matches!(

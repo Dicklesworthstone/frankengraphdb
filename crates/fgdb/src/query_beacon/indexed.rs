@@ -331,7 +331,15 @@ pub(crate) fn evaluate_filtered(
     let mut kernel = ScratchWork {
         work,
         used: &scratch,
-        limit: expansion.limits.max_source_scratch,
+        // Fusion state joins the graph's one allowance only while the lane
+        // runs: a disabled lane neither inspects seeds nor enforces graph
+        // limits, so text/vector fusion is charged work but never refused by
+        // the graph's scratch cap.
+        limit: if query.graph_enabled() {
+            expansion.limits.max_source_scratch
+        } else {
+            usize::MAX
+        },
     };
     let rows = match index {
         Some(index) => index.snapshot().hybrid_search_graph_filtered(
@@ -753,7 +761,15 @@ mod tests {
             let seeds = [VId(0)];
             let mut expansion = spec(&seeds, ExpansionDirection::Outgoing, 1);
             expansion.limits.max_input_edges = 2;
-            expansion.limits.max_source_scratch = 2;
+            // The two reached incidences plus the BFS, ranking and fusion
+            // state the seed-directed profile retains (0b24aa88): far below
+            // what the materialized profile's 128 disconnected edges need.
+            expansion.limits.max_source_scratch =
+                crate::query::beacon::graph::least_source_scratch(expansion, |spec| {
+                    db.beacon_search_graph_indexed(&c.query(), &options(), query(), spec)
+                        .is_ok()
+                });
+            assert!(expansion.limits.max_source_scratch >= 2);
             let expected = db
                 .beacon_search_graph(
                     &c.query(),
@@ -781,10 +797,12 @@ mod tests {
             ));
             expansion.limits.max_input_edges = 2;
             expansion.limits.max_source_scratch = 1;
+            // One entry cannot even hold the seed's own BFS state, which the
+            // shared allowance (0b24aa88) reserves before any incidence.
             assert!(matches!(
                 db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion),
                 Err(Error::Index(BeaconError::ResourceLimit {
-                    resource: "indexed expansion source admissions",
+                    resource: "indexed graph scratch entries",
                     limit: 1,
                 }))
             ));

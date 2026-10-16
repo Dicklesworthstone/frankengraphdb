@@ -244,7 +244,38 @@ fn zero_hop_isolates_skip_edges_but_not_vertex_or_output_admission() {
         spec.max_hops = 0;
         spec.include_seeds = true;
         spec.limits.max_input_edges = 0;
-        spec.limits.max_source_scratch = 0;
+        // No edge is opened; the seeds' BFS, ranking and fusion state is the
+        // expansion's scratch (0b24aa88), and one entry less refuses.
+        let evaluate = |spec| {
+            let work = RefCell::new(WorkBudget::new(1_000_000));
+            evaluate_filtered(
+                &db.snapshot,
+                db.frontier().unwrap(),
+                &options(),
+                q,
+                spec,
+                &work,
+                Scan::Metered,
+                |_| Ok(true),
+                |_| true,
+                |_| panic!("unused property"),
+                |_| true,
+                || panic!("zero-hop read touched adjacency"),
+                |_| true,
+            )
+        };
+        let least =
+            crate::query::beacon::graph::least_source_scratch(spec, |spec| evaluate(spec).is_ok());
+        assert!(least > 0, "retained zero-hop state is scratch");
+        spec.limits.max_source_scratch = least - 1;
+        assert!(matches!(
+            evaluate(spec),
+            Err(BeaconError::ResourceLimit {
+                resource: "indexed graph scratch entries",
+                ..
+            })
+        ));
+        spec.limits.max_source_scratch = least;
         let work = RefCell::new(WorkBudget::new(1_000_000));
         let actual = evaluate_filtered(
             &db.snapshot,
