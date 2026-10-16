@@ -360,13 +360,19 @@ fn aggregate_definitions_share_depth_bounds_and_never_masquerade_as_leaves() {
     assert!(!group.has_foldable_expansion());
     assert!(!group.has_factorized_cardinality());
     assert!(!group.has_repeated_factor(&[]));
-    assert!(
-        group
-            .with_page(0, Some(0))
-            .incremental_window()
-            .unwrap()
-            .is_none()
-    );
+    // Since 32aab046 (fgdb-ezgeq) a page over a group is the window owner's
+    // to peel: it peels as a window, and what remains is the complete group
+    // itself, still a group and never a pattern leaf.
+    let (complete, window) = group
+        .clone()
+        .with_page(0, Some(0))
+        .incremental_window()
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete.canonical_bytes(), group.canonical_bytes());
+    assert_eq!((window.offset(), window.count()), (0, 0));
+    assert!(complete.incremental_group().is_some());
+    assert!(complete.incremental_pattern().is_none());
     let mut deepest = PreparedGraphSet::singleton();
     for _ in 1..MAX_GRAPH_SET_DEPTH {
         deepest = deepest
