@@ -28,6 +28,7 @@ mod evidence_page;
 pub mod free_join;
 mod graph_text;
 pub mod id_hash;
+pub mod id_sort;
 mod identified;
 pub mod insertion;
 pub mod insertion_query;

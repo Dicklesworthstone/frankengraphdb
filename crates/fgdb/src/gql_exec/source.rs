@@ -3615,7 +3615,11 @@ fn slot_closure<'a, E>(
         control(SourceEvent::SnapshotRecord)?;
     }
     let reached = slots.into_iter().flatten().collect();
-    selected.sort_unstable_by_key(|((eid, ..), _)| *eid);
+    fgdb_gql::id_sort::sort_by_leading_identity(
+        &mut selected,
+        |((eid, ..), _)| eid.0,
+        |edges| edges.sort_unstable_by_key(|((eid, ..), _)| *eid),
+    );
     debug_assert!(
         selected.windows(2).all(|pair| pair[0].0.0 != pair[1].0.0),
         "a closure admitted an edge twice"
@@ -3854,7 +3858,11 @@ fn shortest_closure<'a, E>(
         vertices.insert(src);
         vertices.insert(dst);
     }
-    selected.sort_unstable_by_key(|((eid, ..), _)| *eid);
+    fgdb_gql::id_sort::sort_by_leading_identity(
+        &mut selected,
+        |((eid, ..), _)| eid.0,
+        |edges| edges.sort_unstable_by_key(|((eid, ..), _)| *eid),
+    );
     Ok(Some((selected, vertices)))
 }
 

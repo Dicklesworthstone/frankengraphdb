@@ -1706,7 +1706,7 @@ where
     }
     let mut hops = BTreeMap::<RelationId, Hops>::new();
     for (relation, mut pairs) in arrivals {
-        pairs.sort_unstable();
+        crate::id_sort::sort_by_leading_identity(&mut pairs, |pair| pair.0.0, <[_]>::sort_unstable);
         let mut out = Vec::new();
         let mut loops = Vec::new();
         let mut at = 0;
