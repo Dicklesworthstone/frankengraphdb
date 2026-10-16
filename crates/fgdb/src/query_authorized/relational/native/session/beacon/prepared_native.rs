@@ -1,8 +1,8 @@
 //! Compiled CALL pipelines over an exact-session prepared retrieval corpus.
 //! The ordinary GLA owns expressions, ordering and sets; only its source changes.
 
-use super::*;
 use super::super::super::{AuthorizedPreparedRead, check_branch, selector_error};
+use super::*;
 use crate::query::authorized::relational::set_error;
 use crate::query::{EndpointFilter, HybridCallError, HybridSearch, ProcedureError, hybrid_refusal};
 use crate::{EmbeddedReadView, GqlError, PreparedNativeRead, QueryResult};
@@ -21,7 +21,9 @@ type Live<'cx, 'permit, 'clock> = super::super::Live<'cx, 'permit, 'clock>;
 type CallResult = Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, QueryError>>;
 
 fn source_refusal(message: &'static str) -> GqlError {
-    GqlError::Procedure(ProcedureError::Search(HybridCallError::Combination(message)))
+    GqlError::Procedure(ProcedureError::Search(HybridCallError::Combination(
+        message,
+    )))
 }
 
 // Equality is about the logical corpus and numeric projection, not build knobs.
@@ -54,10 +56,18 @@ fn matching_definition(
         }
     }
     if vector {
-        let stored = frozen.index.vector.as_ref().ok_or(BeaconError::Disabled("vector"))?;
-        let requested_vector = requested.index.vector.as_ref().ok_or(BeaconError::Invariant(
-            "bound vector CALL has no vector definition",
-        ))?;
+        let stored = frozen
+            .index
+            .vector
+            .as_ref()
+            .ok_or(BeaconError::Disabled("vector"))?;
+        let requested_vector = requested
+            .index
+            .vector
+            .as_ref()
+            .ok_or(BeaconError::Invariant(
+                "bound vector CALL has no vector definition",
+            ))?;
         if frozen.projection.vector != requested.projection.vector
             || frozen.projection.encoding != requested.projection.encoding
             || stored.dimensions != requested_vector.dimensions
@@ -181,15 +191,22 @@ fn call_at(
             "prepared index execution accepts only hybrid.search sources",
         )));
     }
-    let (search, eligible) = HybridSearch::bind_snapshot_filtered(
-        call, arguments, index.sequence, remaining,
-    ).map_err(hybrid_refusal)?;
+    let (search, eligible) =
+        HybridSearch::bind_snapshot_filtered(call, arguments, index.sequence, remaining)
+            .map_err(hybrid_refusal)?;
     let query = search.query();
     matching_definition(&index.definition, search.options(), query)
         .map_err(|error| hybrid_refusal(HybridCallError::Index(error)))?;
     admit_prepared(
-        owner, index, view, scope, remaining, execution, Search::Hybrid(query.retrieval),
-    ).map_err(GqlQueryError::Interrupted)?;
+        owner,
+        index,
+        view,
+        scope,
+        remaining,
+        execution,
+        Search::Hybrid(query.retrieval),
+    )
+    .map_err(GqlQueryError::Interrupted)?;
     let allowance = prepared_policy(index, search.options().policy, remaining);
     let spent = Cell::new(0_u64);
     let work = RefCell::new(Meter::new(allowance.max_work_units, |units| {
@@ -202,16 +219,23 @@ fn call_at(
         query.candidate_depths()?;
         if query.retrieval.k > allowance.max_result_rows {
             return Err(BeaconError::ResourceLimit {
-                resource: "result rows", limit: allowance.max_result_rows,
+                resource: "result rows",
+                limit: allowance.max_result_rows,
             });
         }
-        Search::Hybrid(query.source_query()).validate(&index.definition.index, &mut SharedWork(&work))?;
+        Search::Hybrid(query.source_query())
+            .validate(&index.definition.index, &mut SharedWork(&work))?;
         let filter = EndpointFilter::prepare(
-            eligible, query.retrieval.k, remaining.evaluator.max_scratch_entries,
+            eligible,
+            query.retrieval.k,
+            remaining.evaluator.max_scratch_entries,
             &mut SharedWork(&work),
         )?;
         let hits = filter.finish(index.index.hybrid_search_graph_filtered(
-            query, &[], |id| filter.admits(id, &work), &mut SharedWork(&work),
+            query,
+            &[],
+            |id| filter.admits(id, &work),
+            &mut SharedWork(&work),
         ))?;
         // Reserve a row, all YIELD cells and a provenance-set entry per hit
         // before allocating output. Repeated identities conservatively pay
@@ -222,11 +246,13 @@ fn call_at(
             .filter(|&count| count <= u128::from(remaining.evaluator.max_scratch_entries))
             .ok_or(BeaconError::ResourceLimit {
                 resource: "prepared CALL scratch entries",
-                limit: usize::try_from(remaining.evaluator.max_scratch_entries).unwrap_or(usize::MAX),
+                limit: usize::try_from(remaining.evaluator.max_scratch_entries)
+                    .unwrap_or(usize::MAX),
             })?;
         for hit in &hits {
             let entries = retrieved.borrow().len();
-            work.borrow_mut().charge(1 + entries.checked_ilog2().unwrap_or(0) as usize)?;
+            work.borrow_mut()
+                .charge(1 + entries.checked_ilog2().unwrap_or(0) as usize)?;
             for _ in call.outputs() {
                 work.borrow_mut().charge(1)?;
             }
@@ -243,7 +269,10 @@ fn call_at(
             snapshot_records: index.admitted,
             result_rows: value.len() as u64,
         },
-        evaluator: GlaExecutionStats { work_units: spent.get(), scratch_entries },
+        evaluator: GlaExecutionStats {
+            work_units: spent.get(),
+            scratch_entries,
+        },
         value,
     })
 }
