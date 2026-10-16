@@ -41,7 +41,9 @@ struct Membership {
 /// Work is admitted before each membership request, queue step and ranking
 /// operation. The optional admission callback runs before retaining a NEW
 /// visit, permitting a host MemoryPool to cover the distance map and queue.
-/// Hosts separately meter source I/O and reserve ranking/output workspace.
+/// The synchronous driver uses WorkControl::reserve_scratch for that callback;
+/// finish uses the same hook for ranking/output entries before allocation.
+/// Hosts separately meter source I/O and any resident source representation.
 pub struct ExpansionCursor<'a> {
     seeds: &'a [VId],
     next_seed: usize,
@@ -258,6 +260,7 @@ impl<'a> ExpansionCursor<'a> {
             }
             let candidate = (hops, id);
             if best.len() < self.candidates {
+                work.reserve_scratch(1)?;
                 best.push(candidate);
             } else if best.peek().is_some_and(|worst| candidate < *worst) {
                 best.pop();
@@ -267,6 +270,7 @@ impl<'a> ExpansionCursor<'a> {
         let mut rows = Vec::new();
         while !best.is_empty() {
             work.charge(tree_work(best.len()))?;
+            work.reserve_scratch(1)?;
             let (hops, id) = best
                 .pop()
                 .ok_or(BeaconError::Invariant("expansion heap disappeared"))?;

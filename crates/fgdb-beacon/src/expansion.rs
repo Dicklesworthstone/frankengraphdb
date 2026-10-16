@@ -432,13 +432,15 @@ fn expand_controlled(
         match cursor.request(work)? {
             ExpansionRequest::Seed(id) => {
                 let present = contains(id, work)?;
-                cursor.resolve_membership(present, || Ok(()))?;
+                // The cursor invokes admission only for a NEW present visit,
+                // after its visit limit and before distance/queue allocation.
+                cursor.resolve_membership(present, || work.reserve_scratch(2))?;
             }
             ExpansionRequest::Neighbors(id) => {
                 let result = source.visit_neighbors(id, work, &mut |next, work| {
                     cursor.prepare_neighbor(next, work)?;
                     let present = contains(next, work).map_err(|error| cursor.refuse(error))?;
-                    cursor.resolve_membership(present, || Ok(()))
+                    cursor.resolve_membership(present, || work.reserve_scratch(2))
                 });
                 if let Err(error) = result {
                     return Err(cursor.refuse(error));
