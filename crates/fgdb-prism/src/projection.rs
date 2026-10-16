@@ -775,6 +775,20 @@ impl SnapshotGraphView {
     pub fn charged_workspace_bytes(&self) -> usize {
         self.0.workspace_bytes
     }
+    /// The heap this view keeps while it is held: its vertex, name, row and
+    /// weight vectors, by capacity. The builder's input staging is freed by
+    /// then, so this is below `charged_workspace_bytes`, the build's peak.
+    pub fn charged_resident_bytes(&self) -> usize {
+        let graph = &*self.0;
+        let rows = |rows: &Rows| {
+            (rows.offsets.capacity() + rows.neighbors.capacity()) * size_of::<usize>()
+        };
+        graph.vertices.capacity() * size_of::<VId>()
+            + graph.names.capacity() * size_of::<[u8; 32]>()
+            + rows(&graph.outgoing)
+            + graph.incoming.as_ref().map_or(0, rows)
+            + graph.weights.capacity() * size_of::<f64>()
+    }
     pub fn shares_cache_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
