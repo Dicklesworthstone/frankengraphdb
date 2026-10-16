@@ -3545,7 +3545,24 @@ impl<V: Vfs + Clone> Database<V> {
                 | PendingRow::SetLabel { .. } => {}
             }
         }
+        if batch.rows.iter().all(|pending| {
+            matches!(
+                pending,
+                PendingRow::Vertex { ensure: false, .. } | PendingRow::Edge { ensure: false, .. }
+            )
+        }) {
+            return self.build_create_template(batch);
+        }
+        self.build_general_template(batch)
+    }
 
+    /// Every row of `batch` as the durable delta rows of one template, in
+    /// evaluation order, for any mix of row kinds (see
+    /// [`Self::build_create_template`] for a batch of plain creates).
+    fn build_general_template(
+        &self,
+        batch: WriteBatch,
+    ) -> Result<LogicalDeltaTemplate, WriteError> {
         // Build durable rows SEQUENTIALLY, deriving every delete's
         // before-image from the fold's live state PLUS the batch prefix: a
         // create-then-delete in one batch must image the version the create
@@ -4046,6 +4063,182 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                 })?;
             }
+        }
+        Ok(template)
+    }
+
+    /// [`Self::build_general_template`] for a batch of plain creates (no
+    /// ensure). It runs the same checks in the same order and gives the same
+    /// rows and the same refusals, without the batch-prefix versions,
+    /// contents and fold the general path keeps for later deletes and
+    /// updates. A bulk load's chunks are all creates. Hashing every row's
+    /// statement version, cloning its content into ordered maps and folding
+    /// rows that cannot share a target were most of their preparation
+    /// (fgdb-load-beats-memgraph-xf2n8).
+    ///
+    /// What carries over:
+    /// - A row's statement transcript can fail only where a property cannot
+    ///   encode, so it is still written, into one reused buffer, for the
+    ///   same error at the same row.
+    /// - Content admission runs after the template is built: vertices, then
+    ///   edges, each in identity order, as the general path's ordered maps
+    ///   ran it.
+    fn build_create_template(&self, batch: WriteBatch) -> Result<LogicalDeltaTemplate, WriteError> {
+        let relation = batch.relation;
+        let mut rows = Vec::with_capacity(batch.rows.len());
+        let mut created_vertices = fgdb_gql::id_hash::IdSet::<VId>::default();
+        let mut created_edges = fgdb_gql::id_hash::IdSet::<EId>::default();
+        let mut transcript = Vec::new();
+        for (visit, pending) in batch.rows.into_iter().enumerate() {
+            let intent_ordinal = u64::try_from(visit)
+                .ok()
+                .and_then(|visit| visit.checked_add(1))
+                .expect("a batch cannot contain 2^64 rows");
+            match pending {
+                PendingRow::Vertex {
+                    vid,
+                    labels,
+                    props,
+                    ensure: false,
+                } => {
+                    if created_vertices.contains(&vid) || self.writer.is_vertex_live(vid) {
+                        return Err(WriteError::AlreadyLive {
+                            elem: ElementId::Vertex(vid),
+                        });
+                    }
+                    if self.writer.is_vertex_spent(vid) {
+                        return Err(WriteError::IdentitySpent {
+                            elem: ElementId::Vertex(vid),
+                        });
+                    }
+                    let (mut labels, mut props) = (labels, props);
+                    sort_write_labels_and_props(&mut labels, &mut props);
+                    write_vertex_statement_transcript(
+                        &mut transcript,
+                        vid,
+                        intent_ordinal,
+                        &labels,
+                        &props,
+                    )?;
+                    created_vertices.insert(vid);
+                    rows.push(DeltaRow::CreateVertex {
+                        vid,
+                        birth_ordinal: intent_ordinal,
+                        labels,
+                        props,
+                        valid_time: None,
+                    });
+                }
+                PendingRow::Edge {
+                    eid,
+                    src,
+                    dst,
+                    props,
+                    ensure: false,
+                } => {
+                    if created_edges.contains(&eid) || self.writer.live_edge(eid).is_some() {
+                        return Err(WriteError::AlreadyLive {
+                            elem: ElementId::Edge(eid),
+                        });
+                    }
+                    if self.writer.is_edge_spent(eid) {
+                        return Err(WriteError::IdentitySpent {
+                            elem: ElementId::Edge(eid),
+                        });
+                    }
+                    for endpoint in [src, dst] {
+                        if !created_vertices.contains(&endpoint)
+                            && !self.writer.is_vertex_live(endpoint)
+                        {
+                            return Err(WriteError::DanglingEndpoint { eid, endpoint });
+                        }
+                    }
+                    let mut props = props;
+                    sort_write_props(&mut props);
+                    write_edge_statement_transcript(
+                        &mut transcript,
+                        eid,
+                        src,
+                        relation,
+                        dst,
+                        &props,
+                    )?;
+                    created_edges.insert(eid);
+                    rows.push(DeltaRow::CreateEdge {
+                        eid,
+                        birth_ordinal: intent_ordinal,
+                        src,
+                        relation,
+                        dst,
+                        canonical_key: None,
+                        props,
+                        valid_time: None,
+                    });
+                }
+                _ => unreachable!("build_create_template takes plain creates only"),
+            }
+        }
+        // The general path's fold hands its build the created vertices in
+        // identity order, then the edges. With labels deduplicated and
+        // properties sorted, the build can refuse these rows only for a
+        // property key repeated with two values, at the first such row in
+        // input order. Only then does the order matter, so only then are the
+        // rows put in the fold's.
+        let repeats_a_key = |props: &[(PropertyKeyId, CanonicalScalar)]| {
+            props.windows(2).any(|pair| pair[0].0 == pair[1].0)
+        };
+        if rows.iter().any(|row| match row {
+            DeltaRow::CreateVertex { props, .. } | DeltaRow::CreateEdge { props, .. } => {
+                repeats_a_key(props)
+            }
+            _ => false,
+        }) {
+            rows.sort_unstable_by_key(|row| match row {
+                DeltaRow::CreateVertex { vid, .. } => (0_u8, vid.0),
+                DeltaRow::CreateEdge { eid, .. } => (1, eid.0),
+                _ => unreachable!("plain creates only"),
+            });
+        }
+        let template = LogicalDeltaTemplate::build(
+            intent_semantics_oid(),
+            [0u8; 32],
+            vec![CoordinateEntry {
+                graph: GRAPH,
+                branch: BRANCH,
+                relation,
+                schema_epoch: SchemaEpoch(0),
+                schema_transition: None,
+                rows,
+            }],
+        )?;
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        for row in template.rows() {
+            match row {
+                DeltaRow::CreateVertex {
+                    vid, labels, props, ..
+                } => vertices.push((*vid, labels, props)),
+                DeltaRow::CreateEdge { eid, props, .. } => edges.push((*eid, props)),
+                _ => {}
+            }
+        }
+        vertices.sort_unstable_by_key(|(vid, ..)| *vid);
+        edges.sort_unstable_by_key(|(eid, _)| *eid);
+        for (vid, labels, props) in vertices {
+            fgdb_strata::vertex::admit_row_content(labels, props).map_err(|source| {
+                WriteError::VertexStorageAdmission {
+                    vid,
+                    source: Box::new(source),
+                }
+            })?;
+        }
+        for (eid, props) in edges {
+            fgdb_strata::edge_props::admitted_row_bytes(props).map_err(|source| {
+                WriteError::EdgeStorageAdmission {
+                    eid,
+                    source: Box::new(source),
+                }
+            })?;
         }
         Ok(template)
     }
