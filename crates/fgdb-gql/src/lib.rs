@@ -158,6 +158,7 @@ pub use graph_text::{
     PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog, reads_element_identity,
     starts_fnx_graph_projection,
 };
+pub use identified::IdentifiedNeighbors;
 pub use insertion_query::{
     GraphInsertBinding, GraphInsertQueryBatch, GraphInsertQueryBuildError, GraphInsertQueryError,
     PreparedGraphInsertQuery,
@@ -234,7 +235,6 @@ pub use temporal_text::{
     BoundTemporalGraphQuery, GraphTemporalTextError, GraphTemporalTextErrorKind,
     PreparedTemporalGraphText,
 };
-pub use identified::IdentifiedNeighbors;
 pub use trail::GraphTrailCursor;
 pub use vertex_merge::{
     GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
