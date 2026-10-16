@@ -6,6 +6,9 @@ use fgdb_types::VId;
 use crate::ranking::{Ranked, retain_best};
 use crate::{BeaconError, WorkControl};
 
+#[path = "bm25/boolean.rs"]
+pub(crate) mod boolean;
+
 #[path = "bm25/conjunction.rs"]
 mod conjunction;
 
