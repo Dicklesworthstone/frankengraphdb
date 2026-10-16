@@ -77,12 +77,13 @@ pub(super) async fn run<V: Vfs + Clone>(
     if let Some(bytes) = options.max_total_key_bytes {
         policy.max_total_key_bytes = bytes;
     }
-    // Without --rows-per-chunk, fit chunks to the source. A chunk commits as
-    // one capsule, whose container measured 1.29x its source transcript on a
-    // 42,048-row load (3,302,237 -> 4,249,172 bytes), and a V1 capsule carries
-    // at most 14.4 MB; half of the preflight cap leaves room for rows whose
-    // templates outweigh their transcript by more (fgdb-hkp7k).
-    let mut fit = ChunkFit::new(policy.max_chunk_bytes / 2);
+    // Without --rows-per-chunk, fit chunks to the source (fgdb-hkp7k): every
+    // chunk within the preflight's transcript cap, and its capsule, which a
+    // V1 capsule holds to 14.4 MB, within ChunkFit::TEMPLATE_BUDGET by each
+    // row's exact template bytes. Fitting to half the transcript cap as a
+    // proxy for the capsule held road-ny to 32,768-row chunks: 31 commits
+    // where 16 suffice, each with ~110 ms of fixed publication cost.
+    let mut fit = ChunkFit::new(policy.max_chunk_bytes);
     // Preserve Saved V1's full raw source/binding identity while sealing it
     // without keeping the entire source file or its decoded rows resident.
     let binding = format!(

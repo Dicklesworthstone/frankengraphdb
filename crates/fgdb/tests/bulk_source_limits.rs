@@ -365,6 +365,107 @@ fn chunk_fit_takes_the_largest_power_of_two_the_preflight_admits() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// `ChunkFit` also holds every chunk's capsule to
+/// `ChunkFit::TEMPLATE_BUDGET` by each row's exact template bytes: the
+/// canonical `CreateVertex` or `CreateEdge` row fgdb-delta-types encodes for
+/// it, measured here by encoding that row independently. With no transcript
+/// bound, the fitted width is the largest power of two whose widest chunk
+/// stays within the budget. A chunk that wide commits, so its capsule fits
+/// the V1 cap.
+#[test]
+fn chunk_fit_holds_every_chunks_template_to_the_capsule_budget() {
+    use fgdb_delta_types::DeltaRow;
+    use fgdb_types::{CanonicalText, EId, VId};
+    let ((), report) = run_async_under_lab(0x000b_5210, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let text = |n: usize| {
+            // At most 14 KB: text encodes 9 bytes per 8, and a stored row
+            // holds at most 16 KiB.
+            let len = 2_000 + n * 7_919 % 12_000;
+            CanonicalScalar::Text(CanonicalText::new_ucs_basic(&"t".repeat(len)).unwrap())
+        };
+        // Uneven heavy vertices (one or two labels, an int and 2-14 KB of
+        // text), then edges along them carrying text, so each width has a
+        // different widest chunk.
+        let mut input: Vec<BulkRow> = (0..2_400)
+            .map(|n| {
+                BulkRow::Vertex(BulkVertex {
+                    key: format!("v{n}"),
+                    labels: (1..=1 + n as u64 % 2).map(LabelId).collect(),
+                    props: vec![
+                        (PropertyKeyId(1), CanonicalScalar::Int(n as i64)),
+                        (PropertyKeyId(2), text(n)),
+                    ],
+                })
+            })
+            .collect();
+        input.extend((0..600).map(|n| {
+            BulkRow::Edge(BulkEdge {
+                key: format!("e{n}"),
+                source: format!("v{n}").as_str().into(),
+                destination: format!("v{}", n + 1).as_str().into(),
+                relation: RelationId(1),
+                props: vec![(PropertyKeyId(3), text(n + 2_400))],
+            })
+        }));
+        let template = |row: &BulkRow| {
+            let encoded = match row {
+                BulkRow::Vertex(v) => DeltaRow::CreateVertex {
+                    vid: VId(0),
+                    birth_ordinal: 0,
+                    labels: v.labels.clone(),
+                    props: v.props.clone(),
+                    valid_time: None,
+                },
+                BulkRow::Edge(e) => DeltaRow::CreateEdge {
+                    eid: EId(0),
+                    birth_ordinal: 0,
+                    src: VId(0),
+                    relation: e.relation,
+                    dst: VId(0),
+                    canonical_key: None,
+                    props: e.props.clone(),
+                    valid_time: None,
+                },
+            };
+            encoded.canonical_bytes().unwrap().len()
+        };
+        let widest = |rows: usize| {
+            input
+                .chunks(rows)
+                .map(|chunk| chunk.iter().map(template).sum::<usize>())
+                .max()
+                .unwrap()
+        };
+        let mut fit = ChunkFit::new(usize::MAX);
+        for row in &input {
+            fit.push(&cx, row).unwrap();
+        }
+        let expected = (0..=16)
+            .rev()
+            .map(|j| 1usize << j)
+            .find(|&rows| widest(rows) <= ChunkFit::TEMPLATE_BUDGET)
+            .unwrap();
+        assert_eq!(fit.rows_per_chunk(), Some(expected));
+        // The template bound is what binds: twice the width overflows it,
+        // and the width is well short of the row cap and of the input.
+        assert!(widest(expected * 2) > ChunkFit::TEMPLATE_BUDGET);
+        assert!((256..=1_024).contains(&expected), "{expected}");
+        // Every chunk that wide, the widest included, commits as one capsule.
+        let mut policy = BulkLoadPolicy::new(expected, RelationId(1));
+        policy.max_chunk_bytes = usize::MAX;
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let done = db
+            .bulk_load(&cx, &commit, input.clone(), policy)
+            .await
+            .unwrap();
+        assert_eq!(done.committed_chunks, input.len().div_ceil(expected));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn a_never_ending_source_stops_at_its_first_over_budget_row() {
     let ((), report) = run_async_under_lab(0x000b_5205, |root| async move {

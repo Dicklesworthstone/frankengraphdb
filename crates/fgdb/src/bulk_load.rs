@@ -155,16 +155,32 @@ const _: () = assert!(BulkLoadPolicy::MAX_ROWS_PER_CHUNK.is_power_of_two());
 /// refuses past `max_chunk_bytes`. Chunks start at row 0, as in preflight and
 /// on resume, so the answer is a function of the source alone and a resumed
 /// load recomputes it exactly.
+///
+/// Every chunk must also keep its capsule within [`Self::TEMPLATE_BUDGET`]:
+/// each row adds an exact upper bound of its template bytes, the capsule's
+/// plaintext. Transcript bytes are a proxy for that and a poor one: a capsule
+/// ran 1.29x its transcript on one load, and rows with short keys run nearer
+/// 2x, so the CLI fitted to half the transcript cap and road-ny committed
+/// 32,768-row chunks whose capsules were about 3 MB.
 #[derive(Clone, Debug)]
 pub struct ChunkFit {
     budget: usize,
     rows: usize,
     /// Running transcript bytes of the current chunk for 2^k rows per chunk.
     open: [usize; Self::SIZES],
+    /// Running template bytes of the same chunk.
+    template: [usize; Self::SIZES],
     fits: [bool; Self::SIZES],
 }
 impl ChunkFit {
     const SIZES: usize = BulkLoadPolicy::MAX_ROWS_PER_CHUNK.ilog2() as usize + 1;
+
+    /// Template bytes a fitted chunk carries at most. A V1 capsule holds at
+    /// most 14.4 MB (fgdb-chronicle), and its RaptorQ encode grows steeply
+    /// with source symbols past 4 MiB at the largest symbol size: 8 MiB stays
+    /// well inside the cap and leaves room for the template's header and
+    /// coordinate entries.
+    pub const TEMPLATE_BUDGET: usize = 8 << 20;
 
     #[must_use]
     pub const fn new(budget: usize) -> Self {
@@ -172,18 +188,28 @@ impl ChunkFit {
             budget,
             rows: 0,
             open: [0; Self::SIZES],
+            template: [0; Self::SIZES],
             fits: [true; Self::SIZES],
         }
     }
 
     pub fn push(&mut self, cx: &QueryCx, row: &BulkRow) -> Result<(), BulkLoadErrorKind> {
         let bytes = source::transcript_len(cx, self.rows, row)?;
-        for (k, (open, fits)) in self.open.iter_mut().zip(&mut self.fits).enumerate() {
+        let template = source::template_len(self.rows, row)?;
+        for (k, ((open, carried), fits)) in self
+            .open
+            .iter_mut()
+            .zip(&mut self.template)
+            .zip(&mut self.fits)
+            .enumerate()
+        {
             if self.rows.is_multiple_of(1 << k) {
                 *open = 0;
+                *carried = 0;
             }
             *open = open.saturating_add(bytes);
-            *fits &= *open <= self.budget;
+            *carried = carried.saturating_add(template);
+            *fits &= *open <= self.budget && *carried <= Self::TEMPLATE_BUDGET;
         }
         self.rows = self
             .rows

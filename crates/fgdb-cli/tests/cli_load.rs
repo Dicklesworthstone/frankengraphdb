@@ -886,10 +886,12 @@ fn default_chunk_size_and_completed_resume_do_not_invent_commits() {
 
 /// Without --rows-per-chunk the loader fits chunks to the input
 /// (fgdb-hkp7k): 3,000 small rows commit as ONE chunk, past the old fixed
-/// 1,000-row default, and 3,000 rows carrying 1,500 characters of text each
-/// (~1.75 KB of transcript: text is group-encoded, 8 bytes to 9) take the
-/// largest power of two whose every chunk stays within 4 MiB of source
-/// transcript, 2,048, so they commit as 2,048 + 952.
+/// 1,000-row default, and 3,000 rows carrying 3,000 characters of text each
+/// (~3.4 KB of transcript and of capsule template: text is group-encoded,
+/// 8 bytes to 9) take the largest power of two whose every chunk stays
+/// within the 8 MiB transcript cap and the 8 MiB template budget, 2,048, so
+/// they commit as 2,048 + 952. (Before the template budget the fit held
+/// chunks to half the transcript cap, and 1,500-character rows did this.)
 #[test]
 fn the_default_chunk_is_fitted_to_the_input() {
     let small: String = (0..3000)
@@ -904,7 +906,7 @@ fn the_default_chunk_is_fitted_to_the_input() {
     outcome.loaded(3000, 1, fixture.basis + 1);
     assert_eq!(outcome.progress(), [(3000, fixture.basis + 1)]);
 
-    let text = "x".repeat(1500);
+    let text = "x".repeat(3000);
     let large: String = (0..3000)
         .map(|n| {
             format!(
