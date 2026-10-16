@@ -3397,9 +3397,10 @@ fn slot_closure<'a, E>(
     steps: &[BoundStep<'_>],
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<Closure<'a>>, E> {
-    // Probed sets: every frontier is sorted before it is walked and the
-    // selected edges are sorted by EId once, so visit order, admission order
-    // and every charge are those of ordered sets.
+    // Probed sets and maps, never iterated into an order: every frontier is
+    // sorted before it is walked and the selected edges are sorted by EId
+    // once, so visit order, admission order and every charge are those of
+    // ordered sets.
     use fgdb_gql::id_hash::{IdMap, IdSet};
     let index = snapshot.adjacency_index();
     let edges = index.edge_count();

@@ -10,6 +10,12 @@
 //! record (and fail the closure's debug check). A chain that changes
 //! relation keeps identities, and must still admit the second relation's
 //! edges of a vertex the first expansion met.
+//!
+//! Two characterization pins follow: the least budgets of six closure
+//! shapes, authorized and owner. The authorized path admits its closure
+//! through a scan that only polls, so its closure's own work and scratch
+//! show only on the owner path; together they hold every charge a closure
+//! refactor must keep.
 
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
@@ -221,17 +227,18 @@ fn uniform_chains_admit_each_edge_once_when_a_step_expands_a_vertex_again() {
             }
             checked += 1;
         }
-        assert!(checked >= 6, "{checked}");
+        // Every chain, and every relation-changing chain: none is skipped.
+        assert_eq!(checked, 8);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
 /// Closure shapes whose admission charges a refactor of the closure must
 /// keep, as least budgets per dimension (snapshot records, evaluator work,
-/// evaluator scratch, the grant's signed work and nodes), recorded at
-/// 13e2c5fa (fgdb-61p1n): an edge-rooted uniform chain, walks with and
-/// without zero hops, an undirected chain, and chains that change relation
-/// or direction.
+/// evaluator scratch, the grant's signed work and nodes), recorded on the
+/// closure with endpoint-free admission and before its walk's marks map
+/// (fgdb-61p1n): an edge-rooted uniform chain, walks with and without zero
+/// hops, an undirected chain, and chains that change relation or direction.
 const PINNED: [(&str, [u64; 5]); 6] = [
     (
         "MATCH (a {p: 0})-[:E]->(b)-[:E]->(c) RETURN COUNT(*) AS n",
@@ -323,8 +330,8 @@ fn closure_shapes_keep_their_pinned_budgets() {
 }
 
 /// The same shapes read by the owner, whose closure charges its own walk:
-/// least snapshot records, evaluator work and evaluator scratch, recorded at
-/// 13e2c5fa (fgdb-61p1n).
+/// least snapshot records, evaluator work and evaluator scratch, recorded
+/// with the authorized pins (fgdb-61p1n).
 const OWNER_PINNED: [[u64; 3]; 6] = [
     [9, 166, 48],
     [16, 184, 58],
