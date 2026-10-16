@@ -21,7 +21,7 @@ use crate::{Database, GqlError, ReadError, Snapshot, VertexRow};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GlaOutput, GlaPlan, GraphValue, PreparedGraphPattern, VertexPredicate};
-use fgdb_gql::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
+use fgdb_gql::{GovernedCheckpoint, GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, ExecutionPermit, PlannerPredicates, ReadAccess};
 use std::cell::{Cell, RefCell};
@@ -1128,6 +1128,23 @@ fn text(
     CanonicalScalar::ucs_basic_text(name).map_err(|_| None)
 }
 
+/// The governed evaluator's checkpoint over the live execution: one signed
+/// unit per event, and an evaluator run's units in one call. Pattern and
+/// aggregate hosts share it. The callbacks it runs past are table lookups
+/// that charge nothing, and the phase's signed work is already charged in
+/// runs (`work_runs`).
+struct WorkCheckpoint<'e, 'cx, 'permit, Clock>(&'e RefCell<Execution<'cx, 'permit, Clock>>);
+
+impl<Clock: FnMut() -> u64> GovernedCheckpoint<QueryError> for WorkCheckpoint<'_, '_, '_, Clock> {
+    const RUNS: bool = true;
+    fn unit(&mut self) -> Result<(), QueryError> {
+        self.0.borrow_mut().checkpoint()
+    }
+    fn units(&mut self, n: u64) -> Result<(), QueryError> {
+        self.0.borrow_mut().work_units(n)
+    }
+}
+
 fn pattern_at<Row: GlaOutput, Clock: FnMut() -> u64>(
     snapshot: &Arc<Snapshot>,
     at: CommitSeq,
@@ -1147,7 +1164,7 @@ fn pattern_at<Row: GlaOutput, Clock: FnMut() -> u64>(
             policy,
             &mut || execution.borrow_mut().node(),
             &mut || execution.borrow_mut().poll(),
-            &mut || execution.borrow_mut().checkpoint(),
+            WorkCheckpoint(execution),
         )
     })
 }
@@ -1164,7 +1181,7 @@ fn pattern_at_controlled<Row: GlaOutput>(
     policy: GqlQueryPolicy,
     node: &mut impl FnMut() -> Result<(), QueryError>,
     poll: &mut impl FnMut() -> Result<(), QueryError>,
-    checkpoint: &mut impl FnMut() -> Result<(), QueryError>,
+    mut checkpoint: impl GovernedCheckpoint<QueryError>,
 ) -> Governed<Row> {
     let mut usage = AdmissionUsage::default();
     let tables = Tables::admit(
@@ -1176,7 +1193,7 @@ fn pattern_at_controlled<Row: GlaOutput>(
         || node().map_err(GqlQueryError::Interrupted),
         &mut || poll().map_err(GqlQueryError::Interrupted),
         &mut |event| {
-            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            checkpoint.unit().map_err(GqlQueryError::Interrupted)?;
             usage.observe::<ReadError, QueryError>(policy, event)
         },
     )?;
@@ -1190,7 +1207,7 @@ fn execute_tables<Row: GlaOutput>(
     scope: &PlannerPredicates,
     policy: GqlQueryPolicy,
     usage: AdmissionUsage,
-    checkpoint: &mut impl FnMut() -> Result<(), QueryError>,
+    checkpoint: impl GovernedCheckpoint<QueryError>,
 ) -> Governed<Row> {
     let result = pattern.plan().execute_governed_with_element_maps(
         tables.records,

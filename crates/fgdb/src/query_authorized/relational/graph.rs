@@ -172,24 +172,6 @@ fn visit_at<Clock: FnMut() -> u64>(
     })
 }
 
-/// The governed evaluator's checkpoint over the live execution: one signed
-/// unit per event, and an evaluator run's units in one call. The callbacks
-/// it runs past are table lookups that charge nothing, and the phase's
-/// signed work is already charged in runs (`work_runs`).
-struct WorkCheckpoint<'e, 'cx, 'permit, Clock>(&'e RefCell<Execution<'cx, 'permit, Clock>>);
-
-impl<Clock: FnMut() -> u64> fgdb_gql::GovernedCheckpoint<QueryError>
-    for WorkCheckpoint<'_, '_, '_, Clock>
-{
-    const RUNS: bool = true;
-    fn unit(&mut self) -> Result<(), QueryError> {
-        self.0.borrow_mut().checkpoint()
-    }
-    fn units(&mut self, n: u64) -> Result<(), QueryError> {
-        self.0.borrow_mut().work_units(n)
-    }
-}
-
 impl<V: Vfs + Clone> Database<V> {
     /// Execute a complete native aggregate on the capability-visible graph.
     /// Plain, computed and relational definitions retain all source expressions,

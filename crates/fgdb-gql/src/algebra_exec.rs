@@ -9,6 +9,7 @@ mod policy;
 mod projection;
 mod trail;
 pub(crate) use comparison::{charge_payload, compare_element_properties, compare_properties};
+pub(crate) use policy::Charges;
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::{GovernedCheckpoint, ProjectedRows};
 

@@ -24,6 +24,7 @@ use crate::algebra::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator, GraphPath, GraphValue, GraphValueRow,
     MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection, VertexPredicate,
 };
+use crate::algebra_exec::Charges;
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
     GqlQueryExecution, GqlQueryPolicy,
@@ -1156,23 +1157,8 @@ impl PreparedGraphAggregate {
             .rows
             .check(GqlBudgetDimension::SnapshotRecords, snapshot_records)
             .map_err(GqlQueryError::Rows)?;
-        // Evaluator runs, for a host that takes them: while the evaluator's
-        // allowances cover two whole runs, events are counted and their host
-        // units, work and scratch charged together (the host's in one call).
-        // The Work and scratch fast path is all the closure holds, so it
-        // inlines into the hottest loops; everything else is `Charges::slow`.
-        let mut charges = Charges {
-            checkpoint,
-            policy,
-            rows: GqlExecutionStats {
-                snapshot_records,
-                result_rows: 0,
-            },
-            evaluator: GlaExecutionStats::default(),
-            left: 0,
-            opened: 0,
-            scratch: 0,
-        };
+        // Evaluator runs, for a host that takes them (`Charges`).
+        let mut charges = Charges::new(checkpoint, policy, snapshot_records);
         let mut control = |event| charges.event(event);
         let mut streaming = result::RootGroups::new(self);
         let mut groups = groups::GroupTable::new(self.keys.len());
@@ -1279,144 +1265,6 @@ impl PreparedGraphAggregate {
             rows: charges.rows,
             evaluator: charges.evaluator,
         })
-    }
-}
-
-/// Events one evaluator run defers.
-const EVALUATOR_RUN: u64 = 1024;
-
-/// A governed aggregate's charges: the host checkpoint, row and evaluator
-/// counters, and the open evaluator run.
-struct Charges<K> {
-    checkpoint: K,
-    policy: GqlQueryPolicy,
-    rows: GqlExecutionStats,
-    evaluator: GlaExecutionStats,
-    /// Events the open run may still take; `opened` is its size, so it has
-    /// taken `opened - left`, each owing its host unit and evaluator work.
-    left: u64,
-    opened: u64,
-    /// Scratch entries the open run has taken, owing their scratch charge.
-    scratch: u64,
-}
-
-impl<K> Charges<K> {
-    /// A Work event or scratch entry inside a run is only counted: the
-    /// closure's whole body, so it inlines into the hottest loops.
-    #[inline(always)]
-    fn event<E, C>(
-        &mut self,
-        event: GlaExecutionEvent,
-    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>
-    where
-        K: crate::GovernedCheckpoint<C>,
-    {
-        if self.left > 0 {
-            match event {
-                GlaExecutionEvent::Work => {
-                    self.left -= 1;
-                    return Ok(());
-                }
-                GlaExecutionEvent::ScratchEntry => {
-                    self.left -= 1;
-                    self.scratch += 1;
-                    return Ok(());
-                }
-                GlaExecutionEvent::ResultRow => {}
-            }
-        }
-        self.slow(event)
-    }
-
-    /// Every event the fast path does not take. A spent run settles; the
-    /// next opens while the host takes runs and the evaluator's work and
-    /// scratch allowances each cover two whole runs, so no evaluator refusal
-    /// can fall inside one. An event outside a run is charged on the spot:
-    /// host, rows, then evaluator, the per-event order.
-    #[inline(never)]
-    fn slow<E, C>(
-        &mut self,
-        event: GlaExecutionEvent,
-    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>
-    where
-        K: crate::GovernedCheckpoint<C>,
-    {
-        if self.left == 0 {
-            self.settle()?;
-            let limits = self.policy.evaluator;
-            let covered = |limit: u64, used: u64| limit.saturating_sub(used) >= 2 * EVALUATOR_RUN;
-            if !K::RUNS
-                || !covered(limits.max_work_units, self.evaluator.work_units)
-                || !covered(limits.max_scratch_entries, self.evaluator.scratch_entries)
-            {
-                self.checkpoint.unit().map_err(GqlQueryError::Interrupted)?;
-                return self.judge(event);
-            }
-            self.left = EVALUATOR_RUN;
-            self.opened = EVALUATOR_RUN;
-            if event != GlaExecutionEvent::ResultRow {
-                return self.event(event);
-            }
-        }
-        // Inside a run, a result row's limit is judged now while its host
-        // unit and evaluator work wait. Per event, the host was charged for
-        // it and for every event before it first, so a host refusal among
-        // them wins.
-        self.left -= 1;
-        let next = self.rows.result_rows + 1;
-        if let Err(error) = self.policy.rows.check(GqlBudgetDimension::ResultRows, next) {
-            self.settle()?;
-            return Err(GqlQueryError::Rows(error));
-        }
-        self.rows.result_rows = next;
-        Ok(())
-    }
-
-    /// The row and evaluator charges of one event.
-    fn judge<E, C>(
-        &mut self,
-        event: GlaExecutionEvent,
-    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
-        if event == GlaExecutionEvent::ResultRow {
-            let next = self.rows.result_rows + 1;
-            self.policy
-                .rows
-                .check(GqlBudgetDimension::ResultRows, next)
-                .map_err(GqlQueryError::Rows)?;
-            self.rows.result_rows = next;
-        }
-        self.evaluator
-            .charge_event(self.policy.evaluator, event)
-            .map_err(GqlQueryError::Evaluator)
-    }
-
-    /// Charge the run: its host units in one checkpoint call, in event order,
-    /// then its events' evaluator work and its scratch entries. Nothing is
-    /// left pending, so a host that refused here is never called again. A
-    /// run opens only while the evaluator's allowances cover two whole runs,
-    /// so only the host can refuse here, at its own per-unit ordinal.
-    fn settle<E, C>(&mut self) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>
-    where
-        K: crate::GovernedCheckpoint<C>,
-    {
-        let taken = self.opened - self.left;
-        let scratch = std::mem::take(&mut self.scratch);
-        self.left = 0;
-        self.opened = 0;
-        if taken > 0 {
-            self.checkpoint
-                .units(taken)
-                .map_err(GqlQueryError::Interrupted)?;
-            self.evaluator
-                .charge_work_units(self.policy.evaluator, taken)
-                .map_err(GqlQueryError::Evaluator)?;
-        }
-        if scratch > 0 {
-            self.evaluator
-                .charge_scratch_entries(self.policy.evaluator, scratch)
-                .map_err(GqlQueryError::Evaluator)?;
-        }
-        Ok(())
     }
 }
 
