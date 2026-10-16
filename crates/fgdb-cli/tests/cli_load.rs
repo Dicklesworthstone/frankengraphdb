@@ -1097,6 +1097,45 @@ fn refusal_preserves_frontier(bad: &str, kind: &str) {
         assert!(db.edges().unwrap().is_empty());
     });
 }
+/// The loader reads and parses rows a batch of 16,384 lines ahead, across
+/// threads (fgdb-load-beats-memgraph-xf2n8). A source spanning three
+/// batches loads every row. A malformed row is reported at its own line
+/// with nothing committed, whether it is a batch's last line, the next
+/// batch's first, or mid-batch.
+#[test]
+fn rows_parsed_in_batches_keep_their_lines_and_all_load() {
+    let row = |n: usize| {
+        format!(
+            "{{\"kind\":\"vertex\",\"key\":\"v{n}\",\"labels\":[\"Person\"],\"props\":{{\"p\":\"int:{n}\"}}}}\n"
+        )
+    };
+    let rows: Vec<String> = (0..40_000).map(row).collect();
+    let fixture = Fixture::new("batches", &rows.concat());
+    fixture.load(None).loaded(40_000, 1, fixture.basis + 1);
+    runtime_check(async |contexts| {
+        let db = open(&fixture.db, &contexts).await;
+        let vertices = db.vertices().unwrap();
+        assert_eq!(vertices.len(), 40_000);
+        let mut values: Vec<i64> = vertices
+            .iter()
+            .map(|vertex| match vertex.props[..] {
+                [(_, CanonicalScalar::Int(value))] => value,
+                _ => panic!("{vertex:?}"),
+            })
+            .collect();
+        values.sort_unstable();
+        assert!(values.iter().copied().eq(0..40_000));
+    });
+    for line in [16_384, 16_385, 33_000] {
+        let mut bad = rows.clone();
+        bad[line - 1] = "{not-json}\n".into();
+        let fixture = Fixture::new("batches-bad", &bad.concat());
+        let failure = fixture.load(None);
+        failure.refusal("MalformedRow", Some(line));
+        assert!(failure.progress().is_empty(), "line {line}");
+    }
+}
+
 #[test]
 fn malformed_line_is_typed_line_two_and_atomic() {
     refusal_preserves_frontier("{not-json}", "MalformedRow");

@@ -402,16 +402,49 @@ pub(super) async fn run<V: Vfs + Clone>(
     }
 }
 
+/// Lines one refill reads before parsing them: one sequential pass of block
+/// reads, their hash checks and cancellation polls, then the whole batch's
+/// JSON parsed across worker threads, in order. Parsing every row on the
+/// loading thread, once in each of a load's three passes over its source,
+/// was about a twelfth of a road-ny load (fgdb-load-beats-memgraph-xf2n8).
+const PARSE_BATCH: usize = 16_384;
+
+/// At most this many threads parse one batch; fewer lines parse inline.
+const PARSE_WORKERS: usize = 8;
+const PARSE_INLINE_BELOW: usize = 1_024;
+
 /// Cloneable decoder over independently positioned, verified input blocks.
 /// Only the owned row/error escapes next(); no borrowed source payload reaches
 /// an await. A decoder or read error is terminal, never translated into EOF.
+/// Rows are read and parsed a batch ahead; the first error in source order
+/// ends the rows exactly where reading them one by one would have.
 #[derive(Clone)]
 struct Rows<'a> {
     reader: input::Reader,
     cx: &'a fgdb_types::QueryCx,
     options: &'a Options,
     resolver: Option<&'a fgdb::PinnedTzdb>,
+    /// Parsed rows not yet yielded, in source order.
+    ready: std::collections::VecDeque<BulkRow>,
+    /// What follows `ready`.
+    after: After,
     failed: bool,
+}
+/// What follows a batch's parsed rows: another batch, the end, or the first
+/// error in source order. A read error is shared only so a clone of a
+/// decoder holding one can be made; the yielded error is the original.
+#[derive(Clone)]
+enum After {
+    More,
+    End,
+    Decode {
+        line: usize,
+        message: String,
+    },
+    Read {
+        line: usize,
+        error: std::sync::Arc<io::Error>,
+    },
 }
 impl<'a> Rows<'a> {
     fn new(
@@ -425,9 +458,87 @@ impl<'a> Rows<'a> {
             cx,
             options,
             resolver,
+            ready: std::collections::VecDeque::new(),
+            after: After::More,
             failed: false,
         }
     }
+
+    /// Read up to [`PARSE_BATCH`] lines, parse them, and queue the rows up
+    /// to the first error in source order, which becomes `after`.
+    fn refill(&mut self) {
+        let mut lines = Vec::new();
+        let mut after = After::More;
+        while lines.len() < PARSE_BATCH {
+            let line = self.reader.line();
+            match self.reader.next_line(self.cx) {
+                Ok(None) => {
+                    after = After::End;
+                    break;
+                }
+                Ok(Some(text)) => lines.push((line, text)),
+                Err(error) => {
+                    after = After::Read {
+                        line,
+                        error: std::sync::Arc::new(error),
+                    };
+                    break;
+                }
+            }
+        }
+        let parsed = parse_rows(&lines, self.options, self.resolver);
+        for ((line, _), result) in lines.iter().zip(parsed) {
+            match result {
+                Ok(row) => self.ready.push_back(row),
+                Err(message) => {
+                    after = After::Decode {
+                        line: *line,
+                        message,
+                    };
+                    break;
+                }
+            }
+        }
+        self.after = after;
+    }
+}
+
+/// `parse_row` over every line, in order, across up to [`PARSE_WORKERS`]
+/// scoped threads. A worker's panic resumes on the calling thread.
+fn parse_rows(
+    lines: &[(usize, String)],
+    options: &Options,
+    resolver: Option<&fgdb::PinnedTzdb>,
+) -> Vec<Result<BulkRow, String>> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(PARSE_WORKERS);
+    if workers < 2 || lines.len() < PARSE_INLINE_BELOW {
+        return lines
+            .iter()
+            .map(|(_, text)| parse_row(text, options, resolver))
+            .collect();
+    }
+    let share = lines.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let parts: Vec<_> = lines
+            .chunks(share)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .map(|(_, text)| parse_row(text, options, resolver))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        parts
+            .into_iter()
+            .flat_map(|part| {
+                part.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
 }
 #[derive(Debug)]
 struct RowError {
@@ -463,25 +574,37 @@ impl RowError {
 impl Iterator for Rows<'_> {
     type Item = Result<BulkRow, RowError>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.failed {
-            return None;
-        }
-        let line = self.reader.line();
-        let result = match self.reader.next_line(self.cx) {
-            Ok(None) => return None,
-            Err(error) => Err(RowError {
-                line,
-                detail: RowErrorDetail::Read(error),
-            }),
-            Ok(Some(text)) => {
-                parse_row(&text, self.options, self.resolver).map_err(|error| RowError {
-                    line,
-                    detail: RowErrorDetail::Decode(error),
-                })
+        loop {
+            if self.failed {
+                return None;
             }
-        };
-        self.failed = result.is_err();
-        Some(result)
+            if let Some(row) = self.ready.pop_front() {
+                return Some(Ok(row));
+            }
+            match std::mem::replace(&mut self.after, After::More) {
+                After::More => self.refill(),
+                After::End => {
+                    self.after = After::End;
+                    return None;
+                }
+                After::Decode { line, message } => {
+                    self.failed = true;
+                    return Some(Err(RowError {
+                        line,
+                        detail: RowErrorDetail::Decode(message),
+                    }));
+                }
+                After::Read { line, error } => {
+                    self.failed = true;
+                    let error = std::sync::Arc::try_unwrap(error)
+                        .unwrap_or_else(|shared| io::Error::new(shared.kind(), shared.to_string()));
+                    return Some(Err(RowError {
+                        line,
+                        detail: RowErrorDetail::Read(error),
+                    }));
+                }
+            }
+        }
     }
 }
 impl std::iter::FusedIterator for Rows<'_> {}
