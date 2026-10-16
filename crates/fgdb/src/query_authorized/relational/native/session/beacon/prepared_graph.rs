@@ -14,6 +14,7 @@ use fgdb_gql::GqlQueryPolicy;
 use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::stream::{VertexScanSource, VertexScanSourceError};
 use fgdb_warden::PlannerPredicates;
+use std::cell::Cell;
 
 /// Forward kernel scratch reservations into the host's already-selected
 /// cumulative admission callback without creating a second work allowance.
