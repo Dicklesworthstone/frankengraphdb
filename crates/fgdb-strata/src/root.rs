@@ -2198,12 +2198,21 @@ impl EdgeHistoryValidator {
     ) -> std::collections::BTreeMap<(EId, CommitSeq), crate::AdjacencyEntry> {
         // Chains are in admission order: sort them by EId once. Each chain is
         // ascending by created_at, so the pairs then arrive sorted and the
-        // map is bulk-built.
-        let mut chains: Vec<&EdgeChain> = self.chains.iter().collect();
-        chains.sort_unstable_by_key(|chain| chain.eid());
-        chains
+        // map is bulk-built. Each chain's EId is read once, in order, beside
+        // its position: sorting references by a key read through them made
+        // every comparison a random read of the chains (6 s of a pokec open,
+        // 30.6M chains). One EId per chain, so the order is the same.
+        // (An (EId, usize) pair pads to the 32 bytes an (EId, u32) would.)
+        let mut order: Vec<(EId, usize)> = self
+            .chains
+            .iter()
+            .enumerate()
+            .map(|(at, chain)| (chain.eid(), at))
+            .collect();
+        order.sort_unstable();
+        order
             .into_iter()
-            .flat_map(|chain| chain.statements())
+            .flat_map(|(_, at)| self.chains[at].statements())
             .map(|statement| ((statement.eid, statement.created_at), *statement))
             .collect()
     }
