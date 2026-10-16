@@ -604,7 +604,11 @@ impl FnxCallSpec {
                 kind: FnxBindErrorKind::TextTooLong,
             });
         }
-        let mut parser = Parser { text, pos: 0 };
+        let mut parser = Parser {
+            text,
+            pos: 0,
+            unterminated_comment: None,
+        };
         parser.expect_keyword("CALL")?;
         let namespace = parser.word()?;
         parser.expect(b'.', ".")?;
@@ -650,6 +654,9 @@ impl FnxCallSpec {
         }
         parser.take(b';');
         parser.space();
+        if let Some(error) = parser.trivia_error() {
+            return Err(error);
+        }
         if parser.pos != text.len() {
             return Err(parser.error(FnxBindErrorKind::TrailingInput));
         }
@@ -919,23 +926,66 @@ fn float_argument(argument: FnxArgument) -> Option<f64> {
 struct Parser<'a> {
     text: &'a str,
     pos: usize,
+    unterminated_comment: Option<usize>,
 }
 impl<'a> Parser<'a> {
     fn error(&self, kind: FnxBindErrorKind) -> FnxBindError {
         FnxBindError { at: self.pos, kind }
     }
+    fn trivia_error(&self) -> Option<FnxBindError> {
+        self.unterminated_comment.map(|at| FnxBindError {
+            at,
+            kind: FnxBindErrorKind::Expected("closing */"),
+        })
+    }
+    /// Standalone CALL text follows native GQL trivia: ASCII whitespace,
+    /// // line comments and /* block comments */. Markers inside tokens are
+    /// never consumed because token parsers invoke this only at boundaries.
     fn space(&mut self) {
-        while self
-            .text
-            .as_bytes()
-            .get(self.pos)
-            .is_some_and(u8::is_ascii_whitespace)
-        {
-            self.pos += 1;
+        loop {
+            while self
+                .text
+                .as_bytes()
+                .get(self.pos)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                self.pos += 1;
+            }
+            let bytes = self.text.as_bytes();
+            if bytes.get(self.pos) == Some(&b'/') && bytes.get(self.pos + 1) == Some(&b'/') {
+                self.pos += 2;
+                while bytes.get(self.pos).is_some_and(|byte| *byte != b'\n') {
+                    self.pos += 1;
+                }
+                continue;
+            }
+            if bytes.get(self.pos) == Some(&b'/') && bytes.get(self.pos + 1) == Some(&b'*') {
+                let start = self.pos;
+                self.pos += 2;
+                let mut closed = false;
+                while self.pos + 1 < bytes.len() {
+                    if bytes[self.pos] == b'*' && bytes[self.pos + 1] == b'/' {
+                        self.pos += 2;
+                        closed = true;
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                if !closed {
+                    self.unterminated_comment = Some(start);
+                    self.pos = bytes.len();
+                    return;
+                }
+                continue;
+            }
+            return;
         }
     }
     fn take(&mut self, byte: u8) -> bool {
         self.space();
+        if self.unterminated_comment.is_some() {
+            return false;
+        }
         if self.text.as_bytes().get(self.pos) == Some(&byte) {
             self.pos += 1;
             true
@@ -946,12 +996,17 @@ impl<'a> Parser<'a> {
     fn expect(&mut self, byte: u8, name: &'static str) -> Result<(), FnxBindError> {
         if self.take(byte) {
             Ok(())
+        } else if let Some(error) = self.trivia_error() {
+            Err(error)
         } else {
             Err(self.error(FnxBindErrorKind::Expected(name)))
         }
     }
     fn word(&mut self) -> Result<&'a str, FnxBindError> {
         self.space();
+        if let Some(error) = self.trivia_error() {
+            return Err(error);
+        }
         let start = self.pos;
         let Some(&first) = self.text.as_bytes().get(self.pos) else {
             return Err(self.error(FnxBindErrorKind::Expected("identifier")));
@@ -1013,17 +1068,64 @@ impl<'a> Parser<'a> {
             return Ok(FnxArgument::Null);
         }
         self.space();
+        if let Some(error) = self.trivia_error() {
+            return Err(error);
+        }
+        // Native numeric spelling: optional sign, at least one leading digit,
+        // an optional fractional part with at least one digit, and an optional
+        // exponent with at least one digit. Thus .5 and 1. refuse while 1e5
+        // and 1.5e-3 bind exactly as native GQL does.
         let start = self.pos;
-        while self.text.as_bytes().get(self.pos).is_some_and(|byte| {
-            byte.is_ascii_digit() || matches!(*byte, b'+' | b'-' | b'.' | b'e' | b'E')
-        }) {
+        let bytes = self.text.as_bytes();
+        if bytes
+            .get(self.pos)
+            .is_some_and(|byte| matches!(*byte, b'+' | b'-'))
+        {
             self.pos += 1;
         }
-        if self.pos == start {
+        let integer_start = self.pos;
+        while bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
+            self.pos += 1;
+        }
+        if self.pos == integer_start {
+            self.pos = start;
             return Err(self.error(FnxBindErrorKind::Expected("typed argument")));
         }
+        let mut float = false;
+        if bytes.get(self.pos) == Some(&b'.')
+            && bytes
+                .get(self.pos + 1)
+                .is_some_and(u8::is_ascii_digit)
+        {
+            float = true;
+            self.pos += 1;
+            while bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
+                self.pos += 1;
+            }
+        }
+        if bytes
+            .get(self.pos)
+            .is_some_and(|byte| matches!(*byte, b'e' | b'E'))
+        {
+            let exponent = self.pos;
+            let mut at = exponent + 1;
+            if bytes
+                .get(at)
+                .is_some_and(|byte| matches!(*byte, b'+' | b'-'))
+            {
+                at += 1;
+            }
+            let digits = at;
+            while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+                at += 1;
+            }
+            if at > digits {
+                float = true;
+                self.pos = at;
+            }
+        }
         let token = &self.text[start..self.pos];
-        if token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+        if float {
             token
                 .parse::<f64>()
                 .map(FnxArgument::Float)
@@ -1034,6 +1136,8 @@ impl<'a> Parser<'a> {
             // Large exact positive literals belong only to the VId domain;
             // they cannot silently become approximate f64 numeric arguments.
             token
+                .strip_prefix('+')
+                .unwrap_or(token)
                 .parse::<u128>()
                 .map(|value| FnxArgument::Vertex(VId(value)))
                 .map_err(|_| self.error(FnxBindErrorKind::InvalidArgument("integer overflow")))
