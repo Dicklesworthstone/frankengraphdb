@@ -390,8 +390,11 @@ fn computed_collections_keep_original_child_order_and_unproved_shapes_refuse() {
             "{text}"
         );
     }
+    let single = prepare("MATCH (a)-[r:R]->(b) RETURN COLLECT(b) AS values");
+    let single_plan = EdgeAggregatePlan::compile(&single).unwrap();
+    assert!(single_plan.canonical_collections);
     for text in [
-        "MATCH (a)-[r:R]->(b) RETURN COLLECT(b) AS values",
+        "MATCH (a)-[:R]->(b) RETURN COLLECT(b) AS values",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p + 1) AS values",
     ] {
         assert!(

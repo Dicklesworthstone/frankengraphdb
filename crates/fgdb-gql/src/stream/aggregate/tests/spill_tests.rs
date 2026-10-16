@@ -340,8 +340,17 @@ fn spill_rejects_unimplemented_semantics_and_cross_definition_states() {
         None,
     )
     .unwrap();
+    assert!(SpillAggregatePlan::compile(&relation).is_ok());
+    let windowed_relation = PreparedGraphAggregate::prepare_relation(
+        crate::PreparedGraphSet::from(input()).with_page(0, Some(1)),
+        &[],
+        &[GraphAggregate::count_rows("rows")],
+        0,
+        None,
+    )
+    .unwrap();
     assert!(matches!(
-        SpillAggregatePlan::compile(&relation),
+        SpillAggregatePlan::compile(&windowed_relation),
         Err(SpillAggregateBuildError::Unsupported)
     ));
     let definition = PreparedGraphAggregate::prepare(

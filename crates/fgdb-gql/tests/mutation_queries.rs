@@ -289,8 +289,6 @@ fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() 
         "MATCH (a) SET a += {p: 1},",
         "MATCH (a) SET a += {p: 1, p: 1}",
         "MATCH (a) SET a += {p: 1, p: 2}",
-        "MATCH (a) SET a += {p: {q: 1}}",
-        "MATCH (a) SET a += {p: [1, 2]}",
         "MATCH (a) SET a += {p: 1} RETURN a",
         "MATCH (a) SET a += {p: 1} DETACH DELETE a",
         "MATCH (a) SET missing += {p: 1}",
@@ -307,6 +305,15 @@ fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() 
             "{text}"
         );
         assert_eq!(calls.get(), 0, "{text}");
+    }
+    for composite in [
+        "MATCH (a) SET a += {p: {q: 1}}",
+        "MATCH (a) SET a += {p: [1, 2]}",
+    ] {
+        assert!(
+            PreparedGraphMutationText::prepare(composite, R, symbols).is_ok(),
+            "{composite}"
+        );
     }
     let duplicate = "MATCH (a) SET a += {p: 1, p: 2}";
     let error = PreparedGraphMutationText::prepare(duplicate, R, symbols).unwrap_err();

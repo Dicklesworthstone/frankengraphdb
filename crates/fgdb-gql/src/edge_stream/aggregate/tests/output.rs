@@ -503,6 +503,12 @@ fn close_discards_validated_pages_without_more_demand_and_other_profiles_remain_
         EdgeAggregatePlan::compile(&prepare(
             "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values"
         ))
+        .is_ok()
+    );
+    assert!(
+        EdgeAggregatePlan::compile(&prepare(
+            "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p + 1) AS values"
+        ))
         .is_err()
     );
     assert!(

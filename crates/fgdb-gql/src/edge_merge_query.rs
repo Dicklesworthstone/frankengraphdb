@@ -543,7 +543,10 @@ mod with_tests {
         assert_ne!(first.canonical_bytes(), second.canonical_bytes());
         let rows = vec![vec![int(1)], vec![int(2)], vec![int(2)]];
         assert_eq!(values(finish(&first, rows.clone(), 1)), vec![vec![int(10)]]);
-        assert_eq!(values(finish(&second, rows, 1)), vec![vec![int(0)]]);
+        assert_eq!(
+            values(finish(&second, rows, 1)),
+            vec![vec![GraphValue::Scalar(CanonicalScalar::Null)]]
+        );
         assert!(template.bind_parameters(&GqlParameters::new()).is_err());
     }
 

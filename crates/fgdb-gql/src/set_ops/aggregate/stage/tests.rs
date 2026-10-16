@@ -357,15 +357,17 @@ fn aggregate_definitions_share_depth_bounds_and_never_masquerade_as_leaves() {
     assert!(group.incremental_binary().is_none());
     assert!(group.incremental_projection().is_none());
     assert!(group.incremental_filter().is_none());
+    assert!(group.incremental_group().is_some());
     assert!(!group.has_foldable_expansion());
     assert!(!group.has_factorized_cardinality());
     assert!(!group.has_repeated_factor(&[]));
+    assert!(group.clone().with_page(0, Some(0)).incremental_group().is_none());
     assert!(
         group
             .with_page(0, Some(0))
             .incremental_window()
             .unwrap()
-            .is_none()
+            .is_some()
     );
     let mut deepest = PreparedGraphSet::singleton();
     for _ in 1..MAX_GRAPH_SET_DEPTH {

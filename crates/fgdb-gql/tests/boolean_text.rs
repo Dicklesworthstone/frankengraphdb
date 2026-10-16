@@ -566,13 +566,25 @@ fn a_label_test_value_is_label_membership_or_type_equality() {
         fgdb_gql::PreparedGraphSetText::prepare("MATCH (a) WITH a.n AS n RETURN n:L AS x", symbols)
             .is_err()
     );
-    assert!(
+    assert_eq!(
         fgdb_gql::PreparedGraphMutationText::prepare(
             "MATCH (a) SET a.n = a:L",
             RelationId(1),
-            symbols
+            symbols,
         )
-        .is_err()
+        .unwrap()
+        .bind_parameters(&fgdb_gql::GqlParameters::new())
+        .unwrap()
+        .canonical_bytes(),
+        fgdb_gql::PreparedGraphMutationText::prepare(
+            "MATCH (a) SET a.n = 'L' IN labels(a)",
+            RelationId(1),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&fgdb_gql::GqlParameters::new())
+        .unwrap()
+        .canonical_bytes()
     );
 }
 

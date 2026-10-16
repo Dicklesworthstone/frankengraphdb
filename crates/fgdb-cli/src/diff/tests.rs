@@ -776,9 +776,28 @@ fn query_and_replay_take_the_same_exact_limits_and_write_refuses_them() {
         replay.budget.policy(),
         GqlQueryPolicy::new(100_000, 100_000, 7, 10_000_000)
     );
-    okay(crate::parse(&argv(&[]), "write"));
-    let error = crate::parse(&argv(&["--max-work-units", "1"]), "write")
+    let write = okay(crate::parse(&argv(&["--max-work-units", "5"]), "write"));
+    assert_eq!(
+        write.budget.policy(),
+        GqlQueryPolicy::new(100_000, 100_000, 5, 10_000_000)
+    );
+    let error = crate::parse(&argv(&["--max-output-bytes", "1"]), "write")
         .err()
-        .expect("write takes no query limits");
+        .expect("write refuses diff-only output byte limits");
+    assert_eq!(error.code, 2);
+    let compact: Vec<String> = [
+        "--db",
+        "unused",
+        "--key-file",
+        "unused",
+        "--max-work-units",
+        "1",
+    ]
+    .iter()
+    .map(|arg| (*arg).to_owned())
+    .collect();
+    let error = crate::parse(&compact, "compact")
+        .err()
+        .expect("compact takes no query limits");
     assert_eq!(error.code, 2);
 }

@@ -159,7 +159,7 @@ fn async_edge_aggregate_refusals_keep_typed_failures_and_release_pending_orienta
 fn async_edge_aggregate_selects_complete_inputs_and_reduction_requires_exhaustion() {
     for text in [
         "MATCH (a)-[r:R]->(b)-[:R*1..2]->(c) RETURN COUNT(*) AS rows LIMIT 0",
-        "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN COUNT(*) AS rows LIMIT 0",
+        "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN COUNT(*) AS rows LIMIT 0",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r.p) AS rows LIMIT 0",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS rows LIMIT 0",
     ] {
@@ -168,12 +168,18 @@ fn async_edge_aggregate_selects_complete_inputs_and_reduction_requires_exhaustio
             "{text}"
         );
     }
-    assert!(matches!(
-        AsyncSpillAggregatePlan::compile(&definition(
-            "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN COUNT(*) AS rows LIMIT 0"
-        )),
-        Ok(AsyncSpillAggregatePlan::Join(_))
-    ));
+    for text in [
+        "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN COUNT(*) AS rows LIMIT 0",
+        "MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN COUNT(*) AS rows LIMIT 0",
+    ] {
+        assert!(
+            matches!(
+                AsyncSpillAggregatePlan::compile(&definition(text)),
+                Ok(AsyncSpillAggregatePlan::Join(_))
+            ),
+            "{text}"
+        );
+    }
     assert!(matches!(
         AsyncSpillAggregatePlan::compile(&definition(
             "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r.p) AS rows LIMIT 0"

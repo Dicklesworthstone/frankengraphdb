@@ -312,7 +312,7 @@ fn supported_projection_and_pipeline_streams_do_not_weaken_real_refusals() {
         db.write(&contexts.commit(), batch(1, 4)).await.unwrap();
 
         for text in [
-            "MATCH (n) RETURN n.p AS p",
+            "MATCH (n) RETURN n AS id, n.p AS p",
             "MATCH (n) WITH n.p AS p RETURN COUNT(*) AS total",
         ] {
             let opts = options(text);
@@ -332,6 +332,7 @@ fn supported_projection_and_pipeline_streams_do_not_weaken_real_refusals() {
         }
 
         for text in [
+            "MATCH (n) RETURN n.p AS p",
             "MATCH (n) RETURN n UNION ALL MATCH (m) RETURN m",
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 2 RETURN n AS id LIMIT 0",
         ] {
