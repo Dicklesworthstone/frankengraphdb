@@ -1093,9 +1093,7 @@ impl<'a> Parser<'a> {
         }
         let mut float = false;
         if bytes.get(self.pos) == Some(&b'.')
-            && bytes
-                .get(self.pos + 1)
-                .is_some_and(u8::is_ascii_digit)
+            && bytes.get(self.pos + 1).is_some_and(u8::is_ascii_digit)
         {
             float = true;
             self.pos += 1;

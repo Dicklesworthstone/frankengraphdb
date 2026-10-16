@@ -167,10 +167,7 @@ fn standalone_text_matches_native_comments_and_numeric_spelling() {
 
     let unterminated =
         FnxCallSpec::bind("CALL fnx.pagerank() /* missing", &FnxParameters::new()).unwrap_err();
-    assert_eq!(
-        unterminated.kind,
-        FnxBindErrorKind::Expected("closing */")
-    );
+    assert_eq!(unterminated.kind, FnxBindErrorKind::Expected("closing */"));
 }
 
 #[test]

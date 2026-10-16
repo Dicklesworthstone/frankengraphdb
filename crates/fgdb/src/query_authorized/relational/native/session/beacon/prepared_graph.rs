@@ -154,22 +154,23 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     .min(allowance.max_source_scratch)
                     .min(prepared.definition.policy.max_source_scratch);
                 let scratch = Cell::new(0usize);
-                let admit_scratch = |entries: usize| {
-                    let next = scratch.get().checked_add(entries).ok_or(
-                        BeaconError::ResourceLimit {
-                            resource: "prepared graph scratch entries",
-                            limit: scratch_limit,
-                        },
-                    )?;
-                    if next > scratch_limit {
-                        return Err(BeaconError::ResourceLimit {
-                            resource: "prepared graph scratch entries",
-                            limit: scratch_limit,
-                        });
-                    }
-                    scratch.set(next);
-                    Ok(())
-                };
+                let admit_scratch =
+                    |entries: usize| {
+                        let next = scratch.get().checked_add(entries).ok_or(
+                            BeaconError::ResourceLimit {
+                                resource: "prepared graph scratch entries",
+                                limit: scratch_limit,
+                            },
+                        )?;
+                        if next > scratch_limit {
+                            return Err(BeaconError::ResourceLimit {
+                                resource: "prepared graph scratch entries",
+                                limit: scratch_limit,
+                            });
+                        }
+                        scratch.set(next);
+                        Ok(())
+                    };
                 let graph = if query.graph_enabled() {
                     expand_at(
                         cx,

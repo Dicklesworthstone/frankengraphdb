@@ -478,14 +478,8 @@ fn zero_hop_indexed_kernel_scratch_uses_the_expansion_source_allowance() {
         spec.limits.max_input_edges = 0;
         spec.limits.max_source_scratch = 0;
         assert!(
-            db.beacon_search_graph_indexed_filtered(
-                &c.query(),
-                &options,
-                q,
-                spec,
-                |_| true,
-            )
-            .is_err(),
+            db.beacon_search_graph_indexed_filtered(&c.query(), &options, q, spec, |_| true,)
+                .is_err(),
             "zero-hop BFS/ranking state must not bypass the shared scratch cap"
         );
         spec.limits.max_source_scratch = 32;

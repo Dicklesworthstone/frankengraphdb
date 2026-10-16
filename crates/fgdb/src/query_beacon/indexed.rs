@@ -29,10 +29,14 @@ impl<W: WorkControl> WorkControl for ScratchWork<'_, W> {
 
     fn reserve_scratch(&mut self, entries: usize) -> Result<(), BeaconError> {
         self.work.borrow_mut().charge(entries)?;
-        let next = self.used.get().checked_add(entries).ok_or(BeaconError::ResourceLimit {
-            resource: "indexed graph scratch entries",
-            limit: self.limit,
-        })?;
+        let next = self
+            .used
+            .get()
+            .checked_add(entries)
+            .ok_or(BeaconError::ResourceLimit {
+                resource: "indexed graph scratch entries",
+                limit: self.limit,
+            })?;
         if next > self.limit {
             return Err(BeaconError::ResourceLimit {
                 resource: "indexed graph scratch entries",
@@ -64,10 +68,14 @@ where
     A: FnMut() -> Result<(), BeaconError>,
 {
     fn reserve_source(&mut self) -> Result<(), BeaconError> {
-        let next = self.scratch.get().checked_add(1).ok_or(BeaconError::ResourceLimit {
-            resource: "indexed graph scratch entries",
-            limit: self.limits.max_source_scratch,
-        })?;
+        let next = self
+            .scratch
+            .get()
+            .checked_add(1)
+            .ok_or(BeaconError::ResourceLimit {
+                resource: "indexed graph scratch entries",
+                limit: self.limits.max_source_scratch,
+            })?;
         if next > self.limits.max_source_scratch {
             return Err(BeaconError::ResourceLimit {
                 resource: "indexed graph scratch entries",
@@ -326,9 +334,12 @@ pub(crate) fn evaluate_filtered(
         limit: expansion.limits.max_source_scratch,
     };
     let rows = match index {
-        Some(index) => index
-            .snapshot()
-            .hybrid_search_graph_filtered(query, &graph_hits, eligible, &mut kernel)?,
+        Some(index) => index.snapshot().hybrid_search_graph_filtered(
+            query,
+            &graph_hits,
+            eligible,
+            &mut kernel,
+        )?,
         None => query.fuse_graph_only(&graph_hits, eligible, &mut kernel)?,
     };
     work.borrow_mut().charge(1)?;

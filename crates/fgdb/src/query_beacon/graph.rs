@@ -22,15 +22,14 @@ struct ScratchWork<'a, W> {
     limit: usize,
 }
 
-fn reserve_scratch(
-    used: &Cell<usize>,
-    limit: usize,
-    entries: usize,
-) -> Result<(), BeaconError> {
-    let next = used.get().checked_add(entries).ok_or(BeaconError::ResourceLimit {
-        resource: "graph query scratch entries",
-        limit,
-    })?;
+fn reserve_scratch(used: &Cell<usize>, limit: usize, entries: usize) -> Result<(), BeaconError> {
+    let next = used
+        .get()
+        .checked_add(entries)
+        .ok_or(BeaconError::ResourceLimit {
+            resource: "graph query scratch entries",
+            limit,
+        })?;
     if next > limit {
         return Err(BeaconError::ResourceLimit {
             resource: "graph query scratch entries",
@@ -263,9 +262,12 @@ pub(crate) fn evaluate_filtered(
         limit: expansion.limits.max_source_scratch,
     };
     let rows = match index {
-        Some(index) => index
-            .snapshot()
-            .hybrid_search_graph_filtered(query, &graph_hits, eligible, &mut kernel)?,
+        Some(index) => index.snapshot().hybrid_search_graph_filtered(
+            query,
+            &graph_hits,
+            eligible,
+            &mut kernel,
+        )?,
         None => query.fuse_graph_only(&graph_hits, eligible, &mut kernel)?,
     };
     // No partial rows escape, even on empty/zero-k paths or final refusal.
@@ -1191,5 +1193,4 @@ mod tests {
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
-
 }
