@@ -686,15 +686,8 @@ impl<'a> Tables<'a> {
             else {
                 return Ok(None);
             };
-            let mut complete = true;
-            for vid in reached {
-                complete &= match source::find_vertex(snapshot, vid, at, scan)? {
-                    Some(row) => tables
-                        .admit_vertex(row, predicates, node, control)?
-                        .is_some(),
-                    None => false,
-                };
-            }
+            let complete =
+                tables.admit_found(snapshot, &reached, at, predicates, node, scan, control)?;
             for edge in edges {
                 tables.admit_closure_edge(edge, predicates, complete, control)?;
             }
@@ -725,15 +718,8 @@ impl<'a> Tables<'a> {
                 <[_]>::sort_unstable,
             );
             endpoints.dedup();
-            let mut complete = true;
-            for vid in endpoints {
-                complete &= match source::find_vertex(snapshot, vid, at, scan)? {
-                    Some(row) => tables
-                        .admit_vertex(row, predicates, node, control)?
-                        .is_some(),
-                    None => false,
-                };
-            }
+            let complete =
+                tables.admit_found(snapshot, &endpoints, at, predicates, node, scan, control)?;
             for edge in edges {
                 tables.admit_closure_edge(edge, predicates, complete, control)?;
             }
@@ -835,6 +821,44 @@ impl<'a> Tables<'a> {
     // Snapshot visitors and canonical transaction rows use identical masking
     // and logical admission charges. No input source can bypass this boundary.
     /// Returns the number of labels charged when the vertex is admitted.
+    /// Find and admit a bound admission's vertices in order; whether every one
+    /// was found and admitted. `scan` only polls: a vertex's history is walked
+    /// uncharged (FG-INV-20), so each lookup observes cancellation once, not
+    /// once per node its descent visits, whose number followed the shape of a
+    /// history index that includes versions the capability cannot see. The
+    /// lookups are pure reads, made a chunk at a time before the chunk is
+    /// admitted: independent lookups whose cache misses overlap, where one at
+    /// a time each waited on the last (most of a pokec hub_degree,
+    /// fgdb-61p1n). Every poll and charge keeps its per-vertex order.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_found(
+        &mut self,
+        snapshot: &'a Snapshot,
+        vids: &[VId],
+        at: CommitSeq,
+        predicates: &PlannerPredicates,
+        node: &mut impl FnMut() -> Result<(), Fault>,
+        scan: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+    ) -> Result<bool, Fault> {
+        const CHUNK: usize = 16;
+        let mut complete = true;
+        for chunk in vids.chunks(CHUNK) {
+            let mut rows = [None; CHUNK];
+            for (slot, &vid) in rows.iter_mut().zip(chunk) {
+                *slot = source::find_vertex(snapshot, vid, at, &mut |_| Ok::<(), Fault>(()))?;
+            }
+            for row in &rows[..chunk.len()] {
+                scan(SourceEvent::Work)?;
+                complete &= match row {
+                    Some(row) => self.admit_vertex(row, predicates, node, control)?.is_some(),
+                    None => false,
+                };
+            }
+        }
+        Ok(complete)
+    }
+
     fn admit_vertex(
         &mut self,
         row: &'a VertexRow,
