@@ -3160,8 +3160,9 @@ pub(crate) fn bound_edges<'a, E, Row>(
     Ok(Some(selected.into_values().collect()))
 }
 
-/// A bound closure's admitted edges and every vertex its slots can bind.
-type Closure<'a> = (Vec<BorrowedEdge<'a>>, std::collections::BTreeSet<VId>);
+/// A bound closure's admitted edges and every vertex its slots can bind,
+/// ascending and distinct (the order an ordered set iterates them).
+type Closure<'a> = (Vec<BorrowedEdge<'a>>, Vec<VId>);
 
 /// The VIds a bound root can take: served from the property index when one
 /// root predicate can seek it, so a bound hub costs its candidates, not a
@@ -3614,7 +3615,9 @@ fn slot_closure<'a, E>(
     for _ in 0..selected.len() {
         control(SourceEvent::SnapshotRecord)?;
     }
-    let reached = slots.into_iter().flatten().collect();
+    let mut reached: Vec<VId> = slots.into_iter().flatten().collect();
+    fgdb_gql::id_sort::sort_by_leading_identity(&mut reached, |vid| vid.0, <[_]>::sort_unstable);
+    reached.dedup();
     fgdb_gql::id_sort::sort_by_leading_identity(
         &mut selected,
         |((eid, ..), _)| eid.0,
@@ -3863,7 +3866,7 @@ fn shortest_closure<'a, E>(
         |((eid, ..), _)| eid.0,
         |edges| edges.sort_unstable_by_key(|((eid, ..), _)| *eid),
     );
-    Ok(Some((selected, vertices)))
+    Ok(Some((selected, vertices.into_iter().collect())))
 }
 
 /// The VIds of the visible vertices satisfying every root predicate, served

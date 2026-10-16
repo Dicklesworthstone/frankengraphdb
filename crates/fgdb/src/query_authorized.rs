@@ -719,7 +719,11 @@ impl<'a> Tables<'a> {
                 .iter()
                 .flat_map(|&((_, src, _, dst), _)| [src, dst])
                 .collect();
-            endpoints.sort_unstable();
+            fgdb_gql::id_sort::sort_by_leading_identity(
+                &mut endpoints,
+                |vid| vid.0,
+                <[_]>::sort_unstable,
+            );
             endpoints.dedup();
             let mut complete = true;
             for vid in endpoints {
