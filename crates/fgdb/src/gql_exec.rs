@@ -781,6 +781,39 @@ impl AdmissionUsage {
         *self = next;
         Ok(())
     }
+    /// Whether `records` more snapshot records, `work` more work units and
+    /// `scratch` more scratch entries all fit `policy`: charged in any order,
+    /// no event among them could refuse.
+    pub(crate) fn absorbs(
+        &self,
+        policy: fgdb_gql::GqlQueryPolicy,
+        records: u64,
+        work: u64,
+        scratch: u64,
+    ) -> bool {
+        let fits = |used: u64, more: u64, limit: u64| {
+            used.checked_add(more).is_some_and(|total| total <= limit)
+        };
+        self.records.checked_add(records).is_some_and(|total| {
+            policy
+                .rows
+                .check(fgdb_gql::GqlBudgetDimension::SnapshotRecords, total)
+                .is_ok()
+        }) && fits(self.work_units, work, policy.evaluator.max_work_units)
+            && fits(
+                self.scratch_entries,
+                scratch,
+                policy.evaluator.max_scratch_entries,
+            )
+    }
+
+    /// Charge counts [`Self::absorbs`] admitted.
+    pub(crate) fn absorb(&mut self, records: u64, work: u64, scratch: u64) {
+        self.records += records;
+        self.work_units += work;
+        self.scratch_entries += scratch;
+    }
+
     /// Snapshot records admitted so far, for a source that reports its own
     /// execution stats (an authorized procedure call).
     pub(crate) fn snapshot_records(&self) -> u64 {

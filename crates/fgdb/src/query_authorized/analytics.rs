@@ -40,6 +40,8 @@ static REUSE: ProjectionCache<Snapshot, Arc<Tape>> = ProjectionCache::new(PROJEC
 thread_local! {
     /// Projection builds on this thread: the tests' physical reuse witness.
     static BUILDS: Cell<usize> = const { Cell::new(0) };
+    /// Records a reuse replayed in one live-execution loop.
+    static BULK_RECORDS: Cell<u64> = const { Cell::new(0) };
 }
 
 // Like governed GQL, the interruption carrier preserves a live authorization
@@ -151,9 +153,9 @@ impl<V: Vfs + Clone> Database<V> {
                     root: view.partition_root().0,
                     as_of: at,
                 };
-                execute(snapshot, binding, call, options, scope, execution, |_| {
-                    Ok(())
-                })
+                execute(
+                    snapshot, binding, call, options, scope, execution, Unmetered,
+                )
             },
         )
     }
@@ -238,7 +240,7 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
         Ok::<_, Error>(
             match reusable.then(|| REUSE.lookup(snapshot, request)).flatten() {
                 Some((graph, tape)) => {
-                    tape.replay(poll, spend)?;
+                    replay(&tape, execution, &observe, &work, options, poll, spend)?;
                     graph
                 }
                 None => {
@@ -313,6 +315,97 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
     // The kernel's certificate is trusted-host provenance, not a capability
     // response. Releasing it could expose the unmasked root/history identity.
     Ok(result.rows)
+}
+
+/// Replay `tape` exactly as `Tape::replay` through `poll` and `spend`, but a
+/// run whose caller and source meters provably cannot refuse anywhere in it
+/// (every one of its events fits their allowances) is replayed as one loop
+/// over the live execution: each item's polls, work units and node in their
+/// order, so every signed charge, cancellation poll and clock read happens
+/// exactly where it did. Only the meters' pure counters, which no event of
+/// the run can trip, are added once - for the items the loop completed, as
+/// item-by-item replay would have left them.
+fn replay<Clock: FnMut() -> u64, O: Observe>(
+    tape: &Tape,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    observe: &RefCell<O>,
+    work: &Cell<u64>,
+    options: FnxReadOptions,
+    poll: impl Fn() -> Result<(), Error>,
+    spend: impl Fn(Step) -> Result<(), Error>,
+) -> Result<(), Error> {
+    for (polls, step, count) in tape.runs() {
+        // Per item, as `spend` charges it: its live work units, whether it
+        // is a signed node, and whether it is an admitted record. Each unit
+        // of a record is also a source work unit and a caller Work event,
+        // and the record then a SnapshotRecord and a ScratchEntry event,
+        // each of which the caller meter counts as work too. A builder
+        // checkpoint is one live unit and one caller Work event; polls alone
+        // charge nothing.
+        let (units, node, record) = match step {
+            Some(Step::Vertex(labels)) => (1 + u64::from(labels), true, true),
+            Some(Step::Edge) => (1, false, true),
+            Some(Step::Checkpoint) => (1, false, false),
+            None => (0, false, false),
+        };
+        if count > 1 {
+            let n = u64::from(count);
+            let (records, source, meter) = if record {
+                (n, units.checked_mul(n), (units + 2).checked_mul(n))
+            } else {
+                (0, Some(0), units.checked_mul(n))
+            };
+            let source_fits = source
+                .and_then(|more| work.get().checked_add(more))
+                .is_some_and(|total| total <= options.source_limits.max_work_units);
+            let meter_fits =
+                meter.is_some_and(|more| observe.borrow().absorbs(records, more, records));
+            if source_fits && meter_fits {
+                // Items completed, and live units of the item a refusal
+                // stopped, each of which `spend` would already have counted.
+                let (mut done, mut partial) = (0_u64, 0_u64);
+                let ran = (|| {
+                    let mut live = execution.borrow_mut();
+                    for _ in 0..count {
+                        for _ in 0..polls {
+                            live.poll().map_err(control_error)?;
+                        }
+                        for _ in 0..units {
+                            live.checkpoint().map_err(control_error)?;
+                            partial += 1;
+                        }
+                        if node {
+                            live.node().map_err(control_error)?;
+                        }
+                        (done, partial) = (done + 1, 0);
+                    }
+                    Ok::<_, Error>(())
+                })();
+                #[cfg(test)]
+                if record {
+                    BULK_RECORDS.with(|bulk| bulk.set(bulk.get() + done));
+                }
+                let (records, meter) = if record {
+                    work.set(work.get() + units * done + partial);
+                    (done, (units + 2) * done + partial)
+                } else {
+                    (0, units * done + partial)
+                };
+                observe.borrow_mut().absorb(records, meter, records);
+                ran?;
+                continue;
+            }
+        }
+        for _ in 0..count {
+            for _ in 0..polls {
+                poll()?;
+            }
+            if let Some(step) = step {
+                spend(step)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Visit, admit and build. `tape`, when present, records every live call in
@@ -445,12 +538,37 @@ pub(super) trait Observe {
     fn work(&mut self, n: usize) -> Result<(), QueryError> {
         (0..n).try_for_each(|_| self.event(SourceEvent::Work))
     }
+    /// Whether `records` admitted records, `work` Work events and `scratch`
+    /// scratch entries (each record also one SnapshotRecord event) can all be
+    /// observed with no refusal among them. A meter that cannot tell says no,
+    /// and every record is then observed event by event.
+    fn absorbs(&self, _records: u64, _work: u64, _scratch: u64) -> bool {
+        false
+    }
+    /// Observe counts [`Self::absorbs`] admitted, in one step.
+    fn absorb(&mut self, _records: u64, _work: u64, _scratch: u64) {
+        unreachable!("absorb follows a successful absorbs")
+    }
 }
 
 impl<F: FnMut(SourceEvent) -> Result<(), QueryError>> Observe for F {
     fn event(&mut self, event: SourceEvent) -> Result<(), QueryError> {
         self(event)
     }
+}
+
+/// No caller meter beside the signed permit: it observes nothing, so no
+/// count can refuse.
+struct Unmetered;
+
+impl Observe for Unmetered {
+    fn event(&mut self, _: SourceEvent) -> Result<(), QueryError> {
+        Ok(())
+    }
+    fn absorbs(&self, _records: u64, _work: u64, _scratch: u64) -> bool {
+        true
+    }
+    fn absorb(&mut self, _records: u64, _work: u64, _scratch: u64) {}
 }
 
 /// A caller meter over one [`AdmissionUsage`] allowance.
@@ -469,6 +587,12 @@ impl Observe for UsageObserver<'_> {
         self.usage
             .observe_work::<ReadError, QueryError>(self.policy, n as u64)
             .map_err(super::query_error)
+    }
+    fn absorbs(&self, records: u64, work: u64, scratch: u64) -> bool {
+        self.usage.absorbs(self.policy, records, work, scratch)
+    }
+    fn absorb(&mut self, records: u64, work: u64, scratch: u64) {
+        self.usage.absorb(records, work, scratch);
     }
 }
 
