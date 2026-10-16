@@ -1,6 +1,7 @@
 //! `fgdbd`: serve FrankenGraphDB databases over FGP, mint capability tokens,
 //! and generate owner-only key files.
 #![forbid(unsafe_code)]
+#![recursion_limit = "256"]
 
 use asupersync::Budget;
 use asupersync::Cx;
@@ -71,16 +72,18 @@ TLS early data is disabled. FGP clients require ALPN fgp/1; HTTPS uses
 http/1.1. Bolt clients use bolt+s:// or neo4j+s:// with normal certificate
 verification. Warden capability authentication still applies inside TLS.
 
---http-listen adds the HTTP/1.1 JSON adapter: POST /v1/databases/<name>/query
-or /write with `Authorization: Bearer <hex token>` and a JSON body
-{\"statement\": \"<gql>\", \"parameters\": {...}}; GET /v1/health. Requests must
+--http-listen adds the HTTP/1.1 JSON adapter: POST /v1/databases/<name>/query,
+/write, or /write-batch with `Authorization: Bearer <hex token>` and a JSON
+body {\"statement\": \"<gql>\", \"parameters\": {...}} (or \"argument_sets\" for
+/write-batch); GET /v1/databases/<name>/schema; GET /v1/health. Requests must
 name an allowed Host (default localhost, 127.0.0.1, [::1] and the listen IP;
 --http-allow-host replaces that list).
 
 --bolt-listen adds the Bolt-compat adapter (BoltCompatProfileV1) for official
 Neo4j drivers: bolt:// or neo4j:// URIs, authenticated with the hex token as a
-bearer credential (or as the basic-auth password). It is read-only: every RUN
-executes on a read session, and writes refuse with
+bearer credential (or as the basic-auth password). It serves Cypher/GQL reads,
+explicit read-only transactions, and bounded no-RETURN autocommit writes;
+write RETURN and explicit write transactions refuse with
 Neo.ClientError.Statement.AccessMode. The database is the driver's database
 argument, or the only one served.
 
