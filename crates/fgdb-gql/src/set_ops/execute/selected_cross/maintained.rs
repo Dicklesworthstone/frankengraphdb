@@ -21,10 +21,13 @@ impl PreparedGraphSet {
     /// eager predicate. Both child queries remain intact; an empty child is
     /// never permission to omit the other child's admission or failures.
     ///
-    /// Only same-domain Scalar/Vertex equalities become arrangement keys.
-    /// Dynamic Any comparisons and all residual Boolean operations remain in
-    /// ON. In particular an equality under NOT or only one OR arm is not an
-    /// arrangement key. No authorization or source support is inferred here.
+    /// Only same-domain Vertex/Edge equalities become typed arrangement keys.
+    /// Scalar and dynamic Any equalities remain in ON: Scalar admits Int/Float
+    /// pairs whose WHERE equality differs from RowJoinSpec's typed identity.
+    /// Without an identity key, the existing predicate join scans candidates;
+    /// this trades scalar selectivity for correct mixed-representation results.
+    /// An equality under NOT or only one OR arm is never an arrangement key.
+    /// No authorization or source support is inferred here.
     ///
     /// One column-only ALL projection and transparent scopes may be crossed.
     /// The complete predicate is rebound to original left-then-right columns;
@@ -51,12 +54,15 @@ impl PreparedGraphSet {
         };
         let slots = columns(projection, control)?;
         let mut keys = required_keys(left.types.len(), code, slots.as_deref(), control)?;
-        // A necessary dynamic equality is still enforced by ON. It cannot
-        // widen RowJoinSpec's declared key domains or change NULL semantics.
+        // Necessary WHERE equality does not imply canonical typed equality:
+        // Int(7) = Float(7) can be TRUE while their arrangement keys differ.
+        // Keep such comparisons in ON instead of discarding candidates before
+        // the native matcher sees them. Vertex/Edge identity is safe to index;
+        // the declared domains, not currently observed rows, prove that fact.
         keys.retain(|&(a, b)| {
             let l = left.types[a];
             l == right.types[b]
-                && matches!(l, GraphSetColumnType::Scalar | GraphSetColumnType::Vertex)
+                && matches!(l, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
         });
         for _ in 0..left.types.len() + right.types.len() + keys.len() {
             control(GlaExecutionEvent::ScratchEntry)?;
