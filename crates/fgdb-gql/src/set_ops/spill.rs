@@ -1,6 +1,7 @@
-//! Physical admission for external relations. Do not fuse across a stage:
+//! Physical admission for external relations. Preserve evaluation barriers:
 //! every child's complete evaluation and selected row order precede its
 //! parent's operation, including when a later stage requests LIMIT zero.
+//! Only the native selected-product seam may fuse transparent copies/filter.
 
 pub use super::aggregate::SpillSetAggregateRowError;
 pub use super::merge::SpillSetMergeStep;
@@ -21,6 +22,7 @@ use crate::{GlaExecutionEvent, GraphAggregateError, GraphAggregateRow};
 use core::convert::Infallible;
 
 mod relational_join;
+mod selected_cross;
 pub use relational_join::SpillSetJoinPlan;
 
 /// A refusal found before any graph source or scratch writer is opened.
@@ -80,24 +82,26 @@ impl AsyncSpillSetSourcePlan {
     }
 }
 
-/// A compiler-owned Cartesian product of two complete native relations.
+/// A compiler-owned Cartesian or selected product of complete native relations.
 ///
 /// Complete the left child, then the right child exactly once, including when
 /// either is empty or an enclosing page is zero. Each child retains its own
-/// order, DISTINCT, grouping and page. Emit every right occurrence for each
+/// order, DISTINCT, grouping and page. Visit every right occurrence for each
 /// left occurrence in that order; neither child nor this product is implicitly
-/// canonicalized. The enclosing Identity stage alone owns this node's explicit
-/// ORDER BY/SKIP/LIMIT. Native correlated predicates remain later row filters.
+/// canonicalized. A compiler-proved native selection tests borrowed pairs and
+/// copies only TRUE occurrences. Other correlations remain later row filters.
+/// The enclosing Identity stage owns this node's ORDER BY/SKIP/LIMIT.
 ///
-/// Output names and domains concatenate the original children unchanged.
-/// There is no comparison, type unification, numeric coercion or null padding.
-/// The complete product must succeed before any enclosing stage consumes it.
+/// Plain output concatenates the original children; a selected product may
+/// carry the native seam's column-only projection. No coercion or null padding
+/// is introduced. Complete the selected product before a parent consumes it.
 #[derive(Clone)]
 pub struct SpillSetCrossPlan {
     left: Box<AsyncSpillSetPlan>,
     right: Box<AsyncSpillSetPlan>,
     columns: Vec<String>,
     types: Vec<GraphSetColumnType>,
+    selection: Option<selected_cross::Selection>,
 }
 
 impl core::fmt::Debug for SpillSetCrossPlan {
@@ -122,8 +126,9 @@ impl SpillSetCrossPlan {
         &self.types
     }
 
-    /// Admit one pair against the original child schemas, then copy it with
-    /// the SAME kernel as native materialized and folded Cartesian execution.
+    /// Admit one pair against the original child schemas, then copy its output
+    /// with the native value-copy kernels. This is not a witness test: physical
+    /// hosts use select_pair_with_control before retaining selected products.
     /// InputSchema's operand is local to this pair: zero is left, one is right.
     /// NULL remains valid in each nullable domain, without narrowing Any.
     ///
@@ -138,24 +143,8 @@ impl SpillSetCrossPlan {
         right: &GraphValueRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<GraphValueRow, SpillSetRowError<E>> {
-        let mut event = |event| control(event).map_err(SpillSetRowError::Control);
-        for (operand, input, row) in [(0, self.left(), left), (1, self.right(), right)] {
-            event(GlaExecutionEvent::Work)?;
-            if row.len() != input.column_types().len() {
-                return Err(SpillSetRowError::Native(
-                    GraphSetExecutionError::InputSchema { operand },
-                ));
-            }
-            for (kind, value) in input.column_types().iter().zip(row.values()) {
-                event(GlaExecutionEvent::Work)?;
-                if !kind.accepts(value) {
-                    return Err(SpillSetRowError::Native(
-                        GraphSetExecutionError::InputSchema { operand },
-                    ));
-                }
-            }
-        }
-        super::execute::copy_cross_pair(left, right, &mut event)
+        self.validate_pair_with_control(left, right, control)?;
+        self.copy_output_with_control(left, right, control)
     }
 }
 
@@ -817,6 +806,9 @@ fn compile_stages<'a>(
     depth: usize,
     stages: &mut Vec<SpillSetStage>,
 ) -> Result<CompiledSource<'a>, SpillSetBuildError> {
+    if let Some(cross) = selected_cross::compile(query, depth, stages)? {
+        return Ok(CompiledSource::Cross(cross));
+    }
     let (pattern, input, operation, canonical, distinct) = match &query.node {
         SetNode::Values => (
             CompiledSource::Values,
@@ -895,6 +887,7 @@ fn compile_stages<'a>(
                     right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
                     columns: query.columns.clone(),
                     types: query.types.clone(),
+                    selection: None,
                 }),
                 query.types.clone(),
                 Operation::Identity,
