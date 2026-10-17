@@ -12,7 +12,9 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, GraphAggregateValue,
     GraphSetExecutionError, GraphSymbol, GraphSymbolKind,
 };
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use std::cell::Cell;
 
 const PROPERTY: PropertyKeyId = PropertyKeyId(1);
@@ -28,6 +30,7 @@ fn keys() -> DatabaseKeys {
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PROPERTY)),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         _ => None,
     }
 }
@@ -790,6 +793,75 @@ fn a_read_only_open_heals_a_root_that_lags_the_chain_through_a_full_open() {
             again.delta_since(CommitSeq(0)),
             Err(ReadError::DeltaCursorRetired { .. })
         ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A read-only view builds its adjacency index on first use rather than with
+/// the generation. Edge patterns, edge aggregates, temporal edge reads and the
+/// neighbour API must answer exactly as a full open's eagerly built index does.
+#[test]
+fn a_read_only_views_lazy_adjacency_answers_like_a_full_open() {
+    let ((), report) = run_async_under_lab(0x7669_650b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut first = WriteBatch::new(RelationId(1));
+        for vid in 1..=4u128 {
+            first.create_vertex(
+                VId(vid),
+                vec![],
+                vec![(PROPERTY, CanonicalScalar::Int(vid as i64 * 10))],
+            );
+        }
+        first.add_edge(EId(10), VId(1), VId(2), vec![]);
+        first.add_edge(EId(11), VId(1), VId(3), vec![]);
+        first.add_edge(EId(12), VId(2), VId(3), vec![]);
+        first.add_edge(EId(13), VId(4), VId(1), vec![]);
+        db.write(&commit, first).await.unwrap();
+        let mut second = WriteBatch::new(RelationId(1));
+        second.delete_edge(EId(11));
+        second.add_edge(EId(14), VId(3), VId(4), vec![]);
+        db.write(&commit, second).await.unwrap();
+        drop(db);
+
+        let params = GqlParameters::new();
+        let texts = [
+            "MATCH (a)-[r:R]->(b) RETURN a.p AS a, b.p AS b ORDER BY a, b",
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS edges",
+            "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 1 RETURN a.p AS a, b.p AS b ORDER BY a, b",
+        ];
+        let full = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let expected: Vec<QueryResult> = texts
+            .iter()
+            .map(|text| full.query(&cx, text, &params, symbols, policy()).unwrap())
+            .collect();
+        let neighbours: Vec<Vec<VId>> = (1..=4u128)
+            .map(|vid| full.neighbours(VId(vid), RelationId(1)).unwrap())
+            .collect();
+        assert_eq!(neighbours[0], vec![VId(2)], "edge 11 was deleted");
+        drop(full);
+
+        let view = Database::open_read_view_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        for (text, expected) in texts.iter().zip(&expected) {
+            assert_eq!(
+                &view.query(&cx, text, &params, symbols, policy()).unwrap(),
+                expected,
+                "{text}"
+            );
+        }
+        for (vid, expected) in (1..=4u128).zip(&neighbours) {
+            assert_eq!(&view.neighbours(VId(vid), RelationId(1)).unwrap(), expected);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

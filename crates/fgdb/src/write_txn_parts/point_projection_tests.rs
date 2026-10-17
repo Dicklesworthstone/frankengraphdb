@@ -186,7 +186,7 @@ fn requested_payload_is_borrowed_from_its_actual_snapshot_or_prepared_effect() {
                 .unwrap();
             let (block, row) = db
                 .snapshot
-                .adjacency_index
+                .adjacency_index()
                 .statement_at(&db.snapshot.blocks, EId(0), txn.basis())
                 .unwrap();
             let props = db.snapshot.block_props[block].as_ref().unwrap();

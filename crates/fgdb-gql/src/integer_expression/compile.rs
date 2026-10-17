@@ -128,7 +128,10 @@ fn prepare_root(
         let child_kind = |position: usize| nodes[children[position]].kind;
         for (position, &child) in children.iter().enumerate() {
             if !integer_root && matches!(op, Op::Unary(_) | Op::Binary(_)) {
-                if !matches!(nodes[child].kind, Kind::Null | Kind::Integer | Kind::Float | Kind::Dynamic) {
+                if !matches!(
+                    nodes[child].kind,
+                    Kind::Null | Kind::Integer | Kind::Float | Kind::Dynamic
+                ) {
                     return Err(wrong());
                 }
                 continue;
@@ -196,7 +199,10 @@ fn prepare_root(
             Op::Unary(_) | Op::Binary(_) if !integer_root => {
                 if matches!(op, Op::Binary(GraphIntegerBinary::NullIf)) {
                     child_kind(0)
-                } else if children.iter().any(|&child| nodes[child].kind == Kind::Float) {
+                } else if children
+                    .iter()
+                    .any(|&child| nodes[child].kind == Kind::Float)
+                {
                     Kind::Float
                 } else {
                     Kind::Integer
@@ -686,7 +692,10 @@ mod tests {
                 Op::Binary(GraphIntegerBinary::Add),
             ],
         ] {
-            assert!(matches!(prepare(&ops), Err(GraphIntegerBuildError::OperandType { .. })));
+            assert!(matches!(
+                prepare(&ops),
+                Err(GraphIntegerBuildError::OperandType { .. })
+            ));
             assert!(prepare_scalar(&ops).is_ok());
         }
         for ops in [
@@ -963,7 +972,7 @@ mod tests {
         }
         assert_eq!(
             expression
-                .evaluate_with_control(&[], &mut |_| Ok::<_, ()>(() ))
+                .evaluate_with_control(&[], &mut |_| Ok::<_, ()>(()))
                 .unwrap(),
             expected
         );

@@ -42,7 +42,7 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
     ) -> Result<Option<EId>, EdgeScanSourceError<ReadError, C>> {
         let cx = self.cx;
         cx.with_restriction(|| {
-            let mut node = self.view.snapshot.adjacency_index.histories.0.as_deref();
+            let mut node = self.view.snapshot.adjacency_index().histories.0.as_deref();
             let mut successor = None;
             // Strict successor, not eid+1: zero and u128::MAX are ordinary IDs.
             // Each visited node is metered; no unmetered rank lookup or ID bag.
@@ -129,7 +129,7 @@ pub(super) fn edge_from_view<'a, C>(
 ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<ReadError, C>> {
     cx.with_restriction(|| {
         let snapshot = &view.snapshot;
-        let mut node = snapshot.adjacency_index.histories.0.as_deref();
+        let mut node = snapshot.adjacency_index().histories.0.as_deref();
         let mut history = None;
         while let Some(current) = node {
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;

@@ -74,10 +74,14 @@ fn ints(rows: &[GraphValueRow], column: usize) -> Vec<Option<i64>> {
         })
         .collect()
 }
+// The native WITH/RETURN pipeline reads its inputs as scalar columns and
+// prepares the expressions as scalars. Since 31408b2c a dynamic column under
+// arithmetic stays a scalar load (it may hold a Float), so the typed mirror
+// spells it the same way.
 fn integer(column: usize, n: i64, op: GraphIntegerBinary) -> GraphSetValue {
     GraphSetValue::Integer(
-        GraphIntegerExpression::prepare(&[
-            GraphIntegerOp::Column(column),
+        GraphIntegerExpression::prepare_scalar(&[
+            GraphIntegerOp::ScalarColumn(column),
             GraphIntegerOp::Literal(Some(n)),
             GraphIntegerOp::Binary(op),
         ])
