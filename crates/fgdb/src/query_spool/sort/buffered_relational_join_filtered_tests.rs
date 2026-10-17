@@ -1,6 +1,9 @@
 //! Residual witnesses are per occurrence, not per sorted equality-key group.
 use super::*;
 
+#[path = "buffered_selected_cross_tests.rs"]
+mod selected_cross_tests;
+
 fn filtered_spec(kind: RowJoinKind, keys: &[(usize, usize)], rhs: usize) -> RowJoinSpec {
     let types = [GraphSetColumnType::Scalar; 2];
     RowJoinSpec::new(&types, &types, keys)
