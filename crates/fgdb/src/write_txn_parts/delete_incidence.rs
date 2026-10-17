@@ -193,7 +193,7 @@ impl WriteTxn {
             }
         }
         let snapshot = &database.snapshot;
-        let index = &snapshot.adjacency_index;
+        let index = snapshot.adjacency_index();
         let mut seen = BTreeSet::new();
         for &vertex in targets {
             event(DeleteSourceEvent::Work)?;
