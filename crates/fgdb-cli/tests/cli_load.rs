@@ -1,4 +1,7 @@
 //! Real subprocess ingestion, checkpoint recovery, and caller-keyed engine differential.
+// The binary root (src/main.rs) takes the same limit: proving `Send` for
+// an in-process open here descends the whole verified-reopen future.
+#![recursion_limit = "256"]
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{
     BulkEdge, BulkLoadCheckpoint, BulkLoadPolicy, BulkRow, BulkVertex, Database, DatabaseKeys,
@@ -883,10 +886,12 @@ fn default_chunk_size_and_completed_resume_do_not_invent_commits() {
 
 /// Without --rows-per-chunk the loader fits chunks to the input
 /// (fgdb-hkp7k): 3,000 small rows commit as ONE chunk, past the old fixed
-/// 1,000-row default, and 3,000 rows carrying 1,500 characters of text each
-/// (~1.75 KB of transcript: text is group-encoded, 8 bytes to 9) take the
-/// largest power of two whose every chunk stays within 4 MiB of source
-/// transcript, 2,048, so they commit as 2,048 + 952.
+/// 1,000-row default, and 3,000 rows carrying 3,000 characters of text each
+/// (~3.4 KB of transcript and of capsule template: text is group-encoded,
+/// 8 bytes to 9) take the largest power of two whose every chunk stays
+/// within the 8 MiB transcript cap and the 8 MiB template budget, 2,048, so
+/// they commit as 2,048 + 952. (Before the template budget the fit held
+/// chunks to half the transcript cap, and 1,500-character rows did this.)
 #[test]
 fn the_default_chunk_is_fitted_to_the_input() {
     let small: String = (0..3000)
@@ -901,7 +906,7 @@ fn the_default_chunk_is_fitted_to_the_input() {
     outcome.loaded(3000, 1, fixture.basis + 1);
     assert_eq!(outcome.progress(), [(3000, fixture.basis + 1)]);
 
-    let text = "x".repeat(1500);
+    let text = "x".repeat(3000);
     let large: String = (0..3000)
         .map(|n| {
             format!(
@@ -1092,6 +1097,45 @@ fn refusal_preserves_frontier(bad: &str, kind: &str) {
         assert!(db.edges().unwrap().is_empty());
     });
 }
+/// The loader reads and parses rows a batch of 16,384 lines ahead, across
+/// threads (fgdb-load-beats-memgraph-xf2n8). A source spanning three
+/// batches loads every row. A malformed row is reported at its own line
+/// with nothing committed, whether it is a batch's last line, the next
+/// batch's first, or mid-batch.
+#[test]
+fn rows_parsed_in_batches_keep_their_lines_and_all_load() {
+    let row = |n: usize| {
+        format!(
+            "{{\"kind\":\"vertex\",\"key\":\"v{n}\",\"labels\":[\"Person\"],\"props\":{{\"p\":\"int:{n}\"}}}}\n"
+        )
+    };
+    let rows: Vec<String> = (0..40_000).map(row).collect();
+    let fixture = Fixture::new("batches", &rows.concat());
+    fixture.load(None).loaded(40_000, 1, fixture.basis + 1);
+    runtime_check(async |contexts| {
+        let db = open(&fixture.db, &contexts).await;
+        let vertices = db.vertices().unwrap();
+        assert_eq!(vertices.len(), 40_000);
+        let mut values: Vec<i64> = vertices
+            .iter()
+            .map(|vertex| match vertex.props[..] {
+                [(_, CanonicalScalar::Int(value))] => value,
+                _ => panic!("{vertex:?}"),
+            })
+            .collect();
+        values.sort_unstable();
+        assert!(values.iter().copied().eq(0..40_000));
+    });
+    for line in [16_384, 16_385, 33_000] {
+        let mut bad = rows.clone();
+        bad[line - 1] = "{not-json}\n".into();
+        let fixture = Fixture::new("batches-bad", &bad.concat());
+        let failure = fixture.load(None);
+        failure.refusal("MalformedRow", Some(line));
+        assert!(failure.progress().is_empty(), "line {line}");
+    }
+}
+
 #[test]
 fn malformed_line_is_typed_line_two_and_atomic() {
     refusal_preserves_frontier("{not-json}", "MalformedRow");

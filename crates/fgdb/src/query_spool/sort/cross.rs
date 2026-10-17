@@ -1,6 +1,6 @@
 //! Bounded native Cartesian products, including the input relation for
-//! leading UNWIND followed by MATCH. The native following filter owns any
-//! correlation predicate; this operator never reruns a graph per left row.
+//! leading UNWIND followed by MATCH. A compiler-proved native selection can
+//! test borrowed pairs before copying/spilling them. No graph is rerun per row.
 
 use super::*;
 use crate::BufferedReadView;
@@ -94,15 +94,23 @@ where
     )
     .await?;
     // Both children have completed, even if the product is empty or an
-    // enclosing clause asks for no output. Admit the whole private product
-    // before a parent correlation predicate or window can discard its rows.
-    let expected = left
-        .row_count()
-        .checked_mul(right.row_count())
-        .ok_or(SpillError::SizeOverflow)?;
-    GqlExecutionBudget::result_rows(max_input_rows)
-        .check(GqlBudgetDimension::ResultRows, expected)
-        .map_err(|error| NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Rows(error))))?;
+    // enclosing clause asks for no output. A selected product never retains
+    // L*R rows: admit accepted occurrences below instead. Plain products keep
+    // their original pre-admission, including behind an ORDER/LIMIT barrier.
+    let expected = if plan.has_selection() {
+        None
+    } else {
+        let product = left
+            .row_count()
+            .checked_mul(right.row_count())
+            .ok_or(SpillError::SizeOverflow)?;
+        GqlExecutionBudget::result_rows(max_input_rows)
+            .check(GqlBudgetDimension::ResultRows, product)
+            .map_err(|error| {
+                NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Rows(error)))
+            })?;
+        Some(product)
+    };
     let pool = scratch.memory_pool().clone();
     let mut work = Work {
         cx,
@@ -120,7 +128,7 @@ where
             let right_row = decode(bytes, &pool, &mut work, resolver)?;
             let mut charge = pool.reserve(cx, 0).map_err(SpillError::Memory)?;
             let row = plan
-                .copy_pair_with_control(&left_row.row, &right_row.row, &mut |event| {
+                .select_pair_with_control(&left_row.row, &right_row.row, &mut |event| {
                     staged::native_event(cx, policy, &mut evaluator, event)?;
                     if event == GlaExecutionEvent::ScratchEntry {
                         charge
@@ -136,17 +144,26 @@ where
                     SpillSetRowError::Control(error) => error,
                     SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
                 })?;
+            let Some(row) = row else {
+                continue;
+            };
+            let next = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+            GqlExecutionBudget::result_rows(max_input_rows)
+                .check(GqlBudgetDimension::ResultRows, next)
+                .map_err(|error| {
+                    NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Rows(error)))
+                })?;
             let row = SpoolRow::buffered((row, charge));
             let encoded = codec::encode(&pool, &mut work, &row.row, max_row_bytes)?;
             write_row(&mut writer, &encoded.0, &mut work).await?;
             largest = largest.max(encoded.0.len());
-            rows = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+            rows = next;
             // Each decoded/copy/encoder reservation survives the awaited
             // append, then refunds before advancing to the next right row.
         }
     }
     drop(left_input);
-    if rows != expected {
+    if expected.is_some_and(|expected| rows != expected) {
         return Err(NativeSpoolError::IncompleteCursor);
     }
     work.charge(1)?;

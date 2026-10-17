@@ -17,7 +17,7 @@
 
 mod cycle;
 mod intersection;
-pub(super) use intersection::visit_bindings as visit_original_bindings;
+pub(super) use intersection::{VertexAt, visit_positioned_bindings as visit_original_bindings};
 
 use super::*;
 use crate::algebra::{
@@ -232,7 +232,7 @@ fn add<E>(
 }
 
 fn oriented<E>(
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
     access: EdgeAccess,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Factor, E> {
@@ -286,7 +286,8 @@ fn compose<E>(
 pub(super) fn visit_bindings<'a, E, C, F, R, M, P>(
     plan: &GlaPlan<GraphValueRow>,
     vertices: impl IntoIterator<Item = VId>,
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
+    positioned: Option<VertexAt<'_>>,
     accesses: &[EdgeAccess],
     forest: &tree::Forest,
     test_vertex: F,
@@ -340,6 +341,7 @@ where
             });
         }
     }
+    let derived = Topology::from(derived);
     let (execution, topology, accesses) = if let Some(reduced) = &reduced {
         (
             reduced.pattern.plan(),
@@ -349,15 +351,18 @@ where
     } else {
         (plan, topology, accesses)
     };
-    intersection::visit_bindings(
+    // Reused by every binding: the slots a binding writes are the same for
+    // all of them, so the rest stay empty, as in a fresh array.
+    let mut original = [None; MAX_PATTERN_VERTICES];
+    intersection::visit_positioned_bindings(
         execution,
         vertices,
         topology,
+        positioned,
         test_vertex,
         property,
         control,
         |columns, bindings, property, control| {
-            let mut original = [None; MAX_PATTERN_VERTICES];
             let forest_bindings = if let Some(reduced) = &reduced {
                 for (old, slot) in reduced.slots[..reduced.width].iter().enumerate() {
                     if let Some(slot) = slot {

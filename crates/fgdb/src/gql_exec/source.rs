@@ -31,14 +31,18 @@ type EqualityCandidates = IndexMap<(PropertyKeyId, std::sync::Arc<[u8]>), IndexM
 #[derive(Clone, Debug)]
 struct IndexMap<K, V>(Option<std::sync::Arc<IndexNode<K, V>>>);
 
+/// `height` and `len` are narrow so that a node keyed by a 16-byte identity
+/// with a root-sized value, or by a statement coordinate, fits the 64-byte
+/// allocation with its Arc counts rather than 80: four such nodes per edge
+/// are most of what an adjacency index costs.
 #[derive(Clone, Debug)]
 struct IndexNode<K, V> {
     key: K,
     value: V,
     left: IndexMap<K, V>,
     right: IndexMap<K, V>,
-    height: u16,
-    len: usize,
+    height: u8,
+    len: u32,
 }
 
 impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
@@ -46,15 +50,17 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
         Self(None)
     }
     fn height(&self) -> u16 {
-        self.0.as_ref().map_or(0, |n| n.height)
+        self.0.as_ref().map_or(0, |n| u16::from(n.height))
     }
     fn len(&self) -> usize {
-        self.0.as_ref().map_or(0, |n| n.len)
+        self.0.as_ref().map_or(0, |n| n.len as usize)
     }
     fn node(key: K, value: V, left: Self, right: Self, work: &mut u64) -> Self {
         *work += 1;
-        let height = 1 + left.height().max(right.height());
-        let len = 1 + left.len() + right.len();
+        // An AVL tree of fewer than 2^32 nodes is under 47 levels high.
+        let height = u8::try_from(1 + left.height().max(right.height())).expect("AVL height");
+        let len = u32::try_from(1 + left.len() + right.len())
+            .expect("an index tree holds fewer than 2^32 entries");
         Self(Some(std::sync::Arc::new(IndexNode {
             key,
             value,
@@ -376,24 +382,102 @@ impl<I: Ord + Clone> StatementHistoryIndex<I> {
     }
 }
 
-impl StatementHistoryIndex<EId> {
-    pub(crate) fn edges(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
-        let mut histories = BTreeMap::<EId, Vec<(CommitSeq, usize, usize)>>::new();
-        for (block, entries) in blocks.iter().enumerate() {
-            for (row, entry) in entries.as_ref().iter().enumerate() {
-                histories
-                    .entry(entry.eid)
-                    .or_default()
-                    .push((entry.created_at, block, row));
+impl StatementHistoryIndex<VId> {
+    /// The vertex statement histories [`PropertyEqualityIndex::build`] gives
+    /// `statement_histories`, without indexing any property value: a writer
+    /// resolving a vertex's version chain needs only these coordinates.
+    pub(crate) fn vertices(patches: &[VertexPatchRows]) -> Self {
+        let mut statements = Vec::with_capacity(patches.iter().map(|rows| rows.len()).sum());
+        for (patch, rows) in patches.iter().enumerate() {
+            for (row_at, row) in rows.iter().enumerate() {
+                statements.push((row.vid, row.created_at, patch, row_at));
             }
         }
+        sort_by_leading_identity(&mut statements, |&(vid, ..)| vid.0);
         let mut work = 0;
-        let histories = histories
-            .into_iter()
-            .map(|(eid, versions)| (eid, unit_set(versions, &mut work)))
+        let histories = statements
+            .chunk_by(|a, b| a.0 == b.0)
+            .map(|group| {
+                let versions = group.iter().map(|&(_, at, patch, row)| (at, patch, row));
+                (group[0].0, unit_set(versions.collect(), &mut work))
+            })
             .collect();
         Self(IndexMap::from_sorted(histories, &mut work))
     }
+}
+
+impl StatementHistoryIndex<EId> {
+    pub(crate) fn edges(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
+        let statements = edge_statements(blocks);
+        let mut work = 0;
+        let histories = statements
+            .chunk_by(|a, b| a.0 == b.0)
+            .map(|group| (group[0].0, statement_history(group, &mut work)))
+            .collect();
+        Self(IndexMap::from_sorted(histories, &mut work))
+    }
+}
+
+/// Every edge statement's `(identity, created_at, block, row)`, sorted, so
+/// each identity's statements are one run in history order. One sort of one
+/// vector replaces an ordered-map insert per statement, in the random key
+/// order a keyed EId permutation gives: on a packed web-google (5.1M edges)
+/// those inserts were about 40% of building the adjacency index.
+fn edge_statements(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Vec<(EId, CommitSeq, usize, usize)> {
+    let mut statements =
+        Vec::with_capacity(blocks.iter().map(|entries| entries.as_ref().len()).sum());
+    for (block, entries) in blocks.iter().enumerate() {
+        for (row, entry) in entries.as_ref().iter().enumerate() {
+            statements.push((entry.eid, entry.created_at, block, row));
+        }
+    }
+    sort_by_leading_identity(&mut statements, |&(eid, ..)| eid.0);
+    statements
+}
+
+/// [`edge_statements`] with each statement's endpoint that `end` picks, read
+/// while its block is scanned in order: `(identity, created_at, block, row,
+/// endpoint)`, 48 bytes like an unannotated statement. A generation's faces
+/// once read every statement's entry back in identity order, a random read
+/// per statement per face: about 1.8 s of a pokec server's first bound
+/// query. The statements order as [`edge_statements`] does, whichever
+/// endpoint they carry, since `(identity, created_at, block, row)` already
+/// names one statement.
+fn edge_statements_with_endpoint(
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    end: fn(&AdjacencyEntry) -> VId,
+) -> Vec<(EId, CommitSeq, u32, u32, VId)> {
+    let mut statements =
+        Vec::with_capacity(blocks.iter().map(|entries| entries.as_ref().len()).sum());
+    for (block, entries) in blocks.iter().enumerate() {
+        let block = u32::try_from(block).expect("a generation holds fewer than u32::MAX blocks");
+        for (row, entry) in entries.as_ref().iter().enumerate() {
+            let row = u32::try_from(row).expect("a block holds fewer than u32::MAX rows");
+            statements.push((entry.eid, entry.created_at, block, row, end(entry)));
+        }
+    }
+    sort_by_leading_identity(&mut statements, |&(eid, ..)| eid.0);
+    statements
+}
+
+/// Sorts `items`, whose order starts with an identity, exactly as
+/// `sort_unstable` does, by one bucket pass on the identity bits that vary
+/// (fgdb_gql::id_sort). A generation's lazy adjacency build sorts every
+/// statement and both faces' incidences this way: comparison-sorting them
+/// was about 3.2 s of a pokec server's 8.4 s first bound query.
+fn sort_by_leading_identity<T: Copy + Ord>(items: &mut Vec<T>, identity: impl Fn(&T) -> u128) {
+    fgdb_gql::id_sort::sort_by_leading_identity(items, identity, <[T]>::sort_unstable);
+}
+
+/// The history of one identity's run from [`edge_statements`].
+fn statement_history(group: &[(EId, CommitSeq, usize, usize)], work: &mut u64) -> History {
+    unit_set(
+        group
+            .iter()
+            .map(|&(_, created_at, block, row)| (created_at, block, row))
+            .collect(),
+        work,
+    )
 }
 
 /// The `(block, row)` of the latest statement in `history` created at or
@@ -415,85 +499,464 @@ fn latest_statement(history: &History, as_of: CommitSeq) -> Option<(usize, usize
         .map(|(&(_, block, row), _)| (block, row))
 }
 
+/// One base statement: `(created_at, block, row)`. A generation's blocks and
+/// a block's rows both stay far below `u32::MAX` (root and block ceilings).
+type FlatStatement = (CommitSeq, u32, u32);
+
+/// The number of levels of the balanced tree [`IndexMap::from_sorted`] builds
+/// over `len` items; a flat search descends the same nodes.
+fn balanced_height(len: usize) -> usize {
+    (usize::BITS - len.leading_zeros()) as usize
+}
+
+/// The midpoint [`IndexMap::from_sorted`] roots `low..high` at, so a search
+/// over a sorted slice visits exactly the nodes a descent of that tree does.
+fn balanced_middle(low: usize, high: usize) -> usize {
+    low + (high - low) / 2
+}
+
+/// An identity's statements as a range of [`FlatIndex::statements`].
+type StatementRange = (u32, u32);
+
+/// One face of the flat base: each endpoint with the base identities incident
+/// to it there, ascending, each beside its statement range. A visit reads an
+/// endpoint's entries in sequence and each history with one access, as the
+/// trees' incidence nodes carried their history (fgdb-61p1n).
+#[derive(Debug, Default)]
+struct FlatFace {
+    vertices: Vec<VId>,
+    starts: Vec<usize>,
+    ids: Vec<EId>,
+    ranges: Vec<StatementRange>,
+}
+
+impl FlatFace {
+    fn build(mut incidences: Vec<(VId, EId, StatementRange)>) -> Self {
+        // Every statement of an identity adds its endpoint: dedup them. An
+        // identity has one range, so this dedups (endpoint, identity).
+        sort_by_leading_identity(&mut incidences, |&(vid, ..)| vid.0);
+        incidences.dedup();
+        let mut face = Self::default();
+        face.ids.reserve_exact(incidences.len());
+        face.ranges.reserve_exact(incidences.len());
+        for group in incidences.chunk_by(|a, b| a.0 == b.0) {
+            face.vertices.push(group[0].0);
+            face.starts.push(face.ids.len());
+            for &(_, eid, range) in group {
+                face.ids.push(eid);
+                face.ranges.push(range);
+            }
+        }
+        face.starts.push(face.ids.len());
+        face
+    }
+
+    fn members_at(&self, at: usize) -> (&[EId], &[StatementRange]) {
+        let (start, end) = (self.starts[at], self.starts[at + 1]);
+        (&self.ids[start..end], &self.ranges[start..end])
+    }
+
+    fn members(&self, endpoint: VId) -> (&[EId], &[StatementRange]) {
+        self.vertices
+            .binary_search(&endpoint)
+            .map_or((&[], &[]), |at| self.members_at(at))
+    }
+}
+
+/// A built generation's adjacency as sorted arrays: every identity, its
+/// statements in history order, and each endpoint's incident identities.
+/// About 90 bytes per singly-stated edge (40 for its identity and statement,
+/// 24 in each face), where the persistent trees took four 64-80 byte nodes
+/// (fgdb-61p1n), and built without an allocation per node.
+#[derive(Debug, Default)]
+struct FlatIndex {
+    ids: Vec<EId>,
+    starts: Vec<usize>,
+    statements: Vec<FlatStatement>,
+    outgoing: FlatFace,
+    incoming: FlatFace,
+}
+
+impl FlatIndex {
+    fn history(&self, at: usize) -> &[FlatStatement] {
+        &self.statements[self.starts[at]..self.starts[at + 1]]
+    }
+
+    fn statements_in(&self, (start, end): StatementRange) -> &[FlatStatement] {
+        &self.statements[start as usize..end as usize]
+    }
+
+    fn position(&self, eid: EId) -> Option<usize> {
+        self.ids.binary_search(&eid).ok()
+    }
+}
+
+/// One identity's statements in history order, from the flat base or the
+/// overlay; each resolves a cut by the same rule.
+#[derive(Clone, Copy, Debug)]
+enum HistoryRef<'a> {
+    Flat(&'a [FlatStatement]),
+    Tree(&'a History),
+}
+
+impl<'a> HistoryRef<'a> {
+    fn len(self) -> usize {
+        match self {
+            Self::Flat(statements) => statements.len(),
+            Self::Tree(history) => history.len(),
+        }
+    }
+
+    /// The levels a charged resolution of this history may descend.
+    #[cfg(test)]
+    fn height(self) -> usize {
+        match self {
+            Self::Flat(statements) => balanced_height(statements.len()),
+            Self::Tree(history) => usize::from(history.height()),
+        }
+    }
+
+    /// The `(block, row)` of the latest statement created at or before
+    /// `as_of`: among one cut's restatements the later block wins.
+    fn latest(self, as_of: CommitSeq) -> Option<(usize, usize)> {
+        match self {
+            Self::Flat(statements) => statements
+                .partition_point(|statement| statement.0 <= as_of)
+                .checked_sub(1)
+                .map(|at| (statements[at].1 as usize, statements[at].2 as usize)),
+            Self::Tree(history) => latest_statement(history, as_of),
+        }
+    }
+
+    /// [`Self::latest`], calling `charge` once per node a descent of this
+    /// history's tree visits (a flat history descends its balanced tree's).
+    fn latest_charged<E>(
+        self,
+        as_of: CommitSeq,
+        charge: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<(usize, usize)>, E> {
+        match self {
+            Self::Flat(statements) => {
+                let (mut low, mut high) = (0, statements.len());
+                let mut winner = None;
+                while low < high {
+                    charge()?;
+                    let middle = balanced_middle(low, high);
+                    if statements[middle].0 <= as_of {
+                        winner = Some(middle);
+                        low = middle + 1;
+                    } else {
+                        high = middle;
+                    }
+                }
+                Ok(winner.map(|at| (statements[at].1 as usize, statements[at].2 as usize)))
+            }
+            Self::Tree(history) => {
+                let mut node = history.0.as_deref();
+                let mut winner = None;
+                while let Some(current) = node {
+                    charge()?;
+                    if current.key.0 <= as_of {
+                        winner = Some((current.key.1, current.key.2));
+                        node = current.right.0.as_deref();
+                    } else {
+                        node = current.left.0.as_deref();
+                    }
+                }
+                Ok(winner)
+            }
+        }
+    }
+
+    fn coordinates(self) -> Vec<(CommitSeq, usize, usize)> {
+        match self {
+            Self::Flat(statements) => statements
+                .iter()
+                .map(|&(created_at, block, row)| (created_at, block as usize, row as usize))
+                .collect(),
+            Self::Tree(history) => history.iter().map(|(coordinate, ())| *coordinate).collect(),
+        }
+    }
+}
+
+/// The incident identities of one endpoint in one face, merged from the flat
+/// base and the overlay in EId order. The overlay carries the complete
+/// current history of every identity it holds, so it wins a tie.
+struct FaceEntries<'a> {
+    base: &'a FlatIndex,
+    members: std::iter::Zip<std::slice::Iter<'a, EId>, std::slice::Iter<'a, StatementRange>>,
+    /// The overlay holds nothing at this endpoint.
+    base_only: bool,
+    pending: Option<(EId, HistoryRef<'a>)>,
+    overlay: std::iter::Peekable<IndexIter<'a, EId, History>>,
+}
+
+impl<'a> Iterator for FaceEntries<'a> {
+    type Item = (EId, HistoryRef<'a>);
+    fn next(&mut self) -> Option<Self::Item> {
+        // An endpoint the overlay never touched, every endpoint of a
+        // generation no commit extended: the base entries as they are.
+        if self.base_only {
+            return self
+                .members
+                .next()
+                .map(|(&eid, &range)| (eid, HistoryRef::Flat(self.base.statements_in(range))));
+        }
+        if self.pending.is_none() {
+            self.pending = self
+                .members
+                .next()
+                .map(|(&eid, &range)| (eid, HistoryRef::Flat(self.base.statements_in(range))));
+        }
+        match (self.pending, self.overlay.peek()) {
+            (Some((eid, history)), Some(&(&overlay, tree))) => {
+                if overlay < eid {
+                    self.overlay.next();
+                    Some((overlay, HistoryRef::Tree(tree)))
+                } else if overlay == eid {
+                    self.overlay.next();
+                    self.pending = None;
+                    Some((overlay, HistoryRef::Tree(tree)))
+                } else {
+                    self.pending = None;
+                    Some((eid, history))
+                }
+            }
+            (Some(entry), None) => {
+                self.pending = None;
+                Some(entry)
+            }
+            (None, Some(_)) => self
+                .overlay
+                .next()
+                .map(|(&eid, tree)| (eid, HistoryRef::Tree(tree))),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Which face of an endpoint: identities leaving it, or arriving at it.
+#[derive(Clone, Copy)]
+enum Face {
+    Outgoing,
+    Incoming,
+}
+
+/// Rebuildable coordinates into an admitted generation. [`Self::build`] lays
+/// the whole generation out as a shared flat base. Statements published after
+/// that go to a persistent overlay that copies search paths, never a pinned
+/// predecessor's tree, and that holds the complete current history of each
+/// identity it names, at every endpoint any of its statements named.
 #[derive(Clone, Debug)]
 pub(crate) struct AdjacencyIndex {
+    base: std::sync::Arc<FlatIndex>,
     histories: IndexMap<EId, History>,
     outgoing: IndexMap<VId, Incidence>,
     incoming: IndexMap<VId, Incidence>,
+    /// Overlay identities the base does not hold.
+    added: usize,
     work: u64,
 }
 
 impl AdjacencyIndex {
     /// Edge identities this generation has ever indexed, live or retired.
     pub(crate) fn edge_count(&self) -> usize {
-        self.histories.len()
+        self.base.ids.len() + self.added
+    }
+
+    /// The incident identities of `endpoint` in `face`, base and overlay.
+    fn face_entries(&self, face: Face, endpoint: VId) -> FaceEntries<'_> {
+        let (base, overlay) = match face {
+            Face::Outgoing => (&self.base.outgoing, &self.outgoing),
+            Face::Incoming => (&self.base.incoming, &self.incoming),
+        };
+        let (ids, ranges) = base.members(endpoint);
+        let overlay = overlay.get(&endpoint);
+        FaceEntries {
+            base: &self.base,
+            members: ids.iter().zip(ranges),
+            base_only: overlay.is_none(),
+            pending: None,
+            overlay: overlay
+                .map_or(IndexIter { stack: Vec::new() }, IndexMap::iter)
+                .peekable(),
+        }
+    }
+
+    /// How many identities `face` holds at `endpoint`.
+    fn face_len(&self, face: Face, endpoint: VId) -> usize {
+        let (base, overlay) = match face {
+            Face::Outgoing => (&self.base.outgoing, &self.outgoing),
+            Face::Incoming => (&self.base.incoming, &self.incoming),
+        };
+        let (members, _) = base.members(endpoint);
+        let Some(overlay) = overlay.get(&endpoint) else {
+            return members.len();
+        };
+        // Overlay entries the base also holds here are one identity.
+        let shared = overlay
+            .iter()
+            .filter(|&(eid, _)| members.binary_search(eid).is_ok())
+            .count();
+        members.len() + overlay.len() - shared
     }
 
     /// Incidences (live or retired) of `endpoint` along `direction`: an upper
-    /// bound on what a visit yields, at one tree descent per face.
+    /// bound on what a visit yields.
     pub(crate) fn degree(
         &self,
         endpoint: VId,
         direction: fgdb_gql::algebra::GlaDirection,
     ) -> usize {
         use fgdb_gql::algebra::GlaDirection;
-        let face = |map: &IndexMap<VId, Incidence>| map.get(&endpoint).map_or(0, IndexMap::len);
         match direction {
-            GlaDirection::Forward => face(&self.outgoing),
-            GlaDirection::Reverse => face(&self.incoming),
-            GlaDirection::Undirected => face(&self.outgoing) + face(&self.incoming),
+            GlaDirection::Forward => self.face_len(Face::Outgoing, endpoint),
+            GlaDirection::Reverse => self.face_len(Face::Incoming, endpoint),
+            GlaDirection::Undirected => {
+                self.face_len(Face::Outgoing, endpoint) + self.face_len(Face::Incoming, endpoint)
+            }
         }
     }
 
-    /// Build a generation from scratch: group rows in ordinary sorted maps,
-    /// then assemble each persistent tree bottom-up. The contents equal
-    /// folding every row through `apply_added`, without a path copy per row.
-    pub(crate) fn build(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
-        let mut work = 0;
-        let mut histories = BTreeMap::<EId, Vec<(CommitSeq, usize, usize)>>::new();
-        let mut outgoing = BTreeMap::<VId, Vec<EId>>::new();
-        let mut incoming = BTreeMap::<VId, Vec<EId>>::new();
-        for (block, entries) in blocks.iter().enumerate() {
-            for (row, entry) in entries.as_ref().iter().enumerate() {
-                work += 1;
-                histories
-                    .entry(entry.eid)
-                    .or_default()
-                    .push((entry.created_at, block, row));
-                outgoing.entry(entry.src).or_default().push(entry.eid);
-                incoming.entry(entry.dst).or_default().push(entry.eid);
+    /// `eid`'s current history, if this generation indexed it.
+    fn history(&self, eid: EId) -> Option<HistoryRef<'_>> {
+        if let Some(history) = self.histories.get(&eid) {
+            return Some(HistoryRef::Tree(history));
+        }
+        self.base
+            .position(eid)
+            .map(|at| HistoryRef::Flat(self.base.history(at)))
+    }
+
+    /// [`Self::history`], calling `charge` once per node a descent visits: the
+    /// overlay's, then the base's balanced tree's.
+    fn history_charged<E>(
+        &self,
+        eid: EId,
+        charge: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<HistoryRef<'_>>, E> {
+        let mut node = self.histories.0.as_deref();
+        while let Some(current) = node {
+            charge()?;
+            match eid.cmp(&current.key) {
+                core::cmp::Ordering::Less => node = current.left.0.as_deref(),
+                core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
+                core::cmp::Ordering::Equal => return Ok(Some(HistoryRef::Tree(&current.value))),
             }
         }
-        let histories: Vec<(EId, History)> = histories
-            .into_iter()
-            .map(|(eid, versions)| (eid, unit_set(versions, &mut work)))
-            .collect();
-        let face = |map: BTreeMap<VId, Vec<EId>>, work: &mut u64| {
-            let items = map
-                .into_iter()
-                .map(|(vid, mut eids)| {
-                    eids.sort_unstable();
-                    eids.dedup();
-                    let entries = eids
-                        .into_iter()
-                        .map(|eid| {
-                            let at = histories
-                                .binary_search_by_key(&eid, |&(eid, _)| eid)
-                                .expect("every incident identity has a history");
-                            (eid, histories[at].1.clone())
-                        })
-                        .collect();
-                    (vid, IndexMap::from_sorted(entries, work))
-                })
-                .collect();
-            IndexMap::from_sorted(items, work)
+        let (mut low, mut high) = (0, self.base.ids.len());
+        while low < high {
+            charge()?;
+            let middle = balanced_middle(low, high);
+            match eid.cmp(&self.base.ids[middle]) {
+                core::cmp::Ordering::Less => high = middle,
+                core::cmp::Ordering::Greater => low = middle + 1,
+                core::cmp::Ordering::Equal => {
+                    return Ok(Some(HistoryRef::Flat(self.base.history(middle))));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The least indexed identity above `after` (or the least of all),
+    /// calling `charge` once per node a descent visits, as
+    /// [`Self::history_charged`] does. Zero and `u128::MAX` are ordinary ids.
+    pub(crate) fn next_identity<E>(
+        &self,
+        after: Option<EId>,
+        charge: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<EId>, E> {
+        let mut next = None;
+        let mut node = self.histories.0.as_deref();
+        while let Some(current) = node {
+            charge()?;
+            if after.is_none_or(|after| current.key > after) {
+                next = Some(current.key);
+                node = current.left.0.as_deref();
+            } else {
+                node = current.right.0.as_deref();
+            }
+        }
+        let (mut low, mut high) = (0, self.base.ids.len());
+        while low < high {
+            charge()?;
+            let middle = balanced_middle(low, high);
+            let eid = self.base.ids[middle];
+            if after.is_none_or(|after| eid > after) {
+                next = Some(next.map_or(eid, |next: EId| next.min(eid)));
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        Ok(next)
+    }
+
+    /// The levels a charged identity lookup may descend: the overlay's tree
+    /// and the base's balanced one.
+    pub(crate) fn identity_height(&self) -> usize {
+        usize::from(self.histories.height()) + balanced_height(self.base.ids.len())
+    }
+
+    /// The levels a charged resolution of `eid`'s history may descend.
+    #[cfg(test)]
+    pub(crate) fn history_height(&self, eid: EId) -> usize {
+        self.history(eid).map_or(0, HistoryRef::height)
+    }
+
+    /// Build a generation from scratch: one sorted statement vector, grouped
+    /// in place into the flat base. The contents equal folding every row
+    /// through `apply_added`.
+    pub(crate) fn build(blocks: &[impl AsRef<[AdjacencyEntry]>]) -> Self {
+        // Each face's endpoints are read while their blocks are scanned in
+        // order, once per face, so no face reads a block again and only one
+        // face's statements and incidences are held at a time.
+        let statements = edge_statements_with_endpoint(blocks, |entry| entry.src);
+        let mut base = FlatIndex::default();
+        base.statements.reserve_exact(statements.len());
+        let position = |at: usize| {
+            u32::try_from(at).expect("a generation holds fewer than u32::MAX edge statements")
         };
-        let outgoing = face(outgoing, &mut work);
-        let incoming = face(incoming, &mut work);
+        let mut outgoing = Vec::with_capacity(statements.len());
+        for group in statements.chunk_by(|a, b| a.0 == b.0) {
+            let (eid, start) = (group[0].0, base.statements.len());
+            base.ids.push(eid);
+            base.starts.push(start);
+            // The statements sort each run by (created_at, block, row), and
+            // one block names a statement once.
+            for &(_, created_at, block, row, _) in group {
+                base.statements.push((created_at, block, row));
+            }
+            let range = (position(start), position(base.statements.len()));
+            outgoing.extend(group.iter().map(|&(.., src)| (src, eid, range)));
+        }
+        base.starts.push(base.statements.len());
+        let work = statements.len() as u64;
+        drop(statements);
+        base.ids.shrink_to_fit();
+        base.starts.shrink_to_fit();
+        base.outgoing = FlatFace::build(outgoing);
+        // The same statements in the same order, now with their targets.
+        let statements = edge_statements_with_endpoint(blocks, |entry| entry.dst);
+        let mut incoming = Vec::with_capacity(statements.len());
+        for (at, &eid) in base.ids.iter().enumerate() {
+            let (start, end) = (base.starts[at], base.starts[at + 1]);
+            let range = (position(start), position(end));
+            incoming.extend(
+                statements[start..end]
+                    .iter()
+                    .map(|&(.., dst)| (dst, eid, range)),
+            );
+        }
+        drop(statements);
+        base.incoming = FlatFace::build(incoming);
         Self {
-            histories: IndexMap::from_sorted(histories, &mut work),
-            outgoing,
-            incoming,
+            base: std::sync::Arc::new(base),
+            histories: IndexMap::new(),
+            outgoing: IndexMap::new(),
+            incoming: IndexMap::new(),
+            added: 0,
             work,
         }
     }
@@ -511,37 +974,76 @@ impl AdjacencyIndex {
         self.work
     }
 
-    pub(crate) fn equivalent(&self, other: &Self) -> bool {
-        // Inner keys only: a face entry's value is checked against
-        // `histories` below, and the histories themselves compare here.
-        fn same<K: Ord + Clone + PartialEq, I: Ord + Clone + PartialEq, V: Clone>(
-            a: &IndexMap<K, IndexMap<I, V>>,
-            b: &IndexMap<K, IndexMap<I, V>>,
-        ) -> bool {
-            a.len() == b.len()
-                && a.iter().zip(b.iter()).all(|((ak, av), (bk, bv))| {
-                    ak == bk
-                        && av.len() == bv.len()
-                        && av
-                            .iter()
-                            .map(|(key, _)| key)
-                            .eq(bv.iter().map(|(key, _)| key))
+    /// Every identity with its current history, ascending, base and overlay.
+    fn identities(&self) -> Vec<(EId, HistoryRef<'_>)> {
+        let mut identities: Vec<(EId, HistoryRef<'_>)> = self
+            .base
+            .ids
+            .iter()
+            .enumerate()
+            .filter(|(_, eid)| self.histories.get(eid).is_none())
+            .map(|(at, &eid)| (eid, HistoryRef::Flat(self.base.history(at))))
+            .collect();
+        identities.extend(
+            self.histories
+                .iter()
+                .map(|(&eid, history)| (eid, HistoryRef::Tree(history))),
+        );
+        identities.sort_unstable_by_key(|&(eid, _)| eid);
+        identities
+    }
+
+    /// Every endpoint `face` holds an identity at, ascending.
+    fn face_vertices(&self, face: Face) -> Vec<VId> {
+        let (base, overlay) = match face {
+            Face::Outgoing => (&self.base.outgoing, &self.outgoing),
+            Face::Incoming => (&self.base.incoming, &self.incoming),
+        };
+        let mut vertices = base.vertices.clone();
+        vertices.extend(overlay.iter().map(|(&vertex, _)| vertex));
+        vertices.sort_unstable();
+        vertices.dedup();
+        vertices
+    }
+
+    /// Both faces, each endpoint with its incident identities in order.
+    fn faces(&self) -> [Vec<(VId, Vec<EId>)>; 2] {
+        [Face::Outgoing, Face::Incoming].map(|face| {
+            self.face_vertices(face)
+                .into_iter()
+                .map(|vertex| {
+                    let ids = self
+                        .face_entries(face, vertex)
+                        .map(|(eid, _)| eid)
+                        .collect();
+                    (vertex, ids)
                 })
-        }
-        same(&self.histories, &other.histories)
-            && same(&self.outgoing, &other.outgoing)
-            && same(&self.incoming, &other.incoming)
+                .collect()
+        })
+    }
+
+    pub(crate) fn equivalent(&self, other: &Self) -> bool {
+        let histories = |index: &Self| {
+            index
+                .identities()
+                .into_iter()
+                .map(|(eid, history)| (eid, history.coordinates()))
+                .collect::<Vec<_>>()
+        };
+        histories(self) == histories(other)
+            && self.faces() == other.faces()
             && self.faces_carry_histories()
             && other.faces_carry_histories()
     }
 
     /// Every incidence entry carries exactly its identity's current history.
     fn faces_carry_histories(&self) -> bool {
-        [&self.outgoing, &self.incoming].iter().all(|face| {
-            face.iter().all(|(_, incidence)| {
-                incidence.iter().all(|(eid, carried)| {
-                    self.histories.get(eid).is_some_and(|history| {
-                        history.len() == carried.len() && history.iter().eq(carried.iter())
+        [Face::Outgoing, Face::Incoming].iter().all(|&face| {
+            self.face_vertices(face).into_iter().all(|vertex| {
+                self.face_entries(face, vertex).all(|(eid, carried)| {
+                    self.history(eid).is_some_and(|history| {
+                        history.len() == carried.len()
+                            && history.coordinates() == carried.coordinates()
                     })
                 })
             })
@@ -557,11 +1059,27 @@ impl AdjacencyIndex {
         for (block, entries) in blocks.iter().enumerate().skip(added_from) {
             for (row, entry) in entries.as_ref().iter().enumerate() {
                 self.work += 1;
-                let previous = self
-                    .histories
-                    .get(&entry.eid)
-                    .cloned()
-                    .unwrap_or_else(IndexMap::new);
+                // The overlay holds an identity's whole history: the first
+                // statement after the build carries the base's with it.
+                let previous = match self.histories.get(&entry.eid) {
+                    Some(history) => history.clone(),
+                    None => match self.base.position(entry.eid) {
+                        Some(at) => IndexMap::from_sorted(
+                            self.base
+                                .history(at)
+                                .iter()
+                                .map(|&(created_at, block, row)| {
+                                    ((created_at, block as usize, row as usize), ())
+                                })
+                                .collect(),
+                            &mut self.work,
+                        ),
+                        None => {
+                            self.added += 1;
+                            IndexMap::new()
+                        }
+                    },
+                };
                 let history = previous.insert((entry.created_at, block, row), (), &mut self.work);
                 self.histories = self
                     .histories
@@ -640,7 +1158,7 @@ impl AdjacencyIndex {
         eid: EId,
         as_of: CommitSeq,
     ) -> Option<(usize, usize)> {
-        let (block, row) = latest_statement(self.histories.get(&eid)?, as_of)?;
+        let (block, row) = self.history(eid)?.latest(as_of)?;
         blocks[block].as_ref()[row]
             .visible_at(as_of)
             .then_some((block, row))
@@ -662,50 +1180,64 @@ impl AdjacencyIndex {
     {
         use fgdb_gql::algebra::GlaDirection;
         control(SourceEvent::Work)?;
-        let face = |set: &'a Incidence| set.iter().peekable();
-        let outgoing = self.outgoing.get(&endpoint).map(face);
-        let incoming = self.incoming.get(&endpoint).map(face);
+        let outgoing = || Some(self.face_entries(Face::Outgoing, endpoint).peekable());
+        let incoming = || Some(self.face_entries(Face::Incoming, endpoint).peekable());
         let (mut left, mut right) = match direction {
-            GlaDirection::Forward => (outgoing, None),
-            GlaDirection::Reverse => (incoming, None),
-            GlaDirection::Undirected => (outgoing, incoming),
+            GlaDirection::Forward => (outgoing(), None),
+            GlaDirection::Reverse => (incoming(), None),
+            GlaDirection::Undirected => (outgoing(), incoming()),
         };
+        // Each identity's statement is read a chunk ahead: pure reads of
+        // independent sealed rows, whose cache misses overlap, where one at a
+        // time each waited on the last. The chunk then replays in order, one
+        // Work per identity before its visit, as the walk always ran.
+        const CHUNK: usize = 32;
+        let mut ahead: [Option<(&'a AdjacencyEntry, usize, usize)>; CHUNK] = [None; CHUNK];
         loop {
-            // The lower identity of the two faces, with its history.
-            let next = match (&mut left, &mut right) {
-                (Some(a), Some(b)) => match (a.peek(), b.peek()) {
-                    (Some(&(x, hx)), Some(&(y, hy))) => {
-                        Some(if x <= y { (x, hx) } else { (y, hy) })
-                    }
-                    (Some(&pair), None) | (None, Some(&pair)) => Some(pair),
-                    (None, None) => break,
-                },
-                (Some(a), None) | (None, Some(a)) => a.peek().copied(),
-                (None, None) => break,
-            };
-            let Some((id, history)) = next else { break };
-            control(SourceEvent::Work)?;
-            if let Some(a) = left.as_mut()
-                && a.peek().is_some_and(|&(x, _)| x == id)
-            {
-                a.next();
+            let mut taken = 0;
+            while taken < CHUNK {
+                // The lower identity of the two faces, with its history.
+                let next = match (&mut left, &mut right) {
+                    (Some(a), Some(b)) => match (a.peek(), b.peek()) {
+                        (Some(&(x, hx)), Some(&(y, hy))) => {
+                            Some(if x <= y { (x, hx) } else { (y, hy) })
+                        }
+                        (Some(&pair), None) | (None, Some(&pair)) => Some(pair),
+                        (None, None) => None,
+                    },
+                    (Some(a), None) | (None, Some(a)) => a.peek().copied(),
+                    (None, None) => None,
+                };
+                let Some((id, history)) = next else { break };
+                if let Some(a) = left.as_mut()
+                    && a.peek().is_some_and(|&(x, _)| x == id)
+                {
+                    a.next();
+                }
+                if let Some(b) = right.as_mut()
+                    && b.peek().is_some_and(|&(x, _)| x == id)
+                {
+                    b.next();
+                }
+                ahead[taken] = history.latest(as_of).and_then(|(block, row)| {
+                    let entry = &blocks[block].as_ref()[row];
+                    let incident = match direction {
+                        GlaDirection::Forward => entry.src == endpoint,
+                        GlaDirection::Reverse => entry.dst == endpoint,
+                        GlaDirection::Undirected => entry.src == endpoint || entry.dst == endpoint,
+                    };
+                    (incident && entry.visible_at(as_of)).then_some((entry, block, row))
+                });
+                taken += 1;
             }
-            if let Some(b) = right.as_mut()
-                && b.peek().is_some_and(|&(x, _)| x == id)
-            {
-                b.next();
+            for &step in &ahead[..taken] {
+                control(SourceEvent::Work)?;
+                if let Some((entry, block, row)) = step {
+                    visit(entry, block, row, control)?;
+                }
             }
-            let Some((block, row)) = latest_statement(history, as_of) else {
-                continue;
-            };
-            let entry = &blocks[block].as_ref()[row];
-            let incident = match direction {
-                GlaDirection::Forward => entry.src == endpoint,
-                GlaDirection::Reverse => entry.dst == endpoint,
-                GlaDirection::Undirected => entry.src == endpoint || entry.dst == endpoint,
-            };
-            if incident && entry.visible_at(as_of) {
-                visit(entry, block, row, control)?;
+            if taken < CHUNK {
+                break;
             }
         }
         Ok(())
@@ -722,6 +1254,120 @@ pub(crate) struct PropertyEqualityIndex {
     candidates: EqualityCandidates,
     histories: IndexMap<VId, History>,
     work: u64,
+    flat: FlatRowCache,
+}
+
+/// Lookups a generation answers by descent before it flattens its history
+/// index: at least this many, and one per 64 identities. Flattening pokec's
+/// 1.6M identities took 18.6 ms, the cost of about 35k descents, so a
+/// generation never spends much more on flattening than it already spent
+/// descending (a commit makes a new generation), and a one-shot read never
+/// flattens.
+const FLAT_ROW_LOOKUPS: u32 = 4096;
+
+/// A generation's history index, flattened for row lookups (fgdb-61p1n).
+/// Resolving a row descends the identity tree (about 21 separately allocated
+/// nodes on pokec) and then the version tree, charging one Work per node:
+/// half of a resident pokec hub_degree. For each identity this keeps the
+/// number of nodes both descents visit when the cut is at or after its latest
+/// version, and that version's coordinates. Such a lookup is one hashed probe
+/// and charges exactly the descents' Work. An absent identity, an earlier
+/// cut or coordinates past u32 take the descents.
+#[derive(Debug)]
+struct FlatRows {
+    /// The history index these describe. They answer only for that index.
+    root: IndexMap<VId, History>,
+    /// Ascending by identity.
+    rows: Vec<(VId, FlatRow)>,
+    positions: crate::query::authorized::positions::VertexPositions,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FlatRow {
+    /// The version tree's greatest key: the winner for any cut at or after it.
+    latest: CommitSeq,
+    patch: u32,
+    row: u32,
+    /// Nodes the identity descent visits, this identity's own included.
+    path: u8,
+    /// Nodes the version descent visits for a cut at or after `latest`: the
+    /// version tree's right spine.
+    spine: u8,
+}
+
+impl FlatRows {
+    fn build(histories: &IndexMap<VId, History>) -> Option<Self> {
+        let mut rows = Vec::with_capacity(histories.len());
+        // In order, with each node's depth: an AVL tree under 2^32 nodes is
+        // under 47 levels, so a depth fits a byte.
+        let mut stack: Vec<(&IndexNode<VId, History>, u8)> = Vec::new();
+        let mut node = histories.0.as_deref();
+        let mut depth = 1_u8;
+        loop {
+            while let Some(current) = node {
+                stack.push((current, depth));
+                node = current.left.0.as_deref();
+                depth = depth.checked_add(1)?;
+            }
+            let Some((current, path)) = stack.pop() else {
+                break;
+            };
+            if let Some(row) = FlatRow::of(&current.value, path) {
+                rows.push((current.key, row));
+            }
+            node = current.right.0.as_deref();
+            depth = path.checked_add(1)?;
+        }
+        let positions = crate::query::authorized::positions::VertexPositions::build(&rows)?;
+        Some(Self {
+            root: histories.clone(),
+            rows,
+            positions,
+        })
+    }
+
+    fn describes(&self, histories: &IndexMap<VId, History>) -> bool {
+        match (&self.root.0, &histories.0) {
+            (Some(built), Some(current)) => std::sync::Arc::ptr_eq(built, current),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl FlatRow {
+    fn of(history: &History, path: u8) -> Option<Self> {
+        let mut spine = 0_u8;
+        let mut latest = None;
+        let mut node = history.0.as_deref();
+        while let Some(current) = node {
+            spine = spine.checked_add(1)?;
+            latest = Some(current.key);
+            node = current.right.0.as_deref();
+        }
+        let (latest, patch, row) = latest?;
+        Some(Self {
+            latest,
+            patch: u32::try_from(patch).ok()?,
+            row: u32::try_from(row).ok()?,
+            path,
+            spine,
+        })
+    }
+}
+
+/// A generation's flattened rows, built once it has answered enough lookups.
+/// A clone starts empty: an index is cloned to be changed.
+#[derive(Debug, Default)]
+struct FlatRowCache {
+    lookups: std::sync::atomic::AtomicU32,
+    rows: std::sync::OnceLock<Option<FlatRows>>,
+}
+
+impl Clone for FlatRowCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 impl PropertyEqualityIndex {
@@ -735,18 +1381,19 @@ impl PropertyEqualityIndex {
     }
 
     /// Build a generation from scratch bottom-up, with the same contents as
-    /// folding every row through `apply_added`.
+    /// folding every row through `apply_added`. Statements and property
+    /// values are each one sorted vector, grouped in place, as the adjacency
+    /// index's statements are: an ordered-map insert per row, and a shared
+    /// key allocated per row only to be dropped when the key existed, were
+    /// about a fifth of opening a compacted road-ny.
     pub(crate) fn build(patches: &[VertexPatchRows]) -> Self {
         let mut work = 0;
-        let mut histories = BTreeMap::<VId, Vec<(CommitSeq, usize, usize)>>::new();
-        let mut candidates = BTreeMap::<(PropertyKeyId, std::sync::Arc<[u8]>), Vec<VId>>::new();
+        let mut statements = Vec::with_capacity(patches.iter().map(|rows| rows.len()).sum());
+        let mut values = Vec::new();
         for (patch, rows) in patches.iter().enumerate() {
             for (row_at, row) in rows.iter().enumerate() {
                 work += 1;
-                histories
-                    .entry(row.vid)
-                    .or_default()
-                    .push((row.created_at, patch, row_at));
+                statements.push((row.vid, row.created_at, patch, row_at));
                 for (key, value) in &row.props {
                     work += 1;
                     if matches!(value, CanonicalScalar::Null) {
@@ -756,25 +1403,35 @@ impl PropertyEqualityIndex {
                         continue;
                     };
                     work += encoded.len() as u64;
-                    candidates
-                        .entry((*key, std::sync::Arc::from(encoded)))
-                        .or_default()
-                        .push(row.vid);
+                    values.push((*key, encoded, row.vid));
                 }
             }
         }
-        let histories = histories
-            .into_iter()
-            .map(|(vid, versions)| (vid, unit_set(versions, &mut work)))
+        // `unit_set` charges only the set it builds, so grouping order leaves
+        // every `work` count as the per-row maps gave it.
+        sort_by_leading_identity(&mut statements, |&(vid, ..)| vid.0);
+        let histories = statements
+            .chunk_by(|a, b| a.0 == b.0)
+            .map(|group| {
+                let versions = group.iter().map(|&(_, at, patch, row)| (at, patch, row));
+                (group[0].0, unit_set(versions.collect(), &mut work))
+            })
             .collect();
-        let candidates = candidates
-            .into_iter()
-            .map(|(key, vids)| (key, unit_set(vids, &mut work)))
+        drop(statements);
+        values.sort_unstable();
+        let candidates = values
+            .chunk_by(|a, b| a.0 == b.0 && a.1 == b.1)
+            .map(|group| {
+                let key = (group[0].0, std::sync::Arc::from(group[0].1.as_slice()));
+                let vids = group.iter().map(|&(_, _, vid)| vid).collect();
+                (key, unit_set(vids, &mut work))
+            })
             .collect();
         Self {
             candidates: IndexMap::from_sorted(candidates, &mut work),
             histories: IndexMap::from_sorted(histories, &mut work),
             work,
+            flat: FlatRowCache::default(),
         }
     }
 
@@ -809,6 +1466,7 @@ impl PropertyEqualityIndex {
 
     pub(crate) fn apply_added(&mut self, patches: &[VertexPatchRows], added_from: usize) -> u64 {
         self.work = 0;
+        self.flat = FlatRowCache::default();
         for (patch, rows) in patches.iter().enumerate().skip(added_from) {
             for (row_at, row) in rows.iter().enumerate() {
                 self.work += 1;
@@ -896,6 +1554,33 @@ impl PropertyEqualityIndex {
         Ok(())
     }
 
+    /// Lookups this generation answers by descent before it flattens.
+    fn flat_threshold(&self) -> u32 {
+        let per_identities = u32::try_from(self.histories.len() / 64).unwrap_or(u32::MAX);
+        FLAT_ROW_LOOKUPS.max(per_identities)
+    }
+
+    /// This generation's flattened rows, once it has answered its threshold
+    /// of lookups, and only while they describe its history index.
+    fn flat_rows(&self) -> Option<&FlatRows> {
+        let flat = match self.flat.rows.get() {
+            Some(flat) => flat,
+            None => {
+                let seen = self
+                    .flat
+                    .lookups
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if seen < self.flat_threshold() {
+                    return None;
+                }
+                self.flat
+                    .rows
+                    .get_or_init(|| FlatRows::build(&self.histories))
+            }
+        };
+        flat.as_ref().filter(|flat| flat.describes(&self.histories))
+    }
+
     /// Resolve a borrowed vertex row in O(log identities + log versions),
     /// charging every node on both search paths. Later patches win equal
     /// creation sequences exactly as in visit_vertices; a retirement winner
@@ -909,6 +1594,20 @@ impl PropertyEqualityIndex {
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<Option<&'a VertexRow>, E> {
         control(SourceEvent::Work)?;
+        if let Some(flat) = self.flat_rows()
+            && let Some(at) = flat.positions.find(&flat.rows, vid)
+            && flat.rows[at].1.latest <= as_of
+        {
+            let found = flat.rows[at].1;
+            // The descents' charges: each identity node on the search path,
+            // each version node on the right spine, then the row read.
+            for _ in 0..u32::from(found.path) + u32::from(found.spine) {
+                control(SourceEvent::Work)?;
+            }
+            control(SourceEvent::Work)?;
+            let row = &patches[found.patch as usize][found.row as usize];
+            return Ok(row.visible_at(as_of).then_some(row));
+        }
         let mut node = self.histories.0.as_deref();
         let mut history = None;
         while let Some(current) = node {
@@ -1126,17 +1825,19 @@ pub(crate) fn bound_vertices<'a, E, Row>(
         let Some(range) = prefix_range(key, text) else {
             return Ok(None);
         };
-        if !snapshot.property_index.prefix_types_are_safe(&range) {
+        if !snapshot.property_index().prefix_types_are_safe(&range) {
             return Ok(None);
         }
-        let candidates = snapshot.property_index.range_candidates(&range, control)?;
+        let candidates = snapshot
+            .property_index()
+            .range_candidates(&range, control)?;
         let mut rows = Vec::new();
         for vid in &candidates {
             control(SourceEvent::Work)?;
             control(SourceEvent::SnapshotRecord)?;
             if let Some(row) =
                 snapshot
-                    .property_index
+                    .property_index()
                     .visible_row(&snapshot.patches, *vid, as_of, control)?
             {
                 // Historical membership is only a candidate superset. Recheck
@@ -1200,7 +1901,7 @@ pub(crate) fn bound_vertices<'a, E, Row>(
         return range_vertices(snapshot, prefix, as_of, control);
     };
     let mut rows = Vec::new();
-    let candidates = snapshot.property_index.lookup(key, &value);
+    let candidates = snapshot.property_index().lookup(key, &value);
     for vid in candidates {
         control(SourceEvent::Work)?;
         // History candidates consume admission even when their visible row
@@ -1210,7 +1911,7 @@ pub(crate) fn bound_vertices<'a, E, Row>(
         // The visible row remains the authority for the complete predicate.
         if let Some(row) =
             snapshot
-                .property_index
+                .property_index()
                 .visible_row(&snapshot.patches, *vid, as_of, control)?
             && bound_predicates
                 .iter()
@@ -1276,14 +1977,16 @@ fn range_vertices<'a, E>(
     let Some(range) = range else {
         return Ok(None);
     };
-    let candidates = snapshot.property_index.range_candidates(&range, control)?;
+    let candidates = snapshot
+        .property_index()
+        .range_candidates(&range, control)?;
     let mut rows = Vec::new();
     for vid in &candidates {
         control(SourceEvent::Work)?;
         control(SourceEvent::SnapshotRecord)?;
         if let Some(row) =
             snapshot
-                .property_index
+                .property_index()
                 .visible_row(&snapshot.patches, *vid, as_of, control)?
             && predicates().all(|predicate| predicate.matches(&row.labels, &row.props))
         {
@@ -1429,14 +2132,25 @@ mod indexed_tests {
             "unbalanced at {:?}",
             node.key
         );
-        assert_eq!(node.height, 1 + left_height.max(right_height));
-        assert_eq!(node.len, 1 + left_len + right_len);
+        assert_eq!(u16::from(node.height), 1 + left_height.max(right_height));
+        assert_eq!(node.len as usize, 1 + left_len + right_len);
         let keys: Vec<&K> = map.iter().map(|(key, _)| key).collect();
         assert!(
             keys.windows(2).all(|pair| pair[0] < pair[1]),
             "keys out of order"
         );
-        (node.height, node.len)
+        (u16::from(node.height), node.len as usize)
+    }
+
+    /// Each node kind of the adjacency and property indexes fits a 64-byte
+    /// allocation with its two Arc counts.
+    #[test]
+    fn index_nodes_fit_the_64_byte_class() {
+        let arc = 2 * std::mem::size_of::<usize>();
+        assert!(arc + std::mem::size_of::<IndexNode<EId, History>>() <= 64);
+        assert!(arc + std::mem::size_of::<IndexNode<VId, Incidence>>() <= 64);
+        assert!(arc + std::mem::size_of::<IndexNode<(CommitSeq, usize, usize), ()>>() <= 64);
+        assert!(arc + std::mem::size_of::<IndexNode<VId, ()>>() <= 64);
     }
 
     fn assert_nested_avl<
@@ -1449,6 +2163,38 @@ mod indexed_tests {
         assert_avl(map);
         for (_, inner) in map.iter() {
             assert_avl(inner);
+        }
+    }
+
+    /// A built generation is all flat base: identities, each history and
+    /// each face's endpoints and members strictly ascending, ranges exact.
+    fn assert_flat(index: &AdjacencyIndex) {
+        assert_eq!(index.histories.len(), 0, "a build holds no overlay");
+        assert_eq!(index.outgoing.len() + index.incoming.len(), 0);
+        let base = &index.base;
+        assert!(base.ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(base.starts.len(), base.ids.len() + 1);
+        assert_eq!(base.starts.last().copied(), Some(base.statements.len()));
+        for at in 0..base.ids.len() {
+            let history = base.history(at);
+            assert!(!history.is_empty());
+            assert!(history.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+        for face in [&base.outgoing, &base.incoming] {
+            assert!(face.vertices.windows(2).all(|pair| pair[0] < pair[1]));
+            assert_eq!(face.starts.len(), face.vertices.len() + 1);
+            assert_eq!(face.starts.last().copied(), Some(face.ids.len()));
+            assert_eq!(face.ids.len(), face.ranges.len());
+            for at in 0..face.vertices.len() {
+                let (ids, ranges) = face.members_at(at);
+                assert!(!ids.is_empty());
+                assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+                // Each member carries exactly its identity's history.
+                for (&eid, &range) in ids.iter().zip(ranges) {
+                    let position = base.position(eid).expect("a member is an identity");
+                    assert_eq!(base.statements_in(range), base.history(position));
+                }
+            }
         }
     }
 
@@ -1510,9 +2256,12 @@ mod indexed_tests {
                 built.equivalent(&folded),
                 "seed {seed}: adjacency build != fold"
             );
-            assert_nested_avl(&built.histories);
-            assert_nested_avl(&built.outgoing);
-            assert_nested_avl(&built.incoming);
+            assert_flat(&built);
+            // A fold from empty is all overlay, as the persistent trees were.
+            assert_eq!(folded.base.ids.len(), 0);
+            assert_nested_avl(&folded.histories);
+            assert_nested_avl(&folded.outgoing);
+            assert_nested_avl(&folded.incoming);
             let last = blocks.len() - 1;
             let extended = AdjacencyIndex::build(&blocks[..last]).extend(&blocks, last);
             assert!(
@@ -1520,6 +2269,8 @@ mod indexed_tests {
                 "seed {seed}: extend of a bulk build"
             );
             assert_nested_avl(&extended.histories);
+            assert_nested_avl(&extended.outgoing);
+            assert_nested_avl(&extended.incoming);
 
             let built = PropertyEqualityIndex::build(&patches);
             let mut folded = PropertyEqualityIndex::build(&[]);
@@ -1539,7 +2290,79 @@ mod indexed_tests {
                 "seed {seed}: extend of a bulk build"
             );
             assert_nested_avl(&extended.candidates);
+            // A writer's value-free vertex histories are the index's.
+            let vertices = StatementHistoryIndex::vertices(&patches);
+            assert!(
+                vertices.0.len() == built.histories.len()
+                    && vertices
+                        .0
+                        .iter()
+                        .zip(built.histories.iter())
+                        .all(|((a, ah), (b, bh))| a == b && ah.iter().eq(bh.iter())),
+                "seed {seed}: value-free vertex histories"
+            );
+            assert_nested_avl(&vertices.0);
         }
+    }
+
+    /// A generation large enough that its statements and both faces take the
+    /// identity bucket sort (more than 4,096 of each), with identities as
+    /// wide as a keyed permutation's, restatements, retirements and shared
+    /// endpoints, builds exactly what folding its blocks one at a time
+    /// builds: each face's endpoints, read per pass in block order, land on
+    /// their own identity's statement range.
+    #[test]
+    fn large_bulk_builds_with_wide_identities_equal_the_incremental_fold() {
+        let mut state = 0x0bad_5eed_0000_0001_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut wide = move || (u128::from(next()) << 64) | u128::from(next());
+        let vertices: Vec<VId> = (0..900).map(|_| VId(wide())).collect();
+        let edges: Vec<(EId, VId, VId, RelationId)> = (0..6_000)
+            .map(|_| {
+                let draw = wide();
+                (
+                    EId(wide()),
+                    vertices[(draw % 900) as usize],
+                    vertices[((draw >> 20) % 900) as usize],
+                    RelationId(1 + ((draw >> 40) % 2) as u64),
+                )
+            })
+            .collect();
+        let mut blocks = Vec::new();
+        for seq in 1..=4_u64 {
+            let mut block = Vec::new();
+            for &(eid, src, dst, relation) in &edges {
+                let draw = wide();
+                // Every edge first, then about a quarter restated per block.
+                if seq == 1 || draw % 4 == 0 {
+                    block.push(AdjacencyEntry {
+                        src,
+                        dst,
+                        relation,
+                        eid,
+                        created_at: CommitSeq(seq),
+                        retired_at: ((draw >> 8) % 9 == 0).then_some(CommitSeq(seq)),
+                    });
+                }
+            }
+            blocks.push(block);
+        }
+        let statements: usize = blocks.iter().map(Vec::len).sum();
+        assert!(statements > 9_000, "{statements}");
+        let built = AdjacencyIndex::build(&blocks);
+        let mut folded = AdjacencyIndex::build(&[] as &[Vec<AdjacencyEntry>]);
+        for carried in 0..blocks.len() {
+            folded = folded.extend(&blocks[..=carried], carried);
+        }
+        assert!(built.equivalent(&folded), "large adjacency build != fold");
+        assert_flat(&built);
+        assert_eq!(built.base.ids.len(), 6_000);
+        assert!(built.base.outgoing.ids.len() > 4_096 && built.base.incoming.ids.len() > 4_096);
     }
 
     /// A visit reads each incident identity's history from its face entry. It
@@ -1556,17 +2379,18 @@ mod indexed_tests {
             direction: GlaDirection,
             as_of: CommitSeq,
         ) -> Vec<(EId, usize, usize)> {
-            let keys = |face: &IndexMap<VId, Incidence>| -> Vec<EId> {
-                face.get(&endpoint)
-                    .map(|set| set.iter().map(|(eid, _)| *eid).collect())
-                    .unwrap_or_default()
+            let keys = |face: Face| -> Vec<EId> {
+                index
+                    .face_entries(face, endpoint)
+                    .map(|(eid, _)| eid)
+                    .collect()
             };
             let mut ids = match direction {
-                GlaDirection::Forward => keys(&index.outgoing),
-                GlaDirection::Reverse => keys(&index.incoming),
+                GlaDirection::Forward => keys(Face::Outgoing),
+                GlaDirection::Reverse => keys(Face::Incoming),
                 GlaDirection::Undirected => {
-                    let mut both = keys(&index.outgoing);
-                    both.extend(keys(&index.incoming));
+                    let mut both = keys(Face::Outgoing);
+                    both.extend(keys(Face::Incoming));
                     both
                 }
             };
@@ -1574,7 +2398,8 @@ mod indexed_tests {
             ids.dedup();
             ids.into_iter()
                 .filter_map(|eid| {
-                    let (block, row) = latest_statement(index.histories.get(&eid)?, as_of)?;
+                    // The identity's own history, not the one a face carries.
+                    let (block, row) = index.history(eid)?.latest(as_of)?;
                     let entry = &blocks[block][row];
                     let incident = match direction {
                         GlaDirection::Forward => entry.src == endpoint,
@@ -1615,15 +2440,21 @@ mod indexed_tests {
                 folded = folded.extend(&blocks[..=carried], carried);
             }
             assert!(built.faces_carry_histories() && folded.faces_carry_histories());
-            for (_, history) in built.histories.iter() {
+            // A flat base with later blocks in its overlay: identities the
+            // overlay restates are in both, and the overlay's history wins.
+            let mixed = AdjacencyIndex::build(&blocks[..5]).extend(&blocks, 5);
+            assert!(!mixed.base.ids.is_empty() && mixed.histories.len() > 0);
+            assert!(mixed.faces_carry_histories());
+            for (_, history) in built.identities() {
                 let mut ends: Vec<_> = history
-                    .iter()
-                    .map(|(&(_, block, row), ())| (blocks[block][row].src, blocks[block][row].dst))
+                    .coordinates()
+                    .into_iter()
+                    .map(|(_, block, row)| (blocks[block][row].src, blocks[block][row].dst))
                     .collect();
                 ends.dedup();
                 changed_endpoints += usize::from(ends.len() > 1);
             }
-            for index in [&built, &folded] {
+            for index in [&built, &folded, &mixed] {
                 for vid in 0..8 {
                     for direction in [
                         GlaDirection::Forward,
@@ -1733,6 +2564,171 @@ mod indexed_tests {
             ever_nonempty |= !visible.is_empty();
         }
         assert!(ever_nonempty);
+    }
+
+    /// A flattened lookup answers and charges exactly as the two descents
+    /// (fgdb-61p1n): every identity, absent ones included, at every cut
+    /// around each version, over histories with retirements, superseding
+    /// versions and equal-sequence copies in later patches, before and after
+    /// an extension.
+    #[test]
+    fn flattened_row_lookups_answer_and_charge_as_the_descents() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut random = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let patch = |rows: &[VertexRow]| {
+            let bytes = fgdb_strata::vertex::encode_patch(rows).unwrap();
+            fgdb_strata::vertex::decode_patch(&bytes).unwrap()
+        };
+        // Patch p commits at sequence 3p + 1: creations, later versions and
+        // retirement copies of up to 400 identities (0..400, multiples of 7
+        // never written).
+        let mut patches = Vec::new();
+        let mut live: BTreeMap<u64, u64> = BTreeMap::new();
+        for at in 0..12_u64 {
+            let seq = 3 * at + 1;
+            let mut rows = Vec::new();
+            let mut touched = std::collections::BTreeSet::new();
+            for _ in 0..random(120) + 1 {
+                let vid = random(400);
+                if vid % 7 == 0 || !touched.insert(vid) {
+                    continue;
+                }
+                let row = |created: u64, retired: Option<u64>| VertexRow {
+                    vid: VId(u128::from(vid)),
+                    birth_ordinal: vid,
+                    created_at: CommitSeq(created),
+                    retired_at: retired.map(CommitSeq),
+                    labels: vec![],
+                    props: vec![],
+                };
+                match (live.get(&vid).copied(), random(3)) {
+                    (None, _) => {
+                        rows.push(row(seq, None));
+                        live.insert(vid, seq);
+                    }
+                    // Retire the live version: a copy at its creation sequence.
+                    (Some(created), 0) => {
+                        rows.push(row(created, Some(seq)));
+                        live.remove(&vid);
+                    }
+                    // Supersede it: retire the copy and create a new version.
+                    (Some(created), _) => {
+                        rows.push(row(created, Some(seq)));
+                        rows.push(row(seq, None));
+                        live.insert(vid, seq);
+                    }
+                }
+            }
+            rows.sort_by_key(|row| (row.vid, row.created_at));
+            patches.push(patch(&rows));
+        }
+        let charged = |index: &PropertyEqualityIndex, patches: &[VertexPatchRows], vid, at| {
+            let mut work = 0_u64;
+            let row = index
+                .visible_row(patches, VId(vid), CommitSeq(at), &mut |event| {
+                    assert_eq!(event, SourceEvent::Work);
+                    work += 1;
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+            (row.map(|row| row as *const VertexRow), work)
+        };
+        // Two indexes of one shape: one always descends, the other answers
+        // from its rows.
+        let compare = |patches: &[VertexPatchRows],
+                       descending: &PropertyEqualityIndex,
+                       flat: &PropertyEqualityIndex| {
+            descending.flat.rows.set(None).unwrap();
+            flat.flat
+                .rows
+                .set(FlatRows::build(&flat.histories))
+                .unwrap();
+            let rows = flat.flat_rows().expect("flattened");
+            let mut fast = 0;
+            for vid in 0..410_u64 {
+                for at in 0..=3 * patches.len() as u64 + 2 {
+                    let expected = charged(descending, patches, u128::from(vid), at);
+                    let actual = charged(flat, patches, u128::from(vid), at);
+                    assert_eq!(
+                        (expected.0.is_some(), expected.1),
+                        (actual.0.is_some(), actual.1),
+                        "vid {vid} at {at}"
+                    );
+                    assert_eq!(expected.0, actual.0, "vid {vid} at {at}");
+                    fast += usize::from(
+                        rows.positions
+                            .find(&rows.rows, VId(u128::from(vid)))
+                            .is_some_and(|row| rows.rows[row].1.latest <= CommitSeq(at)),
+                    );
+                }
+            }
+            fast
+        };
+        let first = patches.len() / 2;
+        let built = |patches| PropertyEqualityIndex::build(patches);
+        let early = built(&patches[..first]);
+        let fast_early = compare(&patches[..first], &early, &built(&patches[..first]));
+        let all = built(&patches);
+        let fast_all = compare(&patches, &all, &built(&patches));
+        // An extension starts unflattened, and rows built for the index it
+        // extended do not describe it.
+        let extended = early.extend(&patches, first);
+        assert!(extended.flat.rows.get().is_none());
+        let stale = FlatRows::build(&early.histories).unwrap();
+        assert!(stale.describes(&early.histories) && !stale.describes(&extended.histories));
+        // Inserts shaped the extension's trees, so its descents charge for
+        // that shape; flattened, it charges the same, and it answers as an
+        // index built from every patch.
+        let fast_extended = compare(&patches, &extended, &early.extend(&patches, first));
+        assert!(
+            fast_early > 1_000 && fast_all > 2_000 && fast_extended > 2_000,
+            "{fast_early} {fast_all} {fast_extended}"
+        );
+        for vid in 0..410_u128 {
+            for at in 0..=3 * patches.len() as u64 + 2 {
+                assert_eq!(
+                    charged(&extended, &patches, vid, at).0,
+                    charged(&all, &patches, vid, at).0
+                );
+            }
+        }
+    }
+
+    /// A generation answers FLAT_ROW_LOOKUPS lookups by descent, then
+    /// flattens once and answers from its rows.
+    #[test]
+    fn a_generation_flattens_after_its_lookup_threshold() {
+        let rows: Vec<VertexRow> = (0..64_u64)
+            .map(|vid| VertexRow {
+                vid: VId(u128::from(vid)),
+                birth_ordinal: vid,
+                created_at: CommitSeq(1),
+                retired_at: None,
+                labels: vec![],
+                props: vec![],
+            })
+            .collect();
+        let bytes = fgdb_strata::vertex::encode_patch(&rows).unwrap();
+        let patches = vec![fgdb_strata::vertex::decode_patch(&bytes).unwrap()];
+        let index = PropertyEqualityIndex::build(&patches);
+        let look = |times: u32| {
+            for at in 0..times {
+                let vid = VId(u128::from(at % 64));
+                let row = index
+                    .visible_row(&patches, vid, CommitSeq(1), &mut |_| Ok::<_, ()>(()))
+                    .unwrap();
+                assert_eq!(row.map(|row| row.vid), Some(vid));
+            }
+        };
+        look(FLAT_ROW_LOOKUPS);
+        assert!(index.flat.rows.get().is_none());
+        look(1);
+        assert!(index.flat_rows().is_some_and(|flat| flat.rows.len() == 64));
     }
 }
 
@@ -2059,7 +3055,7 @@ pub(crate) fn find_vertex<'a, E>(
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<&'a VertexRow>, E> {
     snapshot
-        .property_index
+        .property_index()
         .visible_row(&snapshot.patches, vid, as_of, control)
 }
 
@@ -2164,6 +3160,40 @@ pub(crate) fn bound_edges<'a, E, Row>(
         (None, Some(hops)) => hops,
         (None, None) => return Ok(None),
     };
+    // A directed lookup reaches each edge from one endpoint only, and a visit
+    // yields each incident identity once, so distinct roots reach each edge at
+    // most once. With no hop to follow, nothing reads the frontier either: a
+    // label root (every N vertex for (:N)-[r:E]->(:N)) made this an ordered
+    // map insert per edge and two set probes per endpoint, ~45% of a pokec
+    // count. The edges are sorted into the order the map gave.
+    if hops == 0
+        && lookup_direction != GlaDirection::Undirected
+        && roots.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        let mut edges = Vec::new();
+        for root in roots {
+            snapshot.adjacency_index().visit(
+                &snapshot.blocks,
+                root,
+                lookup_direction,
+                as_of,
+                control,
+                |entry, block, row, control| {
+                    if relation.matches(entry.relation) {
+                        control(SourceEvent::SnapshotRecord)?;
+                        control(SourceEvent::ScratchEntry)?;
+                        edges.push((
+                            (entry.eid, entry.src, entry.relation, entry.dst),
+                            edge_properties_at(&snapshot.block_props, block, row),
+                        ));
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        edges.sort_unstable_by_key(|((eid, ..), _)| *eid);
+        return Ok(Some(edges));
+    }
     for root in roots {
         snapshot.adjacency_index().visit(
             &snapshot.blocks,
@@ -2237,8 +3267,9 @@ pub(crate) fn bound_edges<'a, E, Row>(
     Ok(Some(selected.into_values().collect()))
 }
 
-/// A bound closure's admitted edges and every vertex its slots can bind.
-type Closure<'a> = (Vec<BorrowedEdge<'a>>, std::collections::BTreeSet<VId>);
+/// A bound closure's admitted edges and every vertex its slots can bind,
+/// ascending and distinct (the order an ordered set iterates them).
+type Closure<'a> = (Vec<BorrowedEdge<'a>>, Vec<VId>);
 
 /// The VIds a bound root can take: served from the property index when one
 /// root predicate can seek it, so a bound hub costs its candidates, not a
@@ -2456,8 +3487,12 @@ mod closure_fits_tests {
 ///
 /// Before each level the projected closure (see [`closure_fits`]) must stay
 /// within half the snapshot's edges, about where a sequential scan becomes
-/// cheaper (fgdbd measurements: a closure costs 1.6-2.3x a scanned record);
-/// otherwise None leaves the caller's complete admission.
+/// cheaper (fgdbd measurements: a closure costs 1.6-2.3x a scanned record),
+/// or the closure must actually stay within a sixteenth of that: a walk the
+/// projection overestimates still runs while what it admits is small, and a
+/// large one stops after at most that much. Otherwise None leaves the caller's
+/// complete admission. A citation graph's 13-hop reach from a 770-degree hub
+/// projects past the whole graph but holds 1.3% of it (fgdb-61p1n).
 fn slot_closure<'a, E>(
     snapshot: &'a Snapshot,
     as_of: CommitSeq,
@@ -2470,21 +3505,23 @@ fn slot_closure<'a, E>(
     steps: &[BoundStep<'_>],
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<Closure<'a>>, E> {
-    // Probed sets and maps: every frontier is sorted before it is walked and
-    // the selected edges are sorted by EId once, so visit order, admission
-    // order and every charge are those of ordered sets.
+    // Probed sets and maps, never iterated into an order: every frontier is
+    // sorted before it is walked and the selected edges are sorted by EId
+    // once, so visit order, admission order and every charge are those of
+    // ordered sets.
     use fgdb_gql::id_hash::{IdMap, IdSet};
     let index = snapshot.adjacency_index();
     let edges = index.edge_count();
-    let mean = (edges / snapshot.property_index.vertex_count().max(1)).max(1);
+    let mean = (edges / snapshot.property_index().vertex_count().max(1)).max(1);
     let cap = (edges / 2).max(4096);
+    let trial = (cap / 16).max(4096);
     let later = |from: usize| steps[from..].iter().map(step_hops).sum::<u64>();
     let probe = |frontier: &[VId],
                  direction: fgdb_gql::algebra::GlaDirection,
                  admitted: usize,
                  remaining: u64,
                  control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
-     -> Result<bool, E> {
+     -> Result<Option<usize>, E> {
         let mut incidences = 0_usize;
         for &vertex in frontier {
             control(SourceEvent::Work)?;
@@ -2494,43 +3531,74 @@ fn slot_closure<'a, E>(
         // no faster than the snapshot's: a hub root projects at the snapshot
         // mean, and an unrelated dense component never inflates a sparse walk.
         let growth = (incidences / frontier.len().max(1)).clamp(1, mean);
-        Ok(closure_fits(admitted, incidences, remaining, growth, cap))
+        Ok((closure_fits(admitted, incidences, remaining, growth, cap)
+            || admitted.saturating_add(incidences) <= trial)
+            .then_some(incidences))
     };
     let width = if root.is_some() { 2 } else { 1 };
-    let mut selected = IdMap::<EId, BorrowedEdge<'a>>::default();
+    // The admitted edges, each once, in admission order. The root lookup and
+    // each step expand a vertex at most once, and a directed visit yields an
+    // edge only from its own end. So when they all have one relation and one
+    // direction, an edge is met again only from a vertex an earlier one
+    // expanded, which admitted every matching edge of it then: such a visit
+    // only records far ends. An undirected expansion, or expansions that
+    // differ, can meet an edge again any other way, so those closures keep
+    // the identities they admitted. Pushing instead of keeping every edge in
+    // a map by identity was a sixth of a pokec three-hop reach, and the
+    // identity set a fifth of a pokec two-hop (fgdb-61p1n).
+    let mut selected: Vec<BorrowedEdge<'a>> = Vec::new();
+    let mut expansions = root
+        .map(|(relation, direction, _)| (relation, direction))
+        .into_iter()
+        .chain(steps.iter().map(|step| (step.relation, step.direction)));
+    let uniform = expansions.next().is_none_or(|(relation, direction)| {
+        direction != fgdb_gql::algebra::GlaDirection::Undirected
+            && expansions.all(|other| other == (relation, direction))
+    });
+    let mut seen = (!uniform).then(IdSet::<EId>::default);
+    // The vertices earlier expansions of a uniform closure expanded (a root
+    // lookup's own roots included, should one repeat).
+    let mut expanded_earlier =
+        (uniform && (root.is_some() || steps.len() > 1)).then(IdSet::<VId>::default);
     let mut slots = vec![IdSet::<VId>::default(); width + steps.len()];
-    let admit = |entry: &AdjacencyEntry,
-                 block: usize,
-                 row: usize,
-                 selected: &mut IdMap<EId, BorrowedEdge<'a>>,
-                 target: &mut IdSet<VId>,
-                 far: VId,
-                 control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
+    // An edge an expansion meets is admitted unless it already was; then
+    // its far end joins the expansion's slot, and then, for a walk, its
+    // frontier. Each is one scratch entry when new, in that order.
+    let select = |entry: &AdjacencyEntry,
+                  block: usize,
+                  row: usize,
+                  selected: &mut Vec<BorrowedEdge<'a>>,
+                  seen: &mut Option<IdSet<EId>>,
+                  control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
      -> Result<(), E> {
-        if let std::collections::hash_map::Entry::Vacant(slot) = selected.entry(entry.eid) {
+        if seen.as_mut().is_none_or(|seen| seen.insert(entry.eid)) {
             // Its SnapshotRecord is charged when the closure commits.
             control(SourceEvent::ScratchEntry)?;
-            slot.insert((
+            selected.push((
                 (entry.eid, entry.src, entry.relation, entry.dst),
                 edge_properties_at(&snapshot.block_props, block, row),
             ));
         }
-        if !target.contains(&far) {
-            control(SourceEvent::ScratchEntry)?;
-            target.insert(far);
-        }
         Ok(())
     };
+    // A walk keeps its slot and the vertices it expanded in one map of
+    // marks, so each edge it crosses probes once, not once per set: half of
+    // the probes that were a seventh of a pokec three-hop reach.
+    const TARGET: u8 = 1;
+    const EXPANDED: u8 = 2;
     // The roots were found (and are held) by the caller, uncharged there as
     // in the superset closure; this copy only lets a step expand from them.
     let root_slot = root.map_or(0, |(_, _, slot)| slot);
     slots[root_slot].extend(roots.iter().copied());
     if let Some((relation, lookup_direction, root_slot)) = root {
-        if !probe(&roots, lookup_direction, 0, later(0), control)? {
+        if probe(&roots, lookup_direction, 0, later(0), control)?.is_none() {
             return Ok(None);
         }
         for root in roots {
             let target = &mut slots[1 - root_slot];
+            let repeat = expanded_earlier
+                .as_mut()
+                .is_some_and(|earlier| !earlier.insert(root));
             index.visit(
                 &snapshot.blocks,
                 root,
@@ -2540,7 +3608,12 @@ fn slot_closure<'a, E>(
                 |entry, block, row, control| {
                     if relation.matches(entry.relation) {
                         let far = far_endpoint(entry, root, lookup_direction);
-                        admit(entry, block, row, &mut selected, target, far, control)?;
+                        if !repeat {
+                            select(entry, block, row, &mut selected, &mut seen, control)?;
+                        }
+                        if target.insert(far) {
+                            control(SourceEvent::ScratchEntry)?;
+                        }
                     }
                     Ok(())
                 },
@@ -2551,17 +3624,19 @@ fn slot_closure<'a, E>(
         let mut near = slots[step.source].iter().copied().collect::<Vec<_>>();
         near.sort_unstable();
         let (zero, maximum) = step.walk.unwrap_or((false, 1));
+        // An Expand's slot, or a walk's marks. A walk marks the vertices it
+        // expanded too: one that returns to a vertex reuses the edges it
+        // admitted when it first left it.
         let mut target = IdSet::default();
-        // Vertices already expanded by this step: a walk that returns to one
-        // reuses edges this step admitted when it first left it.
-        let mut expanded = IdSet::default();
+        let mut marks = IdMap::<VId, u8>::default();
         if step.walk.is_some() {
             for &vertex in &near {
+                let mark = marks.entry(vertex).or_insert(0);
                 control(SourceEvent::ScratchEntry)?;
-                expanded.insert(vertex);
-                if zero && !target.contains(&vertex) {
+                *mark |= EXPANDED;
+                if zero && *mark & TARGET == 0 {
                     control(SourceEvent::ScratchEntry)?;
-                    target.insert(vertex);
+                    *mark |= TARGET;
                 }
             }
         }
@@ -2570,18 +3645,31 @@ fn slot_closure<'a, E>(
         while depth < maximum && !frontier.is_empty() {
             depth += 1;
             let remaining = u64::from(maximum - depth) + later(at + 1);
-            if !probe(
+            let Some(incidences) = probe(
                 &frontier,
                 step.direction,
                 selected.len(),
                 remaining,
                 control,
-            )? {
+            )?
+            else {
                 return Ok(None);
+            };
+            // The level meets at most its frontier's incidences: room for
+            // them up front, so neither the edges nor an Expand's endpoints
+            // regrow as the level fills (a pokec two-hop's 410k).
+            selected.reserve(incidences);
+            if step.walk.is_none() {
+                target.reserve(incidences);
             }
             let mut next = Vec::new();
             for vertex in frontier {
                 control(SourceEvent::Work)?;
+                // Every matching edge of a vertex an earlier step expanded
+                // is already admitted.
+                let repeat = expanded_earlier
+                    .as_mut()
+                    .is_some_and(|earlier| !earlier.insert(vertex));
                 index.visit(
                     &snapshot.blocks,
                     vertex,
@@ -2591,11 +3679,24 @@ fn slot_closure<'a, E>(
                     |entry, block, row, control| {
                         if step.relation.matches(entry.relation) {
                             let far = far_endpoint(entry, vertex, step.direction);
-                            admit(entry, block, row, &mut selected, &mut target, far, control)?;
-                            if step.walk.is_some() && !expanded.contains(&far) {
-                                control(SourceEvent::ScratchEntry)?;
-                                expanded.insert(far);
-                                next.push(far);
+                            if !repeat {
+                                select(entry, block, row, &mut selected, &mut seen, control)?;
+                            }
+                            if step.walk.is_none() {
+                                if target.insert(far) {
+                                    control(SourceEvent::ScratchEntry)?;
+                                }
+                            } else {
+                                let mark = marks.entry(far).or_insert(0);
+                                if *mark & TARGET == 0 {
+                                    *mark |= TARGET;
+                                    control(SourceEvent::ScratchEntry)?;
+                                }
+                                if *mark & EXPANDED == 0 {
+                                    *mark |= EXPANDED;
+                                    control(SourceEvent::ScratchEntry)?;
+                                    next.push(far);
+                                }
                             }
                         }
                         Ok(())
@@ -2604,7 +3705,15 @@ fn slot_closure<'a, E>(
             }
             frontier = next;
         }
-        slots[width + at] = target;
+        slots[width + at] = if step.walk.is_none() {
+            target
+        } else {
+            marks
+                .into_iter()
+                .filter(|&(_, mark)| mark & TARGET != 0)
+                .map(|(vertex, _)| vertex)
+                .collect()
+        };
     }
     // Records are charged once the closure commits, so a fallback after an
     // admitted level never counts records the tables do not hold: the budget
@@ -2613,9 +3722,18 @@ fn slot_closure<'a, E>(
     for _ in 0..selected.len() {
         control(SourceEvent::SnapshotRecord)?;
     }
-    let reached = slots.into_iter().flatten().collect();
-    let mut selected: Vec<_> = selected.into_values().collect();
-    selected.sort_unstable_by_key(|((eid, ..), _)| *eid);
+    let mut reached: Vec<VId> = slots.into_iter().flatten().collect();
+    fgdb_gql::id_sort::sort_by_leading_identity(&mut reached, |vid| vid.0, <[_]>::sort_unstable);
+    reached.dedup();
+    fgdb_gql::id_sort::sort_by_leading_identity(
+        &mut selected,
+        |((eid, ..), _)| eid.0,
+        |edges| edges.sort_unstable_by_key(|((eid, ..), _)| *eid),
+    );
+    debug_assert!(
+        selected.windows(2).all(|pair| pair[0].0.0 != pair[1].0.0),
+        "a closure admitted an edge twice"
+    );
     Ok(Some((selected, reached)))
 }
 
@@ -2657,7 +3775,205 @@ pub(crate) fn bound_vertex_closure<'a, E, Row>(
     let Some(roots) = root_candidates(snapshot, predicates, as_of, indexed_only, control)? else {
         return Ok(None);
     };
+    if let (&[source], Some(shortest)) = (roots.as_slice(), bound_shortest(prefix)) {
+        let targets = root_candidates(snapshot, shortest.targets, as_of, true, control)?;
+        if let Some(&[target]) = targets.as_deref()
+            && source != target
+        {
+            return shortest_closure(snapshot, as_of, source, target, &shortest, control);
+        }
+    }
     slot_closure(snapshot, as_of, None, roots, &steps, control)
+}
+
+/// A vertex-rooted plan's one SHORTEST walk from the root (slot 0) to the
+/// endpoint (slot 1) a Select names.
+struct BoundShortest<'p> {
+    relation: &'p fgdb_gql::algebra::EdgeRelation,
+    direction: fgdb_gql::algebra::GlaDirection,
+    maximum: u32,
+    targets: &'p [fgdb_gql::algebra::VertexPredicate],
+}
+
+/// The plan's SHORTEST walk, when it is the only expansion: ANY or ALL
+/// SHORTEST, directed, with a lower bound of at most one, and a Select on
+/// its endpoint. The caller's bound_edge_steps has checked that every other
+/// operator only filters, captures or projects.
+fn bound_shortest(prefix: &[fgdb_gql::algebra::GlaOperator]) -> Option<BoundShortest<'_>> {
+    use fgdb_gql::algebra::{GlaDirection, GlaOperator, GraphWalkSearch};
+    let mut walks = prefix.iter().filter(|op| {
+        matches!(
+            op,
+            GlaOperator::Expand { .. } | GlaOperator::VarLengthExpand { .. }
+        )
+    });
+    let Some(GlaOperator::VarLengthExpand {
+        source,
+        relation,
+        direction,
+        bounds,
+        search,
+    }) = walks.next()
+    else {
+        return None;
+    };
+    if walks.next().is_some()
+        || source.ordinal() != 0
+        || bounds.minimum() > 1
+        || bounds.minimum() > bounds.maximum()
+        || *direction == GlaDirection::Undirected
+        || !matches!(
+            search,
+            GraphWalkSearch::AnyShortest | GraphWalkSearch::AllShortest
+        )
+    {
+        return None;
+    }
+    let targets = prefix.iter().find_map(|op| match op {
+        GlaOperator::Select { slot, predicates } if slot.ordinal() == 1 => Some(predicates),
+        _ => None,
+    })?;
+    Some(BoundShortest {
+        relation,
+        direction: *direction,
+        maximum: bounds.maximum(),
+        targets,
+    })
+}
+
+/// The closure of a SHORTEST walk between one bound source and one bound
+/// target (fgdb-61p1n): breadth-first from both ends, a whole level at a
+/// time on the side whose frontier has fewer incidences, until the levels
+/// meet. A gauntlet target is the vertex farthest from its hub, so the
+/// source's own closure held nearly everything the source reaches: a pokec
+/// SHORTEST took 7.1 s, and takes 38 ms this way.
+///
+/// It admits every edge either search crossed: the out-edges of the forward
+/// levels it expanded and the in-edges of the backward ones. Say the
+/// searches first meet once the forward one has reached level a and the
+/// backward one level b. Before that last level their reached sets were
+/// disjoint, so no walk is shorter than a + b (a shorter one has a vertex
+/// both had reached), and a + b is the shortest length. On a shortest walk
+/// the vertex at position i is i hops from the source and a + b - i from
+/// the target. So each of its first a edges leaves a vertex the forward
+/// search expanded, and each later edge enters one the backward search
+/// expanded: every shortest walk lies in the closure, and none shorter can,
+/// since the closure holds only real edges. A SHORTEST over it finds the
+/// same walks to the target, and ANY chooses the same one; the
+/// bound_shortest_closure law compares both against the source's closure.
+/// Other endpoints may get other walks, but the target's Select drops them.
+/// When the searches cannot meet within the bound there is no walk, and the
+/// closure holds the two endpoints only. A search that grows past the
+/// closure cap leaves the caller's complete admission, as slot_closure does.
+fn shortest_closure<'a, E>(
+    snapshot: &'a Snapshot,
+    as_of: CommitSeq,
+    source: VId,
+    target: VId,
+    shortest: &BoundShortest<'_>,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<Closure<'a>>, E> {
+    use fgdb_gql::algebra::GlaDirection;
+    use fgdb_gql::id_hash::IdSet;
+    let backward = match shortest.direction {
+        GlaDirection::Forward => GlaDirection::Reverse,
+        GlaDirection::Reverse => GlaDirection::Forward,
+        GlaDirection::Undirected => return Ok(None),
+    };
+    let index = snapshot.adjacency_index();
+    let cap = (index.edge_count() / 2).max(4096);
+    let mut selected: Vec<BorrowedEdge<'a>> = Vec::new();
+    let mut seen = IdSet::<EId>::default();
+    // [forward, backward]: each side's direction, reached vertices and
+    // newest level.
+    let directions = [shortest.direction, backward];
+    let mut reached = [IdSet::<VId>::default(), IdSet::<VId>::default()];
+    reached[0].insert(source);
+    reached[1].insert(target);
+    let mut frontiers = [vec![source], vec![target]];
+    // Each frontier's incidences, which bound the edges its level can admit.
+    let mut incidences = [0_usize; 2];
+    let sum = |frontier: &[VId],
+               direction: GlaDirection,
+               control: &mut dyn FnMut(SourceEvent) -> Result<(), E>|
+     -> Result<usize, E> {
+        let mut total = 0_usize;
+        for &vertex in frontier {
+            control(SourceEvent::Work)?;
+            total = total.saturating_add(index.degree(vertex, direction));
+        }
+        Ok(total)
+    };
+    for side in 0..2 {
+        incidences[side] = sum(&frontiers[side], directions[side], control)?;
+    }
+    let mut depth = 0_u32;
+    let met = loop {
+        if frontiers[0].is_empty() || frontiers[1].is_empty() || depth >= shortest.maximum {
+            break false;
+        }
+        let side = usize::from(incidences[1] < incidences[0]);
+        if selected.len().saturating_add(incidences[side]) > cap {
+            return Ok(None);
+        }
+        let mut frontier = std::mem::take(&mut frontiers[side]);
+        frontier.sort_unstable();
+        let mut next = Vec::new();
+        for vertex in frontier {
+            control(SourceEvent::Work)?;
+            index.visit(
+                &snapshot.blocks,
+                vertex,
+                directions[side],
+                as_of,
+                control,
+                |entry, block, row, control| {
+                    if shortest.relation.matches(entry.relation) {
+                        if seen.insert(entry.eid) {
+                            // Its SnapshotRecord is charged when the closure
+                            // commits.
+                            control(SourceEvent::ScratchEntry)?;
+                            selected.push((
+                                (entry.eid, entry.src, entry.relation, entry.dst),
+                                edge_properties_at(&snapshot.block_props, block, row),
+                            ));
+                        }
+                        let far = far_endpoint(entry, vertex, directions[side]);
+                        if reached[side].insert(far) {
+                            control(SourceEvent::ScratchEntry)?;
+                            next.push(far);
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        depth += 1;
+        let other = &reached[1 - side];
+        if next.iter().any(|vertex| other.contains(vertex)) {
+            break true;
+        }
+        incidences[side] = sum(&next, directions[side], control)?;
+        frontiers[side] = next;
+    };
+    if !met {
+        selected.clear();
+    }
+    // Records are charged once the closure commits, as in slot_closure.
+    for _ in 0..selected.len() {
+        control(SourceEvent::SnapshotRecord)?;
+    }
+    let mut vertices = std::collections::BTreeSet::from([source, target]);
+    for &((_, src, _, dst), _) in &selected {
+        vertices.insert(src);
+        vertices.insert(dst);
+    }
+    fgdb_gql::id_sort::sort_by_leading_identity(
+        &mut selected,
+        |((eid, ..), _)| eid.0,
+        |edges| edges.sort_unstable_by_key(|((eid, ..), _)| *eid),
+    );
+    Ok(Some((selected, vertices.into_iter().collect())))
 }
 
 /// The VIds of the visible vertices satisfying every root predicate, served
@@ -2693,11 +4009,11 @@ fn indexed_roots<E>(
         return Ok(None);
     };
     let mut roots = Vec::new();
-    for vid in snapshot.property_index.lookup(key, value) {
+    for vid in snapshot.property_index().lookup(key, value) {
         control(SourceEvent::Work)?;
         if let Some(row) =
             snapshot
-                .property_index
+                .property_index()
                 .visible_row(&snapshot.patches, *vid, as_of, control)?
             && predicates
                 .iter()

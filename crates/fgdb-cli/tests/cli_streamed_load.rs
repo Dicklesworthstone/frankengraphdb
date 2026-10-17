@@ -251,3 +251,167 @@ fn a_checkpoint_cannot_expand_its_own_read_budget_or_erase_valid_database_state(
     assert_eq!(fixture.frontier(), basis);
     assert_eq!(fixture.inspect(|db| db.vertices().unwrap().len()), 0);
 }
+
+impl Fixture {
+    fn array_source(&self) -> String {
+        let lines = String::from_utf8(self.source()).unwrap();
+        let source = format!("[\n{}\n]\n", lines.lines().collect::<Vec<_>>().join(",\n"));
+        std::fs::write(self.home.join("input"), &source).unwrap();
+        source
+    }
+}
+
+#[test]
+fn json_array_chunks_reconcile_each_durability_boundary_without_duplicate_creations() {
+    for crash in ["before-capsule", "after-d1", "after-marker-sync"] {
+        let fixture = Fixture::new();
+        fixture.array_source();
+        let basis = fixture.frontier();
+        let stopped = fixture
+            .load()
+            .env("FGDB_LOAD_CRASH_CHUNK", "1")
+            .env("FGDB_LOAD_CRASH_POINT", crash)
+            .output()
+            .unwrap();
+        assert!(!stopped.status.success(), "{crash}");
+        success(&fixture.load().output().unwrap());
+        let before = fixture.inspect_window(Some(basis), |db| {
+            assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 4));
+            assert_eq!(db.delta_since(basis).unwrap().count(), 4);
+            assert_eq!(db.vertices().unwrap().len(), 6);
+            let edges = db.edges().unwrap();
+            assert_eq!(edges.len(), 4);
+            assert_eq!(
+                edges.iter().filter(|row| row.entry.relation.0 == 1).count(),
+                2
+            );
+            assert_eq!(
+                edges.iter().filter(|row| row.entry.relation.0 == 2).count(),
+                2
+            );
+            (db.vertices().unwrap(), edges)
+        });
+        let checkpoint = std::fs::read(fixture.home.join("checkpoint")).unwrap();
+        success(&fixture.load().output().unwrap());
+        assert_eq!(fixture.frontier(), CommitSeq(basis.0 + 4));
+        assert_eq!(
+            fixture.inspect(|db| (db.vertices().unwrap(), db.edges().unwrap())),
+            before
+        );
+        assert_eq!(
+            std::fs::read(fixture.home.join("checkpoint")).unwrap(),
+            checkpoint
+        );
+    }
+}
+
+#[test]
+fn json_array_grammar_shape_and_logical_row_limits_refuse_before_any_chunk() {
+    for fault in 0..4 {
+        let fixture = Fixture::new();
+        let mut source = fixture.array_source();
+        let closing = source.rfind(']').unwrap();
+        match fault {
+            0 => source.insert(closing, ','),
+            1 => source.truncate(closing),
+            2 => {
+                // Valid framing/JSON, but an invalid graph record AFTER ten
+                // valid rows. Native preflight must not commit those rows.
+                source.insert_str(closing, ",{\"kind\":\"unknown\",\"key\":\"late\"}");
+            }
+            _ => {}
+        }
+        std::fs::write(fixture.home.join("input"), source).unwrap();
+        let basis = fixture.frontier();
+        let mut command = fixture.load();
+        if fault == 3 {
+            command.args(["--max-source-rows", "9"]);
+        }
+        let failed = command.output().unwrap();
+        assert_eq!(failed.status.code(), Some(3), "fault {fault}: {failed:?}");
+        assert!(!fixture.home.join("checkpoint").exists());
+        assert_eq!(fixture.frontier(), basis);
+        assert_eq!(fixture.inspect(|db| db.vertices().unwrap().len()), 0);
+        assert!(!String::from_utf8_lossy(&failed.stdout).contains("\"event\":\"progress\""));
+    }
+}
+
+#[test]
+fn json_array_whitespace_changes_cannot_relabel_an_existing_resume() {
+    let fixture = Fixture::new();
+    let source = fixture.array_source();
+    success(&fixture.load().output().unwrap());
+    let before = fixture.inspect(|db| {
+        (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        )
+    });
+    let checkpoint = std::fs::read(fixture.home.join("checkpoint")).unwrap();
+    // Identical graph rows, different authenticated raw source identity.
+    std::fs::write(fixture.home.join("input"), format!(" \n{source}")).unwrap();
+    let failed = fixture.load().output().unwrap();
+    assert_eq!(failed.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&failed.stdout).contains("InvalidResume"));
+    assert_eq!(
+        fixture.inspect(|db| {
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            )
+        }),
+        before
+    );
+    assert_eq!(
+        std::fs::read(fixture.home.join("checkpoint")).unwrap(),
+        checkpoint
+    );
+}
+
+#[test]
+fn json_array_vertex_and_edge_properties_are_queryable_after_reopen() {
+    use fgdb_protocol::json::{Json, parse_json};
+
+    let fixture = Fixture::new();
+    let source = r#"[
+        {"kind":"vertex","key":"a","labels":["Person"],"props":{"name":"text:Ada"}},
+        {"kind":"vertex","key":"b","labels":["Person"],"props":{"name":"text:Bob"}},
+        {"kind":"edge","key":"ab","source":"a","destination":"b","relation":"R",
+         "props":{"weight":"float:0.5"}}
+    ]"#;
+    std::fs::write(fixture.home.join("input"), source).unwrap();
+    let bindings = [
+        "--label",
+        "Person=1",
+        "--property",
+        "name=1",
+        "--property",
+        "weight=2",
+    ];
+    success(&fixture.load().args(bindings).output().unwrap());
+    let answer = fixture
+        .command("query")
+        .args(bindings)
+        .arg("MATCH (a:Person)-[r:R]->(b:Person) RETURN a.name, b.name, r.weight")
+        .output()
+        .unwrap();
+    success(&answer);
+    let text = String::from_utf8(answer.stdout).unwrap();
+    let rows: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("\"event\":\"row\""))
+        .collect();
+    assert_eq!(rows.len(), 1);
+    let Json::Object(row) = parse_json(rows[0], usize::MAX, rows[0].len()).unwrap() else {
+        panic!("row envelope");
+    };
+    let expected = r#"[{"type":"text","value":"Ada"},{"type":"text","value":"Bob"},{"type":"float","value":"0.5"}]"#;
+    let expected = parse_json(expected, usize::MAX, expected.len()).unwrap();
+    assert_eq!(row.get("cells"), Some(&expected));
+    assert_eq!(
+        fixture.inspect(|db| (db.vertices().unwrap().len(), db.edges().unwrap().len())),
+        (2, 1)
+    );
+}

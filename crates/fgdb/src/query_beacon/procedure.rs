@@ -10,7 +10,10 @@
 //! `vector_property` holding the whole embedding as packed little-endian f32
 //! bytes (`metric`
 //! l2/cosine/dot, exact unless `ann` gives the HNSW `ef_search`), restricted
-//! to `label` when given. `seeds` with an explicit nonnegative `max_hops`
+//! to `label` when given. Numeric properties require exact f32 by default;
+//! `vector_encoding => 'coordinates-rounded'` explicitly rounds finite
+//! integers, floats and decimals to f32. The original properties are unchanged.
+//! `seeds` with an explicit nonnegative `max_hops`
 //! enable the graph lane (`relation`, `direction` out/in/both, `include_seeds`,
 //! `graph_candidates`, `graph_weight`). Seeds may be the ONLY retrieval input:
 //! that path reads topology without projecting properties or creating an index.
@@ -46,12 +49,24 @@
 //! Both transaction profiles retain conservative global edge-scan witnesses.
 //! Omitted/null access retains the host's default; a nonnull choice needs seeds.
 //!
+//! `graph_access => 'demand'` is an explicit graph-only profile. It
+//! resolves only probed vertex histories and reached incidences, without a full
+//! vertex directory, property projection or index build. Visible membership
+//! entries and incidences share the source allowance; native scratch also
+//! reserves the output capacity. Node admission counts unique visible probes,
+//! not the whole corpus. Transactions use canonical staged membership and the
+//! native/staged incidence merge, retaining negative and edge-scan dependencies.
+//! Mixed-modality demand requests refuse; no index lane or staged change can
+//! be silently discarded. Existing source
+//! defaults and indexed/materialized accounting are unchanged. Storage itself
+//! remains resident; this does not claim spill or physical timing isolation.
+//!
 //! Requested indexes are built for this one execution from the read's snapshot.
 //! This is exact fusion of selected candidates, not an exhaustive hybrid
 //! top-k; `ann` remains approximate. It is not a durable index definition.
 
 use super::{Meter, Options, Scan, SharedWork};
-use super::{graph, indexed};
+use super::{demand, graph, indexed};
 use crate::query::ProcedureError;
 use crate::{GqlError, ReadError, Snapshot, VertexRow};
 use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
@@ -159,6 +174,7 @@ pub(crate) fn refuse<C>(error: HybridCallError) -> GqlQueryError<GqlError, C> {
 enum GraphAccess {
     Materialized,
     Indexed,
+    Demand,
 }
 
 /// A bound `hybrid.search`: the frozen corpus definition and query inputs.
@@ -226,7 +242,7 @@ fn list<'v>(
 
 impl HybridSearch {
     /// Bind a host backed by the canonical staged overlay. Preserve its
-    /// materialized default while honoring an explicit indexed source choice.
+    /// materialized default while honoring indexed and demand source choices.
     pub(crate) fn bind_filtered<'a>(
         call: &PreparedProcedureCall,
         arguments: &'a [GraphValue],
@@ -273,6 +289,7 @@ impl HybridSearch {
         let mut vector = None;
         let mut vector_properties = None;
         let mut vector_property = None;
+        let mut vector_encoding = None;
         let mut metric = None;
         let mut ann = None;
         let mut label = None;
@@ -301,7 +318,13 @@ impl HybridSearch {
                     graph_access = Some(match text_value("graph_access", value)? {
                         "materialized" => GraphAccess::Materialized,
                         "indexed" => GraphAccess::Indexed,
-                        _ => return Err(domain("graph_access", "'materialized' or 'indexed'")),
+                        "demand" => GraphAccess::Demand,
+                        _ => {
+                            return Err(domain(
+                                "graph_access",
+                                "'materialized', 'indexed' or 'demand'",
+                            ));
+                        }
                     });
                 }
                 "text" => text = Some(text_value("text", value)?.to_owned()),
@@ -361,6 +384,19 @@ impl HybridSearch {
                         keys.push(key);
                     }
                     vector_properties = Some(keys);
+                }
+                "vector_encoding" => {
+                    vector_encoding = Some(match text_value("vector_encoding", value)? {
+                        "coordinates" => VectorEncoding::Coordinates,
+                        "coordinates-rounded" => VectorEncoding::CoordinatesRoundedF32,
+                        "packed" => VectorEncoding::PackedF32Le,
+                        _ => {
+                            return Err(domain(
+                                "vector_encoding",
+                                "'coordinates', 'coordinates-rounded' or 'packed'",
+                            ));
+                        }
+                    });
                 }
                 "metric" => {
                     metric = Some(match text_value("metric", value)? {
@@ -435,6 +471,7 @@ impl HybridSearch {
         };
         // A vector is projected either one property per coordinate, or from
         // one property holding the whole embedding as packed f32 bytes.
+        // An explicit encoding may not reinterpret the other declaration shape.
         let vector = match (vector, vector_properties, vector_property) {
             (Some(coordinates), Some(keys), None) => {
                 if coordinates.len() != keys.len() || keys.is_empty() {
@@ -442,9 +479,19 @@ impl HybridSearch {
                         "vector needs exactly one vector_properties entry per coordinate",
                     ));
                 }
-                Some((coordinates, keys, VectorEncoding::Coordinates))
+                if vector_encoding == Some(VectorEncoding::PackedF32Le) {
+                    return Err(HybridCallError::Combination(
+                        "packed vector_encoding requires vector_property, not vector_properties",
+                    ));
+                }
+                Some((coordinates, keys, vector_encoding.unwrap_or_default()))
             }
             (Some(coordinates), None, Some(key)) if !coordinates.is_empty() => {
+                if vector_encoding.is_some_and(|mode| mode != VectorEncoding::PackedF32Le) {
+                    return Err(HybridCallError::Combination(
+                        "numeric vector_encoding requires vector_properties, not vector_property",
+                    ));
+                }
                 Some((coordinates, vec![key], VectorEncoding::PackedF32Le))
             }
             (None, None, None) => None,
@@ -459,6 +506,9 @@ impl HybridSearch {
                 ));
             }
         };
+        if vector.is_none() && vector_encoding.is_some() {
+            return Err(HybridCallError::Combination("vector_encoding needs vector"));
+        }
         if text.is_none() && vector.is_none() && seeds.is_none() {
             return Err(HybridCallError::Combination(
                 "a search needs text, a vector, or seeds with an explicit max_hops",
@@ -505,6 +555,11 @@ impl HybridSearch {
         } else {
             GraphAccess::Materialized
         });
+        if graph_access == GraphAccess::Demand && (text.is_some() || vector.is_some()) {
+            return Err(HybridCallError::Combination(
+                "demand graph access requires a graph-only read",
+            ));
+        }
         if !graph
             && (max_hops.is_some()
                 || relation.is_some()
@@ -614,7 +669,17 @@ impl HybridSearch {
                 // the caller's --max-work-units raises it as well as lowers it.
                 max_work_units: usize::try_from(remaining.evaluator.max_work_units)
                     .unwrap_or(usize::MAX),
-                max_staging_rows: default.max_staging_rows.min(records),
+                // A transaction demand source caches absent probes as well as
+                // surviving records. Do not turn its physical membership cap
+                // into a proxy for the GQL record allowance: an absent-only
+                // search legitimately reports zero snapshot records. Its live
+                // observer separately admits every actual record and scratch
+                // entry. Existing directory/immutable profiles are unchanged.
+                max_staging_rows: if graph_access == GraphAccess::Demand && !indexed_default {
+                    default.max_staging_rows
+                } else {
+                    default.max_staging_rows.min(records)
+                },
                 ..default
             },
         };
@@ -658,6 +723,11 @@ impl HybridSearch {
     /// the way to its canonical overlay; it is not an immutable-source handle.
     pub(crate) fn uses_indexed_graph(&self) -> bool {
         self.graph_access == GraphAccess::Indexed
+    }
+
+    /// Select the transaction's demand source, never an immutable fallback.
+    pub(crate) fn uses_demand_graph(&self) -> bool {
+        self.graph_access == GraphAccess::Demand
     }
 
     /// The fused query. A lane that was not requested has weight zero and is
@@ -721,6 +791,7 @@ impl HybridSearch {
             remaining.evaluator.max_scratch_entries,
             &mut SharedWork(work),
         )?;
+        let source_entries = Cell::new(0_u64);
         let result = match self.graph_access {
             GraphAccess::Materialized => graph::evaluate_filtered(
                 snapshot,
@@ -752,10 +823,61 @@ impl HybridSearch {
                 || Ok(()),
                 |id| filter.admits(id, work),
             ),
+            GraphAccess::Demand => {
+                // Bound source retention before any point lookup. The parent
+                // owns output rows, so reserve their maximum capacity here and
+                // report unused reserved slots below as well. Replaying with
+                // the reported exact allowance must not leave less source room.
+                let output = u64::try_from(self.k)
+                    .map_err(|_| BeaconError::InvalidQuery("demand result capacity exceeds u64"))?;
+                let available = remaining
+                    .evaluator
+                    .max_scratch_entries
+                    .checked_sub(filter.scratch_entries())
+                    .and_then(|entries| entries.checked_sub(output))
+                    .ok_or(BeaconError::ResourceLimit {
+                        resource: "demand graph scratch entries",
+                        limit: usize::try_from(remaining.evaluator.max_scratch_entries)
+                            .unwrap_or(usize::MAX),
+                    })?;
+                let mut options = self.options.clone();
+                options.policy.max_source_scratch = options
+                    .policy
+                    .max_source_scratch
+                    .min(usize::try_from(available).unwrap_or(usize::MAX));
+                demand::evaluate_filtered(
+                    snapshot,
+                    at,
+                    &options,
+                    self.query(),
+                    self.expansion(),
+                    work,
+                    scan,
+                    admit,
+                    label_allowed,
+                    relation_allowed,
+                    || Ok(()),
+                    |id| filter.admits(id, work),
+                )
+                .and_then(|(hits, admissions)| {
+                    let delivered = u64::try_from(hits.len())
+                        .map_err(|_| BeaconError::Invariant("demand result count exceeds u64"))?;
+                    let retained = output
+                        .checked_sub(delivered)
+                        .and_then(|unused| admissions.checked_add(unused))
+                        .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
+                    source_entries.set(retained);
+                    Ok(hits)
+                })
+            }
         };
-        filter
-            .finish(result)
-            .map(|hits| (hits, filter.scratch_entries()))
+        filter.finish(result).and_then(|hits| {
+            let scratch = filter
+                .scratch_entries()
+                .checked_add(source_entries.get())
+                .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
+            Ok((hits, scratch))
+        })
     }
 
     /// Fused hits as rows of exactly the YIELD columns, best first.

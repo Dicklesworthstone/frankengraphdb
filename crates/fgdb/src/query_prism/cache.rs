@@ -22,10 +22,17 @@ use super::{
 use std::sync::{Arc, Mutex, Weak};
 
 const CACHE_ENTRIES: usize = 8;
-// A conservative sum of the builder's charged vector-workspace peaks, not a
-// process RSS claim. Snapshot data, caller-held graphs, concurrent builders and
-// allocator metadata remain outside this retained-cache allowance.
-pub(crate) const CACHE_BYTES: usize = 64 * 1024 * 1024;
+// A sum of the vectors each kept graph holds, not a process RSS claim.
+// Snapshot data, caller-held graphs, concurrent builders and allocator metadata
+// remain outside this retained-cache allowance. It is the default projection
+// admission, so whatever a default CALL may build can be kept: at 64 MiB no
+// Tier-1 projection fit (a directed web-google one charges about 490 MB), and
+// every PageRank and WCC rebuilt its own (fgdb-62mzm). An entry is charged what
+// it keeps, not its build's peak: the peak also counts the freed edge staging,
+// about half of it, and pokec's PageRank graph alone then filled the allowance,
+// so every WCC beside it rebuilt for 75 s.
+pub(crate) const CACHE_BYTES: usize =
+    fgdb_prism::FnxReadOptions::DEFAULT_PROJECTION_LIMITS.max_workspace_bytes;
 static CACHE: ProjectionCache<crate::Snapshot> = ProjectionCache::new(CACHE_BYTES);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,7 +142,7 @@ impl<Owner, Extra: Clone> ProjectionCache<Owner, Extra> {
         if graph.binding() != request.binding || graph.spec() != request.projection {
             return;
         }
-        let Some(bytes) = graph.charged_workspace_bytes().checked_add(extra_bytes) else {
+        let Some(bytes) = graph.charged_resident_bytes().checked_add(extra_bytes) else {
             return;
         };
         self.remember(owner, request, (graph.clone(), extra), bytes);
@@ -384,7 +391,9 @@ mod tests {
     fn full_and_oversized_caches_build_without_displacing_live_entries() {
         let owner = Arc::new(());
         let builds = Cell::new(0);
-        let bytes = graph(request()).charged_workspace_bytes();
+        let bytes = graph(request()).charged_resident_bytes();
+        // An entry is charged what it keeps, below its build's peak.
+        assert!(bytes < graph(request()).charged_workspace_bytes());
         let cache = ProjectionCache::new(bytes - 1);
         assert!(!acquire(&cache, &owner, request(), &builds).1);
         assert!(!acquire(&cache, &owner, request(), &builds).1);

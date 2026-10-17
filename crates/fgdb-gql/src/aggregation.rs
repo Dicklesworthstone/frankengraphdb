@@ -8,10 +8,12 @@
 mod computed;
 mod groups;
 mod numeric;
+mod positioned;
 mod relational;
 mod result;
 mod weighted;
 pub use numeric::GraphExactAverage;
+pub use positioned::{PositionedEdge, PositionedGraph};
 pub use result::{
     GraphAggregateColumn, GraphAggregateFilter, GraphAggregateOrder, GraphAggregateTest,
     GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
@@ -22,6 +24,7 @@ use crate::algebra::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator, GraphPath, GraphValue, GraphValueRow,
     MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection, VertexPredicate,
 };
+use crate::algebra_exec::Charges;
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
     GqlQueryExecution, GqlQueryPolicy,
@@ -1049,14 +1052,73 @@ impl PreparedGraphAggregate {
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl crate::GovernedCheckpoint<C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        type NoTest<E> = fn(u32, &[VertexPredicate]) -> Result<bool, E>;
+        self.execute_input(
+            snapshot_records,
+            vertices,
+            edges,
+            None::<(&PositionedGraph<'_, ()>, NoTest<E>)>,
+            test_vertex,
+            property,
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// [`Self::execute_governed`] over a positioned graph: its vertices,
+    /// and its edges as identity triples in arrival order, with the same
+    /// value, statistics and refusals. `test_at` is `test_vertex` for the
+    /// vertex at a position. Every reader must be pure (the same answer for
+    /// the same input, with no effect), so a visitor that keeps per-vertex
+    /// state by position may skip a read that only repeats one it made;
+    /// every event is still charged as the identity-keyed visitor charges it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_positioned<'a, T, E, C>(
+        &self,
+        snapshot_records: u64,
+        graph: &PositionedGraph<'_, T>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        test_at: impl FnMut(u32, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl crate::GovernedCheckpoint<C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.execute_input(
+            snapshot_records,
+            graph.vertices(),
+            graph.triples(),
+            Some((graph, test_at)),
+            test_vertex,
+            property,
+            policy,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_input<'a, T, A, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+        positioned: Option<(&PositionedGraph<'_, T>, A)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
-        mut checkpoint: impl FnMut() -> Result<(), C>,
+        mut checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    where
+        A: FnMut(u32, &[VertexPredicate]) -> Result<bool, E>,
     {
         if self.input.plan().projects_property_maps() {
-            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            checkpoint.unit().map_err(GqlQueryError::Interrupted)?;
             return Err(crate::GraphIntegerError {
                 instruction: 0,
                 kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
@@ -1076,7 +1138,7 @@ impl PreparedGraphAggregate {
                 test_vertex,
                 property,
                 policy,
-                checkpoint,
+                || checkpoint.unit(),
             );
         }
         if self.computed_input.is_some() {
@@ -1087,43 +1149,41 @@ impl PreparedGraphAggregate {
                 test_vertex,
                 property,
                 policy,
-                checkpoint,
+                || checkpoint.unit(),
             );
         }
-        checkpoint().map_err(GqlQueryError::Interrupted)?;
+        checkpoint.unit().map_err(GqlQueryError::Interrupted)?;
         policy
             .rows
             .check(GqlBudgetDimension::SnapshotRecords, snapshot_records)
             .map_err(GqlQueryError::Rows)?;
-        let mut rows = GqlExecutionStats {
-            snapshot_records,
-            result_rows: 0,
-        };
-        let mut evaluator = GlaExecutionStats::default();
-        let mut control = |event| {
-            checkpoint().map_err(GqlQueryError::Interrupted)?;
-            if event == GlaExecutionEvent::ResultRow {
-                let next = rows.result_rows + 1;
-                policy
-                    .rows
-                    .check(GqlBudgetDimension::ResultRows, next)
-                    .map_err(GqlQueryError::Rows)?;
-                rows.result_rows = next;
-            }
-            evaluator
-                .charge_event(policy.evaluator, event)
-                .map_err(GqlQueryError::Evaluator)
-        };
+        // Evaluator runs, for a host that takes them (`Charges`).
+        let mut charges = Charges::new(checkpoint, policy, snapshot_records);
+        let mut control = |event| charges.event(event);
         let mut streaming = result::RootGroups::new(self);
         let mut groups = groups::GroupTable::new(self.keys.len());
         if self.keys.is_empty() {
             control(GlaExecutionEvent::ScratchEntry)?;
             groups.insert(Vec::new(), new_group(&self.aggregates, &mut control)?);
         }
-        weighted::visit_bindings(
+        // One binding's values and group key, reused by every binding. A
+        // fresh pair of pattern-wide arrays per binding was about 5 KB of
+        // stores each, most of a vertex count's time. A column past the
+        // binding's own is null, as in a fresh array.
+        let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+        let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+        let mut written = 0;
+        let visited = weighted::visit_bindings(
             self,
             vertices,
             edges,
+            positioned.map(|(graph, mut test_at)| weighted::Positioned {
+                graph,
+                test_at: move |at, predicates: &[VertexPredicate]| {
+                    test_at(at, predicates)
+                        .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))
+                },
+            }),
             |vid, predicates| {
                 test_vertex(vid, predicates)
                     .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))
@@ -1134,7 +1194,8 @@ impl PreparedGraphAggregate {
             },
             &mut control,
             |columns, bindings, property, control, multiplicity| {
-                let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
+                values[columns.len()..written.max(columns.len())].fill(ValueRef::Scalar(&NULL));
+                written = columns.len();
                 for (at, column) in columns.iter().enumerate() {
                     control(GlaExecutionEvent::Work)?;
                     values[at] = match column {
@@ -1163,7 +1224,6 @@ impl PreparedGraphAggregate {
                 if let Some(streaming) = &mut streaming {
                     return streaming.push(&values[..columns.len()], multiplicity, control);
                 }
-                let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
                 for (at, column) in self.keys.iter().enumerate() {
                     control(GlaExecutionEvent::Work)?;
                     key[at] = values[*column];
@@ -1185,17 +1245,25 @@ impl PreparedGraphAggregate {
                 let state = groups.insert(owned_key, state);
                 update_group(&self.aggregates, state, &values, multiplicity, control)
             },
-        )?;
-        let value = match streaming {
-            Some(streaming) => streaming.finish(&mut control)?,
-            None => self.finish_groups(&groups.into_tree(), &mut control)?,
-        };
-        // Even empty and zero-count outputs observe a terminal checkpoint.
-        control(GlaExecutionEvent::Work)?;
+        );
+        let finished = visited.and_then(|()| {
+            let value = match streaming {
+                Some(streaming) => streaming.finish(&mut control)?,
+                None => self.finish_groups(&groups.into_tree(), &mut control)?,
+            };
+            // Even empty and zero-count outputs observe a terminal checkpoint.
+            control(GlaExecutionEvent::Work)?;
+            Ok(value)
+        });
+        // A run's units are charged before the outcome is judged; a host
+        // refusal among them is the one per-event charging met first. A
+        // settled or refused run leaves none, so a host that has refused is
+        // not called again.
+        charges.settle()?;
         Ok(GqlQueryExecution {
-            value,
-            rows,
-            evaluator,
+            value: finished?,
+            rows: charges.rows,
+            evaluator: charges.evaluator,
         })
     }
 }

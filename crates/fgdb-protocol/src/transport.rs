@@ -17,9 +17,10 @@ use asupersync::Cx;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use core::future::poll_fn;
 use core::pin::Pin;
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, Waker};
 use std::io::ErrorKind;
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::task::Wake;
 
 const READ_AHEAD: usize = 4096;
 const IO_POLLS_PER_TURN: usize = 16;
@@ -29,16 +30,82 @@ const IO_POLLS_PER_TURN: usize = 16;
 pub trait DuplexIo: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> DuplexIo for T {}
 
+const READ_LANE: usize = 0;
+const WRITE_LANE: usize = 1;
+
+/// A duplex stream may retain only its most recent I/O waker. Both halves
+/// therefore poll it with ONE stable waker, which forwards readiness to the
+/// latest task registered on each lane. No stream or TLS state is retained by
+/// this waker, so an underlying I/O registration cannot keep the stream alive.
+#[derive(Default)]
+struct DuplexWake {
+    tasks: Mutex<[Option<Waker>; 2]>,
+}
+
+impl DuplexWake {
+    fn register(&self, lane: usize, task: &Waker) {
+        // User-supplied clone/drop/wake callbacks never run under this mutex.
+        let task = task.clone();
+        let previous =
+            self.tasks.lock().unwrap_or_else(PoisonError::into_inner)[lane].replace(task);
+        drop(previous);
+    }
+
+    fn clear(&self, lane: usize) {
+        let previous = self.tasks.lock().unwrap_or_else(PoisonError::into_inner)[lane].take();
+        drop(previous);
+    }
+
+    fn wake_lane(&self, lane: usize) {
+        let task = self.tasks.lock().unwrap_or_else(PoisonError::into_inner)[lane].take();
+        if let Some(task) = task {
+            task.wake();
+        }
+    }
+
+    fn wake_tasks(&self) {
+        let [reader, writer] =
+            core::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
+        match (reader, writer) {
+            (Some(reader), Some(writer)) if reader.will_wake(&writer) => reader.wake(),
+            (reader, writer) => {
+                if let Some(reader) = reader {
+                    reader.wake();
+                }
+                if let Some(writer) = writer {
+                    writer.wake();
+                }
+            }
+        }
+    }
+}
+
+impl Wake for DuplexWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_tasks();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wake_tasks();
+    }
+}
+
+struct DuplexState<T> {
+    io: Mutex<T>,
+    wake: Arc<DuplexWake>,
+    io_waker: Waker,
+}
+
 /// One receive handle for a duplex stream whose TLS state cannot be split.
 pub struct DuplexReader<T> {
-    io: Arc<Mutex<T>>,
+    io: Arc<DuplexState<T>>,
 }
 
 /// The corresponding send handle. Its mutex is held for one nonblocking poll
 /// only, never across an await. Readers and writers retain independent frame
 /// state while sharing the foundation's single encryption state.
 pub struct DuplexWriter<T> {
-    io: Arc<Mutex<T>>,
+    io: Arc<DuplexState<T>>,
 }
 
 /// Split ownership without splitting a TLS session or requiring a !Send
@@ -49,7 +116,12 @@ pub fn split_duplex<T: DuplexIo>(
 ) -> Result<(DuplexReader<T>, DuplexWriter<T>), TransportError> {
     cx.checkpoint()
         .map_err(|_| TransportError::ContextStopped)?;
-    let io = Arc::new(Mutex::new(io));
+    let wake = Arc::new(DuplexWake::default());
+    let io = Arc::new(DuplexState {
+        io: Mutex::new(io),
+        io_waker: Waker::from(Arc::clone(&wake)),
+        wake,
+    });
     Ok((
         DuplexReader {
             io: Arc::clone(&io),
@@ -61,12 +133,16 @@ pub fn split_duplex<T: DuplexIo>(
 // A different task can momentarily own the other half. Do not block a runtime
 // worker or hold a guard on Pending; arrange another bounded poll instead.
 fn duplex_poll<T, U>(
-    io: &Mutex<T>,
+    state: &DuplexState<T>,
+    lane: usize,
     task: &mut Context<'_>,
     poll: impl FnOnce(&mut T, &mut Context<'_>) -> Poll<std::io::Result<U>>,
 ) -> Poll<std::io::Result<U>> {
-    match io.try_lock() {
-        Ok(mut io) => poll(&mut io, task),
+    // Register BEFORE polling: an I/O implementation can wake synchronously
+    // and still return Pending. The other half never replaces this task.
+    state.wake.register(lane, task.waker());
+    let result = match state.io.try_lock() {
+        Ok(mut io) => poll(&mut io, &mut Context::from_waker(&state.io_waker)),
         Err(TryLockError::WouldBlock) => {
             task.waker().wake_by_ref();
             Poll::Pending
@@ -74,6 +150,25 @@ fn duplex_poll<T, U>(
         Err(TryLockError::Poisoned(_)) => Poll::Ready(Err(std::io::Error::other(
             "duplex transport state is unavailable",
         ))),
+    };
+    if result.is_ready() {
+        state.wake.clear(lane);
+        // TLS progress can satisfy the opposite operation from buffered state
+        // without another kernel readiness edge. Wake only after unlocking I/O.
+        state.wake.wake_lane(1 - lane);
+    }
+    result
+}
+
+impl<T> Drop for DuplexReader<T> {
+    fn drop(&mut self) {
+        self.io.wake.clear(READ_LANE);
+    }
+}
+
+impl<T> Drop for DuplexWriter<T> {
+    fn drop(&mut self) {
+        self.io.wake.clear(WRITE_LANE);
     }
 }
 
@@ -83,7 +178,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for DuplexReader<T> {
         task: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        duplex_poll(&self.io, task, |io, task| {
+        duplex_poll(&self.io, READ_LANE, task, |io, task| {
             Pin::new(io).poll_read(task, buffer)
         })
     }
@@ -95,17 +190,21 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for DuplexWriter<T> {
         task: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        duplex_poll(&self.io, task, |io, task| {
+        duplex_poll(&self.io, WRITE_LANE, task, |io, task| {
             Pin::new(io).poll_write(task, bytes)
         })
     }
 
     fn poll_flush(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        duplex_poll(&self.io, task, |io, task| Pin::new(io).poll_flush(task))
+        duplex_poll(&self.io, WRITE_LANE, task, |io, task| {
+            Pin::new(io).poll_flush(task)
+        })
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        duplex_poll(&self.io, task, |io, task| Pin::new(io).poll_shutdown(task))
+        duplex_poll(&self.io, WRITE_LANE, task, |io, task| {
+            Pin::new(io).poll_shutdown(task)
+        })
     }
 }
 
@@ -404,5 +503,305 @@ impl<W: AsyncWrite + Unpin> FrameWriter<W> {
         mut authorize: impl FnMut(&Header) -> Result<(), ProtocolError>,
     ) -> Result<SendCompletion, TransportError> {
         poll_fn(|task| self.poll_send(cx, task, &mut authorize)).await
+    }
+}
+
+#[cfg(test)]
+mod duplex_tests {
+    use super::*;
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl WakeCount {
+        fn count(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    fn task() -> (Arc<WakeCount>, Waker) {
+        let count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&count));
+        (count, waker)
+    }
+
+    /// Deliberately retains ONE registration across all four I/O methods.
+    /// Directly forwarding per-half task wakers loses the earlier waiter.
+    #[derive(Default)]
+    struct OneRegistration {
+        waker: Mutex<Option<Waker>>,
+        ready: AtomicBool,
+        synchronous_wake: AtomicBool,
+    }
+
+    impl OneRegistration {
+        fn poll_ready(&self, task: &Context<'_>) -> bool {
+            if self.ready.load(Ordering::Acquire) {
+                return true;
+            }
+            *self.waker.lock().unwrap() = Some(task.waker().clone());
+            if self.synchronous_wake.swap(false, Ordering::AcqRel) {
+                task.waker().wake_by_ref();
+            }
+            false
+        }
+
+        fn signal(&self) {
+            self.ready.store(true, Ordering::Release);
+            let waker = self.waker.lock().unwrap().take();
+            waker.expect("I/O was polled").wake();
+        }
+    }
+
+    struct OneWakerIo(Arc<OneRegistration>);
+
+    impl AsyncRead for OneWakerIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if !self.0.poll_ready(task) {
+                return Poll::Pending;
+            }
+            buffer.put_slice(b"r");
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for OneWakerIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if !self.0.poll_ready(task) {
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if !self.0.poll_ready(task) {
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            self.poll_flush(task)
+        }
+    }
+
+    fn with_duplex(
+        test: impl FnOnce(Arc<OneRegistration>, DuplexReader<OneWakerIo>, DuplexWriter<OneWakerIo>),
+    ) {
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let io = Arc::new(OneRegistration::default());
+        let (reader, writer) = split_duplex(&cx, OneWakerIo(Arc::clone(&io))).unwrap();
+        test(io, reader, writer);
+    }
+
+    fn read_once(reader: &mut DuplexReader<OneWakerIo>, waker: &Waker) -> bool {
+        let mut bytes = [0; 1];
+        let mut buffer = ReadBuf::new(&mut bytes);
+        match Pin::new(reader).poll_read(&mut Context::from_waker(waker), &mut buffer) {
+            Poll::Pending => false,
+            Poll::Ready(Ok(())) => {
+                assert_eq!(buffer.filled(), b"r");
+                true
+            }
+            Poll::Ready(Err(error)) => panic!("unexpected read error: {error}"),
+        }
+    }
+
+    #[test]
+    fn both_pending_halves_are_woken_in_either_poll_order() {
+        for read_first in [true, false] {
+            with_duplex(|io, mut reader, mut writer| {
+                let (reads, read_waker) = task();
+                let (writes, write_waker) = task();
+                if read_first {
+                    assert!(!read_once(&mut reader, &read_waker));
+                }
+                assert!(
+                    Pin::new(&mut writer)
+                        .poll_write(&mut Context::from_waker(&write_waker), b"request")
+                        .is_pending()
+                );
+                if !read_first {
+                    assert!(!read_once(&mut reader, &read_waker));
+                }
+                assert_eq!((reads.count(), writes.count()), (0, 0));
+                io.signal();
+                // No blind re-poll: the I/O event must schedule BOTH tasks.
+                assert_eq!((reads.count(), writes.count()), (1, 1));
+                assert!(read_once(&mut reader, &read_waker));
+                assert!(matches!(
+                    Pin::new(&mut writer)
+                        .poll_write(&mut Context::from_waker(&write_waker), b"request"),
+                    Poll::Ready(Ok(7))
+                ));
+            });
+        }
+    }
+
+    #[test]
+    fn pending_flush_and_shutdown_do_not_replace_the_reader() {
+        for shutdown in [true, false] {
+            with_duplex(|io, mut reader, mut writer| {
+                let (reads, read_waker) = task();
+                let (writes, write_waker) = task();
+                assert!(!read_once(&mut reader, &read_waker));
+                let mut context = Context::from_waker(&write_waker);
+                let result = if shutdown {
+                    Pin::new(&mut writer).poll_shutdown(&mut context)
+                } else {
+                    Pin::new(&mut writer).poll_flush(&mut context)
+                };
+                assert!(result.is_pending());
+                io.signal();
+                assert_eq!((reads.count(), writes.count()), (1, 1));
+            });
+        }
+    }
+
+    #[test]
+    fn repoll_replaces_only_its_own_task_registration() {
+        with_duplex(|io, mut reader, mut writer| {
+            let (old_reads, old_waker) = task();
+            let (new_reads, new_waker) = task();
+            let (writes, write_waker) = task();
+            assert!(!read_once(&mut reader, &old_waker));
+            assert!(
+                Pin::new(&mut writer)
+                    .poll_write(&mut Context::from_waker(&write_waker), b"request")
+                    .is_pending()
+            );
+            assert!(!read_once(&mut reader, &new_waker));
+            io.signal();
+            assert_eq!(old_reads.count(), 0);
+            assert_eq!((new_reads.count(), writes.count()), (1, 1));
+        });
+    }
+
+    #[test]
+    fn ready_progress_wakes_the_other_half_without_an_io_edge() {
+        with_duplex(|io, mut reader, mut writer| {
+            let (reads, read_waker) = task();
+            let (writes, write_waker) = task();
+            assert!(!read_once(&mut reader, &read_waker));
+            assert!(
+                Pin::new(&mut writer)
+                    .poll_write(&mut Context::from_waker(&write_waker), b"request")
+                    .is_pending()
+            );
+            // Model shared TLS state becoming ready while its writer polls.
+            // There is deliberately no reactor wake here.
+            io.ready.store(true, Ordering::Release);
+            assert!(matches!(
+                Pin::new(&mut writer)
+                    .poll_write(&mut Context::from_waker(&write_waker), b"request"),
+                Poll::Ready(Ok(7))
+            ));
+            assert_eq!((reads.count(), writes.count()), (1, 0));
+            assert!(read_once(&mut reader, &read_waker));
+            // Neither completed operation retains a task registration.
+            io.signal();
+            assert_eq!((reads.count(), writes.count()), (1, 0));
+        });
+    }
+
+    #[test]
+    fn synchronous_wake_inside_a_pending_poll_is_not_lost() {
+        with_duplex(|io, mut reader, _writer| {
+            let (reads, read_waker) = task();
+            io.synchronous_wake.store(true, Ordering::Release);
+            assert!(!read_once(&mut reader, &read_waker));
+            assert_eq!(reads.count(), 1);
+            assert!(!read_once(&mut reader, &read_waker));
+            io.signal();
+            assert_eq!(reads.count(), 2);
+            assert!(read_once(&mut reader, &read_waker));
+        });
+    }
+
+    #[test]
+    fn one_task_waiting_on_both_halves_is_woken_once() {
+        with_duplex(|io, mut reader, mut writer| {
+            let (wakes, waker) = task();
+            assert!(!read_once(&mut reader, &waker));
+            assert!(
+                Pin::new(&mut writer)
+                    .poll_flush(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            io.signal();
+            assert_eq!(wakes.count(), 1);
+        });
+    }
+
+    #[test]
+    fn dropped_halves_release_tasks_and_do_not_keep_io_alive() {
+        with_duplex(|io, mut reader, mut writer| {
+            let (reads, read_waker) = task();
+            let (writes, write_waker) = task();
+            let read_task = Arc::downgrade(&reads);
+            let write_task = Arc::downgrade(&writes);
+            let stream = Arc::downgrade(&reader.io);
+            assert!(!read_once(&mut reader, &read_waker));
+            assert!(
+                Pin::new(&mut writer)
+                    .poll_flush(&mut Context::from_waker(&write_waker))
+                    .is_pending()
+            );
+            drop((reads, read_waker, writes, write_waker));
+            assert!(read_task.upgrade().is_some());
+            assert!(write_task.upgrade().is_some());
+            drop(reader);
+            assert!(read_task.upgrade().is_none());
+            assert!(write_task.upgrade().is_some());
+            drop(writer);
+            assert!(write_task.upgrade().is_none());
+            assert!(stream.upgrade().is_none());
+            // A late reactor wake holds only the empty notifier, not the I/O.
+            io.signal();
+        });
+    }
+
+    #[test]
+    fn wake_callbacks_run_outside_the_registration_lock() {
+        struct ReentrantWake(Arc<DuplexWake>, AtomicUsize);
+        impl Wake for ReentrantWake {
+            fn wake(self: Arc<Self>) {
+                assert!(self.0.tasks.try_lock().is_ok());
+                self.0.clear(READ_LANE);
+                self.0.clear(WRITE_LANE);
+                self.1.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let signal = Arc::new(DuplexWake::default());
+        let callback = Arc::new(ReentrantWake(Arc::clone(&signal), AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&callback));
+        signal.register(READ_LANE, &waker);
+        signal.register(WRITE_LANE, &waker);
+        signal.wake_tasks();
+        assert_eq!(callback.1.load(Ordering::SeqCst), 1);
     }
 }

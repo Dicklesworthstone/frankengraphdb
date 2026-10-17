@@ -289,7 +289,9 @@ impl LogicalDeltaTemplate {
         source_intent_root_digest: [u8; 32],
         mut coordinate_entries: Vec<CoordinateEntry>,
     ) -> Result<Self, CanonicalError> {
-        canonicalize(&mut coordinate_entries)?;
+        // The entries are this call's own: an error drops them, so no row
+        // needs a defensive copy.
+        canonical::canonicalize_owned(&mut coordinate_entries)?;
         let template = LogicalDeltaTemplate {
             format: delta_format_for(&coordinate_entries),
             intent_semantics_oid,

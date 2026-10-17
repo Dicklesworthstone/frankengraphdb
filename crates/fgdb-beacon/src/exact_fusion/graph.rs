@@ -249,14 +249,17 @@ fn fuse(
             // They must not hide duplicates, disorder, or budget failures.
             work.charge(2 * (1 + seen.len().checked_ilog2().unwrap_or(0) as usize))?;
             let key = (hit.hops, hit.id);
-            if previous.is_some_and(|before| before >= key) || !seen.insert(hit.id) {
+            if previous.is_some_and(|before| before >= key) || seen.contains(&hit.id) {
                 return Err(BeaconError::InvalidQuery(
                     "graph ranks must be ordered and unique",
                 ));
             }
+            work.reserve_scratch(1)?;
+            seen.insert(hit.id);
             previous = Some(key);
             if eligible(hit.id) {
                 let next_rank = rank(graph_ranks.len())?;
+                work.reserve_scratch(1)?;
                 graph_ranks.insert(hit.id, (next_rank, hit.hops));
             }
         }
@@ -275,7 +278,10 @@ fn fuse(
     };
     for &id in graph_ranks.keys() {
         work.charge(1 + fused.len().checked_ilog2().unwrap_or(0) as usize)?;
-        fused.entry(id).or_default();
+        if let std::collections::btree_map::Entry::Vacant(entry) = fused.entry(id) {
+            work.reserve_scratch(1)?;
+            entry.insert(Default::default());
+        }
     }
     let mut best = BinaryHeap::<Ranked>::new();
     for (&id, evidence) in &fused {
@@ -291,6 +297,7 @@ fn fuse(
             ),
         };
         if best.len() < query.retrieval.k {
+            work.reserve_scratch(1)?;
             best.push(candidate);
         } else if best.peek().is_some_and(|worst| candidate < *worst) {
             best.pop();
@@ -300,6 +307,7 @@ fn fuse(
     let mut rows = Vec::new();
     while !best.is_empty() {
         work.charge(1 + best.len().checked_ilog2().unwrap_or(0) as usize)?;
+        work.reserve_scratch(1)?;
         let hit = best
             .pop()
             .ok_or(BeaconError::Invariant("RRF heap disappeared"))?;

@@ -24,8 +24,13 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 /// Retained coordinate bytes over all live snapshots. A graph too large for
-/// this is admitted afresh by every statement, as before.
-const ADMITTED_BYTES: usize = 128 * 1024 * 1024;
+/// this is admitted afresh by every statement, as before. roadnet-ca (2.0M
+/// vertices, 5.5M edges) needs more than 128 MiB, and readmitting it made a
+/// resident count of its edges 3.6x slower. 1 GiB keeps a pokec core (1.6M
+/// vertices, 30.6M edges: ~300 MB of coordinates and ~370 MB of positioned
+/// edges) beside its vertex-only core, on a resident server that holds
+/// 15-50 GiB for such graphs.
+const ADMITTED_BYTES: usize = 1024 * 1024 * 1024;
 
 pub(super) static ADMITTED: LiveCache<Snapshot, AdmissionKey, Arc<AdmittedCore>> =
     LiveCache::new(ADMITTED_BYTES);
@@ -43,7 +48,7 @@ pub(super) struct AdmissionKey {
 /// statement on refill. Read-back costs a lookup per edge (epinions edge
 /// count +10%, the unlabelled one +25%), so it is only paid where inline
 /// identities would not fit the budget at all (web-google's ~290 MB).
-const INLINE_IDENTITY_BYTES: usize = ADMITTED_BYTES / 2;
+const INLINE_IDENTITY_BYTES: usize = 256 * 1024 * 1024;
 
 /// Lets the admission laws (which run serialized) cover both refill forms.
 #[cfg(test)]
@@ -60,6 +65,42 @@ fn inline_identity_bytes() -> usize {
 
 /// An admitted edge's identity: (EId, src, relation, dst).
 pub(super) type EdgeIdentity = (EId, VId, RelationId, VId);
+
+/// A core keeps its edges positioned (each endpoint's position in the sealed
+/// vertex table, its relation's in `relations`) while they fit this many
+/// bytes, 12 per edge: a triples-only statement then reads them in place,
+/// with per-vertex state in arrays, instead of copying or reading back every
+/// edge.
+const POSITIONED_EDGE_BYTES: usize = 512 * 1024 * 1024;
+
+/// Lets the admission laws cover cores with and without positioned edges.
+#[cfg(test)]
+pub(super) static POSITIONED_EDGES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+fn positioned_edge_bytes() -> usize {
+    #[cfg(test)]
+    if !POSITIONED_EDGES.load(std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    POSITIONED_EDGE_BYTES
+}
+
+/// Every admitted edge of a core, in its sealed (identity) order, by
+/// position: endpoints in the sealed vertex table every refill of the core
+/// builds, relations in `relations`, which is ascending.
+#[derive(Debug, Default)]
+pub(super) struct PositionedEdges {
+    pub(super) relations: Vec<RelationId>,
+    pub(super) edges: Vec<fgdb_gql::PositionedEdge>,
+}
+
+impl PositionedEdges {
+    fn bytes(&self) -> usize {
+        self.relations.capacity() * size_of::<RelationId>()
+            + self.edges.capacity() * size_of::<fgdb_gql::PositionedEdge>()
+    }
+}
 
 /// Where one admitted edge's winning statement sits. Its identity is that
 /// statement's, read back on refill from the snapshot allocation the core is
@@ -83,6 +124,10 @@ pub(super) struct AdmittedCore {
     /// Each edge's identity in `edges` order, while they fit
     /// [`INLINE_IDENTITY_BYTES`]; otherwise refill reads them back.
     pub(super) identities: Option<Vec<EdgeIdentity>>,
+    /// The edges by position, when the scan admitted them in strictly
+    /// ascending identity (so admission order is the sealed order) and they
+    /// fit [`POSITIONED_EDGE_BYTES`].
+    pub(super) positioned: Option<PositionedEdges>,
     pub(super) records: u64,
     pub(super) tape: Tape,
     /// Where each vertex sits in the sealed table this core refills, built by
@@ -99,6 +144,7 @@ impl AdmittedCore {
             + self.identities.as_ref().map_or(0, |identities| {
                 identities.capacity() * size_of::<EdgeIdentity>()
             })
+            + self.positioned.as_ref().map_or(0, PositionedEdges::bytes)
             + self.tape.bytes()
     }
 }
@@ -111,6 +157,13 @@ pub(super) struct Recording {
     abandoned: bool,
     /// The identities outgrew [`INLINE_IDENTITY_BYTES`] and were dropped.
     compact: bool,
+    /// The positioned edges were dropped: an edge arrived out of strictly
+    /// ascending identity, a position did not fit, or they outgrew
+    /// [`POSITIONED_EDGE_BYTES`].
+    unpositioned: bool,
+    /// The newest admitted edge's identity, and its relation's position.
+    last_edge: Option<EId>,
+    last_relation: Option<(RelationId, u32)>,
 }
 
 impl Recording {
@@ -136,12 +189,19 @@ impl Recording {
     }
 
     /// The admitted edge `identity`, whose winning statement is `row` of
-    /// `block`.
-    pub(super) fn edge(&mut self, identity: EdgeIdentity, block: usize, row: usize) {
+    /// `block`, with its endpoints at `positions` of the sealed vertex table.
+    pub(super) fn edge(
+        &mut self,
+        identity: EdgeIdentity,
+        block: usize,
+        row: usize,
+        positions: [usize; 2],
+    ) {
         match (u32::try_from(block), u32::try_from(row)) {
             (Ok(block), Ok(row)) => {
                 self.core.tape.emit(Some(Step::Edge));
                 self.core.edges.push(CoreEdge { block, row });
+                self.position(identity, positions);
                 if !self.compact {
                     let identities = self.core.identities.get_or_insert_with(Vec::new);
                     if (identities.len() + 1) * size_of::<EdgeIdentity>() <= inline_identity_bytes()
@@ -157,6 +217,49 @@ impl Recording {
         }
     }
 
+    /// Keep `identity`'s edge by position while the positioned form holds.
+    fn position(&mut self, (eid, _, relation, _): EdgeIdentity, [source, destination]: [usize; 2]) {
+        if self.unpositioned {
+            return;
+        }
+        let ascending = self.last_edge.is_none_or(|last| last < eid);
+        self.last_edge = Some(eid);
+        let positioned = self.core.positioned.get_or_insert_with(Default::default);
+        let relation_at = match self.last_relation {
+            Some((known, at)) if known == relation => Some(at),
+            _ => match positioned
+                .relations
+                .iter()
+                .position(|&known| known == relation)
+            {
+                Some(at) => u32::try_from(at).ok(),
+                None => u32::try_from(positioned.relations.len()).ok().inspect(|_| {
+                    positioned.relations.push(relation);
+                }),
+            },
+        };
+        let fits = (positioned.edges.len() + 1) * size_of::<fgdb_gql::PositionedEdge>()
+            <= positioned_edge_bytes();
+        match (
+            u32::try_from(source),
+            u32::try_from(destination),
+            relation_at,
+        ) {
+            (Ok(source), Ok(destination), Some(relation_at)) if ascending && fits => {
+                self.last_relation = Some((relation, relation_at));
+                positioned.edges.push(fgdb_gql::PositionedEdge {
+                    source,
+                    destination,
+                    relation: relation_at,
+                });
+            }
+            _ => {
+                self.core.positioned = None;
+                self.unpositioned = true;
+            }
+        }
+    }
+
     /// The finished core of a scan that admitted `records`, unless abandoned.
     pub(super) fn finish(self, records: u64) -> Option<AdmittedCore> {
         if self.abandoned {
@@ -166,9 +269,39 @@ impl Recording {
         core.records = records;
         core.tape = core.tape.finish();
         core.vertices.shrink_to_fit();
+        // Inline identities are sealed here once, as every refill's table
+        // would seal them (by identity, a repeat keeping its last
+        // admission), so a refill is already in order and a triples-only
+        // read can take them in place. The tape keeps admission order.
+        if let Some(identities) = core.identities.take() {
+            let mut paired: Vec<(EdgeIdentity, CoreEdge)> =
+                identities.into_iter().zip(core.edges.drain(..)).collect();
+            super::seal_by_key(&mut paired, |&((eid, ..), _)| eid);
+            let (identities, edges): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
+            core.identities = Some(identities);
+            core.edges = edges;
+        }
         core.edges.shrink_to_fit();
         if let Some(identities) = &mut core.identities {
             identities.shrink_to_fit();
+        }
+        // Positioned edges arrived in strictly ascending identity, so their
+        // admission order is already the sealed order. Relations are
+        // renumbered in ascending identity, so a relation's position, like a
+        // vertex's, orders exactly as its identity.
+        if let Some(positioned) = &mut core.positioned {
+            let mut order: Vec<u32> = (0..positioned.relations.len() as u32).collect();
+            order.sort_unstable_by_key(|&at| positioned.relations[at as usize]);
+            let mut renumbered = vec![0_u32; order.len()];
+            for (new, &old) in order.iter().enumerate() {
+                renumbered[old as usize] = new as u32;
+            }
+            positioned.relations.sort_unstable();
+            for edge in &mut positioned.edges {
+                edge.relation = renumbered[edge.relation as usize];
+            }
+            positioned.edges.shrink_to_fit();
+            positioned.relations.shrink_to_fit();
         }
         Some(core)
     }

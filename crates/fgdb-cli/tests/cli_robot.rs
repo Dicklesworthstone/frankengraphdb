@@ -1,5 +1,8 @@
 //! Black-box CLI contracts: every database operation starts a fresh process.
 //! The dependency-free JSON reader checks the frozen schema, not substrings.
+// The binary root (src/main.rs) takes the same limit: proving `Send` for
+// an in-process open here descends the whole verified-reopen future.
+#![recursion_limit = "256"]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

@@ -165,24 +165,18 @@ fn past_the_resident_budget_each_object_is_read_alone() {
             // Nothing was admitted as resident.
             assert_eq!(store.packs.resident_packs(), 0);
             // Without the spent budget the first read loads the pack whole,
-            // and it stays resident until every object has been read once.
+            // and it stays resident once every object has been read.
             let unbudgeted = open(&cx, &dir).await;
-            let (last, rest) = objects.split_last().unwrap();
             assert!(
-                read_all(&cx, &unbudgeted, rest)
+                read_all(&cx, &unbudgeted, &objects)
                     .await
                     .iter()
                     .all(Result::is_ok)
             );
             assert_eq!(unbudgeted.packs.resident_packs(), 1);
-            let final_read = read_all(&cx, &unbudgeted, std::slice::from_ref(last)).await;
-            assert_eq!(final_read[0].as_ref().unwrap(), &last.1);
-            assert_eq!(
-                unbudgeted.packs.resident_packs(),
-                0,
-                "a drained pack is released"
-            );
-            // A drained pack still serves every object, one at a time.
+            // A released pack still serves every object, one at a time.
+            unbudgeted.packs.release();
+            assert_eq!(unbudgeted.packs.resident_packs(), 0);
             let again = read_all(&cx, &unbudgeted, &objects).await;
             assert!(
                 again
@@ -204,10 +198,11 @@ fn past_the_resident_budget_each_object_is_read_alone() {
     );
 }
 
-/// A resident pack is released only once every object in it has been read.
-/// Many blocks can name one small object (an identical property patch), so a
-/// walk reads that object again and again; those reads must not release the
-/// pack before the walk reaches its other objects.
+/// A resident pack is evicted only once every object in it has been read,
+/// and only when another pack needs its bytes. Many blocks can name one small
+/// object (an identical property patch), so a walk reads that object again and
+/// again, before and after the pack's other objects; neither may cost the
+/// pack its residency while the budget has room.
 #[test]
 fn rereading_one_object_does_not_release_its_pack() {
     let dir = scratch_dir("reread");
@@ -242,11 +237,71 @@ fn rereading_one_object_does_not_release_its_pack() {
             assert_eq!(store.packs.resident_packs(), 1);
             let final_read = read_all(&cx, &store, std::slice::from_ref(last)).await;
             assert_eq!(final_read[0].as_ref().unwrap(), &last.1);
+            for _ in 0..3 {
+                assert_eq!(
+                    read_all(&cx, &store, first).await[0].as_ref().unwrap(),
+                    &objects[0].1
+                );
+            }
             assert_eq!(
                 store.packs.resident_packs(),
-                0,
-                "released once every object was read"
+                1,
+                "a spent pack stays resident while the budget has room"
             );
+            assert_eq!(store.packs.whole_reads(), 1);
+        }
+    });
+}
+
+/// A pack that does not fit the budget evicts a spent one, and never one
+/// with objects still unread.
+#[test]
+fn a_spent_pack_is_evicted_to_admit_another_and_an_unspent_one_is_not() {
+    let dir = scratch_dir("evict");
+    let first = objects(14, PACK_MIN_OBJECTS + 5);
+    let second = objects(15, PACK_MIN_OBJECTS + 5);
+    under_lab(0x9a0b, {
+        let dir = dir.clone();
+        move |cx| async move {
+            let store = open(&cx, &dir).await;
+            publish(&cx, &store, &first, None).await.expect("publish");
+            publish(&cx, &store, &second, None).await.expect("publish");
+            assert_eq!(packs_in(&dir).len(), 2);
+            let store = open(&cx, &dir).await;
+            // The first pack is resident with one object unread; the rest of
+            // the budget is gone.
+            let (last, rest) = first.split_last().unwrap();
+            assert!(read_all(&cx, &store, rest).await.iter().all(Result::is_ok));
+            store.packs.spend_resident_budget();
+            assert!(read_all(&cx, &store, &second[..1]).await[0].is_ok());
+            assert_eq!(
+                (store.packs.resident_packs(), store.packs.whole_reads()),
+                (1, 1),
+                "an unspent pack is not evicted: the second pack is read one object at a time"
+            );
+            // Spent, the first pack gives its bytes to the second.
+            assert!(read_all(&cx, &store, std::slice::from_ref(last)).await[0].is_ok());
+            let reads = read_all(&cx, &store, &second).await;
+            assert!(
+                reads
+                    .iter()
+                    .zip(&second)
+                    .all(|(read, (_, bytes))| read.as_ref().unwrap() == bytes)
+            );
+            assert_eq!(
+                (store.packs.resident_packs(), store.packs.whole_reads()),
+                (1, 2),
+                "the second pack is loaded whole in the first one's place"
+            );
+            // The evicted pack still serves its objects, one at a time.
+            assert!(
+                read_all(&cx, &store, &first)
+                    .await
+                    .iter()
+                    .zip(&first)
+                    .all(|(read, (_, bytes))| read.as_ref().unwrap() == bytes)
+            );
+            assert_eq!(store.packs.whole_reads(), 2);
         }
     });
 }
@@ -496,4 +551,144 @@ fn every_pack_crash_instant_leaves_absence_or_the_complete_pack() {
 
 fn hex(id: &ObjectId) -> String {
     id.0.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Every root walk reads each pack whole once, however many walks came
+/// before it in the store's life: compaction re-walks the root its open just
+/// walked, and the objects the two share sit in packs the first walk drained.
+/// A walk releases what it left resident, including a pack holding an object
+/// the walked root does not name, which would otherwise never drain.
+#[test]
+fn every_root_walk_reads_each_pack_whole_once_and_releases_it() {
+    use crate::writer::BlockWriter;
+    use fgdb_delta_types::{DeltaRow, RelationId};
+    use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
+    let dir = scratch_dir("rewalk");
+    under_lab(0x9a11, {
+        let dir = dir.clone();
+        move |cx| async move {
+            let keys = (&K_OID, NAMESPACE);
+            let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+            for vid in 1..=80u128 {
+                let row = DeltaRow::CreateVertex {
+                    vid: VId(vid),
+                    birth_ordinal: vid as u64,
+                    labels: vec![],
+                    props: vec![],
+                    valid_time: None,
+                };
+                writer
+                    .apply(keys, CommitSeq(1), &row)
+                    .expect("creates a vertex");
+            }
+            for src in 1..80u128 {
+                let row = DeltaRow::CreateEdge {
+                    eid: EId(src),
+                    birth_ordinal: 100 + src as u64,
+                    src: VId(src),
+                    relation: RelationId(1),
+                    dst: VId(src + 1),
+                    canonical_key: None,
+                    props: vec![],
+                    valid_time: None,
+                };
+                writer
+                    .apply(keys, CommitSeq(2), &row)
+                    .expect("creates an edge");
+            }
+            let (root, blocks, patches) = writer.publish(keys, CommitSeq(2)).expect("publishes");
+            assert!(blocks.len() + patches.len() >= PACK_MIN_OBJECTS);
+            let store = open(&cx, &dir).await;
+            let mut receipts = PublishReceipts::new();
+            let mut batch = store
+                .publication_batch(&cx, &mut receipts, None)
+                .expect("batch");
+            for block in &blocks {
+                batch
+                    .put_object(&cx, StoredObjectKind::Block, block.block_id, &block.bytes)
+                    .await
+                    .expect("stages a block");
+            }
+            for patch in &patches {
+                batch
+                    .put_object(
+                        &cx,
+                        StoredObjectKind::VertexPatch,
+                        patch.patch_id,
+                        &patch.bytes,
+                    )
+                    .await
+                    .expect("stages a patch");
+            }
+            // An object this root does not name, as a superseded block is.
+            let (orphan, orphan_bytes) = objects(12, 1).remove(0);
+            batch
+                .put_object(&cx, StoredObjectKind::Block, orphan, &orphan_bytes)
+                .await
+                .expect("stages the orphan");
+            batch.finish(&cx).await.expect("publishes the pack");
+            let root_id = store.put_root(&cx, &root).await.expect("stores the root");
+            assert_eq!(packs_in(&dir).len(), 1);
+
+            let store = open(&cx, &dir).await;
+            for walk in 1..=3 {
+                store.reopen(&cx, root_id).await.expect("reopens");
+                assert_eq!(
+                    store.packs.whole_reads(),
+                    walk,
+                    "walk {walk} reads the pack whole exactly once"
+                );
+                assert_eq!(
+                    store.packs.resident_packs(),
+                    0,
+                    "walk {walk} leaves nothing resident"
+                );
+            }
+        }
+    });
+}
+
+/// Within a root walk a pack is spent once it has served every object the
+/// walked root names in it: an object the root no longer names (a superseded
+/// block left behind by compaction) does not keep the pack resident against
+/// the next one. Outside a walk every object counts.
+#[test]
+fn a_walk_spends_a_pack_once_it_has_served_what_the_root_names_there() {
+    let dir = scratch_dir("named");
+    let first = objects(16, PACK_MIN_OBJECTS + 5);
+    let second = objects(17, PACK_MIN_OBJECTS + 5);
+    under_lab(0x9a0c, {
+        let dir = dir.clone();
+        move |cx| async move {
+            let store = open(&cx, &dir).await;
+            publish(&cx, &store, &first, None).await.expect("publish");
+            publish(&cx, &store, &second, None).await.expect("publish");
+            // The first pack's last object is the one no root names.
+            let (orphan, named) = first.split_last().unwrap();
+            for walk in [false, true] {
+                let store = open(&cx, &dir).await;
+                if walk {
+                    store.packs.rearm(
+                        named
+                            .iter()
+                            .chain(&second)
+                            .map(|(id, _)| *id)
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                assert!(read_all(&cx, &store, named).await.iter().all(Result::is_ok));
+                store.packs.spend_resident_budget();
+                assert!(read_all(&cx, &store, &second[..1]).await[0].is_ok());
+                assert_eq!(
+                    store.packs.whole_reads(),
+                    if walk { 2 } else { 1 },
+                    "walk={walk}: the second pack is loaded whole only once the first is spent"
+                );
+                assert_eq!(store.packs.resident_packs(), 1, "walk={walk}");
+                // The unnamed object is still served, from wherever it is.
+                let read = read_all(&cx, &store, std::slice::from_ref(orphan)).await;
+                assert_eq!(read[0].as_ref().unwrap(), &orphan.1);
+            }
+        }
+    });
 }

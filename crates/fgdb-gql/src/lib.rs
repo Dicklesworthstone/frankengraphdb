@@ -28,6 +28,8 @@ mod evidence_page;
 pub mod free_join;
 mod graph_text;
 pub mod id_hash;
+pub mod id_sort;
+mod identified;
 pub mod insertion;
 pub mod insertion_query;
 mod insertion_query_text;
@@ -100,12 +102,14 @@ pub use aggregation::{
     GraphAggregateError, GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder,
     GraphAggregateRow, GraphAggregateTest, GraphAggregateValue, GraphExactAverage,
     GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
-    MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PreparedGraphAggregate,
+    MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PositionedEdge, PositionedGraph,
+    PreparedGraphAggregate,
 };
 pub use algebra::GraphMatchMode;
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
-    GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GlaLimitDimension, GlaLimitExceeded, GovernedCheckpoint, GqlQueryError, GqlQueryExecution,
+    GqlQueryPolicy,
 };
 pub use deletion::{
     GraphDeleteBuildError, GraphDeleteError, GraphDeletePolicy, GraphDeleteProposal,
@@ -155,6 +159,7 @@ pub use graph_text::{
     PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog, reads_element_identity,
     starts_fnx_graph_projection,
 };
+pub use identified::IdentifiedNeighbors;
 pub use insertion_query::{
     GraphInsertBinding, GraphInsertQueryBatch, GraphInsertQueryBuildError, GraphInsertQueryError,
     PreparedGraphInsertQuery,

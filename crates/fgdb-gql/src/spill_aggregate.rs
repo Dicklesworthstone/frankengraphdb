@@ -40,7 +40,7 @@ impl core::fmt::Display for SpillAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Unsupported => {
-                f.write_str("external aggregation requires COUNT/SUM/AVG (including DISTINCT arguments) or MIN/MAX, without collection")
+                f.write_str("external aggregation requires COUNT/SUM/AVG, MIN/MAX, or COLLECT over a complete relational input")
             }
             Self::Vertex(error) => error.fmt(f),
             Self::Edge(error) => error.fmt(f),
@@ -169,7 +169,9 @@ impl AsyncSpillAggregatePlan {
     /// definition. Zero-source Values/UNWIND pipelines require this owner;
     /// graph-backed and binary inputs retain the same stages and result clauses.
     /// Every descendant is admitted before I/O, including beneath LIMIT zero.
-    /// Unsupported joins and collection grouping refuse.
+    /// COLLECT and COLLECT DISTINCT retain the complete relation's occurrence
+    /// order. Each collected value must fit the host's memory and row limits;
+    /// the host must admit every native allocation event before retaining it.
     /// The private summary never becomes an executable single-graph source.
     pub fn compile_relation(
         aggregate: &PreparedGraphSetAggregate,
@@ -200,7 +202,7 @@ impl AsyncSpillAggregatePlan {
     }
 }
 
-/// Sealed numeric aggregate definition, including completed-group clauses.
+/// Sealed aggregate definition, including completed-group clauses.
 /// Clones share immutable compiler metadata; no source predicate is rewritten.
 #[derive(Clone)]
 pub struct SpillAggregateDefinition {
@@ -212,6 +214,7 @@ pub struct SpillAggregateDefinition {
     // relational owner already produces complete rows and MUST NOT replay it.
     // Shared metadata, never a retained match bag or per-group support set.
     input_pipeline: Option<Arc<InputPipeline>>,
+    collections: bool,
 }
 impl core::fmt::Debug for SpillAggregateDefinition {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -225,6 +228,8 @@ impl core::fmt::Debug for SpillAggregateDefinition {
 
 /// One group's existing exact cells. A host must admit storage before creating
 /// this state and before updating an extremum with an owned input payload.
+/// Collection profiles additionally admit every allocation event and retain
+/// that credit through finalization; fixed state bytes cannot cover a list.
 pub struct SpillAggregateState {
     definition: SpillAggregateDefinition,
     cells: Vec<NumericState>,
@@ -296,7 +301,17 @@ impl SpillAggregateDefinition {
             || aggregate.input_pattern().columns().len(),
             |relation| relation.columns().len(),
         );
-        if input_width > MAX_PATTERN_VERTICES
+        let collections = aggregate.aggregates().iter().any(|spec| {
+            matches!(
+                spec.function(),
+                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+            )
+        });
+        // Direct graph cursors have separate visitation-order proofs. Only a
+        // complete relational owner establishes the order this profile needs;
+        // do not silently sort collected values or select a graph-only leaf.
+        if (collections && aggregate.input_relation().is_none())
+            || input_width > MAX_PATTERN_VERTICES
             || aggregate
                 .input_projection()
                 .is_some_and(|projection| projection.len() > MAX_PATTERN_VERTICES)
@@ -317,6 +332,8 @@ impl SpillAggregateDefinition {
                         | GraphAggregateFunction::AverageIntDistinct
                         | GraphAggregateFunction::Min
                         | GraphAggregateFunction::Max
+                        | GraphAggregateFunction::Collect
+                        | GraphAggregateFunction::CollectDistinct
                 )
             })
         {
@@ -339,7 +356,15 @@ impl SpillAggregateDefinition {
             aggregate: Arc::new(aggregate),
             projected_ordering,
             input_pipeline: None,
+            collections,
         })
+    }
+
+    /// Variable-size collection cells require allocation-event admission in
+    /// addition to state_resident_bytes(). The same guard must cover retained
+    /// membership, collected payloads, finalization and envelope-copy overlap.
+    pub fn has_collections(&self) -> bool {
+        self.collections
     }
 
     pub fn input_width(&self) -> usize {
@@ -584,6 +609,8 @@ impl SpillAggregateDefinition {
     /// Fixed retained cell storage, including possible binary64 promotion.
     /// The host separately reserves keys, variable extremum payloads, allocator
     /// overhead and transient decoded/projected rows before taking ownership.
+    /// Collections require additional per-allocation admission, not a bound
+    /// derived from the largest individual input row.
     pub fn state_resident_bytes(&self) -> usize {
         core::mem::size_of::<SpillAggregateState>()
             .saturating_add(
@@ -664,8 +691,9 @@ impl SpillAggregateDefinition {
         }
         let mut cells = Vec::with_capacity(self.aggregate.aggregates().len());
         for spec in self.aggregate.aggregates() {
-            // The external host proves uniqueness. Retaining native DISTINCT
-            // support sets here would make one large group unbounded again.
+            // Numeric DISTINCT uses external uniqueness passes. Collection
+            // DISTINCT must preserve first occurrence, so it keeps the native
+            // membership owner under the host's per-allocation byte admission.
             cells.push(NumericState::new_governed(
                 plain_function(spec.function()),
                 control,
@@ -677,8 +705,9 @@ impl SpillAggregateDefinition {
         })
     }
 
-    /// Add every occurrence to ordinary cells. DISTINCT cells are populated
-    /// separately by update_distinct_argument after external canonical dedup.
+    /// Add every occurrence to ordinary and collection-DISTINCT cells. Numeric
+    /// DISTINCT cells alone are populated by update_distinct_argument. Sorting
+    /// a COLLECT DISTINCT argument here would destroy first-occurrence order.
     pub fn update<E, C>(
         &self,
         state: &mut SpillAggregateState,

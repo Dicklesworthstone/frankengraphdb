@@ -13,7 +13,7 @@ type Cancel = Box<asupersync::error::Error>;
 #[path = "query_aggregate_stream.rs"]
 mod aggregate_stream;
 #[path = "query_authorized.rs"]
-mod authorized;
+pub(crate) mod authorized;
 #[path = "query_beacon.rs"]
 mod beacon;
 #[path = "query_diff.rs"]

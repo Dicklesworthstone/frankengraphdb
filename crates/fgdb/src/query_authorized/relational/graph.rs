@@ -69,46 +69,107 @@ fn visit_at<Clock: FnMut() -> u64>(
     fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
     GqlQueryError<GraphAggregateError<ReadError>, QueryError>,
 > {
-    let mut usage = AdmissionUsage::default();
-    let tables = Tables::admit(
-        snapshot,
-        query.input_pattern().plan(),
-        at,
-        scope,
-        || {
-            execution
-                .borrow_mut()
-                .node()
-                .map_err(GqlQueryError::Interrupted)
-        },
-        &mut || {
-            execution
-                .borrow_mut()
-                .poll()
-                .map_err(GqlQueryError::Interrupted)
-        },
-        &mut |event| {
-            execution
-                .borrow_mut()
-                .checkpoint()
-                .map_err(GqlQueryError::Interrupted)?;
-            usage.observe::<ReadError, QueryError>(policy, event)
-        },
-    )
-    .map_err(|error| error.map_source(GraphAggregateError::Source))?;
-    let result = query.execute_governed(
-        tables.records,
-        tables.vertices.iter().map(|&(vid, _)| vid),
-        tables
-            .edges
-            .iter()
-            .map(|&((_, from, relation, to), _)| (from, relation, to)),
-        |vid, required| Ok(tables.matches(vid, required, scope)),
-        |vid, key| Ok(tables.property(vid, key, scope)),
-        usage.remaining(policy),
-        || execution.borrow_mut().checkpoint(),
-    );
-    usage.finish(policy, result)
+    // Admission and evaluation are one phase: their signed work is charged
+    // in runs.
+    work_runs(execution, GqlQueryError::Interrupted, || {
+        let mut usage = AdmissionUsage::default();
+        // A graph aggregate reads its edges as triples alone.
+        let mut tables = Tables::admit(
+            snapshot,
+            query.input_pattern().plan(),
+            at,
+            true,
+            scope,
+            || {
+                execution
+                    .borrow_mut()
+                    .node()
+                    .map_err(GqlQueryError::Interrupted)
+            },
+            &mut || {
+                execution
+                    .borrow_mut()
+                    .poll()
+                    .map_err(GqlQueryError::Interrupted)
+            },
+            &mut |event| {
+                execution
+                    .borrow_mut()
+                    .checkpoint()
+                    .map_err(GqlQueryError::Interrupted)?;
+                usage.observe::<ReadError, QueryError>(policy, event)
+            },
+        )
+        .map_err(|error| error.map_source(GraphAggregateError::Source))?;
+        let remaining = usage.remaining(policy);
+        let checkpoint = WorkCheckpoint(execution);
+        // A vertex-only aggregate tests and reads the vertex its scan has just
+        // yielded: `scan` remembers it, so neither finds it again (count_vertices
+        // 1.9-2.3x). An edge-reading one keeps the plain lookups. Its endpoint
+        // tests run in the evaluator's hottest loop, and the remembering
+        // closures measured 5-13% slower there.
+        // Each source of triples gets its own call, so the evaluator's
+        // hottest loop reads one plain iterator (a chained one cost a
+        // compact-core count 6-15%).
+        let result = match tables.positioned_graph() {
+            // Edges by position: the evaluator keeps per-vertex state in
+            // arrays. Every reader is a pure table lookup.
+            Some(graph) => query.execute_governed_positioned(
+                tables.records,
+                &graph,
+                |vid, required| Ok(tables.matches(vid, required, scope)),
+                |at, required| Ok(tables.matches_at(at, required, scope)),
+                |vid, key| Ok(tables.property(vid, key, scope)),
+                remaining,
+                checkpoint,
+            ),
+            None => {
+                tables.settle_unpositioned(snapshot);
+                let tables = &tables;
+                let owned_edges = || {
+                    tables
+                        .edges
+                        .iter()
+                        .map(|&((_, from, relation, to), _)| (from, relation, to))
+                };
+                if let Some(inline) = tables.inline_triples() {
+                    query.execute_governed(
+                        tables.records,
+                        tables.vertices.iter().map(|&(vid, _)| vid),
+                        inline
+                            .iter()
+                            .map(|&(_, from, relation, to)| (from, relation, to)),
+                        |vid, required| Ok(tables.matches(vid, required, scope)),
+                        |vid, key| Ok(tables.property(vid, key, scope)),
+                        remaining,
+                        checkpoint,
+                    )
+                } else if query.input_pattern().plan().reads_edges() {
+                    query.execute_governed(
+                        tables.records,
+                        tables.vertices.iter().map(|&(vid, _)| vid),
+                        owned_edges(),
+                        |vid, required| Ok(tables.matches(vid, required, scope)),
+                        |vid, key| Ok(tables.property(vid, key, scope)),
+                        remaining,
+                        checkpoint,
+                    )
+                } else {
+                    let last = std::cell::Cell::new(None);
+                    query.execute_governed(
+                        tables.records,
+                        tables.scan(&last),
+                        owned_edges(),
+                        |vid, required| Ok(tables.matches_after(&last, vid, required, scope)),
+                        |vid, key| Ok(tables.property_after(&last, vid, key, scope)),
+                        remaining,
+                        checkpoint,
+                    )
+                }
+            }
+        };
+        usage.finish(policy, result)
+    })
 }
 
 impl<V: Vfs + Clone> Database<V> {

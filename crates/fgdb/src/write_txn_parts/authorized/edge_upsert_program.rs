@@ -5,7 +5,8 @@
 
 use super::{Database, Execution, Vfs, WriteTxn, WriteTxnError};
 use crate::write_txn::authorized::{edge_merge, selection, stage};
-use crate::write_txn::{edge_upsert_actions, edge_upsert_property};
+use crate::write_txn::edge_upsert_actions;
+use fgdb_delta_types::ElementId;
 use fgdb_gql::{
     GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats,
     GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphEdgeMergeError, GraphEdgeMergeOutcome,
@@ -237,7 +238,24 @@ fn apply_all<V: Vfs + Clone, Clock: FnMut() -> u64>(
                             return Ok(fgdb_types::CanonicalScalar::Null);
                         }
                         let state = state.borrow();
-                        edge_upsert_property(state.0, state.1, edge, key, control)
+                        selection::property(
+                            state.0,
+                            state.1,
+                            ElementId::Edge(edge),
+                            key,
+                            scope,
+                            || {
+                                cx.checkpoint()
+                                    .map_err(WriteTxnError::Interrupted)
+                                    .map_err(GqlQueryError::Interrupted)?;
+                                controls
+                                    .borrow_mut()
+                                    .poll()
+                                    .map_err(GqlQueryError::Interrupted)
+                            },
+                            control,
+                            staging,
+                        )
                     },
                     |batch| {
                         let mut state = state.borrow_mut();

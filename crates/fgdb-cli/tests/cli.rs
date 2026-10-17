@@ -3,6 +3,9 @@
 //! against the real durable engine. Temporary artifacts are retained for
 //! diagnosis; no fixture deletes files. Key files are created owner-only
 //! (0600), as the CLI requires on Unix.
+// The binary root (src/main.rs) takes the same limit: proving `Send` for
+// an in-process open here descends the whole verified-reopen future.
+#![recursion_limit = "256"]
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};

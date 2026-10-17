@@ -72,12 +72,20 @@ const MAX_PACK_OBJECTS: u64 = MAX_PACK_BYTES / ENTRY_BYTES as u64;
 
 /// Bytes of whole packs kept resident between reads. An open walks every
 /// object once, in root order, which visits each commit's pack once per
-/// family; a resident pack serves all of those visits from one read. Packs
-/// are admitted until the budget is spent and never evicted: once it is,
-/// other packs are read one object at a time. Evicting instead would make a
-/// walk over more pack bytes than the budget reload a whole pack for almost
-/// every object it reads.
+/// family; a resident pack serves all of those visits from one read. Only a
+/// spent pack (every object served at least once) is evicted to admit
+/// another, and once no spent pack is left the rest are read one object at a
+/// time. Evicting a pack still being walked instead would make a walk over
+/// more pack bytes than the budget reload a whole pack for almost every
+/// object it reads.
 const PACK_CACHE_BYTES: usize = 256 << 20;
+
+/// Whether `size` more resident bytes stay within the budget.
+fn fits(resident: usize, size: usize) -> bool {
+    resident
+        .checked_add(size)
+        .is_some_and(|total| total <= PACK_CACHE_BYTES)
+}
 
 /// Where one packed object's bytes are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,8 +199,8 @@ enum Slot {
     Empty,
     Loading,
     Loaded(Arc<[u8]>),
-    /// Served every object its table holds at least once, then released: a
-    /// walk is done with it. Later reads take one object at a time.
+    /// Loaded, then released: evicted once spent, or left by a walk that
+    /// ended. Later reads take one object at a time until the next walk.
     Drained,
 }
 
@@ -200,16 +208,56 @@ struct PackFile {
     path: PathBuf,
     len: u64,
     objects: u64,
-    /// Distinct objects this pack has served by any path: whole, or one at a
-    /// time while another read was loading it.
+    /// Distinct wanted objects this pack has served by any path: whole, or
+    /// one at a time while another read was loading it. At `named` the pack
+    /// is spent, and only then may it be evicted.
     served: std::sync::atomic::AtomicU64,
+    /// One bit per table entry the current root walk will read; outside a
+    /// walk, every entry. A compaction leaves objects its root no longer
+    /// names in old packs: counted, they kept those packs unspent through
+    /// the compaction's reopen, which filled the budget and sent 199,014 of
+    /// a web-google reopen's reads one at a time.
+    wanted: Box<[std::sync::atomic::AtomicU64]>,
+    /// Entries set in `wanted`.
+    named: std::sync::atomic::AtomicU64,
     /// One bit per table entry, set once that object has been served. Many
     /// blocks can name one small object (an identical property patch), and
-    /// counting each of those reads would release the pack before the walk
+    /// counting each of those reads would spend the pack before the walk
     /// reached its other objects: a packed road-ny open read 5,375 objects
-    /// 39,396 extra times, and that many reads then went one object at a time.
+    /// 39,396 extra times. Those rereads continue after the last distinct
+    /// object, so a spent pack stays resident until its bytes are needed:
+    /// releasing it at once sent 36,576 of one open's reads one at a time.
     seen: Box<[std::sync::atomic::AtomicU64]>,
     slot: Mutex<Slot>,
+}
+
+impl PackFile {
+    /// Forget which objects have been served.
+    fn forget(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        for word in &self.seen {
+            word.store(0, Relaxed);
+        }
+        self.served.store(0, Relaxed);
+    }
+
+    /// Want every object in the table.
+    fn want_everything(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let objects = usize::try_from(self.objects).expect("a pack table fits memory");
+        for (at, word) in self.wanted.iter().enumerate() {
+            let bits = (objects - 64 * at).min(64);
+            word.store(
+                if bits == 64 {
+                    u64::MAX
+                } else {
+                    (1 << bits) - 1
+                },
+                Relaxed,
+            );
+        }
+        self.named.store(self.objects, Relaxed);
+    }
 }
 
 #[derive(Default)]
@@ -231,6 +279,9 @@ pub(super) struct PackIndex {
     /// Bytes of whole packs admitted as resident, never more than
     /// [`PACK_CACHE_BYTES`]. A pack being loaded is counted from the start.
     resident: Mutex<usize>,
+    /// Whole-pack reads so far.
+    #[cfg(test)]
+    whole_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl PackIndex {
@@ -248,6 +299,8 @@ impl PackIndex {
             dir,
             table: RwLock::new(Table::default()),
             resident: Mutex::new(0),
+            #[cfg(test)]
+            whole_reads: std::sync::atomic::AtomicUsize::new(0),
         };
         index.refresh(cx, vfs).await?;
         Ok(index)
@@ -323,16 +376,23 @@ impl PackIndex {
 
     fn insert(table: &mut Table, path: PathBuf, len: u64, objects: Vec<(ObjectId, u64, u32)>) {
         let pack = u32::try_from(table.packs.len()).expect("fewer than u32::MAX packs");
-        table.packs.push(Arc::new(PackFile {
+        let words = objects.len().div_ceil(64);
+        let pack_file = PackFile {
             path,
             len,
             objects: objects.len() as u64,
             served: std::sync::atomic::AtomicU64::new(0),
-            seen: (0..objects.len().div_ceil(64))
+            wanted: (0..words)
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect(),
+            named: std::sync::atomic::AtomicU64::new(0),
+            seen: (0..words)
                 .map(|_| std::sync::atomic::AtomicU64::new(0))
                 .collect(),
             slot: Mutex::new(Slot::Empty),
-        }));
+        };
+        pack_file.want_everything();
+        table.packs.push(Arc::new(pack_file));
         for (entry, (id, offset, len)) in objects.into_iter().enumerate() {
             let entry = u32::try_from(entry).expect("a pack table is far below u32::MAX entries");
             let location = Location {
@@ -410,9 +470,7 @@ impl PackIndex {
                 Slot::Loading | Slot::Drained => false,
                 Slot::Empty => {
                     let mut resident = self.resident.lock().expect("resident packs");
-                    let admitted = resident
-                        .checked_add(size)
-                        .is_some_and(|total| total <= PACK_CACHE_BYTES);
+                    let admitted = fits(*resident, size) || self.evict_spent(&mut resident, size);
                     if admitted {
                         *resident += size;
                         *slot = Slot::Loading;
@@ -437,7 +495,7 @@ impl PackIndex {
             self.served(&pack, location.entry);
             return Ok(object);
         }
-        let loaded = Self::read_whole(cx, vfs, &pack).await;
+        let loaded = self.read_whole(cx, vfs, &pack).await;
         let mut slot = pack.slot.lock().expect("pack slot");
         match loaded {
             Ok(bytes) => {
@@ -456,30 +514,113 @@ impl PackIndex {
         }
     }
 
-    /// Count the object at `entry` served, once however often it is read.
-    /// Once a pack has served every object its table holds, a loaded pack is
-    /// released with its budget; that is checked on every read, so a load
-    /// that completes after the last distinct object was read one at a time
-    /// is released too.
+    /// Count the object at `entry` served, once however often it is read,
+    /// when it is one the pack is wanted for.
     fn served(&self, pack: &PackFile, entry: u32) {
         use std::sync::atomic::Ordering::Relaxed;
-        let bit = 1u64 << (entry % 64);
-        let first = pack.seen[entry as usize / 64].fetch_or(bit, Relaxed) & bit == 0;
-        let served = if first {
-            pack.served.fetch_add(1, Relaxed) + 1
-        } else {
-            pack.served.load(Relaxed)
+        let (word, bit) = (entry as usize / 64, 1u64 << (entry % 64));
+        if pack.seen[word].fetch_or(bit, Relaxed) & bit == 0
+            && pack.wanted[word].load(Relaxed) & bit != 0
+        {
+            pack.served.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// Release spent resident packs until `size` more bytes fit the budget,
+    /// reporting whether they now do. The caller holds the slot of the pack
+    /// it is admitting and `resident`, so this never waits: a pack whose slot
+    /// another read holds is skipped, as is the whole pass while the table is
+    /// being extended.
+    fn evict_spent(&self, resident: &mut usize, size: usize) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Ok(table) = self.table.try_read() else {
+            return false;
         };
-        if served < pack.objects {
-            return;
+        for pack in &table.packs {
+            if fits(*resident, size) {
+                break;
+            }
+            if pack.served.load(Relaxed) < pack.named.load(Relaxed) {
+                continue;
+            }
+            let Ok(mut slot) = pack.slot.try_lock() else {
+                continue;
+            };
+            if matches!(*slot, Slot::Loaded(_)) {
+                *slot = Slot::Drained;
+                *resident -= usize::try_from(pack.len).unwrap_or(usize::MAX);
+            }
         }
-        let mut slot = pack.slot.lock().expect("pack slot");
-        if matches!(*slot, Slot::Loaded(_)) {
-            *slot = Slot::Drained;
+        fits(*resident, size)
+    }
+
+    /// A root walk is about to read every object its root names: each pack an
+    /// earlier walk drained may be loaded whole again. Without this a second
+    /// walk in one process read every object it shared with the first one at
+    /// a time, an open, a seek and a read each: compacting a packed road-ny
+    /// spent 1,374 of its 2,531 main-thread samples re-reading the blocks the
+    /// open had just read.
+    ///
+    /// `named` is every object the walk will read by identity; a pack is
+    /// spent once it has served those it holds, whatever else it holds.
+    pub(super) fn rearm(&self, named: impl IntoIterator<Item = ObjectId>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        for pack in self.packs() {
+            let mut slot = pack.slot.lock().expect("pack slot");
+            if matches!(*slot, Slot::Drained) {
+                *slot = Slot::Empty;
+            }
             drop(slot);
-            *self.resident.lock().expect("resident packs") -=
-                usize::try_from(pack.len).unwrap_or(usize::MAX);
+            pack.forget();
+            for word in &pack.wanted {
+                word.store(0, Relaxed);
+            }
+            pack.named.store(0, Relaxed);
         }
+        let table = self.table.read().expect("pack table");
+        for id in named {
+            let Some(location) = table.objects.get(&id) else {
+                continue;
+            };
+            let pack = &table.packs[location.pack as usize];
+            let bit = 1u64 << (location.entry % 64);
+            if pack.wanted[location.entry as usize / 64].fetch_or(bit, Relaxed) & bit == 0 {
+                pack.named.fetch_add(1, Relaxed);
+            }
+        }
+    }
+
+    /// A root walk is done: release every pack it left resident, spent or not.
+    /// A pack holding objects the walked root no longer names (a compaction
+    /// superseded them) is never spent, so without this it would keep its
+    /// share of the budget for the life of the store.
+    /// Every pack is then wanted for all of its objects again, as before
+    /// any walk.
+    pub(super) fn release(&self) {
+        let mut freed = 0;
+        for pack in self.packs() {
+            let mut slot = pack.slot.lock().expect("pack slot");
+            if matches!(*slot, Slot::Loaded(_)) {
+                *slot = Slot::Drained;
+                freed += usize::try_from(pack.len).unwrap_or(usize::MAX);
+            }
+            drop(slot);
+            pack.forget();
+            pack.want_everything();
+        }
+        *self.resident.lock().expect("resident packs") -= freed;
+    }
+
+    /// The packs indexed so far. A caller locks their slots only after the
+    /// table lock is released: a read holding a slot may need the table.
+    fn packs(&self) -> Vec<Arc<PackFile>> {
+        self.table.read().expect("pack table").packs.clone()
+    }
+
+    /// How many times a pack has been read whole.
+    #[cfg(test)]
+    pub(super) fn whole_reads(&self) -> usize {
+        self.whole_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Spend the whole resident budget, so every later read of a pack not
@@ -492,20 +633,21 @@ impl PackIndex {
     /// How many packs are loaded whole.
     #[cfg(test)]
     pub(super) fn resident_packs(&self) -> usize {
-        self.table
-            .read()
-            .expect("pack table")
-            .packs
+        self.packs()
             .iter()
             .filter(|pack| matches!(*pack.slot.lock().expect("pack slot"), Slot::Loaded(_)))
             .count()
     }
 
     async fn read_whole<V: Vfs>(
+        &self,
         cx: &impl StorageReadCx,
         vfs: &V,
         pack: &PackFile,
     ) -> Result<Arc<[u8]>, StoreError> {
+        #[cfg(test)]
+        self.whole_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let file = cx.with_restriction_async(vfs.open_read(&pack.path)).await?;
         let bytes = read_bounded(cx, file, MAX_PACK_BYTES).await?;
         if bytes.len() as u64 != pack.len {
@@ -607,6 +749,7 @@ mod tests {
             dir: PathBuf::new(),
             table: RwLock::new(table),
             resident: Mutex::new(0),
+            whole_reads: std::sync::atomic::AtomicUsize::new(0),
         };
         match index.locate(id(1)) {
             Located::Several(all) => {

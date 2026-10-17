@@ -134,6 +134,43 @@ fn literals_parameters_defaults_and_whitespace_bind_identically() {
 }
 
 #[test]
+fn standalone_text_matches_native_comments_and_numeric_spelling() {
+    let canonical = bind("CALL fnx.pagerank(0.85,100,1e-6,true) YIELD vertex,score");
+    let commented = bind(
+        "/* lead */ CALL /* keyword */ fnx /* namespace */ . pagerank /* name */ (\
+         85e-2, // alpha\n 100, 1E-6, true /* weighted */) \
+         /* before yield */ YIELD vertex, /* split */ score ; // tail\n",
+    );
+    assert_eq!(commented, canonical);
+    assert!(!FnxCallSpec::continues_past_call(
+        "/* lead */ CALL fnx.pagerank() /* done */"
+    ));
+    assert!(FnxCallSpec::continues_past_call(
+        "CALL fnx.pagerank() YIELD vertex /* pipeline */ RETURN vertex"
+    ));
+
+    for text in [
+        "CALL fnx.pagerank(.85)",
+        "CALL fnx.pagerank(0.)",
+        "CALL fnx.pagerank(85e)",
+        "CALL fnx.pagerank(85e+)",
+        "CALL fnx.pagerank(85e-)",
+        "CALL fnx.pagerank(0.8.5)",
+        "CALL fnx.pagerank(-.5)",
+        "CALL fnx.pagerank(+.5)",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
+
+    let unterminated =
+        FnxCallSpec::bind("CALL fnx.pagerank() /* missing", &FnxParameters::new()).unwrap_err();
+    assert_eq!(unterminated.kind, FnxBindErrorKind::Expected("closing */"));
+}
+
+#[test]
 fn yield_slots_aliases_and_call_digests_are_bound() {
     let call = bind("CALL fnx.pagerank() YIELD score AS rank, vertex AS id");
     assert_eq!(call.outputs()[0].field, FnxOutput::Score);

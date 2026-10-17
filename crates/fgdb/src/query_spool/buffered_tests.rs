@@ -725,9 +725,11 @@ fn dropping_pending_input_append_refunds_source_row_and_encoder_together() {
             1024,
             "the source row is owned by the pending append"
         );
+        // The encoder keeps its output's capacity admitted, not its completed
+        // workspace (c6b17db3); that reservation is what must survive.
         assert!(
-            spill_pool.used() >= encoded_len * 8 + 128,
-            "the native encoder reservation survives the awaited page write"
+            spill_pool.used() >= encoded_len,
+            "the encoded row's reservation survives the awaited page write"
         );
         drop(future);
         assert_eq!(source_pool.used(), 0);

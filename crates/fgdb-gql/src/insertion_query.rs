@@ -369,6 +369,9 @@ impl PreparedGraphInsertQuery {
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertQueryBatch, GqlQueryError<GraphInsertQueryError<E, A>, C>> {
+        // Every engine below (creation, aggregate, ordering, tail) sees one
+        // checkpoint type per error-type pair, not one per caller (fgdb-2goz).
+        let mut checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         let mut creation_policy = policy;
         creation_policy.query = GqlQueryPolicy::new(
             policy.query.rows.max_snapshot_records().unwrap_or(u64::MAX),

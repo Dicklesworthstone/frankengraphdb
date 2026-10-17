@@ -779,7 +779,16 @@ fn bound_ingestion_reuses_graph_and_templates_across_more_than_sixty_four_steps(
             .execute_bound_batch_stats(&query, &batch)
             .await
             .unwrap();
-        assert_eq!(stats, repeat.stats());
+        // A receipt call owns its vertex MERGE outcomes and pays for them
+        // (b16ecd0e): a work unit before and after the transfer and a scratch
+        // entry, itself a work unit, per target. A stats-only call transfers
+        // none. Each record runs two single-target vertex MERGEs; everything
+        // else is the same.
+        let merges = 24 * 2;
+        let mut transferred = repeat.stats();
+        transferred.evaluator.work_units -= 3 * merges;
+        transferred.evaluator.scratch_entries -= merges;
+        assert_eq!(stats, transferred);
         assert!(matches!(
             completion,
             EmbeddedTxnCompletion::ReadClosed { .. }

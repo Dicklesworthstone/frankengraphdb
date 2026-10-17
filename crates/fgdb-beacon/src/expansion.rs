@@ -3,7 +3,10 @@
 //! authorization grant. Cursor sources can instead supply admitted neighbors
 //! on demand. Both use the same multi-source BFS and canonical rank reduction.
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
+use std::collections::BTreeSet;
+
+mod cursor;
+pub use cursor::{ExpansionCursor, ExpansionRequest};
 
 use fgdb_types::VId;
 
@@ -306,9 +309,10 @@ impl ExpansionGraph {
             include_seeds,
             candidates,
             self.limits,
-            &mut |id, entries, work| {
-                // Preserve the resident profile's existing combined charge.
-                work.charge(tree_work(self.vertices.len()) + tree_work(entries))?;
+            &mut |id, work| {
+                // The shared cursor admits its own distance-map work before
+                // this source probe; the directory pays only its lookup.
+                work.charge(tree_work(self.vertices.len()))?;
                 Ok(self.contains(id))
             },
             source,
@@ -403,10 +407,7 @@ pub fn expand_from_membership_filtered(
         include_seeds,
         candidates,
         limits,
-        &mut |id, entries, work| {
-            work.charge(tree_work(entries))?;
-            membership.contains_vertex(id, work)
-        },
+        &mut |id, work| membership.contains_vertex(id, work),
         source,
         &mut eligible,
         work,
@@ -420,102 +421,38 @@ fn expand_controlled(
     include_seeds: bool,
     candidates: u32,
     limits: ExpansionLimits,
-    contains: &mut impl FnMut(VId, usize, &mut dyn WorkControl) -> Result<bool, BeaconError>,
+    contains: &mut impl FnMut(VId, &mut dyn WorkControl) -> Result<bool, BeaconError>,
     source: &mut impl ExpansionNeighbors,
     eligible: &mut impl FnMut(VId, &mut dyn WorkControl) -> Result<bool, BeaconError>,
     work: &mut dyn WorkControl,
 ) -> Result<Vec<GraphHit>, BeaconError> {
-    work.charge(1)?;
-    if seeds.len() > limits.max_seed_ids {
-        return Err(BeaconError::ResourceLimit {
-            resource: "expansion seed IDs",
-            limit: limits.max_seed_ids,
-        });
-    }
-    let k = usize::try_from(candidates)
-        .map_err(|_| BeaconError::InvalidQuery("graph candidate depth exceeds usize"))?;
-    if k == 0 {
-        return Ok(Vec::new());
-    }
-    let mut distance = BTreeMap::new();
-    let mut frontier = VecDeque::new();
-    for &id in seeds {
-        if contains(id, distance.len(), work)? && !distance.contains_key(&id) {
-            admit_visit(distance.len(), limits)?;
-            distance.insert(id, 0_u32);
-            frontier.push_back((id, 0_u32));
-        }
-    }
-    while let Some((id, hops)) = frontier.pop_front() {
-        work.charge(1)?;
-        if hops == max_hops {
-            continue;
-        }
-        // Keep the first refusal even if a defective source swallows a
-        // visitor error and continues. It cannot publish a partial search.
-        let mut failure: Option<BeaconError> = None;
-        let result = source.visit_neighbors(id, work, &mut |next, work| {
-            if let Some(error) = &failure {
-                return Err(error.clone());
+    let mut cursor =
+        ExpansionCursor::new(seeds, max_hops, include_seeds, candidates, limits, work)?;
+    loop {
+        match cursor.request(work)? {
+            ExpansionRequest::Seed(id) => {
+                let present = contains(id, work)?;
+                // The cursor invokes admission only for a NEW present visit,
+                // after its visit limit and before distance/queue allocation.
+                cursor.resolve_membership(present, || work.reserve_scratch(2))?;
             }
-            let result: Result<(), BeaconError> = (|| {
-                if !contains(next, distance.len(), work)? {
-                    return Err(BeaconError::InvalidQuery(
-                        "expansion endpoint outside selected corpus",
-                    ));
+            ExpansionRequest::Neighbors(id) => {
+                let result = source.visit_neighbors(id, work, &mut |next, work| {
+                    cursor.prepare_neighbor(next, work)?;
+                    let present = contains(next, work).map_err(|error| cursor.refuse(error))?;
+                    cursor.resolve_membership(present, || work.reserve_scratch(2))
+                });
+                if let Err(error) = result {
+                    return Err(cursor.refuse(error));
                 }
-                if distance.contains_key(&next) {
-                    return Ok(());
-                }
-                admit_visit(distance.len(), limits)?;
-                // hops < max_hops <= u32::MAX.
-                let next_hops = hops + 1;
-                distance.insert(next, next_hops);
-                frontier.push_back((next, next_hops));
-                Ok(())
-            })();
-            if let Err(error) = &result {
-                failure = Some(error.clone());
+                // Also observes a swallowed visitor failure before allowing
+                // another source or a final result. There is only one BFS.
+                cursor.finish_neighbors()?;
             }
-            result
-        });
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        result?;
-    }
-    let mut best = BinaryHeap::new();
-    for (id, hops) in distance {
-        work.charge(2 * tree_work(best.len()))?;
-        if hops == 0 && !include_seeds {
-            continue;
-        }
-        if !eligible(id, work)? {
-            continue;
-        }
-        let candidate = (hops, id);
-        if best.len() < k {
-            best.push(candidate);
-        } else if best.peek().is_some_and(|worst| candidate < *worst) {
-            best.pop();
-            best.push(candidate);
+            ExpansionRequest::Complete => break,
         }
     }
-    let mut rows = Vec::new();
-    while !best.is_empty() {
-        work.charge(tree_work(best.len()))?;
-        let (hops, id) = best
-            .pop()
-            .ok_or(BeaconError::Invariant("expansion heap disappeared"))?;
-        rows.push(GraphHit { id, hops });
-    }
-    for i in 0..rows.len() / 2 {
-        work.charge(1)?;
-        let other = rows.len() - i - 1;
-        rows.swap(i, other);
-    }
-    work.charge(1)?;
-    Ok(rows)
+    cursor.finish(eligible, work)
 }
 
 fn admit_visit(count: usize, limits: ExpansionLimits) -> Result<(), BeaconError> {

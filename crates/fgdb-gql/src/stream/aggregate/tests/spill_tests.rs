@@ -332,16 +332,24 @@ fn spill_reduction_remains_cancellable_after_source_release() {
 
 #[test]
 fn spill_rejects_unimplemented_semantics_and_cross_definition_states() {
-    let relation = PreparedGraphAggregate::prepare_relation(
-        crate::PreparedGraphSet::from(input()),
-        &[],
-        &[GraphAggregate::count_rows("rows")],
-        0,
-        None,
-    )
-    .unwrap();
+    let relation = |input: crate::PreparedGraphSet| {
+        PreparedGraphAggregate::prepare_relation(
+            input,
+            &[],
+            &[GraphAggregate::count_rows("rows")],
+            0,
+            None,
+        )
+        .unwrap()
+    };
+    // A single-source ALL relation is a row-local pipeline, which spill
+    // aggregation admits since 62990e3b; an intermediate window is not, and
+    // still refuses.
+    assert!(SpillAggregatePlan::compile(&relation(crate::PreparedGraphSet::from(input()))).is_ok());
     assert!(matches!(
-        SpillAggregatePlan::compile(&relation),
+        SpillAggregatePlan::compile(&relation(
+            crate::PreparedGraphSet::from(input()).with_page(0, Some(1))
+        )),
         Err(SpillAggregateBuildError::Unsupported)
     ));
     let definition = PreparedGraphAggregate::prepare(

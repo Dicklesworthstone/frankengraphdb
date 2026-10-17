@@ -390,18 +390,28 @@ fn computed_collections_keep_original_child_order_and_unproved_shapes_refuse() {
             "{text}"
         );
     }
-    for text in [
-        "MATCH (a)-[r:R]->(b) RETURN COLLECT(b) AS values",
-        "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p + 1) AS values",
-    ] {
-        assert!(
-            matches!(
-                EdgeAggregatePlan::compile(&prepare(text)),
-                Err(EdgeAggregateBuildError::Scan(_))
-            ),
-            "{text}"
-        );
-    }
+    // A plain endpoint collection is proved now (fgdb-dvtfk) and streams the
+    // batch answer; a computed collection is still refused by the scan.
+    let ends = prepare("MATCH (a)-[r:R]->(b) RETURN COLLECT(b) AS values");
+    let s = source(31);
+    let expected = batch(&ends, &s);
+    assert_eq!(
+        EdgeAggregateCursor::new(
+            s,
+            EdgeAggregatePlan::compile(&ends).unwrap(),
+            wide(),
+            || Ok::<_, ()>(())
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap(),
+        expected
+    );
+    assert!(matches!(
+        EdgeAggregatePlan::compile(&prepare(
+            "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p + 1) AS values"
+        )),
+        Err(EdgeAggregateBuildError::Scan(_))
+    ));
 }
 
 // Independent property-order oracle. The child orders its projected columns;

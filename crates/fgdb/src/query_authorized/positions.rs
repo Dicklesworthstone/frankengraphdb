@@ -18,7 +18,7 @@ const PROBE_LIMIT: usize = 32;
 const EMPTY: u32 = u32::MAX;
 
 #[derive(Debug)]
-pub(super) struct VertexPositions {
+pub(crate) struct VertexPositions {
     slots: Box<[u32]>,
     mask: usize,
     len: usize,
@@ -27,7 +27,7 @@ pub(super) struct VertexPositions {
 impl VertexPositions {
     /// Index `table`, sorted and unique by identity. `None` when it is too
     /// long to address with a slot.
-    pub(super) fn build<T>(table: &[(VId, T)]) -> Option<Self> {
+    pub(crate) fn build<T>(table: &[(VId, T)]) -> Option<Self> {
         let len = u32::try_from(table.len()).ok().filter(|&len| len < EMPTY)?;
         let capacity = (len as usize).max(1).checked_mul(2)?.next_power_of_two();
         let mask = capacity - 1;
@@ -52,7 +52,7 @@ impl VertexPositions {
     }
 
     /// Where `vid` is in `table`, the table this index was built from.
-    pub(super) fn find<T>(&self, table: &[(VId, T)], vid: VId) -> Option<usize> {
+    pub(crate) fn find<T>(&self, table: &[(VId, T)], vid: VId) -> Option<usize> {
         debug_assert_eq!(table.len(), self.len, "an index of a different table");
         let mut at = mix(vid) & self.mask;
         for _ in 0..PROBE_LIMIT {

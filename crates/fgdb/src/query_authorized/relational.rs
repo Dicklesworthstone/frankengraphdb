@@ -80,6 +80,25 @@ fn set_execution_at<Clock: FnMut() -> u64>(
     fgdb_gql::GqlQueryExecution<GraphValueRow>,
     GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>,
 > {
+    // The whole statement is one phase: its row stages' signed work (ORDER BY
+    // and LIMIT over every row a CALL yields) is charged in runs, as its
+    // patterns' and kernels' already is.
+    work_runs(execution, GqlQueryError::Interrupted, || {
+        set_execution_in_runs(snapshot, at, query, scope, execution, policy)
+    })
+}
+
+fn set_execution_in_runs<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    query: &PreparedGraphSet,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    policy: GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<GraphValueRow>,
+    GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>,
+> {
     query.execute_governed_with_elements(
         policy,
         |pattern, remaining| {
@@ -146,7 +165,10 @@ fn procedure_at<Clock: FnMut() -> u64>(
         options,
         scope,
         execution,
-        |event| usage.observe(remaining, event).map_err(query_error),
+        super::analytics::UsageObserver {
+            usage: &mut usage,
+            policy: remaining,
+        },
     )
     .map_err(crate::query::procedure_failure)?;
     let value = crate::query::procedure_rows(rows)?;

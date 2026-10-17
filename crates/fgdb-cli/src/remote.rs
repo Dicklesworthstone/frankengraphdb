@@ -7,6 +7,8 @@
 //! authentication and database selection are open failures (4), and
 //! transport failures or an unknown commit outcome are I/O failures (5).
 
+mod batch;
+
 use super::{Failure, emit, float_text, hex, render_row_body, render_rows};
 use crate::load::{Json, parse_json};
 use asupersync::Budget;
@@ -38,6 +40,10 @@ struct RemoteOptions {
     /// `subscribe` stops after this many batches (default: until interrupted).
     max_batches: Option<u64>,
     tls: Option<RemoteTls>,
+    /// A complete typed argument file for one atomic write-batch request.
+    rows_file: Option<PathBuf>,
+    /// Explicit CSV column types; absent means the typed JSON file format.
+    csv_types: Option<batch::CsvSchema>,
 }
 
 struct RemoteTls {
@@ -55,6 +61,8 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut read_mode = None;
     let mut tls_server_name = None;
     let mut tls_ca_file = None;
+    let mut rows_file = None;
+    let mut csv_types = None;
     let mut at = 0;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -74,6 +82,10 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             }
             "--token-file" if token_file.is_none() => token_file = Some(PathBuf::from(value()?)),
             "--database" if database.is_none() => database = Some(value()?),
+            "--rows-file" if rows_file.is_none() => rows_file = Some(PathBuf::from(value()?)),
+            "--csv-types" if csv_types.is_none() => {
+                csv_types = Some(batch::CsvSchema::parse(&value()?)?);
+            }
             "--tls-server-name" if tls_server_name.is_none() => {
                 let name = value()?;
                 if name.is_empty() || name.chars().any(char::is_whitespace) {
@@ -139,6 +151,14 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     if max_batches.is_some() && mode != ExecuteMode::Subscribe {
         return Err(Failure::usage("--max-batches applies only to subscribe"));
     }
+    if rows_file.is_some() && (mode != ExecuteMode::Write || !parameters.is_empty()) {
+        return Err(Failure::usage(
+            "--rows-file applies only to write and cannot be combined with --param",
+        ));
+    }
+    if csv_types.is_some() && rows_file.is_none() {
+        return Err(Failure::usage("--csv-types requires --rows-file"));
+    }
     let tls = match (tls_server_name, tls_ca_file) {
         (Some(server_name), Some(ca_file)) => Some(RemoteTls {
             server_name,
@@ -171,6 +191,8 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         parameters,
         max_batches,
         tls,
+        rows_file,
+        csv_types,
     })
 }
 
@@ -396,6 +418,27 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
     let options = parse(args)?;
     let runtime = fgdb::runtime_builder().build().map_err(Failure::io)?;
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    if let Some(path) = &options.rows_file {
+        return runtime.block_on(async {
+            // Complete file/value/wire admission precedes credential access
+            // and connection. Nothing ever sends a successfully decoded prefix.
+            let batch = batch::PreparedBatch::read(
+                &cx,
+                path,
+                &options.statement,
+                options.csv_types.as_ref(),
+            )
+            .await?;
+            let mut client = connect(&cx, &options).await?;
+            client
+                .select(&cx, &options.database)
+                .await
+                .map_err(failure)?;
+            batch.execute(&cx, &mut client, robot, out).await?;
+            let _ = client.close(&cx).await;
+            Ok(())
+        });
+    }
     if options.mode == ExecuteMode::Subscribe {
         return runtime.block_on(subscribe(&cx, options, robot, out));
     }

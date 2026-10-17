@@ -67,6 +67,14 @@ impl Tape {
         size_of::<Self>() + self.runs.capacity() * size_of::<(Token, u32)>()
     }
 
+    /// The runs in order: `count` repetitions of `polls` charge-free polls
+    /// then `step` (none: polls only), exactly what `replay` walks.
+    pub(super) fn runs(&self) -> impl Iterator<Item = (u32, Option<Step>, u32)> + '_ {
+        self.runs
+            .iter()
+            .map(|&(token, count)| (token.polls, token.step, count))
+    }
+
     pub(super) fn replay<E>(
         &self,
         mut poll: impl FnMut() -> Result<(), E>,

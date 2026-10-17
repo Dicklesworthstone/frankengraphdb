@@ -27,6 +27,46 @@ impl SpillSetJoinPlan {
     pub fn kind(&self) -> RowJoinKind {
         self.spec.kind()
     }
+    /// Positional canonical equality keys; each side is sorted independently
+    /// in this tuple order. Repeated positions do not require duplicate sorts.
+    pub fn keys(&self) -> &[(usize, usize)] {
+        self.spec.keys()
+    }
+    /// Fixed eligibility, not an adaptive choice or a retry after refusal.
+    /// Residual ON uses supports_merge_filtered() and per-occurrence witnesses.
+    /// Equal NULL tuples still do not establish presence.
+    pub fn supports_merge_presence(&self) -> bool {
+        matches!(self.kind(), RowJoinKind::Semi | RowJoinKind::Anti)
+            && !self.keys().is_empty()
+            && self.spec.predicate().is_none()
+    }
+    /// Equality-only pair joins can replay one sorted key group instead of
+    /// rescanning the complete opposite relation. Residual ON predicates need
+    /// supports_merge_filtered(): a group witness cannot prove row absence.
+    pub fn supports_merge_pairs(&self) -> bool {
+        matches!(
+            self.kind(),
+            RowJoinKind::Inner | RowJoinKind::Left | RowJoinKind::Right | RowJoinKind::Full
+        ) && !self.keys().is_empty()
+            && self.spec.predicate().is_none()
+    }
+    /// Keyed residual joins replay only equal-key candidates through the native
+    /// ON kernel. Every left/right occurrence owns its own witness; outer and
+    /// presence decisions never reuse another occurrence's predicate result.
+    /// This is a fixed choice before execution, never a retry after refusal.
+    pub fn supports_merge_filtered(&self) -> bool {
+        !self.keys().is_empty() && self.spec.predicate().is_some()
+    }
+    pub fn compare_keys_with_control<E>(
+        &self,
+        left: &GraphValueRow,
+        right: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<core::cmp::Ordering, SpillSetRowError<E>> {
+        self.spec
+            .compare_keys_with_control(left, right, control)
+            .map_err(failure)
+    }
     pub fn validate_row_with_control<E>(
         &self,
         row: &GraphValueRow,

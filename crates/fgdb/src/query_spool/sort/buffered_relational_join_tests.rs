@@ -9,6 +9,11 @@ use fgdb_gql::{
     PreparedGraphSetText, PreparedGraphText,
 };
 
+#[path = "buffered_relational_join_pair_tests.rs"]
+mod pair_tests;
+#[path = "buffered_relational_join_filtered_tests.rs"]
+mod filtered_tests;
+
 const KINDS: [RowJoinKind; 6] = [
     RowJoinKind::Inner,
     RowJoinKind::Left,
@@ -306,6 +311,291 @@ fn empty_left_and_zero_parent_page_still_execute_the_failing_right_child() {
                 fgdb_gql::GraphSetExecutionError::Projection { .. }
             ))
         ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn presence_frames<const N: usize>(rows: &[[i64; N]]) -> Vec<Vec<u8>> {
+    let mut rows: Vec<_> = rows
+        .iter()
+        .map(|row| GraphValueRow::from_owned_values(row.iter().copied().map(scalar).collect()))
+        .collect();
+    rows.sort();
+    rows.into_iter()
+        .map(|row| row.canonical_bytes().unwrap())
+        .collect()
+}
+
+#[test]
+fn merge_presence_selection_accounts_for_both_sorts_without_admitting_residuals() {
+    for kind in KINDS {
+        for keyed in [false, true] {
+            for residual in [false, true] {
+                let query = joined(kind, keyed, residual, false);
+                let compiled = AsyncSpillSetPlan::compile(&query).unwrap();
+                let AsyncSpillSetSourcePlan::RowJoin(join) = compiled.source() else {
+                    panic!("expected a relational join");
+                };
+                let eligible =
+                    matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti) && keyed && !residual;
+                assert_eq!(join.supports_merge_presence(), eligible);
+                let pairs =
+                    !matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti) && keyed && !residual;
+                assert_eq!(join.supports_merge_pairs(), pairs);
+                let filtered = keyed && residual;
+                assert_eq!(join.supports_merge_filtered(), filtered);
+                let barriers = if eligible || pairs || filtered { 3 } else { 2 };
+                assert_eq!(
+                    compiled.stage_count(),
+                    compiled.stages().len()
+                        + join.left().stage_count()
+                        + join.right().stage_count()
+                        + barriers
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn merge_presence_preserves_duplicate_left_occurrences_and_parent_pagination() {
+    let ((), report) = run_async_under_lab(0xc01d_3111, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &pool).await;
+        let baseline = pool.used();
+        let key_only = |side| -> PreparedGraphSet {
+            let endpoint = if side == 0 { "a" } else { "b" };
+            PreparedGraphText::prepare(
+                &format!("MATCH (a)-[r:R]->(b) RETURN {endpoint}.p AS k"),
+                resolve,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .with_duplicates()
+            .into()
+        };
+        let types = [GraphSetColumnType::Scalar];
+        for cut in [1, 2] {
+            for kind in [RowJoinKind::Semi, RowJoinKind::Anti] {
+                let query = key_only(0)
+                    .join(
+                        key_only(1),
+                        RowJoinSpec::new(&types, &types, &[(0, 0)])
+                            .unwrap()
+                            .with_kind(kind),
+                    )
+                    .unwrap();
+                let value = if kind == RowJoinKind::Semi { 1 } else { 3 };
+                let expected = presence_frames(&[[value], [value]]);
+                let (actual, _, _, _) = execute(&query, cut, &mut view, &cx, policy(100), 8, WORK)
+                    .await
+                    .unwrap();
+                assert_eq!(actual, expected);
+                let page = query.clone().with_page(1, Some(1));
+                assert_eq!(
+                    execute(&page, cut, &mut view, &cx, policy(1), 8, WORK)
+                        .await
+                        .unwrap()
+                        .0,
+                    expected[1..].to_vec()
+                );
+                let empty = query.with_page(0, Some(0));
+                assert!(
+                    execute(&empty, cut, &mut view, &cx, policy(0), 8, WORK)
+                        .await
+                        .unwrap()
+                        .0
+                        .is_empty()
+                );
+                // The two complete children require eight private rows even
+                // when the final output page is empty.
+                assert!(matches!(
+                    execute(&empty, cut, &mut view, &cx, policy(0), 7, WORK).await,
+                    Err(NativeSpoolError::BufferedExecute(error))
+                        if matches!(*error, GqlQueryError::Rows(_))
+                ));
+                assert_eq!(pool.used(), baseline);
+            }
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn merge_presence_handles_mapped_composite_and_repeated_key_positions() {
+    let ((), report) = run_async_under_lab(0xc01d_3112, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &pool).await;
+        let right: PreparedGraphSet = PreparedGraphText::prepare(
+            "MATCH (a)-[r:R]->(b) RETURN r.p AS value,b.p AS k",
+            resolve,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .with_duplicates()
+        .into();
+        let types = [GraphSetColumnType::Scalar; 2];
+        for cut in [1, 2] {
+            for kind in [RowJoinKind::Semi, RowJoinKind::Anti] {
+                let query = leaf(0, false)
+                    .join(
+                        right.clone(),
+                        RowJoinSpec::new(&types, &types, &[(0, 1), (1, 0), (0, 1)])
+                            .unwrap()
+                            .with_kind(kind),
+                    )
+                    .unwrap();
+                let first = if cut == 1 { 7 } else { 17 };
+                let expected = if kind == RowJoinKind::Semi {
+                    presence_frames(&[[1, 9]])
+                } else {
+                    presence_frames(&[[1, 10], [3, first], [3, 8]])
+                };
+                assert_eq!(
+                    execute(&query, cut, &mut view, &cx, policy(100), 8, WORK)
+                        .await
+                        .unwrap()
+                        .0,
+                    expected
+                );
+            }
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn merge_presence_replays_exact_cumulative_budgets_and_refuses_one_less() {
+    let ((), report) = run_async_under_lab(0xc01d_3113, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &pool).await;
+        let baseline = pool.used();
+        for kind in [RowJoinKind::Semi, RowJoinKind::Anti] {
+            let query = joined(kind, true, false, false);
+            let literal = if kind == RowJoinKind::Semi {
+                presence_frames(&[[1, 9], [1, 10]])
+            } else {
+                presence_frames(&[[3, 8], [3, 17]])
+            };
+            let (rows, records, native, physical) =
+                execute(&query, 2, &mut view, &cx, policy(100), 8, WORK)
+                    .await
+                    .unwrap();
+            assert_eq!(rows, literal);
+            let exact = GqlQueryPolicy::new(
+                records.snapshot_records,
+                records.result_rows,
+                native.work_units,
+                native.scratch_entries,
+            );
+            assert_eq!(
+                execute(&query, 2, &mut view, &cx, exact, 8, physical)
+                    .await
+                    .unwrap()
+                    .0,
+                literal
+            );
+            for dimension in 0..3 {
+                let mut allowance = exact;
+                let mut external = physical;
+                match dimension {
+                    0 => allowance.evaluator.max_work_units -= 1,
+                    1 => allowance.evaluator.max_scratch_entries -= 1,
+                    _ => external -= 1,
+                }
+                let error = execute(&query, 2, &mut view, &cx, allowance, 8, external)
+                    .await
+                    .expect_err("a cumulative refusal must not retry another join path");
+                if dimension == 2 {
+                    assert!(matches!(
+                        error,
+                        NativeSpoolError::SortWorkLimit { limit, .. } if limit == external
+                    ));
+                } else {
+                    assert!(matches!(
+                        error,
+                        NativeSpoolError::BufferedExecute(source)
+                            if matches!(*source, GqlQueryError::Evaluator(_))
+                    ));
+                }
+                assert_eq!(pool.used(), baseline);
+            }
+            assert_eq!(
+                execute(&query, 2, &mut view, &cx, exact, 8, physical)
+                    .await
+                    .unwrap()
+                    .0,
+                literal
+            );
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn merge_presence_empty_children_keep_absence_semantics_and_release_memory() {
+    let ((), report) = run_async_under_lab(0xc01d_3114, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &pool).await;
+        let types = [GraphSetColumnType::Scalar; 2];
+        let baseline = pool.used();
+        for empty_side in [0, 1] {
+            for kind in [RowJoinKind::Semi, RowJoinKind::Anti] {
+                let left = if empty_side == 0 {
+                    leaf(0, false).with_page(0, Some(0))
+                } else {
+                    leaf(0, false)
+                };
+                let right = if empty_side == 1 {
+                    leaf(1, false).with_page(0, Some(0))
+                } else {
+                    leaf(1, false)
+                };
+                let query = left
+                    .join(
+                        right,
+                        RowJoinSpec::new(&types, &types, &[(0, 0)])
+                            .unwrap()
+                            .with_kind(kind),
+                    )
+                    .unwrap();
+                let expected = if empty_side == 1 && kind == RowJoinKind::Anti {
+                    presence_frames(&[[1, 9], [1, 10], [3, 8], [3, 17]])
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    execute(&query, 2, &mut view, &cx, policy(100), 100, WORK)
+                        .await
+                        .unwrap()
+                        .0,
+                    expected
+                );
+                assert_eq!(pool.used(), baseline);
+            }
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

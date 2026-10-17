@@ -14,7 +14,39 @@ use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, WorkControl};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{GlaExecutionEvent, algebra::GlaDirection};
 use fgdb_types::{CommitSeq, QueryCx, VId};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+
+struct ScratchWork<'a, W> {
+    work: &'a RefCell<W>,
+    used: &'a Cell<usize>,
+    limit: usize,
+}
+
+impl<W: WorkControl> WorkControl for ScratchWork<'_, W> {
+    fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+        self.work.borrow_mut().charge(units)
+    }
+
+    fn reserve_scratch(&mut self, entries: usize) -> Result<(), BeaconError> {
+        self.work.borrow_mut().charge(entries)?;
+        let next = self
+            .used
+            .get()
+            .checked_add(entries)
+            .ok_or(BeaconError::ResourceLimit {
+                resource: "indexed graph scratch entries",
+                limit: self.limit,
+            })?;
+        if next > self.limit {
+            return Err(BeaconError::ResourceLimit {
+                resource: "indexed graph scratch entries",
+                limit: self.limit,
+            });
+        }
+        self.used.set(next);
+        Ok(())
+    }
+}
 
 struct IndexedNeighbors<'s, 'g, 'c, R, A> {
     snapshot: &'s Snapshot,
@@ -27,7 +59,7 @@ struct IndexedNeighbors<'s, 'g, 'c, R, A> {
     relation_allowed: R,
     admit_edge: A,
     admitted: usize,
-    scratch: usize,
+    scratch: &'g Cell<usize>,
 }
 
 impl<R, A> IndexedNeighbors<'_, '_, '_, R, A>
@@ -36,13 +68,21 @@ where
     A: FnMut() -> Result<(), BeaconError>,
 {
     fn reserve_source(&mut self) -> Result<(), BeaconError> {
-        if self.scratch >= self.limits.max_source_scratch {
+        let next = self
+            .scratch
+            .get()
+            .checked_add(1)
+            .ok_or(BeaconError::ResourceLimit {
+                resource: "indexed graph scratch entries",
+                limit: self.limits.max_source_scratch,
+            })?;
+        if next > self.limits.max_source_scratch {
             return Err(BeaconError::ResourceLimit {
-                resource: "indexed expansion source admissions",
+                resource: "indexed graph scratch entries",
                 limit: self.limits.max_source_scratch,
             });
         }
-        self.scratch += 1;
+        self.scratch.set(next);
         Ok(())
     }
 
@@ -250,6 +290,7 @@ pub(crate) fn evaluate_filtered(
             Ok(())
         },
     )?;
+    let scratch = Cell::new(0usize);
     let graph_hits = if let Some(graph) = selected {
         let mut source = IndexedNeighbors {
             snapshot,
@@ -266,7 +307,12 @@ pub(crate) fn evaluate_filtered(
             relation_allowed,
             admit_edge,
             admitted: 0,
-            scratch: 0,
+            scratch: &scratch,
+        };
+        let mut kernel = ScratchWork {
+            work,
+            used: &scratch,
+            limit: expansion.limits.max_source_scratch,
         };
         graph.expand_from_source_filtered(
             expansion.seeds,
@@ -275,21 +321,34 @@ pub(crate) fn evaluate_filtered(
             query.graph_candidates,
             &mut source,
             |id, _| Ok(eligible(id)),
-            &mut SharedWork(work),
+            &mut kernel,
         )?
     } else {
         Vec::new()
     };
     // Index-free and indexed execution share the exact fusion owner. None
     // is selected before source access, never a fallback after index failure.
+    let mut kernel = ScratchWork {
+        work,
+        used: &scratch,
+        // Fusion state joins the graph's one allowance only while the lane
+        // runs: a disabled lane neither inspects seeds nor enforces graph
+        // limits, so text/vector fusion is charged work but never refused by
+        // the graph's scratch cap.
+        limit: if query.graph_enabled() {
+            expansion.limits.max_source_scratch
+        } else {
+            usize::MAX
+        },
+    };
     let rows = match index {
         Some(index) => index.snapshot().hybrid_search_graph_filtered(
             query,
             &graph_hits,
             eligible,
-            &mut SharedWork(work),
+            &mut kernel,
         )?,
-        None => query.fuse_graph_only(&graph_hits, eligible, &mut SharedWork(work))?,
+        None => query.fuse_graph_only(&graph_hits, eligible, &mut kernel)?,
     };
     work.borrow_mut().charge(1)?;
     Ok(rows)
@@ -702,7 +761,15 @@ mod tests {
             let seeds = [VId(0)];
             let mut expansion = spec(&seeds, ExpansionDirection::Outgoing, 1);
             expansion.limits.max_input_edges = 2;
-            expansion.limits.max_source_scratch = 2;
+            // The two reached incidences plus the BFS, ranking and fusion
+            // state the seed-directed profile retains (0b24aa88): far below
+            // what the materialized profile's 128 disconnected edges need.
+            expansion.limits.max_source_scratch =
+                crate::query::beacon::graph::least_source_scratch(expansion, |spec| {
+                    db.beacon_search_graph_indexed(&c.query(), &options(), query(), spec)
+                        .is_ok()
+                });
+            assert!(expansion.limits.max_source_scratch >= 2);
             let expected = db
                 .beacon_search_graph(
                     &c.query(),
@@ -730,10 +797,12 @@ mod tests {
             ));
             expansion.limits.max_input_edges = 2;
             expansion.limits.max_source_scratch = 1;
+            // One entry cannot even hold the seed's own BFS state, which the
+            // shared allowance (0b24aa88) reserves before any incidence.
             assert!(matches!(
                 db.beacon_search_graph_indexed(&c.query(), &options(), query(), expansion),
                 Err(Error::Index(BeaconError::ResourceLimit {
-                    resource: "indexed expansion source admissions",
+                    resource: "indexed graph scratch entries",
                     limit: 1,
                 }))
             ));

@@ -1,4 +1,7 @@
 //! Real FGP decoder/callback tests for incremental remote CLI delivery.
+#[path = "batch_wire_tests.rs"]
+mod batch_tests;
+
 use super::*;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;

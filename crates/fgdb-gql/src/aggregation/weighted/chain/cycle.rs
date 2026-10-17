@@ -280,7 +280,7 @@ fn eliminate<E, C>(
 
 pub(super) struct Reduced {
     pattern: PreparedGraphPattern<GraphValueRow>,
-    topology: BTreeMap<TopologyKey, Multiplicity>,
+    topology: Topology,
     accesses: Vec<EdgeAccess>,
     slots: [Option<usize>; MAX_PATTERN_VERTICES],
     columns: Vec<ValueProjection>,
@@ -289,7 +289,7 @@ pub(super) struct Reduced {
 
 pub(super) fn contract<E, C>(
     plan: &GlaPlan<GraphValueRow>,
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
     accesses: &[EdgeAccess],
     forest: &tree::Forest,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
@@ -451,7 +451,7 @@ pub(super) fn contract<E, C>(
     }
     Ok(Some(Reduced {
         pattern,
-        topology: derived,
+        topology: derived.into(),
         accesses: mapped_accesses,
         slots,
         columns,
@@ -495,6 +495,9 @@ impl Reduced {
             Multiplicity,
         ) -> Result<(), VisitError<E, C>>,
     {
+        // Reused by every binding: the slots a binding writes are the same
+        // for all of them, so the rest stay empty, as in a fresh array.
+        let mut original = [None; MAX_PATTERN_VERTICES];
         super::intersection::visit_bindings(
             self.pattern.plan(),
             vertices,
@@ -503,7 +506,6 @@ impl Reduced {
             property,
             control,
             |_, bindings, property, control| {
-                let mut original = [None; MAX_PATTERN_VERTICES];
                 for (old, slot) in self.slots[..self.width].iter().enumerate() {
                     if let Some(slot) = slot {
                         control(GlaExecutionEvent::Work)?;

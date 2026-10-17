@@ -45,9 +45,9 @@ impl From<Unavailable> for Refusal {
 }
 
 /// A complete, already-decided statement answer.
-pub(crate) struct Answer {
+pub(crate) struct Answer<R = Vec<Vec<WireValue>>> {
     pub(crate) columns: Vec<String>,
-    pub(crate) rows: Vec<Vec<WireValue>>,
+    pub(crate) rows: R,
     pub(crate) outcome: Outcome,
     pub(crate) generation: Generation,
 }
@@ -546,7 +546,7 @@ async fn write_batch_inner(
 }
 /// Prepared write projections share the same capability and native completion
 /// boundary as their effects. Their collectors own RETURN semantics.
-enum Returning {
+pub(crate) enum Returning {
     Insert(Box<PreparedGraphInsertQuery>),
     Mutation(Box<PreparedGraphMutationQuery>),
     Merge(Box<PreparedGraphVertexUpsertQuery>),
@@ -555,11 +555,14 @@ enum Returning {
 }
 
 impl Returning {
-    fn prepare(
+    pub(crate) fn prepare(
         db: &Served,
         text: &str,
         parameters: &fgdb_gql::GqlParameters,
     ) -> Result<Option<Self>, Refusal> {
+        // Other adapters may retain this definition until a later PULL.
+        // Preparing it directly must not bypass the shared identity fence.
+        refuse_element_identity(text)?;
         let declarations: Vec<_> = parameters.parameter_types().collect();
         let refusal = |error: &dyn core::fmt::Display| {
             Refusal::new(ErrorCode::Statement, format!("statement: {error}"))
@@ -634,7 +637,7 @@ impl Returning {
         Ok(None)
     }
 
-    fn columns(&self) -> &[String] {
+    pub(crate) fn columns(&self) -> &[String] {
         match self {
             Self::Insert(query) => query.columns(),
             Self::Mutation(query) => query.columns(),
@@ -653,7 +656,37 @@ async fn write_returning(
     token: &CapabilityToken,
     prepared: Returning,
 ) -> Result<Answer, Refusal> {
-    let _operation = db.db.enter().map_err(Refusal::from)?;
+    write_returning_checked(cx, db, token, prepared, None, |_, rows, _| Ok(rows)).await
+}
+
+/// A surface owns its final representation BEFORE the native commit, not a
+/// fallible conversion after publication. Shared wire admission still checks
+/// every native cell first; the surface's additional work uses the SAME live
+/// signed permit. A rejected representation aborts all staged effects.
+///
+/// A deferred definition retains no transaction, read pin or operation permit.
+/// Its original generation and bookmark floor are checked again under the
+/// write lock before allocating identities or executing the native program.
+/// Successful output is returned only after the native completion; an unknown
+/// outcome is propagated unchanged and this owner never retries.
+pub(crate) async fn write_returning_checked<R: Send>(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    prepared: Returning,
+    deferred: Option<(&Generation, fgdb_types::CommitSeq)>,
+    mut collect: impl FnMut(
+        &[String],
+        Vec<Vec<WireValue>>,
+        &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    ) -> Result<R, Refusal>
+    + Send,
+) -> Result<Answer<R>, Refusal> {
+    let _operation = match deferred {
+        Some((generation, _)) => generation.enter(),
+        None => db.db.enter(),
+    }
+    .map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let (txn, commit, query) = (
         contexts.txn(),
@@ -662,6 +695,18 @@ async fn write_returning(
     );
     let columns = prepared.columns().to_vec();
     let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
+    if let Some((generation, minimum_seq)) = deferred {
+        generation.check().map_err(Refusal::from)?;
+        let frontier = guard
+            .frontier()
+            .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
+        if frontier < minimum_seq {
+            return Err(Refusal::new(
+                ErrorCode::Busy,
+                "the local bookmark has not been reached; no write was executed",
+            ));
+        }
+    }
     let generation = guard.generation();
     // RETURN changes delivered rows, never the host's write authority. Derive
     // each native policy from the SAME configured program policy as rowless
@@ -671,6 +716,12 @@ async fn write_returning(
     let policy = db.write_policy;
     let mut admitted_rows = None;
     let mut output_refusal = None;
+    let mut output =
+        |rows: &[fgdb_gql::algebra::GraphValueRow],
+         work: &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>| {
+            let rows = edge_upsert_output::collect(&columns, rows, work)?;
+            collect(&columns, rows, work)
+        };
     let result = match &prepared {
         Returning::Insert(prepared) => guard
             .execute_graph_insert_query_authorized_checked(
@@ -683,7 +734,7 @@ async fn write_returning(
                 prepared,
                 policy.insertion_policy(),
                 unix_millis,
-                |rows, work| match edge_upsert_output::collect(&columns, rows, work) {
+                |rows, work| match output(rows, work) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -711,7 +762,7 @@ async fn write_returning(
                 prepared,
                 policy.mutations,
                 unix_millis,
-                |rows, work| match edge_upsert_output::collect(&columns, rows, work) {
+                |rows, work| match output(rows, work) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -739,7 +790,7 @@ async fn write_returning(
                 prepared,
                 policy.vertex_upsert_policy(),
                 unix_millis,
-                |rows, work| match edge_upsert_output::collect(&columns, rows, work) {
+                |rows, work| match output(rows, work) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -767,7 +818,7 @@ async fn write_returning(
                 prepared,
                 policy.edge_upsert_policy(),
                 unix_millis,
-                |rows, work| match edge_upsert_output::collect(&columns, rows, work) {
+                |rows, work| match output(rows, work) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -795,7 +846,7 @@ async fn write_returning(
                 prepared,
                 policy.edge_merge_policy(),
                 unix_millis,
-                |rows, work| match edge_upsert_output::collect(&columns, rows, work) {
+                |rows, work| match output(rows, work) {
                     Ok(rows) => {
                         admitted_rows = Some(rows);
                         Ok(())
@@ -1009,3 +1060,6 @@ mod all_target_merge_tests;
 
 #[cfg(test)]
 mod occurrence_upsert_tests;
+
+#[cfg(test)]
+mod returning_admission_tests;

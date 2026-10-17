@@ -51,11 +51,7 @@ fn projected(columns: &[ValueProjection], bindings: &[Option<VId>]) -> Vec<VId> 
         })
         .collect()
 }
-fn collect(
-    plan: &GlaPlan<GraphValueRow>,
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
-    optimized: bool,
-) -> Vec<Vec<VId>> {
+fn collect(plan: &GlaPlan<GraphValueRow>, topology: &Topology, optimized: bool) -> Vec<Vec<VId>> {
     let mut result = Vec::new();
     if optimized {
         visit_bindings(
@@ -128,6 +124,7 @@ fn triangle_intersections_match_independent_assignments_and_the_original_visitor
                         }
                     }
                 }
+                let topology = Topology::from(topology);
                 let present = |from, to| {
                     topology.contains_key(&match direction {
                         GlaDirection::Forward => (VId(from), RelationId(1), VId(to)),
@@ -159,7 +156,7 @@ fn triangle_intersections_match_independent_assignments_and_the_original_visitor
 
 #[test]
 fn cliques_parallel_constraints_loops_aliases_and_reversed_atoms_share_one_binding_assignment() {
-    let topology: BTreeMap<_, _> = [0, 1, 1_u128 << 100, u128::MAX]
+    let topology: Topology = [0, 1, 1_u128 << 100, u128::MAX]
         .into_iter()
         .flat_map(|a| {
             [0, 1, 1_u128 << 100, u128::MAX]
@@ -202,7 +199,10 @@ fn only_pure_cyclic_support_uses_intersection_and_fallback_keeps_its_event_trace
         assert!(Shape::compile(pattern(input).plan()).is_none(), "{input}");
     }
     let q = pattern("MATCH (a)-[:R]->(b)-[:R]->(c) RETURN a,b,c");
-    let topology = BTreeMap::from([((VId(0), RelationId(1), VId(1)), Multiplicity::ONE)]);
+    let topology = Topology::from(BTreeMap::from([(
+        (VId(0), RelationId(1), VId(1)),
+        Multiplicity::ONE,
+    )]));
     let mut direct_events = Vec::new();
     q.plan()
         .visit_value_bindings(
@@ -271,6 +271,215 @@ fn weighted_counts_groups_and_support_summaries_equal_unfactored_bags() {
             .unwrap()
         };
         assert_eq!(run(&q).value, run(&ordinary).value);
+    }
+}
+
+/// A 30-vertex, three-relation graph whose triangle count takes thousands
+/// of work units, so evaluator runs open and close many times.
+fn run_graph() -> Vec<(VId, RelationId, VId)> {
+    (0..30_u128)
+        .flat_map(|a| {
+            (0..30_u128).flat_map(move |b| {
+                (1..=3_u64)
+                    .filter(move |r| (a * 7 + b * 3 + u128::from(*r)) % 4 == 0)
+                    .map(move |r| (VId(a), RelationId(r), VId(b)))
+            })
+        })
+        .collect()
+}
+
+/// **AN EVALUATOR RUN CHARGES THE PER-EVENT TOTAL IN FEWER HOST CALLS.** A
+/// triangle count over a 30-vertex, three-relation graph returns the same
+/// value and statistics with a checkpoint that takes a run in one call as
+/// with one that is called per unit; the host sees exactly the per-unit
+/// total, in far fewer calls.
+#[test]
+fn evaluator_runs_charge_the_per_event_total_in_fewer_host_calls() {
+    use crate::GovernedCheckpoint;
+    use std::cell::Cell;
+    struct Bulk<'c> {
+        units: &'c Cell<u64>,
+        calls: &'c Cell<u64>,
+    }
+    impl GovernedCheckpoint<()> for Bulk<'_> {
+        const RUNS: bool = true;
+        fn unit(&mut self) -> Result<(), ()> {
+            self.units(1)
+        }
+        fn units(&mut self, n: u64) -> Result<(), ()> {
+            self.units.set(self.units.get() + n);
+            self.calls.set(self.calls.get() + 1);
+            Ok(())
+        }
+    }
+    let q = aggregate("MATCH (a)-[:R]->(b)-[:S]->(c)-[:T]->(a) RETURN COUNT(*) AS n");
+    let edges = run_graph();
+    let mut per_unit = 0_u64;
+    let expected = q
+        .execute_governed(
+            edges.len() as u64,
+            (0..30).map(VId),
+            edges.iter().copied(),
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            wide(),
+            || {
+                per_unit += 1;
+                Ok::<_, ()>(())
+            },
+        )
+        .unwrap();
+    let (units, calls) = (Cell::new(0), Cell::new(0));
+    let bulk = q
+        .execute_governed(
+            edges.len() as u64,
+            (0..30).map(VId),
+            edges.iter().copied(),
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            wide(),
+            Bulk {
+                units: &units,
+                calls: &calls,
+            },
+        )
+        .unwrap();
+    assert_eq!(bulk, expected);
+    assert_eq!(units.get(), per_unit, "the per-unit total");
+    assert!(
+        calls.get() * 100 < units.get(),
+        "{} calls for {} units",
+        calls.get(),
+        units.get()
+    );
+}
+
+/// **AN EVALUATOR RUN NEVER MOVES A REFUSAL.** Over the same graph, a
+/// grouped and an ungrouped triangle count refuse at every sampled work,
+/// scratch and host limit exactly as per-event charging does: the evaluator
+/// limit's own unit observes limit + 1, and a host that charges a run in one
+/// call (refusing inside it at the exceeding unit, as fgdb's signed meter
+/// does) refuses at the same host ordinal as one called per unit.
+#[test]
+fn evaluator_runs_refuse_at_the_per_event_ordinal() {
+    use crate::{GlaLimitDimension, GlaLimitExceeded, GovernedCheckpoint};
+    /// Refuses at unit `budget + 1`, inside a bulk call as fgdb's signed
+    /// meter does, and is never to be called again after refusing.
+    struct Budget<'u> {
+        used: &'u mut u64,
+        budget: u64,
+        refused: bool,
+    }
+    impl GovernedCheckpoint<u64> for Budget<'_> {
+        const RUNS: bool = true;
+        fn unit(&mut self) -> Result<(), u64> {
+            self.units(1)
+        }
+        fn units(&mut self, n: u64) -> Result<(), u64> {
+            assert!(!self.refused, "called after refusing");
+            if self.budget - *self.used < n {
+                *self.used = self.budget;
+                self.refused = true;
+                return Err(self.budget + 1);
+            }
+            *self.used += n;
+            Ok(())
+        }
+    }
+    let edges = run_graph();
+    for text in [
+        "MATCH (a)-[:R]->(b)-[:S]->(c)-[:T]->(a) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R]->(b)-[:S]->(c)-[:T]->(a) RETURN a, COUNT(*) AS n GROUP BY a",
+    ] {
+        let q = aggregate(text);
+        let run = |policy, checkpoint: &mut dyn FnMut() -> Result<(), u64>| {
+            q.execute_governed(
+                edges.len() as u64,
+                (0..30).map(VId),
+                edges.iter().copied(),
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                policy,
+                checkpoint,
+            )
+        };
+        let mut host = 0_u64;
+        let baseline = run(wide(), &mut || {
+            host += 1;
+            Ok(())
+        })
+        .unwrap();
+        let (work, scratch) = (
+            baseline.evaluator.work_units,
+            baseline.evaluator.scratch_entries,
+        );
+        assert!(work > 4 * 1024, "{work} units must span several runs");
+        let sampled = |total: u64| (0..total).filter(move |at| at % 13 == 0 || total - at <= 40);
+        for limit in sampled(work) {
+            let refused = run(
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, limit, u64::MAX),
+                &mut || Ok(()),
+            );
+            assert!(
+                matches!(refused, Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                    dimension: GlaLimitDimension::WorkUnits,
+                    limit: found,
+                    observed,
+                })) if found == limit && observed == u128::from(limit) + 1),
+                "work limit {limit}"
+            );
+        }
+        for limit in sampled(scratch) {
+            let refused = run(
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, limit),
+                &mut || Ok(()),
+            );
+            assert!(
+                matches!(refused, Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                    dimension: GlaLimitDimension::ScratchEntries,
+                    limit: found,
+                    observed,
+                })) if found == limit && observed == u128::from(limit) + 1),
+                "scratch limit {limit}"
+            );
+        }
+        for budget in sampled(host) {
+            let mut used = 0;
+            let refused = q.execute_governed(
+                edges.len() as u64,
+                (0..30).map(VId),
+                edges.iter().copied(),
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                Budget {
+                    used: &mut used,
+                    budget,
+                    refused: false,
+                },
+            );
+            assert!(
+                matches!(refused, Err(GqlQueryError::Interrupted(at)) if at == budget + 1),
+                "host budget {budget}"
+            );
+            assert_eq!(used, budget);
+        }
+        let mut used = 0;
+        let accepted = q.execute_governed(
+            edges.len() as u64,
+            (0..30).map(VId),
+            edges.iter().copied(),
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            wide(),
+            Budget {
+                used: &mut used,
+                budget: host,
+                refused: false,
+            },
+        );
+        assert_eq!(accepted.unwrap(), baseline);
+        assert_eq!(used, host);
     }
 }
 
@@ -422,7 +631,7 @@ fn support_summaries_do_not_expand_or_reject_an_above_count_parallel_product() {
 /// charge it makes and every row it holds.
 fn tree_build(
     atom: Atom,
-    topology: &BTreeMap<TopologyKey, Multiplicity>,
+    topology: &Topology,
     events: &mut Vec<GlaExecutionEvent>,
 ) -> BTreeMap<VId, Vec<VId>> {
     let mut rows: BTreeMap<VId, BTreeSet<VId>> = BTreeMap::new();
@@ -489,7 +698,7 @@ fn flat_tries_charge_and_hold_what_the_tree_build_did() {
     for round in 0..12 {
         // Two relations over six vertices, loops and both orientations of a
         // pair included; keys are unique as in any topology table.
-        let topology: BTreeMap<TopologyKey, Multiplicity> = (0..8 + 4 * round)
+        let topology: Topology = (0..8 + 4 * round)
             .map(|_| {
                 let key = (
                     VId(u128::from(next(6))),
@@ -514,13 +723,60 @@ fn flat_tries_charge_and_hold_what_the_tree_build_did() {
                 let mut expected = Vec::new();
                 let rows = tree_build(atom, &topology, &mut expected);
                 let mut events = Vec::new();
-                let trie = Trie::build(atom, &topology, &mut |event| {
+                let trie = Trie::build(atom, topology.keys().copied(), 0, &mut |event| {
                     events.push(event);
                     Ok::<_, ()>(())
                 })
                 .unwrap();
                 assert_eq!(events, expected, "{round} {direction:?} {left} {right}");
                 assert!(trie.roots.iter().eq(rows.keys()));
+                // Keyed by position in the ascending endpoint table, the
+                // trie charges the same events and holds the same rows.
+                let mut table: Vec<VId> = topology
+                    .keys()
+                    .flat_map(|&(source, _, destination)| [source, destination])
+                    .collect();
+                table.sort_unstable();
+                table.dedup();
+                let position = |vid: VId| table.binary_search(&vid).unwrap() as u32;
+                let mut positioned_events = Vec::new();
+                let positioned = Trie::<u32>::build(
+                    atom,
+                    topology.keys().map(|&(source, relation, destination)| {
+                        (position(source), relation, position(destination))
+                    }),
+                    table.len(),
+                    &mut |event| {
+                        positioned_events.push(event);
+                        Ok::<_, ()>(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    positioned_events, expected,
+                    "{round} {direction:?} {left} {right}"
+                );
+                assert!(
+                    positioned
+                        .roots
+                        .iter()
+                        .map(|&at| table[at as usize])
+                        .eq(trie.roots.iter().copied())
+                );
+                for vid in &table {
+                    let mut by_identity = [None; MAX_PATTERN_VERTICES];
+                    let mut by_position = [None; MAX_PATTERN_VERTICES];
+                    by_identity[trie.low] = Some(*vid);
+                    by_position[trie.low] = Some(position(*vid));
+                    let identity_domain = trie.domain(trie.high, &by_identity).unwrap_or(&[]);
+                    let position_domain = positioned.domain(trie.high, &by_position).unwrap_or(&[]);
+                    assert!(
+                        position_domain
+                            .iter()
+                            .map(|&at| table[at as usize])
+                            .eq(identity_domain.iter().copied())
+                    );
+                }
                 // A loop atom's one variable ranges over its roots alone.
                 if trie.low != trie.high {
                     let mut assigned = [None; MAX_PATTERN_VERTICES];
@@ -535,7 +791,7 @@ fn flat_tries_charge_and_hold_what_the_tree_build_did() {
                 // A refusal at any charge stops the build there.
                 for stop in 1..=expected.len() {
                     let mut at = 0;
-                    let result = Trie::build(atom, &topology, &mut |_| {
+                    let result = Trie::build(atom, topology.keys().copied(), 0, &mut |_| {
                         at += 1;
                         if at == stop { Err(at) } else { Ok(()) }
                     });

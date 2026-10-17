@@ -211,18 +211,22 @@ impl PreparedGraphWriteScript {
     }
 
     /// Structural read requirement before parameter binding. Standalone and
-    /// source-free UNWIND INSERT/CREATE need no graph reads; every other current
-    /// statement family may inspect graph state even when its eventual selection is empty. This is
-    /// definition metadata, not a grant or a replacement for source admission.
+    /// source-free WITH/UNWIND INSERT/CREATE need no graph reads. A relational
+    /// input containing MATCH still requires reads, even when its eventual
+    /// selection is empty. This is definition metadata, not a grant or a
+    /// replacement for source admission.
     #[must_use]
     pub fn requires_read(&self) -> bool {
         self.statements().iter().any(|statement| match statement {
-            GraphWriteTemplateStatement::Insert(input) => {
-                matches!(
-                    &input.input,
-                    crate::insertion_text::InsertTextInput::Match(_)
-                )
-            }
+            GraphWriteTemplateStatement::Insert(input) => match &input.input {
+                crate::insertion_text::InsertTextInput::Match(_) => true,
+                crate::insertion_text::InsertTextInput::Relation { input, .. } => {
+                    // Inspect the prepared source, never parameter values,
+                    // source spelling or an assumed empty occurrence bag.
+                    input.selection.is_some()
+                }
+                crate::insertion_text::InsertTextInput::Unit { .. } => false,
+            },
             GraphWriteTemplateStatement::Mutation(_)
             | GraphWriteTemplateStatement::Delete(_)
             | GraphWriteTemplateStatement::VertexMerge(_)
@@ -296,8 +300,8 @@ impl core::error::Error for GraphWriteScriptBatchError {
 #[derive(Debug)]
 pub enum GraphWriteScriptBatchBindError<C> {
     Binding(GraphWriteScriptBatchError),
-    /// Some(i) precedes argument set i. None is the allocation or final
-    /// acceptance boundary and must not be attributed to an input record.
+    /// Some(i) precedes argument set i. None precedes allocation or final
+    /// acceptance and must not be attributed to an input record.
     Interrupted {
         argument_set: Option<usize>,
         source: C,
@@ -584,6 +588,12 @@ mod controlled_binding_tests {
         for (text, reads) in [
             ("CREATE (n)", false),
             ("CREATE (n); INSERT (m)", false),
+            ("WITH 1 AS x CREATE (m)", false),
+            ("UNWIND [1,2] AS x CREATE (m)", false),
+            ("UNWIND ['MATCH'] AS x CREATE (m)", false),
+            ("UNWIND [1,2] AS x MATCH (n) CREATE (m)", true),
+            ("UNWIND [] AS x MATCH (n) CREATE (m)", true),
+            ("UNWIND $rows AS x MATCH (n) CREATE (m)", true),
             ("MATCH (n) INSERT (m)", true),
             ("CREATE (n); MATCH (m) DETACH DELETE m", true),
             ("MATCH (n) DELETE n", true),

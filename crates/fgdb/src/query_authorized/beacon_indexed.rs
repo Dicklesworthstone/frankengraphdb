@@ -79,6 +79,7 @@ impl<V: Vfs + Clone> Database<V> {
                     live.checkpoint()?;
                     let units =
                         u64::try_from(units).map_err(|_| live.refusal(WardenError::TooLarge))?;
+                    live.settle()?;
                     let now = (live.clock)();
                     let charged = live.permit.charge_work_at(now, units);
                     charged.map_err(|error| live.refusal(error))
@@ -340,7 +341,28 @@ mod tests {
             let token = authority.issue_at(&grant(), 100).unwrap();
             let mut expansion = expansion();
             expansion.limits.max_input_edges = 2;
-            expansion.limits.max_source_scratch = 2;
+            // The admitted incidences plus the BFS, ranking and fusion state
+            // share one scratch allowance (0b24aa88). Its least value is
+            // measured on each physical graph: hidden history cannot move it.
+            let base = expansion;
+            let scratch = |db: &Database<MemVfs>| {
+                crate::query::beacon::graph::least_source_scratch(base, |spec| {
+                    db.beacon_search_graph_indexed_authorized(
+                        &c.query(),
+                        &authority,
+                        &token,
+                        "main",
+                        &options(),
+                        query(),
+                        spec,
+                        || 100,
+                    )
+                    .is_ok()
+                })
+            };
+            expansion.limits.max_source_scratch = scratch(&clean);
+            assert!(expansion.limits.max_source_scratch >= 2);
+            assert_eq!(scratch(&full), expansion.limits.max_source_scratch);
             let calls = Cell::new(0usize);
             let run = |db: &Database<MemVfs>, limit: usize| {
                 let mut options = options();

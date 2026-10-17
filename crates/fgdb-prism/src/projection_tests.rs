@@ -320,6 +320,13 @@ fn owned_projection_retains_the_vertex_allocation_and_charges_spare_capacity() {
     );
     assert_eq!(graph.vertex_ids(), &[VId(0), VId(17)]);
     assert_eq!(graph.charged_workspace_bytes(), expected);
+    // Held after the build: the transferred vertices with their spare
+    // capacity, the names, both faces' offsets and neighbors, and the weight.
+    // The edge staging is not.
+    assert_eq!(
+        graph.charged_resident_bytes(),
+        32 * size_of::<VId>() + 2 * 32 + 2 * (3 + 1) * size_of::<usize>() + size_of::<f64>()
+    );
     let shared = graph.clone();
     assert!(graph.shares_cache_with(&shared));
     assert!(std::ptr::eq(

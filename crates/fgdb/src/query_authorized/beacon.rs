@@ -243,6 +243,7 @@ impl<V: Vfs + Clone> Database<V> {
                     live.checkpoint()?;
                     let units =
                         u64::try_from(units).map_err(|_| live.refusal(WardenError::TooLarge))?;
+                    live.settle()?;
                     let now = (live.clock)();
                     let charged = live.permit.charge_work_at(now, units);
                     charged.map_err(|error| live.refusal(error))
@@ -316,6 +317,7 @@ pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
             let mut live = execution.borrow_mut();
             live.checkpoint()?;
             let units = u64::try_from(units).map_err(|_| live.refusal(WardenError::TooLarge))?;
+            live.settle()?;
             let now = (live.clock)();
             let charged = live.permit.charge_work_at(now, units);
             charged.map_err(|error| live.refusal(error))
@@ -400,6 +402,7 @@ fn search<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
                 live.checkpoint()?;
                 let units =
                     u64::try_from(units).map_err(|_| live.refusal(WardenError::TooLarge))?;
+                live.settle()?;
                 let now = (live.clock)();
                 let charged = live.permit.charge_work_at(now, units);
                 charged.map_err(|error| live.refusal(error))

@@ -9,8 +9,9 @@ mod policy;
 mod projection;
 mod trail;
 pub(crate) use comparison::{charge_payload, compare_element_properties, compare_properties};
+pub(crate) use policy::Charges;
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
-pub use projection::ProjectedRows;
+pub use projection::{GovernedCheckpoint, ProjectedRows};
 
 use crate::algebra::{
     EdgeRelation, GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphPath,
@@ -115,6 +116,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GlaExecutionError<E
     }
 }
 
+#[inline]
 fn increment(
     value: u64,
     limit: u64,
@@ -131,6 +133,7 @@ fn increment(
     Ok(observed as u64)
 }
 
+#[inline]
 fn charge(
     stats: &mut GlaExecutionStats,
     limits: GlaExecutionLimits,
@@ -155,7 +158,8 @@ fn charge(
 
 type Adjacency = BTreeMap<VId, Vec<VId>>;
 type Index = BTreeMap<(EdgeRelation, GlaDirection), Adjacency>;
-type IdentifiedIndex = BTreeMap<(EdgeRelation, GlaDirection), BTreeMap<VId, Vec<(EId, VId)>>>;
+use crate::identified::{IdentifiedAdjacency, IdentifiedNeighbors, IdentifiedStage};
+type IdentifiedIndex = BTreeMap<(EdgeRelation, GlaDirection), IdentifiedAdjacency>;
 
 // Search kernels borrow the SAME admitted index and feed the same binding
 // continuation. Search is a prepared logical choice, never an adaptive fallback
@@ -416,15 +420,15 @@ fn build_identified_index<E>(
                 index.entry((relation, direction))
             {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                e.insert(BTreeMap::new());
+                e.insert(IdentifiedAdjacency::default());
             }
         }
     }
     let alternations = alternation_selectors(index.keys().map(|(relation, _)| *relation));
     // Identified edges need not arrive grouped by endpoint, so each push is
-    // one hash probe into a staging map, which becomes the ordered adjacency
-    // once at the end. Neighbors keep their arrival order within a key, so
-    // every charged event, and each list's sort, is as before.
+    // one hash probe into a stage, which becomes the flat adjacency once at
+    // the end. Neighbors keep their arrival order within a key, so every
+    // charged event, and each list's sort, is as before.
     let keys: Vec<_> = index.keys().copied().collect();
     let mut staged: Vec<IdentifiedStage> =
         keys.iter().map(|_| IdentifiedStage::default()).collect();
@@ -464,47 +468,22 @@ fn build_identified_index<E>(
                 (source, destination)
             };
             control(GlaExecutionEvent::ScratchEntry)?;
-            push_identified(adjacency, from, (edge, to), control)?;
+            adjacency.push(from, (edge, to), control)?;
             if direction == GlaDirection::Undirected && source != destination {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                push_identified(adjacency, destination, (edge, source), control)?;
+                adjacency.push(destination, (edge, source), control)?;
             }
         }
     }
     for (key, adjacency) in keys.into_iter().zip(staged) {
-        let mut entries: Vec<_> = adjacency.into_iter().collect();
-        entries.sort_unstable_by_key(|(from, _)| *from);
-        index.insert(key, entries.into_iter().collect());
+        index.insert(key, adjacency.finish());
     }
     for adjacency in index.values_mut() {
-        for neighbors in adjacency.values_mut() {
+        for neighbors in adjacency.lists_mut() {
             sort_identified_neighbors(neighbors, control)?;
         }
     }
     Ok(index)
-}
-
-/// An identified adjacency while it is built: probed, never iterated before
-/// it is sorted into the index, so its order never reaches a result.
-type IdentifiedStage = crate::id_hash::IdMap<VId, Vec<(EId, VId)>>;
-
-/// One identified neighbor under `from`, charging the key's own scratch
-/// entry first when it is new: one probe, where contains_key then entry
-/// took two searches.
-fn push_identified<E>(
-    adjacency: &mut IdentifiedStage,
-    from: VId,
-    neighbor: (EId, VId),
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-) -> Result<(), E> {
-    match adjacency.entry(from) {
-        std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().push(neighbor),
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            control(GlaExecutionEvent::ScratchEntry)?;
-            entry.insert(vec![neighbor]);
-        }
-    }
-    Ok(())
 }
 
 fn sort_identified_neighbors<E>(
@@ -978,7 +957,9 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                                     | GlaOperator::DifferentEdges { .. }
                             )
                         });
-                        let adjacency = identified.get(&(*relation, *direction));
+                        let adjacency = identified
+                            .get(&(*relation, *direction))
+                            .map(|adjacency| adjacency as &dyn IdentifiedNeighbors);
                         let cursor = if let Some(segments) =
                             different_edges::for_expansion(operators, ordinal, bindings.len())
                         {
@@ -1542,18 +1523,18 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                     .as_ref()
                     .and_then(|index| index.get(&(*relation, *direction)))
                 {
-                    for (source, neighbors) in adjacency {
+                    for (source, neighbors) in adjacency.iter() {
                         for &(edge, destination) in neighbors {
                             (execution.control)(GlaExecutionEvent::Work)?;
                             for _ in 0..3 {
                                 (execution.control)(GlaExecutionEvent::ScratchEntry)?;
                             }
                             execution.segments[1] = Some(GraphPath::new(
-                                *source,
+                                source,
                                 vec![(edge, destination)].into_boxed_slice(),
                             ));
                             bindings.clear();
-                            bindings.extend([Some(*source), Some(destination)]);
+                            bindings.extend([Some(source), Some(destination)]);
                             execution.visit(operators, 1, &mut bindings, &index)?;
                             execution.segments[1] = None;
                         }
@@ -2063,5 +2044,176 @@ mod tests {
         assert_eq!(result, Err("stopped in adjacency ordering"));
         assert_eq!(events, stop);
         assert_eq!(reads, 0);
+    }
+
+    type OrderedIdentifiedIndex =
+        BTreeMap<(EdgeRelation, GlaDirection), BTreeMap<VId, Vec<(EId, VId)>>>;
+
+    /// The identified index the flat one replaced (fgdb-61p1n): a staging map
+    /// of vectors per key, collected into ordered maps, then each list sorted
+    /// in key order. Its lists, their order and its events are the oracle.
+    fn ordered_identified_index<E>(
+        operators: &[GlaOperator],
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<OrderedIdentifiedIndex, E> {
+        type Stage = crate::id_hash::IdMap<VId, Vec<(EId, VId)>>;
+        fn push<E>(
+            stage: &mut Stage,
+            from: VId,
+            neighbor: (EId, VId),
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            match stage.entry(from) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().push(neighbor)
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    entry.insert(vec![neighbor]);
+                }
+            }
+            Ok(())
+        }
+        let mut index = OrderedIdentifiedIndex::new();
+        for operator in operators {
+            let GlaOperator::ScanEdges {
+                relation,
+                direction,
+            } = operator
+            else {
+                continue;
+            };
+            if let std::collections::btree_map::Entry::Vacant(e) =
+                index.entry((*relation, *direction))
+            {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                e.insert(BTreeMap::new());
+            }
+        }
+        let alternations = alternation_selectors(index.keys().map(|(relation, _)| *relation));
+        let keys: Vec<_> = index.keys().copied().collect();
+        let mut staged: Vec<Stage> = keys.iter().map(|_| Stage::default()).collect();
+        for (edge, source, relation, destination) in edges {
+            control(GlaExecutionEvent::Work)?;
+            for direction in [
+                GlaDirection::Forward,
+                GlaDirection::Reverse,
+                GlaDirection::Undirected,
+            ] {
+                for selector in edge_selectors(relation, &alternations) {
+                    let Ok(at) = keys.binary_search(&(selector, direction)) else {
+                        continue;
+                    };
+                    let (from, to) = if direction == GlaDirection::Reverse {
+                        (destination, source)
+                    } else {
+                        (source, destination)
+                    };
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    push(&mut staged[at], from, (edge, to), control)?;
+                    if direction == GlaDirection::Undirected && source != destination {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        push(&mut staged[at], destination, (edge, source), control)?;
+                    }
+                }
+            }
+        }
+        for (key, stage) in keys.into_iter().zip(staged) {
+            let mut entries: Vec<_> = stage.into_iter().collect();
+            entries.sort_unstable_by_key(|(from, _)| *from);
+            index.insert(key, entries.into_iter().collect());
+        }
+        for adjacency in index.values_mut() {
+            for neighbors in adjacency.values_mut() {
+                sort_identified_neighbors(neighbors, control)?;
+            }
+        }
+        Ok(index)
+    }
+
+    /// The flat identified index holds exactly the ordered one's lists, in
+    /// its order, and charges exactly its events (fgdb-61p1n): random edges
+    /// with self-loops, parallel edges and three relations, into random key
+    /// sets of one type, an alternation and the untyped selector, in every
+    /// orientation, edges arriving in no endpoint order.
+    #[test]
+    fn flat_identified_index_equals_the_ordered_one_event_for_event() {
+        let alternation = EdgeRelation::alternation(&[RelationId(1), RelationId(2)]).unwrap();
+        let selectors = [
+            EdgeRelation::One(RelationId(1)),
+            EdgeRelation::One(RelationId(2)),
+            alternation,
+            EdgeRelation::Any,
+        ];
+        let directions = [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ];
+        let mut state = 0x1de7_1f1e_d000_0001_u64;
+        let mut random = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let (mut checked, mut listed) = (0, 0);
+        for _ in 0..300 {
+            let operators: Vec<GlaOperator> = (0..1 + random(5))
+                .map(|_| GlaOperator::ScanEdges {
+                    relation: selectors[random(4) as usize],
+                    direction: directions[random(3) as usize],
+                })
+                .collect();
+            let vertices = 1 + random(25);
+            let edges: Vec<(EId, VId, RelationId, VId)> = (0..random(120))
+                .map(|eid| {
+                    let vertex = |at: u64| VId(u128::from(at) * 0x9_0000_0007 % 1_000_003);
+                    (
+                        EId((u128::from(random(1 << 30)) << 8) | u128::from(eid)),
+                        vertex(random(vertices)),
+                        RelationId(1 + random(3)),
+                        vertex(random(vertices)),
+                    )
+                })
+                .collect();
+            let (mut flat_log, mut ordered_log) = (Vec::new(), Vec::new());
+            let flat = build_identified_index(&operators, edges.iter().copied(), &mut |event| {
+                flat_log.push(event);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+            let ordered =
+                ordered_identified_index(&operators, edges.iter().copied(), &mut |event| {
+                    ordered_log.push(event);
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+            assert_eq!(flat_log, ordered_log);
+            assert_eq!(
+                flat.keys().collect::<Vec<_>>(),
+                ordered.keys().collect::<Vec<_>>()
+            );
+            for (key, adjacency) in &flat {
+                let lists: Vec<(VId, Vec<(EId, VId)>)> = adjacency
+                    .iter()
+                    .map(|(endpoint, list)| (endpoint, list.to_vec()))
+                    .collect();
+                let expected: Vec<_> = ordered[key].clone().into_iter().collect();
+                assert_eq!(lists, expected, "{key:?}");
+                for probe in 0..vertices + 2 {
+                    let vertex = VId(u128::from(probe) * 0x9_0000_0007 % 1_000_003);
+                    assert_eq!(
+                        adjacency.neighbors(&vertex),
+                        ordered[key].neighbors(&vertex)
+                    );
+                }
+                listed += lists.len();
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 300);
+        assert!(listed > 3_000, "{listed}");
     }
 }

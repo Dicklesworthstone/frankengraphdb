@@ -17,9 +17,10 @@
 
 use fgdb_strata::root::{
     BlockRef, EdgeBirth, EdgeIdentityConflict, MAX_ENCODED_ROOT_V4_BYTES,
-    MAX_ENCODED_ROOT_V5_BYTES, PartitionRoot, PatchRef, ROOT_FORMAT_V1, RootError, RootFrame,
-    RootFrameV4, RootFrameV5, SegmentCache, assemble_root, decode_root, decode_root_frame,
-    encode_root, encode_root_v4, encode_root_v5, read_root, resolve_blocks, root_id, span_of,
+    MAX_ENCODED_ROOT_V5_BYTES, MAX_FLAT_ROOT_BLOCKS, MAX_ROOT_BLOCKS, PartitionRoot, PatchRef,
+    ROOT_FORMAT_V1, RootError, RootFrame, RootFrameV4, RootFrameV5, SegmentCache, assemble_root,
+    decode_root, decode_root_frame, encode_root, encode_root_v4, encode_root_v5, read_root,
+    resolve_blocks, root_id, span_of,
 };
 use fgdb_strata::root_segment::{
     INDEX_REFS, SEGMENT_REFS, SegmentClass, SegmentError, decode_index, decode_segment,
@@ -1369,14 +1370,18 @@ fn an_incremental_v5_encode_equals_a_fresh_one_across_index_boundaries() {
 }
 
 /// The point of V5: a commit's root is bounded whatever the history. Grown
-/// to the 2^20 ceiling through one cache, the root peaks just short of each
+/// to 2^20 references (the flat ceiling; the V5 ceiling is 2^24, too large to
+/// materialize here) through one cache, the root peaks just short of each
 /// index boundary (the index references so far, 15 segment references and a
 /// 255-reference tail) and drops to the index references alone at the
 /// boundary. Sampled at the first, a middle and the last index boundaries;
-/// V4 holds 4,096 segment references at the ceiling.
+/// V4 holds 4,096 segment references at its ceiling. The bound is the same
+/// formula at every count: 67,934 bytes for two lists of 2^20 references,
+/// 682,334 at the 2^24 ceiling.
 #[test]
 fn a_v5_root_is_bounded_whatever_the_history() {
-    const _: () = assert!(MAX_ENCODED_ROOT_V5_BYTES == 67_934);
+    const _: () = assert!(MAX_ENCODED_ROOT_V5_BYTES == 682_334);
+    const _: () = assert!(MAX_FLAT_ROOT_BLOCKS == 1 << 20 && MAX_ROOT_BLOCKS == 1 << 24);
     let ceiling = 1 << 20;
     let mut root = synthetic(0, 0, 0);
     let all = synthetic(ceiling, 0, 0);
@@ -1547,4 +1552,80 @@ fn a_v4_root_still_decodes_beside_v5() {
     assert!(v4.new_index_segments.is_empty());
     assert!(matches!(decode_root_frame(&v4.bytes), Ok(RootFrame::V4(_))));
     assert_eq!(resolve_v4(&v4.bytes, &objects_of(&v4)).unwrap(), root);
+}
+
+/// fgdb-u9jln: a partition holds a block per (source, relation) family, so a
+/// graph with more than 2^20 sources needs a root past the flat ceiling. A V5
+/// root names one and round-trips; V3 and V4, whose encodings grow with every
+/// reference, refuse the same root by its count.
+#[test]
+fn a_v5_root_past_the_flat_ceiling_round_trips_and_flat_formats_refuse_it() {
+    let blocks = MAX_FLAT_ROOT_BLOCKS as usize + 300;
+    let root = synthetic(blocks, 3, 0);
+    let mut cache = SegmentCache::default();
+    let encoded = encode_root_v5(&root, &K_OID, namespace(), &mut cache).expect("V5 encodes");
+    assert_eq!(
+        resolve_v5(&encoded.bytes, &objects_of(&encoded)).expect("V5 resolves"),
+        root
+    );
+    let declared = u32::try_from(blocks).unwrap();
+    assert_eq!(
+        encode_root(&root),
+        Err(RootError::ImplausibleBlockCount { declared })
+    );
+    assert_eq!(
+        encode_root_v4(&root, &K_OID, namespace(), &mut SegmentCache::default()).err(),
+        Some(RootError::ImplausibleBlockCount { declared })
+    );
+}
+
+/// Each decoder refuses a count past its own format's ceiling before it reads
+/// a reference: V3 and V4 at the flat ceiling, V5 at its own. A V5 header past
+/// the flat ceiling gets as far as its (here missing) references.
+#[test]
+fn each_root_format_refuses_a_count_past_its_own_ceiling() {
+    // magic(4) + format(2) + graph(16) + branch(16) + partition(8) + published_at(8)
+    const OFF_BLOCK_COUNT: usize = 54;
+    let with_count = |mut bytes: Vec<u8>, count: u32| {
+        bytes[OFF_BLOCK_COUNT..OFF_BLOCK_COUNT + 4].copy_from_slice(&count.to_be_bytes());
+        bytes
+    };
+    let small = synthetic(3, 1, 0);
+    let flat_plus_one = MAX_FLAT_ROOT_BLOCKS + 1;
+    let v3 = with_count(encode_root(&small).unwrap(), flat_plus_one);
+    assert_eq!(
+        decode_root(&v3),
+        Err(RootError::ImplausibleBlockCount {
+            declared: flat_plus_one
+        })
+    );
+    let segmented = |v5: bool| {
+        let mut cache = SegmentCache::default();
+        if v5 {
+            encode_root_v5(&small, &K_OID, namespace(), &mut cache)
+        } else {
+            encode_root_v4(&small, &K_OID, namespace(), &mut cache)
+        }
+        .unwrap()
+        .bytes
+    };
+    assert_eq!(
+        decode_root_frame(&with_count(segmented(false), flat_plus_one)).err(),
+        Some(RootError::ImplausibleBlockCount {
+            declared: flat_plus_one
+        })
+    );
+    // Past the flat ceiling, V5 admits the count and then finds its
+    // references missing.
+    assert!(matches!(
+        decode_root_frame(&with_count(segmented(true), flat_plus_one)),
+        Err(RootError::Truncated { .. })
+    ));
+    let v5_plus_one = MAX_ROOT_BLOCKS + 1;
+    assert_eq!(
+        decode_root_frame(&with_count(segmented(true), v5_plus_one)).err(),
+        Some(RootError::ImplausibleBlockCount {
+            declared: v5_plus_one
+        })
+    );
 }
