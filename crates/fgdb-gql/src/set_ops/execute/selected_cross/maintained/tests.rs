@@ -99,7 +99,10 @@ fn keys_are_necessary_conditions_and_original_names_survive() {
             .unwrap();
         assert_eq!(left, &leaf());
         assert_eq!(right, &leaf());
-        assert_eq!(spec.keys(), keys);
+        // Keep the Boolean necessity proof checked, independently of whether
+        // its WHERE equality can soundly become a canonical arrangement key.
+        assert_eq!(required_keys(2, &code, None, &mut allow).unwrap(), keys);
+        assert!(spec.keys().is_empty(), "Scalar is not a concrete numeric kind");
         assert_eq!(spec.predicate(), Some(code.as_slice()));
         assert_eq!(spec.kind(), crate::row_join::RowJoinKind::Inner);
         assert_eq!(
@@ -432,7 +435,7 @@ fn projected_collisions_integrate_both_parent_retractions_before_publication() {
         .incremental_selected_join_with_control(&mut allow)
         .unwrap()
         .unwrap();
-    assert_eq!(spec.keys(), &[(0, 0)]);
+    assert!(spec.keys().is_empty(), "projected Scalar equality stays in ON");
     assert_eq!(spec.predicate(), Some([equal(0, 2)].as_slice()));
     let mut joined = IncrementalRowJoin::new(spec);
     let mut projected = IncrementalRowProjection::new(output);
@@ -573,5 +576,230 @@ fn projection_lowering_preserves_barriers_and_refuses_at_every_metadata_checkpoi
             .incremental_selected_join_with_control(&mut allow)
             .unwrap()
             .is_none()
+    );
+}
+
+fn numeric_row(key: CanonicalScalar, payload: i64) -> GraphValueRow {
+    GraphValueRow::from_owned_values(vec![
+        GraphValue::Scalar(key),
+        GraphValue::Scalar(CanonicalScalar::Int(payload)),
+    ])
+}
+fn concatenated(left: &GraphValueRow, right: &GraphValueRow) -> GraphValueRow {
+    GraphValueRow::from_owned_values(
+        left.values().iter().chain(right.values()).cloned().collect(),
+    )
+}
+
+#[test]
+fn scalar_lowering_keeps_exact_numeric_matches_without_decimal_or_rounding_coercion() {
+    use fgdb_types::{CanonicalDecimal, CanonicalF64};
+    let query = leaf()
+        .cross_join(leaf())
+        .unwrap()
+        .filter(&[equal(0, 2)])
+        .unwrap();
+    let decimal =
+        CanonicalScalar::Decimal(CanonicalDecimal::from_scaled_half_even(7, 0).unwrap());
+    let left_rows = [
+        numeric_row(CanonicalScalar::Int(7), 10),
+        numeric_row(decimal.clone(), 11),
+        numeric_row(CanonicalScalar::Null, 12),
+        numeric_row(CanonicalScalar::Int(9_007_199_254_740_993), 13),
+        numeric_row(CanonicalScalar::Int(i64::MAX), 14),
+    ];
+    let float = |value| CanonicalScalar::Float(CanonicalF64::new(value));
+    let right_rows = [
+        numeric_row(float(7.0), 20),
+        numeric_row(decimal, 21),
+        numeric_row(CanonicalScalar::Null, 22),
+        numeric_row(float(9_007_199_254_740_992.0), 23),
+        numeric_row(float(9_223_372_036_854_775_808.0), 24),
+    ];
+    let left = bag(left_rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| (row.clone(), at as i128 + 2)));
+    let right = bag(right_rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| (row.clone(), at as i128 + 7)));
+    let expected = Bag::from([
+        (concatenated(&left_rows[0], &right_rows[0]), 14),
+        (concatenated(&left_rows[1], &right_rows[1]), 24),
+    ]);
+    assert_eq!(selected_bag(&query, &left, &right), expected);
+}
+
+#[test]
+fn mixed_numeric_representations_survive_every_simultaneous_insert_and_retraction() {
+    use fgdb_types::CanonicalF64;
+    let query = leaf()
+        .cross_join(leaf())
+        .unwrap()
+        .filter(&[equal(0, 2)])
+        .unwrap();
+    let input = |mask: usize, right: bool| {
+        let first = if right { 20 } else { 10 };
+        bag([
+            (
+                numeric_row(CanonicalScalar::Int(7), first),
+                if mask & 1 != 0 { 1 } else { 0 },
+            ),
+            (
+                numeric_row(CanonicalScalar::Float(CanonicalF64::new(7.0)), first + 1),
+                if mask & 2 != 0 { 2 } else { 0 },
+            ),
+        ])
+    };
+    // Every key is exactly seven by construction. The expected bag is a
+    // literal occurrence product, not the production predicate or key matcher.
+    let expected = |left: &ZSet<GraphValueRow>, right: &ZSet<GraphValueRow>| {
+        let mut result = Bag::new();
+        for (l, lw) in left.iter() {
+            for (r, rw) in right.iter() {
+                result.insert(
+                    concatenated(l, r),
+                    lw.to_i128().unwrap() * rw.to_i128().unwrap(),
+                );
+            }
+        }
+        result
+    };
+    for before in 0..16 {
+        for after in 0..16 {
+            let (_, _, spec, output) = query
+                .incremental_selected_join_with_control(&mut allow)
+                .unwrap()
+                .unwrap();
+            assert!(spec.keys().is_empty());
+            let mut joined = IncrementalRowJoin::new(spec);
+            let mut projected = IncrementalRowProjection::new(output);
+            let old_left = input(before & 3, false);
+            let old_right = input(before >> 2, true);
+            let initial = joined
+                .prepare(&old_left, &old_right, LIMBS, None, &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .commit();
+            projected
+                .prepare(&initial, LIMBS, None, &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .commit();
+            assert_eq!(plain(projected.rows()), expected(&old_left, &old_right));
+            let next_left = input(after & 3, false);
+            let next_right = input(after >> 2, true);
+            let delta = joined
+                .prepare(
+                    &difference(&next_left, &old_left),
+                    &difference(&next_right, &old_right),
+                    LIMBS,
+                    None,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap()
+                .commit();
+            projected
+                .prepare(&delta, LIMBS, None, &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .commit();
+            assert_eq!(plain(projected.rows()), expected(&next_left, &next_right));
+        }
+    }
+}
+
+#[test]
+fn maintained_vertex_and_edge_keys_remain_selective_with_numeric_residuals() {
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::{CanonicalF64, EId, VId};
+    for edge in [false, true] {
+        let text = if edge {
+            "MATCH (a)-[r:R]->(b) RETURN r AS id,r.p AS k"
+        } else {
+            "MATCH (n) RETURN n AS id,n.p AS k"
+        };
+        let source: PreparedGraphSet = PreparedGraphText::prepare(text, |kind, name| {
+            match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+                _ => None,
+            }
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .with_duplicates()
+        .into();
+        let code = [equal(0, 2), equal(1, 3), GraphSetPredicateOp::And];
+        let query = source
+            .clone()
+            .cross_join(source)
+            .unwrap()
+            .filter(&code)
+            .unwrap();
+        let (_, _, spec, _) = query
+            .incremental_selected_join_with_control(&mut allow)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            spec.keys(),
+            &[(0, 0)],
+            "only identity equality is a typed key"
+        );
+        assert_eq!(spec.predicate(), Some(code.as_slice()));
+        let identity = |value| {
+            if edge {
+                GraphValue::Edge(EId(value))
+            } else {
+                GraphValue::Vertex(VId(value))
+            }
+        };
+        let left_row = GraphValueRow::from_owned_values(vec![
+            identity(1),
+            GraphValue::Scalar(CanonicalScalar::Int(7)),
+        ]);
+        let right_row = GraphValueRow::from_owned_values(vec![
+            identity(1),
+            GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(7.0))),
+        ]);
+        let unrelated =
+            GraphValueRow::from_owned_values(vec![identity(2), right_row.values()[1].clone()]);
+        assert_eq!(
+            selected_bag(
+                &query,
+                &bag([(left_row.clone(), 2)]),
+                &bag([(right_row.clone(), 3), (unrelated, 9)]),
+            ),
+            Bag::from([(concatenated(&left_row, &right_row), 6)])
+        );
+    }
+}
+
+#[test]
+fn explicit_typed_join_identity_is_not_redefined_by_selected_product_lowering() {
+    use fgdb_types::CanonicalF64;
+    let types = [GraphSetColumnType::Scalar; 2];
+    let spec = RowJoinSpec::new(&types, &types, &[(0, 0)])
+        .unwrap()
+        .with_predicate(&[equal(0, 2)])
+        .unwrap();
+    let mut typed = IncrementalRowJoin::new(spec);
+    let left = bag([(numeric_row(CanonicalScalar::Int(7), 10), 2)]);
+    let right = bag([(
+        numeric_row(CanonicalScalar::Float(CanonicalF64::new(7.0)), 20),
+        3,
+    )]);
+    typed
+        .prepare(&left, &right, LIMBS, None, &mut |_| Ok::<_, ()>(()))
+        .unwrap()
+        .commit();
+    assert!(plain(typed.rows()).is_empty());
+    let selected = leaf()
+        .cross_join(leaf())
+        .unwrap()
+        .filter(&[equal(0, 2)])
+        .unwrap();
+    assert_eq!(
+        selected_bag(&selected, &left, &right).values().copied().sum::<i128>(),
+        6
     );
 }
