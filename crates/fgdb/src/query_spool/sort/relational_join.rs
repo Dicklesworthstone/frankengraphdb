@@ -12,6 +12,8 @@ use std::cmp::Ordering;
 
 #[path = "relational_join_pairs.rs"]
 mod pairs;
+#[path = "relational_join_filtered.rs"]
+mod filtered;
 
 fn failure(error: SpillSetRowError<NativeSpoolError>) -> NativeSpoolError {
     match error {
@@ -372,6 +374,29 @@ where
         if seen != child.row_count() {
             return Err(NativeSpoolError::IncompleteCursor);
         }
+    }
+    if plan.supports_merge_filtered() {
+        let result = filtered::execute(
+            &plan,
+            &left,
+            &right,
+            snapshot,
+            snapshot_records,
+            evaluator,
+            policy,
+            scratch,
+            destination,
+            auxiliary,
+            run_rows,
+            max_runs,
+            page_bytes,
+            max_row_bytes,
+            max_input_rows,
+            &mut work,
+            resolver,
+        )
+        .await?;
+        return Ok((result, work.used));
     }
     if plan.supports_merge_presence() {
         let result = merge_presence(

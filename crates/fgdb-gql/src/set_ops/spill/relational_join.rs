@@ -33,22 +33,29 @@ impl SpillSetJoinPlan {
         self.spec.keys()
     }
     /// Fixed eligibility, not an adaptive choice or a retry after refusal.
-    /// A residual ON needs per-occurrence witnesses and keeps the existing
-    /// general join path. Equal NULL tuples still do not establish presence.
+    /// Residual ON uses supports_merge_filtered() and per-occurrence witnesses.
+    /// Equal NULL tuples still do not establish presence.
     pub fn supports_merge_presence(&self) -> bool {
         matches!(self.kind(), RowJoinKind::Semi | RowJoinKind::Anti)
             && !self.keys().is_empty()
             && self.spec.predicate().is_none()
     }
     /// Equality-only pair joins can replay one sorted key group instead of
-    /// rescanning the complete opposite relation. Residual ON predicates stay
-    /// on the general path: a group-level witness cannot prove their absence.
+    /// rescanning the complete opposite relation. Residual ON predicates need
+    /// supports_merge_filtered(): a group witness cannot prove row absence.
     pub fn supports_merge_pairs(&self) -> bool {
         matches!(
             self.kind(),
             RowJoinKind::Inner | RowJoinKind::Left | RowJoinKind::Right | RowJoinKind::Full
         ) && !self.keys().is_empty()
             && self.spec.predicate().is_none()
+    }
+    /// Keyed residual joins replay only equal-key candidates through the native
+    /// ON kernel. Every left/right occurrence owns its own witness; outer and
+    /// presence decisions never reuse another occurrence's predicate result.
+    /// This is a fixed choice before execution, never a retry after refusal.
+    pub fn supports_merge_filtered(&self) -> bool {
+        !self.keys().is_empty() && self.spec.predicate().is_some()
     }
     pub fn compare_keys_with_control<E>(
         &self,

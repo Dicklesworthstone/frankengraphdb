@@ -11,6 +11,8 @@ use fgdb_gql::{
 
 #[path = "buffered_relational_join_pair_tests.rs"]
 mod pair_tests;
+#[path = "buffered_relational_join_filtered_tests.rs"]
+mod filtered_tests;
 
 const KINDS: [RowJoinKind; 6] = [
     RowJoinKind::Inner,
@@ -340,7 +342,9 @@ fn merge_presence_selection_accounts_for_both_sorts_without_admitting_residuals(
                 let pairs =
                     !matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti) && keyed && !residual;
                 assert_eq!(join.supports_merge_pairs(), pairs);
-                let barriers = if eligible || pairs { 3 } else { 2 };
+                let filtered = keyed && residual;
+                assert_eq!(join.supports_merge_filtered(), filtered);
+                let barriers = if eligible || pairs || filtered { 3 } else { 2 };
                 assert_eq!(
                     compiled.stage_count(),
                     compiled.stages().len()

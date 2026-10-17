@@ -339,7 +339,7 @@ impl SpillSetValuesPlan {
     /// its identity tuple. These events belong to the SAME cumulative allowance
     /// used by every following stage; no final ResultRow is charged here.
     ///
-    /// The host retains the returned cursor's reservation through the yielded
+    /// The host retains the returned cursor's reservation, used by the yielded
     /// row's last use, including awaited encoding/appends. The consuming cursor
     /// emits exactly one unit row and then exhausts. Its first stage still owns
     /// the Values node's page; a later LIMIT zero never skips this source.
@@ -508,10 +508,14 @@ impl AsyncSpillSetPlan {
                 .left()
                 .stage_count()
                 .saturating_add(join.right().stage_count())
-                // Equality joins sort both children, then merge
-                // directly into destination. General joins emit and copy.
+                // Keyed joins sort both children, then write one output run.
+                // Residual right-absence sweeps only reread these same runs.
+                // General unkeyed joins emit and copy.
                 .saturating_add(
-                    if join.supports_merge_presence() || join.supports_merge_pairs() {
+                    if join.supports_merge_presence()
+                        || join.supports_merge_pairs()
+                        || join.supports_merge_filtered()
+                    {
                         3
                     } else {
                         2
