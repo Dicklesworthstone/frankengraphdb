@@ -793,111 +793,121 @@ fn historical_winners_cannot_resurrect_a_hidden_successor_even_after_compaction(
 fn every_source_builder_kernel_and_delivery_clock_observes_expiry_and_retirement() {
     let ((), report) = run_async_under_lab(0x5ec0_3006, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
-        let cx = c.query();
         let db = database(&c.commit(), true).await;
-        for empty in [false, true] {
-            let issuer = authority(307 + u64::from(empty), NS);
-            let token = issuer.issue_at(&grant(), 100).unwrap();
-            let mut opt = options(Directedness::Undirected);
-            if empty {
-                opt.selection.vertex_label = Some(LabelId(99));
-            }
-            let mut calls = 0;
-            let expected = db
-                .call_fnx_authorized(
-                    &cx,
-                    &issuer,
-                    &token,
-                    BRANCH,
-                    TRIANGLES,
-                    &FnxParameters::new(),
-                    opt,
-                    || {
-                        calls += 1;
-                        100
-                    },
-                )
-                .unwrap();
-            assert_eq!(expected.is_empty(), empty);
-            assert!(calls > 10);
-            for stop in 1..=calls {
-                let mut seen = 0;
-                let error = db
+        // Exercise every observed public phase. PageRank's physical arithmetic
+        // must still sample fresh authorization time when ordinary work shares
+        // its clock sample across 128 charges; triangles keep their prior law.
+        for (text, interval) in [(TRIANGLES, 1), (CALLS[0], 128)] {
+            let cx = c
+                .query()
+                .with_host_clock_interval(std::num::NonZeroU32::new(interval).unwrap());
+            for empty in [false, true] {
+                let issuer = authority(307 + u64::from(empty), NS);
+                let token = issuer.issue_at(&grant(), 100).unwrap();
+                let mut opt = options(Directedness::Undirected);
+                if empty {
+                    opt.selection.vertex_label = Some(LabelId(99));
+                }
+                let mut calls = 0;
+                let expected = db
                     .call_fnx_authorized(
                         &cx,
                         &issuer,
                         &token,
                         BRANCH,
-                        TRIANGLES,
+                        text,
+                        &FnxParameters::new(),
+                        opt,
+                        || {
+                            calls += 1;
+                            100
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(expected.is_empty(), empty);
+                assert!(calls > 0, "{text}, empty={empty}");
+                if text == TRIANGLES || !empty {
+                    assert!(calls > 10, "exercise live phases: {text}, empty={empty}");
+                }
+                for stop in 1..=calls {
+                    let mut seen = 0;
+                    let error = db
+                        .call_fnx_authorized(
+                            &cx,
+                            &issuer,
+                            &token,
+                            BRANCH,
+                            text,
+                            &FnxParameters::new(),
+                            opt,
+                            || {
+                                seen += 1;
+                                if seen == stop { 1000 } else { 100 }
+                            },
+                        )
+                        .unwrap_err();
+                    authorization(error, Error::Expired);
+                    assert_eq!(seen, stop, "no successful-prefix continuation after expiry");
+                }
+                let mut seen = 0;
+                authorization(
+                    db.call_fnx_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
                         &FnxParameters::new(),
                         opt,
                         || {
                             seen += 1;
-                            if seen == stop { 1000 } else { 100 }
+                            if seen == 2 { 99 } else { 100 }
                         },
                     )
-                    .unwrap_err();
-                authorization(error, Error::Expired);
-                assert_eq!(seen, stop, "no successful-prefix continuation after expiry");
+                    .unwrap_err(),
+                    Error::ClockWentBackwards,
+                );
+                assert_eq!(read(&db, &cx, &issuer, &token, text, opt), expected);
+                let mut seen = 0;
+                authorization(
+                    db.call_fnx_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &FnxParameters::new(),
+                        opt,
+                        || {
+                            seen += 1;
+                            if seen == calls {
+                                issuer.retire();
+                            }
+                            100
+                        },
+                    )
+                    .unwrap_err(),
+                    Error::AuthorityRetired,
+                );
+                assert_eq!(
+                    seen, calls,
+                    "retire at final delivery, even for an empty result"
+                );
+                authorization(
+                    db.call_fnx_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &FnxParameters::new(),
+                        opt,
+                        || 100,
+                    )
+                    .unwrap_err(),
+                    Error::AuthorityRetired,
+                );
             }
-            let mut seen = 0;
-            authorization(
-                db.call_fnx_authorized(
-                    &cx,
-                    &issuer,
-                    &token,
-                    BRANCH,
-                    TRIANGLES,
-                    &FnxParameters::new(),
-                    opt,
-                    || {
-                        seen += 1;
-                        if seen == 2 { 99 } else { 100 }
-                    },
-                )
-                .unwrap_err(),
-                Error::ClockWentBackwards,
-            );
-            assert_eq!(read(&db, &cx, &issuer, &token, TRIANGLES, opt), expected);
-            let mut seen = 0;
-            authorization(
-                db.call_fnx_authorized(
-                    &cx,
-                    &issuer,
-                    &token,
-                    BRANCH,
-                    TRIANGLES,
-                    &FnxParameters::new(),
-                    opt,
-                    || {
-                        seen += 1;
-                        if seen == calls {
-                            issuer.retire();
-                        }
-                        100
-                    },
-                )
-                .unwrap_err(),
-                Error::AuthorityRetired,
-            );
-            assert_eq!(
-                seen, calls,
-                "retire at final delivery, even for an empty result"
-            );
-            authorization(
-                db.call_fnx_authorized(
-                    &cx,
-                    &issuer,
-                    &token,
-                    BRANCH,
-                    TRIANGLES,
-                    &FnxParameters::new(),
-                    opt,
-                    || 100,
-                )
-                .unwrap_err(),
-                Error::AuthorityRetired,
-            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

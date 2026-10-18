@@ -767,10 +767,7 @@ fn indexed_overlay_expansions_admit_only_reached_rows_in_every_direction() {
         for (direction, expected) in [
             (GlaDirection::Forward, vec![VId(102)]),
             (GlaDirection::Reverse, vec![VId(98)]),
-            (
-                GlaDirection::Undirected,
-                vec![VId(98), VId(100), VId(102)],
-            ),
+            (GlaDirection::Undirected, vec![VId(98), VId(100), VId(102)]),
         ] {
             let pattern = indexed_overlay_pattern(Some(100), direction);
             let result = txn
