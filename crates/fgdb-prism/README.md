@@ -115,10 +115,15 @@ representable integers, never silent decimal/string/boolean coercion.
 
 `EmbeddedReadView::prism_projection_at` prepares a cache for several bound calls.
 Clones share it without rebuilding adjacency. `projected_row` borrows a target
-slice and its position-aligned weights. No executing kernel constructs a second
-Graph/DiGraph or normalized adjacency copy. PageRank uses three O(n) f64 vectors;
-BFS and components use O(n) arrays and queues. Strong components use iterative
-Kosaraju with explicit bounded stacks, not recursive process-stack traversal.
+slice and its position-aligned weights. PageRank borrows outgoing CSR offsets
+for unweighted degrees. Its scratch includes three O(n) f64 vectors and O(n)
+dangling-vertex indices; weighted PageRank also uses O(m) normalized incoming
+weights and an O(n) construction cursor. Triangle counts and clustering build
+temporary degree-oriented forward CSR rows using O(n+m) scratch, then discover
+each triangle once. They skip endpoints and intersections that cannot contain
+a triangle. This scratch never becomes a storage or authorization root. BFS
+and components use O(n) arrays and queues. Strong components use iterative
+Kosaraju with explicit bounded stacks.
 
 Every kernel checks cancellation during vertex and edge passes, including hub
 rows, PageRank iterations and SCC discovery/relabeling. An observed cancellation
@@ -134,9 +139,13 @@ source traversal, initialization and output conversion are separate work.
 The iteration cap applies only to PageRank. Component/PageRank row counts are
 admitted before execution; BFS admits each newly reached row before enqueueing,
 so a small reachable result is not rejected solely because many isolates exist.
-Kernel workspace evidence reports requested vector backing bytes, excluding the
-existing cache, result rows and allocator overhead. It is not a process-memory
-quota. Visitor scratch and staging are governed by their separate allowances.
+Kernel workspace evidence covers peak vector backing bytes, excluding the
+existing cache, result rows and allocator overhead. PageRank records actual
+reserved capacities, including temporary construction storage. Other kernels
+use their declared allocation models; the triangle model is a conservative
+bound because proven-empty intersections avoid some allocations. This evidence
+is not a process-memory quota. Visitor scratch and staging are governed by their
+separate allowances.
 
 Certificates bind the snapshot, projection, typed call, canonical typed rows,
 actual kernel identifier, source-bundle digest, numeric profile, workspace model

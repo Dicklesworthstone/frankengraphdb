@@ -17,7 +17,8 @@ pub struct FnxExecutionLimits {
     pub max_result_rows: usize,
     /// Admission model: PageRank (n + arcs) * (max_iter + 1), BFS/CC n + arcs,
     /// WCC n + 2*arcs, SCC 2*(n + arcs). Dijkstra includes heap sift height;
-    /// triangle kernels include one lower-degree scan per undirected edge.
+    /// Triangle kernels include forward-CSR construction and a lower-degree
+    /// row bound per undirected edge, plus initialization and conversion.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -727,7 +728,7 @@ impl FnxCallSpec {
                 crate::shortest_path::workspace_bytes::<C>(n)?
             }
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
-                crate::clustering::workspace_bytes::<C>(n)?
+                crate::clustering::workspace_bytes::<C>(n, graph.edge_count())?
             }
             FnxAlgorithm::Foundation(_) => {
                 crate::foundation::copy_bytes(n, arcs).ok_or(FnxExecutionError::SizeOverflow)?

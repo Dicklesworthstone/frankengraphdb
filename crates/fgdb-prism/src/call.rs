@@ -237,7 +237,7 @@ const SIGNATURES: &[FnxSignature] = &[
         rng_policy: "none",
         graph_laws: "explicit undirected simple projection; unweighted; self-loops ignored; exact per-vertex counts; isolates retained",
         complexity: "O(|V| + |E| + sum_edges min(deg(u), deg(v)))",
-        execution_kernel: "fgdb-prism/triangles-degree-mark-v1",
+        execution_kernel: "fgdb-prism/triangles-degree-forward-csr-v1",
     },
     FnxSignature {
         name: "fnx.clustering_coefficient",
@@ -250,7 +250,7 @@ const SIGNATURES: &[FnxSignature] = &[
         rng_policy: "none",
         graph_laws: "explicit undirected simple projection; unweighted; self-loops ignored; 2*t/(d*(d-1)); degree below two yields zero",
         complexity: "O(|V| + |E| + sum_edges min(deg(u), deg(v)))",
-        execution_kernel: "fgdb-prism/clustering-degree-mark-v1",
+        execution_kernel: "fgdb-prism/clustering-degree-forward-csr-v1",
     },
     foundation(
         "fnx.degree_centrality",
