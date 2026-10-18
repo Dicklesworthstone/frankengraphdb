@@ -30,12 +30,23 @@ type StreamError = GqlQueryError<VertexScanError<ReadError>, Cancel>;
 
 type EqualityKey = (PropertyKeyId, Arc<[u8]>);
 
+struct RootEquality {
+    key: PropertyKeyId,
+    value: CanonicalScalar,
+}
+
 enum RootCandidates {
     Histories,
     // Resolve keys on first demand, never while opening a cursor. Numeric
     // equality has at most one exact key per canonical numeric domain.
-    Pending([Option<EqualityKey>; 2]),
-    Indexed([Option<IndexMap<VId, ()>>; 2]),
+    Pending {
+        keys: [Option<EqualityKey>; 2],
+        equality: RootEquality,
+    },
+    Indexed {
+        roots: [Option<IndexMap<VId, ()>>; 2],
+        equality: RootEquality,
+    },
 }
 
 /// Public only because it is a parameter of the returned public cursor. The
@@ -90,9 +101,9 @@ impl SnapshotVertexSource<'_> {
         let Some((key, value)) = equality else {
             return self;
         };
-        let values = match value {
+        let values = match &value {
             CanonicalScalar::Int(_) | CanonicalScalar::Float(_) => numeric::equality_peers(&value),
-            scalar => [Some(scalar), None],
+            scalar => [Some(scalar.clone()), None],
         };
         let mut keys = [None, None];
         for (target, value) in keys.iter_mut().zip(values) {
@@ -103,7 +114,10 @@ impl SnapshotVertexSource<'_> {
                 *target = Some((key, Arc::from(encoded)));
             }
         }
-        self.candidates = RootCandidates::Pending(keys);
+        self.candidates = RootCandidates::Pending {
+            keys,
+            equality: RootEquality { key, value },
+        };
         self
     }
 }
@@ -121,7 +135,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         let successor = self
             .cx
             .with_restriction(|| {
-                if let RootCandidates::Pending(keys) = &self.candidates {
+                if let RootCandidates::Pending { keys, .. } = &self.candidates {
                     let mut roots = [None, None];
                     for (target, key) in roots.iter_mut().zip(keys) {
                         let Some(key) = key else { continue };
@@ -138,10 +152,17 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                             }
                         }
                     }
-                    self.candidates = RootCandidates::Indexed(roots);
+                    // Move the selected predicate only after every controlled
+                    // lookup succeeds. A refusal leaves the source unadvanced.
+                    let RootCandidates::Pending { equality, .. } =
+                        core::mem::replace(&mut self.candidates, RootCandidates::Histories)
+                    else {
+                        unreachable!("candidate roots resolved from pending keys")
+                    };
+                    self.candidates = RootCandidates::Indexed { roots, equality };
                 }
                 match &self.candidates {
-                    RootCandidates::Indexed(roots) => {
+                    RootCandidates::Indexed { roots, .. } => {
                         let mut successor = None;
                         for root in roots.iter().flatten() {
                             if let Some(vid) = index_successor(root, self.after, control)? {
@@ -155,7 +176,9 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                         self.after,
                         control,
                     ),
-                    RootCandidates::Pending(_) => unreachable!("candidate roots resolved above"),
+                    RootCandidates::Pending { .. } => {
+                        unreachable!("candidate roots resolved above")
+                    }
                 }
             })
             .map_err(VertexScanSourceError::Control)?;
@@ -163,6 +186,37 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
             self.after = Some(vid);
         }
         Ok(successor)
+    }
+
+    fn root_is_candidate<C>(
+        &self,
+        row: &VertexScanRow<'_>,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<bool, VertexScanSourceError<ReadError, C>> {
+        let equality = match &self.candidates {
+            RootCandidates::Histories => return Ok(true),
+            RootCandidates::Pending { equality, .. }
+            | RootCandidates::Indexed { equality, .. } => equality,
+        };
+        // This poll-only recheck is for the scoped adapter's private candidate
+        // admission. The native cursor later meters its ordinary full predicate
+        // evaluation; the unscoped source still counts every examined history.
+        let mut low = 0;
+        let mut high = row.properties.len();
+        while low < high {
+            control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+            let mid = low + (high - low) / 2;
+            match row.properties[mid].0.cmp(&equality.key) {
+                core::cmp::Ordering::Less => low = mid + 1,
+                core::cmp::Ordering::Greater => high = mid,
+                core::cmp::Ordering::Equal => {
+                    control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+                    return Ok(IntegerComparison::Equal
+                        .accepts_scalar_pair(Some(&row.properties[mid].1), Some(&equality.value)));
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn next_probe_vertex<C>(

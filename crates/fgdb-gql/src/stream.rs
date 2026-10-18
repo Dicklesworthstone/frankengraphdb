@@ -408,6 +408,19 @@ pub trait VertexScanSource {
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VId>, VertexScanSourceError<Self::Error, C>>;
 
+    /// Recheck an optional root candidate restriction against an already
+    /// resolved visible row. A scoped adapter must admit the row's authority
+    /// before calling this method and may use a poll-only control so stale
+    /// historical index entries do not consume candidate allowances.
+    /// This does not replace ordinary predicates or narrow independent probes.
+    fn root_is_candidate<C>(
+        &self,
+        _row: &VertexScanRow<'_>,
+        _control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<bool, VertexScanSourceError<Self::Error, C>> {
+        Ok(true)
+    }
+
     /// A cooperative consumer asks for one source examination at a time.
     /// Sources which internally filter a directory override this to return a
     /// skipped identity instead of synchronously consuming its unread suffix.
