@@ -34,7 +34,7 @@ pub(crate) fn run<C>(
             let source = graph
                 .vertex_ordinal(source)
                 .ok_or(FnxExecutionError::UnknownSource(source))?;
-            bfs(graph, source, cutoff, row_limit, &mut || checkpoint.unit())
+            bfs(graph, source, cutoff, row_limit, checkpoint)
         }
         FnxAlgorithm::ConnectedComponents => components(graph, false, checkpoint),
         FnxAlgorithm::WeaklyConnectedComponents => components(graph, true, checkpoint),
@@ -54,15 +54,18 @@ fn bfs<C>(
     source: usize,
     cutoff: Option<usize>,
     row_limit: usize,
-    checkpoint: &mut impl FnMut() -> Result<(), C>,
+    checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<KernelOutput, FnxExecutionError<C>> {
     admit("result rows", 1, row_limit)?;
     let n = graph.node_count();
     let mut distances = reserve(n)?;
     let mut queue = reserve(n)?;
-    for _ in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        distances.push(None);
+    while distances.len() < n {
+        let run = FNX_METER_RUN.min(n - distances.len());
+        checkpoint
+            .units(run)
+            .map_err(FnxExecutionError::Cancelled)?;
+        distances.resize(distances.len() + run, None);
     }
     distances[source] = Some(0usize);
     queue.push(source);
@@ -70,7 +73,7 @@ fn bfs<C>(
     let mut witness = witness("single_source_shortest_path_length_bfs");
     witness.queue_peak = 1;
     while head < queue.len() {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let vertex = queue[head];
         head += 1;
         increment(&mut witness.nodes_touched)?;
@@ -84,19 +87,36 @@ fn bfs<C>(
         let neighbors = graph
             .neighbors_indices(vertex)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-        for &neighbor in neighbors {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
-            increment(&mut witness.edges_scanned)?;
-            if distances[neighbor].is_none() {
-                let requested = queue
-                    .len()
-                    .checked_add(1)
-                    .ok_or(FnxExecutionError::SizeOverflow)?;
-                admit("result rows", requested, row_limit)?;
-                distances[neighbor] = Some(next_depth);
-                queue.push(neighbor);
-                witness.queue_peak = witness.queue_peak.max(queue.len() - head);
+        let mut remaining = neighbors;
+        while !remaining.is_empty() {
+            // Each arc can discover at most one vertex. A run no longer than
+            // the remaining row allowance cannot encounter a row refusal, so
+            // charging it before the walk preserves the scalar refusal point.
+            // At a full allowance, examine one arc at a time: it may revisit a
+            // known vertex, or be the exact first disallowed discovery.
+            let allowance = if row_limit >= n {
+                FNX_METER_RUN
+            } else {
+                row_limit.saturating_sub(queue.len()).max(1)
+            };
+            let run = FNX_METER_RUN.min(allowance).min(remaining.len());
+            checkpoint
+                .units(run)
+                .map_err(FnxExecutionError::Cancelled)?;
+            for &neighbor in &remaining[..run] {
+                increment(&mut witness.edges_scanned)?;
+                if distances[neighbor].is_none() {
+                    let requested = queue
+                        .len()
+                        .checked_add(1)
+                        .ok_or(FnxExecutionError::SizeOverflow)?;
+                    admit("result rows", requested, row_limit)?;
+                    distances[neighbor] = Some(next_depth);
+                    queue.push(neighbor);
+                    witness.queue_peak = witness.queue_peak.max(queue.len() - head);
+                }
             }
+            remaining = &remaining[run..];
         }
     }
     Ok(KernelOutput {

@@ -119,6 +119,143 @@ impl FnxMeter<usize> for &mut ComponentMeter {
 }
 
 #[test]
+fn bfs_runs_preserve_distances_witnesses_and_every_work_refusal() {
+    // A hub followed by another level exercises full runs, remainders, loops,
+    // duplicate incidences, and a wide frontier whose rows mostly revisit
+    // vertices. Cutoffs must leave the deeper part of the graph unobserved.
+    let width = 2 * FNX_METER_RUN + 3;
+    let vertices: Vec<_> = (0..width + 3)
+        .map(|index| VId((index as u128) << 64 | 19))
+        .collect();
+    let mut edges = Vec::new();
+    for target in 0..width {
+        for (source, target) in [(0, target), (target, width), (width, target)] {
+            edges.push(ProjectionEdge {
+                eid: EId(edges.len() as u128),
+                source: vertices[source],
+                target: vertices[target],
+                weight: -1.0,
+            });
+        }
+    }
+    edges.push(ProjectionEdge {
+        eid: EId(edges.len() as u128),
+        source: vertices[width],
+        target: vertices[width + 1],
+        weight: -1.0,
+    });
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        let view = graph(&vertices, &edges, direction);
+        for cutoff in [None, Some(0), Some(1), Some(2)] {
+            let call = FnxCallSpec::single_source_shortest_path_length(vertices[0], cutoff);
+            let mut scalar_units = 0;
+            let scalar = call
+                .execute(&view, limits(), || {
+                    scalar_units += 1;
+                    Ok::<(), usize>(())
+                })
+                .unwrap();
+            let mut meter = ComponentMeter::default();
+            let batched = call.execute(&view, limits(), &mut meter).unwrap();
+            assert_eq!(batched, scalar, "{direction:?} {cutoff:?}");
+            assert_eq!(meter.observed, scalar_units);
+            assert!(meter.calls < scalar_units);
+            assert_eq!(meter.largest_run, FNX_METER_RUN);
+            let reached = batched.rows.len();
+            let witness = &batched.certificate.witness;
+            assert_eq!(witness.nodes_touched, reached);
+            assert_eq!(
+                scalar_units,
+                3 * vertices.len() + reached + witness.edges_scanned + 3
+            );
+            for stop in 1..=scalar_units {
+                let mut meter = ComponentMeter {
+                    stop: Some(stop),
+                    ..ComponentMeter::default()
+                };
+                let result = call.execute(&view, limits(), &mut meter);
+                assert!(matches!(result, Err(FnxExecutionError::Cancelled(at)) if at == stop));
+                assert_eq!(meter.observed, stop);
+                assert!(meter.stopped);
+            }
+        }
+    }
+}
+
+#[test]
+fn bfs_batching_does_not_charge_past_the_first_disallowed_discovery() {
+    let n = 2 * FNX_METER_RUN + 5;
+    let vertices: Vec<_> = (0..n).map(|index| VId(index as u128)).collect();
+    // Source 0 first visits itself, then every other vertex in ID order.
+    // The back edges force visits to already discovered vertices even after
+    // an exact n-row allowance has been exhausted.
+    let mut edges = Vec::new();
+    for target in 0..n {
+        for (source, target) in [(0, target), (target, 0)] {
+            edges.push(ProjectionEdge {
+                eid: EId(edges.len() as u128),
+                source: vertices[source],
+                target: vertices[target],
+                weight: 1.0,
+            });
+        }
+    }
+    let view = graph(&vertices, &edges, Directedness::Directed);
+    let call = FnxCallSpec::single_source_shortest_path_length(vertices[0], None);
+    for row_limit in 1..n {
+        let mut meter = ComponentMeter::default();
+        let result = call.execute(
+            &view,
+            FnxExecutionLimits {
+                max_result_rows: row_limit,
+                ..limits()
+            },
+            &mut meter,
+        );
+        assert!(matches!(result, Err(FnxExecutionError::LimitExceeded {
+            resource: "result rows", requested, limit,
+        }) if requested == row_limit + 1 && limit == row_limit));
+        // Initial call + degree pass + distance init +
+        // popped source + loop + first row_limit discoveries (the last fails).
+        let exact = 2 * n + row_limit + 3;
+        assert_eq!(meter.observed, exact, "row allowance {row_limit}");
+        // When the work budget crosses that same arc, its refusal must win.
+        let mut meter = ComponentMeter {
+            stop: Some(exact),
+            ..ComponentMeter::default()
+        };
+        let result = call.execute(
+            &view,
+            FnxExecutionLimits {
+                max_result_rows: row_limit,
+                ..limits()
+            },
+            &mut meter,
+        );
+        assert!(matches!(result, Err(FnxExecutionError::Cancelled(at)) if at == exact));
+        assert_eq!(meter.observed, exact);
+    }
+    let mut meter = ComponentMeter::default();
+    let result = call
+        .execute(
+            &view,
+            FnxExecutionLimits {
+                max_result_rows: n,
+                ..limits()
+            },
+            &mut meter,
+        )
+        .unwrap();
+    assert_eq!(result.rows.len(), n);
+    assert_eq!(result.certificate.witness.edges_scanned, 2 * n - 1);
+    assert!(meter.full_runs >= 2 * (n / FNX_METER_RUN));
+}
+
+#[test]
 fn component_runs_keep_every_work_refusal_and_witness_on_hubs() {
     // Two disconnected hubs cross the run boundary on both directed faces.
     // Full-width IDs, loops, duplicate edges and an isolate retain their
