@@ -659,11 +659,101 @@ fn kernel_bulk_work_preserves_crossed_allowance_refusals_and_control_prefixes() 
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-/// Arithmetic checkpoints are live without adding signed/native work,
-/// settling a deferred charge, or sampling the authorization clock again.
+/// Arithmetic checks use the same live context and authority as metered work,
+/// while preserving signed/native usage and any partially prepaid work run.
+#[test]
+fn kernel_live_polls_preserve_charges_and_observe_cancellation_expiry_and_retirement() {
+    let ((), report) = run_async_under_lab(0x0b7b_000b, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c
+            .query()
+            .with_host_clock_interval(std::num::NonZeroU32::new(128).unwrap());
+        for cause in ["cancellation", "expiry", "retirement"] {
+            let authority = issuer();
+            let token = authority.issue_at(&open(), 100).unwrap();
+            let verified = authority.verify_at(&token, BRANCH, 100).unwrap();
+            let permit = verified.begin_read_at(BRANCH, 100).unwrap();
+            let now = Cell::new(100);
+            let probe = Arc::new(SimulationCheckpointProbe::new(
+                (cause == "cancellation").then_some(2),
+            ));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let mut execution = Execution::new(&controlled, permit, || now.get());
+            execution.in_runs = true;
+            // Admission of this deferred prefix does not poll. The live
+            // arithmetic poll must neither settle it nor add a unit to it.
+            execution.work_units(3).unwrap();
+            let policy = GqlQueryPolicy::new(1_000, 1_000, 1_000, 1_000);
+            let mut usage = AdmissionUsage::default();
+            let mut observer = UsageObserver {
+                usage: &mut usage,
+                policy,
+            };
+            observer.work(3).unwrap();
+            let before = (
+                execution.permit.usage(),
+                *observer.usage,
+                execution.deferred,
+                execution.run_left,
+            );
+            KernelMeter {
+                execution: &mut execution,
+                observe: &mut observer,
+            }
+            .poll()
+            .unwrap();
+            match cause {
+                "expiry" => now.set(10_001),
+                "retirement" => {
+                    assert!(authority.retire());
+                }
+                _ => {}
+            }
+            let result = KernelMeter {
+                execution: &mut execution,
+                observe: &mut observer,
+            }
+            .poll();
+            assert!(
+                matches!(
+                    (cause, &result),
+                    (
+                        "cancellation",
+                        Err(QueryError::Pattern(fgdb_gql::GqlQueryError::Interrupted(_)))
+                    ) | (
+                        "expiry",
+                        Err(QueryError::Authorization(fgdb_warden::Error::Expired))
+                    ) | (
+                        "retirement",
+                        Err(QueryError::Authorization(
+                            fgdb_warden::Error::AuthorityRetired
+                        ))
+                    )
+                ),
+                "{cause} must retain its own refusal: {result:?}",
+            );
+            assert_eq!(
+                (
+                    execution.permit.usage(),
+                    *observer.usage,
+                    execution.deferred,
+                    execution.run_left,
+                ),
+                before,
+                "{cause}: live checks spend no work and preserve the prefix",
+            );
+            assert_eq!(probe.calls(), 2);
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Keep the remote cancellation-prefix law alongside the expiry/retirement
+/// cases. Polls sample the live clock, but never settle or add prepaid work.
 #[test]
 fn kernel_live_polls_cancel_without_changing_any_work_accounting() {
-    let ((), report) = run_async_under_lab(0x0b7b_000b, |root| async move {
+    let ((), report) = run_async_under_lab(0x0b7b_000c, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let authority = issuer();
@@ -693,8 +783,8 @@ fn kernel_live_polls_cancel_without_changing_any_work_accounting() {
                 *observer.usage,
                 execution.deferred,
                 execution.run_left,
-                reads.get(),
             );
+            let clock_before = reads.get();
             assert!(before.2 > 0, "exercise a real deferred charge");
             let probe = Arc::new(SimulationCheckpointProbe::new(stop));
             let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
@@ -720,10 +810,14 @@ fn kernel_live_polls_cancel_without_changing_any_work_accounting() {
                     *observer.usage,
                     execution.deferred,
                     execution.run_left,
-                    reads.get(),
                 ),
                 before,
                 "stop={stop:?}: a live poll must not mutate accounting"
+            );
+            assert_eq!(
+                reads.get() - clock_before,
+                stop.map_or(4, |stop| stop - 1),
+                "each uncancelled arithmetic poll samples fresh authorization time"
             );
         }
         assert_eq!(contexts.outstanding_obligations(), 0);

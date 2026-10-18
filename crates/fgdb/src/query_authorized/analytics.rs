@@ -624,7 +624,12 @@ where
     O: Observe,
 {
     fn poll(&mut self) -> Result<(), QueryError> {
-        self.execution.poll()
+        self.execution.poll()?;
+        // Arithmetic has already charged its work. A cached charge-time
+        // sample must not hide expiry throughout this physical phase.
+        let now = self.execution.sample();
+        let checked = self.execution.permit.checkpoint_at(now);
+        checked.map_err(|error| self.execution.refusal(error))
     }
     fn unit(&mut self) -> Result<(), QueryError> {
         self.execution.work_units(1)?;
