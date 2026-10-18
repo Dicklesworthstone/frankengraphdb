@@ -1,28 +1,42 @@
 //! Actual pull scans over a pinned, already decoded database generation.
 //!
-//! The persistent history index supplies ordered successors without collecting
-//! candidate IDs or restarting at the beginning. Only the chosen candidate's
+//! Persistent equality candidates or the history index supply ordered successors
+//! without collecting IDs or restarting at the beginning. Only the chosen candidate's
 //! MVCC history is resolved. The source holds an EmbeddedReadView, not a borrow
 //! of the mutable Database: writes, compaction, reopen and handle drop cannot
 //! change its generation. This is not paging an evidence artifact or materialized
 //! graph table, and it does not claim that the pinned generation is out of core.
 
-use crate::gql_exec::source::SourceEvent;
+use crate::gql_exec::source::{IndexMap, SourceEvent, numeric};
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
-use fgdb_gql::algebra::{GlaPlan, GraphValueRow, PreparedGraphPattern};
+use fgdb_delta_types::PropertyKeyId;
+use fgdb_gql::algebra::{
+    GlaPlan, GraphValueRow, IntegerComparison, PreparedGraphPattern, VertexPredicate,
+};
 use fgdb_gql::edge_stream::{EdgeExpansionSourceError, EdgeScanRow};
 use fgdb_gql::stream::{
     VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanOutput, VertexScanPlan,
     VertexScanRow, VertexScanSource, VertexScanSourceError,
 };
 use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy, PreparedGqlQuery};
-use fgdb_types::{CommitSeq, EId, QueryCx, VId};
+use fgdb_types::{CanonicalScalar, CommitSeq, EId, QueryCx, VId};
+use std::sync::Arc;
 
 mod global_aggregate;
 
 type Cancel = Box<asupersync::error::Error>;
 type StreamError = GqlQueryError<VertexScanError<ReadError>, Cancel>;
+
+type EqualityKey = (PropertyKeyId, Arc<[u8]>);
+
+enum RootCandidates {
+    Histories,
+    // Resolve keys on first demand, never while opening a cursor. Numeric
+    // equality has at most one exact key per canonical numeric domain.
+    Pending([Option<EqualityKey>; 2]),
+    Indexed([Option<IndexMap<VId, ()>>; 2]),
+}
 
 /// Public only because it is a parameter of the returned public cursor. The
 /// host alone constructs it from an admitted view and an exact retained cut.
@@ -33,7 +47,57 @@ pub struct SnapshotVertexSource<'q> {
     cx: &'q QueryCx,
     as_of: CommitSeq,
     after: Option<VId>,
+    candidates: RootCandidates,
 }
+
+impl SnapshotVertexSource<'_> {
+    /// Select only an admitted leading equality. This retains at most two
+    /// immutable candidate roots, never a candidate-ID collection. Range and
+    /// prefix scans keep the history walk until they have a bounded ordered
+    /// source with the same authorization and error behavior.
+    pub(crate) fn with_root_equality<Row: VertexScanOutput>(
+        mut self,
+        plan: &VertexScanPlan<Row>,
+        allows_property: impl Fn(PropertyKeyId) -> bool,
+    ) -> Self {
+        let equality = plan.leading_root_predicates().find_map(|predicate| {
+            let (key, value) = match predicate {
+                VertexPredicate::IntegerProperty {
+                    key,
+                    comparison: IntegerComparison::Equal,
+                    value,
+                } => (*key, CanonicalScalar::Int(*value)),
+                VertexPredicate::ScalarProperty { key, predicate }
+                    if predicate.comparison() == IntegerComparison::Equal
+                        && !matches!(predicate.value(), CanonicalScalar::Null) =>
+                {
+                    (*key, predicate.value().clone())
+                }
+                _ => return None,
+            };
+            allows_property(key).then_some((key, value))
+        });
+        let Some((key, value)) = equality else {
+            return self;
+        };
+        let values = match value {
+            CanonicalScalar::Int(_) | CanonicalScalar::Float(_) => numeric::equality_peers(&value),
+            scalar => [Some(scalar), None],
+        };
+        let mut keys = [None, None];
+        for (target, value) in keys.iter_mut().zip(values) {
+            if let Some(value) = value {
+                let Ok(encoded) = value.encode() else {
+                    return self;
+                };
+                *target = Some((key, Arc::from(encoded)));
+            }
+        }
+        self.candidates = RootCandidates::Pending(keys);
+        self
+    }
+}
+
 impl VertexScanSource for SnapshotVertexSource<'_> {
     type Error = ReadError;
     fn snapshot_seq(&self) -> CommitSeq {
@@ -44,7 +108,46 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         &mut self,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VId>, VertexScanSourceError<ReadError, C>> {
-        let successor = vertex_successor(&self.view, self.cx, self.after, control)
+        let successor = self
+            .cx
+            .with_restriction(|| {
+                if let RootCandidates::Pending(keys) = &self.candidates {
+                    let mut roots = [None, None];
+                    for (target, key) in roots.iter_mut().zip(keys) {
+                        let Some(key) = key else { continue };
+                        let mut node = self.view.snapshot.property_index().candidates.0.as_deref();
+                        while let Some(current) = node {
+                            control(VertexScanEvent::Work)?;
+                            match key.cmp(&current.key) {
+                                core::cmp::Ordering::Less => node = current.left.0.as_deref(),
+                                core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
+                                core::cmp::Ordering::Equal => {
+                                    *target = Some(current.value.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    self.candidates = RootCandidates::Indexed(roots);
+                }
+                match &self.candidates {
+                    RootCandidates::Indexed(roots) => {
+                        let mut successor = None;
+                        for root in roots.iter().flatten() {
+                            if let Some(vid) = index_successor(root, self.after, control)? {
+                                successor = Some(successor.map_or(vid, |next: VId| next.min(vid)));
+                            }
+                        }
+                        Ok(successor)
+                    }
+                    RootCandidates::Histories => index_successor(
+                        &self.view.snapshot.property_index().histories,
+                        self.after,
+                        control,
+                    ),
+                    RootCandidates::Pending(_) => unreachable!("candidate roots resolved above"),
+                }
+            })
             .map_err(VertexScanSourceError::Control)?;
         if let Some(vid) = successor {
             self.after = Some(vid);
@@ -126,20 +229,28 @@ fn vertex_successor<C>(
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
 ) -> Result<Option<VId>, C> {
     cx.with_restriction(|| {
-        let mut node = view.snapshot.property_index().histories.0.as_deref();
-        let mut successor = None;
-        // No +1 sentinel: VId(0) and VId(u128::MAX) are ordinary identities.
-        while let Some(current) = node {
-            control(VertexScanEvent::Work)?;
-            if after.is_none_or(|after| current.key > after) {
-                successor = Some(current.key);
-                node = current.left.0.as_deref();
-            } else {
-                node = current.right.0.as_deref();
-            }
-        }
-        Ok(successor)
+        index_successor(&view.snapshot.property_index().histories, after, control)
     })
+}
+
+fn index_successor<T, C>(
+    index: &IndexMap<VId, T>,
+    after: Option<VId>,
+    control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+) -> Result<Option<VId>, C> {
+    let mut node = index.0.as_deref();
+    let mut successor = None;
+    // No +1 sentinel: VId(0) and VId(u128::MAX) are ordinary identities.
+    while let Some(current) = node {
+        control(VertexScanEvent::Work)?;
+        if after.is_none_or(|after| current.key > after) {
+            successor = Some(current.key);
+            node = current.left.0.as_deref();
+        } else {
+            node = current.right.0.as_deref();
+        }
+    }
+    Ok(successor)
 }
 
 // Both outer source kinds reuse the same successor and own exactly one pin.
@@ -186,7 +297,9 @@ fn open<'q, Row: VertexScanOutput>(
         cx,
         as_of,
         after: None,
-    };
+        candidates: RootCandidates::Histories,
+    }
+    .with_root_equality(&plan, |_| true);
     Ok(VertexScanCursor::new(source, plan, policy, move || {
         cx.with_restriction(|| cx.checkpoint())
     }))
@@ -342,6 +455,7 @@ impl EmbeddedReadView {
             cx,
             as_of,
             after: None,
+            candidates: RootCandidates::Histories,
         })
     }
 

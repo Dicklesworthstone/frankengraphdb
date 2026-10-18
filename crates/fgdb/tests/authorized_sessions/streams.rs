@@ -26,6 +26,140 @@ fn expected_row(id: u128, p: i64) -> GraphValueRow {
     ])
 }
 
+#[test]
+fn authorized_equality_streams_seek_only_admitted_candidates_in_both_drivers() {
+    let ((), report) = run_async_under_lab(0x5ec0_6101, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = database(&commit).await;
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 100..228_u128 {
+            batch.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+            );
+            // Hidden equality candidates must not spend the native record
+            // allowance or alter the signed visible-node charge.
+            batch.create_vertex(
+                VId(id + 1000),
+                vec![LabelId(99)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+            );
+        }
+        batch.create_vertex(
+            VId(u128::MAX),
+            vec![LabelId(1)],
+            vec![(
+                PropertyKeyId(1),
+                CanonicalScalar::Float(fgdb_types::CanonicalF64::new(7.0)),
+            )],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new().with_int64("value", 7).unwrap();
+        let text = "MATCH (n) WHERE n.p = $value RETURN n AS id";
+        let eager = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap()
+            .query(&cx, text, &args)
+            .unwrap();
+        let expected = vec![
+            GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(1))]),
+            GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(u128::MAX))]),
+        ];
+        let mut session = db
+            .authorized_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                GqlQueryPolicy::new(2, 2, 1_000_000, 1000),
+                || 100,
+            )
+            .unwrap();
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+        let columns = cursor.columns().to_vec();
+        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows, expected);
+        assert_eq!(rows_result(&columns, rows), eager);
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        drop(cursor);
+        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&cursor);
+        // Root keys are still unresolved, and must resolve against the pin
+        // captured at opening rather than the writer's later index generation.
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(8)));
+        change.delete_vertex(VId(u128::MAX));
+        db.write(&commit, change).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        assert_eq!(
+            cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+            expected
+        );
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        assert!(cursor.next().is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn denied_equality_properties_cannot_change_stream_quota_refusals() {
+    let ((), report) = run_async_under_lab(0x5ec0_6102, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        for hidden in [55, 99] {
+            let mut db = Database::open_memory(&commit, DatabaseKeys::new([1; 32], NS, [2; 32]))
+                .await
+                .unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for id in 1..=2 {
+                batch.create_vertex(
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(hidden))],
+                );
+            }
+            db.write(&commit, batch).await.unwrap();
+            let mut session = db
+                .authorized_read_session(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols,
+                    GqlQueryPolicy::new(1, 10, 1_000_000, 1000),
+                    || 100,
+                )
+                .unwrap();
+            let args = GqlParameters::new();
+            let prepared = session
+                .prepare(&cx, "MATCH (n) WHERE n.hidden = 55 RETURN n AS id", &args)
+                .unwrap();
+            let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+            assert!(matches!(
+                cursor.next(),
+                Some(Err(QueryError::Stream(GqlQueryError::Rows(error))))
+                    if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                        && error.limit == 1 && error.observed == 2
+            ));
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+            assert!(cursor.next().is_none());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-7xqxb: a set whose canonical order is its one vertex scan's order
 /// (the vertex first, then columns, constants and parameters) pulls through
 /// that scan's native cursor, projecting each row exactly as the eager set

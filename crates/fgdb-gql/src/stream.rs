@@ -81,6 +81,22 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         Self::compile_with_projection(plan, None, Row::accepts_projection)
     }
 
+    /// Infallible root predicates that precede every Boolean expression and
+    /// existence probe. A source may use an exact candidate superset for one
+    /// of these predicates, but must keep the ordinary visible-row checks.
+    /// Later predicates cannot prune roots: doing so could hide an earlier
+    /// expression or probe error. Source authorization still controls which
+    /// property indexes may be consulted.
+    pub fn leading_root_predicates(&self) -> impl Iterator<Item = &VertexPredicate> {
+        self.tests
+            .iter()
+            .take_while(|test| matches!(test, Test::Predicate(_) | Test::Identity(_)))
+            .filter_map(|test| match test {
+                Test::Predicate(predicate) => Some(predicate),
+                _ => None,
+            })
+    }
+
     // Private to this operator family. A checked global numeric aggregate may
     // consume an unordered value projection; ordinary row streams still prove
     // the requested canonical order through their sealed output profile.

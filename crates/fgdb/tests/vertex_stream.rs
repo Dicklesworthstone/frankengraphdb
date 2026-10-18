@@ -4,7 +4,8 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, ReadError, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
-    GlaDirection, GraphPatternBuilder, IntegerComparison, PreparedGraphPattern, VertexPredicate,
+    GlaDirection, GraphPatternBuilder, IntegerComparison, PreparedGraphPattern, ScalarPredicate,
+    VertexPredicate,
 };
 use fgdb_gql::stream::{VertexScanError, VertexScanState};
 use fgdb_gql::{
@@ -12,7 +13,8 @@ use fgdb_gql::{
     RelationBind,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId,
+    CanonicalF64, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId,
+    PurposeContexts, VId,
 };
 
 const LABEL: LabelId = LabelId(3);
@@ -47,6 +49,245 @@ fn pattern(offset: u64, count: Option<u64>, filter: bool) -> PreparedGraphPatter
             .unwrap();
     }
     builder.prepare("n", offset, count).unwrap()
+}
+
+fn equality(value: CanonicalScalar, offset: u64, count: Option<u64>) -> PreparedGraphPattern {
+    let mut builder = GraphPatternBuilder::new();
+    builder.vertex("n").unwrap();
+    builder
+        .filter(
+            "n",
+            VertexPredicate::ScalarProperty {
+                key: KEY,
+                predicate: ScalarPredicate::new(value, IntegerComparison::Equal).unwrap(),
+            },
+        )
+        .unwrap();
+    builder.prepare("n", offset, count).unwrap()
+}
+
+#[test]
+fn equality_streams_seek_exact_numeric_domains_and_match_the_storage_oracle() {
+    let ((), report) = run_async_under_lab(0x51ca_0101, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let float = |value| CanonicalScalar::Float(CanonicalF64::new(value));
+        let values = vec![
+            CanonicalScalar::Int(0),
+            float(-0.0),
+            CanonicalScalar::Int(7),
+            float(7.0),
+            float(7.5),
+            CanonicalScalar::Int(9_007_199_254_740_993),
+            float(9_007_199_254_740_992.0),
+            CanonicalScalar::Int(i64::MIN),
+            float(-9_223_372_036_854_775_808.0),
+            CanonicalScalar::Int(i64::MAX),
+            float(9_223_372_036_854_775_808.0),
+            float(f64::NEG_INFINITY),
+            float(f64::INFINITY),
+            float(f64::NAN),
+            CanonicalScalar::Bool(false),
+            CanonicalScalar::Bool(true),
+            CanonicalScalar::ucs_basic_text("").unwrap(),
+            CanonicalScalar::ucs_basic_text("key").unwrap(),
+        ];
+        let mut batch = WriteBatch::new(R);
+        for (id, value) in values.iter().enumerate() {
+            batch.create_vertex(VId(id as u128), vec![], vec![(KEY, value.clone())]);
+        }
+        batch.create_vertex(VId(100), vec![], vec![(KEY, CanonicalScalar::Null)]);
+        batch.create_vertex(VId(u128::MAX), vec![], vec![]);
+        let at = db.write(&commit, batch).await.unwrap();
+        let rows = db.vertices_at(at).unwrap();
+        for literal in values.into_iter().chain([CanonicalScalar::Int(999)]) {
+            let expected: Vec<_> = rows
+                .iter()
+                .filter(|row| {
+                    IntegerComparison::Equal.accepts_scalar_pair(
+                        row.props
+                            .iter()
+                            .find(|(key, _)| *key == KEY)
+                            .map(|(_, value)| value),
+                        Some(&literal),
+                    )
+                })
+                .map(|row| row.vid)
+                .collect();
+            let query = equality(literal.clone(), 0, None);
+            let eager = db
+                .execute_graph_pattern_governed(&cx, &query, wide())
+                .unwrap();
+            assert_eq!(eager.value, expected, "literal={literal:?}");
+            // A full scan exceeds this allowance. Only historical index
+            // candidates may reach MVCC resolution and row admission.
+            let mut cursor = db
+                .stream_graph_vertices_governed(
+                    &cx,
+                    &query,
+                    GqlQueryPolicy::new(expected.len() as u64, u64::MAX, u64::MAX, 0),
+                )
+                .unwrap();
+            assert_eq!(cursor.row_stats().snapshot_records, 0);
+            assert_eq!(cursor.evaluator_stats().work_units, 0);
+            assert_eq!(
+                cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected,
+                "literal={literal:?}"
+            );
+            assert_eq!(cursor.row_stats().snapshot_records, expected.len() as u64);
+            assert_eq!(cursor.evaluator_stats().scratch_entries, 0);
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn equality_streams_keep_historical_candidates_lazy_and_recheck_the_pinned_winner() {
+    let ((), report) = run_async_under_lab(0x51ca_0102, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 100..356_u128 {
+            batch.create_vertex(
+                VId(id),
+                vec![],
+                vec![(KEY, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        for (vid, value) in [
+            (VId(0), CanonicalScalar::Int(7)),
+            (VId(3), CanonicalScalar::Float(CanonicalF64::new(7.0))),
+            (VId(u128::MAX), CanonicalScalar::Int(7)),
+        ] {
+            batch.create_vertex(vid, vec![], vec![(KEY, value)]);
+        }
+        let first = db.write(&commit, batch).await.unwrap();
+        let query = equality(CanonicalScalar::Int(7), 0, None);
+        let pinned = db
+            .stream_graph_vertices_governed(&cx, &query, wide())
+            .unwrap();
+        let mut change = WriteBatch::new(R);
+        // VId(0) becomes a candidate in BOTH numeric roots, but remains one
+        // canonical output and one candidate admission.
+        change.set_vertex_property(
+            VId(0),
+            KEY,
+            Some(CanonicalScalar::Float(CanonicalF64::new(7.0))),
+        );
+        change.set_vertex_property(VId(3), KEY, Some(CanonicalScalar::Int(9)));
+        change.delete_vertex(VId(u128::MAX));
+        change.create_vertex(VId(2), vec![], vec![(KEY, CanonicalScalar::Int(7))]);
+        let latest = db.write(&commit, change).await.unwrap();
+        for compact in [false, true] {
+            if compact {
+                db.compact(&commit).await.unwrap();
+            }
+            for (at, expected) in [
+                (CommitSeq::ORIGIN, vec![]),
+                (first, vec![VId(0), VId(3), VId(u128::MAX)]),
+                (latest, vec![VId(0), VId(2)]),
+            ] {
+                let mut cursor = db
+                    .stream_graph_vertices_governed_at(
+                        &cx,
+                        &query,
+                        at,
+                        GqlQueryPolicy::new(4, 4, 10_000, 0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                    expected
+                );
+                assert_eq!(cursor.row_stats().snapshot_records, 4);
+                assert_eq!(
+                    db.execute_graph_pattern_governed_at(&cx, &query, at, wide())
+                        .unwrap()
+                        .value,
+                    expected
+                );
+            }
+        }
+        // A zero page never resolves even the equality root or candidate history.
+        let zero = equality(CanonicalScalar::Int(7), 0, Some(0));
+        let mut empty = db
+            .stream_graph_vertices_governed(&cx, &zero, GqlQueryPolicy::new(0, 0, 1, 0))
+            .unwrap();
+        assert!(empty.next().is_none());
+        assert_eq!(empty.row_stats().snapshot_records, 0);
+        assert_eq!(empty.evaluator_stats().work_units, 1);
+        // Each pull consumes only its selected candidate; close never drains.
+        let one = equality(CanonicalScalar::Int(7), 0, Some(1));
+        let mut limited = db
+            .stream_graph_vertices_governed(&cx, &one, GqlQueryPolicy::new(1, 1, 10_000, 0))
+            .unwrap();
+        assert_eq!(limited.next().unwrap().unwrap(), VId(0));
+        assert!(limited.next().is_none());
+        assert_eq!(limited.row_stats().snapshot_records, 1);
+        let mut cursor = db
+            .stream_graph_vertices_governed(&cx, &query, wide())
+            .unwrap();
+        cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let work = cursor.evaluator_stats().work_units;
+        let mut refused = db
+            .stream_graph_vertices_governed(&cx, &query, GqlQueryPolicy::new(4, 4, work - 1, 0))
+            .unwrap();
+        assert!(matches!(
+            refused.by_ref().collect::<Result<Vec<_>, _>>(),
+            Err(GqlQueryError::Evaluator(_))
+        ));
+        assert_eq!(refused.state(), VertexScanState::Failed);
+        assert!(refused.next().is_none());
+        drop(db);
+        assert_eq!(
+            pinned.collect::<Result<Vec<_>, _>>().unwrap(),
+            vec![VId(0), VId(3), VId(u128::MAX)]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn equality_inside_a_fallible_boolean_does_not_hide_the_prior_data_error() {
+    let ((), report) = run_async_under_lab(0x51ca_0103, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(VId(0), vec![], vec![(KEY, CanonicalScalar::Int(0))]);
+        db.write(&commit, batch).await.unwrap();
+        let prepared = fgdb_gql::PreparedGraphText::prepare(
+            "MATCH (n) WHERE 10 / n.p > 0 AND n.p = 7 RETURN n",
+            |kind, name: &str| match (kind, name) {
+                (fgdb_gql::GraphSymbolKind::Property, "p") => {
+                    Some(fgdb_gql::GraphSymbol::Property(KEY))
+                }
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&fgdb_gql::GqlParameters::new())
+        .unwrap();
+        let mut cursor = db
+            .stream_graph_values_governed(&cx, &prepared, wide())
+            .unwrap();
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Data(error)))
+                if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+        ));
+        assert_eq!(cursor.row_stats().snapshot_records, 1);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) -> CommitSeq {
     let mut batch = WriteBatch::new(R);

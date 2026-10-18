@@ -15,6 +15,35 @@ struct NumericBounds {
     ranges: [PropertyRange; 2],
 }
 
+fn numeric_peers(value: &CanonicalScalar) -> [CanonicalScalar; 2] {
+    match value {
+        CanonicalScalar::Int(value) => [
+            CanonicalScalar::Int(*value),
+            CanonicalScalar::Float(CanonicalF64::new(*value as f64)),
+        ],
+        CanonicalScalar::Float(value) => [
+            CanonicalScalar::Int(if value.get().is_nan() {
+                i64::MAX
+            } else {
+                value.get() as i64
+            }),
+            CanonicalScalar::Float(*value),
+        ],
+        _ => unreachable!("only numeric operands enter numeric bounds"),
+    }
+}
+
+/// Equality needs at most one canonical key in each numeric domain. The
+/// shared exact comparator rejects a rounded/saturated peer instead of
+/// treating the cast as evidence of equality.
+pub(super) fn equality_peers(value: &CanonicalScalar) -> [Option<CanonicalScalar>; 2] {
+    numeric_peers(value).map(|peer| {
+        C::Equal
+            .accepts_scalar_pair(Some(&peer), Some(value))
+            .then_some(peer)
+    })
+}
+
 impl NumericBounds {
     fn new(key: PropertyKeyId) -> Self {
         Self {
@@ -40,21 +69,7 @@ impl NumericBounds {
     /// STRICT_PORTABLE orders NaN after +infinity, hence its integer boundary
     /// is MAX, not Rust's NaN-to-integer cast result of zero.
     fn constrain(&mut self, value: &CanonicalScalar, comparison: C) {
-        let peers = match value {
-            CanonicalScalar::Int(value) => [
-                CanonicalScalar::Int(*value),
-                CanonicalScalar::Float(CanonicalF64::new(*value as f64)),
-            ],
-            CanonicalScalar::Float(value) => [
-                CanonicalScalar::Int(if value.get().is_nan() {
-                    i64::MAX
-                } else {
-                    value.get() as i64
-                }),
-                CanonicalScalar::Float(*value),
-            ],
-            _ => unreachable!("only numeric operands enter numeric bounds"),
-        };
+        let peers = numeric_peers(value);
         for (range, peer) in self.ranges.iter_mut().zip(peers) {
             let equal = C::Equal.accepts_scalar_pair(Some(&peer), Some(value));
             let below = C::Less.accepts_scalar_pair(Some(&peer), Some(value));

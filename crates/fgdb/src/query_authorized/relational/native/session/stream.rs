@@ -916,7 +916,12 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
     execution: Shared<'q, C>,
     policy: GqlQueryPolicy,
 ) -> Result<impl FnMut() -> DriverStep + use<'q, C>, QueryError> {
-    let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
+    let inner = view
+        .vertex_scan_source(cx, at)
+        .map_err(QueryError::Read)?
+        .with_root_equality(&plan, |key| {
+            execution.borrow().permit.predicates().allows_property(key)
+        });
     let source = ScopedSource {
         inner,
         execution: execution.clone(),

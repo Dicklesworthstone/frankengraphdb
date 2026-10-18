@@ -38,6 +38,7 @@ fn open_global<'q>(
             cx,
             as_of,
             after: None,
+            candidates: RootCandidates::Histories,
         },
         plan.clone(),
         policy,
