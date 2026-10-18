@@ -3,12 +3,14 @@
 
 use super::super::super::{AuthorizedPreparedRead, check_branch, selector_error};
 use super::*;
+use crate::gql_exec::{AdmissionUsage, source};
 use crate::query::authorized::relational::{aggregate_gql_error, set_error};
+use crate::query::authorized::{Tables, WorkCheckpoint, execute_tables};
 use crate::query::{EndpointFilter, HybridCallError, HybridSearch, ProcedureError, hybrid_refusal};
 use crate::{EmbeddedReadView, GqlError, PreparedNativeRead, QueryResult};
 use fgdb_beacon::GraphHybridQuery;
 use fgdb_delta_types::ElementId;
-use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+use fgdb_gql::algebra::{GlaOperator, GraphValue, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryExecution, GqlQueryPolicy,
     PreparedProcedureCall,
@@ -24,6 +26,142 @@ fn source_refusal(message: &'static str) -> GqlError {
     GqlError::Procedure(ProcedureError::Search(HybridCallError::Combination(
         message,
     )))
+}
+
+/// Seek one returned identity without initializing a snapshot-wide property
+/// index (or its later flat-row cache). Canonical patches are ordered by
+/// (VId, creation), so one predecessor per patch suffices. The latest patch
+/// wins a restatement of the same creation; apply visibility only AFTER that
+/// winner is chosen, otherwise a retirement could resurrect an older row.
+///
+/// Physical history depth can include hidden records. Poll every comparison
+/// without charging that hidden work (FG-INV-20); callers charge the visible
+/// lookup and its metadata/expression work. This takes constant scratch and
+/// O(patches * log(rows per patch)) comparisons, including on a cold snapshot.
+fn returned_vertex_at<'a>(
+    view: &'a EmbeddedReadView,
+    id: VId,
+    at: fgdb_types::CommitSeq,
+    poll: &mut impl FnMut() -> Result<(), QueryError>,
+) -> Result<Option<&'a crate::VertexRow>, QueryError> {
+    poll()?;
+    let mut winner: Option<&crate::VertexRow> = None;
+    for patch in &view.snapshot.patches {
+        poll()?;
+        if patch.first().is_none_or(|row| row.vid > id)
+            || patch.last().is_some_and(|row| row.vid < id)
+        {
+            continue;
+        }
+        let (mut low, mut high) = (0, patch.len());
+        while low < high {
+            poll()?;
+            let middle = low + (high - low) / 2;
+            let row = &patch[middle];
+            if (row.vid, row.created_at) <= (id, at) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        if let Some(position) = low.checked_sub(1) {
+            let row = &patch[position];
+            if row.vid == id && winner.is_none_or(|previous| row.created_at >= previous.created_at)
+            {
+                winner = Some(row);
+            }
+        }
+    }
+    Ok(winner.filter(|row| row.visible_at(at)))
+}
+
+/// The compiler marks CALL outputs correlated with the following identity
+/// pattern. Its vertex roots must ALL be those outputs before a prepared
+/// source can substitute returned hits for a graph scan. Consume this source
+/// once: a later MATCH or set sibling cannot inherit a preceding CALL's scope.
+struct IdentityRows {
+    roots: usize,
+    vertices: BTreeSet<VId>,
+}
+
+fn identity_at(
+    index: &AuthorizedBeaconIndex,
+    view: &EmbeddedReadView,
+    scope: &PlannerPredicates,
+    execution: &Live<'_, '_, '_>,
+    pattern: &PreparedGraphPattern<GraphValueRow>,
+    policy: GqlQueryPolicy,
+    pending: &RefCell<Option<IdentityRows>>,
+) -> CallResult {
+    let source = pending.borrow_mut().take().ok_or_else(|| {
+        GqlQueryError::Source(source_refusal(
+            "prepared index patterns require the preceding CALL's returned vertices",
+        ))
+    })?;
+    let mut roots = 0;
+    for operator in pattern.plan().operators() {
+        match operator {
+            GlaOperator::ScanVertices => roots += 1,
+            GlaOperator::Select { .. }
+            | GlaOperator::VertexIdentity { .. }
+            | GlaOperator::CompareProperties { .. }
+            | GlaOperator::SelectBoolean { .. }
+            | GlaOperator::ProjectValues { .. }
+            | GlaOperator::Distinct
+            | GlaOperator::OrderByValues
+            | GlaOperator::OrderByValueColumns { .. }
+            | GlaOperator::Limit { .. } => {}
+            _ => {
+                return Err(GqlQueryError::Source(source_refusal(
+                    "prepared index patterns accept only returned-vertex identity reads",
+                )));
+            }
+        }
+    }
+    if roots == 0 || roots != source.roots {
+        return Err(GqlQueryError::Source(source_refusal(
+            "prepared index patterns cannot introduce uncorrelated vertices",
+        )));
+    }
+
+    (|| {
+        let mut usage = AdmissionUsage::default();
+        let mut control = |event| {
+            execution
+                .borrow_mut()
+                .checkpoint()
+                .map_err(GqlQueryError::Interrupted)?;
+            usage.observe(policy, event)
+        };
+        let mut tables = Tables::new();
+        for id in source.vertices {
+            // Membership and the saved population were already admitted by
+            // this CALL. These are borrowed property lookups over its private
+            // hits, with no extra source-record or signed-node admission.
+            control(source::SourceEvent::Work)?;
+            let row = returned_vertex_at(view, id, index.sequence, &mut || {
+                execution.borrow_mut().poll()
+            })
+            .map_err(GqlQueryError::Interrupted)?;
+            if let Some(row) = row
+                && scope.allows_vertex(&row.labels)
+            {
+                control(source::SourceEvent::ScratchEntry)?;
+                // The source set is already in VId order, without duplicates.
+                tables.vertices.push((id, row));
+            }
+        }
+        tables.metadata(pattern.plan(), scope, &mut control)?;
+        execute_tables(
+            tables,
+            pattern,
+            scope,
+            policy,
+            usage,
+            WorkCheckpoint(execution),
+        )
+    })()
+    .map_err(|error| error.map_source(GqlError::Read))
 }
 
 // Equality is about the logical corpus and numeric projection, not build knobs.
@@ -114,8 +252,11 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// still applies to every CALL; final group rows use normal session delivery.
     /// A failed property read or aggregate input is not hidden by LIMIT 0.
     ///
-    /// Pattern sources, other procedures and temporal wrappers still refuse;
-    /// there is no one-shot fallback. A nonnull graph_access
+    /// CALL property/label reads and flat identity MATCHes use only that
+    /// CALL's returned vertices, preserving the compiler's ordinary correlated
+    /// relation and bag semantics. Uncorrelated patterns, incidence patterns,
+    /// other procedures and temporal wrappers still refuse; there is no
+    /// one-shot fallback. A nonnull graph_access
     /// override refuses: this explicit prepared source profile owns its native
     /// incidence path, rather than silently substituting a requested physical
     /// source. The normal execute method and its source choices are unchanged.
@@ -153,31 +294,58 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             // eligibility predicate or a second source. Admit storage in call_at
             // before insertion, and discard it with the enclosing execution.
             let retrieved = RefCell::new(BTreeSet::new());
+            let identity = RefCell::new(None);
+            // The element callback's narrow source-error type cannot carry a
+            // live QueryError. Retain the first interruption and return it
+            // through the evaluator's control boundary or immediately after
+            // execution, preserving its original class and stopped prefix.
+            let element_failure = RefCell::new(None);
             let mut procedures = |call: &PreparedProcedureCall,
                                   arguments: &[GraphValue],
                                   remaining: GqlQueryPolicy| {
+                // A new CALL cannot accidentally reuse its predecessor's
+                // identity source, including when it produces no hits.
+                *identity.borrow_mut() = None;
                 call_at(
                     cx, &owner, index, view, scope, execution, call, arguments, remaining,
-                    &retrieved,
+                    &retrieved, &identity,
                 )
             };
             let mut elements = |element, key| {
                 if !scope.allows_property(key) {
                     return Ok(None);
                 }
-                if !matches!(element, ElementId::Vertex(id) if retrieved.borrow().contains(&id)) {
+                let ElementId::Vertex(id) = element else {
+                    return Err(source_refusal(
+                        "prepared index property reads require a retrieved vertex",
+                    ));
+                };
+                if !retrieved.borrow().contains(&id) {
                     return Err(source_refusal(
                         "prepared index property reads require a retrieved vertex",
                     ));
                 }
-                crate::gql_exec::read_element_property(
-                    element,
-                    key,
-                    |id| view.snapshot.vertex_at(id, index.sequence),
-                    |id| view.snapshot.edge_at(id, index.sequence),
-                )
+                let row = returned_vertex_at(view, id, index.sequence, &mut || {
+                    execution.borrow_mut().poll()
+                })
+                .map_err(|error| {
+                    element_failure.borrow_mut().get_or_insert(error);
+                    source_refusal("prepared index property read interrupted")
+                })?;
+                Ok(row.and_then(|row| {
+                    row.props
+                        .binary_search_by_key(&key, |(key, _)| *key)
+                        .ok()
+                        .map(|position| row.props[position].1.clone())
+                }))
             };
-            match prepared.native.as_ref() {
+            let mut checkpoint = || {
+                if let Some(error) = element_failure.borrow_mut().take() {
+                    return Err(error);
+                }
+                execution.borrow_mut().checkpoint()
+            };
+            let result = (|| match prepared.native.as_ref() {
                 PreparedNativeRead::Set(template) => {
                     let bound = template
                         .bind_parameters(selected.parameters())
@@ -185,14 +353,14 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     let result = bound
                         .execute_governed_with_elements(
                             policy,
-                            |_, _| {
-                                Err(GqlQueryError::Source(source_refusal(
-                                    "prepared index execution does not scan pattern sources",
-                                )))
+                            |pattern, remaining| {
+                                identity_at(
+                                    index, view, scope, execution, pattern, remaining, &identity,
+                                )
                             },
                             &mut procedures,
                             &mut elements,
-                            || execution.borrow_mut().checkpoint(),
+                            &mut checkpoint,
                         )
                         .map_err(set_error)?;
                     let count = result.value.len();
@@ -211,14 +379,14 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     let result = bound
                         .execute_governed_with_elements(
                             policy,
-                            |_, _| {
-                                Err(GqlQueryError::Source(source_refusal(
-                                    "prepared index execution does not scan pattern sources",
-                                )))
+                            |pattern, remaining| {
+                                identity_at(
+                                    index, view, scope, execution, pattern, remaining, &identity,
+                                )
                             },
                             &mut procedures,
                             &mut elements,
-                            || execution.borrow_mut().checkpoint(),
+                            &mut checkpoint,
                         )
                         .map_err(aggregate_gql_error)?;
                     let count = result.value.len();
@@ -237,6 +405,11 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                             .to_owned(),
                     ],
                 }),
+            })();
+            let failure = element_failure.borrow_mut().take();
+            match failure {
+                Some(error) => Err(error),
+                None => result,
             }
         })
     }
@@ -254,6 +427,7 @@ fn call_at(
     arguments: &[GraphValue],
     remaining: GqlQueryPolicy,
     retrieved: &RefCell<BTreeSet<VId>>,
+    identity: &RefCell<Option<IdentityRows>>,
 ) -> CallResult {
     if !crate::query::is_hybrid(call) {
         return Err(hybrid_refusal(HybridCallError::Combination(
@@ -376,7 +550,12 @@ fn call_at(
         // Reserve a row, all YIELD cells and a provenance-set entry per hit
         // before allocating output. Repeated identities conservatively pay
         // again, so warming the private set cannot widen the query allowance.
-        let scratch = (call.outputs().len() as u128 + 2)
+        let identity_roots = call.vertex_outputs().len();
+        let mut identity_rows = (identity_roots != 0).then(|| IdentityRows {
+            roots: identity_roots,
+            vertices: BTreeSet::new(),
+        });
+        let scratch = (call.outputs().len() as u128 + 2 + u128::from(identity_roots != 0))
             .checked_mul(hits.len() as u128)
             .and_then(|count| count.checked_add(u128::from(graph_scratch.get())))
             .filter(|&count| count <= u128::from(remaining.evaluator.max_scratch_entries))
@@ -393,13 +572,19 @@ fn call_at(
                 work.borrow_mut().charge(1)?;
             }
             retrieved.borrow_mut().insert(hit.id);
+            if let Some(rows) = &mut identity_rows {
+                work.borrow_mut()
+                    .charge(1 + rows.vertices.len().checked_ilog2().unwrap_or(0) as usize)?;
+                rows.vertices.insert(hit.id);
+            }
         }
         work.borrow_mut().charge(1)?;
-        Ok((search.rows(hits), scratch as u64))
+        Ok((search.rows(hits), scratch as u64, identity_rows))
     })();
-    let (value, scratch_entries) = settle(work, result)
+    let (value, scratch_entries, identity_rows) = settle(work, result)
         .map_err(GqlQueryError::Interrupted)?
         .map_err(|error| hybrid_refusal(HybridCallError::Index(error)))?;
+    *identity.borrow_mut() = identity_rows;
     Ok(GqlQueryExecution {
         rows: GqlExecutionStats {
             // expand_at checks this same sum at each admitted incidence, before

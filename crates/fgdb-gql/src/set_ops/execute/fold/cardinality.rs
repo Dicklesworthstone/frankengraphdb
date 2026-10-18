@@ -246,7 +246,7 @@ where
                 // DISTINCT, filters, computed projections and dynamic UNWIND.
                 // Its page has already been applied; do not apply it twice.
                 let mut size = Amount::ZERO;
-                visit(query, source, meter, operand, &mut |_, meter| {
+                visit(query, source, meter, operand, &mut |_, _, meter| {
                     meter.event(GlaExecutionEvent::Work)?;
                     size = size.add(Amount::ONE);
                     Ok(())

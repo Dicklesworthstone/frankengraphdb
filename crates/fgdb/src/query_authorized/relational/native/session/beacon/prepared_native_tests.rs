@@ -208,6 +208,134 @@ fn compiled_reuse_rebinds_filters_without_resolving_symbols_or_rebuilding() {
 }
 
 #[test]
+fn returned_identity_reads_keep_bags_and_masked_metadata_without_graph_scans() {
+    let ((), report) = run_async_under_lab(0xbeac_6207, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = database(&c.commit()).await;
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let mut session = db
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                catalog,
+                host(),
+                || NOW,
+            )
+            .unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
+        let params = parameters(0, &[HIGH]);
+        for tail in [
+            "RETURN node.name AS name, node.secret AS hidden, labels(node) AS labels",
+            "UNWIND [1,1,2] AS copy RETURN node, node.name AS name, copy ORDER BY copy",
+            "MATCH (node:Node) RETURN node.name AS name, node.secret AS hidden",
+        ] {
+            let query = format!("{CALL}{tail}");
+            let prepared = session.prepare(&c.query(), &query, &params).unwrap();
+            let expected = rows(session.execute(&c.query(), &prepared, &params).unwrap());
+            assert!(!expected.is_empty(), "{query}");
+            let scans = crate::query::authorized::SCANS.with(Cell::get);
+            let actual = rows(
+                session
+                    .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                    .unwrap(),
+            );
+            assert_eq!(actual, expected, "{query}");
+            assert_eq!(crate::query::authorized::SCANS.with(Cell::get), scans);
+            if tail.starts_with("UNWIND") {
+                assert_eq!(actual.len(), 3);
+                assert_eq!(actual[0], actual[1], "duplicate input occurrences survive");
+            } else {
+                assert_eq!(
+                    actual[0][1],
+                    QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
+                );
+                if actual[0].len() == 3 {
+                    assert_eq!(
+                        actual[0][2],
+                        QueryValue::Value(GraphValue::List(
+                            vec![GraphValue::Scalar(text("Node"))].into()
+                        ))
+                    );
+                }
+            }
+        }
+        session.close();
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn returned_identity_sources_cannot_authorize_unbound_or_later_pattern_roots() {
+    let ((), report) = run_async_under_lab(0xbeac_6208, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = database(&c.commit()).await;
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let mut session = db
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                catalog,
+                host(),
+                || NOW,
+            )
+            .unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
+        let params = parameters(0, &[HIGH]);
+        for query in [
+            format!("{CALL}MATCH (other:Node) RETURN other.name AS name"),
+            format!("{CALL}MATCH (node), (other:Node) RETURN other.name AS name"),
+            format!(
+                "{CALL}RETURN node.name AS name \
+                UNION ALL MATCH (other:Node) RETURN other.name AS name"
+            ),
+            format!(
+                "({CALL}RETURN node.name AS name LIMIT 0) \
+                UNION ALL MATCH (other:Node) RETURN other.name AS name"
+            ),
+            format!("{CALL}MATCH (node)-[]->(other) RETURN other.name AS name LIMIT 0"),
+        ] {
+            let prepared = session.prepare(&c.query(), &query, &params).unwrap();
+            assert!(
+                session.execute(&c.query(), &prepared, &params).is_ok(),
+                "ordinary graph execution remains supported: {query}"
+            );
+            let scans = crate::query::authorized::SCANS.with(Cell::get);
+            assert!(
+                session
+                    .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                    .is_err(),
+                "{query}"
+            );
+            assert_eq!(crate::query::authorized::SCANS.with(Cell::get), scans);
+            assert!(!session.is_closed());
+        }
+        let prepared = session.prepare(&c.query(), &statement(), &params).unwrap();
+        assert_eq!(
+            rows(
+                session
+                    .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                    .unwrap()
+            ),
+            expected(HIGH, "high")
+        );
+        session.close();
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn cached_hits_and_return_properties_share_the_old_cut_after_writer_drop() {
     let ((), report) = run_async_under_lab(0xbeac_6202, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

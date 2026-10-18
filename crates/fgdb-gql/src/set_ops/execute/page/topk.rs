@@ -128,7 +128,7 @@ where
 {
     let count = query.count.expect("finite ranked page admitted");
     let mut ranked = Ranked::new(&query.order, query.offset, count);
-    fold::visit_unwindowed(query, source, meter, operand, &mut |row, meter| {
+    fold::visit_unwindowed(query, source, meter, operand, &mut |row, _, meter| {
         ranked.offer(row, &mut |event| meter.event(event))
     })?;
     // All upstream sources and expressions have now succeeded. Sort only the

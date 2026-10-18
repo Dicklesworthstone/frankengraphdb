@@ -11,8 +11,8 @@ use super::*;
 mod cardinality;
 mod repeated;
 
-type Consumer<'a, Checkpoint, E, C> =
-    dyn FnMut(GraphValueRow, &mut Meter<Checkpoint>) -> SetResult<(), E, C> + 'a;
+type Consumer<'a, S, Checkpoint, E, C> =
+    dyn FnMut(GraphValueRow, &mut S, &mut Meter<Checkpoint>) -> SetResult<(), E, C> + 'a;
 
 impl PreparedGraphSet {
     /// A terminal expansion can be folded even if its children need a sort.
@@ -69,7 +69,7 @@ impl PreparedGraphSet {
             &mut *source,
             &mut meter,
             &mut operand,
-            &mut |row, meter| consume(row, &mut |event| meter.event(event)),
+            &mut |row, _, meter| consume(row, &mut |event| meter.event(event)),
         )?;
         meter.event(GlaExecutionEvent::Work)?;
         Ok((meter.rows, meter.evaluator))
@@ -92,11 +92,12 @@ impl<E> Window<E> {
         }
     }
 
-    fn push<C, Checkpoint>(
+    fn push<C, S: ?Sized, Checkpoint>(
         &mut self,
         row: GraphValueRow,
+        source: &mut S,
         meter: &mut Meter<Checkpoint>,
-        consume: &mut Consumer<'_, Checkpoint, E, C>,
+        consume: &mut Consumer<'_, S, Checkpoint, E, C>,
     ) -> SetResult<(), E, C>
     where
         Checkpoint: FnMut() -> Result<(), C>,
@@ -113,7 +114,7 @@ impl<E> Window<E> {
             *remaining -= 1;
         }
         if self.downstream.is_none() {
-            remember(consume(row, meter), &mut self.downstream)?;
+            remember(consume(row, source, meter), &mut self.downstream)?;
         }
         Ok(())
     }
@@ -156,7 +157,7 @@ pub(super) fn visit<E, C, S, Checkpoint>(
     source: &mut S,
     meter: &mut Meter<Checkpoint>,
     operand: &mut usize,
-    consume: &mut Consumer<'_, Checkpoint, E, C>,
+    consume: &mut Consumer<'_, S, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
     S: GraphSetSource<E, C> + ?Sized,
@@ -169,7 +170,7 @@ where
         let rows = run(query, source, meter, operand)?;
         let mut forward = Window::new(0, None);
         for row in rows {
-            forward.push(row, meter, consume)?;
+            forward.push(row, source, meter, consume)?;
         }
         return forward.finish();
     }
@@ -191,7 +192,7 @@ pub(super) fn visit_unwindowed<E, C, S, Checkpoint>(
     source: &mut S,
     meter: &mut Meter<Checkpoint>,
     operand: &mut usize,
-    consume: &mut Consumer<'_, Checkpoint, E, C>,
+    consume: &mut Consumer<'_, S, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
     S: GraphSetSource<E, C> + ?Sized,
@@ -207,7 +208,7 @@ fn visit_expansion<E, C, S, Checkpoint>(
     meter: &mut Meter<Checkpoint>,
     operand: &mut usize,
     mut window: Window<E>,
-    consume: &mut Consumer<'_, Checkpoint, E, C>,
+    consume: &mut Consumer<'_, S, Checkpoint, E, C>,
 ) -> SetResult<(), E, C>
 where
     S: GraphSetSource<E, C> + ?Sized,
@@ -235,7 +236,7 @@ where
                     })?;
                 // Keep the ordinary window and deferred downstream-error law.
                 // The probe walk drains even after the output page is full.
-                window.push(row, meter, consume)
+                window.push(row, source, meter, consume)
             },
         )?;
         return window.finish();
@@ -272,7 +273,7 @@ where
                 // Move the occurrence directly into the ordinary window/sink.
                 // A full page or deferred semantic sink failure still drains
                 // the merge; interruption/resource refusal stops immediately.
-                window.push(row, meter, consume)?;
+                window.push(row, source, meter, consume)?;
             }
         }
         SetNode::CrossJoin { left, right } => {
@@ -283,13 +284,13 @@ where
             for a in &left {
                 for b in &right {
                     let row = copy_cross_pair(a, b, &mut |event| meter.event(event))?;
-                    window.push(row, meter, consume)?;
+                    window.push(row, source, meter, consume)?;
                 }
             }
         }
         SetNode::Unwind { input, value } => {
             let mut row_at = 0_usize;
-            visit(input, source, meter, operand, &mut |row, meter| {
+            visit(input, source, meter, operand, &mut |row, source, meter| {
                 if local.is_some() {
                     return Ok(());
                 }
@@ -301,7 +302,7 @@ where
                         rows.next_with_control(&mut |event| meter.event(event))?
                     {
                         rows = next;
-                        window.push(row, meter, consume)?;
+                        window.push(row, source, meter, consume)?;
                     }
                     Ok(())
                 })();
@@ -315,15 +316,15 @@ where
             })?;
         }
         SetNode::Scope(input) => {
-            visit(input, source, meter, operand, &mut |row, meter| {
-                window.push(row, meter, consume)
+            visit(input, source, meter, operand, &mut |row, source, meter| {
+                window.push(row, source, meter, consume)
             })?;
         }
         SetNode::Filter { input, predicate } => {
-            visit(input, source, meter, operand, &mut |row, meter| {
+            visit(input, source, meter, operand, &mut |row, source, meter| {
                 meter.event(GlaExecutionEvent::Work)?;
                 if predicate.evaluate(&row, &mut |event| meter.event(event))? {
-                    window.push(row, meter, consume)?;
+                    window.push(row, source, meter, consume)?;
                 }
                 Ok(())
             })?;
@@ -334,23 +335,30 @@ where
             // Admission proves ALL and order preservation. Implicit canonical
             // projection sorting is never bypassed just because the sink sums.
             let mut row_at = 0_usize;
-            visit(input, source, meter, operand, &mut |row, meter| {
+            visit(input, source, meter, operand, &mut |row, source, meter| {
                 if local.is_some() {
                     return Ok(());
                 }
                 meter.event(GlaExecutionEvent::Work)?;
                 // Numbered like project_rows, so rand() draws the same here.
-                // The fold's per-row callback holds no source, so an element
-                // property read here stays a typed error (fgdb-xnd7x).
+                // Carry the same host through the fold so aliases keep its
+                // saved snapshot, masking and element-read error semantics.
+                let mut read = |element, key| {
+                    source.element_property(element, key).map(|read| {
+                        read.map_err(|error| {
+                            GqlQueryError::Source(GraphSetExecutionError::Source(error))
+                        })
+                    })
+                };
                 let result = projection::evaluate(
                     &row,
                     projection,
                     Some(row_at as u64),
                     &mut |event| meter.event(event),
-                    &mut projection::no_element_reads,
+                    &mut read,
                 )
                 .map_err(|error| projected(error, row_at))
-                .and_then(|row| window.push(row, meter, consume));
+                .and_then(|row| window.push(row, source, meter, consume));
                 remember(result, &mut local)?;
                 row_at = row_at.checked_add(1).ok_or_else(|| {
                     GqlQueryError::Source(GraphSetExecutionError::AccountingOverflow {

@@ -96,7 +96,7 @@ where
         // Reuse the complete fold, including every nested local page and its
         // deferred semantic-error law. The fold applies THIS page exactly once.
         // It drains expressions even after the receiver has enough rows.
-        fold::visit(query, source, meter, operand, &mut |row, meter| {
+        fold::visit(query, source, meter, operand, &mut |row, _, meter| {
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             rows.push(row);
             Ok(())

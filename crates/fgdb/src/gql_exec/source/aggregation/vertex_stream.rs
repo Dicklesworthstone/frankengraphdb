@@ -195,8 +195,9 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
     ) -> Result<bool, VertexScanSourceError<ReadError, C>> {
         let equality = match &self.candidates {
             RootCandidates::Histories => return Ok(true),
-            RootCandidates::Pending { equality, .. }
-            | RootCandidates::Indexed { equality, .. } => equality,
+            RootCandidates::Pending { equality, .. } | RootCandidates::Indexed { equality, .. } => {
+                equality
+            }
         };
         // This poll-only recheck is for the scoped adapter's private candidate
         // admission. The native cursor later meters its ordinary full predicate
