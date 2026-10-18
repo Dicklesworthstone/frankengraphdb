@@ -160,6 +160,187 @@ fn denied_equality_properties_cannot_change_stream_quota_refusals() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn keyed_aggregate_streams_share_candidate_bounds_in_local_send_and_async_drivers() {
+    let ((), report) = run_async_under_lab(0x5ec0_6103, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = database(&commit).await;
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 100..228_u128 {
+            batch.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+            );
+            batch.create_vertex(
+                VId(id + 1000),
+                vec![LabelId(99)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+            );
+        }
+        batch.create_vertex(
+            VId(u128::MAX),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new().with_int64("key", 7).unwrap();
+        let text = "MATCH (n) WHERE n.p = $key RETURN COUNT(*) AS total, SUM(n.p) AS sum";
+        let eager = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap()
+            .query(&cx, text, &args)
+            .unwrap();
+        let mut exact = grant();
+        exact.limits.max_nodes = 2;
+        let token = issuer.issue_at(&exact, 100).unwrap();
+        let mut session = db
+            .authorized_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                GqlQueryPolicy::new(2, 1, 1_000_000, 1000),
+                || 100,
+            )
+            .unwrap();
+        let prepared = session.prepare(&cx, text, &args).unwrap();
+        for driver in 0..3 {
+            let (columns, rows) = match driver {
+                0 => {
+                    let mut cursor = session.stream_aggregate(&cx, &prepared, &args).unwrap();
+                    let columns = cursor.columns().to_vec();
+                    let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    (columns, rows)
+                }
+                1 => {
+                    let mut cursor = session
+                        .stream_aggregate_send(&cx, &prepared, &args)
+                        .unwrap();
+                    fn is_send<T: Send>(_: &T) {}
+                    is_send(&cursor);
+                    let columns = cursor.columns().to_vec();
+                    let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    (columns, rows)
+                }
+                _ => {
+                    let mut cursor = session
+                        .stream_aggregate_async(&cx, &prepared, &args)
+                        .unwrap();
+                    fn is_send<T: Send>(_: &T) {}
+                    is_send(&cursor);
+                    let columns = cursor.columns().to_vec();
+                    let mut rows = Vec::new();
+                    while let Some(row) = cursor.next_row().await.unwrap() {
+                        rows.push(row);
+                    }
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    (columns, rows)
+                }
+            };
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].values()[0].as_count(), Some(2));
+            assert_eq!(rows[0].values()[1].as_integer(), Some(14));
+            assert_eq!(
+                QueryResult::Rows {
+                    columns,
+                    rows: rows.into_iter().map(|row| row.values().to_vec()).collect(),
+                },
+                eager,
+                "driver {driver}",
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn denied_aggregate_equality_keeps_the_same_quota_refusal_in_every_driver() {
+    let ((), report) = run_async_under_lab(0x5ec0_6104, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        for hidden in [55, 99] {
+            let mut db = Database::open_memory(&commit, DatabaseKeys::new([1; 32], NS, [2; 32]))
+                .await
+                .unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for id in 1..=2 {
+                batch.create_vertex(
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(hidden))],
+                );
+            }
+            db.write(&commit, batch).await.unwrap();
+            let mut session = db
+                .authorized_read_session(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols,
+                    GqlQueryPolicy::new(1, 1, 1_000_000, 1000),
+                    || 100,
+                )
+                .unwrap();
+            let args = GqlParameters::new();
+            let prepared = session
+                .prepare(
+                    &cx,
+                    "MATCH (n) WHERE n.hidden = 55 RETURN COUNT(*) AS total",
+                    &args,
+                )
+                .unwrap();
+            for driver in 0..3 {
+                let error = match driver {
+                    0 => {
+                        let mut cursor = session.stream_aggregate(&cx, &prepared, &args).unwrap();
+                        let error = cursor.next().unwrap().unwrap_err();
+                        assert_eq!(cursor.state(), VertexScanState::Failed);
+                        assert!(cursor.next().is_none());
+                        error
+                    }
+                    1 => {
+                        let mut cursor = session
+                            .stream_aggregate_send(&cx, &prepared, &args)
+                            .unwrap();
+                        let error = cursor.next().unwrap().unwrap_err();
+                        assert_eq!(cursor.state(), VertexScanState::Failed);
+                        assert!(cursor.next().is_none());
+                        error
+                    }
+                    _ => {
+                        let mut cursor = session
+                            .stream_aggregate_async(&cx, &prepared, &args)
+                            .unwrap();
+                        let error = cursor.next_row().await.unwrap_err();
+                        assert_eq!(cursor.state(), VertexScanState::Failed);
+                        assert!(cursor.next_row().await.unwrap().is_none());
+                        error
+                    }
+                };
+                assert!(matches!(
+                    error,
+                    QueryError::AggregateStream(GqlQueryError::Rows(error))
+                        if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                            && error.limit == 1 && error.observed == 2
+                ));
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-7xqxb: a set whose canonical order is its one vertex scan's order
 /// (the vertex first, then columns, constants and parameters) pulls through
 /// that scan's native cursor, projecting each row exactly as the eager set

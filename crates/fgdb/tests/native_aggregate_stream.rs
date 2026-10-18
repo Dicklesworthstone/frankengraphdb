@@ -60,6 +60,102 @@ fn seed() -> WriteBatch {
 }
 
 #[test]
+fn keyed_count_and_sum_streams_read_only_equality_candidates() {
+    let ((), report) = run_async_under_lab(0xa66e_1101, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 100..356_u128 {
+            batch.create_vertex(
+                VId(id),
+                vec![LABEL],
+                vec![
+                    (SCORE, CanonicalScalar::Int(id as i64)),
+                    (TAG, CanonicalScalar::Int(id as i64)),
+                ],
+            );
+        }
+        for (id, key, score) in [
+            (0, CanonicalScalar::Int(7), -9),
+            (
+                u128::MAX,
+                CanonicalScalar::Float(fgdb_types::CanonicalF64::new(7.0)),
+                14,
+            ),
+        ] {
+            batch.create_vertex(
+                VId(id),
+                vec![LABEL],
+                vec![(SCORE, CanonicalScalar::Int(score)), (TAG, key)],
+            );
+        }
+        db.write(&commit, batch).await.unwrap();
+        let text = "MATCH (n:L) WHERE n.tag = $key RETURN COUNT(*) AS total, SUM(n.score) AS sum";
+        for (key, records, total, sum) in [(7, 2, 2, Some(5)), (999, 0, 0, None)] {
+            let args = GqlParameters::new().with_int64("key", key).unwrap();
+            let QueryResult::Rows { columns, rows } =
+                db.query(&cx, text, &args, symbols(), wide()).unwrap()
+            else {
+                panic!("aggregate returned a write");
+            };
+            let mut cursor = db
+                .query_aggregate_stream(
+                    &cx,
+                    text,
+                    &args,
+                    symbols(),
+                    GqlQueryPolicy::new(records, 1, 1_000_000, 1000),
+                )
+                .unwrap();
+            assert_eq!(cursor.columns(), columns);
+            assert_eq!(cursor.row_stats().snapshot_records, 0);
+            let row = cursor.next().unwrap().unwrap();
+            assert_eq!(row.values()[0].as_count(), Some(total));
+            assert_eq!(row.values()[1].as_integer(), sum);
+            assert_eq!(rows, vec![row.values().to_vec()]);
+            assert_eq!(cursor.row_stats().snapshot_records, records);
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            assert!(cursor.next().is_none());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn aggregate_equality_cannot_hide_an_earlier_fallible_filter() {
+    let ((), report) = run_async_under_lab(0xa66e_1102, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(
+            VId(0),
+            vec![LABEL],
+            vec![
+                (SCORE, CanonicalScalar::Int(0)),
+                (TAG, CanonicalScalar::Int(0)),
+            ],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let text = "MATCH (n:L) WHERE 10 / n.score > 0 AND n.tag = 7 RETURN COUNT(*) AS total";
+        let mut cursor = db
+            .query_aggregate_stream(&cx, text, &GqlParameters::new(), symbols(), wide())
+            .unwrap();
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(QueryError::AggregateStream(GqlQueryError::Data(_))))
+        ));
+        assert_eq!(cursor.row_stats().snapshot_records, 1);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.next().is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn native_aliases_typed_arguments_and_empty_inputs_equal_the_ordinary_engine() {
     let ((), report) = run_async_under_lab(0xa66e_1001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

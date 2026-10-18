@@ -120,6 +120,14 @@ impl VertexAggregatePlan {
         })
     }
 
+    /// Leading infallible root predicates from the checked input. Sources may
+    /// use these to choose an admitted candidate superset, keeping all ordinary
+    /// visible-row checks. The relaxed aggregate input plan stays private: it
+    /// does not prove the ordering required by an ordinary row cursor.
+    pub fn leading_root_predicates(&self) -> impl Iterator<Item = &VertexPredicate> {
+        self.input.leading_root_predicates()
+    }
+
     /// Names addressing GraphAggregateRow::values(), not grouping keys.
     #[must_use]
     pub fn columns(&self) -> &[String] {

@@ -460,7 +460,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
                 let input: Box<dyn InputCursor + Send + 'q> = match plan {
                     RowPlan::Vertex(plan) => {
                         let source = ScopedSource {
-                            inner: view.vertex_scan_source(cx, at).map_err(QueryError::Read)?,
+                            inner: view
+                                .vertex_scan_source(cx, at)
+                                .map_err(QueryError::Read)?
+                                .with_root_equality(&plan, |key| {
+                                    execution.borrow().permit.predicates().allows_property(key)
+                                }),
                             execution: execution.clone(),
                         };
                         let rows = VertexInput(VertexScanCursor::new(

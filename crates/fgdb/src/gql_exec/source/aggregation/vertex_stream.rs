@@ -56,11 +56,21 @@ impl SnapshotVertexSource<'_> {
     /// prefix scans keep the history walk until they have a bounded ordered
     /// source with the same authorization and error behavior.
     pub(crate) fn with_root_equality<Row: VertexScanOutput>(
-        mut self,
+        self,
         plan: &VertexScanPlan<Row>,
         allows_property: impl Fn(PropertyKeyId) -> bool,
     ) -> Self {
-        let equality = plan.leading_root_predicates().find_map(|predicate| {
+        self.with_root_equality_predicates(plan.leading_root_predicates(), allows_property)
+    }
+
+    /// Aggregate inputs expose the same admitted prefix without exporting a
+    /// relaxed row plan that could bypass the ordinary cursor's ordering proof.
+    pub(crate) fn with_root_equality_predicates<'p>(
+        mut self,
+        mut predicates: impl Iterator<Item = &'p VertexPredicate>,
+        allows_property: impl Fn(PropertyKeyId) -> bool,
+    ) -> Self {
+        let equality = predicates.find_map(|predicate| {
             let (key, value) = match predicate {
                 VertexPredicate::IntegerProperty {
                     key,

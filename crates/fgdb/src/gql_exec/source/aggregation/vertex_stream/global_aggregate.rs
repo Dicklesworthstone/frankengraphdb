@@ -39,7 +39,8 @@ fn open_global<'q>(
             as_of,
             after: None,
             candidates: RootCandidates::Histories,
-        },
+        }
+        .with_root_equality_predicates(plan.leading_root_predicates(), |_| true),
         plan.clone(),
         policy,
         move || cx.with_restriction(|| cx.checkpoint()),
