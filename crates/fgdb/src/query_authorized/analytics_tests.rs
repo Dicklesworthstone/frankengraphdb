@@ -489,6 +489,173 @@ fn kernel_runs_admit_and_refuse_at_the_per_unit_threshold() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// A signed refusal must not overtake an earlier native refusal in a kernel
+/// run. Compare with explicit signed-then-native unit charges, including both
+/// counters, partial deferred runs and the live control transcript. When the
+/// native allowance admits the run, it still receives one bulk observation.
+#[test]
+fn kernel_bulk_work_preserves_crossed_allowance_refusals_and_control_prefixes() {
+    #[derive(Clone, Copy, Debug)]
+    struct Case {
+        prefix: u64,
+        signed: u64,
+        native: u64,
+        units: usize,
+        stop: Option<usize>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Footprint {
+        outcome: String,
+        signed: fgdb_warden::Usage,
+        native: AdmissionUsage,
+        deferred: u64,
+        run_left: u64,
+        polls: usize,
+        clock_reads: usize,
+    }
+
+    struct ObservedUsage<'a> {
+        inner: UsageObserver<'a>,
+        largest_run: usize,
+    }
+    impl Observe for ObservedUsage<'_> {
+        fn event(&mut self, event: SourceEvent) -> Result<(), QueryError> {
+            self.inner.event(event)
+        }
+        fn work(&mut self, n: usize) -> Result<(), QueryError> {
+            self.largest_run = self.largest_run.max(n);
+            self.inner.work(n)
+        }
+        fn absorbs(&self, records: u64, work: u64, scratch: u64) -> bool {
+            self.inner.absorbs(records, work, scratch)
+        }
+    }
+
+    let ((), report) = run_async_under_lab(0x0b7b_000a, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let authority = issuer();
+        let token = authority.issue_at(&open(), 100).unwrap();
+        let run = |case: Case, bulk: bool| {
+            let token = token
+                .attenuate(Restriction::MaxWork(case.prefix + case.signed))
+                .unwrap();
+            let verified = authority.verify_at(&token, BRANCH, 100).unwrap();
+            let permit = verified.begin_read_at(BRANCH, 100).unwrap();
+            let reads = Cell::new(0usize);
+            let mut execution = Execution::new(&cx, permit, || {
+                reads.set(reads.get() + 1);
+                100
+            });
+            execution.in_runs = true;
+            let policy = GqlQueryPolicy::new(1_000, 1_000, case.prefix + case.native, 1_000);
+            let mut usage = AdmissionUsage::default();
+            let mut observer = ObservedUsage {
+                inner: UsageObserver {
+                    usage: &mut usage,
+                    policy,
+                },
+                largest_run: 0,
+            };
+            // Warm an arbitrary partial run before attaching the controlled
+            // probe. Both executions begin the requested run in the same state.
+            for _ in 0..case.prefix {
+                execution.checkpoint().unwrap();
+                observer.event(SourceEvent::Work).unwrap();
+            }
+            let probe = Arc::new(SimulationCheckpointProbe::new(case.stop));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            execution.cx = &controlled;
+            reads.set(0);
+            let mut result = if bulk {
+                KernelMeter {
+                    execution: &mut execution,
+                    observe: &mut observer,
+                }
+                .units(case.units)
+            } else {
+                (0..case.units).try_for_each(|_| {
+                    execution.checkpoint()?;
+                    observer.event(SourceEvent::Work)
+                })
+            };
+            if result.is_ok() {
+                result = execution.settle();
+            }
+            (
+                Footprint {
+                    outcome: format!("{result:?}"),
+                    signed: execution.permit.usage(),
+                    native: *observer.inner.usage,
+                    deferred: execution.deferred,
+                    run_left: execution.run_left,
+                    polls: probe.calls(),
+                    clock_reads: reads.get(),
+                },
+                observer.largest_run,
+            )
+        };
+
+        for prefix in [0, 3, 63, 65] {
+            for units in [0, 1, 4, 64] {
+                for signed in [0, 1, 3, 4, 63, 64, 65, 256] {
+                    for native in [0, 1, 3, 4, 63, 64, 65, 256] {
+                        let case = Case {
+                            prefix,
+                            signed,
+                            native,
+                            units,
+                            stop: None,
+                        };
+                        let (actual, largest_run) = run(case, true);
+                        let (expected, _) = run(case, false);
+                        assert_eq!(actual, expected, "{case:?}");
+                        if units as u64 <= signed.min(native) {
+                            assert_eq!(actual.outcome, "Ok(())", "{case:?}");
+                            if units > 1 {
+                                assert_eq!(largest_run, units, "{case:?}: bulk observation");
+                            }
+                        } else if signed <= native {
+                            assert_eq!(
+                                actual.outcome, "Err(Authorization(LimitExceeded(Work)))",
+                                "{case:?}: signed refusal comes first"
+                            );
+                        } else {
+                            assert!(
+                                actual.outcome.starts_with("Err(Pattern(Evaluator("),
+                                "{case:?}: native refusal comes first: {actual:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cancellation at a settlement inside the requested run leaves only
+        // its completed prefix observed; cancellation on final settlement
+        // leaves the whole run observed. Both must match the scalar path.
+        for prefix in [1, 3, 63, 65] {
+            for stop in [1, 2] {
+                let case = Case {
+                    prefix,
+                    signed: 256,
+                    native: 256,
+                    units: 64,
+                    stop: Some(stop),
+                };
+                let (actual, _) = run(case, true);
+                let (expected, _) = run(case, false);
+                assert_eq!(actual, expected, "{case:?}");
+                assert!(actual.outcome.starts_with("Err("), "{case:?}");
+                assert_eq!(actual.polls, stop, "{case:?}");
+            }
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// A capability with any label, relation or property scope builds its own
 /// projection every time: it never sees the unrestricted projection cached
 /// before it, and leaves nothing for an unrestricted caller. A database that

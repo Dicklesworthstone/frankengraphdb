@@ -609,8 +609,10 @@ impl Observe for UsageObserver<'_> {
     }
 }
 
-/// A Prism kernel's meter over the live execution: work units charged in runs
-/// (fgdb-62mzm), and observed by the caller meter as the same run.
+/// A Prism kernel's meter over the live execution. Signed and caller work
+/// interleave in that order, even when their limits would refuse within the
+/// same run. A caller that admits the whole run may count the signed meter's
+/// completed prefix in bulk (fgdb-62mzm).
 struct KernelMeter<'m, 'cx, 'permit, Clock, O> {
     execution: &'m mut Execution<'cx, 'permit, Clock>,
     observe: &'m mut O,
@@ -622,11 +624,26 @@ where
     O: Observe,
 {
     fn unit(&mut self) -> Result<(), QueryError> {
-        self.units(1)
+        self.execution.work_units(1)?;
+        self.observe.work(1)
     }
     fn units(&mut self, n: usize) -> Result<(), QueryError> {
-        self.execution.work_units(n as u64)?;
-        self.observe.work(n)
+        if n > 1 && self.observe.absorbs(0, n as u64, 0) {
+            // The caller cannot refuse anywhere in this run, but the signed
+            // permit still can. Keep its per-unit settlement/poll boundaries
+            // and report every completed unit, including a partial prefix
+            // when the signed charge refuses.
+            let mut done = 0;
+            let result = self.execution.units_one_by_one(n as u64, &mut done);
+            self.observe.work(done as usize)?;
+            return result;
+        }
+        // Without that proof, charging all signed units first could hide an
+        // earlier caller refusal behind a later signed refusal.
+        for _ in 0..n {
+            self.unit()?;
+        }
+        Ok(())
     }
 }
 
