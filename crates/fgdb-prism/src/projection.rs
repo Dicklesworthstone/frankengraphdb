@@ -654,10 +654,11 @@ impl SnapshotGraphView {
         limit("adjacency entries", arcs, limits.max_adjacency_entries)?;
         let faces = if directed { 2 } else { 1 };
         let mut bytes = add(input_bytes, mul(n, size_of::<[u8; 32]>())?)?;
-        // Degree arrays, row offsets and construction cursors for each face.
+        // Degree arrays become construction cursors after prefix sums, so
+        // only one n-element buffer and n+1 offsets are live for each face.
         bytes = add(
             bytes,
-            mul(mul(add(mul(n, 3)?, 1)?, faces)?, size_of::<usize>())?,
+            mul(mul(add(mul(n, 2)?, 1)?, faces)?, size_of::<usize>())?,
         )?;
         bytes = add(bytes, mul(mul(arcs, faces)?, size_of::<usize>())?)?;
         bytes = add(bytes, mul(arcs, size_of::<f64>())?)?;
@@ -669,10 +670,21 @@ impl SnapshotGraphView {
         } else {
             Vec::new()
         };
-        for edge in &work {
+        // The final outgoing array first holds one dense target per reduced
+        // edge. Sources are already ordered, so walk their stable-ID directory
+        // once instead of binary-searching both endpoints in both CSR passes.
+        // Identity hashing and EId-ordered reduction above still use full VIds.
+        let mut out_nodes = filled(arcs, 0usize, &mut checkpoint)?;
+        let mut source = 0;
+        for (index, edge) in work.iter().enumerate() {
             poll(&mut checkpoint)?;
-            let s = ordinal(&vertices, edge.eid, edge.source)?;
+            while vertices[source] < edge.source {
+                poll(&mut checkpoint)?;
+                source += 1;
+            }
+            let s = source;
             let t = ordinal(&vertices, edge.eid, edge.target)?;
+            out_nodes[index] = t;
             out_counts[s] = add(out_counts[s], 1)?;
             if directed {
                 in_counts[t] = add(in_counts[t], 1)?;
@@ -682,44 +694,59 @@ impl SnapshotGraphView {
         }
         let out_offsets = offsets(&out_counts, &mut checkpoint)?;
         let out_len = *out_offsets.last().expect("initial zero");
-        let mut out_next = clone_slice(&out_offsets[..n], &mut checkpoint)?;
-        let mut out_nodes = filled(out_len, 0usize, &mut checkpoint)?;
+        debug_assert_eq!(out_len, arcs);
+        let mut out_next = out_counts;
+        for (next, &end) in out_next.iter_mut().zip(&out_offsets[1..]) {
+            poll(&mut checkpoint)?;
+            *next = end;
+        }
         let mut weights = filled(out_len, 0.0, &mut checkpoint)?;
         let in_offsets = if directed {
             offsets(&in_counts, &mut checkpoint)?
         } else {
             Vec::new()
         };
-        let mut in_next = if directed {
-            clone_slice(&in_offsets[..n], &mut checkpoint)?
-        } else {
-            Vec::new()
-        };
+        let mut in_next = in_counts;
+        for (next, &end) in in_next.iter_mut().zip(in_offsets.iter().skip(1)) {
+            poll(&mut checkpoint)?;
+            *next = end;
+        }
         let mut in_nodes = if directed {
             filled(kept, 0usize, &mut checkpoint)?
         } else {
             Vec::new()
         };
-        for edge in &work {
+        // Scatter backwards into row ends. Each edge's forward incidence has
+        // the same relative order as the compact input, hence its final slot
+        // is at least its input index. Undirected normalization makes source
+        // <= target: a reciprocal incidence is later still (absent for loops).
+        // Thus neither write can overwrite an unread dense target in the
+        // prefix of out_nodes. Reversing both the traversal and row cursors
+        // leaves neighbors ascending on both faces, without row sorting.
+        for (index, edge) in work.iter().enumerate().rev() {
             poll(&mut checkpoint)?;
-            let s = ordinal(&vertices, edge.eid, edge.source)?;
-            let t = ordinal(&vertices, edge.eid, edge.target)?;
+            while vertices[source] > edge.source {
+                poll(&mut checkpoint)?;
+                source -= 1;
+            }
+            let s = source;
+            let t = out_nodes[index];
+            out_next[s] -= 1;
             let slot = out_next[s];
+            debug_assert!(slot >= index);
             out_nodes[slot] = t;
             weights[slot] = edge.weight;
-            out_next[s] += 1;
             if directed {
+                in_next[t] -= 1;
                 in_nodes[in_next[t]] = s;
-                in_next[t] += 1;
             } else if s != t {
+                out_next[t] -= 1;
                 let slot = out_next[t];
+                debug_assert!(slot >= index);
                 out_nodes[slot] = s;
                 weights[slot] = edge.weight;
-                out_next[t] += 1;
             }
         }
-        // Sorted normalized pairs and source-order scatter produce sorted
-        // rows on BOTH faces. Binary edge lookup therefore needs no hash map.
         let mut names = reserved(n, &mut checkpoint)?;
         for &vertex in &vertices {
             poll(&mut checkpoint)?;

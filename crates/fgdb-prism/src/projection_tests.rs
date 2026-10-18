@@ -298,7 +298,7 @@ fn owned_projection_retains_the_vertex_allocation_and_charges_spare_capacity() {
         vertices.capacity() * size_of::<VId>() + edges.capacity() * size_of::<ProjectionEdge>();
     let expected = input_bytes
         + 2 * 32
-        + 2 * (3 * 2 + 1) * size_of::<usize>()
+        + 2 * (2 * 2 + 1) * size_of::<usize>()
         + 2 * size_of::<usize>()
         + size_of::<f64>();
     let graph = SnapshotGraphView::build_owned_with_checkpoint(
@@ -485,6 +485,245 @@ fn all_three_node_topologies_match_an_independent_multigraph_reducer() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn csr_scatter_preserves_skewed_rows_loops_and_isolated_sparse_identities() {
+    // Distinct high bits with identical low bits catch accidental narrowing;
+    // the two extremes and directory holes also exercise the source walk.
+    let mut vertices: Vec<_> = (0..64)
+        .map(|i| VId((1u128 << 120) + ((i as u128) << 64) + 17))
+        .collect();
+    vertices[0] = VId(0);
+    vertices[63] = VId(u128::MAX);
+    let mut edges = Vec::new();
+    let mut push = |s: usize, t: usize, weight| {
+        edges.push(ProjectionEdge {
+            eid: EId((1u128 << 96) + edges.len() as u128),
+            source: vertices[s],
+            target: vertices[t],
+            weight,
+        });
+    };
+    for target in 1..63 {
+        if target % 5 != 0 {
+            push(7, target, 1.0 + (target % 11) as f64 / 4.0);
+            push(target, 29, -((target % 7) as f64) / 8.0);
+            push(58, target, 2.0);
+            push(target, 7, 3.0);
+        }
+    }
+    push(7, 7, -0.0);
+    push(62, 62, 5.0);
+    push(1, 61, 1e16);
+    push(1, 61, -1e16);
+    push(1, 61, 1.0);
+    let admission = ProjectionLimits {
+        max_input_edges: edges.len(),
+        max_adjacency_entries: edges.len() * 2,
+        ..limits()
+    };
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        for loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+            let spec = ProjectionSpec {
+                directedness: direction,
+                self_loops: loops,
+                ..spec()
+            };
+            // An independent stable-ID map reduces in ascending EId order.
+            // It neither assigns ordinals nor shares the builder's scatter.
+            let mut reference = BTreeMap::<(VId, VId), f64>::new();
+            for edge in &edges {
+                let (mut source, mut target) = (edge.source, edge.target);
+                if source == target && loops == SelfLoopPolicy::Drop {
+                    continue;
+                }
+                if direction == Directedness::Reversed
+                    || (direction == Directedness::Undirected && target < source)
+                {
+                    std::mem::swap(&mut source, &mut target);
+                }
+                let value = reference.entry((source, target)).or_insert(0.0);
+                *value += edge.weight;
+                if *value == 0.0 {
+                    *value = 0.0;
+                }
+            }
+            let mut rows = vec![BTreeMap::<VId, u64>::new(); vertices.len()];
+            let mut incoming = vec![Vec::new(); vertices.len()];
+            for (s, &source) in vertices.iter().enumerate() {
+                for (t, &target) in vertices.iter().enumerate() {
+                    let get = |a, b| {
+                        reference.get(&(a, b)).or_else(|| {
+                            (direction == Directedness::Undirected)
+                                .then(|| reference.get(&(b, a)))
+                                .flatten()
+                        })
+                    };
+                    if let Some(weight) = get(source, target) {
+                        rows[s].insert(target, weight.to_bits());
+                    }
+                    if get(target, source).is_some() {
+                        incoming[s].push(t);
+                    }
+                }
+            }
+            let graph =
+                SnapshotGraphView::build(binding(), &vertices, &edges, spec, admission).unwrap();
+            let owned = SnapshotGraphView::build_owned_with_checkpoint(
+                binding(),
+                vertices.iter().copied().rev().collect(),
+                edges.iter().copied().rev().collect(),
+                spec,
+                admission,
+                || Ok::<(), Infallible>(()),
+            )
+            .unwrap();
+            assert_eq!(graph.digest(), owned.digest());
+            assert_eq!(graph.edge_count(), reference.len());
+            assert_eq!(graph.input_edge_count(), edges.len());
+            for graph in [&graph, &owned] {
+                assert_eq!(graph.vertex_ids(), vertices);
+                for s in 0..vertices.len() {
+                    let (neighbors, weights) = graph.projected_row(s).unwrap();
+                    let actual: Vec<_> = neighbors
+                        .iter()
+                        .zip(weights)
+                        .map(|(&t, weight)| (vertices[t], weight.to_bits()))
+                        .collect();
+                    let expected: Vec<_> = rows[s].iter().map(|(&t, &w)| (t, w)).collect();
+                    assert_eq!(actual, expected, "{direction:?} {loops:?} source={s}");
+                    assert_eq!(graph.in_neighbors_indices(s).unwrap(), incoming[s]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn degree_buffers_are_reused_with_exact_peak_admission_on_every_face() {
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        let vertices = vec![VId(0), VId(17), VId(91), VId(u128::MAX)];
+        let edges = vec![edge(1, 0, 17, 2.0), edge(2, 17, 17, 3.0)];
+        let spec = ProjectionSpec {
+            directedness: direction,
+            ..spec()
+        };
+        let faces = if direction == Directedness::Undirected {
+            1
+        } else {
+            2
+        };
+        let arcs = if faces == 1 { 3 } else { 2 };
+        let expected = vertices.capacity() * size_of::<VId>()
+            + edges.capacity() * size_of::<ProjectionEdge>()
+            + vertices.len() * 32
+            + faces * (2 * vertices.len() + 1) * size_of::<usize>()
+            + arcs * faces * size_of::<usize>()
+            + arcs * size_of::<f64>();
+        let admission = ProjectionLimits {
+            max_workspace_bytes: expected,
+            ..limits()
+        };
+        let graph = SnapshotGraphView::build_owned_with_checkpoint(
+            binding(),
+            vertices.clone(),
+            edges.clone(),
+            spec,
+            admission,
+            || Ok::<(), Infallible>(()),
+        )
+        .unwrap();
+        assert_eq!(graph.charged_workspace_bytes(), expected);
+        let error = SnapshotGraphView::build_owned_with_checkpoint(
+            binding(),
+            vertices,
+            edges,
+            spec,
+            ProjectionLimits {
+                max_workspace_bytes: expected - 1,
+                ..admission
+            },
+            || Ok::<(), Infallible>(()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            ProjectionBuildError::Projection(ProjectionError::LimitExceeded {
+                resource: "workspace bytes",
+                limit: expected - 1,
+                observed: expected,
+            })
+        );
+    }
+}
+
+#[test]
+fn empty_and_fully_dropped_graphs_never_read_a_source_ordinal() {
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        let spec = ProjectionSpec {
+            directedness: direction,
+            self_loops: SelfLoopPolicy::Drop,
+            ..spec()
+        };
+        for (vertices, edges) in [
+            (vec![], vec![]),
+            (vec![VId(0), VId(u128::MAX)], vec![]),
+            (
+                vec![VId(0), VId(u128::MAX)],
+                vec![
+                    edge(1, 0, 0, f64::NAN),
+                    edge(2, u128::MAX, u128::MAX, f64::NEG_INFINITY),
+                ],
+            ),
+        ] {
+            let borrowed =
+                SnapshotGraphView::build(binding(), &vertices, &edges, spec, limits()).unwrap();
+            let owned = SnapshotGraphView::build_owned_with_checkpoint(
+                binding(),
+                vertices.clone(),
+                edges.clone(),
+                spec,
+                limits(),
+                || Ok::<(), Infallible>(()),
+            )
+            .unwrap();
+            assert_eq!(borrowed.digest(), owned.digest());
+            for graph in [borrowed, owned] {
+                assert_eq!(graph.vertex_ids(), vertices);
+                assert_eq!(graph.input_edge_count(), edges.len());
+                assert_eq!(graph.edge_count(), 0);
+                assert_eq!(graph.outgoing_offsets(), vec![0; vertices.len() + 1]);
+                let (offsets, neighbors) = graph.incoming_face();
+                assert_eq!(offsets, vec![0; vertices.len() + 1]);
+                assert!(neighbors.is_empty());
+                for s in 0..vertices.len() {
+                    assert_eq!(graph.projected_row(s).unwrap(), (&[][..], &[][..]));
+                }
+            }
+        }
+        // Dropping a loop must not bypass the existing endpoint admission.
+        assert_eq!(
+            SnapshotGraphView::build(binding(), &[], &[edge(1, 0, 0, f64::NAN)], spec, limits())
+                .unwrap_err(),
+            ProjectionError::MissingEndpoint {
+                edge: EId(1),
+                vertex: VId(0),
+            }
+        );
     }
 }
 
