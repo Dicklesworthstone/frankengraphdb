@@ -355,6 +355,19 @@ fn run_oracle(
 }
 
 fn canonical_rows(result: &FnxResult, algorithm: &str, vertices: usize) -> Result<Vec<i64>> {
+    let expected_columns = match algorithm {
+        "bfs" => ["vertex", "distance"],
+        "wcc" => ["vertex", "component"],
+        _ => return Err("unknown result algorithm".into()),
+    };
+    if result
+        .columns
+        .iter()
+        .map(String::as_str)
+        .ne(expected_columns)
+    {
+        return Err("production result has the wrong column schema".into());
+    }
     let mut values = vec![-1; vertices];
     let mut previous = None;
     for row in &result.rows {
@@ -1006,8 +1019,7 @@ mod tests {
     use fgdb_types::{CommitSeq, ids::ObjectId};
     use std::convert::Infallible;
 
-    #[test]
-    fn complete_smoke_results_preserve_diamonds_duplicates_loops_and_isolates() {
+    fn smoke_projection() -> SnapshotGraphView {
         let vertices: Vec<_> = (0..8).map(VId).collect();
         let edges: Vec<_> = fixture("smoke", 8)
             .unwrap()
@@ -1020,7 +1032,7 @@ mod tests {
                 weight: 1.0,
             })
             .collect();
-        let graph = SnapshotGraphView::build(
+        SnapshotGraphView::build(
             SnapshotBinding {
                 root: ObjectId([8; 32]),
                 as_of: CommitSeq(1),
@@ -1039,7 +1051,12 @@ mod tests {
                 max_workspace_bytes: 1 << 20,
             },
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn complete_smoke_results_preserve_diamonds_duplicates_loops_and_isolates() {
+        let graph = smoke_projection();
         for (algorithm, expected) in [
             ("bfs", vec![0, 1, 1, 2, -1, -1, -1, -1]),
             ("wcc", vec![0, 0, 0, 0, 4, 4, 6, 7]),
@@ -1057,6 +1074,29 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(canonical_rows(&result, algorithm, 8).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn result_normalization_rejects_wrong_missing_reordered_and_extra_columns() {
+        let graph = smoke_projection();
+        let call = FnxCallSpec::bind(&statement("bfs", 0), &FnxParameters::new()).unwrap();
+        let mut result = call
+            .execute(&graph, FnxReadOptions::DEFAULT_EXECUTION_LIMITS, || {
+                Ok::<(), Infallible>(())
+            })
+            .unwrap();
+        assert!(canonical_rows(&result, "bfs", 8).is_ok());
+        // Every result value remains correct, but none of these schemas
+        // matches the requested YIELD. A values-only comparison accepted them.
+        for columns in [
+            vec!["vertex", "component"],
+            vec!["vertex"],
+            vec!["distance", "vertex"],
+            vec!["vertex", "distance", "extra"],
+        ] {
+            result.columns = columns.into_iter().map(str::to_owned).collect();
+            assert!(canonical_rows(&result, "bfs", 8).is_err());
         }
     }
 

@@ -106,12 +106,12 @@ impl FnxMeter<usize> for &mut ComponentMeter {
         self.calls += 1;
         self.largest_run = self.largest_run.max(n);
         self.full_runs += usize::from(n == FNX_METER_RUN);
-        if let Some(stop) = self.stop {
-            if self.observed + n >= stop {
-                self.observed = stop;
-                self.stopped = true;
-                return Err(stop);
-            }
+        if let Some(stop) = self.stop
+            && self.observed + n >= stop
+        {
+            self.observed = stop;
+            self.stopped = true;
+            return Err(stop);
         }
         self.observed += n;
         Ok(())
