@@ -519,7 +519,7 @@ mod lookup_domain_tests {
             columns,
             &mut total,
             |_, _| Ok::<_, usize>(()),
-            |total, amount| {
+            |amount, total| {
                 *total += amount;
                 Ok(())
             },
