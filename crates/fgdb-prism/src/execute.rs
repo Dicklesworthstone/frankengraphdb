@@ -443,6 +443,20 @@ struct Gather<'a> {
 impl Gather<'_> {
     fn rows(&self, low: usize, rows: &mut [f64], poll: &mut dyn FnMut() -> bool) {
         let mut run = LiveRun::new();
+        if self.sources.is_empty() {
+            // Every target keeps its initial value. Fill only the rows that
+            // the live run admits, preserving each poll and refusal boundary.
+            let mut rest = rows;
+            while !rest.is_empty() {
+                let Some(taken) = run.take(rest.len(), poll) else {
+                    return;
+                };
+                let (slots, tail) = rest.split_at_mut(taken);
+                slots.fill(self.initial);
+                rest = tail;
+            }
+            return;
+        }
         for (at, slot) in rows.iter_mut().enumerate() {
             if run.take(1, poll).is_none() {
                 return;
@@ -1496,6 +1510,61 @@ mod tests {
                         "row={row} weighted={weighted} threads={threads}",
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_gather_preserves_initial_bits_and_live_polls_on_every_thread_count() {
+        for n in [0, 1, 31, 65_536] {
+            let offsets = vec![0; n + 1];
+            for initial in [0.0, -0.0, 0.25, f64::from_bits(0x7ff8_0000_0000_0042)] {
+                for weighted in [false, true] {
+                    let gather = Gather {
+                        offsets: &offsets,
+                        sources: &[],
+                        contrib: &[],
+                        shares: weighted.then_some(&[]),
+                        initial,
+                    };
+                    for threads in 1..=MAX_GATHER_THREADS {
+                        let mut actual = vec![f64::NAN; n];
+                        let mut meter = LiveOnly {
+                            polls: 0,
+                            stop: None,
+                        };
+                        gather.pass(&mut actual, threads, &mut meter).unwrap();
+                        assert!(actual.iter().all(|value| value.to_bits() == initial.to_bits()));
+                        assert_eq!(meter.polls, 2 + n.div_ceil(FNX_METER_RUN));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_gather_bulk_fill_preserves_each_live_refusal_prefix() {
+        let n = 2 * FNX_METER_RUN + 1;
+        let offsets = vec![0; n + 1];
+        for weighted in [false, true] {
+            let gather = Gather {
+                offsets: &offsets,
+                sources: &[],
+                contrib: &[],
+                shares: weighted.then_some(&[]),
+                initial: 0.25,
+            };
+            for stop in 1..=3 {
+                let mut actual = vec![f64::NAN; n];
+                let mut polls = 0;
+                gather.rows(0, &mut actual, &mut || {
+                    polls += 1;
+                    polls != stop
+                });
+                let filled = (stop - 1) * FNX_METER_RUN;
+                assert_eq!(polls, stop);
+                assert!(actual[..filled].iter().all(|&value| value == 0.25));
+                assert!(actual[filled..].iter().all(|value| value.is_nan()));
             }
         }
     }

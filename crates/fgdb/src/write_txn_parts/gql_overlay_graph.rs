@@ -6,7 +6,8 @@ mod query_source {
     use asupersync::fs::Vfs;
     use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
     use fgdb_gql::algebra::{
-        GlaIdentityOutput, GlaOutput, GlaPlan, PreparedGraphPattern, VertexPredicate,
+        EdgeRelation, GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan,
+        PreparedGraphPattern, VertexPredicate,
     };
     use fgdb_types::{CanonicalScalar, EId, VId};
     use std::collections::{BTreeMap, BTreeSet};
@@ -115,6 +116,112 @@ mod query_source {
         }
     }
 
+    type OverlayEdges<'a> = BTreeMap<EId, (VId, RelationId, VId, EdgeView<'a>)>;
+    type StagedAdjacency<'a> =
+        BTreeMap<(VId, bool, EId), (IdentifiedEdge, &'a [(PropertyKeyId, CanonicalScalar)])>;
+
+    /// A conservative input closure, before applying the canonical effects.
+    /// Retired edges may still be in this set; the ordinary overlay removes
+    /// them below. Every staged creation that a binding can traverse is here.
+    struct BoundOverlay<'a> {
+        vertices: BTreeSet<VId>,
+        edges: OverlayEdges<'a>,
+        root_observation: usize,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn select_bound_edge<'a, E>(
+        edge: IdentifiedEdge,
+        props: &'a [(PropertyKeyId, CanonicalScalar)],
+        near: VId,
+        direction: GlaDirection,
+        target: &mut BTreeSet<VId>,
+        selected: &mut OverlayEdges<'a>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let (eid, src, relation, dst) = edge;
+        if let std::collections::btree_map::Entry::Vacant(slot) = selected.entry(eid) {
+            control(SourceEvent::ScratchEntry)?;
+            slot.insert((src, relation, dst, EdgeView::new(props)));
+        }
+        let far = match direction {
+            GlaDirection::Forward => dst,
+            GlaDirection::Reverse => src,
+            GlaDirection::Undirected if src == near => dst,
+            GlaDirection::Undirected => src,
+        };
+        if !target.contains(&far) {
+            control(SourceEvent::ScratchEntry)?;
+            target.insert(far);
+        }
+        Ok(())
+    }
+
+    /// Follow one typed step through both the exact-cut adjacency index and
+    /// staged creations. The index is only a candidate source; the unchanged
+    /// algebra still checks predicates, correlations and edge uniqueness.
+    #[allow(clippy::too_many_arguments)]
+    fn extend_bound<'a, E>(
+        snapshot: &'a Snapshot,
+        as_of: fgdb_types::CommitSeq,
+        roots: &BTreeSet<VId>,
+        relation: &EdgeRelation,
+        direction: GlaDirection,
+        staged: &StagedAdjacency<'a>,
+        selected: &mut OverlayEdges<'a>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<BTreeSet<VId>, E> {
+        let mut target = BTreeSet::new();
+        for &near in roots {
+            control(SourceEvent::Work)?;
+            snapshot.adjacency_index().visit(
+                &snapshot.blocks,
+                near,
+                direction,
+                as_of,
+                control,
+                |entry, block, row, control| {
+                    if relation.matches(entry.relation) {
+                        select_bound_edge(
+                            (entry.eid, entry.src, entry.relation, entry.dst),
+                            source::edge_properties_at(&snapshot.block_props, block, row),
+                            near,
+                            direction,
+                            &mut target,
+                            selected,
+                            control,
+                        )?;
+                    }
+                    Ok(())
+                },
+            )?;
+            for incoming in [false, true] {
+                if matches!(direction, GlaDirection::Forward) && incoming
+                    || matches!(direction, GlaDirection::Reverse) && !incoming
+                {
+                    continue;
+                }
+                for (_, &(edge, props)) in
+                    staged.range((near, incoming, EId(0))..=(near, incoming, EId(u128::MAX)))
+                {
+                    control(SourceEvent::Work)?;
+                    if relation.matches(edge.2) {
+                        select_bound_edge(
+                            edge,
+                            props,
+                            near,
+                            direction,
+                            &mut target,
+                            selected,
+                            control,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(target)
+    }
+
     /// Per-execution label and type names for `labels(n)` and `type(r)`. An
     /// element whose id the plan's catalog cannot name keeps that id, and
     /// refuses only when its own labels or type are read: a staged label on
@@ -134,7 +241,10 @@ mod query_source {
                 Some(Err(id)) => Err(WriteTxnError::Read(crate::ReadError::UnmappedLabel(*id))),
             }
         }
-        pub(super) fn edge_type(&self, eid: EId) -> Result<Option<&CanonicalScalar>, WriteTxnError> {
+        pub(super) fn edge_type(
+            &self,
+            eid: EId,
+        ) -> Result<Option<&CanonicalScalar>, WriteTxnError> {
             match self.types.get(&eid) {
                 None => Ok(None),
                 Some(Ok(name)) => Ok(Some(name)),
@@ -188,7 +298,9 @@ mod query_source {
         /// as NULL.
         pub(super) fn catalog_names(&self) -> CatalogNames {
             let reverse = self.logical.reverse_catalog.as_deref();
-            let name = |text: Option<&String>| text.and_then(|text| CanonicalScalar::ucs_basic_text(text).ok());
+            let name = |text: Option<&String>| {
+                text.and_then(|text| CanonicalScalar::ucs_basic_text(text).ok())
+            };
             let mut labels = BTreeMap::new();
             if self.logical.projects_labels() {
                 for (vid, view) in &self.vertices {
@@ -356,6 +468,209 @@ mod query_source {
     }
 
     impl WriteTxn {
+        /// Admit indexed flat fixed-hop patterns without scanning the two
+        /// complete tables. Roots that gain a predicate field in this
+        /// transaction join the historical index candidates. Walking the
+        /// union of basis edges and staged creations is a superset of the
+        /// final overlay even when a preceding statement deleted an edge or
+        /// vertex. The existing effect application then removes those rows.
+        ///
+        /// Nested/independent scopes and quantified paths retain complete
+        /// admission until their overlay closure has its own completeness law.
+        fn bound_query_source<'a, E, Row>(
+            &'a self,
+            snapshot: &'a Snapshot,
+            logical: &GlaPlan<Row>,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<Option<BoundOverlay<'a>>, E> {
+            let Some(root) = logical.operators().first() else {
+                return Ok(None);
+            };
+            let width = match root {
+                GlaOperator::ScanVertices => 1,
+                GlaOperator::ScanEdges { .. } => 2,
+                _ => return Ok(None),
+            };
+            let prefix = &logical.operators()[1..];
+            let Some(steps) = source::bound_edge_steps(prefix, width) else {
+                return Ok(None);
+            };
+            if steps.iter().any(|step| step.walk.is_some()) {
+                return Ok(None);
+            }
+            let mut root_selection = None;
+            for operator in prefix.iter().take_while(|operator| {
+                !matches!(
+                    operator,
+                    GlaOperator::Expand { .. } | GlaOperator::SelectBoolean { .. }
+                )
+            }) {
+                control(SourceEvent::Work)?;
+                let GlaOperator::Select { slot, predicates } = operator else {
+                    continue;
+                };
+                let Ok(root_slot) = usize::try_from(slot.ordinal()) else {
+                    continue;
+                };
+                if root_slot >= width {
+                    continue;
+                }
+                // Either root endpoint's conjunctive selection can bound the
+                // edge candidates. A label-only left endpoint must not hide
+                // an indexed key on the right endpoint. Do not add a witness
+                // until a selection can seek the index.
+                let mut indexed = false;
+                for predicate in predicates {
+                    control(SourceEvent::Work)?;
+                    use fgdb_gql::algebra::IntegerComparison;
+                    indexed = match predicate {
+                        VertexPredicate::IntegerProperty { comparison, .. } => {
+                            *comparison != IntegerComparison::NotEqual
+                        }
+                        VertexPredicate::ScalarProperty { predicate, .. } => {
+                            let comparison = predicate.comparison();
+                            (comparison == IntegerComparison::Equal
+                                && !matches!(predicate.value(), CanonicalScalar::Null))
+                                || (comparison != IntegerComparison::NotEqual
+                                    && matches!(
+                                        predicate.value(),
+                                        CanonicalScalar::Int(_) | CanonicalScalar::Float(_)
+                                    ))
+                        }
+                        _ => false,
+                    };
+                    if indexed {
+                        break;
+                    }
+                }
+                if indexed {
+                    root_selection = Some((root_slot, operator, predicates));
+                    break;
+                }
+            }
+            let Some((root_slot, selection, predicates)) = root_selection else {
+                return Ok(None);
+            };
+            // A root outside the current closure can enter it by changing a
+            // predicate field without inserting an edge. Keep the existing
+            // membership witness before probing, including after a refusal.
+            // Primitive predicates read one vertex regardless of its root slot.
+            let selections = core::slice::from_ref(selection);
+            super::VertexScanRead::charge_definition(selections, control)?;
+            let root_observation = self.point_reads.borrow_mut().begin_vertex_scan(selections);
+            let Some(roots) = source::indexed_roots(snapshot, predicates, self.basis, control)?
+            else {
+                return Ok(None);
+            };
+            let mut candidates = BTreeSet::new();
+            for vid in roots {
+                control(SourceEvent::ScratchEntry)?;
+                candidates.insert(vid);
+            }
+            let mut staged = StagedAdjacency::new();
+            if let Some(prepared) = &self.prepared {
+                for coordinate in prepared.template.coordinate_entries() {
+                    control(SourceEvent::Work)?;
+                    for effect in &coordinate.rows {
+                        control(SourceEvent::Work)?;
+                        let new_root = match effect {
+                            DeltaRow::CreateVertex { vid, .. } => Some(*vid),
+                            DeltaRow::LabelMembership { vid, label, .. }
+                                if predicates.iter().any(|predicate| {
+                                    matches!(predicate, VertexPredicate::HasLabel(id) if id == label)
+                                }) => Some(*vid),
+                            DeltaRow::Property {
+                                elem: ElementId::Vertex(vid),
+                                property,
+                                ..
+                            } if predicates
+                                .iter()
+                                .any(|predicate| predicate.property_key() == Some(*property)) =>
+                            {
+                                Some(*vid)
+                            }
+                            _ => None,
+                        };
+                        if let Some(vid) = new_root
+                            && !candidates.contains(&vid)
+                        {
+                            control(SourceEvent::ScratchEntry)?;
+                            candidates.insert(vid);
+                        }
+                        if let DeltaRow::CreateEdge {
+                            eid,
+                            src,
+                            relation,
+                            dst,
+                            props,
+                            ..
+                        } = effect
+                        {
+                            for (near, incoming) in [(*src, false), (*dst, true)] {
+                                control(SourceEvent::ScratchEntry)?;
+                                staged.insert(
+                                    (near, incoming, *eid),
+                                    ((*eid, *src, *relation, *dst), props),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            let mut slots = (0..width).map(|_| BTreeSet::new()).collect::<Vec<_>>();
+            slots[root_slot] = candidates;
+            let mut edges = OverlayEdges::new();
+            if let GlaOperator::ScanEdges {
+                relation,
+                direction,
+            } = root
+            {
+                let direction = match (*direction, root_slot) {
+                    (GlaDirection::Forward, 1) => GlaDirection::Reverse,
+                    (GlaDirection::Reverse, 1) => GlaDirection::Forward,
+                    (direction, _) => direction,
+                };
+                slots[1 - root_slot] = extend_bound(
+                    snapshot,
+                    self.basis,
+                    &slots[root_slot],
+                    relation,
+                    direction,
+                    &staged,
+                    &mut edges,
+                    control,
+                )?;
+            }
+            for step in steps {
+                let target = extend_bound(
+                    snapshot,
+                    self.basis,
+                    &slots[step.source],
+                    step.relation,
+                    step.direction,
+                    &staged,
+                    &mut edges,
+                    control,
+                )?;
+                slots.push(target);
+            }
+            let mut vertices = BTreeSet::new();
+            for slot in slots {
+                for vid in slot {
+                    control(SourceEvent::Work)?;
+                    if !vertices.contains(&vid) {
+                        control(SourceEvent::ScratchEntry)?;
+                        vertices.insert(vid);
+                    }
+                }
+            }
+            Ok(Some(BoundOverlay {
+                vertices,
+                edges,
+                root_observation,
+            }))
+        }
+
         pub(super) fn query_snapshot<'a, V: Vfs + Clone>(
             &self,
             database: &'a Database<V>,
@@ -384,9 +699,11 @@ mod query_source {
         /// basis plus canonical staged effects. All shapes retain the same
         /// source, witnesses and one shared source/evaluator allowance.
         /// Single-vertex selections retain insertion/membership witnesses
-        /// plus full reads of matching and staged vertices. Other logical shapes
-        /// retain conservative scans. Refusals keep a broad vertex-domain witness;
-        /// no prior getter, failed scan or savepoint observation is narrowed.
+        /// plus full reads of matching and staged vertices. Indexed flat
+        /// expansions admit their basis/staged adjacency closure and retain a
+        /// root-membership witness. Other shapes keep conservative scans.
+        /// Refusals keep a broad vertex-domain witness; no prior getter, failed
+        /// scan or savepoint observation is narrowed.
         pub fn execute_graph_pattern_governed<V: Vfs + Clone, Row: GlaOutput>(
             &self,
             database: &Database<V>,
@@ -510,18 +827,21 @@ mod query_source {
         /// procedure. It requires both table phantom witnesses even when the
         /// current graph is empty; existing query plans keep their narrower
         /// source requirements and precise acceptance protocol.
-        fn query_source_tables<'a, E, Row: GlaOutput>(
+        fn query_source_tables<'a, E, Row: GlaOutput, C>(
             &'a self,
             snapshot: &'a Snapshot,
             logical: Option<&GlaPlan<Row>>,
             required_vertex_label: Option<LabelId>,
             precise: bool,
-            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-        ) -> Result<OverlayGraphTables<'a>, E> {
+            control: &mut C,
+        ) -> Result<OverlayGraphTables<'a>, E>
+        where
+            C: FnMut(SourceEvent) -> Result<(), E>,
+        {
             let predicates = logical
                 .filter(|_| precise)
                 .and_then(super::VertexScanRead::predicates);
-            let scan_observation = if let Some(predicates) = predicates {
+            let mut scan_observation = if let Some(predicates) = predicates {
                 // Charge the bounded definition copy before allocation or graph
                 // reads. A failure here has learned nothing from the database.
                 super::VertexScanRead::charge_definition(predicates, control)?;
@@ -612,9 +932,35 @@ mod query_source {
                     }
                 }
             }
+            let bound = match logical.filter(|_| reads_edges) {
+                Some(logical) => self.bound_query_source(snapshot, logical, control)?,
+                None => None,
+            };
+            let (mut edges, vertex_candidates) = if let Some(bound) = bound {
+                if precise {
+                    scan_observation = Some((self, bound.root_observation));
+                }
+                for (&eid, (src, relation, dst, _)) in &bound.edges {
+                    control(SourceEvent::Work)?;
+                    if edge_relations
+                        .as_ref()
+                        .is_none_or(|relations| relations.contains(relation))
+                    {
+                        for element in [
+                            ElementId::Edge(eid),
+                            ElementId::Vertex(*src),
+                            ElementId::Vertex(*dst),
+                        ] {
+                            self.note_query_read(&mut observed, element, control)?;
+                        }
+                    }
+                }
+                (bound.edges, Some(bound.vertices))
+            } else {
+                (BTreeMap::new(), None)
+            };
             let mut vertices = BTreeMap::new();
-            let mut edges = BTreeMap::new();
-            if reads_edges {
+            if reads_edges && vertex_candidates.is_none() {
                 source::visit_edges_with_properties(
                     snapshot,
                     self.basis,
@@ -645,7 +991,7 @@ mod query_source {
                 )?;
             }
             if vertex_scan {
-                source::visit_vertices(&snapshot.patches, self.basis, control, |row, control| {
+                let mut admit = |row: &'a crate::VertexRow, control: &mut C| {
                     let view = VertexView::new(&row.labels, &row.props);
                     let selected = match predicates {
                         Some(predicates) => {
@@ -656,12 +1002,22 @@ mod query_source {
                     if selected {
                         self.note_query_read(&mut observed, ElementId::Vertex(row.vid), control)?;
                     }
-                    // Keep the same complete source and row-admission semantics.
-                    // Only dependency recording changes, never the query result.
+                    // Every row in a bound closure remains a candidate; the
+                    // algebra, after staged effects, owns the actual selection.
                     control(SourceEvent::ScratchEntry)?;
                     vertices.insert(row.vid, view);
                     Ok(())
-                })?;
+                };
+                if let Some(candidates) = &vertex_candidates {
+                    for &vid in candidates {
+                        if let Some(row) = source::find_vertex(snapshot, vid, self.basis, control)?
+                        {
+                            admit(row, control)?;
+                        }
+                    }
+                } else {
+                    source::visit_vertices(&snapshot.patches, self.basis, control, admit)?;
+                }
             }
             let mut vertex_effects = Vec::new();
             if let Some(prepared) = &self.prepared {
@@ -683,7 +1039,12 @@ mod query_source {
                                     control,
                                 )?;
                             }
-                            apply_vertex(&mut vertices, effect, None, control)?;
+                            apply_vertex(
+                                &mut vertices,
+                                effect,
+                                vertex_candidates.as_ref(),
+                                control,
+                            )?;
                         }
                         if reads_edges {
                             match effect {
@@ -694,7 +1055,7 @@ mod query_source {
                                     dst,
                                     props,
                                     ..
-                                } => {
+                                } if vertex_candidates.is_none() || edges.contains_key(eid) => {
                                     if !edges.contains_key(eid) {
                                         control(SourceEvent::ScratchEntry)?;
                                     }

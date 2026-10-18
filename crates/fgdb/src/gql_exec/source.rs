@@ -1265,7 +1265,7 @@ impl AdjacencyIndex {
 
     /// Visit the surviving versions of every incident identity at `as_of`,
     /// merging both faces in EId order; self loops appear once.
-    fn visit<'a, E, C>(
+    pub(crate) fn visit<'a, E, C>(
         &'a self,
         blocks: &'a [impl AsRef<[AdjacencyEntry]>],
         endpoint: VId,
@@ -3411,11 +3411,11 @@ fn root_candidates<E>(
 /// carries its hop bound (`None` for one Expand) and whether zero hops may
 /// bind the endpoint to the source itself.
 #[derive(Clone, Copy)]
-struct BoundStep<'p> {
-    source: usize,
-    relation: &'p fgdb_gql::algebra::EdgeRelation,
-    direction: fgdb_gql::algebra::GlaDirection,
-    walk: Option<(bool, u32)>,
+pub(crate) struct BoundStep<'p> {
+    pub(crate) source: usize,
+    pub(crate) relation: &'p fgdb_gql::algebra::EdgeRelation,
+    pub(crate) direction: fgdb_gql::algebra::GlaDirection,
+    pub(crate) walk: Option<(bool, u32)>,
 }
 
 /// The steps after a plan's root that binds `width` slots (ScanEdges binds
@@ -3424,7 +3424,7 @@ struct BoundStep<'p> {
 /// operator here only filters, captures or projects the binding. Anything
 /// that could bind a slot another way (or a step after a projection) returns
 /// None, leaving the caller's superset or complete admission.
-fn bound_edge_steps(
+pub(crate) fn bound_edge_steps(
     operators: &[fgdb_gql::algebra::GlaOperator],
     width: usize,
 ) -> Option<Vec<BoundStep<'_>>> {
@@ -4079,7 +4079,7 @@ fn shortest_closure<'a, E>(
 /// from the property index when one predicate can seek it: a numeric
 /// comparison (both numeric kinds) or a non-null equality. None leaves the
 /// caller's predicate scan over every vertex.
-fn indexed_roots<E>(
+pub(crate) fn indexed_roots<E>(
     snapshot: &Snapshot,
     predicates: &[fgdb_gql::algebra::VertexPredicate],
     as_of: CommitSeq,

@@ -67,7 +67,7 @@ mod procedures {
                 .max_scratch_entries
                 .min(options.source_limits.max_scratch_entries);
             let source =
-                self.query_source_tables::<_, VId>(snapshot, None, None, false, &mut |event| {
+                self.query_source_tables::<_, VId, _>(snapshot, None, None, false, &mut |event| {
                     cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                     usage.observe(source_policy, event)
                 })?;
