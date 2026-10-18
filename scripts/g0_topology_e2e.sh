@@ -117,12 +117,14 @@ if grep -q '"event":"topology_violation"' "$FIRST"; then
 fi
 
 echo "==> report what is deferred rather than letting a green bar imply coverage"
-# No composition crate is active, so every posture closure is deferred. Named
+# All three composition crates (fgdb, fgdb-server, fgdb-cli) are now active, so
+# all three posture closures report outcome=pass and 0 are deferred. Named
 # edges may advance independently, so the Rust reader owns their live/deferred
 # partition and the monotone set-floor. This shell gate checks the event schema
 # and non-vacuous verdict, not a second hand-copied count.
 grep '"event":"required_edge_coverage"' "$FIRST"
-grep '"event":"posture_closure_checked"' "$FIRST" | grep -c '"outcome":"deferred"'
+test "$(grep '"event":"posture_closure_checked"' "$FIRST" | grep -c '"outcome":"pass"')" -eq 3
+grep '"event":"posture_closure_checked"' "$FIRST" | grep -c '"outcome":"deferred"' || true
 if ! grep -Eq '^\{"event":"required_edge_coverage","declared":[0-9]+,"evaluated_live":[0-9]+,"deferred":[0-9]+,"ratcheted_live_floor":[1-9][0-9]*,"unratcheted_live":[0-9]+,"outcome":"pass"\}$' "$FIRST"; then
   echo "ERROR: the named-edge ratchet event is absent, malformed, vacuous, or red" >&2
   exit 1
