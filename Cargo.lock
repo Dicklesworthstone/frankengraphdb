@@ -635,6 +635,7 @@ dependencies = [
  "fgdb",
  "fgdb-delta-types",
  "fgdb-gql",
+ "fgdb-prism",
  "fgdb-types",
 ]
 
