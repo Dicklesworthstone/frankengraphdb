@@ -200,6 +200,11 @@ struct Projection {
     outgoing: Rows,
     incoming: Option<Rows>,
     weights: Vec<f64>,
+    // The 1-based row/weight checkpoint of the first negative final CSR
+    // weight. Finite weights are guaranteed by construction. Retaining the
+    // visit ordinal preserves Dijkstra's cancellation/error precedence while
+    // avoiding another immutable weight scan on every source query.
+    first_negative_weight_visit: Option<usize>,
     edges: usize,
     input_edges: usize,
     workspace_bytes: usize,
@@ -723,6 +728,18 @@ impl SnapshotGraphView {
         // Thus neither write can overwrite an unread dense target in the
         // prefix of out_nodes. Reversing both the traversal and row cursors
         // leaves neighbors ascending on both faces, without row sorting.
+        let mut first_negative_weight_visit = None;
+        let mut record_weight = |source, slot, weight: f64| {
+            if weight < 0.0 {
+                // Each earlier row and weight contributes one checkpoint.
+                // Observe the reduced weight, never a raw parallel edge.
+                let visit = add(add(source, slot)?, 2)?;
+                first_negative_weight_visit = Some(
+                    first_negative_weight_visit.map_or(visit, |first: usize| first.min(visit)),
+                );
+            }
+            Ok::<(), ProjectionError>(())
+        };
         for (index, edge) in work.iter().enumerate().rev() {
             poll(&mut checkpoint)?;
             while vertices[source] > edge.source {
@@ -736,6 +753,7 @@ impl SnapshotGraphView {
             debug_assert!(slot >= index);
             out_nodes[slot] = t;
             weights[slot] = edge.weight;
+            record_weight(s, slot, edge.weight)?;
             if directed {
                 in_next[t] -= 1;
                 in_nodes[in_next[t]] = s;
@@ -745,6 +763,7 @@ impl SnapshotGraphView {
                 debug_assert!(slot >= index);
                 out_nodes[slot] = s;
                 weights[slot] = edge.weight;
+                record_weight(t, slot, edge.weight)?;
             }
         }
         let mut names = reserved(n, &mut checkpoint)?;
@@ -769,6 +788,7 @@ impl SnapshotGraphView {
             },
             incoming,
             weights,
+            first_negative_weight_visit,
             edges: kept,
             input_edges: e,
             workspace_bytes: bytes,
@@ -798,6 +818,9 @@ impl SnapshotGraphView {
     }
     pub fn input_edge_count(&self) -> usize {
         self.0.input_edges
+    }
+    pub(crate) fn first_negative_weight_visit(&self) -> Option<usize> {
+        self.0.first_negative_weight_visit
     }
     pub fn charged_workspace_bytes(&self) -> usize {
         self.0.workspace_bytes

@@ -998,9 +998,7 @@ impl FnxCallSpec {
             }
             FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
                 let output =
-                    crate::shortest_path::run(graph, options, limits.max_result_rows, &mut || {
-                        checkpoint.unit()
-                    })?;
+                    crate::shortest_path::run(graph, options, limits.max_result_rows, &mut checkpoint)?;
                 KernelOutput {
                     values: KernelValues::WeightedDistances(output.distances),
                     row_count: output.row_count,

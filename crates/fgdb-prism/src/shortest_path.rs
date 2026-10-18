@@ -7,8 +7,8 @@
 
 use crate::execute::{admit, reserve};
 use crate::{
-    ComplexityWitness, FnxBindError, FnxBindErrorKind, FnxExecutionError, FnxExecutionLimits,
-    GraphView, SnapshotGraphView,
+    ComplexityWitness, FNX_METER_RUN, FnxBindError, FnxBindErrorKind, FnxExecutionError,
+    FnxExecutionLimits, FnxMeter, GraphView, SnapshotGraphView,
 };
 use fgdb_types::VId;
 
@@ -87,13 +87,13 @@ pub fn dijkstra<C>(
     graph: &SnapshotGraphView,
     options: DijkstraOptions,
     limits: FnxExecutionLimits,
-    mut checkpoint: impl FnMut() -> Result<(), C>,
+    mut checkpoint: impl FnxMeter<C>,
 ) -> Result<DijkstraOutput, FnxExecutionError<C>> {
-    checkpoint().map_err(FnxExecutionError::Cancelled)?;
+    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
     let n = graph.node_count();
     let mut arcs = 0usize;
     for node in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let row = graph
             .neighbors_indices(node)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
@@ -425,26 +425,19 @@ impl IndexedHeap {
     }
 }
 
-pub(crate) fn run<C>(
+#[cfg(test)]
+fn validate_weights_incumbent<C>(
     graph: &SnapshotGraphView,
-    options: DijkstraOptions,
-    row_limit: usize,
-    checkpoint: &mut impl FnMut() -> Result<(), C>,
-) -> Result<DijkstraOutput, FnxExecutionError<C>> {
-    let source = graph
-        .vertex_ordinal(options.source)
-        .ok_or(FnxExecutionError::UnknownSource(options.source))?;
-    admit("result rows", 1, row_limit)?;
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(), FnxExecutionError<C>> {
     let n = graph.node_count();
-    // Reject the entire incompatible projection, not just the prefix reached
-    // before a cutoff. Otherwise an early exit could hide an invalid weight.
     for node in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let (_, weights) = graph
             .projected_row(node)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
         for &weight in weights {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
             if !weight.is_finite() {
                 return Err(FnxExecutionError::InvalidNumericResult);
             }
@@ -453,15 +446,74 @@ pub(crate) fn run<C>(
             }
         }
     }
+    Ok(())
+}
+
+fn validate_weights<C>(
+    graph: &SnapshotGraphView,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(), FnxExecutionError<C>> {
+    // This test-only incumbent lets paired measurements exercise the complete
+    // call, including admission and typed results, in the same invocation.
+    #[cfg(test)]
+    if tests::scan_incumbent_weights() {
+        return validate_weights_incumbent(graph, checkpoint);
+    }
+
+    // Construction validates finiteness after reduction and records the first
+    // negative in final CSR order. Reject the entire incompatible projection,
+    // including an unreachable component or a weight beyond the cutoff.
+    let negative = graph.first_negative_weight_visit();
+    let mut remaining = match negative {
+        Some(visit) => visit,
+        None => graph
+            .node_count()
+            .checked_add(
+                graph
+                    .outgoing_offsets()
+                    .last()
+                    .copied()
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?,
+            )
+            .ok_or(FnxExecutionError::SizeOverflow)?,
+    };
+    // Retain every logical unit and the first refusal point. Meters may batch
+    // this immutable validation; ordinary callbacks still receive each unit.
+    // Bound runs so bulk cancellation checks cannot be deferred indefinitely.
+    while remaining != 0 {
+        let run = remaining.min(FNX_METER_RUN);
+        checkpoint
+            .units(run)
+            .map_err(FnxExecutionError::Cancelled)?;
+        remaining -= run;
+    }
+    if negative.is_some() {
+        return Err(FnxExecutionError::NegativeWeight);
+    }
+    Ok(())
+}
+
+pub(crate) fn run<C>(
+    graph: &SnapshotGraphView,
+    options: DijkstraOptions,
+    row_limit: usize,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<DijkstraOutput, FnxExecutionError<C>> {
+    let source = graph
+        .vertex_ordinal(options.source)
+        .ok_or(FnxExecutionError::UnknownSource(options.source))?;
+    admit("result rows", 1, row_limit)?;
+    let n = graph.node_count();
+    validate_weights(graph, checkpoint)?;
     let mut distances = reserve(n)?;
     let mut overflowed = reserve(n)?;
-    let mut heap = IndexedHeap::new(n, options.comparison, checkpoint)?;
+    let mut heap = IndexedHeap::new(n, options.comparison, &mut || checkpoint.unit())?;
     for _ in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         distances.push(None);
         overflowed.push(false);
     }
-    heap.offer(source, 0.0, checkpoint)?;
+    heap.offer(source, 0.0, &mut || checkpoint.unit())?;
     let mut discovered = 1usize;
     let mut witness = ComplexityWitness {
         algorithm: "single_source_dijkstra_indexed_heap".to_owned(),
@@ -471,8 +523,8 @@ pub(crate) fn run<C>(
         queue_peak: 1,
     };
     loop {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        let Some(Entry { node, cost, .. }) = heap.pop(checkpoint)? else {
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+        let Some(Entry { node, cost, .. }) = heap.pop(&mut || checkpoint.unit())? else {
             break;
         };
         distances[node] = Some(cost);
@@ -484,7 +536,7 @@ pub(crate) fn run<C>(
             .projected_row(node)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
         for (&target, &weight) in targets.iter().zip(weights) {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
             witness.edges_scanned = witness
                 .edges_scanned
                 .checked_add(1)
@@ -514,12 +566,12 @@ pub(crate) fn run<C>(
                 admit("result rows", requested, row_limit)?;
                 discovered = requested;
             }
-            heap.offer(target, candidate, checkpoint)?;
+            heap.offer(target, candidate, &mut || checkpoint.unit())?;
             witness.queue_peak = witness.queue_peak.max(heap.len());
         }
     }
     for node in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         if overflowed[node] && distances[node].is_none() {
             // Reachable but unrepresentable is not the same as unreachable.
             return Err(FnxExecutionError::InvalidNumericResult);
@@ -536,12 +588,90 @@ pub(crate) fn run<C>(
 mod tests {
     use super::*;
     use crate::{
-        Directedness, ParallelEdgePolicy, ProjectionEdge, ProjectionLimits, ProjectionSpec,
-        SelfLoopPolicy, SnapshotBinding,
+        Directedness, FnxCallSpec, FnxResult, FnxValue, ParallelEdgePolicy, ProjectionEdge,
+        ProjectionLimits, ProjectionSpec, SelfLoopPolicy, SnapshotBinding,
     };
     use fgdb_types::{CommitSeq, EId, ids::ObjectId};
     use fnx_classes::{Graph, digraph::DiGraph};
+    use std::cell::Cell;
     use std::convert::Infallible;
+
+    thread_local! {
+        static INCUMBENT_WEIGHT_SCAN: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn scan_incumbent_weights() -> bool {
+        INCUMBENT_WEIGHT_SCAN.with(Cell::get)
+    }
+
+    fn with_weight_scan<R>(incumbent: bool, work: impl FnOnce() -> R) -> R {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                INCUMBENT_WEIGHT_SCAN.with(|mode| mode.set(self.0));
+            }
+        }
+        let _reset = Reset(INCUMBENT_WEIGHT_SCAN.with(|mode| mode.replace(incumbent)));
+        work()
+    }
+
+    #[derive(Default, Debug)]
+    struct Trace {
+        seen: usize,
+        polls: usize,
+        largest_run: usize,
+    }
+
+    struct ExactMeter<'a> {
+        trace: &'a mut Trace,
+        stop: Option<usize>,
+    }
+
+    impl FnxMeter<&'static str> for ExactMeter<'_> {
+        fn unit(&mut self) -> Result<(), &'static str> {
+            self.units(1)
+        }
+
+        fn units(&mut self, n: usize) -> Result<(), &'static str> {
+            assert!((1..=FNX_METER_RUN).contains(&n));
+            self.trace.largest_run = self.trace.largest_run.max(n);
+            if let Some(stop) = self.stop
+                && self.trace.seen + n >= stop
+            {
+                self.trace.seen = stop;
+                return Err("stop");
+            }
+            self.trace.seen += n;
+            Ok(())
+        }
+
+        fn poll(&mut self) -> Result<(), &'static str> {
+            self.trace.polls += 1;
+            Ok(())
+        }
+    }
+
+    fn full_call(
+        view: &SnapshotGraphView,
+        call: &FnxCallSpec,
+        cap: FnxExecutionLimits,
+        incumbent: bool,
+        stop: Option<usize>,
+    ) -> (Result<FnxResult, String>, Trace) {
+        let mut trace = Trace::default();
+        let result = with_weight_scan(incumbent, || {
+            call.execute(
+                view,
+                cap,
+                ExactMeter {
+                    trace: &mut trace,
+                    stop,
+                },
+            )
+        })
+        .map_err(|error| format!("{error:?}"));
+        (result, trace)
+    }
 
     fn graph(
         n: usize,
@@ -853,6 +983,203 @@ mod tests {
                 Err(FnxExecutionError::Cancelled("cancel"))
             ));
             assert_eq!(count, stop);
+        }
+    }
+
+    #[test]
+    fn cached_validation_preserves_full_call_results_and_every_refusal_prefix() {
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            for last_weight in [1.0, -1.0] {
+                // The last edge is unreachable from source zero. Its rejection
+                // occurs beyond the first run even with a zero-cost cutoff.
+                let view = graph(
+                    80,
+                    &[
+                        (0, 1, 3.0),
+                        (0, 2, 1.0),
+                        (2, 1, 1.0),
+                        (2, 2, 0.0),
+                        (70, 79, last_weight),
+                    ],
+                    direction,
+                );
+                for cutoff in [None, Some(0.0)] {
+                    let call =
+                        FnxCallSpec::single_source_dijkstra_path_length(options(&view, 0, cutoff));
+                    for cap in [
+                        limits(),
+                        FnxExecutionLimits {
+                            max_result_rows: 0,
+                            ..limits()
+                        },
+                        FnxExecutionLimits {
+                            max_result_rows: 1,
+                            ..limits()
+                        },
+                        FnxExecutionLimits {
+                            max_estimated_work: 0,
+                            ..limits()
+                        },
+                    ] {
+                        let (expected, before) = full_call(&view, &call, cap, true, None);
+                        let (actual, after) = full_call(&view, &call, cap, false, None);
+                        assert_eq!(actual, expected);
+                        assert_eq!((after.seen, after.polls), (before.seen, before.polls));
+                        for stop in 1..=before.seen + 1 {
+                            let (expected, before) = full_call(&view, &call, cap, true, Some(stop));
+                            let (actual, after) = full_call(&view, &call, cap, false, Some(stop));
+                            assert_eq!(actual, expected, "{direction:?} {cutoff:?} stop={stop}");
+                            assert_eq!((after.seen, after.polls), (before.seen, before.polls));
+                        }
+                    }
+                    // The blanket callback meter retains every original call,
+                    // including all units inside an optimized validation run.
+                    let mut totals = [0usize; 2];
+                    for (index, incumbent) in [true, false].into_iter().enumerate() {
+                        let result = with_weight_scan(incumbent, || {
+                            call.execute(&view, limits(), || {
+                                totals[index] += 1;
+                                Ok::<(), &'static str>(())
+                            })
+                        })
+                        .map_err(|error| format!("{error:?}"));
+                        assert_eq!(result, full_call(&view, &call, limits(), true, None).0);
+                    }
+                    assert_eq!(totals[0], totals[1]);
+                    let (_, trace) = full_call(&view, &call, limits(), false, None);
+                    assert_eq!(trace.largest_run, FNX_METER_RUN);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual same-invocation complete Prism-call performance comparison"]
+    fn cached_validation_paired_full_call_performance() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        struct Counting<'a>(&'a mut usize);
+        impl FnxMeter<Infallible> for Counting<'_> {
+            fn unit(&mut self) -> Result<(), Infallible> {
+                *self.0 += 1;
+                Ok(())
+            }
+            fn units(&mut self, n: usize) -> Result<(), Infallible> {
+                *self.0 += n;
+                Ok(())
+            }
+            fn poll(&mut self) -> Result<(), Infallible> {
+                Ok(())
+            }
+        }
+
+        fn measure(
+            view: &SnapshotGraphView,
+            calls: &[FnxCallSpec],
+            cap: FnxExecutionLimits,
+            incumbent: bool,
+        ) -> (Duration, usize, u64) {
+            with_weight_scan(incumbent, || {
+                let mut units = 0;
+                let mut consumed = 0u64;
+                let start = Instant::now();
+                for _ in 0..8 {
+                    for call in calls {
+                        let result = call
+                            .execute(black_box(view), cap, Counting(&mut units))
+                            .unwrap();
+                        for row in &result.rows {
+                            for value in row {
+                                consumed = consumed.rotate_left(7)
+                                    ^ match value {
+                                        FnxValue::Vertex(vertex) => {
+                                            vertex.0 as u64 ^ (vertex.0 >> 64) as u64
+                                        }
+                                        FnxValue::Float(value) | FnxValue::Score(value) => {
+                                            value.to_bits()
+                                        }
+                                        FnxValue::Integer(value) => *value,
+                                    };
+                            }
+                        }
+                        black_box(&result.certificate);
+                        black_box(consumed);
+                        // Result destruction is included in the measured call.
+                    }
+                }
+                (start.elapsed(), units, consumed)
+            })
+        }
+
+        let n = 4096;
+        let cap = FnxExecutionLimits {
+            max_result_rows: n,
+            ..limits()
+        };
+        let mut disconnected: Vec<_> = (0..31).map(|v| (v, v + 1, 1.0)).collect();
+        for source in 32..n {
+            for offset in 1..=32 {
+                let target = 32 + (source - 32 + offset) % (n - 32);
+                disconnected.push((source, target, (offset % 7 + 1) as f64));
+            }
+        }
+        let chain: Vec<_> = (0..n - 1).map(|v| (v, v + 1, 1.0)).collect();
+        let mut hub: Vec<_> = (1..n).map(|v| (0, v, 1.0)).collect();
+        hub.extend((1..n - 1).map(|v| (v, v + 1, 0.5)));
+        for (name, edges, sources) in [
+            ("small_source_component", disconnected, [0, 8, 16, 31]),
+            ("road_chain", chain, [0, n / 3, 2 * n / 3, n - 1]),
+            ("hub", hub, [0, 1, n / 2, n - 1]),
+            ("isolates", Vec::new(), [0, n / 3, 2 * n / 3, n - 1]),
+        ] {
+            let view = graph(n, &edges, Directedness::Directed);
+            let calls: Vec<_> = sources
+                .into_iter()
+                .map(|source| {
+                    FnxCallSpec::single_source_dijkstra_path_length(options(&view, source, None))
+                })
+                .collect();
+            for call in &calls {
+                let (old, old_trace) = full_call(&view, call, cap, true, None);
+                let (new, new_trace) = full_call(&view, call, cap, false, None);
+                assert_eq!(new, old);
+                assert_eq!(new_trace.seen, old_trace.seen);
+            }
+            // Warm both complete paths, then alternate order in each pair.
+            assert_eq!(
+                measure(&view, &calls, cap, true).1,
+                measure(&view, &calls, cap, false).1
+            );
+            let mut incumbent = Vec::new();
+            let mut cached = Vec::new();
+            for pair in 0..15 {
+                let mut results = [(Duration::ZERO, 0, 0); 2];
+                for mode in if pair % 2 == 0 { [0, 1] } else { [1, 0] } {
+                    results[mode] = measure(&view, &calls, cap, mode == 0);
+                }
+                assert_eq!((results[0].1, results[0].2), (results[1].1, results[1].2));
+                incumbent.push(results[0].0.as_nanos());
+                cached.push(results[1].0.as_nanos());
+            }
+            incumbent.sort_unstable();
+            cached.sort_unstable();
+            eprintln!(
+                "{name}: vertices={n} arcs={} calls_per_sample={} incumbent_ns[min/median/max]={}/{}/{} cached_ns[min/median/max]={}/{}/{} median_speedup={:.3}x",
+                edges.len(),
+                calls.len() * 8,
+                incumbent[0],
+                incumbent[7],
+                incumbent[14],
+                cached[0],
+                cached[7],
+                cached[14],
+                incumbent[7] as f64 / cached[7] as f64,
+            );
         }
     }
 

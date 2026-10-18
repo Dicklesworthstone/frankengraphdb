@@ -46,6 +46,92 @@ fn fixture() -> (Vec<VId>, Vec<ProjectionEdge>) {
     )
 }
 
+fn scanned_first_negative_visit(view: &SnapshotGraphView) -> Option<usize> {
+    let mut visits = 0;
+    for node in 0..view.node_count() {
+        visits += 1;
+        for &weight in view.projected_row(node).unwrap().1 {
+            visits += 1;
+            assert!(weight.is_finite());
+            if weight < 0.0 {
+                return Some(visits);
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn cached_negative_weight_visit_matches_final_reduction_and_csr_order() {
+    let vertices = [VId(u128::MAX), VId(17), VId(0), VId(91)];
+    // EId order differs from outgoing row order. Sum and Maximum remove raw
+    // negatives; Minimum retains them. A dropped negative loop must disappear.
+    let edges = [
+        edge(9, u128::MAX, 17, -4.0),
+        edge(8, 0, 17, -3.0),
+        edge(3, 0, 17, 5.0),
+        edge(2, 91, 91, -1.0),
+        edge(1, u128::MAX, 17, 4.0),
+        edge(7, 17, 0, -0.0),
+    ];
+    for directedness in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        for parallel_edges in [
+            ParallelEdgePolicy::Minimum,
+            ParallelEdgePolicy::Maximum,
+            ParallelEdgePolicy::Sum,
+            ParallelEdgePolicy::CollapseUnit,
+        ] {
+            for self_loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+                let spec = ProjectionSpec {
+                    directedness,
+                    parallel_edges,
+                    self_loops,
+                };
+                let view =
+                    SnapshotGraphView::build(binding(), &vertices, &edges, spec, limits()).unwrap();
+                let expected = scanned_first_negative_visit(&view);
+                assert_eq!(view.first_negative_weight_visit(), expected, "{spec:?}");
+                assert_eq!(view.clone().first_negative_weight_visit(), expected);
+                if parallel_edges == ParallelEdgePolicy::CollapseUnit
+                    || (self_loops == SelfLoopPolicy::Drop
+                        && parallel_edges != ParallelEdgePolicy::Minimum)
+                {
+                    assert_eq!(expected, None, "raw negatives must not poison {spec:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cached_negative_weight_visit_counts_isolates_and_crosses_meter_runs() {
+    let vertices: Vec<_> = (0..80).map(VId).collect();
+    let mut edges: Vec<_> = (1..=65).map(|i| edge(i, 0, i, 1.0)).collect();
+    edges.push(edge(99, 79, 78, -1.0));
+    for directedness in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        let spec = ProjectionSpec {
+            directedness,
+            ..spec()
+        };
+        let view = SnapshotGraphView::build(binding(), &vertices, &edges, spec, limits()).unwrap();
+        let expected = scanned_first_negative_visit(&view);
+        assert!(expected.unwrap() > crate::FNX_METER_RUN);
+        assert_eq!(view.first_negative_weight_visit(), expected);
+    }
+    for vertices in [&[][..], &vertices[..]] {
+        let view = SnapshotGraphView::build(binding(), vertices, &[], spec(), limits()).unwrap();
+        assert_eq!(view.first_negative_weight_visit(), None);
+    }
+}
+
 #[test]
 fn checkpointed_sort_matches_std_on_every_small_permutation_and_duplicate_keys() {
     fn permutations(values: &mut [usize], start: usize) {
