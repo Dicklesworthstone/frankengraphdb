@@ -815,6 +815,12 @@ impl SnapshotGraphView {
         (&rows.offsets, &rows.neighbors)
     }
 
+    /// Dense row boundaries also supply exact out-degrees without retaining a
+    /// second per-vertex degree vector in an executing kernel.
+    pub(crate) fn outgoing_offsets(&self) -> &[usize] {
+        &self.0.outgoing.offsets
+    }
+
     pub fn projected_weight(&self, source: usize, target: usize) -> Option<f64> {
         let row = self.0.outgoing.row(source)?;
         let index = row.binary_search(&target).ok()?;

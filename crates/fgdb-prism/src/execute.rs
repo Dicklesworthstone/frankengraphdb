@@ -165,8 +165,10 @@ pub struct FnxCertificate {
     pub edges: usize,
     pub input_edges: usize,
     pub estimated_work: usize,
-    /// Requested vector backing bytes for the kernel, excluding the existing
-    /// projection, output rows and allocator overhead. No adjacency is copied.
+    /// Peak vector backing bytes for the kernel, excluding the existing
+    /// projection, output rows and allocator overhead. Includes temporary
+    /// kernel indexes and normalized weights; PageRank records its reserved
+    /// capacities at the allocation peak.
     pub kernel_workspace_bytes: usize,
     /// The foundation schema, populated from actual completed kernel passes.
     /// Admission, projection and result-conversion work are not loop counters.
@@ -394,7 +396,7 @@ fn charge_runs<C>(len: usize, meter: &mut impl FnxMeter<C>) -> Result<(), FnxExe
 fn contributions(
     options: crate::PageRankOptions,
     ranks: &[f64],
-    sums: &[f64],
+    out_offsets: &[usize],
     contrib: &mut [f64],
     threads: usize,
 ) {
@@ -404,10 +406,13 @@ fn contributions(
             let push = options.alpha() * ranks[index];
             *slot = if options.weighted() {
                 push
-            } else if sums[index] > 0.0 {
-                push * (1.0 / sums[index])
             } else {
-                0.0
+                let degree = out_offsets[index + 1] - out_offsets[index];
+                if degree > 0 {
+                    push * (1.0 / degree as f64)
+                } else {
+                    0.0
+                }
             };
         }
     };
@@ -446,15 +451,15 @@ fn metered<C>(
 
 /// Preserve the pinned fnx scalar evaluation order exactly: ascending fixed-
 /// width vertex names, ascending targets, division before multiplication,
-/// dangling-mass redistribution, then an ordered L1 convergence test. Repeating
-/// a row's division avoids fnx's second O(m) normalized-adjacency allocation.
-/// All O(n)/O(m) walks checkpoint, including individual edges in a hub row.
+/// dangling-mass redistribution, then an ordered L1 convergence test. Weighted
+/// execution retains one normalized share per incoming arc; unweighted
+/// execution borrows CSR offsets instead of allocating per-vertex sums.
 fn pagerank<C>(
     graph: &SnapshotGraphView,
     options: crate::PageRankOptions,
     arcs: usize,
     meter: &mut impl FnxMeter<C>,
-) -> Result<(Vec<f64>, ComplexityWitness), FnxExecutionError<C>> {
+) -> Result<(Vec<f64>, ComplexityWitness, usize), FnxExecutionError<C>> {
     let n = graph.node_count();
     let mut witness = ComplexityWitness {
         algorithm: "pagerank_power_iteration".to_owned(),
@@ -464,9 +469,8 @@ fn pagerank<C>(
         queue_peak: 0,
     };
     if n == 0 {
-        return Ok((Vec::new(), witness));
+        return Ok((Vec::new(), witness, 0));
     }
-    let mut sums = reserve(n)?;
     let mut ranks = reserve(n)?;
     let mut next = reserve(n)?;
     // The pass gathers over the incoming face. A weighted arc's share is the
@@ -487,6 +491,25 @@ fn pagerank<C>(
         cursor = reserve(n)?;
         cursor.extend_from_slice(&in_offsets[..n]);
     }
+    // All backing stores coexist here. Derive the certificate from the
+    // actual reserved capacities, including the weighted transpose cursor
+    // that is dropped before iteration; a fixed "three vectors" model hid
+    // both O(n) scratch and the O(m) normalized shares.
+    let workspace_bytes = [
+        (ranks.capacity(), std::mem::size_of::<f64>()),
+        (next.capacity(), std::mem::size_of::<f64>()),
+        (contrib.capacity(), std::mem::size_of::<f64>()),
+        (dangling.capacity(), std::mem::size_of::<usize>()),
+        (shares.capacity(), std::mem::size_of::<f64>()),
+        (cursor.capacity(), std::mem::size_of::<usize>()),
+    ]
+    .into_iter()
+    .try_fold(0usize, |bytes, (capacity, width)| {
+        capacity
+            .checked_mul(width)
+            .and_then(|allocation| bytes.checked_add(allocation))
+            .ok_or(FnxExecutionError::SizeOverflow)
+    })?;
     let population = n as f64;
     // Every pass's row-and-arc walk spends one unit per row plus one per arc.
     let mut row_units = 0usize;
@@ -535,7 +558,6 @@ fn pagerank<C>(
         if sum == 0.0 {
             dangling.push(source);
         }
-        sums.push(sum);
         ranks.push(1.0 / population);
         next.push(0.0);
         contrib.push(0.0);
@@ -561,7 +583,13 @@ fn pagerank<C>(
         // The initial values are the gather's starting sums; the
         // contribution walk spends its unit per row first.
         charge_runs(n, meter)?;
-        contributions(options, &ranks, &sums, &mut contrib, threads);
+        contributions(
+            options,
+            &ranks,
+            graph.outgoing_offsets(),
+            &mut contrib,
+            threads,
+        );
         // The walk's units are one stream: a row's unit, then its arcs, row
         // after row, n + m in all. They are charged first, in runs of
         // FNX_METER_RUN across rows, so the meter sees exactly the calls a
@@ -603,7 +631,7 @@ fn pagerank<C>(
             .checked_add(arcs)
             .ok_or(FnxExecutionError::SizeOverflow)?;
         if delta < population * options.tolerance() {
-            return Ok((ranks, witness));
+            return Ok((ranks, witness, workspace_bytes));
         }
     }
     Err(FnxExecutionError::NotConverged {
@@ -615,7 +643,8 @@ fn pagerank<C>(
 impl FnxCallSpec {
     /// Execute a bound in-core call with cancellation inside every graph pass,
     /// not merely before/after an uninterruptible foundation call. Kernel
-    /// workspace is O(n); projection adjacency remains borrowed.
+    /// workspace depends on the kernel; weighted PageRank retains O(n+m)
+    /// scratch while borrowing the projection's adjacency.
     /// The callback may cancel but this synchronous API does not provide an
     /// asynchronous bulkhead, a deadline guarantee or external-memory spill.
     pub fn execute<C>(
@@ -691,7 +720,9 @@ impl FnxCallSpec {
         .ok_or(FnxExecutionError::SizeOverflow)?;
         admit("estimated work", estimated_work, limits.max_estimated_work)?;
         let word = std::mem::size_of::<usize>();
-        let kernel_workspace_bytes = match algorithm {
+        let mut kernel_workspace_bytes = match algorithm {
+            // Successful PageRank returns its measured allocation peak below.
+            FnxAlgorithm::PageRank(_) => 0,
             FnxAlgorithm::SingleSourceDijkstraPathLength(_) => {
                 crate::shortest_path::workspace_bytes::<C>(n)?
             }
@@ -703,7 +734,6 @@ impl FnxCallSpec {
             }
             _ => {
                 let bytes_per_vertex = match algorithm {
-                    FnxAlgorithm::PageRank(_) => 3 * std::mem::size_of::<f64>(),
                     FnxAlgorithm::SingleSourceShortestPathLength { .. } => {
                         word + std::mem::size_of::<Option<usize>>()
                     }
@@ -718,7 +748,9 @@ impl FnxCallSpec {
         };
         let output = match algorithm {
             FnxAlgorithm::PageRank(options) => {
-                let (scores, witness) = pagerank(graph, options, arcs, &mut checkpoint)?;
+                let (scores, witness, workspace_bytes) =
+                    pagerank(graph, options, arcs, &mut checkpoint)?;
+                kernel_workspace_bytes = workspace_bytes;
                 KernelOutput {
                     values: KernelValues::Scores(scores),
                     row_count: n,
@@ -1004,7 +1036,7 @@ mod tests {
             stop: None,
             seen: 0,
         };
-        let (scores, witness) = pagerank(&graph, options, m, &mut meter).unwrap();
+        let (scores, witness, _) = pagerank(&graph, options, m, &mut meter).unwrap();
         for score in &oracle.scores {
             let ordinal = graph.get_node_index(&score.node).unwrap();
             assert_eq!(scores[ordinal].to_bits(), score.score.to_bits());
@@ -1030,6 +1062,55 @@ mod tests {
             let result = pagerank(&graph, options, m, &mut refusing);
             assert!(matches!(result, Err(FnxExecutionError::Cancelled("stop"))));
             assert_eq!(refusing.seen, stop);
+        }
+    }
+
+    #[test]
+    fn contributions_borrow_irregular_degrees_with_scalar_bits_on_every_thread_count() {
+        // Thirty-one rows leave an uneven final chunk for every thread count
+        // from two through eight. Repeated offsets include dangling rows at
+        // the beginning, middle and end, with different degrees at chunk edges.
+        let degrees = [
+            0usize, 1, 3, 0, 17, 2, 0, 1, 9, 4, 0, 6, 1, 0, 11, 2, 0, 5, 2, 13, 0, 7, 1, 0, 3, 19,
+            0, 2, 1, 4, 0,
+        ];
+        let mut offsets = vec![0];
+        for degree in degrees {
+            offsets.push(offsets.last().copied().unwrap() + degree);
+        }
+        let ranks: Vec<f64> = (0..degrees.len())
+            .map(|at| (17 * at + 1) as f64 / ((at + 3) as f64 * 4096.0))
+            .collect();
+        // The incumbent retained these floating-point degree sums. Keep its
+        // reciprocal-then-multiply arithmetic independent of the CSR offsets.
+        let sums: Vec<f64> = degrees.iter().map(|&degree| degree as f64).collect();
+        for weighted in [false, true] {
+            let options = PageRankOptions::new(0.85, 100, 1e-12, weighted).unwrap();
+            let expected: Vec<f64> = ranks
+                .iter()
+                .zip(&sums)
+                .map(|(&rank, &sum)| {
+                    let push = options.alpha() * rank;
+                    if weighted {
+                        push
+                    } else if sum > 0.0 {
+                        push * (1.0 / sum)
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            for threads in 1..=8 {
+                let mut actual = vec![f64::NAN; ranks.len()];
+                contributions(options, &ranks, &offsets, &mut actual, threads);
+                for (row, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "row={row} weighted={weighted} threads={threads}",
+                    );
+                }
+            }
         }
     }
 
@@ -1133,7 +1214,7 @@ mod tests {
                         weighted.then_some(PROJECTED_WEIGHT_ATTRIBUTE),
                     );
                     assert!(oracle.converged);
-                    let (scores, witness) =
+                    let (scores, witness, _) =
                         pagerank(&graph, options, arcs, &mut || Ok::<(), Infallible>(())).unwrap();
                     for score in oracle.scores {
                         let ordinal = graph.get_node_index(&score.node).unwrap();
@@ -1210,7 +1291,87 @@ mod tests {
         );
         assert_eq!(
             result.certificate.kernel_workspace_bytes,
-            3 * 3 * std::mem::size_of::<f64>()
+            3 * (3 * std::mem::size_of::<f64>() + 2 * std::mem::size_of::<usize>())
+                + graph.incoming_face().1.len() * std::mem::size_of::<f64>()
         );
+    }
+
+    #[test]
+    fn pagerank_certifies_weighted_peak_scratch_and_unweighted_degree_borrowing() {
+        let limits = FnxExecutionLimits {
+            max_iterations: 1000,
+            max_result_rows: 3,
+            max_estimated_work: 100000,
+        };
+        // Isolates, a dangling destination, and a complete graph exercise
+        // zero-length shares, degree-zero handling, and a real transpose.
+        for mask in [0, 2, 511] {
+            let graph = projection(mask, Directedness::Directed);
+            let arcs = graph.incoming_face().1.len();
+            for weighted in [false, true] {
+                let result = FnxCallSpec::pagerank(
+                    PageRankOptions::new(0.85, 1000, 1e-12, weighted).unwrap(),
+                )
+                .execute(&graph, limits, || Ok::<(), Infallible>(()))
+                .unwrap();
+                let n = graph.node_count();
+                let retained = n * (3 * std::mem::size_of::<f64>() + std::mem::size_of::<usize>());
+                let weighted_peak = if weighted {
+                    arcs * std::mem::size_of::<f64>() + n * std::mem::size_of::<usize>()
+                } else {
+                    0
+                };
+                assert_eq!(
+                    result.certificate.kernel_workspace_bytes,
+                    retained + weighted_peak,
+                    "mask={mask} weighted={weighted}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_pagerank_certifies_zero_kernel_workspace() {
+        let graph = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([2; 32]),
+                as_of: CommitSeq(3),
+            },
+            &[],
+            &[],
+            ProjectionSpec {
+                directedness: Directedness::Directed,
+                parallel_edges: ParallelEdgePolicy::Sum,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: 0,
+                max_input_edges: 0,
+                max_adjacency_entries: 0,
+                max_workspace_bytes: 1024,
+            },
+        )
+        .unwrap();
+        for weighted in [false, true] {
+            let result =
+                FnxCallSpec::pagerank(PageRankOptions::new(0.85, 1, 1e-12, weighted).unwrap())
+                    .execute(
+                        &graph,
+                        FnxExecutionLimits {
+                            max_iterations: 1,
+                            max_result_rows: 0,
+                            max_estimated_work: 0,
+                        },
+                        || Ok::<(), Infallible>(()),
+                    )
+                    .unwrap();
+            assert!(result.rows.is_empty());
+            let certificate = result.certificate;
+            assert_eq!(certificate.vertices, 0);
+            assert_eq!(certificate.edges, 0);
+            assert_eq!(certificate.kernel_workspace_bytes, 0);
+            assert_eq!(certificate.witness.nodes_touched, 0);
+            assert_eq!(certificate.witness.edges_scanned, 0);
+        }
     }
 }
