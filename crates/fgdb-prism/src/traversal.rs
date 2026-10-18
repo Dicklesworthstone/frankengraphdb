@@ -3,7 +3,9 @@
 //! weights that their registered semantics ignore.
 
 use crate::execute::{ComplexityWitness, KernelOutput, KernelValues, admit, reserve};
-use crate::{FnxAlgorithm, FnxExecutionError, GraphView, SnapshotGraphView};
+use crate::{
+    FNX_METER_RUN, FnxAlgorithm, FnxExecutionError, FnxMeter, GraphView, SnapshotGraphView,
+};
 
 fn witness(algorithm: &str) -> ComplexityWitness {
     ComplexityWitness {
@@ -25,18 +27,20 @@ pub(crate) fn run<C>(
     graph: &SnapshotGraphView,
     algorithm: FnxAlgorithm,
     row_limit: usize,
-    checkpoint: &mut impl FnMut() -> Result<(), C>,
+    checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<KernelOutput, FnxExecutionError<C>> {
     match algorithm {
         FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff } => {
             let source = graph
                 .vertex_ordinal(source)
                 .ok_or(FnxExecutionError::UnknownSource(source))?;
-            bfs(graph, source, cutoff, row_limit, checkpoint)
+            bfs(graph, source, cutoff, row_limit, &mut || checkpoint.unit())
         }
         FnxAlgorithm::ConnectedComponents => components(graph, false, checkpoint),
         FnxAlgorithm::WeaklyConnectedComponents => components(graph, true, checkpoint),
-        FnxAlgorithm::StronglyConnectedComponents => strongly_connected(graph, checkpoint),
+        FnxAlgorithm::StronglyConnectedComponents => {
+            strongly_connected(graph, &mut || checkpoint.unit())
+        }
         FnxAlgorithm::PageRank(_)
         | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
         | FnxAlgorithm::Triangles
@@ -105,14 +109,20 @@ fn bfs<C>(
 fn components<C>(
     graph: &SnapshotGraphView,
     weak: bool,
-    checkpoint: &mut impl FnMut() -> Result<(), C>,
+    checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<KernelOutput, FnxExecutionError<C>> {
     let n = graph.node_count();
     let mut labels = reserve(n)?;
     let mut queue = reserve(n)?;
-    for _ in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        labels.push(usize::MAX);
+    while labels.len() < n {
+        let run = FNX_METER_RUN.min(n - labels.len());
+        if run == 1 {
+            checkpoint.unit()
+        } else {
+            checkpoint.units(run)
+        }
+        .map_err(FnxExecutionError::Cancelled)?;
+        labels.resize(labels.len() + run, usize::MAX);
     }
     let mut witness = witness(if weak {
         "weakly_connected_components_bfs"
@@ -122,7 +132,7 @@ fn components<C>(
     // Roots are visited in VId order, so the first unseen member is already
     // the minimum VId in its component. No post-hoc hash-map relabel is needed.
     for root in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         if labels[root] != usize::MAX {
             continue;
         }
@@ -132,7 +142,7 @@ fn components<C>(
         witness.queue_peak = witness.queue_peak.max(1);
         let mut head = 0;
         while head < queue.len() {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
             let vertex = queue[head];
             head += 1;
             increment(&mut witness.nodes_touched)?;
@@ -143,13 +153,23 @@ fn components<C>(
                     graph.in_neighbors_indices(vertex)
                 })
                 .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-                for &neighbor in neighbors {
-                    checkpoint().map_err(FnxExecutionError::Cancelled)?;
-                    increment(&mut witness.edges_scanned)?;
-                    if labels[neighbor] == usize::MAX {
-                        labels[neighbor] = root;
-                        queue.push(neighbor);
-                        witness.queue_peak = witness.queue_peak.max(queue.len() - head);
+                // Component output rows were admitted before execution, so no
+                // row-limit refusal can interrupt these arcs. Keep their order
+                // and exact work count, with at most 64 arcs between controls.
+                for run in neighbors.chunks(FNX_METER_RUN) {
+                    if run.len() == 1 {
+                        checkpoint.unit()
+                    } else {
+                        checkpoint.units(run.len())
+                    }
+                    .map_err(FnxExecutionError::Cancelled)?;
+                    for &neighbor in run {
+                        increment(&mut witness.edges_scanned)?;
+                        if labels[neighbor] == usize::MAX {
+                            labels[neighbor] = root;
+                            queue.push(neighbor);
+                            witness.queue_peak = witness.queue_peak.max(queue.len() - head);
+                        }
                     }
                 }
             }

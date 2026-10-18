@@ -785,9 +785,7 @@ impl FnxCallSpec {
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::run(graph, algorithm, &mut || checkpoint.unit())?
             }
-            _ => crate::traversal::run(graph, algorithm, limits.max_result_rows, &mut || {
-                checkpoint.unit()
-            })?,
+            _ => crate::traversal::run(graph, algorithm, limits.max_result_rows, &mut checkpoint)?,
         };
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let mut rows = reserve(output.row_count)?;

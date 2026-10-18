@@ -122,7 +122,7 @@ fn sequential_csr_scans_preserve_seek_history_properties_and_unit_fuel() {
         .iter()
         .map(|block| {
             Some(BlockProps {
-                locators: (1..=block.len() as u32).collect(),
+                locators: (1..=u8::try_from(block.len()).unwrap()).collect(),
                 rows: block
                     .iter()
                     .map(|edge| {

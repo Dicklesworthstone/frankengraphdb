@@ -456,7 +456,10 @@ fn kernel_runs_admit_and_refuse_at_the_per_unit_threshold() {
         let cx = c.query();
         let db = database(&c.commit()).await;
         let token = issuer().issue_at(&open(), 100).unwrap();
-        for (text, direction) in CALLS {
+        for (text, direction) in CALLS.into_iter().chain([(
+            "CALL fnx.weakly_connected_components() YIELD vertex,component",
+            Directedness::Directed,
+        )]) {
             let options = options(direction);
             let threshold = |runs: bool| {
                 super::super::WORK_RUNS.with(|cell| cell.set(runs));

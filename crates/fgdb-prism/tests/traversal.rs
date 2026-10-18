@@ -80,6 +80,153 @@ fn oracle_labels(components: Vec<Vec<String>>, graph: &SnapshotGraphView) -> BTr
     result
 }
 
+#[derive(Default)]
+struct ComponentMeter {
+    observed: usize,
+    calls: usize,
+    largest_run: usize,
+    full_runs: usize,
+    stop: Option<usize>,
+    stopped: bool,
+}
+
+impl FnxMeter<usize> for &mut ComponentMeter {
+    fn unit(&mut self) -> Result<(), usize> {
+        self.units(1)
+    }
+
+    fn units(&mut self, n: usize) -> Result<(), usize> {
+        assert!(!self.stopped, "no meter call may follow a refusal");
+        assert!((1..=FNX_METER_RUN).contains(&n));
+        self.calls += 1;
+        self.largest_run = self.largest_run.max(n);
+        self.full_runs += usize::from(n == FNX_METER_RUN);
+        if let Some(stop) = self.stop {
+            if self.observed + n >= stop {
+                self.observed = stop;
+                self.stopped = true;
+                return Err(stop);
+            }
+        }
+        self.observed += n;
+        Ok(())
+    }
+}
+
+#[test]
+fn component_runs_keep_every_work_refusal_and_witness_on_hubs() {
+    // Two disconnected hubs cross the run boundary on both directed faces.
+    // Full-width IDs, loops, duplicate edges and an isolate retain their
+    // projection and canonical-label semantics under the same execution.
+    let width = 2 * FNX_METER_RUN + 3;
+    let mut vertices: Vec<_> = (0..2 * width)
+        .map(|index| VId((index as u128) << 64 | 17))
+        .collect();
+    vertices.push(VId(u128::MAX));
+    let mut edges = Vec::new();
+    for root in [0, width] {
+        for offset in 1..width {
+            let (source, target) = if offset % 2 == 0 {
+                (root, root + offset)
+            } else {
+                (root + offset, root)
+            };
+            edges.push(ProjectionEdge {
+                eid: EId(edges.len() as u128),
+                source: vertices[source],
+                target: vertices[target],
+                weight: -1.0,
+            });
+        }
+        edges.push(ProjectionEdge {
+            eid: EId(edges.len() as u128),
+            source: vertices[root],
+            target: vertices[root],
+            weight: -1.0,
+        });
+    }
+    edges.push(ProjectionEdge {
+        eid: EId(edges.len() as u128),
+        source: edges[0].source,
+        target: edges[0].target,
+        weight: -1.0,
+    });
+    let expected: BTreeMap<_, _> = vertices
+        .iter()
+        .enumerate()
+        .map(|(index, &vertex)| {
+            let component = if index < 2 * width {
+                vertices[index / width * width]
+            } else {
+                vertex
+            };
+            (vertex, component)
+        })
+        .collect();
+    for (call, direction) in [
+        (
+            FnxCallSpec::connected_components(),
+            Directedness::Undirected,
+        ),
+        (
+            FnxCallSpec::weakly_connected_components(),
+            Directedness::Directed,
+        ),
+        (
+            FnxCallSpec::weakly_connected_components(),
+            Directedness::Reversed,
+        ),
+    ] {
+        let view = graph(&vertices, &edges, direction);
+        let mut unit_count = 0;
+        let unit_result = call
+            .execute(&view, limits(), || {
+                unit_count += 1;
+                Ok::<(), usize>(())
+            })
+            .unwrap();
+        let mut meter = ComponentMeter::default();
+        let run_result = call.execute(&view, limits(), &mut meter).unwrap();
+        // Equality covers every row, result digest, certificate and witness.
+        assert_eq!(run_result, unit_result, "{direction:?}");
+        assert_eq!(meter.observed, unit_count);
+        assert!(meter.calls < unit_count);
+        assert_eq!(meter.largest_run, FNX_METER_RUN);
+        assert!(meter.full_runs > vertices.len() / FNX_METER_RUN);
+        let arcs: usize = (0..vertices.len())
+            .map(|vertex| view.neighbors_indices(vertex).unwrap().len())
+            .sum();
+        let visits = arcs * if view.is_directed() { 2 } else { 1 };
+        let witness = &run_result.certificate.witness;
+        assert_eq!(witness.nodes_touched, vertices.len());
+        assert_eq!(witness.edges_scanned, visits);
+        assert_eq!(witness.queue_peak, width - 1);
+        // Admission degree pass, labels, roots, reached vertices and output
+        // rows each charge n units, plus arcs and three call boundaries.
+        assert_eq!(unit_count, 5 * vertices.len() + visits + 3);
+        assert_eq!(labels(run_result), expected);
+
+        for stop in 1..=unit_count {
+            let mut observed = 0;
+            let unit_refusal = call.execute(&view, limits(), || {
+                assert!(observed < stop, "no callback may follow a refusal");
+                observed += 1;
+                if observed == stop { Err(stop) } else { Ok(()) }
+            });
+            let mut meter = ComponentMeter {
+                stop: Some(stop),
+                ..ComponentMeter::default()
+            };
+            let run_refusal = call.execute(&view, limits(), &mut meter);
+            assert!(matches!(unit_refusal, Err(FnxExecutionError::Cancelled(at)) if at == stop));
+            assert!(matches!(run_refusal, Err(FnxExecutionError::Cancelled(at)) if at == stop));
+            assert_eq!(observed, stop);
+            assert_eq!(meter.observed, stop);
+            assert!(meter.stopped);
+        }
+    }
+}
+
 #[test]
 fn every_three_vertex_projection_matches_pinned_fnx_traversals() {
     let vertices = [VId(0), VId(17), VId(u128::MAX)];
