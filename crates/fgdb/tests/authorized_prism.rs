@@ -1042,6 +1042,117 @@ fn threshold(high: u64, mut admits: impl FnMut(u64) -> bool) -> u64 {
     low
 }
 
+#[test]
+fn prepared_pagerank_preserves_crossed_signed_and_native_work_refusals() {
+    use fgdb_gql::{
+        GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GqlQueryPolicy, GraphSymbolKind,
+    };
+
+    let ((), report) = run_async_under_lab(0x5ec0_3102, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit(), true).await;
+        let issuer = authority(312, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        const CEILING: u64 = 4096;
+        let run = |signed_work, native_work| -> Failure {
+            let result = (|| {
+                let token = token.attenuate(Restriction::MaxWork(signed_work)).unwrap();
+                let mut session = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        |_: GraphSymbolKind, _: &str| None,
+                        GqlQueryPolicy::new(100, 100, native_work, 10_000),
+                        || 100,
+                    )
+                    .map_err(FnxReadError::Cancelled)?;
+                let prepared = session.prepare_fnx(
+                    &cx,
+                    "CALL fnx.pagerank(0.85,1,1e-12,true) YIELD vertex,score",
+                    &FnxParameters::new(),
+                    options(Directedness::Directed),
+                )?;
+                session.execute_fnx(&cx, &prepared)
+            })();
+            result.unwrap_err()
+        };
+        let completed_iteration = |error: &Failure| {
+            matches!(
+                error,
+                FnxReadError::Execution(FnxExecutionError::NotConverged {
+                    max_iterations: 1,
+                    witness,
+                }) if witness.nodes_touched == 4 && witness.edges_scanned == 4
+            )
+        };
+        let native_refusal = |error: Failure, limit| {
+            let FnxReadError::Cancelled(QueryError::Pattern(GqlQueryError::Evaluator(observed))) =
+                error
+            else {
+                panic!("expected native work refusal at {limit}, got {error:?}");
+            };
+            assert_eq!(
+                observed,
+                GlaLimitExceeded {
+                    dimension: GlaLimitDimension::WorkUnits,
+                    limit,
+                    observed: u128::from(limit) + 1,
+                }
+            );
+        };
+        // Observe each meter's exact total through the public prepared call.
+        // The witness proves that these thresholds pass admission and reach
+        // the end of the first iteration over four vertices and four arcs.
+        let signed_total = threshold(CEILING, |work| {
+            let error = run(work, CEILING);
+            if completed_iteration(&error) {
+                true
+            } else {
+                authorization(error, Error::LimitExceeded(LimitDimension::Work));
+                false
+            }
+        });
+        let native_total = threshold(CEILING, |work| {
+            let error = run(CEILING, work);
+            if completed_iteration(&error) {
+                true
+            } else {
+                native_refusal(error, work);
+                false
+            }
+        });
+
+        // NotConverged immediately follows the final four-unit delta run.
+        // The session then charges three signed-only checkpoints: its live
+        // post-action check and the two delivery checks for the typed error.
+        let signed_entry = signed_total - 3 - 4;
+        let native_entry = native_total - 4;
+        assert!(
+            native_entry > (4 + 4) * (1 + 1),
+            "past estimated-work admission"
+        );
+        let native_limit = native_entry + 1;
+        native_refusal(run(CEILING, native_limit), native_limit);
+        authorization(
+            run(signed_entry + 3, CEILING),
+            Error::LimitExceeded(LimitDimension::Work),
+        );
+        // Native refuses at delta unit two; signed would refuse at four.
+        // Its remaining third unit pays the session's post-error live check.
+        // Charging the whole signed run before native work gets this wrong.
+        native_refusal(run(signed_entry + 3, native_limit), native_limit);
+        // When both first refuse at unit two, the signed charge comes first.
+        authorization(
+            run(signed_entry + 1, native_limit),
+            Error::LimitExceeded(LimitDimension::Work),
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// FG-INV-20 noninterference over analytics (fgdb-2qm4o). The physically
 /// masked database is the oracle for the rows AND for the refusal point of
 /// every limit the caller controls: the signed MaxWork/MaxNodes/MaxRows a
