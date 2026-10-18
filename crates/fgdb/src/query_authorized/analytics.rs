@@ -623,6 +623,9 @@ where
     Clock: FnMut() -> u64,
     O: Observe,
 {
+    fn poll(&mut self) -> Result<(), QueryError> {
+        self.execution.poll()
+    }
     fn unit(&mut self) -> Result<(), QueryError> {
         self.execution.work_units(1)?;
         self.observe.work(1)

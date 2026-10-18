@@ -91,6 +91,11 @@ struct ComponentMeter {
 }
 
 impl FnxMeter<usize> for &mut ComponentMeter {
+    fn poll(&mut self) -> Result<(), usize> {
+        assert!(!self.stopped, "no meter call may follow a refusal");
+        Ok(())
+    }
+
     fn unit(&mut self) -> Result<(), usize> {
         self.units(1)
     }

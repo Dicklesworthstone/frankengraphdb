@@ -276,12 +276,17 @@ impl KernelValues {
 }
 
 /// A kernel's cancellable work meter. `units(n)` spends n units at once and
-/// by default is n calls of `unit`, so a plain closure meters exactly as one
-/// checkpoint per unit. A host may charge a run in one call, with the same
-/// unit total and refusal ordinal. A kernel asks for at most
-/// [`FNX_METER_RUN`] units at a time, so cancellation is observed at least
-/// that often.
+/// by default is n calls of `unit`. A host may charge a run in one call,
+/// with the same unit total and refusal ordinal. A kernel asks for at most
+/// [`FNX_METER_RUN`] units at a time.
+///
+/// `poll` checks live cancellation without charging work. Precharged phases
+/// use it during their actual arithmetic, including inside a single hub row.
+/// Hosts must keep their resource counters in `unit`/`units`, not in `poll`.
+/// A plain closure is a cancellation checkpoint: it is called for both work
+/// units and live polls, so its invocation count is not a logical work count.
 pub trait FnxMeter<C> {
+    fn poll(&mut self) -> Result<(), C>;
     fn unit(&mut self) -> Result<(), C>;
     fn units(&mut self, n: usize) -> Result<(), C> {
         for _ in 0..n {
@@ -295,6 +300,9 @@ pub trait FnxMeter<C> {
 pub const FNX_METER_RUN: usize = 64;
 
 impl<C, F: FnMut() -> Result<(), C>> FnxMeter<C> for F {
+    fn poll(&mut self) -> Result<(), C> {
+        self()
+    }
     fn unit(&mut self) -> Result<(), C> {
         self()
     }
@@ -315,66 +323,176 @@ fn gather_threads(arcs: usize) -> usize {
         .min(MAX_GATHER_THREADS)
 }
 
-/// One PageRank pass as a gather: each target starts at the pass's initial
-/// value and adds what every arc into it carries, its sources ascending. That is the order a source-ascending
-/// scatter adds them in, and each arc's value is the scatter's `push * share`
-/// (`contrib[source]` alone when unweighted, `contrib[source] * shares[arc]`
-/// when weighted), so every sum is the scatter's floating-point sequence.
-/// Several threads each own a contiguous range of targets with about equal
-/// incoming arcs; the result is bit-identical on every thread count.
-fn gather_pass(
-    offsets: &[usize],
-    sources: &[usize],
-    contrib: &[f64],
-    shares: Option<&[f64]>,
-    initial: f64,
-    next: &mut [f64],
+/// Visit disjoint row ranges while the parent alone owns the host meter.
+/// Workers poll a shared stop bit; they never borrow or send the host's
+/// capability, meter, cancellation value or resource counters. The parent
+/// computes the final range and keeps polling if workers outlast it (as on
+/// a hub assigned to an earlier range). A refusal signals every worker
+/// before the scope joins, so joining cannot hide another whole graph pass.
+fn live_parallel_rows<C>(
+    rows: &mut [f64],
     threads: usize,
-) {
-    let n = next.len();
-    let arcs = sources.len();
-    let gather = |low: usize, rows: &mut [f64]| {
+    boundary: impl Fn(usize) -> usize,
+    meter: &mut impl FnxMeter<C>,
+    visit: impl Fn(usize, &mut [f64], &mut dyn FnMut() -> bool) + Sync,
+) -> Result<(), FnxExecutionError<C>> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct StopOnDrop<'a>(&'a AtomicBool);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    struct Running<'a>(&'a AtomicUsize);
+    impl Drop for Running<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Release);
+        }
+    }
+
+    meter.poll().map_err(FnxExecutionError::Cancelled)?;
+    let stopped = AtomicBool::new(false);
+    let running = AtomicUsize::new(0);
+    let mut cancelled = None;
+    let mut parent_poll = || {
+        if cancelled.is_some() {
+            return false;
+        }
+        if let Err(error) = meter.poll() {
+            cancelled = Some(error);
+            stopped.store(true, Ordering::Release);
+            return false;
+        }
+        true
+    };
+    if threads <= 1 {
+        visit(0, rows, &mut parent_poll);
+        parent_poll();
+    } else {
+        std::thread::scope(|scope| {
+            // Also stops workers before unwinding through the scope if the
+            // parent host or arithmetic panics. Running drains on panic too.
+            let _stop = StopOnDrop(&stopped);
+            let mut rest = rows;
+            let mut low = 0;
+            for chunk in 1..threads {
+                let high = boundary(chunk).max(low);
+                let (part, tail) = rest.split_at_mut(high - low);
+                if !part.is_empty() {
+                    running.fetch_add(1, Ordering::Relaxed);
+                    let guard = Running(&running);
+                    let visit = &visit;
+                    let stopped = &stopped;
+                    let start = low;
+                    scope.spawn(move || {
+                        let _running = guard;
+                        visit(start, part, &mut || !stopped.load(Ordering::Acquire));
+                    });
+                }
+                rest = tail;
+                low = high;
+            }
+            visit(low, rest, &mut parent_poll);
+            while running.load(Ordering::Acquire) != 0 {
+                if !parent_poll() {
+                    return;
+                }
+                std::thread::yield_now();
+            }
+            parent_poll();
+        });
+    }
+    match cancelled {
+        Some(error) => Err(FnxExecutionError::Cancelled(error)),
+        None => Ok(()),
+    }
+}
+
+/// Bound actual arithmetic independently of its already charged work. A run
+/// spans rows so short rows do not each pay for a live host checkpoint.
+struct LiveRun {
+    left: usize,
+}
+impl LiveRun {
+    fn new() -> Self {
+        Self { left: 0 }
+    }
+    fn take(&mut self, count: usize, poll: &mut dyn FnMut() -> bool) -> Option<usize> {
+        if self.left == 0 {
+            if !poll() {
+                return None;
+            }
+            self.left = FNX_METER_RUN;
+        }
+        let taken = count.min(self.left);
+        self.left -= taken;
+        Some(taken)
+    }
+}
+
+/// The gather keeps one scalar accumulator per target across live-check
+/// boundaries: no partial sums, regrouping or reordered floating addition.
+struct Gather<'a> {
+    offsets: &'a [usize],
+    sources: &'a [usize],
+    contrib: &'a [f64],
+    shares: Option<&'a [f64]>,
+    initial: f64,
+}
+impl Gather<'_> {
+    fn rows(&self, low: usize, rows: &mut [f64], poll: &mut dyn FnMut() -> bool) {
+        let mut run = LiveRun::new();
         for (at, slot) in rows.iter_mut().enumerate() {
+            if run.take(1, poll).is_none() {
+                return;
+            }
             let target = low + at;
-            let mut sum = initial;
-            let (start, end) = (offsets[target], offsets[target + 1]);
-            match shares {
-                None => {
-                    for &source in &sources[start..end] {
-                        sum += contrib[source];
+            let mut sum = self.initial;
+            let (mut start, end) = (self.offsets[target], self.offsets[target + 1]);
+            while start < end {
+                let Some(taken) = run.take(end - start, poll) else {
+                    return;
+                };
+                let high = start + taken;
+                match self.shares {
+                    None => {
+                        for &source in &self.sources[start..high] {
+                            sum += self.contrib[source];
+                        }
+                    }
+                    Some(shares) => {
+                        for (&source, &share) in
+                            self.sources[start..high].iter().zip(&shares[start..high])
+                        {
+                            sum += self.contrib[source] * share;
+                        }
                     }
                 }
-                Some(shares) => {
-                    for arc in start..end {
-                        sum += contrib[sources[arc]] * shares[arc];
-                    }
-                }
+                start = high;
             }
             *slot = sum;
         }
-    };
-    if threads <= 1 {
-        gather(0, next);
-        return;
     }
-    std::thread::scope(|scope| {
-        let mut rest = next;
-        let mut low = 0;
-        for chunk in 1..=threads {
-            let high = if chunk == threads {
-                n
-            } else {
-                offsets[..n]
-                    .partition_point(|&offset| offset < chunk * arcs / threads)
-                    .max(low)
-            };
-            let (rows, tail) = rest.split_at_mut(high - low);
-            let start = low;
-            scope.spawn(move || gather(start, rows));
-            rest = tail;
-            low = high;
-        }
-    });
+
+    /// Each target receives sources ascending, exactly as the pinned scalar
+    /// scatter. Disjoint ranges need no reduction or synchronization of sums.
+    fn pass<C>(
+        &self,
+        next: &mut [f64],
+        threads: usize,
+        meter: &mut impl FnxMeter<C>,
+    ) -> Result<(), FnxExecutionError<C>> {
+        let n = next.len();
+        let arcs = self.sources.len();
+        live_parallel_rows(
+            next,
+            threads,
+            |chunk| self.offsets[..n].partition_point(|&offset| offset < chunk * arcs / threads),
+            meter,
+            |low, rows, poll| self.rows(low, rows, poll),
+        )
+    }
 }
 
 /// Spend `len` units in runs of FNX_METER_RUN: the calls `metered` makes for
@@ -394,40 +512,60 @@ fn charge_runs<C>(len: usize, meter: &mut impl FnxMeter<C>) -> Result<(), FnxExe
 /// Each source's per-arc value for this pass: the scatter's push * share,
 /// push alpha times rank, share 1 / sum unweighted (the weighted share is per
 /// arc). Independent per source, so several threads give identical bits.
-fn contributions(
+fn contributions<C>(
     options: crate::PageRankOptions,
     ranks: &[f64],
     out_offsets: &[usize],
     contrib: &mut [f64],
     threads: usize,
-) {
-    let fill = |low: usize, rows: &mut [f64]| {
-        for (at, slot) in rows.iter_mut().enumerate() {
-            let index = low + at;
-            let push = options.alpha() * ranks[index];
-            *slot = if options.weighted() {
-                push
-            } else {
-                let degree = out_offsets[index + 1] - out_offsets[index];
-                if degree > 0 {
-                    push * (1.0 / degree as f64)
-                } else {
-                    0.0
-                }
-            };
-        }
-    };
+    meter: &mut impl FnxMeter<C>,
+) -> Result<(), FnxExecutionError<C>> {
     let n = contrib.len();
-    if threads <= 1 {
-        fill(0, contrib);
-        return;
-    }
-    let chunk = n.div_ceil(threads);
-    std::thread::scope(|scope| {
-        for (at, rows) in contrib.chunks_mut(chunk.max(1)).enumerate() {
-            scope.spawn(move || fill(at * chunk, rows));
+    let chunk = n.div_ceil(threads.max(1));
+    live_parallel_rows(
+        contrib,
+        threads,
+        |part| n.min(part * chunk),
+        meter,
+        |low, rows, poll| {
+            for (run, slots) in rows.chunks_mut(FNX_METER_RUN).enumerate() {
+                if !poll() {
+                    return;
+                }
+                for (at, slot) in slots.iter_mut().enumerate() {
+                    let index = low + run * FNX_METER_RUN + at;
+                    let push = options.alpha() * ranks[index];
+                    *slot = if options.weighted() {
+                        push
+                    } else {
+                        let degree = out_offsets[index + 1] - out_offsets[index];
+                        if degree > 0 {
+                            push * (1.0 / degree as f64)
+                        } else {
+                            0.0
+                        }
+                    };
+                }
+            }
+        },
+    )
+}
+
+/// Dangling mass is a scalar reduction in ascending source order. Even an
+/// all-isolate graph remains interruptible after precharging its row walk.
+fn dangling_mass<C>(
+    dangling: &[usize],
+    ranks: &[f64],
+    meter: &mut impl FnxMeter<C>,
+) -> Result<f64, FnxExecutionError<C>> {
+    let mut sum = 0.0;
+    for run in dangling.chunks(FNX_METER_RUN) {
+        meter.poll().map_err(FnxExecutionError::Cancelled)?;
+        for &source in run {
+            sum += ranks[source];
         }
-    });
+    }
+    Ok(sum)
 }
 
 /// `units` over `0..len` in runs, then `visit` each index of the run.
@@ -488,9 +626,16 @@ fn pagerank<C>(
     let mut cursor: Vec<usize> = Vec::new();
     if options.weighted() && face_ok {
         shares = reserve(in_sources.len())?;
-        shares.resize(in_sources.len(), 0.0);
+        while shares.len() < in_sources.len() {
+            meter.poll().map_err(FnxExecutionError::Cancelled)?;
+            let run = FNX_METER_RUN.min(in_sources.len() - shares.len());
+            shares.resize(shares.len() + run, 0.0);
+        }
         cursor = reserve(n)?;
-        cursor.extend_from_slice(&in_offsets[..n]);
+        for run in in_offsets[..n].chunks(FNX_METER_RUN) {
+            meter.poll().map_err(FnxExecutionError::Cancelled)?;
+            cursor.extend_from_slice(run);
+        }
     }
     // All backing stores coexist here. Derive the certificate from the
     // actual reserved capacities, including the weighted transpose cursor
@@ -542,6 +687,9 @@ fn pagerank<C>(
         }
         if options.weighted() && face_ok {
             for (at, &target) in targets.iter().enumerate() {
+                if at % FNX_METER_RUN == 0 {
+                    meter.poll().map_err(FnxExecutionError::Cancelled)?;
+                }
                 let share = if sum > 0.0 {
                     weights[at] / sum
                 } else {
@@ -576,10 +724,7 @@ fn pagerank<C>(
         // adds exactly the dangling rows' ranks, ascending, as a full walk
         // that skips the others does.
         charge_runs(n, meter)?;
-        let mut dangling_mass = 0.0;
-        for &source in &dangling {
-            dangling_mass += ranks[source];
-        }
+        let dangling_mass = dangling_mass(&dangling, &ranks, meter)?;
         let initial = base + options.alpha() * dangling_mass / population;
         // The initial values are the gather's starting sums; the
         // contribution walk spends its unit per row first.
@@ -590,28 +735,28 @@ fn pagerank<C>(
             graph.outgoing_offsets(),
             &mut contrib,
             threads,
-        );
+            meter,
+        )?;
         // The walk's units are one stream: a row's unit, then its arcs, row
         // after row, n + m in all. They are charged first, in runs of
         // FNX_METER_RUN across rows, so the meter sees exactly the calls a
         // row-at-a-time walk makes and a refusal stops before any of this
-        // pass's arithmetic; the gather then needs no meter and may run on
-        // several threads.
+        // pass's arithmetic. The gather's separate live polls charge no
+        // units; only the parent touches the host meter when using workers.
         let mut unpaid = row_units;
         while unpaid > 0 {
             let run = FNX_METER_RUN.min(unpaid);
             meter.units(run).map_err(FnxExecutionError::Cancelled)?;
             unpaid -= run;
         }
-        gather_pass(
-            in_offsets,
-            in_sources,
-            &contrib,
-            options.weighted().then_some(shares.as_slice()),
+        Gather {
+            offsets: in_offsets,
+            sources: in_sources,
+            contrib: &contrib,
+            shares: options.weighted().then_some(shares.as_slice()),
             initial,
-            &mut next,
-            threads,
-        );
+        }
+        .pass(&mut next, threads, meter)?;
         let mut delta = 0.0;
         metered(n, meter, |index| {
             if !next[index].is_finite() || next[index] < 0.0 {
@@ -957,9 +1102,14 @@ mod tests {
         calls: Vec<usize>,
         stop: Option<usize>,
         seen: usize,
+        polls: usize,
     }
 
     impl FnxMeter<&'static str> for Recording {
+        fn poll(&mut self) -> Result<(), &'static str> {
+            self.polls += 1;
+            Ok(())
+        }
         fn unit(&mut self) -> Result<(), &'static str> {
             self.units(1)
         }
@@ -976,12 +1126,231 @@ mod tests {
         }
     }
 
+    /// Arithmetic helpers are already charged. Their only legal host call
+    /// is a live poll, and cancellation is independent of the work counter.
+    struct LiveOnly {
+        polls: usize,
+        stop: Option<usize>,
+    }
+    impl FnxMeter<&'static str> for LiveOnly {
+        fn poll(&mut self) -> Result<(), &'static str> {
+            self.polls += 1;
+            if self.stop == Some(self.polls) {
+                Err("live cancellation")
+            } else {
+                Ok(())
+            }
+        }
+        fn unit(&mut self) -> Result<(), &'static str> {
+            panic!("already charged arithmetic must not charge work again")
+        }
+    }
+
+    #[test]
+    fn live_cancellation_interrupts_contribution_arithmetic_after_a_bounded_prefix() {
+        let n = 4 * FNX_METER_RUN + 1;
+        let ranks: Vec<f64> = (0..n).map(|row| (row + 1) as f64 / 1024.0).collect();
+        let offsets: Vec<usize> = (0..=n).map(|row| 3 * row).collect();
+        for weighted in [false, true] {
+            let mut values = vec![f64::NAN; n];
+            let mut meter = LiveOnly {
+                polls: 0,
+                stop: Some(4),
+            };
+            let result = contributions(
+                PageRankOptions::new(0.85, 100, 1e-12, weighted).unwrap(),
+                &ranks,
+                &offsets,
+                &mut values,
+                1,
+                &mut meter,
+            );
+            assert!(matches!(
+                result,
+                Err(FnxExecutionError::Cancelled("live cancellation"))
+            ));
+            assert_eq!(meter.polls, 4, "no host call follows cancellation");
+            for row in 0..2 * FNX_METER_RUN {
+                let push = 0.85 * ranks[row];
+                let expected = if weighted { push } else { push * (1.0 / 3.0) };
+                assert_eq!(values[row].to_bits(), expected.to_bits());
+            }
+            assert!(
+                values[2 * FNX_METER_RUN..]
+                    .iter()
+                    .all(|value| value.is_nan())
+            );
+        }
+    }
+
+    #[test]
+    fn live_cancellation_interrupts_a_single_incoming_hub_without_publishing_it() {
+        let hub = 4 * FNX_METER_RUN;
+        let offsets = [0, 1, hub + 1, hub + 2];
+        let sources = vec![0; hub + 2];
+        let shares = vec![0.5; hub + 2];
+        for weighted in [false, true] {
+            let mut values = vec![f64::NAN; 3];
+            let mut meter = LiveOnly {
+                polls: 0,
+                stop: Some(3),
+            };
+            let result = Gather {
+                offsets: &offsets,
+                sources: &sources,
+                contrib: &[2.0],
+                shares: weighted.then_some(shares.as_slice()),
+                initial: 0.25,
+            }
+            .pass(&mut values, 1, &mut meter);
+            assert!(matches!(
+                result,
+                Err(FnxExecutionError::Cancelled("live cancellation"))
+            ));
+            assert_eq!(meter.polls, 3);
+            assert_eq!(values[0], if weighted { 1.25 } else { 2.25 });
+            assert!(
+                values[1].is_nan(),
+                "the interrupted hub has no complete value"
+            );
+            assert!(values[2].is_nan(), "later rows remain untouched");
+        }
+    }
+
+    #[test]
+    fn dangling_arithmetic_checks_live_cancellation_without_recharging_rows() {
+        let n = 3 * FNX_METER_RUN + 1;
+        let ranks: Vec<f64> = (0..n).map(|row| 1.0 / (row + 7) as f64).collect();
+        let dangling: Vec<usize> = (0..n).collect();
+        let mut complete = LiveOnly {
+            polls: 0,
+            stop: None,
+        };
+        let result = dangling_mass(&dangling, &ranks, &mut complete).unwrap();
+        let mut expected = 0.0;
+        for rank in &ranks {
+            expected += rank;
+        }
+        assert_eq!(result.to_bits(), expected.to_bits());
+        assert_eq!(complete.polls, n.div_ceil(FNX_METER_RUN));
+        let mut meter = LiveOnly {
+            polls: 0,
+            stop: Some(2),
+        };
+        assert!(matches!(
+            dangling_mass(&dangling, &ranks, &mut meter),
+            Err(FnxExecutionError::Cancelled("live cancellation"))
+        ));
+        assert_eq!(meter.polls, 2);
+    }
+
+    #[test]
+    fn a_hub_worker_is_cancelled_by_the_non_send_parent_meter_and_joined() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        struct Host<'a> {
+            owner: std::thread::ThreadId,
+            reached_hub: &'a AtomicBool,
+            // Both the meter and its error are intentionally non-Send.
+            polls: Rc<Cell<usize>>,
+        }
+        impl FnxMeter<Rc<Cell<usize>>> for Host<'_> {
+            fn poll(&mut self) -> Result<(), Rc<Cell<usize>>> {
+                assert_eq!(std::thread::current().id(), self.owner);
+                self.polls.set(self.polls.get() + 1);
+                if self.reached_hub.load(Ordering::Acquire) {
+                    Err(Rc::clone(&self.polls))
+                } else {
+                    Ok(())
+                }
+            }
+            fn unit(&mut self) -> Result<(), Rc<Cell<usize>>> {
+                panic!("worker arithmetic may not charge the parent meter")
+            }
+        }
+
+        // Row 0 completes on a worker before it enters row 1's hub. Row 2
+        // follows that hub; the parent has only row 3 and finishes early.
+        let hub = 8 * FNX_METER_RUN;
+        let offsets = [0, 1, hub + 1, hub + 2, hub + 3];
+        let sources = vec![0; hub + 3];
+        let shares = vec![0.5; hub + 3];
+        for weighted in [false, true] {
+            let gather = Gather {
+                offsets: &offsets,
+                sources: &sources,
+                contrib: &[2.0],
+                shares: weighted.then_some(shares.as_slice()),
+                initial: 0.25,
+            };
+            let reached_hub = AtomicBool::new(false);
+            let worker_exited = AtomicBool::new(false);
+            let polls = Rc::new(Cell::new(0));
+            let mut meter = Host {
+                owner: std::thread::current().id(),
+                reached_hub: &reached_hub,
+                polls: Rc::clone(&polls),
+            };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut values = vec![f64::NAN; 4];
+            let result = live_parallel_rows(
+                &mut values,
+                2,
+                |_| 3,
+                &mut meter,
+                |low, rows, poll| {
+                    let mut runs = 0;
+                    gather.rows(low, rows, &mut || {
+                        runs += 1;
+                        if low == 0 && runs == 2 {
+                            // The worker has completed real gather arithmetic
+                            // before requesting cancellation. Keep it at this
+                            // actual hub checkpoint until its parent polls.
+                            reached_hub.store(true, Ordering::Release);
+                            while poll() {
+                                assert!(
+                                    Instant::now() < deadline,
+                                    "parent did not poll while waiting for its hub worker"
+                                );
+                                std::thread::yield_now();
+                            }
+                            return false;
+                        }
+                        poll()
+                    });
+                    if low == 0 {
+                        assert_eq!(runs, 2, "no worker chunk follows the stop signal");
+                        worker_exited.store(true, Ordering::Release);
+                    }
+                },
+            );
+            match result {
+                Err(FnxExecutionError::Cancelled(error)) => assert!(Rc::ptr_eq(&error, &polls)),
+                other => panic!("expected the parent's live cancellation, got {other:?}"),
+            }
+            assert!(
+                worker_exited.load(Ordering::Acquire),
+                "return waits for worker exit"
+            );
+            assert_eq!(values[0], if weighted { 1.25 } else { 2.25 });
+            assert!(values[1].is_nan());
+            assert!(values[2].is_nan());
+            // A cancellation may reach the parent before its own row starts;
+            // any completed parent value must still have the scalar bits.
+            assert!(values[3].is_nan() || values[3] == values[0]);
+        }
+    }
+
     /// **PAGERANK'S ARC WALK IS ONE STREAM OF RUNS ACROSS ROWS.** On a
     /// 300-vertex graph of short rows plus a 150-arc hub, the kernel stays
     /// bit-identical to fnx. Every meter call is at most FNX_METER_RUN units,
     /// the walk makes about (n + m) / 64 calls per pass instead of one per row,
-    /// and the total is unchanged: n, then 4n + m per pass. Refusing at any
-    /// ordinal cancels there, with every earlier unit seen.
+    /// and the total is unchanged: n (n + m when weighted), then 4n + m per
+    /// pass. Live arithmetic polls add no work; refusing at any work ordinal
+    /// cancels there, with every earlier unit seen.
     #[test]
     fn pagerank_charges_its_arc_walk_in_runs_across_rows() {
         let n = 300usize;
@@ -1028,39 +1397,54 @@ mod tests {
         let m: usize = (0..n)
             .map(|node| graph.neighbors_indices(node).unwrap().len())
             .sum();
-        let options = PageRankOptions::new(0.85, 1000, 1e-12, false).unwrap();
-        let oracle = fnx_algorithms::pagerank_with_weight(&graph, 0.85, 1000, 1e-12, None::<&str>);
-        let mut meter = Recording {
-            calls: Vec::new(),
-            stop: None,
-            seen: 0,
-        };
-        let (scores, witness, _) = pagerank(&graph, options, m, &mut meter).unwrap();
-        for score in &oracle.scores {
-            let ordinal = graph.get_node_index(&score.node).unwrap();
-            assert_eq!(scores[ordinal].to_bits(), score.score.to_bits());
-        }
-        assert_eq!(witness, oracle.witness);
-        let passes = witness.nodes_touched / n;
-        assert!(passes > 3, "{passes}");
-        assert_eq!(meter.seen, n + passes * (4 * n + m));
-        assert!(meter.calls.iter().all(|&run| run <= FNX_METER_RUN));
-        // Four metered passes per iteration, each about (units / 64) calls.
-        let per_pass = |units: usize| units.div_ceil(FNX_METER_RUN);
-        assert_eq!(
-            meter.calls.len(),
-            n + passes * (3 * per_pass(n) + per_pass(n + m)),
-            "the arc walk is one stream of runs"
-        );
-        for stop in (1..=meter.seen).step_by(97) {
-            let mut refusing = Recording {
+        for weighted in [false, true] {
+            let options = PageRankOptions::new(0.85, 1000, 1e-12, weighted).unwrap();
+            let oracle = fnx_algorithms::pagerank_with_weight(
+                &graph,
+                0.85,
+                1000,
+                1e-12,
+                weighted.then_some(PROJECTED_WEIGHT_ATTRIBUTE),
+            );
+            let mut meter = Recording {
                 calls: Vec::new(),
-                stop: Some(stop),
+                stop: None,
                 seen: 0,
+                polls: 0,
             };
-            let result = pagerank(&graph, options, m, &mut refusing);
-            assert!(matches!(result, Err(FnxExecutionError::Cancelled("stop"))));
-            assert_eq!(refusing.seen, stop);
+            let (scores, witness, _) = pagerank(&graph, options, m, &mut meter).unwrap();
+            for score in &oracle.scores {
+                let ordinal = graph.get_node_index(&score.node).unwrap();
+                assert_eq!(scores[ordinal].to_bits(), score.score.to_bits());
+            }
+            assert_eq!(witness, oracle.witness);
+            let passes = witness.nodes_touched / n;
+            assert!(passes > 3, "{passes}");
+            let initialization = n + if weighted { m } else { 0 };
+            assert_eq!(meter.seen, initialization + passes * (4 * n + m));
+            assert!(
+                meter.polls > passes,
+                "live polls actually ran between charges"
+            );
+            assert!(meter.calls.iter().all(|&run| run <= FNX_METER_RUN));
+            // Four metered passes per iteration, each about (units / 64) calls.
+            let per_pass = |units: usize| units.div_ceil(FNX_METER_RUN);
+            assert_eq!(
+                meter.calls.len(),
+                initialization + passes * (3 * per_pass(n) + per_pass(n + m)),
+                "the arc walk is one stream of runs"
+            );
+            for stop in (1..=meter.seen).step_by(97) {
+                let mut refusing = Recording {
+                    calls: Vec::new(),
+                    stop: Some(stop),
+                    seen: 0,
+                    polls: 0,
+                };
+                let result = pagerank(&graph, options, m, &mut refusing);
+                assert!(matches!(result, Err(FnxExecutionError::Cancelled("stop"))));
+                assert_eq!(refusing.seen, stop);
+            }
         }
     }
 
@@ -1101,7 +1485,10 @@ mod tests {
                 .collect();
             for threads in 1..=8 {
                 let mut actual = vec![f64::NAN; ranks.len()];
-                contributions(options, &ranks, &offsets, &mut actual, threads);
+                contributions(options, &ranks, &offsets, &mut actual, threads, &mut || {
+                    Ok::<(), Infallible>(())
+                })
+                .unwrap();
                 for (row, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
                     assert_eq!(
                         actual.to_bits(),
@@ -1176,11 +1563,22 @@ mod tests {
         for weighted in [false, true] {
             let shares = weighted.then_some(shares.as_slice());
             let mut one = start.clone();
-            gather_pass(offsets, sources, &contrib, shares, 0.25, &mut one, 1);
+            let gather = Gather {
+                offsets,
+                sources,
+                contrib: &contrib,
+                shares,
+                initial: 0.25,
+            };
+            gather
+                .pass(&mut one, 1, &mut || Ok::<(), Infallible>(()))
+                .unwrap();
             assert_ne!(one, start, "the gather added something");
             for threads in 2..=8 {
                 let mut many = start.clone();
-                gather_pass(offsets, sources, &contrib, shares, 0.25, &mut many, threads);
+                gather
+                    .pass(&mut many, threads, &mut || Ok::<(), Infallible>(()))
+                    .unwrap();
                 assert!(
                     one.iter()
                         .zip(&many)

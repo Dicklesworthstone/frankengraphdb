@@ -659,6 +659,78 @@ fn kernel_bulk_work_preserves_crossed_allowance_refusals_and_control_prefixes() 
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// Arithmetic checkpoints are live without adding signed/native work,
+/// settling a deferred charge, or sampling the authorization clock again.
+#[test]
+fn kernel_live_polls_cancel_without_changing_any_work_accounting() {
+    let ((), report) = run_async_under_lab(0x0b7b_000b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let authority = issuer();
+        let token = authority.issue_at(&open(), 100).unwrap();
+        for stop in [None, Some(1), Some(3)] {
+            let verified = authority.verify_at(&token, BRANCH, 100).unwrap();
+            let permit = verified.begin_read_at(BRANCH, 100).unwrap();
+            let reads = Cell::new(0usize);
+            let mut execution = Execution::new(&cx, permit, || {
+                reads.set(reads.get() + 1);
+                100
+            });
+            execution.in_runs = true;
+            let mut usage = AdmissionUsage::default();
+            let mut observer = UsageObserver {
+                usage: &mut usage,
+                policy: GqlQueryPolicy::new(1_000, 1_000, 1_000, 1_000),
+            };
+            KernelMeter {
+                execution: &mut execution,
+                observe: &mut observer,
+            }
+            .units(17)
+            .unwrap();
+            let before = (
+                execution.permit.usage(),
+                *observer.usage,
+                execution.deferred,
+                execution.run_left,
+                reads.get(),
+            );
+            assert!(before.2 > 0, "exercise a real deferred charge");
+            let probe = Arc::new(SimulationCheckpointProbe::new(stop));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            execution.cx = &controlled;
+            let mut meter = KernelMeter {
+                execution: &mut execution,
+                observe: &mut observer,
+            };
+            let result = (0..4).try_for_each(|_| meter.poll());
+            if let Some(stop) = stop {
+                assert!(matches!(
+                    result,
+                    Err(QueryError::Pattern(fgdb_gql::GqlQueryError::Interrupted(_)))
+                ));
+                assert_eq!(probe.calls(), stop);
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(probe.calls(), 4);
+            }
+            assert_eq!(
+                (
+                    execution.permit.usage(),
+                    *observer.usage,
+                    execution.deferred,
+                    execution.run_left,
+                    reads.get(),
+                ),
+                before,
+                "stop={stop:?}: a live poll must not mutate accounting"
+            );
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// A capability with any label, relation or property scope builds its own
 /// projection every time: it never sees the unrestricted projection cached
 /// before it, and leaves nothing for an unrestricted caller. A database that
