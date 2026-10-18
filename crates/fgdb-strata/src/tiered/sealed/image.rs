@@ -7,7 +7,7 @@ use super::{RowStorageKind, SealedError, SealedLimits, SealedScope, check_limit}
 use crate::compact::Compaction;
 use crate::edge_props::{EdgePropertyRow, admitted_row_bytes, validate_locator_sequence};
 use crate::{AdjacencyEntry, DescriptorKey, Direction, VisibilityInterval};
-use fgdb_codec::elias_fano::{EliasFano, EntryLimit};
+use fgdb_codec::elias_fano::{EliasFano, EliasFanoSequentialCursor, EntryLimit};
 use fgdb_codec::identity::{IdentityColumn, IdentityColumnLimits};
 use fgdb_delta_types::RelationId;
 use fgdb_types::{EId, VId};
@@ -51,6 +51,82 @@ pub(super) struct Run {
     pub edge_ids: IdentityColumn<EId>,
     pub spans: Vec<VisibilityInterval>,
     pub locators: Vec<u32>,
+}
+
+/// Forward state for a retained row. CSR neighbors and visibility spans advance
+/// together, avoiding a rank-directory search and span binary search per edge.
+/// The only positional seeks happen when the caller opens a row (possibly at a
+/// destination lower bound). No decoded adjacency or property copy is retained.
+pub(super) struct RowScan<'a> {
+    image: &'a Image,
+    row: &'a Row,
+    pub position: usize,
+    run: Option<RunScan<'a>>,
+}
+
+struct RunScan<'a> {
+    run: &'a Run,
+    neighbors: EliasFanoSequentialCursor<'a>,
+    span: usize,
+}
+
+impl<'a> RowScan<'a> {
+    pub fn new(image: &'a Image, row: &'a Row, position: usize) -> Self {
+        let run = match row.storage {
+            Storage::Inline(_) => None,
+            Storage::Run(index) => {
+                let run = &image.runs[index];
+                Some(RunScan {
+                    run,
+                    neighbors: run.neighbors.sequential_cursor_from(position),
+                    span: run
+                        .spans
+                        .partition_point(|span| span.end_row as usize <= position),
+                })
+            }
+        };
+        Self {
+            image,
+            row,
+            position,
+            run,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.row.len()
+    }
+
+    pub fn next(&mut self) -> Option<(AdjacencyEntry, u32)> {
+        if self.position >= self.row.len() {
+            return None;
+        }
+        let value = if let Some(scan) = &mut self.run {
+            let ordinal = usize::try_from(scan.neighbors.next()?).ok()?;
+            while scan.run.spans.get(scan.span)?.end_row as usize <= self.position {
+                scan.span += 1;
+            }
+            let span = scan.run.spans.get(scan.span)?;
+            if self.position < span.start_row as usize {
+                return None;
+            }
+            (
+                AdjacencyEntry {
+                    src: self.row.key.src,
+                    relation: self.row.key.relation,
+                    dst: self.image.dictionary.get(ordinal)?,
+                    eid: scan.run.edge_ids.get(self.position)?,
+                    created_at: span.created_at,
+                    retired_at: span.retired_at,
+                },
+                *scan.run.locators.get(self.position)?,
+            )
+        } else {
+            self.row.incidence(self.image, self.position)?
+        };
+        self.position += 1;
+        Some(value)
+    }
 }
 
 impl Row {

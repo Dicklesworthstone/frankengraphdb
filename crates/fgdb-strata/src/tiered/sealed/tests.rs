@@ -47,13 +47,7 @@ fn collect(
         (Some(row), Some(dst)) => row.lower_bound(&partition.image, VId(dst)),
         _ => 0,
     };
-    let mut cursor = SealedCursor {
-        image: &partition.image,
-        row,
-        position,
-        as_of: CommitSeq(as_of),
-        finished: false,
-    };
+    let mut cursor = SealedCursor::new(&partition.image, row, position, CommitSeq(as_of));
     let mut entries = Vec::new();
     while let Some(edge) = cursor.next_inner(&mut || Ok(())).unwrap() {
         entries.push((edge.entry, edge.properties.to_vec()));
@@ -106,6 +100,113 @@ fn real_compaction_to_mixed_tiers_preserves_every_retained_snapshot() {
     }
     assert!(partition.anchor.authorize(CommitSeq(2)).is_err());
     assert!(partition.anchor.authorize(CommitSeq(11)).is_err());
+}
+
+#[test]
+fn sequential_csr_scans_preserve_seek_history_properties_and_unit_fuel() {
+    let source = (1_u128 << 80) + 1;
+    let target_base = 1_u128 << 100;
+    let entries: Vec<_> = (0..257_u128)
+        .map(|i| {
+            entry(
+                source,
+                target_base + i / 5,
+                (1_u128 << 96) + i,
+                1 + (i % 3) as u64,
+                (i % 2 == 0).then_some(8),
+            )
+        })
+        .collect();
+    let blocks: Vec<_> = entries.chunks(120).map(<[_]>::to_vec).collect();
+    let properties: Vec<_> = blocks
+        .iter()
+        .map(|block| {
+            Some(BlockProps {
+                locators: (1..=block.len() as u32).collect(),
+                rows: block
+                    .iter()
+                    .map(|edge| {
+                        vec![(
+                            PropertyKeyId(1),
+                            CanonicalScalar::Int((edge.eid.0 - (1_u128 << 96)) as i64),
+                        )]
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+    let partition = seal(&blocks, &properties, 1);
+    let encoded = bytes(&partition);
+    let reloaded = SealedPartition::reload_inner(
+        partition.anchor(),
+        &encoded,
+        SealedLimits::default(),
+        None,
+        &mut || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(bytes(&reloaded), encoded);
+    for partition in [&partition, &reloaded] {
+        let row = partition
+            .image
+            .find_row(VId(source), RelationId(1))
+            .unwrap();
+        assert_eq!(row.kind(), RowStorageKind::SealedCsr);
+        // Each independent random-access decode is the incumbent path. Seek
+        // inside duplicate destinations, EF words, and visibility-span runs.
+        for start in 0..=row.len() {
+            let mut scan = RowScan::new(&partition.image, row, start);
+            for at in start..row.len() {
+                assert_eq!(scan.next(), row.incidence(&partition.image, at));
+            }
+            assert_eq!(scan.next(), None);
+            assert_eq!(scan.next(), None);
+        }
+        for cut in 1..=10 {
+            for lower in [target_base, target_base + 12, target_base + 51, u128::MAX] {
+                let expected: Vec<_> = entries
+                    .iter()
+                    .copied()
+                    .filter(|edge| edge.dst.0 >= lower && edge.visible_at(CommitSeq(cut)))
+                    .map(|edge| {
+                        let value = (edge.eid.0 - (1_u128 << 96)) as i64;
+                        (edge, vec![(PropertyKeyId(1), CanonicalScalar::Int(value))])
+                    })
+                    .collect();
+                let start = row.lower_bound(&partition.image, VId(lower));
+                let mut cursor =
+                    SealedCursor::new(&partition.image, Some(row), start, CommitSeq(cut));
+                let mut actual = Vec::new();
+                loop {
+                    let position = cursor.scan.as_ref().unwrap().position;
+                    let paused = cursor
+                        .next_budgeted_inner(&mut SealedScanBudget::new(0), &mut || {
+                            Ok::<_, SealedError>(())
+                        })
+                        .unwrap();
+                    assert_eq!(cursor.scan.as_ref().unwrap().position, position);
+                    if matches!(paused, SealedScanStep::End) {
+                        break;
+                    }
+                    assert!(matches!(paused, SealedScanStep::Yield));
+                    match cursor
+                        .next_budgeted_inner(&mut SealedScanBudget::new(1), &mut || {
+                            Ok::<_, SealedError>(())
+                        })
+                        .unwrap()
+                    {
+                        SealedScanStep::Item(edge) => {
+                            actual.push((edge.entry, edge.properties.to_vec()));
+                        }
+                        SealedScanStep::Yield => {}
+                        SealedScanStep::End => break,
+                    }
+                    assert!(cursor.scan.as_ref().unwrap().position <= position + 1);
+                }
+                assert_eq!(actual, expected, "cut={cut}, lower={lower}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -371,18 +472,161 @@ fn interrupted_decode_and_scan_do_not_report_a_successful_prefix() {
         )
         .is_err()
     );
-    let mut cursor = SealedCursor {
-        image: &partition.image,
-        row: partition.image.find_row(VId(1), RelationId(1)),
-        position: 0,
-        as_of: CommitSeq(5),
-        finished: false,
-    };
+    let mut cursor = SealedCursor::new(
+        &partition.image,
+        partition.image.find_row(VId(1), RelationId(1)),
+        0,
+        CommitSeq(5),
+    );
     assert!(
         cursor
             .next_inner(&mut || Err(SealedError::InvalidFloor))
             .is_err()
     );
     assert!(cursor.finished);
-    assert_eq!(cursor.position, 0);
+    assert_eq!(cursor.scan.as_ref().unwrap().position, 0);
+}
+
+/// Manual in-memory physical-access comparison. Both paths run against the
+/// same admitted image in one process; construction, validation, QueryCx,
+/// property copying and durable I/O are outside the timed region. These local
+/// timings are not a Section 17 performance gate or a durable database rate.
+#[test]
+#[ignore = "manual release-mode positional-versus-sequential CSR microbenchmark"]
+fn benchmark_sealed_csr_sequential_scan_against_positional() {
+    use std::hint::black_box;
+    use std::time::{Duration, Instant};
+
+    const ROUNDS: usize = 9;
+    const INCIDENCES_PER_ROUND: usize = 1 << 18;
+
+    fn fingerprint(value: (AdjacencyEntry, u32)) -> u128 {
+        // Force the complete incidence and locator to be decoded on both
+        // paths, even though the timing checksum needs only these fields.
+        let (edge, locator) = black_box(value);
+        edge.eid
+            .0
+            .wrapping_add(edge.dst.0)
+            .wrapping_add(u128::from(locator))
+    }
+
+    fn measure(scans: usize, expected: u128, mut scan: impl FnMut() -> u128) -> Duration {
+        let start = Instant::now();
+        let mut observed = 0_u128;
+        for _ in 0..scans {
+            observed = observed.wrapping_add(black_box(scan()));
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(observed, expected.wrapping_mul(scans as u128));
+        elapsed
+    }
+
+    println!(
+        "sealed_csr_scan_microbenchmark: same-process incumbent; \
+         construction, QueryCx, property copies and durable I/O excluded; \
+         empirical_gate_activated=false"
+    );
+    for count in [16_usize, 256, 4096, 65536] {
+        for varied_spans in [false, true] {
+            let entries: Vec<_> = (0..count)
+                .map(|at| {
+                    let (created, retired) = if varied_spans {
+                        (
+                            1 + ((at / 7) % 3) as u64,
+                            (at / 11).is_multiple_of(2).then_some(8),
+                        )
+                    } else {
+                        (1, None)
+                    };
+                    entry(
+                        (1_u128 << 80) + 1,
+                        (1_u128 << 100) + (at / 3) as u128,
+                        (1_u128 << 96) + at as u128,
+                        created,
+                        retired,
+                    )
+                })
+                .collect();
+            let blocks: Vec<_> = entries.chunks(120).map(<[_]>::to_vec).collect();
+            let properties = vec![None; blocks.len()];
+            let partition = seal(&blocks, &properties, 1);
+            let row = partition
+                .image
+                .find_row(VId((1_u128 << 80) + 1), RelationId(1))
+                .unwrap();
+            assert_eq!(row.kind(), RowStorageKind::SealedCsr);
+            assert_eq!(row.len(), count);
+
+            // Exact source-model checks precede timing; the timed paths still
+            // verify a checksum after every round. Neither copies properties.
+            let expected: Vec<_> = entries.iter().copied().map(|edge| (edge, 0)).collect();
+            let incumbent: Vec<_> = (0..count)
+                .map(|at| row.incidence(&partition.image, at).unwrap())
+                .collect();
+            let mut cursor = RowScan::new(&partition.image, row, 0);
+            let sequential: Vec<_> = std::iter::from_fn(|| cursor.next()).collect();
+            assert_eq!(incumbent, expected);
+            assert_eq!(sequential, expected);
+            let expected_sum = expected
+                .iter()
+                .copied()
+                .fold(0_u128, |sum, value| sum.wrapping_add(fingerprint(value)));
+
+            let positional_scan = || {
+                let image = black_box(&partition.image);
+                let row = black_box(row);
+                let mut sum = 0_u128;
+                for at in 0..row.len() {
+                    sum = sum.wrapping_add(fingerprint(row.incidence(image, at).unwrap()));
+                }
+                sum
+            };
+            let sequential_scan = || {
+                let image = black_box(&partition.image);
+                let row = black_box(row);
+                let mut cursor = RowScan::new(image, row, 0);
+                let mut sum = 0_u128;
+                while let Some(value) = cursor.next() {
+                    sum = sum.wrapping_add(fingerprint(value));
+                }
+                sum
+            };
+            assert_eq!(positional_scan(), expected_sum);
+            assert_eq!(sequential_scan(), expected_sum);
+
+            let scans = INCIDENCES_PER_ROUND.div_ceil(count);
+            let mut positional_times = [Duration::ZERO; ROUNDS];
+            let mut sequential_times = [Duration::ZERO; ROUNDS];
+            for round in 0..ROUNDS {
+                // Reverse order on alternating rounds so either path can be
+                // first under the same cache and process conditions.
+                if round.is_multiple_of(2) {
+                    positional_times[round] = measure(scans, expected_sum, positional_scan);
+                    sequential_times[round] = measure(scans, expected_sum, sequential_scan);
+                } else {
+                    sequential_times[round] = measure(scans, expected_sum, sequential_scan);
+                    positional_times[round] = measure(scans, expected_sum, positional_scan);
+                }
+            }
+            positional_times.sort_unstable();
+            sequential_times.sort_unstable();
+            let incidences = (scans * count) as f64;
+            let ns_per_incidence = |time: Duration| time.as_nanos() as f64 / incidences;
+            let positional_median = ns_per_incidence(positional_times[ROUNDS / 2]);
+            let sequential_median = ns_per_incidence(sequential_times[ROUNDS / 2]);
+            println!(
+                "degree={count} visibility_spans={} rounds={ROUNDS} scans_per_round={scans} \
+                 positional_ns_per_incidence={positional_median:.3} \
+                 positional_min={:.3} positional_max={:.3} \
+                 sequential_ns_per_incidence={sequential_median:.3} \
+                 sequential_min={:.3} sequential_max={:.3} speedup={:.3}",
+                if varied_spans { "varied" } else { "repeating" },
+                ns_per_incidence(positional_times[0]),
+                ns_per_incidence(positional_times[ROUNDS - 1]),
+                ns_per_incidence(sequential_times[0]),
+                ns_per_incidence(sequential_times[ROUNDS - 1]),
+                positional_median / sequential_median,
+            );
+        }
+    }
 }

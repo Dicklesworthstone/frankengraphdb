@@ -147,7 +147,8 @@ pub struct EliasFano {
 /// each unary-high word at most once and reads each low field once, so consuming
 /// the cursor is linear in the encoded words plus yielded values. Callers can
 /// use [`Self::fill`] to cap the amount of work and caller-owned storage used by
-/// one step.
+/// one step. Sparse gaps use the rank directory with logarithmic probes in the
+/// gap length, so a single value never linearly walks a long run of zero words.
 pub struct EliasFanoSequentialCursor<'a> {
     encoded: &'a EliasFano,
     logical_index: usize,
@@ -155,6 +156,8 @@ pub struct EliasFanoSequentialCursor<'a> {
     remaining_high_word: u64,
     #[cfg(test)]
     high_words_examined: usize,
+    #[cfg(test)]
+    high_gap_probes: usize,
 }
 
 impl EliasFano {
@@ -331,6 +334,8 @@ impl EliasFano {
             remaining_high_word: self.high_words.first().copied().unwrap_or(0),
             #[cfg(test)]
             high_words_examined: usize::from(!self.high_words.is_empty()),
+            #[cfg(test)]
+            high_gap_probes: 0,
         }
     }
 
@@ -352,6 +357,8 @@ impl EliasFano {
                 remaining_high_word: 0,
                 #[cfg(test)]
                 high_words_examined: 0,
+                #[cfg(test)]
+                high_gap_probes: 0,
             };
         }
         let position = self
@@ -366,6 +373,8 @@ impl EliasFano {
                 & (u64::MAX << (position % u64::BITS as usize)),
             #[cfg(test)]
             high_words_examined: 1,
+            #[cfg(test)]
+            high_gap_probes: 0,
         }
     }
 
@@ -513,9 +522,56 @@ impl EliasFano {
 }
 
 impl EliasFanoSequentialCursor<'_> {
+    /// Gallop over a zero-word gap, then locate its end in the bounded interval.
+    /// Searching only the gap keeps total traversal linear in the encoded size;
+    /// a global directory search at every word boundary would not have that law.
+    fn skip_empty_high_words(&mut self) -> Option<()> {
+        let target_rank = u32::try_from(self.logical_index).ok()?.checked_add(1)?;
+        let last = self.encoded.high_word_ranks.len().checked_sub(1)?;
+        let origin = self.high_word_index;
+        let mut left = origin.checked_add(1)?;
+        let mut stride = 1_usize;
+        let mut right;
+        loop {
+            right = origin.saturating_add(stride).min(last);
+            #[cfg(test)]
+            {
+                self.high_gap_probes += 1;
+            }
+            if self.encoded.high_word_ranks[right] >= target_rank {
+                break;
+            }
+            if right == last {
+                return None;
+            }
+            left = right + 1;
+            stride = stride.saturating_mul(2);
+        }
+        while left < right {
+            let middle = left + (right - left) / 2;
+            #[cfg(test)]
+            {
+                self.high_gap_probes += 1;
+            }
+            if self.encoded.high_word_ranks[middle] < target_rank {
+                left = middle + 1;
+            } else {
+                right = middle;
+            }
+        }
+        self.high_word_index = left;
+        self.remaining_high_word = *self.encoded.high_words.get(left)?;
+        #[cfg(test)]
+        {
+            self.high_words_examined += 1;
+        }
+        Some(())
+    }
+
     /// Fills at most `output.len()` values and returns the initialized prefix.
     ///
-    /// No allocation or random-access directory search is performed.
+    /// No allocation or repeated positional search per value is performed.
+    /// Sparse high-word gaps use bounded directory probes.
     pub fn fill(&mut self, output: &mut [u64]) -> usize {
         let mut written = 0_usize;
         while written < output.len() {
@@ -548,6 +604,9 @@ impl Iterator for EliasFanoSequentialCursor<'_> {
             #[cfg(test)]
             {
                 self.high_words_examined += 1;
+            }
+            if self.remaining_high_word == 0 {
+                self.skip_empty_high_words()?;
             }
         }
 
@@ -827,13 +886,31 @@ mod tests {
                     } else {
                         encoded.select_high_position(start).unwrap() / 64
                     };
-                    assert_eq!(
-                        cursor.high_words_examined(),
-                        encoded.high_words.len() - first_word,
+                    assert!(
+                        cursor.high_words_examined() <= encoded.high_words.len() - first_word,
                         "a seek must not rescan the preceding high words"
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn sequential_sparse_gaps_use_logarithmic_directory_work() {
+        for zeros in [0_usize, 17] {
+            let mut values = vec![0; zeros];
+            values.resize(65_537, u64::MAX);
+            let encoded = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+            let mut cursor = encoded.sequential_cursor();
+            let prefix = cursor.by_ref().take(zeros + 1).collect::<Vec<_>>();
+            assert_eq!(prefix, values[..zeros + 1]);
+            assert!(cursor.high_words_examined <= 3);
+            assert!(cursor.high_gap_probes > 0);
+            assert!(
+                cursor.high_gap_probes <= 2 * encoded.high_words.len().ilog2() as usize + 3,
+                "one sparse incidence must not scan every intervening word"
+            );
+            assert_eq!(cursor.collect::<Vec<_>>(), values[zeros + 1..]);
         }
     }
 

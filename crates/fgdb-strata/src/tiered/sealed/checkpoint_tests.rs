@@ -97,13 +97,12 @@ fn typed_guard_abandons_each_sort_directory_and_encoding_checkpoint() {
 }
 
 fn outgoing(source: &SealedPartition) -> SealedCursor<'_> {
-    SealedCursor {
-        image: &source.image,
-        row: source.image.find_row(VId(1), RelationId(1)),
-        position: 0,
-        as_of: CommitSeq(5),
-        finished: false,
-    }
+    SealedCursor::new(
+        &source.image,
+        source.image.find_row(VId(1), RelationId(1)),
+        0,
+        CommitSeq(5),
+    )
 }
 
 #[test]

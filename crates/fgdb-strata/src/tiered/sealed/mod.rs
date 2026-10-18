@@ -40,7 +40,7 @@ use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{
     BranchId, CanonicalScalar, CanonicalScalarResolver, CommitSeq, GraphId, QueryCx, VId,
 };
-use image::{Image, Row};
+use image::{Image, Row, RowScan};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -406,13 +406,7 @@ impl SealedPartition {
             (Some(row), Some(destination)) => row.lower_bound(&self.image, destination),
             _ => 0,
         };
-        Ok(SealedCursor {
-            image: &self.image,
-            row,
-            position,
-            as_of,
-            finished: false,
-        })
+        Ok(SealedCursor::new(&self.image, row, position, as_of))
     }
 
     pub fn row<'a>(
@@ -476,13 +470,21 @@ impl SealedScanBudget {
 /// A failed cursor stays failed/finished and cannot resume after skipping rows.
 pub struct SealedCursor<'a> {
     image: &'a Image,
-    row: Option<&'a Row>,
-    position: usize,
+    scan: Option<RowScan<'a>>,
     as_of: CommitSeq,
     finished: bool,
 }
 
 impl<'a> SealedCursor<'a> {
+    fn new(image: &'a Image, row: Option<&'a Row>, position: usize, as_of: CommitSeq) -> Self {
+        Self {
+            image,
+            scan: row.map(|row| RowScan::new(image, row, position)),
+            as_of,
+            finished: false,
+        }
+    }
+
     pub fn next(&mut self, cx: &QueryCx) -> Result<Option<SealedEdge<'a>>, SealedError> {
         self.next_inner(&mut || cx.checkpoint().map_err(SealedError::Interrupted))
     }
@@ -560,24 +562,23 @@ impl<'a> SealedCursor<'a> {
             self.finished = true;
             return Err(error);
         }
-        let Some(row) = self.row else {
+        let Some(scan) = &mut self.scan else {
             self.finished = true;
             return Ok(SealedScanStep::End);
         };
-        while self.position < row.len() {
+        while scan.position < scan.len() {
             if !budget.spend() {
                 return Ok(SealedScanStep::Yield);
             }
-            if self.position.is_multiple_of(64)
+            if scan.position.is_multiple_of(64)
                 && let Err(error) = checkpoint()
             {
                 self.finished = true;
                 return Err(error);
             }
-            let (entry, locator) = row
-                .incidence(self.image, self.position)
+            let (entry, locator) = scan
+                .next()
                 .expect("sealed admission validated every incidence");
-            self.position += 1;
             if entry.visible_at(self.as_of) {
                 let properties = if locator == 0 {
                     &[][..]
