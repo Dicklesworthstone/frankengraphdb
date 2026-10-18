@@ -185,10 +185,7 @@ where
         }
         let mut found = false;
         if nonnull {
-            loop {
-                let Some(peer_row) = head.as_ref() else {
-                    break;
-                };
+            while let Some(peer_row) = head.as_ref() {
                 match compare(plan, pass, &row.row, &peer_row.row, cx, policy, evaluator)? {
                     Ordering::Less => break,
                     Ordering::Greater => {

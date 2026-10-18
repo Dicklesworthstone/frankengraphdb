@@ -650,10 +650,10 @@ impl IdentityScanCursor {
         }
 
         let base = index.base.ids.get(self.base_at).copied();
-        if let Some(overlay) = self.overlay.last()
-            && base.is_none_or(|eid| overlay.key <= eid)
+        if let Some(node) = self
+            .overlay
+            .pop_if(|overlay| base.is_none_or(|eid| overlay.key <= eid))
         {
-            let node = self.overlay.pop().expect("peeked overlay identity");
             if base == Some(node.key) {
                 self.base_at += 1;
             }
