@@ -143,12 +143,12 @@ pub struct EliasFano {
 
 /// Allocation-free forward cursor over one scalar Elias-Fano sequence.
 ///
-/// This crate-internal seam is deliberately below durable framing. It scans
+/// This physical-access seam is deliberately below durable framing. It scans
 /// each unary-high word at most once and reads each low field once, so consuming
 /// the cursor is linear in the encoded words plus yielded values. Callers can
 /// use [`Self::fill`] to cap the amount of work and caller-owned storage used by
 /// one step.
-pub(crate) struct EliasFanoSequentialCursor<'a> {
+pub struct EliasFanoSequentialCursor<'a> {
     encoded: &'a EliasFano,
     logical_index: usize,
     high_word_index: usize,
@@ -321,9 +321,9 @@ impl EliasFano {
 
     /// Creates an allocation-free cursor at the first represented value.
     ///
-    /// This is a crate-internal physical-access seam, not a durable iterator
+    /// This is a physical-access seam, not a durable iterator
     /// format or rank/select capability claim.
-    pub(crate) fn sequential_cursor(&self) -> EliasFanoSequentialCursor<'_> {
+    pub fn sequential_cursor(&self) -> EliasFanoSequentialCursor<'_> {
         EliasFanoSequentialCursor {
             encoded: self,
             logical_index: 0,
@@ -331,6 +331,41 @@ impl EliasFano {
             remaining_high_word: self.high_words.first().copied().unwrap_or(0),
             #[cfg(test)]
             high_words_examined: usize::from(!self.high_words.is_empty()),
+        }
+    }
+
+    /// Creates an allocation-free forward cursor at a logical position.
+    ///
+    /// A nonzero start uses one positional directory lookup, then scans each
+    /// remaining unary-high word at most once. Seeking never decodes the
+    /// preceding values. A position at or beyond the end returns an exhausted
+    /// cursor; duplicates remain distinct positions.
+    pub fn sequential_cursor_from(&self, index: usize) -> EliasFanoSequentialCursor<'_> {
+        if index == 0 {
+            return self.sequential_cursor();
+        }
+        if index >= self.len {
+            return EliasFanoSequentialCursor {
+                encoded: self,
+                logical_index: self.len,
+                high_word_index: self.high_words.len(),
+                remaining_high_word: 0,
+                #[cfg(test)]
+                high_words_examined: 0,
+            };
+        }
+        let position = self
+            .select_high_position(index)
+            .expect("validated Elias-Fano position");
+        let high_word_index = position / u64::BITS as usize;
+        EliasFanoSequentialCursor {
+            encoded: self,
+            logical_index: index,
+            high_word_index,
+            remaining_high_word: self.high_words[high_word_index]
+                & (u64::MAX << (position % u64::BITS as usize)),
+            #[cfg(test)]
+            high_words_examined: 1,
         }
     }
 
@@ -481,7 +516,7 @@ impl EliasFanoSequentialCursor<'_> {
     /// Fills at most `output.len()` values and returns the initialized prefix.
     ///
     /// No allocation or random-access directory search is performed.
-    pub(crate) fn fill(&mut self, output: &mut [u64]) -> usize {
+    pub fn fill(&mut self, output: &mut [u64]) -> usize {
         let mut written = 0_usize;
         while written < output.len() {
             let Some(value) = self.next() else {
@@ -537,6 +572,7 @@ impl Iterator for EliasFanoSequentialCursor<'_> {
 }
 
 impl ExactSizeIterator for EliasFanoSequentialCursor<'_> {}
+impl core::iter::FusedIterator for EliasFanoSequentialCursor<'_> {}
 
 fn words_for_bits(bits: usize) -> Option<usize> {
     let complete = bits / 64;
@@ -752,6 +788,52 @@ mod tests {
             let encoded =
                 EliasFano::try_new(&values, EntryLimit::new(values.len())).expect("valid fixture");
             assert_eq!(encoded.sequential_cursor().collect::<Vec<_>>(), values);
+        }
+    }
+
+    #[test]
+    fn sequential_seek_matches_every_suffix_across_words_and_duplicate_runs() {
+        let fixtures = [
+            Vec::new(),
+            vec![0; 129],
+            vec![u64::MAX; 129],
+            (0..513).map(|i| (i / 3) * 1_000_003).collect(),
+            (0..257).map(|i| if i < 2 { 0 } else { u64::MAX }).collect(),
+            (0..193).map(|i| u64::MAX - 192 + i).collect(),
+        ];
+        for values in fixtures {
+            let encoded = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
+            for start in (0..=values.len() + 1).chain([usize::MAX]) {
+                let mut cursor = encoded.sequential_cursor_from(start);
+                let expected = &values[start.min(values.len())..];
+                assert_eq!(cursor.len(), expected.len());
+                let mut actual = Vec::new();
+                let mut scratch = [0; 17];
+                assert_eq!(cursor.fill(&mut []), 0);
+                loop {
+                    let written = cursor.fill(&mut scratch);
+                    if written == 0 {
+                        break;
+                    }
+                    actual.extend_from_slice(&scratch[..written]);
+                    assert_eq!(cursor.len(), expected.len() - actual.len());
+                }
+                assert_eq!(actual, expected, "start={start}");
+                assert_eq!(cursor.next(), None);
+                assert_eq!(cursor.next(), None);
+                if start < values.len() {
+                    let first_word = if start == 0 {
+                        0
+                    } else {
+                        encoded.select_high_position(start).unwrap() / 64
+                    };
+                    assert_eq!(
+                        cursor.high_words_examined(),
+                        encoded.high_words.len() - first_word,
+                        "a seek must not rescan the preceding high words"
+                    );
+                }
+            }
         }
     }
 
