@@ -599,6 +599,103 @@ enum HistoryRef<'a> {
     Tree(&'a History),
 }
 
+/// The root-edge stream's position in one immutable adjacency generation.
+/// Flat identities advance by ordinal; the overlay keeps only an owned AVL
+/// spine, so a source that owns its snapshot needs no self-borrow or ID bag.
+/// Opening leaves the spine unallocated and visits no index node.
+#[derive(Default)]
+pub(crate) struct IdentityScanCursor {
+    base_at: usize,
+    overlay: Vec<Arc<IndexNode<EId, History>>>,
+    pending: Option<Arc<IndexNode<EId, History>>>,
+    initialized: bool,
+    current: Option<(EId, ScannedHistory)>,
+}
+
+enum ScannedHistory {
+    Flat(usize),
+    Tree(History),
+}
+
+impl IdentityScanCursor {
+    /// Advance the two already ordered sources, with the overlay winning an
+    /// equal identity. A rejected control leaves the previous position and
+    /// history hint intact: only the successfully prepared spine is committed.
+    pub(crate) fn next<E>(
+        &mut self,
+        index: &AdjacencyIndex,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<EId>, E> {
+        if !self.initialized {
+            // Reserve once, lazily. All future spines fit the same immutable
+            // tree's height; flat-only scans allocate nothing.
+            let height = usize::from(index.histories.height());
+            for _ in 0..height {
+                control(SourceEvent::ScratchEntry)?;
+            }
+            let mut overlay = Vec::with_capacity(height);
+            Self::descend(&mut overlay, index.histories.0.as_ref(), control)?;
+            control(SourceEvent::Work)?;
+            self.overlay = overlay;
+            self.initialized = true;
+        } else {
+            let retained = self.overlay.len();
+            let prepared = Self::descend(&mut self.overlay, self.pending.as_ref(), control)
+                .and_then(|()| control(SourceEvent::Work));
+            if let Err(error) = prepared {
+                self.overlay.truncate(retained);
+                return Err(error);
+            }
+            self.pending = None;
+        }
+
+        let base = index.base.ids.get(self.base_at).copied();
+        if let Some(overlay) = self.overlay.last()
+            && base.is_none_or(|eid| overlay.key <= eid)
+        {
+            let node = self.overlay.pop().expect("peeked overlay identity");
+            if base == Some(node.key) {
+                self.base_at += 1;
+            }
+            self.pending = node.right.0.clone();
+            self.current = Some((node.key, ScannedHistory::Tree(node.value.clone())));
+            return Ok(Some(node.key));
+        }
+        if let Some(eid) = base {
+            self.current = Some((eid, ScannedHistory::Flat(self.base_at)));
+            self.base_at += 1;
+        }
+        Ok(base)
+    }
+
+    fn descend<E>(
+        stack: &mut Vec<Arc<IndexNode<EId, History>>>,
+        mut node: Option<&Arc<IndexNode<EId, History>>>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        while let Some(current) = node {
+            control(SourceEvent::Work)?;
+            stack.push(Arc::clone(current));
+            node = current.left.0.as_ref();
+        }
+        Ok(())
+    }
+
+    /// Reuse the identity lookup just performed by `next`; history visibility
+    /// still resolves at the caller's cut. Arbitrary EIds use the ordinary
+    /// lookup instead. The hint cannot outlive either its source or generation.
+    fn history<'a>(&'a self, index: &'a AdjacencyIndex, eid: EId) -> Option<HistoryRef<'a>> {
+        let (current, history) = self.current.as_ref()?;
+        if *current != eid {
+            return None;
+        }
+        Some(match history {
+            ScannedHistory::Flat(at) => HistoryRef::Flat(index.base.history(*at)),
+            ScannedHistory::Tree(history) => HistoryRef::Tree(history),
+        })
+    }
+}
+
 impl<'a> HistoryRef<'a> {
     fn len(self) -> usize {
         match self {
@@ -862,6 +959,8 @@ impl AdjacencyIndex {
     /// The least indexed identity above `after` (or the least of all),
     /// calling `charge` once per node a descent visits, as
     /// [`Self::history_charged`] does. Zero and `u128::MAX` are ordinary ids.
+    /// Retained as the paired benchmark's incumbent successor walk.
+    #[cfg(test)]
     pub(crate) fn next_identity<E>(
         &self,
         after: Option<EId>,

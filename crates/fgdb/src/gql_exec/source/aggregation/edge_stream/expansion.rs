@@ -307,7 +307,7 @@ mod tests {
                 view: db.read_session().unwrap(),
                 cx: &cx,
                 as_of: db.frontier().unwrap(),
-                after: None,
+                scan: IdentityScanCursor::default(),
             };
             for direction in [
                 GlaDirection::Forward,
@@ -339,9 +339,9 @@ mod tests {
                             .unwrap(),
                             expected
                         );
-                        assert_eq!(
-                            source.after, None,
-                            "nested seeks cannot advance the root cursor"
+                        assert!(
+                            !source.scan.initialized,
+                            "nested seeks cannot initialize or advance the root cursor"
                         );
                     }
                 }

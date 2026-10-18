@@ -455,10 +455,7 @@ fn filtered_merge_selective_keys_avoid_all_pairs_when_on_rejects_every_candidate
         let vfs = fixture(&contexts.commit()).await;
         let pool = MemoryPool::new(32_000_000, 0).unwrap();
         let mut view = view(&contexts.commit(), &vfs, &pool).await;
-        let values = (0..32)
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+        let values = (0..32).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
         let input = PreparedGraphSetText::prepare(
             &format!("UNWIND [{values}] AS n RETURN n AS k,n AS value"),
             resolve,
@@ -487,9 +484,17 @@ fn filtered_merge_selective_keys_avoid_all_pairs_when_on_rejects_every_candidate
         let keyed = execute(&query(true), 2, &mut view, &cx, allowance, 100, 100_000_000)
             .await
             .unwrap();
-        let theta = execute(&query(false), 2, &mut view, &cx, allowance, 100, 100_000_000)
-            .await
-            .unwrap();
+        let theta = execute(
+            &query(false),
+            2,
+            &mut view,
+            &cx,
+            allowance,
+            100,
+            100_000_000,
+        )
+        .await
+        .unwrap();
         assert_eq!(keyed.0, theta.0);
         assert_eq!(keyed.0.len(), 64);
         assert_eq!(keyed.1.snapshot_records, 0);

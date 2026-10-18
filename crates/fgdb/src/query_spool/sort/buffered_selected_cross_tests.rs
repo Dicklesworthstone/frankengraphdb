@@ -422,7 +422,9 @@ fn selected_product_spills_only_matches_when_candidate_count_exceeds_private_row
         let mut view = view(&contexts.commit(), &vfs, &pool).await;
         let left: Vec<_> = (0..64).rev().map(Some).collect();
         let right: Vec<_> = (0..64).map(Some).collect();
-        let raw = sequence("l", &left).cross_join(sequence("r", &right)).unwrap();
+        let raw = sequence("l", &left)
+            .cross_join(sequence("r", &right))
+            .unwrap();
         let selected = raw.clone().filter(&[equality(0, 1)]).unwrap();
         let literal: Vec<_> = left.iter().map(|value| [*value, *value]).collect();
         let measured = execute(&selected, 2, &mut view, &cx, policy(64), 128, WORK)

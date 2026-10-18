@@ -138,7 +138,8 @@ impl SpillSetCrossPlan {
         )? {
             return Ok(None);
         }
-        self.copy_output_with_control(left, right, control).map(Some)
+        self.copy_output_with_control(left, right, control)
+            .map(Some)
     }
 
     pub(super) fn copy_output_with_control<E>(

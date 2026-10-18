@@ -177,7 +177,10 @@ and real Chronicle/Strata historical generations that survive writer progress.
 
 Run `cargo test -p fgdb-prism`, `cargo test -p fgdb --test prism_bridge` and
 `cargo test -p fgdb --test prism_traversal` in the supported Rust environment,
-followed by the prescribed formatting, Clippy and registry gates. These Rust
-commands have **not been run** in the connector-only implementation environment.
-Independent Python algorithm-model comparisons are not Rust execution or W8
-acceptance evidence. No W8 acceptance bead is closed by these changes.
+followed by the prescribed formatting, Clippy and registry gates. The ignored
+`forward_csr_paired_incumbent_measurement` test compares the triangle kernel with
+its previous native implementation in the same process, including temporary
+CSR construction and result consumption. Run it with optimized code and
+`--ignored --nocapture --test-threads=1` to inspect every paired sample. These
+decoded-kernel measurements do not establish end-to-end throughput, GAPBS
+parity or W8 acceptance; the full workspace gates remain separate requirements.

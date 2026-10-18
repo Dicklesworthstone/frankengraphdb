@@ -9,10 +9,10 @@ use fgdb_gql::{
     PreparedGraphSetText, PreparedGraphText,
 };
 
-#[path = "buffered_relational_join_pair_tests.rs"]
-mod pair_tests;
 #[path = "buffered_relational_join_filtered_tests.rs"]
 mod filtered_tests;
+#[path = "buffered_relational_join_pair_tests.rs"]
+mod pair_tests;
 
 const KINDS: [RowJoinKind; 6] = [
     RowJoinKind::Inner,

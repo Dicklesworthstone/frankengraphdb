@@ -102,7 +102,10 @@ fn keys_are_necessary_conditions_and_original_names_survive() {
         // Keep the Boolean necessity proof checked, independently of whether
         // its WHERE equality can soundly become a canonical arrangement key.
         assert_eq!(required_keys(2, &code, None, &mut allow).unwrap(), keys);
-        assert!(spec.keys().is_empty(), "Scalar is not a concrete numeric kind");
+        assert!(
+            spec.keys().is_empty(),
+            "Scalar is not a concrete numeric kind"
+        );
         assert_eq!(spec.predicate(), Some(code.as_slice()));
         assert_eq!(spec.kind(), crate::row_join::RowJoinKind::Inner);
         assert_eq!(
@@ -435,7 +438,10 @@ fn projected_collisions_integrate_both_parent_retractions_before_publication() {
         .incremental_selected_join_with_control(&mut allow)
         .unwrap()
         .unwrap();
-    assert!(spec.keys().is_empty(), "projected Scalar equality stays in ON");
+    assert!(
+        spec.keys().is_empty(),
+        "projected Scalar equality stays in ON"
+    );
     assert_eq!(spec.predicate(), Some([equal(0, 2)].as_slice()));
     let mut joined = IncrementalRowJoin::new(spec);
     let mut projected = IncrementalRowProjection::new(output);
@@ -587,7 +593,11 @@ fn numeric_row(key: CanonicalScalar, payload: i64) -> GraphValueRow {
 }
 fn concatenated(left: &GraphValueRow, right: &GraphValueRow) -> GraphValueRow {
     GraphValueRow::from_owned_values(
-        left.values().iter().chain(right.values()).cloned().collect(),
+        left.values()
+            .iter()
+            .chain(right.values())
+            .cloned()
+            .collect(),
     )
 }
 
@@ -599,8 +609,7 @@ fn scalar_lowering_keeps_exact_numeric_matches_without_decimal_or_rounding_coerc
         .unwrap()
         .filter(&[equal(0, 2)])
         .unwrap();
-    let decimal =
-        CanonicalScalar::Decimal(CanonicalDecimal::from_scaled_half_even(7, 0).unwrap());
+    let decimal = CanonicalScalar::Decimal(CanonicalDecimal::from_scaled_half_even(7, 0).unwrap());
     let left_rows = [
         numeric_row(CanonicalScalar::Int(7), 10),
         numeric_row(decimal.clone(), 11),
@@ -717,18 +726,17 @@ fn maintained_vertex_and_edge_keys_remain_selective_with_numeric_residuals() {
         } else {
             "MATCH (n) RETURN n AS id,n.p AS k"
         };
-        let source: PreparedGraphSet = PreparedGraphText::prepare(text, |kind, name| {
-            match (kind, name) {
+        let source: PreparedGraphSet =
+            PreparedGraphText::prepare(text, |kind, name| match (kind, name) {
                 (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
                 (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
                 _ => None,
-            }
-        })
-        .unwrap()
-        .bind_parameters(&GqlParameters::new())
-        .unwrap()
-        .with_duplicates()
-        .into();
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .with_duplicates()
+            .into();
         let code = [equal(0, 2), equal(1, 3), GraphSetPredicateOp::And];
         let query = source
             .clone()
@@ -799,7 +807,10 @@ fn explicit_typed_join_identity_is_not_redefined_by_selected_product_lowering() 
         .filter(&[equal(0, 2)])
         .unwrap();
     assert_eq!(
-        selected_bag(&selected, &left, &right).values().copied().sum::<i128>(),
+        selected_bag(&selected, &left, &right)
+            .values()
+            .copied()
+            .sum::<i128>(),
         6
     );
 }

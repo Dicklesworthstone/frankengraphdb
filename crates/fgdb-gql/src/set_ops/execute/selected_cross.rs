@@ -638,8 +638,7 @@ mod lookup_domain_tests {
         let mut expected = Vec::new();
         for l in &left {
             for r in &right {
-                if GraphSetPredicateOp::evaluate_pair_with_control(&code, l, r, &mut allow)
-                    .unwrap()
+                if GraphSetPredicateOp::evaluate_pair_with_control(&code, l, r, &mut allow).unwrap()
                 {
                     expected.push(GraphValueRow::from_owned_values(vec![
                         l.values()[0].clone(),

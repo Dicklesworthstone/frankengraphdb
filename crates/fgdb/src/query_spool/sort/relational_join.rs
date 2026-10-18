@@ -10,10 +10,10 @@ use fgdb_strata::tiered::memory::{MemoryCharge, MemoryPool};
 use fgdb_types::CanonicalScalarResolver;
 use std::cmp::Ordering;
 
-#[path = "relational_join_pairs.rs"]
-mod pairs;
 #[path = "relational_join_filtered.rs"]
 mod filtered;
+#[path = "relational_join_pairs.rs"]
+mod pairs;
 
 fn failure(error: SpillSetRowError<NativeSpoolError>) -> NativeSpoolError {
     match error {

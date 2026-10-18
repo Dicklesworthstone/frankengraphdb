@@ -5,13 +5,14 @@ use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::CanonicalScalar;
 
 fn leaf() -> PreparedGraphSet {
-    PreparedGraphText::prepare("MATCH (n) RETURN n.p AS k,n.q AS v", |kind, name: &str| {
-        match (kind, name) {
+    PreparedGraphText::prepare(
+        "MATCH (n) RETURN n.p AS k,n.q AS v",
+        |kind, name: &str| match (kind, name) {
             (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
             _ => None,
-        }
-    })
+        },
+    )
     .unwrap()
     .bind_parameters(&GqlParameters::new())
     .unwrap()
@@ -176,11 +177,7 @@ fn selected_pair_propagates_every_control_refusal_without_mutating_inputs() {
             assert_eq!(event, events[at]);
             let current = at;
             at += 1;
-            if current == fail {
-                Err(fail)
-            } else {
-                Ok(())
-            }
+            if current == fail { Err(fail) } else { Ok(()) }
         });
         assert!(matches!(actual, Err(SpillSetRowError::Control(at)) if at == fail));
         assert_eq!(at, fail + 1);
@@ -275,11 +272,9 @@ fn selected_zero_column_identity_and_unknown_have_native_truth_semantics() {
         let plan = cross(&query);
         assert!(plan.has_selection());
         let output = plan
-            .select_pair_with_control(
-                &GraphValueRow::unit(),
-                &GraphValueRow::unit(),
-                &mut |_| Ok::<_, ()>(()),
-            )
+            .select_pair_with_control(&GraphValueRow::unit(), &GraphValueRow::unit(), &mut |_| {
+                Ok::<_, ()>(())
+            })
             .unwrap();
         assert_eq!(output, (truth == Some(true)).then(GraphValueRow::unit));
     }

@@ -19,8 +19,7 @@ impl Pass {
         }
     }
     fn presence(self, kind: RowJoinKind) -> bool {
-        matches!(self, Self::RightAbsence)
-            || matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti)
+        matches!(self, Self::RightAbsence) || matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti)
     }
     fn selected(self, kind: RowJoinKind, found: bool) -> bool {
         match self {
@@ -230,13 +229,7 @@ where
                             // forward cache before the replay admits another page.
                             drop(peer_input.page.take());
                             while let Some(candidate) = pull_sorted(
-                                &mut probe,
-                                peer_file,
-                                pool,
-                                policy,
-                                evaluator,
-                                work,
-                                resolver,
+                                &mut probe, peer_file, pool, policy, evaluator, work, resolver,
                             )
                             .await?
                             {
