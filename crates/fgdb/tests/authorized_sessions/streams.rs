@@ -160,6 +160,7 @@ fn denied_equality_properties_cannot_change_stream_quota_refusals() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[path = "streams/ranges.rs"]
 mod ranges;
 
 #[test]

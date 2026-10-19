@@ -1,7 +1,7 @@
-//! Foundation procedures and their declared native fast paths. Degree and core
-//! run over the admitted CSR and are checked against pinned fnx and independent
-//! expectations. Other procedures retain the foundation copy. All paths keep
-//! canonical VId mapping, admission, refusals and truthful kernel provenance.
+//! Foundation procedures and their declared native fast paths. Degree, core
+//! and eigenvector run over the admitted CSR and are checked against pinned fnx
+//! and independent expectations. Other procedures retain the foundation copy.
+//! All paths keep canonical VId mapping, admission, refusals and provenance.
 
 use fgdb_prism::*;
 use fgdb_types::{CommitSeq, EId, VId, ids::ObjectId};
@@ -549,7 +549,7 @@ fn native_foundation_preserves_every_logical_refusal_and_loop_precedence() {
         view(&[u128::MAX], &[], SelfLoopPolicy::Keep),
         path(),
     ] {
-        for name in ["degree_centrality", "core_number"] {
+        for name in ["degree_centrality", "core_number", "eigenvector_centrality"] {
             let mut complete = NativeControl::default();
             let actual = call(name)
                 .execute(&graph, limits(1 << 20), &mut complete)
@@ -580,7 +580,7 @@ fn native_foundation_preserves_every_logical_refusal_and_loop_precedence() {
     // The loop is in canonical row 1. Its row checkpoint precedes validation;
     // the next row's work refusal must never overtake the self-loop refusal.
     let loop_unit = 2 * kept.node_count() + 1 + 2;
-    for name in ["degree_centrality", "core_number"] {
+    for name in ["degree_centrality", "core_number", "eigenvector_centrality"] {
         for ordinal in [loop_unit, loop_unit + 1] {
             let stop = NativeStop::Work(ordinal);
             let mut control = NativeControl {
@@ -604,6 +604,97 @@ fn native_foundation_preserves_every_logical_refusal_and_loop_precedence() {
                 .execute(&dropped, limits(1 << 20), &mut NativeControl::default())
                 .is_ok()
         );
+    }
+}
+
+#[test]
+fn native_eigenvector_certifies_workspace_and_keeps_live_nonconvergence_refusals() {
+    let name = "eigenvector_centrality";
+    for (graph, bytes) in [
+        (view(&[], &[], SelfLoopPolicy::Keep), 0),
+        (view(&[u128::MAX], &[], SelfLoopPolicy::Keep), 8),
+        (path(), 4 * 16),
+        (
+            view(
+                &[u128::MAX, 0, 1 << 127],
+                &[(u128::MAX, 0), (0, 1 << 127), (u128::MAX, 1 << 127)],
+                SelfLoopPolicy::Keep,
+            ),
+            3 * 16,
+        ),
+    ] {
+        let mut control = NativeControl::default();
+        let actual = call(name)
+            .execute(&graph, limits(1 << 20), &mut control)
+            .unwrap();
+        let (oracle, converged) =
+            fnx_algorithms::eigenvector_centrality_with_params(&copied_graph(&graph), 100, 1e-6);
+        assert!(converged);
+        let expected: BTreeMap<_, _> = oracle
+            .scores
+            .into_iter()
+            .map(|entry| {
+                (
+                    graph
+                        .vertex_id(graph.get_node_index(&entry.node).unwrap())
+                        .unwrap(),
+                    entry.score.to_bits(),
+                )
+            })
+            .collect();
+        assert_eq!(degree_bits(&actual), expected);
+        let certificate = &actual.certificate;
+        assert_eq!(
+            certificate.execution_kernel,
+            "fgdb-prism/eigenvector-csr-gather-v1"
+        );
+        assert_eq!(certificate.registry_version, FNX_SIGNATURE_REGISTRY_VERSION);
+        assert_eq!(certificate.kernel_workspace_bytes, bytes);
+        assert_eq!(certificate.witness, oracle.witness);
+        assert_eq!(control.units, 4 * graph.node_count() + 5);
+    }
+
+    // This path does not converge within the registered 100 iterations. Its
+    // bounded refusal must remain distinct from cancellation at any live poll.
+    let n = 129;
+    let vertices: Vec<_> = (0..n).map(|i| ((i as u128) << 64) | 17).collect();
+    let edges: Vec<_> = vertices.windows(2).map(|pair| (pair[0], pair[1])).collect();
+    let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+    let (oracle, converged) =
+        fnx_algorithms::eigenvector_centrality_with_params(&copied_graph(&graph), 100, 1e-6);
+    assert!(!converged);
+    let mut complete = NativeControl::default();
+    let witness = match call(name).execute(&graph, limits(1 << 20), &mut complete) {
+        Err(FnxExecutionError::NotConverged {
+            max_iterations,
+            witness,
+        }) => {
+            assert_eq!(max_iterations, 100);
+            witness
+        }
+        other => panic!("bounded eigenvector refusal required: {other:?}"),
+    };
+    assert_eq!(witness, oracle.witness);
+    assert_eq!(witness.nodes_touched, 100 * n);
+    assert_eq!(witness.edges_scanned, 100 * 2 * (n - 1));
+    assert_eq!(witness.queue_peak, 0);
+    assert_eq!(complete.units, 3 * n + 2);
+    assert!(complete.polls.len() >= (100 * n).div_ceil(4_096));
+    assert!(complete.polls.iter().all(|&units| units == 3 * n + 2));
+    for ordinal in 1..=complete.polls.len() {
+        let stop = NativeStop::Poll(ordinal);
+        let mut control = NativeControl {
+            stop: Some(stop),
+            ..Default::default()
+        };
+        let result = call(name).execute(&graph, limits(1 << 20), &mut control);
+        assert!(
+            matches!(result, Err(FnxExecutionError::Cancelled(observed)) if observed == stop),
+            "eigenvector poll {ordinal}"
+        );
+        assert_eq!(control.polls.len(), ordinal);
+        assert_eq!(control.units, complete.polls[ordinal - 1]);
+        assert!(control.stopped);
     }
 }
 

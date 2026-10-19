@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 5;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 6;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -285,7 +285,7 @@ const SIGNATURES: &[FnxSignature] = &[
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; power iteration, at most 100 steps to tolerance 1e-6; non-convergence refuses",
         "O(100 * (|V| + |E|))",
-        "fnx-algorithms/eigenvector_centrality_with_params",
+        "fgdb-prism/eigenvector-csr-gather-v1",
     ),
     foundation(
         "fnx.core_number",
@@ -494,9 +494,9 @@ impl FnxAlgorithm {
     }
 }
 
-/// The fnx-algorithms entry points Prism runs as-is over a decoded copy of the
-/// admitted projection (the labelled DECODED_CACHE boundary). The ordinal is
-/// the signature row after the eight in-house kernels.
+/// Catalog algorithms over the admitted in-core DECODED_CACHE. Each signature
+/// identifies whether a native CSR kernel or a copied-Graph fnx entry executes
+/// the computation. The ordinal selects the row after the first eight kernels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FoundationAlgorithm {

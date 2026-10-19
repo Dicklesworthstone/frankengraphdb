@@ -1147,6 +1147,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("clustering.rs"));
         hash_text(&mut hash, include_str!("foundation.rs"));
         hash_text(&mut hash, include_str!("foundation/native.rs"));
+        hash_text(&mut hash, include_str!("foundation/eigenvector.rs"));
         hash.finalize()
     })
 }

@@ -1,17 +1,19 @@
 //! The pinned franken_networkx catalog and its differential native kernels.
 //!
-//! Degree centrality and core decomposition borrow the admitted CSR directly.
-//! They preserve the catalog's logical charges and check live control during
-//! arithmetic. Certificates identify these native kernels and their actual
-//! vector allocation peak; the projection remains an in-core DECODED_CACHE.
+//! Degree centrality, core decomposition and eigenvector power iteration
+//! borrow the admitted CSR directly. They preserve the catalog's logical
+//! charges and check live control during arithmetic. Certificates identify
+//! these kernels and their actual vector allocation peak; the projection
+//! remains an in-core DECODED_CACHE.
 //!
 //! The remaining foundation entry points take `&fnx_classes::Graph` and need
 //! a second, string-keyed graph copy. Those calls observe cancellation before
-//! and after the foundation computation. Iterative procedures use the entry
-//! that reports convergence and refuse instead of publishing unconverged
-//! scores. Katz remains unregistered because its checked entry drops the
-//! result and witness on non-convergence.
+//! and after the foundation computation. Native eigenvector iteration matches
+//! the checked foundation entry's convergence and refusal semantics. Katz
+//! remains unregistered because its checked entry drops the result and
+//! witness on non-convergence.
 
+mod eigenvector;
 mod native;
 
 use crate::execute::{FnxMeter, KernelOutput, KernelValues};
@@ -58,7 +60,9 @@ pub(crate) fn run<C>(
     let n = graph.node_count();
     if matches!(
         algorithm,
-        FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::CoreNumber
+        FoundationAlgorithm::DegreeCentrality
+            | FoundationAlgorithm::CoreNumber
+            | FoundationAlgorithm::EigenvectorCentrality
     ) {
         // Retain the copy path's node and source-row charge phases, including
         // the exact self-loop refusal checkpoint. No node names are created.
@@ -80,6 +84,7 @@ pub(crate) fn run<C>(
         let result = match algorithm {
             FoundationAlgorithm::DegreeCentrality => native::degree(graph, checkpoint)?,
             FoundationAlgorithm::CoreNumber => native::core(graph, checkpoint)?,
+            FoundationAlgorithm::EigenvectorCentrality => eigenvector::run(graph, checkpoint)?,
             _ => return Err(FnxExecutionError::InvalidUpstreamResult),
         };
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
@@ -127,21 +132,9 @@ pub(crate) fn run<C>(
             let result = fnx_algorithms::betweenness_centrality(&copy);
             scores(graph, result.scores, result.witness)?
         }
-        FoundationAlgorithm::EigenvectorCentrality => {
-            let (result, converged) = fnx_algorithms::eigenvector_centrality_with_params(
-                &copy,
-                EIGENVECTOR_MAX_ITERATIONS,
-                EIGENVECTOR_TOLERANCE,
-            );
-            if !converged {
-                return Err(FnxExecutionError::NotConverged {
-                    max_iterations: EIGENVECTOR_MAX_ITERATIONS,
-                    witness: result.witness,
-                });
-            }
-            scores(graph, result.scores, result.witness)?
-        }
-        FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::CoreNumber => {
+        FoundationAlgorithm::DegreeCentrality
+        | FoundationAlgorithm::CoreNumber
+        | FoundationAlgorithm::EigenvectorCentrality => {
             return Err(FnxExecutionError::InvalidUpstreamResult);
         }
     };
