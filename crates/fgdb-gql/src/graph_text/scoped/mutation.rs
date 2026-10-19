@@ -431,6 +431,12 @@ impl<'a> Parser<'a> {
     }
 }
 
+impl PreparedGraphText {
+    pub(crate) fn deletion_feeds_later_match(&self) -> bool {
+        !self.builder.is_single_vertex_selection() || !self.scopes.is_empty()
+    }
+}
+
 impl PreparedGraphMutationText {
     /// Prepare simultaneous SET/REMOVE, plain DELETE or explicit DETACH DELETE
     /// after the existing MATCH/WALK/WHERE/OPTIONAL grammar. SET stores
@@ -690,6 +696,67 @@ impl PreparedGraphMutationText {
     #[must_use]
     pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
         self.selection.parameter_schema()
+    }
+
+    /// Whether sequential input-row execution could change a later row's
+    /// MATCH. This is a conservative definition check, independent of current
+    /// data and argument values, not a proof that aliases identify different
+    /// elements. RHS-only projections do not restrict the MATCH domain.
+    pub(crate) fn feeds_own_match(&self) -> bool {
+        let writes_property = |read| {
+            self.actions.iter().any(|action| {
+                let key = match action {
+                    MutationActionTemplate::ParameterProperty { key, .. }
+                    | MutationActionTemplate::IntegerProperty { key, .. }
+                    | MutationActionTemplate::CompositeProperty { key, .. }
+                    | MutationActionTemplate::Bound(
+                        GraphMutationAction::SetProperty { key, .. }
+                        | GraphMutationAction::RemoveProperty { key, .. },
+                    ) => Some(*key),
+                    MutationActionTemplate::Bound(
+                        GraphMutationAction::SetLabel { .. }
+                        | GraphMutationAction::DetachDelete { .. }
+                        | GraphMutationAction::Delete { .. },
+                    ) => None,
+                };
+                key == Some(read)
+            })
+        };
+        let writes_label = |read| {
+            self.actions.iter().any(|action| {
+                matches!(action, MutationActionTemplate::Bound(
+                    GraphMutationAction::SetLabel { label, .. }
+                ) if *label == read)
+            })
+        };
+        // Repeated deletion of a single matched vertex remains idempotent.
+        // A cascade can remove another row's edge or independent anchor, so
+        // a larger MATCH needs a frozen selection even without property SET.
+        // The ordinary compiler forbids mixing deletion and updates.
+        if self.actions.iter().all(|action| {
+            matches!(
+                action,
+                MutationActionTemplate::Bound(
+                    GraphMutationAction::DetachDelete { .. } | GraphMutationAction::Delete { .. }
+                )
+            )
+        }) {
+            return self.selection.deletion_feeds_later_match();
+        }
+        let reads_written_field = |builder: &GraphPatternBuilder, filters: &[BoundFilter]| {
+            builder.selects_on_any_field(writes_property, writes_label)
+                || filters.iter().any(|filter| match filter {
+                    BoundFilter::Property { key, .. } => writes_property(*key),
+                    BoundFilter::Boolean(_) => true,
+                    BoundFilter::PathLength { .. } => false,
+                })
+        };
+        reads_written_field(&self.selection.builder, &self.selection.filters)
+            || self
+                .selection
+                .scopes
+                .iter()
+                .any(|scope| reads_written_field(scope.builder(), scope.filters()))
     }
 
     /// Exact argument validation precedes all instantiation. No lexing,

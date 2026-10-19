@@ -275,6 +275,30 @@ impl GraphUnwindWriteText {
         control(GraphUnwindBindEvent::Definition(&prepared))
             .map_err(GraphUnwindBindError::Interrupted)?;
 
+        if rows.len() > 1 {
+            // Inspect the resolved definition, not source spelling or current
+            // graph contents. The definition callback still owns authorization
+            // precedence, and no expanded executable statement exists yet.
+            work(&mut control, self.lowered.len() as u64)?;
+            for (statement, input) in prepared.statements().iter().enumerate() {
+                use crate::GraphWriteTemplateStatement;
+                let feeds_later_match = match input {
+                    GraphWriteTemplateStatement::Mutation(mutation) => mutation.feeds_own_match(),
+                    GraphWriteTemplateStatement::Delete(deletion) => {
+                        deletion.selection.deletion_feeds_later_match()
+                    }
+                    GraphWriteTemplateStatement::Insert(_)
+                    | GraphWriteTemplateStatement::VertexMerge(_)
+                    | GraphWriteTemplateStatement::VertexUpsert(_)
+                    | GraphWriteTemplateStatement::EdgeMerge(_)
+                    | GraphWriteTemplateStatement::EdgeUpsert(_) => false,
+                };
+                if feeds_later_match {
+                    return Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement }.into());
+                }
+            }
+        }
+
         // The admitted definition callback saw the ordinary native template.
         // Only private batch provenance changes now: binding reads its typed
         // program, not script slices. The sole span starts in the unchanged

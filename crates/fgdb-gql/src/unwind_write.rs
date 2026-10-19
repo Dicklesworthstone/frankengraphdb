@@ -67,6 +67,12 @@ pub enum GraphUnwindWriteError {
         limit: usize,
         observed: usize,
     },
+    /// A multirow MATCH mutation could change a later input row's selection.
+    /// Until a shared clause-at-a-time owner exists, sequential execution
+    /// would be a different query. The complete batch refuses before binding.
+    RowFeedsLaterMatch {
+        statement: usize,
+    },
     /// A source failed before scalar binding. `row` addresses the selected root
     /// list; `clause` is zero-based. Root selection failures use row/clause zero.
     Expansion {
@@ -105,6 +111,10 @@ impl core::fmt::Display for GraphUnwindWriteError {
             Self::TooManyRows { limit, observed } => {
                 write!(f, "UNWIND write batch has {observed} rows; limit {limit}")
             }
+            Self::RowFeedsLaterMatch { statement } => write!(
+                f,
+                "UNWIND statement {statement} requires a frozen MATCH across its input rows"
+            ),
             Self::Row { row, offset, kind } => {
                 write!(f, "UNWIND input row {row} at byte {offset}: {kind:?}")
             }
@@ -267,6 +277,10 @@ impl GraphUnwindWriteText {
     /// definition size limits still apply to the lowered statement. Execution
     /// uses the ordinary program executor and its existing
     /// rollback, authorization, cancellation, allocation and commit semantics.
+    /// A multirow MATCH mutation that writes its own selection's property or
+    /// label domain refuses before execution, as does deletion whose MATCH
+    /// depends on edges or another vertex binding. Disjoint updates, simple
+    /// single-vertex deletion and MERGE retain sequential program semantics.
     pub fn bind_with_limit(
         &self,
         arguments: &GqlParameters,

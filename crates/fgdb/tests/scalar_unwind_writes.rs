@@ -4,7 +4,8 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    Database, DatabaseKeys, MemVfs, QueryResult, QueryWriteError, WriteBatch, WriteError, WriteTxnError,
+    Database, DatabaseKeys, MemVfs, QueryResult, QueryWriteError, WriteBatch, WriteError,
+    WriteTxnError,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
@@ -91,6 +92,145 @@ fn staged(result: QueryResult, statements: usize) {
     };
     assert!(completion.is_none(), "staging is not durability");
     assert_eq!(receipt.stats().completed_statements, statements);
+}
+
+#[test]
+fn rekey_label_and_cascade_feedback_refuse_before_staging_while_disjoint_updates_commit() {
+    let ((), report) = run_async_under_lab(0x7363_6122, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=2 {
+            seed.create_vertex(
+                VId(id),
+                vec![ENTITY],
+                vec![
+                    (ID, CanonicalScalar::Int(id as i64)),
+                    (P, CanonicalScalar::Int(10)),
+                ],
+            );
+        }
+        seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+        seed.add_edge(EId(2), VId(2), VId(1), vec![]);
+        db.write(&commit, seed).await.unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(99), vec![], vec![]);
+        txn.write(&mut db, prefix).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        for replacements in [[2, 3], [2, 1]] {
+            let input = args(vec![
+                object(vec![("a", int(1)), ("b", int(replacements[0]))]),
+                object(vec![("a", int(2)), ("b", int(replacements[1]))]),
+            ]);
+            for tail in [
+                "MATCH (n:Entity {id:row.a}) SET n.id=row.b",
+                "MATCH (n:Entity {id:row.a}) REMOVE n:Entity",
+                "MATCH (n:Entity {id:row.a})-[:R]->(m) DETACH DELETE n",
+                "MATCH (n:Entity {id:row.a}), (anchor:Entity {id:1}) DETACH DELETE n",
+            ] {
+                let error = txn
+                    .query_write(
+                        &mut db,
+                        &cx,
+                        &format!("UNWIND $rows AS row {tail}"),
+                        &input,
+                        symbols,
+                        R,
+                        policy(20, 0),
+                        no_allocation,
+                    )
+                    .unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        QueryWriteError::UnwindBinding(GraphUnwindWriteError::RowFeedsLaterMatch {
+                            statement: 0
+                        })
+                    ),
+                    "{tail}: {error:?}"
+                );
+                assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+                assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+            }
+        }
+        for id in 1..=2 {
+            let vertex = txn.vertex(&db, VId(id)).unwrap().unwrap();
+            assert_eq!(vertex.labels, [ENTITY]);
+            assert_eq!(
+                vertex.props,
+                [
+                    (ID, CanonicalScalar::Int(id as i64)),
+                    (P, CanonicalScalar::Int(10))
+                ]
+            );
+        }
+        assert_eq!(txn.edges(&db).unwrap().len(), 2);
+
+        let input = args(vec![
+            object(vec![("a", int(1)), ("b", int(20))]),
+            object(vec![("a", int(2)), ("b", int(30))]),
+        ]);
+        staged(
+            txn.query_write(
+                &mut db,
+                &cx,
+                "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.p=row.b",
+                &input,
+                symbols,
+                R,
+                policy(2, 0),
+                no_allocation,
+            )
+            .unwrap(),
+            2,
+        );
+        staged(
+            txn.query_write(
+                &mut db,
+                &cx,
+                "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.id=row.b",
+                &args(vec![object(vec![("a", int(1)), ("b", int(5))])]),
+                symbols,
+                R,
+                policy(1, 0),
+                no_allocation,
+            )
+            .unwrap(),
+            1,
+        );
+        assert_eq!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(2)
+            }
+        );
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+        assert_eq!(db.vertices().unwrap().len(), 3);
+        assert_eq!(db.edges().unwrap().len(), 2);
+        for (id, key, value) in [(1, 5, 20), (2, 2, 30)] {
+            assert_eq!(
+                db.vertex(VId(id)).unwrap().unwrap().props,
+                [
+                    (ID, CanonicalScalar::Int(key)),
+                    (P, CanonicalScalar::Int(value))
+                ]
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

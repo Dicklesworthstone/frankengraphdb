@@ -9,9 +9,9 @@ use super::{
     BindingSlot, EdgeRelation, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphMatchMode,
     GraphPathFunction, GraphWalkSearch, IntegerComparison, VertexPredicate,
 };
-use fgdb_delta_types::LabelId;
 #[cfg(test)]
 use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::VId;
 use property_comparison::PropertyComparison;
 
@@ -363,6 +363,41 @@ impl GraphPatternBuilder {
             operators.push(GlaOperator::DifferentEdges { segments });
         }
         previous.push((edge.relation, appended));
+    }
+
+    /// A deletion of the sole matched vertex cannot remove another binding
+    /// that a later input row needs. Edges and additional variables can.
+    pub(crate) fn is_single_vertex_selection(&self) -> bool {
+        self.variables.len() == 1 && self.edges.is_empty()
+    }
+
+    /// Inspect the bounded selection footprint without compiling or binding
+    /// the pattern. Alias names cannot establish disjoint element identities,
+    /// so a caller compares fields across every variable in this scope.
+    /// A general Boolean expression conservatively reads every field.
+    pub(crate) fn selects_on_any_field(
+        &self,
+        mut property: impl FnMut(PropertyKeyId) -> bool,
+        mut label: impl FnMut(LabelId) -> bool,
+    ) -> bool {
+        self.variables.iter().any(|variable| {
+            variable.predicates.iter().any(|predicate| match predicate {
+                VertexPredicate::HasLabel(value) => label(*value),
+                VertexPredicate::IntegerProperty { key, .. }
+                | VertexPredicate::ScalarProperty { key, .. }
+                | VertexPredicate::PropertyNull { key, .. } => property(*key),
+            })
+        }) || self
+            .property_comparisons
+            .iter()
+            .any(|comparison| match comparison {
+                PropertyComparison::Properties {
+                    left_key,
+                    right_key,
+                    ..
+                } => property(*left_key) || property(*right_key),
+                PropertyComparison::Boolean(_) => true,
+            })
     }
 
     /// Encode the resolved definition without compiling a scope or supplying

@@ -29,12 +29,117 @@ fn rows(values: Vec<GraphValue>) -> GqlParameters {
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         (GraphSymbolKind::Label, "Entity") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Label, "Other") => Some(GraphSymbol::Label(LabelId(2))),
         (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(PropertyKeyId(1))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
         (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(PropertyKeyId(3))),
         _ => None,
     }
+}
+
+#[test]
+fn multirow_mutations_refuse_selection_feedback_across_fields_aliases_and_scopes() {
+    let input = rows(vec![
+        object(vec![("id", int(1)), ("p", int(2))]),
+        object(vec![("id", int(2)), ("p", int(3))]),
+    ]);
+    let single = rows(vec![object(vec![("id", int(1)), ("p", int(2))])]);
+    for tail in [
+        "MATCH (n:Entity {id:row.id}) SET n.id=row.p",
+        "MATCH (n:Entity) WHERE n.id=row.id SET n.id=row.p+1",
+        "MATCH (n:Entity) WHERE n.id IS NULL SET n.id=row.p",
+        "MATCH (n:Entity {id:row.id}) REMOVE n.id",
+        "MATCH (n:Entity) REMOVE n:Entity",
+        "MATCH (n:Entity) SET n:Entity",
+        "MATCH (a:Entity), (b:Entity {id:row.id}) SET a.id=row.p",
+        "MATCH (a:Entity) OPTIONAL MATCH (a)-[:R]->(b {id:row.id}) SET a.id=row.p",
+        "MATCH (a:Entity) WHERE EXISTS { MATCH (a)-[:R]->(b {id:row.id}) } SET a.id=row.p",
+        "MATCH (n:Entity) WHERE n.id=row.id OR n.p=0 SET n.name='changed'",
+        "MATCH (n:Entity {id:row.id})-[:R]->(m) DETACH DELETE n",
+        "MATCH (n:Entity {id:row.id}), (anchor:Entity {id:1}) DETACH DELETE n",
+        "MATCH (n:Entity {id:row.id}), (anchor:Entity {id:1}) DELETE n",
+    ] {
+        let definition =
+            GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}")).unwrap();
+        let result = definition.bind(&input, RelationId(1), symbols);
+        assert!(
+            matches!(
+                result,
+                Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+            ),
+            "{tail}: {result:?}"
+        );
+        assert_eq!(
+            definition
+                .bind(&single, RelationId(1), symbols)
+                .unwrap()
+                .argument_sets(),
+            1,
+            "a single input row has no later MATCH: {tail}"
+        );
+    }
+}
+
+#[test]
+fn disjoint_updates_single_vertex_deletion_and_merges_keep_their_native_programs() {
+    let input = rows(vec![int(1), int(1), int(2)]);
+    for tail in [
+        "MATCH (n:Entity {id:x}) SET n.p=x",
+        "MATCH (n:Entity {id:x}) SET n.p=n.p+1",
+        "MATCH (n:Entity {id:x}) SET n:Other",
+        "MATCH (n:Entity {id:x}) REMOVE n.name",
+        "MATCH (n:Entity {id:x}) DETACH DELETE n",
+        "MATCH (n:Entity {id:x}) DELETE n",
+        "MERGE (n:Entity {id:x}) ON CREATE SET n.p=1 ON MATCH SET n.p=n.p+1",
+    ] {
+        let definition = GraphUnwindWriteText::parse(&format!("UNWIND $rows AS x {tail}")).unwrap();
+        let actual = definition.bind(&input, RelationId(1), symbols).unwrap();
+        assert_eq!(actual.argument_sets(), 3, "{tail}");
+        assert_eq!(actual.program().statements().len(), 3, "{tail}");
+    }
+}
+
+#[test]
+fn selection_feedback_uses_final_expansion_count_and_preserves_definition_control() {
+    let definition = GraphUnwindWriteText::parse(
+        "UNWIND $rows AS row UNWIND row.ids AS x MATCH (n:Entity {id:x}) SET n.id=row.p",
+    )
+    .unwrap();
+    let input = rows(vec![object(vec![
+        ("ids", list(vec![int(1), int(2)])),
+        ("p", int(3)),
+    ])]);
+    assert!(matches!(
+        definition.bind(&input, RelationId(1), symbols),
+        Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+    ));
+    let refused = definition.bind_with_limit_controlled(
+        &input,
+        RelationId(1),
+        3,
+        symbols,
+        |event| match event {
+            GraphUnwindBindEvent::Definition(_) => Err("definition refused"),
+            GraphUnwindBindEvent::Work(_) => Ok(()),
+        },
+    );
+    assert!(matches!(
+        refused,
+        Err(GraphUnwindBindError::Interrupted("definition refused"))
+    ));
+    let contracted = rows(vec![
+        object(vec![("ids", list(vec![int(1)])), ("p", int(3))]),
+        object(vec![("ids", list(vec![])), ("p", int(4))]),
+    ]);
+    assert_eq!(
+        definition
+            .bind(&contracted, RelationId(1), symbols)
+            .unwrap()
+            .argument_sets(),
+        1
+    );
 }
 
 #[test]
