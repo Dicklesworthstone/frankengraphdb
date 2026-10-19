@@ -40,7 +40,7 @@ use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{
     BranchId, CanonicalScalar, CanonicalScalarResolver, CommitSeq, GraphId, QueryCx, VId,
 };
-use image::{Image, Row, RowScan};
+use image::{Image, Row, RowScan, RowScanStep};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -436,11 +436,12 @@ pub enum SealedScanStep<T> {
     End,
 }
 
-/// Shared fuel for a cooperative scan slice. Outgoing incidence decodes and
+/// Shared fuel for a cooperative scan slice. Outgoing raw incidences and
 /// incoming locator probes (including chunk transitions/invisible history)
 /// spend one unit each BEFORE advancing. Several cursors can share the same
-/// allowance; no layer silently resets it. Operators may also spend units for
-/// their vertex/edge work. This is not CPU instructions or a wall-clock bound:
+/// allowance, including when visibility spans avoid a physical decode; no layer
+/// silently resets it. Operators may also spend units for their vertex/edge
+/// work. This is not CPU instructions or a wall-clock bound:
 /// an individual compressed lookup, allocation, and its checkpoint are atomic.
 #[derive(Debug)]
 pub struct SealedScanBudget {
@@ -576,9 +577,23 @@ impl<'a> SealedCursor<'a> {
                 self.finished = true;
                 return Err(error);
             }
-            let (entry, locator) = scan
-                .next()
-                .expect("sealed admission validated every incidence");
+            let (entry, locator) = match scan
+                .next_or_hidden_span(self.as_of)
+                .expect("sealed admission validated every incidence")
+            {
+                RowScanStep::Incidence(entry, locator) => (entry, locator),
+                RowScanStep::Hidden(count) => {
+                    // One raw incidence was paid above, before its checkpoint.
+                    // Pay the rest before advancing, stopping at the next
+                    // checkpoint, fuel exhaustion or visibility transition.
+                    let count = count
+                        .min(64 - scan.position % 64)
+                        .min(budget.remaining.saturating_add(1));
+                    budget.remaining -= count - 1;
+                    scan.skip_hidden(count);
+                    continue;
+                }
+            };
             if entry.visible_at(self.as_of) {
                 let properties = if locator == 0 {
                     &[][..]

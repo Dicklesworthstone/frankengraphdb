@@ -10,7 +10,7 @@ use crate::{AdjacencyEntry, DescriptorKey, Direction, VisibilityInterval};
 use fgdb_codec::elias_fano::{EliasFano, EliasFanoSequentialCursor, EntryLimit};
 use fgdb_codec::identity::{IdentityColumn, IdentityColumnLimits};
 use fgdb_delta_types::RelationId;
-use fgdb_types::{EId, VId};
+use fgdb_types::{CommitSeq, EId, VId};
 
 pub(super) fn reserved<T>(count: usize) -> Result<Vec<T>, SealedError> {
     let mut values = Vec::new();
@@ -55,19 +55,32 @@ pub(super) struct Run {
 
 /// Forward state for a retained row. CSR neighbors and visibility spans advance
 /// together, avoiding a rank-directory search and span binary search per edge.
-/// The only positional seeks happen when the caller opens a row (possibly at a
-/// destination lower bound). No decoded adjacency or property copy is retained.
+/// Positional seeks happen when opening a row or resuming after a long invisible
+/// span. No decoded adjacency or property copy is retained.
 pub(super) struct RowScan<'a> {
     image: &'a Image,
     row: &'a Row,
     pub position: usize,
     run: Option<RunScan<'a>>,
+    #[cfg(test)]
+    decoded: usize,
+    #[cfg(test)]
+    resumed_seeks: usize,
 }
 
 struct RunScan<'a> {
     run: &'a Run,
-    neighbors: EliasFanoSequentialCursor<'a>,
+    // Long skipped history invalidates the old decode position. Reopen only
+    // when a visible incidence actually needs its neighbor and identity.
+    neighbors: Option<EliasFanoSequentialCursor<'a>>,
     span: usize,
+}
+
+pub(super) enum RowScanStep {
+    Incidence(AdjacencyEntry, u32),
+    /// The next incidences are hidden; none has advanced yet. The caller must
+    /// admit their raw work before calling `skip_hidden` with a bounded prefix.
+    Hidden(usize),
 }
 
 impl<'a> RowScan<'a> {
@@ -78,7 +91,7 @@ impl<'a> RowScan<'a> {
                 let run = &image.runs[index];
                 Some(RunScan {
                     run,
-                    neighbors: run.neighbors.sequential_cursor_from(position),
+                    neighbors: Some(run.neighbors.sequential_cursor_from(position)),
                     span: run
                         .spans
                         .partition_point(|span| span.end_row as usize <= position),
@@ -90,6 +103,10 @@ impl<'a> RowScan<'a> {
             row,
             position,
             run,
+            #[cfg(test)]
+            decoded: 0,
+            #[cfg(test)]
+            resumed_seeks: 0,
         }
     }
 
@@ -97,12 +114,57 @@ impl<'a> RowScan<'a> {
         self.row.len()
     }
 
+    #[inline]
     pub fn next(&mut self) -> Option<(AdjacencyEntry, u32)> {
+        match self.next_inner::<false>(CommitSeq(0))? {
+            RowScanStep::Incidence(entry, locator) => Some((entry, locator)),
+            RowScanStep::Hidden(_) => unreachable!("an unfiltered scan never skips history"),
+        }
+    }
+
+    /// Decode one incidence, or report an invisible CSR span without reading
+    /// its neighbor, identity or locator columns. Inline rows remain bounded
+    /// scalar decodes. This does not replace full physical image admission.
+    #[inline]
+    pub fn next_or_hidden_span(&mut self, as_of: CommitSeq) -> Option<RowScanStep> {
+        self.next_inner::<true>(as_of)
+    }
+
+    /// Advance an admitted prefix of the hidden span just reported. Keep
+    /// short version gaps sequential instead of seeking before every live
+    /// edge; long spans need no further neighbor decode until visible work.
+    pub fn skip_hidden(&mut self, count: usize) {
+        let scan = self.run.as_mut().expect("only CSR spans are skipped");
+        let remaining = scan.run.spans[scan.span].end_row as usize - self.position;
+        debug_assert!(count > 0 && count <= remaining);
+        if remaining <= 8 {
+            if let Some(neighbors) = &mut scan.neighbors {
+                for _ in 0..count {
+                    neighbors.next().expect("admitted hidden neighbor");
+                }
+            }
+        } else {
+            scan.neighbors = None;
+        }
+        self.position += count;
+    }
+
+    #[cfg(test)]
+    pub fn decoded_incidences(&self) -> usize {
+        self.decoded
+    }
+
+    #[cfg(test)]
+    pub fn resumed_seeks(&self) -> usize {
+        self.resumed_seeks
+    }
+
+    #[inline]
+    fn next_inner<const FILTER: bool>(&mut self, as_of: CommitSeq) -> Option<RowScanStep> {
         if self.position >= self.row.len() {
             return None;
         }
         let value = if let Some(scan) = &mut self.run {
-            let ordinal = usize::try_from(scan.neighbors.next()?).ok()?;
             while scan.run.spans.get(scan.span)?.end_row as usize <= self.position {
                 scan.span += 1;
             }
@@ -110,6 +172,21 @@ impl<'a> RowScan<'a> {
             if self.position < span.start_row as usize {
                 return None;
             }
+            if FILTER
+                && (as_of < span.created_at || span.retired_at.is_some_and(|end| as_of >= end))
+            {
+                return Some(RowScanStep::Hidden(span.end_row as usize - self.position));
+            }
+            #[cfg(test)]
+            if scan.neighbors.is_none() {
+                self.resumed_seeks += 1;
+            }
+            let position = self.position;
+            let run = scan.run;
+            let neighbors = scan
+                .neighbors
+                .get_or_insert_with(|| run.neighbors.sequential_cursor_from(position));
+            let ordinal = usize::try_from(neighbors.next()?).ok()?;
             (
                 AdjacencyEntry {
                     src: self.row.key.src,
@@ -125,7 +202,11 @@ impl<'a> RowScan<'a> {
             self.row.incidence(self.image, self.position)?
         };
         self.position += 1;
-        Some(value)
+        #[cfg(test)]
+        {
+            self.decoded += 1;
+        }
+        Some(RowScanStep::Incidence(value.0, value.1))
     }
 }
 
