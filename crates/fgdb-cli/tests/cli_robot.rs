@@ -4564,6 +4564,92 @@ fn rows_bind_the_statement_once_per_object_in_one_atomic_program() {
     .failure(3, "query");
 }
 
+/// Repeated vertex-only selections and edge creation share one transaction.
+/// Exercise both public batching transports across fresh-process reopens:
+/// duplicate endpoint matches retain multiplicity, empty matches allocate no
+/// edge, and an error in a later record discards the whole accepted prefix.
+#[test]
+fn independent_edge_batches_preserve_occurrences_and_late_error_atomicity() {
+    for transport in ["json", "csv"] {
+        let db = TestDb::new(&format!("independent-edge-batch-{transport}"));
+        db.create();
+        let basis = db.write(&[
+            "CREATE (:Person {team:1}),(:Person {team:1}),(:Person {team:2}),(:Person {team:3})",
+        ]);
+        let statement = "MATCH (a:Person {team:$s}), (b:Person {team:$d}) CREATE (a)-[:KNOWS {born:12/$q}]->(b)";
+        let input_dir = scratch(&format!("independent-edge-input-{transport}"));
+        std::fs::create_dir(&input_dir).unwrap();
+        let execute = |name: &str, rows: &str, csv: &str| {
+            if transport == "json" {
+                db.command("write", &["--rows", rows, statement])
+            } else {
+                let input = input_dir.join(name);
+                std::fs::write(&input, csv).unwrap();
+                db.command(
+                    "import-csv",
+                    &[
+                        "--label",
+                        "Person=1",
+                        "--relation",
+                        "KNOWS=1",
+                        "--property",
+                        "team=3",
+                        "--property",
+                        "born=2",
+                        "--input",
+                        input.to_str().unwrap(),
+                        statement,
+                    ],
+                )
+            }
+        };
+        let written = execute(
+            "accepted.csv",
+            r#"json:[{"s":1,"d":2,"q":1},{"s":3,"d":2,"q":2},{"s":9,"d":2,"q":0},{"s":2,"d":3,"q":4},{"s":1,"d":2,"q":6}]"#,
+            "s,d,q\n1,2,1\n3,2,2\n9,2,0\n2,3,4\n1,2,6\n",
+        );
+        let kind = if transport == "json" {
+            "written"
+        } else {
+            "imported_csv"
+        };
+        let accepted = written.sequence(kind);
+        assert_eq!(accepted, basis + 1, "{transport}");
+        assert_eq!(written.terminal().get("statements").unsigned(), 5);
+        if transport == "csv" {
+            assert_eq!(written.terminal().get("records").unsigned(), 5);
+        }
+        let query = "MATCH (a:Person)-[e:KNOWS]->(b:Person) RETURN a.team AS src,b.team AS dst,e.born AS value ORDER BY value,src,dst";
+        let expected = r#"[
+            [{"type":"int","value":"1"},{"type":"int","value":"2"},{"type":"int","value":"2"}],
+            [{"type":"int","value":"1"},{"type":"int","value":"2"},{"type":"int","value":"2"}],
+            [{"type":"int","value":"2"},{"type":"int","value":"3"},{"type":"int","value":"3"}],
+            [{"type":"int","value":"3"},{"type":"int","value":"2"},{"type":"int","value":"6"}],
+            [{"type":"int","value":"1"},{"type":"int","value":"2"},{"type":"int","value":"12"}],
+            [{"type":"int","value":"1"},{"type":"int","value":"2"},{"type":"int","value":"12"}]
+        ]"#;
+        let read = db.command("query", &[query]);
+        assert_rows(&read, expected);
+        assert_eq!(read.sequence("rows"), accepted);
+
+        let failed = execute(
+            "refused.csv",
+            r#"json:[{"s":1,"d":3,"q":3},{"s":3,"d":2,"q":0}]"#,
+            "s,d,q\n1,3,3\n3,2,0\n",
+        );
+        failed.failure(3, "query");
+        assert!(
+            failed
+                .events
+                .iter()
+                .all(|event| !matches!(event.get("event").string(), "columns" | "row" | "result"))
+        );
+        let after_failure = db.command("query", &[query]);
+        assert_rows(&after_failure, expected);
+        assert_eq!(after_failure.sequence("rows"), accepted, "{transport}");
+    }
+}
+
 #[test]
 fn external_order_delivers_the_native_page_and_retires_private_scratch() {
     let db = TestDb::new("external-order");

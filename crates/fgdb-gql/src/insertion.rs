@@ -510,6 +510,40 @@ impl PreparedGraphInsert {
         self.edges.len()
     }
 
+    /// A native vertex-only selection followed solely by edge creations in
+    /// one relation. Appending such edges cannot change this selection or its
+    /// frozen property inputs. A host may reuse that fact only while no other
+    /// mutations intervene and must still admit every edge and issued identity.
+    ///
+    /// Relational inputs, procedures and returning-query stages are not part
+    /// of this proof. Native projected values name pattern-bound vertices;
+    /// they cannot hide a read through a supplied edge identity.
+    #[must_use]
+    pub fn independent_edge_append_relation(&self) -> Option<RelationId> {
+        use crate::algebra::ValueProjection;
+
+        let Input::Pattern(selection) = &self.input else {
+            return None;
+        };
+        if !self.vertices.is_empty()
+            || self.edges.is_empty()
+            || self.edges.iter().any(|edge| edge.relation != self.relation)
+            || selection.plan().reads_edges()
+            || !selection.value_columns().iter().all(|column| {
+                matches!(
+                    column,
+                    ValueProjection::Vertex { .. }
+                        | ValueProjection::Property { .. }
+                        | ValueProjection::Labels { .. }
+                        | ValueProjection::Properties { .. }
+                )
+            })
+        {
+            return None;
+        }
+        Some(self.relation)
+    }
+
     pub(crate) fn return_property_keys(
         &self,
         binding: crate::GraphInsertBinding,

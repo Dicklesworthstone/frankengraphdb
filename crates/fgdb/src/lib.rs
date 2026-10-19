@@ -3543,6 +3543,19 @@ impl<V: Vfs + Clone> Database<V> {
         if batch.is_empty() {
             return Err(WriteError::EmptyBatch);
         }
+        self.admit_write_values(&batch)?;
+        if batch.rows.iter().all(|pending| {
+            matches!(
+                pending,
+                PendingRow::Vertex { ensure: false, .. } | PendingRow::Edge { ensure: false, .. }
+            )
+        }) {
+            return self.build_create_template(batch);
+        }
+        self.build_general_template(batch)
+    }
+
+    fn admit_write_values(&self, batch: &WriteBatch) -> Result<(), WriteError> {
         // Validate before normalization/ensure can erase an unsupported input.
         // Validate against exactly the artifacts retained by recovery.
         // A version-2 kind (Date, LocalTime, Time, LocalDateTime, Duration)
@@ -3592,15 +3605,7 @@ impl<V: Vfs + Clone> Database<V> {
                 | PendingRow::SetLabel { .. } => {}
             }
         }
-        if batch.rows.iter().all(|pending| {
-            matches!(
-                pending,
-                PendingRow::Vertex { ensure: false, .. } | PendingRow::Edge { ensure: false, .. }
-            )
-        }) {
-            return self.build_create_template(batch);
-        }
-        self.build_general_template(batch)
+        Ok(())
     }
 
     /// Every row of `batch` as the durable delta rows of one template, in
@@ -4131,6 +4136,17 @@ impl<V: Vfs + Clone> Database<V> {
     ///   edges, each in identity order, as the general path's ordered maps
     ///   ran it.
     fn build_create_template(&self, batch: WriteBatch) -> Result<LogicalDeltaTemplate, WriteError> {
+        self.build_create_template_with_edge_prefix(batch, None)
+    }
+
+    /// A proved independent edge-creation program retains earlier created IDs
+    /// without re-preparing their rows. All checks for this chunk, including
+    /// the source-order choice of the first refusal, remain the ordinary ones.
+    fn build_create_template_with_edge_prefix(
+        &self,
+        batch: WriteBatch,
+        earlier_edges: Option<&fgdb_gql::id_hash::IdSet<EId>>,
+    ) -> Result<LogicalDeltaTemplate, WriteError> {
         let relation = batch.relation;
         let mut rows = Vec::with_capacity(batch.rows.len());
         let mut created_vertices = fgdb_gql::id_hash::IdSet::<VId>::default();
@@ -4183,7 +4199,10 @@ impl<V: Vfs + Clone> Database<V> {
                     props,
                     ensure: false,
                 } => {
-                    if created_edges.contains(&eid) || self.writer.live_edge(eid).is_some() {
+                    if earlier_edges.is_some_and(|edges| edges.contains(&eid))
+                        || created_edges.contains(&eid)
+                        || self.writer.live_edge(eid).is_some()
+                    {
                         return Err(WriteError::AlreadyLive {
                             elem: ElementId::Edge(eid),
                         });

@@ -1,6 +1,112 @@
 // Mixed write programs reuse the existing private program guard and ordinary
 // staging paths. This file owns orchestration, not another writer or matcher.
 
+/// Admitted edge chunks remain private until the program's last stage. Every
+/// selection in this profile reads only the unchanged vertex domain, so it
+/// sees exactly the same values as the ordinary canonical prefix overlay.
+struct IndependentEdgeWrites {
+    relation: RelationId,
+    batches: Vec<WriteBatch>,
+    chunks: Vec<crate::LogicalDeltaTemplate>,
+    created: fgdb_gql::id_hash::IdSet<EId>,
+    dependencies: crate::prepared_write::PreparedDependencies,
+}
+
+impl IndependentEdgeWrites {
+    fn admit(txn: &WriteTxn, program: &fgdb_gql::PreparedGraphWriteProgram) -> Option<Self> {
+        if !txn.staged.is_empty() || txn.prepared.is_some() || program.statements().len() < 2 {
+            return None;
+        }
+        let mut relation = None;
+        for statement in program.statements() {
+            let fgdb_gql::GraphWriteStatement::Insert(insertion) = statement else {
+                return None;
+            };
+            let current = insertion.independent_edge_append_relation()?;
+            if relation.is_some_and(|previous| previous != current) {
+                return None;
+            }
+            relation = Some(current);
+        }
+        Some(Self {
+            relation: relation?,
+            batches: Vec::new(),
+            chunks: Vec::new(),
+            created: fgdb_gql::id_hash::IdSet::default(),
+            dependencies: crate::prepared_write::PreparedDependencies::default(),
+        })
+    }
+
+    fn stage<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        batch: WriteBatch,
+    ) -> Result<(), WriteTxnError> {
+        // The checked insertion definition proves this shape. Keep the storage
+        // seam closed even if a future caller forgets that eligibility proof.
+        if batch.relation != self.relation
+            || batch
+                .rows
+                .iter()
+                .any(|row| !matches!(row, PendingRow::Edge { ensure: false, .. }))
+        {
+            return Err(WriteTxnError::UnsupportedAtomicMutation);
+        }
+        database.ensure_writable()?;
+        // Capture BEFORE validation: a later storage error or unwind can expose
+        // the same conservative dependencies as an ordinary refused write.
+        self.dependencies
+            .extend(crate::prepared_write::PreparedDependencies::capture(
+                &database.writer,
+                &batch,
+            ));
+        let chunk = database.prepare_independent_edge_chunk(batch.clone(), &self.created)?;
+        for row in chunk.rows() {
+            let crate::DeltaRow::CreateEdge { eid, .. } = row else {
+                return Err(WriteTxnError::UnsupportedAtomicMutation);
+            };
+            self.created.insert(*eid);
+        }
+        self.chunks.push(chunk);
+        self.batches.push(batch);
+        Ok(())
+    }
+}
+
+impl<'txn> MutationProgramWorkspace<'txn> {
+    fn for_write_program(
+        txn: &'txn mut WriteTxn,
+        program: &fgdb_gql::PreparedGraphWriteProgram,
+    ) -> Self {
+        let independent_edges = IndependentEdgeWrites::admit(txn, program);
+        let mut workspace = Self::new(txn);
+        workspace.independent_edges = independent_edges;
+        workspace
+    }
+
+    fn finish_independent_edges<V: Vfs + Clone>(
+        &mut self,
+        database: &Database<V>,
+    ) -> Result<(), WriteTxnError> {
+        let Some(independent) = &mut self.independent_edges else {
+            return Ok(());
+        };
+        if independent.chunks.is_empty() {
+            return Ok(());
+        }
+        let prepared = database.compose_independent_edge_chunks(
+            independent.relation,
+            &independent.chunks,
+            independent.dependencies.clone(),
+        )?;
+        debug_assert_eq!(prepared.basis(), self.txn.basis);
+        debug_assert!(self.txn.prepared.is_none() && self.txn.staged.is_empty());
+        self.txn.staged = core::mem::take(&mut independent.batches);
+        self.txn.prepared = Some(std::sync::Arc::new(prepared));
+        Ok(())
+    }
+}
+
 impl WriteTxn {
     /// Execute CREATE/INSERT/MERGE with database-owned identity reservations.
     pub fn execute_graph_write_program_engine_governed<V: Vfs + Clone>(
@@ -122,90 +228,119 @@ impl WriteTxn {
             }));
         }
         cx.with_restriction(|| {
-            let workspace = MutationProgramWorkspace::new(self);
+            let mut workspace = MutationProgramWorkspace::for_write_program(self, program);
             workspace.txn.program_multi_relation = true;
             let stats = program.execute_governed(
                 policy,
-                |statement, input, remaining| match input {
-                    GraphWriteStatement::Mutation(input) => workspace
-                        .txn
-                        .execute_graph_mutation_governed(database, cx, input, remaining.mutations)
-                        .map(GraphWriteStepStats::Mutation)
-                        .map_err(GraphWriteStepError::Mutation),
-                    GraphWriteStatement::Insert(input) => workspace
-                        .txn
-                        .execute_graph_insert_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.insertion_policy(),
-                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
-                        )
-                        .map(GraphWriteStepStats::Insert)
-                        .map_err(GraphWriteStepError::Insert),
-                    GraphWriteStatement::VertexMerge(input) => workspace
-                        .txn
-                        .execute_graph_vertex_merges_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.vertex_merge_policy(),
-                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
-                        )
-                        .map(|(stats, _)| GraphWriteStepStats::VertexMerge(stats))
-                        .map_err(GraphWriteStepError::VertexMerge),
-                    GraphWriteStatement::VertexUpsert(input) => workspace
-                        .txn
-                        .execute_graph_vertex_upserts_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.vertex_upsert_policy(),
-                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
-                        )
-                        .and_then(vertex_upsert_program_result)
-                        .map(|(stats, _)| stats)
-                        .map_err(GraphWriteStepError::VertexUpsert),
-                    GraphWriteStatement::EdgeMerge(input) => workspace
-                        .txn
-                        .execute_graph_edge_merges_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.edge_merge_policy(),
-                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
-                        )
-                        .map(|(stats, _)| GraphWriteStepStats::EdgeMerge(stats))
-                        .map_err(GraphWriteStepError::EdgeMerge),
-                    GraphWriteStatement::EdgeUpsert(input) => workspace
-                        .txn
-                        .execute_graph_edge_upserts_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.edge_upsert_policy(),
-                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
-                        )
-                        .and_then(|execution| {
-                            edge_upsert_program_result(
-                                input,
-                                execution,
-                                remaining.edge_upsert_policy(),
+                |statement, input, remaining| {
+                    let stats = match input {
+                        GraphWriteStatement::Mutation(input) => workspace
+                            .txn
+                            .execute_graph_mutation_governed(
+                                database,
                                 cx,
+                                input,
+                                remaining.mutations,
                             )
-                        })
-                        .map(|(stats, _)| stats)
-                        .map_err(GraphWriteStepError::EdgeUpsert),
-                    GraphWriteStatement::Delete(input) => workspace
-                        .txn
-                        .execute_graph_delete_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.deletion_policy(),
-                        )
-                        .map(GraphWriteStepStats::Delete)
-                        .map_err(GraphWriteStepError::Delete),
+                            .map(GraphWriteStepStats::Mutation)
+                            .map_err(GraphWriteStepError::Mutation),
+                        GraphWriteStatement::Insert(input) => workspace
+                            .txn
+                            .execute_graph_insert_governed_inner(
+                                database,
+                                cx,
+                                input,
+                                remaining.insertion_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                                false,
+                                workspace.independent_edges.as_mut(),
+                            )
+                            .map(|(stats, _, _)| GraphWriteStepStats::Insert(stats))
+                            .map_err(GraphWriteStepError::Insert),
+                        GraphWriteStatement::VertexMerge(input) => workspace
+                            .txn
+                            .execute_graph_vertex_merges_governed(
+                                database,
+                                cx,
+                                input,
+                                remaining.vertex_merge_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .map(|(stats, _)| GraphWriteStepStats::VertexMerge(stats))
+                            .map_err(GraphWriteStepError::VertexMerge),
+                        GraphWriteStatement::VertexUpsert(input) => workspace
+                            .txn
+                            .execute_graph_vertex_upserts_governed(
+                                database,
+                                cx,
+                                input,
+                                remaining.vertex_upsert_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .and_then(vertex_upsert_program_result)
+                            .map(|(stats, _)| stats)
+                            .map_err(GraphWriteStepError::VertexUpsert),
+                        GraphWriteStatement::EdgeMerge(input) => workspace
+                            .txn
+                            .execute_graph_edge_merges_governed(
+                                database,
+                                cx,
+                                input,
+                                remaining.edge_merge_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .map(|(stats, _)| GraphWriteStepStats::EdgeMerge(stats))
+                            .map_err(GraphWriteStepError::EdgeMerge),
+                        GraphWriteStatement::EdgeUpsert(input) => workspace
+                            .txn
+                            .execute_graph_edge_upserts_governed(
+                                database,
+                                cx,
+                                input,
+                                remaining.edge_upsert_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .and_then(|execution| {
+                                edge_upsert_program_result(
+                                    input,
+                                    execution,
+                                    remaining.edge_upsert_policy(),
+                                    cx,
+                                )
+                            })
+                            .map(|(stats, _)| stats)
+                            .map_err(GraphWriteStepError::EdgeUpsert),
+                        GraphWriteStatement::Delete(input) => workspace
+                            .txn
+                            .execute_graph_delete_governed(
+                                database,
+                                cx,
+                                input,
+                                remaining.deletion_policy(),
+                            )
+                            .map(GraphWriteStepStats::Delete)
+                            .map_err(GraphWriteStepError::Delete),
+                    }?;
+                    if statement + 1 == program.statements().len() {
+                        workspace
+                            .finish_independent_edges(database)
+                            .map_err(|error| {
+                                GraphWriteStepError::Insert(fgdb_gql::GqlQueryError::Source(
+                                    fgdb_gql::insertion::GraphInsertError::Source(error),
+                                ))
+                            })?;
+                    }
+                    Ok(stats)
                 },
                 || cx.checkpoint(),
             )?;
@@ -255,118 +390,142 @@ impl WriteTxn {
             }));
         }
         cx.with_restriction(|| {
-            let workspace = MutationProgramWorkspace::new(self);
+            let mut workspace = MutationProgramWorkspace::for_write_program(self, program);
             workspace.txn.program_multi_relation = true;
             let mut receipts = Vec::with_capacity(program.statements().len());
             let stats = program.execute_governed(
                 policy,
-                |statement, input, remaining| match input {
-                    GraphWriteStatement::Mutation(input) => workspace
-                        .txn
-                        .execute_graph_mutation_returning_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.mutations,
-                        )
-                        .map(|(stats, targets, edges)| {
-                            receipts.push(GraphWriteStepReceipt::Mutation { targets, edges });
-                            GraphWriteStepStats::Mutation(stats)
-                        })
-                        .map_err(GraphWriteStepError::Mutation),
-                    GraphWriteStatement::Insert(input) => workspace
-                        .txn
-                        .execute_graph_insert_returning_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.insertion_policy(),
-                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
-                        )
-                        .map(|(stats, vertices, edges)| {
-                            receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
-                            GraphWriteStepStats::Insert(stats)
-                        })
-                        .map_err(GraphWriteStepError::Insert),
-                    GraphWriteStatement::VertexMerge(input) => workspace
-                        .txn
-                        .execute_graph_vertex_merges_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.vertex_merge_policy(),
-                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
-                        )
-                        .and_then(vertex_merge_program_result)
-                        .map(|(stats, receipt)| {
-                            receipts.push(receipt);
-                            GraphWriteStepStats::VertexMerge(stats)
-                        })
-                        .map_err(GraphWriteStepError::VertexMerge),
-                    GraphWriteStatement::VertexUpsert(input) => workspace
-                        .txn
-                        .execute_graph_vertex_upserts_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.vertex_upsert_policy(),
-                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
-                        )
-                        .and_then(vertex_upsert_program_result)
-                        .map(|(stats, receipt)| {
-                            receipts.push(receipt);
-                            stats
-                        })
-                        .map_err(GraphWriteStepError::VertexUpsert),
-                    GraphWriteStatement::EdgeMerge(input) => workspace
-                        .txn
-                        .execute_graph_edge_merges_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.edge_merge_policy(),
-                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
-                        )
-                        .map(|(stats, receipt)| {
-                            receipts.push(receipt);
-                            GraphWriteStepStats::EdgeMerge(stats)
-                        })
-                        .map_err(GraphWriteStepError::EdgeMerge),
-                    GraphWriteStatement::EdgeUpsert(input) => workspace
-                        .txn
-                        .execute_graph_edge_upserts_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.edge_upsert_policy(),
-                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
-                        )
-                        .and_then(|execution| {
-                            edge_upsert_program_result(
-                                input,
-                                execution,
-                                remaining.edge_upsert_policy(),
+                |statement, input, remaining| {
+                    let stats = match input {
+                        GraphWriteStatement::Mutation(input) => workspace
+                            .txn
+                            .execute_graph_mutation_returning_governed(
+                                database,
                                 cx,
+                                input,
+                                remaining.mutations,
                             )
-                        })
-                        .map(|(stats, receipt)| {
-                            receipts.push(receipt);
-                            stats
-                        })
-                        .map_err(GraphWriteStepError::EdgeUpsert),
-                    GraphWriteStatement::Delete(input) => workspace
-                        .txn
-                        .execute_graph_delete_elements_returning_governed(
-                            database,
-                            cx,
-                            input,
-                            remaining.deletion_policy(),
-                        )
-                        .map(|(stats, targets, edges)| {
-                            receipts.push(GraphWriteStepReceipt::Delete { targets, edges });
-                            GraphWriteStepStats::Delete(stats)
-                        })
-                        .map_err(GraphWriteStepError::Delete),
+                            .map(|(stats, targets, edges)| {
+                                receipts.push(GraphWriteStepReceipt::Mutation { targets, edges });
+                                GraphWriteStepStats::Mutation(stats)
+                            })
+                            .map_err(GraphWriteStepError::Mutation),
+                        GraphWriteStatement::Insert(input) => workspace
+                            .txn
+                            .execute_graph_insert_governed_inner(
+                                database,
+                                cx,
+                                input,
+                                remaining.insertion_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                                true,
+                                workspace.independent_edges.as_mut(),
+                            )
+                            .map(|(stats, vertices, edges)| {
+                                receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
+                                GraphWriteStepStats::Insert(stats)
+                            })
+                            .map_err(GraphWriteStepError::Insert),
+                        GraphWriteStatement::VertexMerge(input) => workspace
+                            .txn
+                            .execute_graph_vertex_merges_governed(
+                                database,
+                                cx,
+                                input,
+                                remaining.vertex_merge_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .and_then(vertex_merge_program_result)
+                            .map(|(stats, receipt)| {
+                                receipts.push(receipt);
+                                GraphWriteStepStats::VertexMerge(stats)
+                            })
+                            .map_err(GraphWriteStepError::VertexMerge),
+                        GraphWriteStatement::VertexUpsert(input) => workspace
+                            .txn
+                            .execute_graph_vertex_upserts_governed(
+                                database,
+                                cx,
+                                input,
+                                remaining.vertex_upsert_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .and_then(vertex_upsert_program_result)
+                            .map(|(stats, receipt)| {
+                                receipts.push(receipt);
+                                stats
+                            })
+                            .map_err(GraphWriteStepError::VertexUpsert),
+                        GraphWriteStatement::EdgeMerge(input) => workspace
+                            .txn
+                            .execute_graph_edge_merges_governed(
+                                database,
+                                cx,
+                                input,
+                                remaining.edge_merge_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .map(|(stats, receipt)| {
+                                receipts.push(receipt);
+                                GraphWriteStepStats::EdgeMerge(stats)
+                            })
+                            .map_err(GraphWriteStepError::EdgeMerge),
+                        GraphWriteStatement::EdgeUpsert(input) => workspace
+                            .txn
+                            .execute_graph_edge_upserts_governed(
+                                database,
+                                cx,
+                                input,
+                                remaining.edge_upsert_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .and_then(|execution| {
+                                edge_upsert_program_result(
+                                    input,
+                                    execution,
+                                    remaining.edge_upsert_policy(),
+                                    cx,
+                                )
+                            })
+                            .map(|(stats, receipt)| {
+                                receipts.push(receipt);
+                                stats
+                            })
+                            .map_err(GraphWriteStepError::EdgeUpsert),
+                        GraphWriteStatement::Delete(input) => workspace
+                            .txn
+                            .execute_graph_delete_elements_returning_governed(
+                                database,
+                                cx,
+                                input,
+                                remaining.deletion_policy(),
+                            )
+                            .map(|(stats, targets, edges)| {
+                                receipts.push(GraphWriteStepReceipt::Delete { targets, edges });
+                                GraphWriteStepStats::Delete(stats)
+                            })
+                            .map_err(GraphWriteStepError::Delete),
+                    }?;
+                    if statement + 1 == program.statements().len() {
+                        workspace
+                            .finish_independent_edges(database)
+                            .map_err(|error| {
+                                GraphWriteStepError::Insert(fgdb_gql::GqlQueryError::Source(
+                                    fgdb_gql::insertion::GraphInsertError::Source(error),
+                                ))
+                            })?;
+                    }
+                    Ok(stats)
                 },
                 || cx.checkpoint(),
             )?;
@@ -385,7 +544,10 @@ impl WriteTxn {
 // just the already-accepted inner upsert. The occurrence bag is transferred,
 // never deduplicated; only the separate modified-target count is distinct.
 type EdgeUpsertProgramResult<A> = Result<
-    (fgdb_gql::GraphWriteStepStats, fgdb_gql::GraphWriteStepReceipt),
+    (
+        fgdb_gql::GraphWriteStepStats,
+        fgdb_gql::GraphWriteStepReceipt,
+    ),
     TxnGqlError<fgdb_gql::GraphEdgeUpsertError<WriteTxnError, A>>,
 >;
 
@@ -406,9 +568,8 @@ fn edge_upsert_program_result<A>(
     let bulk = outcomes.len() > 1;
     let mut created = Vec::new();
     let mut targets = std::collections::BTreeSet::new();
-    let mut control = |event| {
-        edge_upsert_batch_event::<A>(cx, policy.merge.query, &mut stats.evaluator, event)
-    };
+    let mut control =
+        |event| edge_upsert_batch_event::<A>(cx, policy.merge.query, &mut stats.evaluator, event);
     control(GlaExecutionEvent::Work)?;
     for outcome in &outcomes {
         control(GlaExecutionEvent::Work)?;
@@ -443,7 +604,10 @@ fn edge_upsert_program_result<A>(
         _ => GraphWriteStepReceipt::EdgeUpsertBatch { outcomes, created },
     };
     Ok((
-        GraphWriteStepStats::EdgeUpsertBatch { stats, target_edges },
+        GraphWriteStepStats::EdgeUpsertBatch {
+            stats,
+            target_edges,
+        },
         receipt,
     ))
 }
@@ -452,7 +616,10 @@ fn edge_upsert_program_result<A>(
 // retention before returning. Transfer it without another collection or graph
 // access. Empty bags are impossible for a vertex get-or-create and refuse.
 type VertexMergeProgramResult<A> = Result<
-    (fgdb_gql::GraphVertexMergeStats, fgdb_gql::GraphWriteStepReceipt),
+    (
+        fgdb_gql::GraphVertexMergeStats,
+        fgdb_gql::GraphWriteStepReceipt,
+    ),
     TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>,
 >;
 
@@ -464,15 +631,24 @@ fn vertex_merge_program_result<A>(
 ) -> VertexMergeProgramResult<A> {
     use fgdb_gql::{GqlQueryError, GraphVertexMergeError, GraphWriteStepReceipt};
     let receipt = match outcomes.len() {
-        0 => return Err(GqlQueryError::Source(GraphVertexMergeError::InvalidSourceStatistics)),
-        1 => GraphWriteStepReceipt::VertexMerge { outcome: outcomes[0] },
+        0 => {
+            return Err(GqlQueryError::Source(
+                GraphVertexMergeError::InvalidSourceStatistics,
+            ));
+        }
+        1 => GraphWriteStepReceipt::VertexMerge {
+            outcome: outcomes[0],
+        },
         _ => GraphWriteStepReceipt::VertexMergeBatch { outcomes },
     };
     Ok((stats, receipt))
 }
 
 type VertexUpsertProgramResult<A> = Result<
-    (fgdb_gql::GraphWriteStepStats, fgdb_gql::GraphWriteStepReceipt),
+    (
+        fgdb_gql::GraphWriteStepStats,
+        fgdb_gql::GraphWriteStepReceipt,
+    ),
     TxnGqlError<fgdb_gql::GraphVertexUpsertError<WriteTxnError, A>>,
 >;
 
@@ -483,17 +659,27 @@ fn vertex_upsert_program_result<A>(
     ),
 ) -> VertexUpsertProgramResult<A> {
     use fgdb_gql::{
-        GqlQueryError, GraphVertexMergeError, GraphVertexUpsertError,
-        GraphWriteStepReceipt, GraphWriteStepStats,
+        GqlQueryError, GraphVertexMergeError, GraphVertexUpsertError, GraphWriteStepReceipt,
+        GraphWriteStepStats,
     };
-    let invalid = || GqlQueryError::Source(GraphVertexUpsertError::Merge(
-        GraphVertexMergeError::InvalidSourceStatistics,
-    ));
+    let invalid = || {
+        GqlQueryError::Source(GraphVertexUpsertError::Merge(
+            GraphVertexMergeError::InvalidSourceStatistics,
+        ))
+    };
     let target_vertices = u64::try_from(outcomes.len()).map_err(|_| invalid())?;
     let receipt = match outcomes.len() {
         0 => return Err(invalid()),
-        1 => GraphWriteStepReceipt::VertexUpsert { outcome: outcomes[0] },
+        1 => GraphWriteStepReceipt::VertexUpsert {
+            outcome: outcomes[0],
+        },
         _ => GraphWriteStepReceipt::VertexUpsertBatch { outcomes },
     };
-    Ok((GraphWriteStepStats::VertexUpsertBatch { stats, target_vertices }, receipt))
+    Ok((
+        GraphWriteStepStats::VertexUpsertBatch {
+            stats,
+            target_vertices,
+        },
+        receipt,
+    ))
 }
