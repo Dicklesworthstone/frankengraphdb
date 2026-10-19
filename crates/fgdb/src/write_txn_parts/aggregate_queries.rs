@@ -77,6 +77,8 @@ impl WriteTxn {
     /// Both positive and negative domains use the ordinary overlay read/scan
     /// tracking, even for an empty set or LIMIT 0. A later set-stage refusal
     /// never erases observations already retained by an operand.
+    /// Properties of carried vertex/edge values use that same basis and staged
+    /// effects, retaining their selected-field and element-lifetime witnesses.
     pub fn execute_graph_set_governed<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -97,7 +99,8 @@ impl WriteTxn {
             let _ = self
                 .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(error)))?;
-            query.execute_governed_with_procedures(
+            let element_failure = std::cell::RefCell::new(None);
+            let result = query.execute_governed_with_elements(
                 policy,
                 |pattern, allowance| {
                     self.execute_graph_pattern_governed(database, cx, pattern, allowance)
@@ -105,8 +108,27 @@ impl WriteTxn {
                 |call, arguments, allowance| {
                     self.execute_procedure_governed(database, cx, call, arguments, allowance)
                 },
-                || cx.checkpoint(),
-            )
+                |element, key| {
+                    self.element_property_with_checkpoint(
+                        database,
+                        cx,
+                        &element_failure,
+                        element,
+                        key,
+                    )
+                },
+                || {
+                    let stopped = element_failure.borrow_mut().take();
+                    match stopped {
+                        Some(error) => Err(error),
+                        None => cx.checkpoint(),
+                    }
+                },
+            );
+            match element_failure.into_inner() {
+                Some(error) => Err(GqlQueryError::Interrupted(error)),
+                None => result,
+            }
         })
     }
 

@@ -461,3 +461,557 @@ fn path_elements_read_their_properties_at_the_query_cut() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+mod transaction_element_properties {
+    use super::*;
+    use fgdb::{PreparedNativeRead, QueryError, QueryResult, QueryValue, WriteTxn};
+    use fgdb_delta_types::ElementId;
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    const ROWS: &str =
+        "UNWIND $elements AS element WITH element AS alias RETURN alias, alias.p AS value";
+    const FOLDED: &str = "UNWIND $elements AS element WITH element.p AS value \
+        RETURN COUNT(value) AS n, SUM(value) AS total";
+    const MATERIALIZED: &str = "UNWIND $elements AS element \
+        WITH element.p AS value ORDER BY value RETURN COUNT(value) AS n, SUM(value) AS total";
+
+    fn parameters(elements: &[ElementId]) -> GqlParameters {
+        GqlParameters::new()
+            .with_list(
+                "elements",
+                elements
+                    .iter()
+                    .map(|element| match element {
+                        ElementId::Vertex(id) => GraphValue::Vertex(*id),
+                        ElementId::Edge(id) => GraphValue::Edge(*id),
+                    })
+                    .collect(),
+            )
+            .unwrap()
+    }
+
+    fn rows(result: QueryResult) -> Vec<Vec<QueryValue>> {
+        match result {
+            QueryResult::Rows { rows, .. } => rows,
+            QueryResult::Write { .. } => panic!("a property read published a write"),
+        }
+    }
+
+    fn properties(result: QueryResult) -> BTreeMap<ElementId, CanonicalScalar> {
+        rows(result)
+            .into_iter()
+            .map(|row| {
+                let element = match row[0].as_value().unwrap() {
+                    GraphValue::Vertex(id) => ElementId::Vertex(*id),
+                    GraphValue::Edge(id) => ElementId::Edge(*id),
+                    _ => panic!("a carried element identity"),
+                };
+                (
+                    element,
+                    row[1].as_value().unwrap().as_scalar().unwrap().clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn read(
+        txn: &WriteTxn,
+        db: &Database<MemVfs>,
+        cx: &fgdb_types::QueryCx,
+        text: &str,
+        params: &GqlParameters,
+    ) -> QueryResult {
+        txn.query(db, cx, text, params, symbols, policy())
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+    }
+
+    async fn seed_edges(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) {
+        seed(db, cx).await;
+        let mut edges = WriteBatch::new(R);
+        edges.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(7))]);
+        edges.add_edge(EId(11), VId(2), VId(3), vec![(P, CanonicalScalar::Int(8))]);
+        db.write(cx, edges).await.unwrap();
+    }
+
+    #[test]
+    fn database_and_saved_view_aggregate_carried_properties_at_their_own_cut() {
+        let ((), report) = run_async_under_lab(0x71f0_0104, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let cx = c.query();
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed_edges(&mut db, &c.commit()).await;
+            let basis = db.frontier().unwrap();
+            let pinned = db.read_session().unwrap();
+            let params = parameters(&[
+                ElementId::Vertex(VId(1)),
+                ElementId::Vertex(VId(2)),
+                ElementId::Vertex(VId(3)),
+                ElementId::Vertex(VId(4)),
+                ElementId::Vertex(VId(9)),
+                ElementId::Vertex(VId(999)),
+                ElementId::Edge(EId(10)),
+                ElementId::Edge(EId(11)),
+                ElementId::Edge(EId(90)),
+                ElementId::Edge(EId(999)),
+            ]);
+            let plans = [FOLDED, MATERIALIZED].map(|text| {
+                let PreparedNativeRead::PipelineAggregate(template) =
+                    PreparedNativeRead::prepare(text, &params, symbols).unwrap()
+                else {
+                    panic!("the public aggregate pipeline classification")
+                };
+                (text, template.bind_relation_parameters(&params).unwrap())
+            });
+            let expected =
+                |count, total| vec![vec![QueryValue::Count(count), QueryValue::Integer(total)]];
+            let check = |db: &Database<MemVfs>, current: (u64, i128)| {
+                for (text, query) in &plans {
+                    assert_eq!(
+                        rows(db.query(&cx, text, &params, symbols, policy()).unwrap()),
+                        expected(current.0, current.1)
+                    );
+                    assert_eq!(
+                        rows(pinned.query(&cx, text, &params, symbols, policy()).unwrap()),
+                        expected(6, 21)
+                    );
+                    for mode in 0..3 {
+                        let execute = |allowance| match mode {
+                            0 => db.execute_graph_set_aggregate_governed(&cx, query, allowance),
+                            1 => pinned.execute_graph_set_aggregate_governed(&cx, query, allowance),
+                            _ => db.execute_graph_set_aggregate_governed_at(
+                                &cx, query, basis, allowance,
+                            ),
+                        };
+                        let measured = execute(policy()).unwrap();
+                        let want = if mode == 0 { current } else { (6, 21) };
+                        assert_eq!(measured.value.len(), 1);
+                        assert_eq!(measured.value[0].values()[0].as_count(), Some(want.0));
+                        assert_eq!(measured.value[0].values()[1].as_integer(), Some(want.1));
+                        let caps = [
+                            measured.rows.snapshot_records,
+                            measured.rows.result_rows,
+                            measured.evaluator.work_units,
+                            measured.evaluator.scratch_entries,
+                        ];
+                        // Supplied identities remain expression inputs; reading
+                        // their properties does not manufacture a graph scan.
+                        assert_eq!(caps[0], 0);
+                        assert_eq!(
+                            execute(GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]))
+                                .unwrap(),
+                            measured
+                        );
+                        for dimension in 1..4 {
+                            let mut smaller = caps;
+                            assert!(smaller[dimension] > 0);
+                            smaller[dimension] -= 1;
+                            assert!(
+                                execute(GqlQueryPolicy::new(
+                                    smaller[0], smaller[1], smaller[2], smaller[3],
+                                ))
+                                .is_err()
+                            );
+                        }
+                    }
+                }
+            };
+            check(&db, (6, 21));
+
+            let mut later = WriteBatch::new(R);
+            later.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(10)));
+            later.set_vertex_property(VId(2), P, None);
+            later.set_vertex_property(VId(4), P, Some(CanonicalScalar::Null));
+            later.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(70)));
+            later.delete_vertex(VId(3));
+            later.create_vertex(VId(9), vec![], vec![(P, CanonicalScalar::Int(90))]);
+            later.add_edge(
+                EId(90),
+                VId(1),
+                VId(9),
+                vec![(P, CanonicalScalar::Int(900))],
+            );
+            db.write(&c.commit(), later).await.unwrap();
+            check(&db, (4, 1070));
+            db.compact(&c.commit()).await.unwrap();
+            check(&db, (4, 1070));
+            assert_eq!(pinned.frontier(), basis);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn carried_vertex_and_edge_properties_follow_the_canonical_overlay_and_saved_basis() {
+        let ((), report) = run_async_under_lab(0x71f0_0101, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed_edges(&mut db, &c.commit()).await;
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(8), vec![], vec![(P, CanonicalScalar::Int(80))]);
+            txn.write(&mut db, prefix).unwrap();
+            txn.savepoint(&db, "prefix").unwrap();
+            let saved = txn.staged_effect_digest().unwrap();
+
+            let mut change = WriteBatch::new(R);
+            change.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(10)));
+            change.set_vertex_property(VId(2), P, None);
+            change.set_vertex_property(VId(4), P, Some(CanonicalScalar::Null));
+            change.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(70)));
+            change.delete_vertex(VId(3));
+            change.create_vertex(VId(9), vec![], vec![(P, CanonicalScalar::Int(90))]);
+            change.add_edge(
+                EId(90),
+                VId(1),
+                VId(9),
+                vec![(P, CanonicalScalar::Int(900))],
+            );
+            // This requested alias never becomes an edge or acquires properties.
+            change.ensure_edge_by_triple(
+                EId(999),
+                VId(1),
+                VId(2),
+                vec![(P, CanonicalScalar::Int(666))],
+            );
+            txn.write(&mut db, change).unwrap();
+            let staged = txn.staged_effect_digest().unwrap();
+            let elements = [
+                ElementId::Vertex(VId(1)),
+                ElementId::Vertex(VId(2)),
+                ElementId::Vertex(VId(3)),
+                ElementId::Vertex(VId(4)),
+                ElementId::Vertex(VId(8)),
+                ElementId::Vertex(VId(9)),
+                ElementId::Vertex(VId(999)),
+                ElementId::Edge(EId(10)),
+                ElementId::Edge(EId(11)),
+                ElementId::Edge(EId(90)),
+                ElementId::Edge(EId(999)),
+            ];
+            let params = parameters(&elements);
+            let expected = |values: &[Option<i64>]| {
+                elements
+                    .iter()
+                    .copied()
+                    .zip(
+                        values
+                            .iter()
+                            .map(|value| value.map_or(CanonicalScalar::Null, CanonicalScalar::Int)),
+                    )
+                    .collect::<BTreeMap<_, _>>()
+            };
+            assert_eq!(
+                properties(read(&txn, &db, &c.query(), ROWS, &params)),
+                expected(&[
+                    Some(10),
+                    None,
+                    None,
+                    None,
+                    Some(80),
+                    Some(90),
+                    None,
+                    Some(70),
+                    None,
+                    Some(900),
+                    None,
+                ])
+            );
+            // Element expressions retain their own work/copy allowance; an
+            // identity carried by UNWIND does not manufacture a pattern scan.
+            let relation = PreparedGraphSetText::prepare(ROWS, symbols)
+                .unwrap()
+                .bind_parameters(&params)
+                .unwrap();
+            let measured = txn
+                .execute_graph_set_governed(&db, &c.query(), &relation, policy())
+                .unwrap();
+            let caps = [
+                measured.rows.snapshot_records,
+                measured.rows.result_rows,
+                measured.evaluator.work_units,
+                measured.evaluator.scratch_entries,
+            ];
+            assert_eq!(caps[0], 0);
+            assert_eq!(
+                txn.execute_graph_set_governed(
+                    &db,
+                    &c.query(),
+                    &relation,
+                    GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                )
+                .unwrap(),
+                measured
+            );
+            for dimension in 1..4 {
+                let mut smaller = caps;
+                smaller[dimension] -= 1;
+                assert!(
+                    txn.execute_graph_set_governed(
+                        &db,
+                        &c.query(),
+                        &relation,
+                        GqlQueryPolicy::new(smaller[0], smaller[1], smaller[2], smaller[3]),
+                    )
+                    .is_err()
+                );
+            }
+            for text in [FOLDED, MATERIALIZED] {
+                assert_eq!(
+                    rows(read(&txn, &db, &c.query(), text, &params)),
+                    vec![vec![QueryValue::Count(5), QueryValue::Integer(1150)]]
+                );
+            }
+            // Path-produced values use the same callback as supplied identities.
+            let path = "MATCH path = (a)-[:R]->(b) \
+                RETURN [n IN nodes(path) | n.p] AS vertices, \
+                [e IN relationships(path) | e.p] AS edges";
+            let path_rows = rows(read(&txn, &db, &c.query(), path, &GqlParameters::new()));
+            let list = |values: &[Option<i64>]| {
+                QueryValue::Value(GraphValue::List(
+                    values
+                        .iter()
+                        .map(|value| {
+                            GraphValue::Scalar(
+                                value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .into(),
+                ))
+            };
+            assert_eq!(path_rows.len(), 2);
+            assert!(path_rows.contains(&vec![list(&[Some(10), None]), list(&[Some(70)])]));
+            assert!(path_rows.contains(&vec![list(&[Some(10), Some(90)]), list(&[Some(900)])]));
+            assert_eq!(txn.staged_effect_digest().unwrap(), staged);
+            assert_eq!(db.frontier().unwrap(), basis);
+
+            txn.rollback_to_savepoint(&db, "prefix").unwrap();
+            assert_eq!(txn.staged_effect_digest().unwrap(), saved);
+            let before = expected(&[
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(0),
+                Some(80),
+                None,
+                None,
+                Some(7),
+                Some(8),
+                None,
+                None,
+            ]);
+            assert_eq!(
+                properties(read(&txn, &db, &c.query(), ROWS, &params)),
+                before
+            );
+            let mut later = WriteBatch::new(R);
+            later.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(1000)));
+            later.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(7000)));
+            db.write(&c.commit(), later).await.unwrap();
+            assert_eq!(
+                properties(read(&txn, &db, &c.query(), ROWS, &params)),
+                before
+            );
+            for text in [FOLDED, MATERIALIZED] {
+                assert_eq!(
+                    rows(read(&txn, &db, &c.query(), text, &params)),
+                    vec![vec![QueryValue::Count(7), QueryValue::Integer(101)]]
+                );
+            }
+            txn.abort();
+            assert_eq!(c.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn supplied_element_reads_retain_field_absence_and_cascade_conflicts() {
+        let ((), report) = run_async_under_lab(0x71f0_0102, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            for (case, target, conflicts) in [
+                (0, ElementId::Vertex(VId(1)), true),
+                (1, ElementId::Vertex(VId(1)), false),
+                (2, ElementId::Vertex(VId(99)), true),
+                (3, ElementId::Edge(EId(10)), true),
+                (4, ElementId::Edge(EId(10)), false),
+                (5, ElementId::Edge(EId(10)), true),
+                (6, ElementId::Edge(EId(99)), true),
+                (7, ElementId::Vertex(VId(1)), true),
+                (8, ElementId::Vertex(VId(4)), true),
+                (9, ElementId::Edge(EId(11)), true),
+                (10, ElementId::Edge(EId(10)), true),
+            ] {
+                for text in [
+                    ROWS,
+                    FOLDED,
+                    MATERIALIZED,
+                    "UNWIND $elements AS element RETURN element.p LIMIT 0",
+                ] {
+                    let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+                    seed_edges(&mut db, &c.commit()).await;
+                    if case == 8 || case == 9 {
+                        let mut remove = WriteBatch::new(R);
+                        if case == 8 {
+                            remove.set_vertex_property(VId(4), P, None);
+                        } else {
+                            remove.set_edge_property(EId(11), P, None);
+                        }
+                        db.write(&c.commit(), remove).await.unwrap();
+                    }
+                    let mut txn = db.begin(&c.txn()).unwrap();
+                    let mut prefix = WriteBatch::new(R);
+                    prefix.create_vertex(VId(1000), vec![], vec![]);
+                    txn.write(&mut db, prefix).unwrap();
+                    let _ = read(&txn, &db, &c.query(), text, &parameters(&[target]));
+                    let mut winner = WriteBatch::new(R);
+                    match case {
+                        0 | 7 => {
+                            winner.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(50)))
+                        }
+                        1 => winner.set_vertex_property(
+                            VId(1),
+                            PropertyKeyId(2),
+                            Some(CanonicalScalar::Int(50)),
+                        ),
+                        2 => winner.create_vertex(
+                            VId(99),
+                            vec![],
+                            vec![(P, CanonicalScalar::Int(50))],
+                        ),
+                        3 => winner.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(50))),
+                        4 => winner.set_edge_property(
+                            EId(10),
+                            PropertyKeyId(2),
+                            Some(CanonicalScalar::Int(50)),
+                        ),
+                        5 => winner.delete_vertex(VId(2)),
+                        6 => winner.add_edge(
+                            EId(99),
+                            VId(1),
+                            VId(2),
+                            vec![(P, CanonicalScalar::Int(50))],
+                        ),
+                        8 => winner.set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(50))),
+                        9 => winner.set_edge_property(EId(11), P, Some(CanonicalScalar::Int(50))),
+                        10 => winner.delete_edge(EId(10)),
+                        _ => unreachable!(),
+                    };
+                    db.write(&c.commit(), winner).await.unwrap();
+                    if case == 7 {
+                        // Restoring a value cannot erase its intervening write.
+                        db.write(&c.commit(), change(1, 1)).await.unwrap();
+                    }
+                    let frontier = db.frontier().unwrap();
+                    let result = txn.finish(&mut db, &c.commit()).await;
+                    if conflicts {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+                            ),
+                            "case={case}, {text}: {result:?}"
+                        );
+                        assert_eq!(db.frontier().unwrap(), frontier);
+                        assert!(db.vertex(VId(1000)).unwrap().is_none());
+                    } else {
+                        result.unwrap();
+                        assert!(db.vertex(VId(1000)).unwrap().is_some());
+                    }
+                    assert_eq!(c.outstanding_obligations(), 0);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn every_property_checkpoint_preserves_interruption_retry_and_refused_read_witnesses() {
+        let ((), report) = run_async_under_lab(0x71f0_0103, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            for text in [ROWS, FOLDED, MATERIALIZED] {
+                let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+                seed_edges(&mut db, &c.commit()).await;
+                let mut txn = db.begin(&c.txn()).unwrap();
+                txn.savepoint(&db, "before").unwrap();
+                let mut stage = WriteBatch::new(R);
+                for id in 1000..1064 {
+                    stage.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(99))]);
+                }
+                txn.write(&mut db, stage).unwrap();
+                let digest = txn.staged_effect_digest().unwrap();
+                let params = parameters(&[ElementId::Vertex(VId(1)), ElementId::Edge(EId(10))]);
+                let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let expected = prepared
+                    .execute_in_transaction(
+                        &txn,
+                        &db,
+                        &c.query().with_checkpoint_probe(Arc::clone(&probe)),
+                        &params,
+                        policy(),
+                    )
+                    .unwrap();
+                let calls = probe.calls();
+                assert!(
+                    calls > 64,
+                    "the canonical prefix is polled during each point read"
+                );
+                for stop in 1..=calls {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                    let result = prepared.execute_in_transaction(
+                        &txn,
+                        &db,
+                        &c.query().with_checkpoint_probe(Arc::clone(&probe)),
+                        &params,
+                        policy(),
+                    );
+                    let interrupted = match &result {
+                        Err(QueryError::TransactionSet(error)) => {
+                            matches!(**error, GqlQueryError::Interrupted(_))
+                        }
+                        Err(QueryError::TransactionAggregate(error)) => {
+                            matches!(**error, GqlQueryError::Interrupted(_))
+                        }
+                        _ => false,
+                    };
+                    assert!(interrupted, "{text}, stop={stop}: {result:?}");
+                    assert_eq!(
+                        probe.calls(),
+                        stop,
+                        "no source or evaluator continuation after refusal"
+                    );
+                    assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+                }
+                assert_eq!(
+                    prepared
+                        .execute_in_transaction(&txn, &db, &c.query(), &params, policy())
+                        .unwrap(),
+                    expected
+                );
+                txn.rollback_to_savepoint(&db, "before").unwrap();
+                let mut prefix = WriteBatch::new(R);
+                prefix.create_vertex(VId(2000), vec![], vec![]);
+                txn.write(&mut db, prefix).unwrap();
+                // Successful reads touched only vertex 1 and edge 10. A read
+                // interrupted inside the canonical-prefix walk retains the
+                // existing allocation-free ALL-CHANGE witness. Neither retry
+                // nor rollback may erase it, even for this unrelated mutation.
+                db.write(&c.commit(), change(4, 40)).await.unwrap();
+                let result = txn.finish(&mut db, &c.commit()).await;
+                assert!(
+                    matches!(
+                        result,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
+                    ),
+                    "{text}: {result:?}"
+                );
+                assert!(db.vertex(VId(2000)).unwrap().is_none());
+                assert_eq!(c.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
