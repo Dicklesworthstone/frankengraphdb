@@ -5263,8 +5263,9 @@ impl<V: Vfs + Clone> Database<V> {
         )?;
 
         // The logical state and allocator are unchanged. The shared tail
-        // republishes and reopens from disk, providing an equivalent version
-        // basis that does not retain the superseded decoded payloads.
+        // republishes and decodes its durably admitted sealed bytes, providing
+        // an equivalent version basis without rereading the entire partition
+        // or retaining the superseded decoded payloads.
         let published_chain_hash = chain_commitment_at(self.coordinator.chain(), frontier)
             .expect("a healthy handle's frontier is on its own recovered chain");
         // Trust publication (fgdb-ibbuq ruling, fgdb-l89gt): every object the
@@ -6651,6 +6652,38 @@ fn consolidate_replay_if_needed(
     if capacity.overflow(writer).is_none() {
         return Ok(());
     }
+    let (blocks, block_props, patches) = decode_sealed_partition(cx, keys, writer)?;
+    let replacement = consolidated_writer(cx, keys, &blocks, &block_props, &patches, frontier)?;
+    if let Some(error) = capacity.overflow(&replacement) {
+        return Err(RebuildError::Fold {
+            commit_seq: frontier.0,
+            error: fgdb_strata::writer::WriteError::Root(error),
+        });
+    }
+    *writer = replacement;
+    Ok(())
+}
+
+/// Decode exactly the immutable objects a writer has sealed, in publication
+/// order. This is the same durable-format round trip normal writes use for
+/// their new snapshot suffix; no live-map row becomes a read answer.
+///
+/// This helper grants no admission or durability. A publication calls it only
+/// after its data, root and manifest have earned the store's receipts. Replay
+/// may also use it before publication to feed the validating compactor.
+#[allow(clippy::type_complexity)]
+fn decode_sealed_partition(
+    cx: &CommitCx,
+    keys: &DatabaseKeys,
+    writer: &BlockWriter,
+) -> Result<
+    (
+        Vec<Vec<AdjacencyEntry>>,
+        Vec<Option<BlockProps>>,
+        Vec<VertexPatchRows>,
+    ),
+    RebuildError,
+> {
     let mut blocks = Vec::with_capacity(writer.sealed().len());
     let mut block_props = Vec::with_capacity(writer.sealed().len());
     for sealed in writer.sealed() {
@@ -6662,7 +6695,7 @@ fn consolidate_replay_if_needed(
                 let patch = sealed
                     .property_patch
                     .as_ref()
-                    .expect("a replay-sealed block declaring a hosted patch carries that patch");
+                    .expect("a sealed block declaring a hosted patch carries that patch");
                 let rows = match keys.scalar_resolver.as_deref() {
                     Some(resolver) => fgdb_strata::edge_props::decode_property_patch_with_resolver(
                         &patch.bytes,
@@ -6693,15 +6726,7 @@ fn consolidate_replay_if_needed(
             .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?,
         );
     }
-    let replacement = consolidated_writer(cx, keys, &blocks, &block_props, &patches, frontier)?;
-    if let Some(error) = capacity.overflow(&replacement) {
-        return Err(RebuildError::Fold {
-            commit_seq: frontier.0,
-            error: fgdb_strata::writer::WriteError::Root(error),
-        });
-    }
-    *writer = replacement;
-    Ok(())
+    Ok((blocks, block_props, patches))
 }
 
 /// Fold every committed template with `commit_seq > after` into the writer,
@@ -6821,9 +6846,11 @@ async fn fold_stream<V: Vfs>(
     Ok(frontier)
 }
 
-/// The publication tail every open path shares: publish from a clone, make
-/// the blocks/patches/root/manifest durable, and assemble the snapshot from
-/// a from-disk reopen — the encode -> address -> fsync -> decode round trip.
+/// The publication tail every open path shares: seal the owned writer, make
+/// the blocks/patches/root/manifest durable, and decode the exact sealed bytes
+/// whose durability and root membership the store just proved. This preserves
+/// the encode -> address -> fsync -> decode round trip without a redundant
+/// writer-map clone or a second whole-partition filesystem read (fgdb-l89gt).
 /// The receipts this publication earned come back with it, so the handle's
 /// first commit does not re-sync what this call just synced (fgdb-ibbuq).
 ///
@@ -6874,12 +6901,12 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     build_adjacency: bool,
     build_property_index: bool,
 ) -> Result<PublishedGeneration, RebuildError> {
-    // Publish from a clone and hand the fold state back: the caller retains it
-    // so later commits fold only their own template (fgdb-fujt). The strata
-    // equality law pins clone-publish == this very rebuild, byte for byte.
-    let (root, blocks, patches) = writer
-        .clone()
-        .publish(keys.block_keys(), frontier)
+    // This replacement writer is owned by the publication, so sealing it in
+    // place needs no copy of its complete live maps. Return the sealed fold
+    // with the snapshot so the next commit extends exactly these objects.
+    let mut writer = writer;
+    let root = writer
+        .publish_in_place(keys.block_keys(), frontier)
         .map_err(|error| RebuildError::Fold {
             commit_seq: frontier.0,
             error,
@@ -6894,7 +6921,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     // root slot names the manifest, which the caller publishes after this.
     let mut receipts = receipts;
     let mut batch = store.publication_batch(cx, &mut receipts, None)?;
-    for block in &blocks {
+    for block in writer.sealed() {
         batch
             .put_verified(
                 cx,
@@ -6907,7 +6934,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
             .await?;
     }
     batch.flush(cx).await?;
-    for patch in &patches {
+    for patch in writer.sealed_patches() {
         batch.put_patch_verified(cx, &patch.bytes).await?;
     }
     batch.finish(cx).await?;
@@ -6918,8 +6945,15 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     let (manifest, _) = store
         .publish_root_and_manifest(cx, verified_root, &manifest_records, &mut receipts)
         .await?;
-    let (reopened_root, decoded, decoded_props, decoded_patches) =
-        store.reopen(cx, root_id).await?;
+    // Batch admission proves identity, shape, hosted properties and history;
+    // its flush also compares the synced backing bytes before publishing an
+    // inode or pack. Root/manifest publication uses the same durable readback
+    // protocol. Existing unreceipted objects still earn the full identity and
+    // byte-equality proof, while published receipts keep their normal trust
+    // rule. Reopening here adds no proof: it only rereads and redecodes every
+    // already-admitted immutable object. A fresh database open still performs
+    // its complete authenticated root walk from disk.
+    let (decoded, decoded_props, decoded_patches) = decode_sealed_partition(cx, keys, &writer)?;
 
     Ok((
         Snapshot {
@@ -6938,13 +6972,13 @@ async fn publish_and_snapshot_inner<V: Vfs>(
                 std::sync::OnceLock::new()
             },
             blocks: decoded.into_iter().map(Arc::from).collect(),
-            refs: reopened_root.blocks,
+            refs: root.blocks,
             block_props: decoded_props
                 .into_iter()
                 .map(|props| props.map(Arc::new))
                 .collect(),
             patches: decoded_patches,
-            patch_refs: reopened_root.vertex_patches,
+            patch_refs: root.vertex_patches,
             frontier,
             root: root_id,
             manifest,
