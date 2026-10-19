@@ -1,8 +1,10 @@
 //! Actual pull scans over a pinned, already decoded database generation.
 //!
-//! Persistent equality candidates or the history index supply ordered successors
-//! without collecting IDs or restarting at the beginning. Only the chosen candidate's
-//! MVCC history is resolved. The source holds an EmbeddedReadView, not a borrow
+//! Persistent property candidates or the history index supply ordered successors.
+//! Equality keeps at most two roots. Numeric ranges merge at most 64 value-bucket
+//! heads; wider ranges test historical membership one identity at a time. Neither
+//! path collects all candidate IDs or resolves unrequested MVCC winners.
+//! The source holds an EmbeddedReadView, not a borrow
 //! of the mutable Database: writes, compaction, reopen and handle drop cannot
 //! change its generation. This is not paging an evidence artifact or materialized
 //! graph table, and it does not claim that the pinned generation is out of core.
@@ -15,6 +17,7 @@ use fgdb_gql::algebra::{
     GlaPlan, GraphValueRow, IntegerComparison, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::edge_stream::{EdgeExpansionSourceError, EdgeScanRow};
+use fgdb_gql::scan_stream::SourceStep;
 use fgdb_gql::stream::{
     VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanOutput, VertexScanPlan,
     VertexScanRow, VertexScanSource, VertexScanSourceError,
@@ -24,6 +27,7 @@ use fgdb_types::{CanonicalScalar, CommitSeq, EId, QueryCx, VId};
 use std::sync::Arc;
 
 mod global_aggregate;
+mod range;
 
 type Cancel = Box<asupersync::error::Error>;
 type StreamError = GqlQueryError<VertexScanError<ReadError>, Cancel>;
@@ -47,6 +51,7 @@ enum RootCandidates {
         roots: [Option<IndexMap<VId, ()>>; 2],
         equality: RootEquality,
     },
+    Range(range::RangeCandidates),
 }
 
 /// Public only because it is a parameter of the returned public cursor. The
@@ -62,10 +67,9 @@ pub struct SnapshotVertexSource<'q> {
 }
 
 impl SnapshotVertexSource<'_> {
-    /// Select only an admitted leading equality. This retains at most two
-    /// immutable candidate roots, never a candidate-ID collection. Range and
-    /// prefix scans keep the history walk until they have a bounded ordered
-    /// source with the same authorization and error behavior.
+    /// Prefer an admitted leading equality, otherwise intersect leading numeric
+    /// constraints on one allowed property. Fallible predicates, including
+    /// string-prefix expressions, retain their ordinary evaluation order.
     pub(crate) fn with_root_equality<Row: VertexScanOutput>(
         self,
         plan: &VertexScanPlan<Row>,
@@ -78,27 +82,45 @@ impl SnapshotVertexSource<'_> {
     /// relaxed row plan that could bypass the ordinary cursor's ordering proof.
     pub(crate) fn with_root_equality_predicates<'p>(
         mut self,
-        mut predicates: impl Iterator<Item = &'p VertexPredicate>,
+        predicates: impl Iterator<Item = &'p VertexPredicate>,
         allows_property: impl Fn(PropertyKeyId) -> bool,
     ) -> Self {
-        let equality = predicates.find_map(|predicate| {
-            let (key, value) = match predicate {
+        let mut equality = None;
+        let mut bounds: Option<numeric::NumericBounds> = None;
+        for predicate in predicates {
+            let selected = match predicate {
                 VertexPredicate::IntegerProperty {
                     key,
                     comparison: IntegerComparison::Equal,
                     value,
-                } => (*key, CanonicalScalar::Int(*value)),
+                } => Some((*key, CanonicalScalar::Int(*value))),
                 VertexPredicate::ScalarProperty { key, predicate }
                     if predicate.comparison() == IntegerComparison::Equal
                         && !matches!(predicate.value(), CanonicalScalar::Null) =>
                 {
-                    (*key, predicate.value().clone())
+                    Some((*key, predicate.value().clone()))
                 }
-                _ => return None,
+                _ => None,
             };
-            allows_property(key).then_some((key, value))
-        });
+            if let Some((key, value)) = selected
+                && allows_property(key)
+            {
+                equality = Some((key, value));
+                break;
+            }
+            if let Some((key, comparison, value)) = numeric::numeric_operand(predicate)
+                && allows_property(key)
+            {
+                let selected = bounds.get_or_insert_with(|| numeric::NumericBounds::new(key));
+                if selected.key() == key {
+                    selected.constrain(&value, comparison);
+                }
+            }
+        }
         let Some((key, value)) = equality else {
+            if let Some(bounds) = bounds {
+                self.candidates = RootCandidates::Range(range::RangeCandidates::new(bounds));
+            }
             return self;
         };
         let values = match &value {
@@ -132,7 +154,20 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         &mut self,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VId>, VertexScanSourceError<ReadError, C>> {
-        let successor = self
+        loop {
+            match self.next_vertex_step(control)? {
+                SourceStep::Item(vid) => return Ok(Some(vid)),
+                SourceStep::Skipped(_) => {}
+                SourceStep::Exhausted => return Ok(None),
+            }
+        }
+    }
+
+    fn next_vertex_step<C>(
+        &mut self,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<SourceStep<VId>, VertexScanSourceError<ReadError, C>> {
+        let step = self
             .cx
             .with_restriction(|| {
                 if let RootCandidates::Pending { keys, .. } = &self.candidates {
@@ -161,7 +196,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                     };
                     self.candidates = RootCandidates::Indexed { roots, equality };
                 }
-                match &self.candidates {
+                let successor = match &mut self.candidates {
                     RootCandidates::Indexed { roots, .. } => {
                         let mut successor = None;
                         for root in roots.iter().flatten() {
@@ -169,23 +204,32 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                                 successor = Some(successor.map_or(vid, |next: VId| next.min(vid)));
                             }
                         }
-                        Ok(successor)
+                        successor
                     }
                     RootCandidates::Histories => index_successor(
                         &self.view.snapshot.property_index().histories,
                         self.after,
                         control,
-                    ),
+                    )?,
+                    RootCandidates::Range(range) => {
+                        return range.next(
+                            self.view.snapshot.property_index(),
+                            &self.view.snapshot.patches,
+                            self.after,
+                            control,
+                        );
+                    }
                     RootCandidates::Pending { .. } => {
                         unreachable!("candidate roots resolved above")
                     }
-                }
+                };
+                Ok(successor.map_or(SourceStep::Exhausted, SourceStep::Item))
             })
             .map_err(VertexScanSourceError::Control)?;
-        if let Some(vid) = successor {
+        if let SourceStep::Item(vid) | SourceStep::Skipped(vid) = step {
             self.after = Some(vid);
         }
-        Ok(successor)
+        Ok(step)
     }
 
     fn root_is_candidate<C>(
@@ -193,11 +237,12 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         row: &VertexScanRow<'_>,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<bool, VertexScanSourceError<ReadError, C>> {
-        let equality = match &self.candidates {
+        let key = match &self.candidates {
             RootCandidates::Histories => return Ok(true),
             RootCandidates::Pending { equality, .. } | RootCandidates::Indexed { equality, .. } => {
-                equality
+                equality.key
             }
+            RootCandidates::Range(range) => range.key(),
         };
         // This poll-only recheck is for the scoped adapter's private candidate
         // admission. The native cursor later meters its ordinary full predicate
@@ -207,13 +252,21 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         while low < high {
             control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
             let mid = low + (high - low) / 2;
-            match row.properties[mid].0.cmp(&equality.key) {
+            match row.properties[mid].0.cmp(&key) {
                 core::cmp::Ordering::Less => low = mid + 1,
                 core::cmp::Ordering::Greater => high = mid,
                 core::cmp::Ordering::Equal => {
                     control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
-                    return Ok(IntegerComparison::Equal
-                        .accepts_scalar_pair(Some(&row.properties[mid].1), Some(&equality.value)));
+                    return Ok(match &self.candidates {
+                        RootCandidates::Pending { equality, .. }
+                        | RootCandidates::Indexed { equality, .. } => IntegerComparison::Equal
+                            .accepts_scalar_pair(
+                                Some(&row.properties[mid].1),
+                                Some(&equality.value),
+                            ),
+                        RootCandidates::Range(range) => range.accepts(&row.properties[mid].1),
+                        RootCandidates::Histories => unreachable!("history roots admit every row"),
+                    });
                 }
             }
         }

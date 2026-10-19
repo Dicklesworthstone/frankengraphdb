@@ -10,9 +10,13 @@ use fgdb_gql::algebra::{GlaOperator, IntegerComparison as C, VertexPredicate};
 use fgdb_types::{CanonicalF64, CanonicalScalar, CommitSeq, VId};
 use std::collections::BTreeSet;
 
-struct NumericBounds {
+pub(super) struct NumericBounds {
     key: PropertyKeyId,
     ranges: [PropertyRange; 2],
+    // Exact query-domain endpoints also recheck a visible winner without
+    // allocating its canonical encoding on every streamed history.
+    lower: Option<(CanonicalScalar, bool)>,
+    upper: Option<(CanonicalScalar, bool)>,
 }
 
 fn numeric_peers(value: &CanonicalScalar) -> [CanonicalScalar; 2] {
@@ -45,9 +49,11 @@ pub(super) fn equality_peers(value: &CanonicalScalar) -> [Option<CanonicalScalar
 }
 
 impl NumericBounds {
-    fn new(key: PropertyKeyId) -> Self {
+    pub(super) fn new(key: PropertyKeyId) -> Self {
         Self {
             key,
+            lower: None,
+            upper: None,
             ranges: [
                 PropertyRange::new(
                     key,
@@ -68,7 +74,26 @@ impl NumericBounds {
     /// This handles fractions, i64 saturation and binary64 rounding above 2^53.
     /// STRICT_PORTABLE orders NaN after +infinity, hence its integer boundary
     /// is MAX, not Rust's NaN-to-integer cast result of zero.
-    fn constrain(&mut self, value: &CanonicalScalar, comparison: C) {
+    pub(super) fn constrain(&mut self, value: &CanonicalScalar, comparison: C) {
+        let inclusive = matches!(comparison, C::Equal | C::LessOrEqual | C::GreaterOrEqual);
+        for (endpoint, tighter) in [(&mut self.lower, C::Less), (&mut self.upper, C::Greater)] {
+            let applies = match tighter {
+                C::Less => matches!(comparison, C::Equal | C::Greater | C::GreaterOrEqual),
+                _ => matches!(comparison, C::Equal | C::Less | C::LessOrEqual),
+            };
+            if !applies {
+                continue;
+            }
+            match endpoint {
+                Some((old, old_inclusive))
+                    if C::Equal.accepts_scalar_pair(Some(old), Some(value)) =>
+                {
+                    *old_inclusive &= inclusive;
+                }
+                Some((old, _)) if !tighter.accepts_scalar_pair(Some(old), Some(value)) => {}
+                _ => *endpoint = Some((value.clone(), inclusive)),
+            }
+        }
         let peers = numeric_peers(value);
         for (range, peer) in self.ranges.iter_mut().zip(peers) {
             let equal = C::Equal.accepts_scalar_pair(Some(&peer), Some(value));
@@ -98,6 +123,33 @@ impl NumericBounds {
         }
     }
 
+    pub(super) fn key(&self) -> PropertyKeyId {
+        self.key
+    }
+
+    pub(super) fn ranges(&self) -> &[PropertyRange; 2] {
+        &self.ranges
+    }
+
+    /// Exact native comparisons, independent of the encoded seek boundaries.
+    /// Scoped streams call this for the visible winner only after admitting
+    /// its labels; private candidate discovery may check historical statements.
+    pub(super) fn accepts(&self, value: &CanonicalScalar) -> bool {
+        matches!(value, CanonicalScalar::Int(_) | CanonicalScalar::Float(_))
+            && self.lower.as_ref().is_none_or(|(bound, inclusive)| {
+                let comparison = if *inclusive {
+                    C::GreaterOrEqual
+                } else {
+                    C::Greater
+                };
+                comparison.accepts_scalar_pair(Some(value), Some(bound))
+            })
+            && self.upper.as_ref().is_none_or(|(bound, inclusive)| {
+                let comparison = if *inclusive { C::LessOrEqual } else { C::Less };
+                comparison.accepts_scalar_pair(Some(value), Some(bound))
+            })
+    }
+
     fn candidates<E>(
         &self,
         index: &PropertyEqualityIndex,
@@ -111,7 +163,9 @@ impl NumericBounds {
     }
 }
 
-fn numeric_operand(predicate: &VertexPredicate) -> Option<(PropertyKeyId, C, CanonicalScalar)> {
+pub(super) fn numeric_operand(
+    predicate: &VertexPredicate,
+) -> Option<(PropertyKeyId, C, CanonicalScalar)> {
     let (key, comparison, value) = match predicate {
         VertexPredicate::IntegerProperty {
             key,

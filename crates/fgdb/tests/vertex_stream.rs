@@ -865,3 +865,6 @@ fn value_streams_keep_exact_shared_budgets_and_refuse_unstreamable_order_before_
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[path = "vertex_stream/ranges.rs"]
+mod ranges;

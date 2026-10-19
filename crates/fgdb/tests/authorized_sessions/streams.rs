@@ -160,6 +160,8 @@ fn denied_equality_properties_cannot_change_stream_quota_refusals() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+mod ranges;
+
 #[test]
 fn keyed_aggregate_streams_share_candidate_bounds_in_local_send_and_async_drivers() {
     let ((), report) = run_async_under_lab(0x5ec0_6103, |root| async move {
