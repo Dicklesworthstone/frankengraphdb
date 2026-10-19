@@ -255,8 +255,8 @@ fn retained_histories_match_independent_all_direction_cut_and_position_oracles()
                                 }
                                 if !scan.is_finished() {
                                     assert!(
-                                        scan.driver.as_ref().unwrap().routes.is_none(),
-                                        "routing released after seeding"
+                                        scan.driver.as_ref().unwrap().root.state.is_none(),
+                                        "incidence retains no whole-partition root heap"
                                     );
                                     assert!(scan.state.as_ref().unwrap().incidence.is_some());
                                 }

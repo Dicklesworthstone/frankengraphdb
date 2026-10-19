@@ -2,7 +2,11 @@
 //! the admitted extent identity/checksum and the ordinary canonical decoders.
 
 use super::*;
-use crate::tiered::edge_scan::{BufferedEdgeScan, BufferedEdgeScanEvent, EdgeScanWork};
+use crate::tiered::edge_scan::{
+    BufferedEdgeDirection, BufferedEdgeScan, BufferedEdgeScanEvent, EdgeScanWork,
+};
+
+pub(crate) use super::block_directory::Candidates as BufferedIncidenceBlocks;
 
 pub(crate) type BufferedBlockImage = (Vec<AdjacencyEntry>, Option<BlockProps>);
 type BufferedBlockKeys = (Vec<AdjacencyEntry>, Option<Vec<u8>>);
@@ -25,6 +29,27 @@ impl<V: Vfs> BufferedPartition<V> {
 
     pub(crate) fn edge_scan_first(&self, at: usize) -> Option<(EId, CommitSeq)> {
         self.blocks[at].summary.map(|summary| summary.first_edge)
+    }
+
+    pub(crate) fn edge_scan_incidence_blocks(
+        &self,
+        endpoint: VId,
+        relation: Option<RelationId>,
+        direction: BufferedEdgeDirection,
+    ) -> BufferedIncidenceBlocks {
+        self.block_directory
+            .candidates(endpoint, relation, direction)
+    }
+
+    pub(crate) fn edge_scan_next_incidence_block<C>(
+        &self,
+        candidates: &mut BufferedIncidenceBlocks,
+        cx: &QueryCx,
+        work: &mut EdgeScanWork,
+        observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+    ) -> Result<Option<usize>, BufferedScanError<C>> {
+        self.block_directory
+            .next(candidates, &mut || work.step(cx, observe))
     }
 
     pub(crate) fn reserve_scan_bytes(

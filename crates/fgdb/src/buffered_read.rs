@@ -194,9 +194,10 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// Unlike adjacency(), this stream is ordered by EId, NOT by destination.
     /// Each output owns its existing MemoryPool reservations independently of
     /// the cursor and view. Callers retaining outputs retain their charges too.
-    /// The first pull builds bounded resident routing, then releases it after
-    /// seeding persistent merge heads. Initial metadata/routing and individual
-    /// records can still exceed admission. No resident Snapshot, eager fallback,
+    /// The first pull seeks authenticated block descriptors and seeds persistent
+    /// merge heads, without building per-query routing from graph payloads.
+    /// Initial descriptor metadata and individual records can still exceed
+    /// admission. No resident Snapshot, eager fallback,
     /// complete result vector or cross-process retention lease is introduced.
     pub fn stream_adjacency(
         &mut self,

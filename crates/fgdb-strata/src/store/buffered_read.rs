@@ -9,6 +9,7 @@
 //! format changes or permission to reclaim objects follow from this reader.
 
 mod admission;
+mod block_directory;
 mod patch_directory;
 mod scan_access;
 
@@ -363,6 +364,7 @@ pub struct BufferedPartition<V: Vfs> {
     blocks: Vec<BlockDescriptor>,
     patches: Vec<PatchDescriptor>,
     patch_directory: patch_directory::PatchDirectory,
+    block_directory: block_directory::BlockDirectory,
     buffer: ExtentBuffer,
     limits: BufferedReadLimits,
     _metadata: MemoryCharge,
@@ -576,6 +578,14 @@ impl<V: Vfs + Clone> BlockStore<V> {
                     .map_err(BufferedReadError::Interrupted)?;
                 advance(&mut work, 1, limits.max_work)
             })?;
+        // The complete root walk has authenticated descriptor topology and
+        // immutable EId endpoints before these fences can exclude payloads.
+        let block_directory =
+            block_directory::BlockDirectory::new(&blocks, cx, &pool, &mut || {
+                cx.buffered_checkpoint()
+                    .map_err(BufferedReadError::Interrupted)?;
+                advance(&mut work, 1, limits.max_work)
+            })?;
         cx.buffered_checkpoint()
             .map_err(BufferedReadError::Interrupted)?;
         Ok(BufferedPartition {
@@ -585,6 +595,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
             blocks,
             patches,
             patch_directory,
+            block_directory,
             buffer,
             limits,
             _metadata: metadata,
@@ -1152,7 +1163,10 @@ mod tests {
                 max_source_bytes: 4096,
                 max_blocks: 1,
                 max_vertex_patches: 0,
-                max_work: 3,
+                // Three existing payload-admission events plus one descriptor
+                // insertion and one interval augmentation. Read limits below
+                // are still independently fixed at each original boundary.
+                max_work: 5,
                 buffer: BufferLimits {
                     max_frames: 1,
                     max_ghost_entries: 1,

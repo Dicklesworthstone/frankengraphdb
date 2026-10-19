@@ -4,18 +4,19 @@ use super::*;
 
 /// A forward-only incident-edge stream in full-width EId order at one cut.
 ///
-/// The first pull builds the same charged endpoint/block routing directory as
-/// independent incidence requests, then seeds one head per routed block. Later
+/// The first pull seeks the shared authenticated descriptor directory and
+/// seeds one head per routed block, without constructing graph routing. Later
 /// pulls retain those heads and advance the SAME history merge; they do not
 /// rebuild the routed heap for every returned edge. Refaults filter bounded
 /// position permutations but keep original row indices as property locators.
 /// All versions of a matching identity remain present until history resolution.
 ///
 /// This retains merge heads and one bounded decoded block, not an adjacency
-/// result vector. Routing is dropped after seeding. Initial routing is resident,
-/// can scale with source
-/// endpoint/block pairs, and can refuse under the existing MemoryPool or work
-/// ceiling. This is not an optimal sequential-I/O or whole-database memory bound.
+/// result vector. The directory is charged once during partition admission,
+/// with one outgoing key and incoming interval per nonempty block. Broad
+/// destination ranges can admit unrelated payload rows. The query's merge
+/// remains governed by the MemoryPool and cumulative work ceiling. This is not
+/// an optimal sequential-I/O or whole-database memory bound.
 ///
 /// Returned edges and endpoints own independent reservations. An undirected
 /// self-loop appears once. Endpoints retain their stored orientation, even for
@@ -58,10 +59,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 after,
             },
             state: None,
-            driver: active.then_some(Driver {
-                root: self,
-                routes: None,
-            }),
+            driver: active.then_some(Driver { root: self }),
         }
     }
 }
@@ -127,9 +125,6 @@ impl<V: Vfs> BufferedEdgeIncidenceScan<'_, V> {
                         .prepare_incident(cx, request, true, &mut observe)
                         .await?,
                 );
-                // Successor heads are now self-contained. This fixed request
-                // never needs the complete endpoint/block directory again.
-                driver.routes = None;
             }
             let state = state.as_mut().expect("complete incidence heads");
             let Some(candidate) = driver.root.advance(state, cx, &mut observe).await? else {
