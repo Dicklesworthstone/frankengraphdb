@@ -2649,7 +2649,7 @@ pub(super) fn bind_stages(
         input = match stage {
             ReadStageTemplate::Aggregate { at, stage } => stage.bind(input, values, *at)?,
             ReadStageTemplate::Unwind { at, name, value } => input
-                .unwind(name.clone(), bind_read_value(value, values)?)
+                .unwind(name.clone(), bind_unwind_value(value, values)?)
                 .map_err(|kind| GraphSetTextError {
                     offset: *at,
                     kind: GraphSetTextErrorKind::ProjectionBuild(kind),
@@ -2799,7 +2799,12 @@ pub(in crate::graph_text) fn bind_read_parameter(
     null_type: GraphSetColumnType,
 ) -> Result<GraphSetValue, GraphPatternTextError> {
     Ok(match value {
-        GqlParameterValue::List(value) => GraphSetValue::Value(value.value().clone()),
+        GqlParameterValue::List(value) => {
+            if value.canonical_bytes().len() > crate::algebra::MAX_SCALAR_PREDICATE_BYTES {
+                return Err(error(at, GraphPatternTextErrorKind::ScalarLiteral));
+            }
+            GraphSetValue::Value(value.value().clone())
+        }
         GqlParameterValue::Map(value) => GraphSetValue::Value(value.value().clone()),
         value => {
             let value = scalar(value.clone(), at)?;
@@ -2812,6 +2817,22 @@ pub(in crate::graph_text) fn bind_read_parameter(
             }
         }
     })
+}
+
+/// A direct UNWIND list argument is a row source, not one predicate operand.
+/// Only that source position may consume the larger admitted document. Every
+/// nested expression and every other use of the same parameter still binds
+/// through `bind_read_parameter`, which checks its cap before copying it.
+fn bind_unwind_value(
+    value: &ReadValueTemplate,
+    values: &[GqlParameterValue],
+) -> Result<GraphSetValue, GraphSetTextError> {
+    if let ReadValueTemplate::Parameter { index, .. } = value
+        && let GqlParameterValue::List(value) = &values[*index]
+    {
+        return Ok(GraphSetValue::Value(value.value().clone()));
+    }
+    bind_read_value(value, values)
 }
 
 pub(in crate::graph_text) fn bind_read_value(
@@ -3072,6 +3093,114 @@ mod graph_scope_tests {
         assert_eq!(prepared.columns(), &["e".to_owned()]);
         assert_eq!(prepared.column_types(), &[GraphSetColumnType::Edge]);
         assert!(prepared.bind_parameters(&GqlParameters::new()).is_ok());
+    }
+
+    #[test]
+    fn bulk_list_sources_do_not_enlarge_predicate_or_expression_operands() {
+        let values: Vec<_> = (0..5_000)
+            .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+            .collect();
+        let arguments = GqlParameters::new().with_list("rows", values).unwrap();
+        let small = GqlParameters::new()
+            .with_list("rows", vec![GraphValue::Scalar(CanonicalScalar::Int(1))])
+            .unwrap();
+        let types = [("rows", GqlParameterType::List)];
+
+        for text in [
+            "UNWIND $rows AS row RETURN row",
+            "UNWIND $rows AS row WITH row WHERE row > 2 RETURN row LIMIT 1",
+        ] {
+            let prepared =
+                PreparedGraphSetText::prepare_with_parameter_types(text, &types, symbols).unwrap();
+            let bound = prepared.bind_parameters(&arguments).unwrap();
+            let output = bound
+                .execute_governed(
+                    GqlQueryPolicy::new(0, 10_000, 1_000_000, 1_000_000),
+                    |_, _| -> Result<_, GqlQueryError<(), ()>> {
+                        panic!("a parameter-only UNWIND must not open a graph source")
+                    },
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap();
+            let expected: Vec<_> = if text.ends_with("LIMIT 1") {
+                vec![3]
+            } else {
+                (0..5_000).collect()
+            };
+            assert_eq!(
+                output.value,
+                expected
+                    .into_iter()
+                    .map(
+                        |value| GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                            CanonicalScalar::Int(value)
+                        )])
+                    )
+                    .collect::<Vec<_>>(),
+                "{text}"
+            );
+        }
+        for text in [
+            "RETURN $rows AS value",
+            "RETURN 1 IN $rows AS value",
+            "RETURN $rows = [1] AS value",
+            "RETURN size($rows) AS value",
+            "UNWIND $rows AS row WITH row WHERE row IN $rows RETURN row",
+            "UNWIND [$rows] AS row RETURN row",
+        ] {
+            let prepared =
+                PreparedGraphSetText::prepare_with_parameter_types(text, &types, symbols).unwrap();
+            assert!(
+                prepared.bind_parameters(&small).is_ok(),
+                "small control: {text}"
+            );
+            let error = prepared.bind_parameters(&arguments).unwrap_err();
+            assert!(
+                matches!(
+                    error.kind,
+                    GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::ScalarLiteral)
+                ),
+                "large operand: {text}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_expression_cap_is_exact_and_checked_independently_of_transport() {
+        let value = |key_bytes| {
+            vec![
+                GraphValue::map(vec![(
+                    "x".repeat(key_bytes).into(),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                )])
+                .unwrap(),
+            ]
+        };
+        let framing = crate::GqlListParameter::new(value(0))
+            .unwrap()
+            .canonical_bytes()
+            .len();
+        let plan = PreparedGraphSetText::prepare_with_parameter_types(
+            "RETURN $rows AS value",
+            &[("rows", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap();
+        for extra in [0, 1] {
+            let argument = crate::GqlListParameter::new(value(
+                crate::algebra::MAX_SCALAR_PREDICATE_BYTES - framing + extra,
+            ))
+            .unwrap();
+            assert_eq!(
+                argument.canonical_bytes().len(),
+                crate::algebra::MAX_SCALAR_PREDICATE_BYTES + extra
+            );
+            let mut arguments = GqlParameters::new();
+            arguments
+                .insert("rows", GqlParameterValue::List(argument))
+                .unwrap();
+            assert_eq!(plan.bind_parameters(&arguments).is_ok(), extra == 0);
+        }
     }
 
     #[test]

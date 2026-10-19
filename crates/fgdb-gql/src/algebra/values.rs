@@ -521,6 +521,79 @@ impl GraphValue {
         visit(self, 0, &mut remaining)
     }
 
+    /// Exact canonical size without encoding or copying any payload. The
+    /// iterative walk keeps only O(nesting) frames, including for a wide list.
+    /// Callers can therefore admit a complete document before allocating its
+    /// canonical transcript. Structural validity remains `validate_bounds`'s
+    /// responsibility, just as it is for `canonical_bytes`.
+    pub fn canonical_byte_len(&self) -> Result<usize, fgdb_types::ScalarEncodeError> {
+        use fgdb_types::ScalarEncodeError::EncodedSizeOverflow;
+
+        enum Frame<'a> {
+            Value(&'a GraphValue),
+            Rest(&'a [GraphValue]),
+        }
+        let mut total = CANONICAL_GRAPH_VALUE_DOMAIN.len();
+        let mut pending = vec![Frame::Value(self)];
+        while let Some(frame) = pending.pop() {
+            let value = match frame {
+                Frame::Value(value) => value,
+                Frame::Rest(values) => {
+                    if let Some((first, rest)) = values.split_first() {
+                        pending.push(Frame::Rest(rest));
+                        pending.push(Frame::Value(first));
+                    }
+                    continue;
+                }
+            };
+            // Every value has its own u64 frame length and u8 arm tag.
+            total = total.checked_add(9).ok_or(EncodedSizeOverflow)?;
+            let bytes = match value {
+                Self::Scalar(value) => value
+                    .canonical_encoded_len()?
+                    .checked_add(8)
+                    .ok_or(EncodedSizeOverflow)?,
+                Self::Vertex(_) | Self::Edge(_) => 16,
+                Self::Path(value) => value
+                    .steps
+                    .len()
+                    .checked_mul(32)
+                    .and_then(|bytes| bytes.checked_add(24))
+                    .ok_or(EncodedSizeOverflow)?,
+                Self::Vertices(values) => values
+                    .len()
+                    .checked_mul(16)
+                    .and_then(|bytes| bytes.checked_add(8))
+                    .ok_or(EncodedSizeOverflow)?,
+                Self::Edges(values) => values
+                    .len()
+                    .checked_mul(16)
+                    .and_then(|bytes| bytes.checked_add(8))
+                    .ok_or(EncodedSizeOverflow)?,
+                Self::List(values) => {
+                    pending.push(Frame::Rest(values));
+                    8
+                }
+                Self::Map { keys, values } => {
+                    // Match the encoder's key/value zip even on an invalid
+                    // public value. Parameter admission checks structure first.
+                    let pairs = keys.len().min(values.len());
+                    let mut bytes = 8usize;
+                    for key in &keys[..pairs] {
+                        bytes = bytes
+                            .checked_add(8)
+                            .and_then(|bytes| bytes.checked_add(key.len()))
+                            .ok_or(EncodedSizeOverflow)?;
+                    }
+                    pending.push(Frame::Rest(&values[..pairs]));
+                    bytes
+                }
+            };
+            total = total.checked_add(bytes).ok_or(EncodedSizeOverflow)?;
+        }
+        Ok(total)
+    }
+
     /// Self-delimiting, domain-separated identity bytes. Encoding is iterative;
     /// even externally constructed deep values never recurse on the stack.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, fgdb_types::ScalarEncodeError> {
@@ -1415,6 +1488,12 @@ mod tests {
                 MAX_PATTERN_VERTICES
             ]),
         ] {
+            for value in row.values() {
+                assert_eq!(
+                    value.canonical_byte_len().unwrap(),
+                    value.canonical_bytes().unwrap().len(),
+                );
+            }
             let bytes = row.canonical_bytes().unwrap();
             let decoded = GraphValueRow::decode_canonical(&bytes).unwrap();
             assert_eq!(decoded, row);

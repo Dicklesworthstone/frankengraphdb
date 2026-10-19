@@ -361,6 +361,41 @@ mod tests {
     }
 
     #[test]
+    fn execute_wire_bulk_lists_reach_native_binding_above_scalar_operand_bounds() {
+        use fgdb_protocol::body::{Body, Execute, ExecuteMode};
+
+        let wire = Execute {
+            mode: ExecuteMode::Write,
+            statement: "UNWIND $rows AS row CREATE (:Node {p:row.p,q:row.q})".into(),
+            parameters: vec![(
+                "rows".into(),
+                WireValue::List(
+                    (0..5_000)
+                        .map(|id| {
+                            WireValue::Map(vec![
+                                ("p".into(), WireValue::Int(id)),
+                                ("q".into(), WireValue::Int(id * 2)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            )],
+        };
+        let bytes = wire.encode().unwrap();
+        assert!(bytes.len() > fgdb_gql::algebra::MAX_SCALAR_PREDICATE_BYTES);
+        let decoded = Execute::decode(&bytes).unwrap();
+        assert_eq!(decoded, wire);
+        let bound = parameters(&decoded.parameters, None).unwrap();
+        let Some(GqlParameterValue::List(list)) = bound.get("rows") else {
+            panic!("wire row list must retain its native parameter type")
+        };
+        assert_eq!(list.values().len(), 5_000);
+        assert_eq!(graph(list.value()), decoded.parameters[0].1);
+        assert!(bound.canonical_byte_len() > fgdb_gql::algebra::MAX_SCALAR_PREDICATE_BYTES);
+        assert_eq!(bound.canonical_byte_len(), bound.canonical_bytes().len());
+    }
+
+    #[test]
     fn unsigned_operands_preserve_their_domain_and_do_not_become_nested_scalars() {
         let bound = parameters(
             &[

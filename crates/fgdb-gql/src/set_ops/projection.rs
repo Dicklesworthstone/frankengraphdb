@@ -755,7 +755,7 @@ fn admit(
             GraphSetColumnType::Scalar
         }
         GraphSetValue::Value(value) => {
-            if !value.validate_bounds() || value.canonical_bytes().is_err() {
+            if !value.validate_bounds() || value.canonical_byte_len().is_err() {
                 return Err(Error::InvalidValue { column });
             }
             match value {
