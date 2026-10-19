@@ -152,7 +152,7 @@ fn scoped_entries_charge_key_capacity_and_keep_weak_exact_source_ownership() {
         let cache = LiveCache::new(allowance);
         let owner = Arc::new(());
         remember_projection(&cache, &owner, key(), &graph, tape());
-        assert_eq!(cache.lookup(&owner, &key()).is_some(), allowance == bytes);
+        assert_eq!(cache.lookup(&owner, key()).is_some(), allowance == bytes);
     }
     let cache = LiveCache::new(bytes);
     let owner = Arc::new(());
