@@ -771,3 +771,182 @@ fn empty_images_and_isolates_work_in_every_direction_without_invented_sources() 
         );
     });
 }
+
+const DEGREE: &str = "CALL fnx.degree_centrality() YIELD score AS rank, vertex AS node";
+
+#[test]
+fn sealed_degree_directory_preserves_reductions_history_pins_and_exact_limits() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+        let original = db.write(&commit, fixture()).await.unwrap();
+        let mut update = WriteBatch::new(RelationId(1));
+        update.create_vertex(VId(40), vec![LabelId(1)], vec![]);
+        update.delete_edge(EId(6));
+        update.add_edge(
+            EId(3000),
+            VId(1),
+            VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        let current = db.write(&commit, update).await.unwrap();
+        let view = db.read_session().unwrap();
+        let procedure = call(DEGREE);
+        assert!(procedure.supports_sealed_execution());
+        assert!(procedure.supports_cooperative_sealed_execution());
+        let mut retained = Vec::new();
+        for at in [original, current] {
+            for reduction in [
+                ParallelEdgePolicy::Sum,
+                ParallelEdgePolicy::Minimum,
+                ParallelEdgePolicy::CollapseUnit,
+            ] {
+                let mut opt = options(Directedness::Undirected);
+                opt.as_of = Some(at);
+                opt.projection.parallel_edges = reduction;
+                opt.projection.self_loops = SelfLoopPolicy::Drop;
+                let expected = view.execute_fnx(&query, &procedure, opt).unwrap();
+                let graph = project(&db, &query, opt).await;
+                let n = graph.node_count();
+                let workspace = n * size_of::<f64>();
+                let work = n + 2;
+                let result_bytes = procedure.outputs().len() * size_of::<String>()
+                    + procedure.outputs().iter().map(|column| column.name.len()).sum::<usize>()
+                    + n * (size_of::<Vec<FnxValue>>()
+                        + procedure.outputs().len() * size_of::<FnxValue>());
+                let exact_memory = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: workspace,
+                    max_result_bytes: result_bytes,
+                };
+                let mut exact_limits = opt.execution_limits;
+                exact_limits.max_result_rows = n;
+                exact_limits.max_estimated_work = work;
+                // Historical raw edges and their incoming locators were already
+                // admitted by projection. The degree kernel does not scan them.
+                assert!(graph.scan_incidence_bound() > n);
+                let actual = procedure
+                    .execute_sealed(&query, &graph, exact_limits, exact_memory)
+                    .unwrap();
+                assert_eq!(actual.columns, expected.analytics.columns);
+                assert_eq!(actual.rows, expected.analytics.rows);
+                assert_eq!(
+                    actual.certificate.result_digest,
+                    expected.analytics.certificate.result_digest
+                );
+                assert_eq!(actual.certificate.adapter, AdapterPath::CompressedCursor);
+                assert_eq!(
+                    actual.certificate.execution_kernel,
+                    "fgdb-prism/sealed-degree-directory-v1"
+                );
+                assert_eq!(actual.certificate.kernel_workspace_bytes, workspace);
+                assert_eq!(actual.certificate.estimated_work, work);
+                assert_eq!(actual.certificate.witness.nodes_touched, n);
+                assert_eq!(actual.certificate.witness.edges_scanned, 0);
+                assert!(!actual.certificate.witness.complexity_claim.contains("incoming"));
+                for resource in ["result rows", "estimated work", "kernel workspace bytes", "result bytes"] {
+                    let mut limits = exact_limits;
+                    let mut memory = exact_memory;
+                    match resource {
+                        "result rows" => limits.max_result_rows -= 1,
+                        "estimated work" => limits.max_estimated_work -= 1,
+                        "kernel workspace bytes" => memory.max_kernel_workspace_bytes -= 1,
+                        "result bytes" => memory.max_result_bytes -= 1,
+                        _ => unreachable!(),
+                    }
+                    assert!(matches!(
+                        procedure.execute_sealed(&query, &graph, limits, memory),
+                        Err(FnxSealedExecutionError::Execution(
+                            FnxExecutionError::LimitExceeded { resource: observed, .. }
+                        )) if observed == resource
+                    ), "{resource}");
+                }
+                // The native stored-source entrypoint admits this procedure too.
+                let native = db
+                    .call_fnx_sealed(
+                        &query,
+                        DEGREE,
+                        &FnxParameters::new(),
+                        opt,
+                        exact_memory,
+                        SealedLimits::default(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(native.analytics.rows, actual.rows);
+                assert_eq!(
+                    native.analytics.certificate.result_digest,
+                    actual.certificate.result_digest
+                );
+                retained.push((graph, exact_limits, exact_memory, actual));
+            }
+        }
+        drop(view);
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        for (graph, limits, memory, expected) in retained {
+            assert_eq!(
+                procedure.execute_sealed(&query, &graph, limits, memory).unwrap(),
+                expected
+            );
+        }
+    });
+}
+
+#[test]
+fn sealed_degree_empty_singleton_and_retained_loops_match_the_catalog_contract() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let procedure = call(DEGREE);
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+        let mut opt = options(Directedness::Undirected);
+        opt.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+        let graph = project(&db, &query, opt).await;
+        let empty = procedure
+            .execute_sealed(&query, &graph, opt.execution_limits, memory())
+            .unwrap();
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.certificate.kernel_workspace_bytes, 0);
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(VId(u128::MAX), vec![LabelId(1)], vec![]);
+        db.write(&commit, batch).await.unwrap();
+        let graph = project(&db, &query, opt).await;
+        let singleton = procedure
+            .execute_sealed(&query, &graph, opt.execution_limits, memory())
+            .unwrap();
+        assert_eq!(
+            singleton.rows,
+            vec![vec![FnxValue::Score(1.0), FnxValue::Vertex(VId(u128::MAX))]]
+        );
+        // Parallel self-loops reduce to one retained loop, not an even pair
+        // of non-loop incidences that could evade the degree metadata check.
+        let mut loops = WriteBatch::new(RelationId(1));
+        for eid in 1..=2 {
+            loops.add_edge(EId(eid), VId(u128::MAX), VId(u128::MAX), vec![]);
+        }
+        db.write(&commit, loops).await.unwrap();
+        let graph = project(&db, &query, opt).await;
+        assert_eq!(graph.edge_count(), 1);
+        assert_eq!(graph.adjacency_entry_count(), 1);
+        assert!(matches!(
+            procedure.execute_sealed(&query, &graph, opt.execution_limits, memory()),
+            Err(FnxSealedExecutionError::Execution(FnxExecutionError::SelfLoopRefused))
+        ));
+        opt.projection.self_loops = SelfLoopPolicy::Drop;
+        let dropped = project(&db, &query, opt).await;
+        assert_eq!(
+            procedure
+                .execute_sealed(&query, &dropped, opt.execution_limits, memory())
+                .unwrap()
+                .rows,
+            singleton.rows
+        );
+    });
+}

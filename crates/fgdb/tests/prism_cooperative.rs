@@ -601,7 +601,7 @@ fn cooperative_admission_has_no_sync_fallback_and_uses_exact_independent_limits(
             FnxExecutionLimits { max_result_rows: 1, ..opt.execution_limits }, memory(),
             quantum(1), yield_now).await.unwrap().rows.len(), 1);
         for call in [FnxCallSpec::triangles(),
-            FnxCallSpec::clustering_coefficient()] {
+            FnxCallSpec::clustering_coefficient(), degree_call()] {
             assert!(call.supports_cooperative_sealed_execution());
             // Supported kernels still reject incompatible directed projections
             // at preflight, rather than yielding or silently changing semantics.
@@ -741,6 +741,7 @@ fn every_cooperative_checkpoint_cancels_and_every_suspension_can_be_dropped_with
             FnxCallSpec::pagerank(PageRankOptions::default()),
             FnxCallSpec::triangles(),
             FnxCallSpec::clustering_coefficient(),
+            degree_call(),
         ] {
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
@@ -911,6 +912,7 @@ fn cooperative_live_guards_span_every_checkpoint_without_changing_successful_res
                 FnxCallSpec::pagerank(pagerank),
                 FnxCallSpec::triangles(),
                 FnxCallSpec::clustering_coefficient(),
+                degree_call(),
             ];
             if n != 0 {
                 calls.push(FnxCallSpec::single_source_shortest_path_length(
@@ -1010,11 +1012,17 @@ fn revocation_during_each_suspension_precedes_any_resumed_source_or_result_work(
         let opt = options(Directedness::Undirected);
         let graph = projection(&db, &cx, opt).await;
         let root_before = db.read_session().unwrap().partition_root();
-        for call in [
-            FnxCallSpec::single_source_shortest_path_length(VId(0), None),
-            FnxCallSpec::pagerank(PageRankOptions::default()),
-            FnxCallSpec::triangles(),
-            FnxCallSpec::clustering_coefficient(),
+        for (call, quantum_size) in [
+            (
+                FnxCallSpec::single_source_shortest_path_length(VId(0), None),
+                3,
+            ),
+            (FnxCallSpec::pagerank(PageRankOptions::default()), 3),
+            (FnxCallSpec::triangles(), 3),
+            (FnxCallSpec::clustering_coefficient(), 3),
+            // Directory-only degree execution has fewer ticks than a scan.
+            // Keep at least four revocation opportunities for this fixture.
+            (degree_call(), 2),
         ] {
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let measured = cx.with_checkpoint_probe(Arc::clone(&probe));
@@ -1024,12 +1032,12 @@ fn revocation_during_each_suspension_precedes_any_resumed_source_or_result_work(
                     &graph,
                     opt.execution_limits,
                     memory(),
-                    quantum(3),
+                    quantum(quantum_size),
                     yield_now,
                     || Ok(()),
                 ),
                 &probe,
-                3,
+                quantum_size,
             );
             let expected = expected.unwrap();
             assert!(suspensions > 3);
@@ -1045,7 +1053,7 @@ fn revocation_during_each_suspension_precedes_any_resumed_source_or_result_work(
                     &graph,
                     opt.execution_limits,
                     memory(),
-                    quantum(3),
+                    quantum(quantum_size),
                     yield_now,
                     || {
                         guards.set(guards.get() + 1);
@@ -1089,5 +1097,129 @@ fn revocation_during_each_suspension_precedes_any_resumed_source_or_result_work(
                 expected
             );
         }
+    });
+}
+
+
+fn degree_call() -> FnxCallSpec {
+    FnxCallSpec::bind(
+        "CALL fnx.degree_centrality() YIELD score AS rank,vertex AS id",
+        &FnxParameters::new(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn cooperative_degree_directory_yields_over_history_and_scalar_only_populations() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        for n in [4, 600] {
+            let (db, original) = if n == 4 {
+                database(&contexts.commit()).await
+            } else {
+                let db = small_database(&contexts.commit(), n, false).await;
+                let at = db.frontier().unwrap();
+                (db, at)
+            };
+            let mut cuts = vec![original];
+            if db.frontier().unwrap() != original {
+                cuts.push(db.frontier().unwrap());
+            }
+            for at in cuts {
+                let mut opt = options(Directedness::Undirected);
+                opt.as_of = Some(at);
+                opt.projection.self_loops = SelfLoopPolicy::Drop;
+                let graph = projection(&db, &cx, opt).await;
+                assert_eq!(graph.node_count(), n);
+                let call = degree_call();
+                let columns = call.outputs().len() * size_of::<String>()
+                    + call.outputs().iter().map(|column| column.name.len()).sum::<usize>();
+                let bytes = columns + n * (size_of::<Vec<fgdb_prism::FnxValue>>()
+                    + call.outputs().len() * size_of::<fgdb_prism::FnxValue>());
+                let exact_limits = FnxExecutionLimits {
+                    max_iterations: 0,
+                    max_result_rows: n,
+                    max_estimated_work: n + 2,
+                };
+                let exact_memory = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: n * size_of::<f64>(),
+                    max_result_bytes: bytes,
+                };
+                let sync = call
+                    .execute_sealed(&cx, &graph, exact_limits, exact_memory)
+                    .unwrap();
+                let decoded = db.read_session().unwrap().execute_fnx(&cx, &call, opt).unwrap();
+                assert_eq!(sync.rows, decoded.analytics.rows);
+                assert_eq!(
+                    sync.certificate.result_digest,
+                    decoded.analytics.certificate.result_digest
+                );
+                let mut previous = None;
+                for q in [1, 7, 257] {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                    let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                    let (actual, pending) = drive(
+                        call.execute_sealed_cooperative(
+                            &controlled,
+                            &graph,
+                            exact_limits,
+                            exact_memory,
+                            quantum(q),
+                            yield_now,
+                        ),
+                        &probe,
+                        q,
+                    );
+                    let actual = actual.unwrap();
+                    compare_execution(&actual, &sync);
+                    assert_eq!(actual.certificate.witness.edges_scanned, 0);
+                    assert_eq!(
+                        actual.certificate.execution_kernel,
+                        "fgdb-prism/sealed-degree-directory-cooperative-v1"
+                    );
+                    if q == 1 {
+                        assert!(pending >= n * 2, "degree reads and result rows must both yield");
+                    }
+                    if let Some(expected) = &previous {
+                        assert_eq!(&actual, expected);
+                    }
+                    previous = Some(actual);
+                }
+                let prepared = previous.unwrap();
+                let hosted = db
+                    .execute_fnx_sealed_cooperative(
+                        &cx, &call, opt, exact_memory, SealedLimits::default(), quantum(7),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(hosted.analytics, prepared);
+                for resource in ["result rows", "estimated work", "kernel workspace bytes", "result bytes"] {
+                    let mut limits = exact_limits;
+                    let mut memory = exact_memory;
+                    match resource {
+                        "result rows" => limits.max_result_rows -= 1,
+                        "estimated work" => limits.max_estimated_work -= 1,
+                        "kernel workspace bytes" => memory.max_kernel_workspace_bytes -= 1,
+                        "result bytes" => memory.max_result_bytes -= 1,
+                        _ => unreachable!(),
+                    }
+                    assert!(matches!(
+                        call.execute_sealed_cooperative(
+                            &cx, &graph, limits, memory, quantum(1),
+                            || -> std::future::Ready<()> {
+                                panic!("degree admission refusal must precede yielding")
+                            },
+                        ).await,
+                        Err(FnxSealedExecutionError::Execution(
+                            FnxExecutionError::LimitExceeded { resource: observed, .. }
+                        )) if observed == resource
+                    ), "{resource}");
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }

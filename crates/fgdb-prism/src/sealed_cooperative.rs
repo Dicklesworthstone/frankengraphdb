@@ -1,4 +1,4 @@
-//! Cooperative ranks, weighted/hop distances, connectivity and local clustering.
+//! Cooperative ranks, degree centrality, distances, connectivity and local clustering.
 //!
 //! One fuel counter covers raw incidence decoding (including invisible history,
 //! excluded endpoints and parallel reductions), scalar passes and result rows.
@@ -12,14 +12,14 @@
 //! made cooperative by this module.
 
 use super::{
-    ComplexityWitness, EncodedRows, Error, ExecutionError, FnxAlgorithm, FnxCallSpec,
+    ComplexityWitness, DegreeCentrality, EncodedRows, Error, ExecutionError, FnxAlgorithm, FnxCallSpec,
     FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, PageRankOptions,
     QueryCx, Result, ResultAdmission, SealedGraphView, SealedNeighborCursor, add, admit,
-    checkpoint, directional_pass_work, finish_encoded, mul, reserve,
+    checkpoint, execution_pass_work, finish_encoded, mul, require_loop_free_degree, reserve,
 };
 use crate::sealed_control::Control;
 use crate::shortest_path::{Entry, IndexedHeap};
-use crate::{DijkstraOptions, SealedProjectionError};
+use crate::{DijkstraOptions, FoundationAlgorithm, SealedProjectionError};
 use fgdb_strata::tiered::sealed::{SealedScanBudget, SealedScanStep};
 use std::cell::RefCell;
 use std::future::Future;
@@ -109,6 +109,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::StronglyConnectedComponents
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
+                | FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
         )
     }
 
@@ -205,9 +206,17 @@ impl FnxCallSpec {
             }
             let n = graph.node_count();
             let admission = ResultAdmission::new(self, limits, memory)?;
-            let pass =
-                directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
+            let pass = execution_pass_work(self, graph)?;
             let (kernel, estimated_work, workspace, source) = match self.algorithm() {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
+                    admission.rows(n)?;
+                    (
+                        "fgdb-prism/sealed-degree-directory-cooperative-v1",
+                        pass,
+                        mul(n, size_of::<f64>())?,
+                        None,
+                    )
+                }
                 FnxAlgorithm::PageRank(options) => {
                     admit("iterations", options.max_iter(), limits.max_iterations)?;
                     admission.rows(n)?;
@@ -266,6 +275,12 @@ impl FnxCallSpec {
                 workspace,
                 memory.max_kernel_workspace_bytes,
             )?;
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+            ) {
+                require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+            }
             let mut control = Cooperate {
                 cx,
                 fuel: SealedScanBudget::new(quantum.get()),
@@ -273,6 +288,9 @@ impl FnxCallSpec {
                 yield_now,
             };
             let output = match self.algorithm() {
+                FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
+                    degree_centrality(graph, &mut control).await?
+                }
                 FnxAlgorithm::PageRank(options) => pagerank(graph, options, &mut control).await?,
                 FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => {
                     bfs(
@@ -320,6 +338,24 @@ impl FnxCallSpec {
         })
         .await
     }
+}
+
+async fn degree_centrality<Yield, YieldFuture>(
+    graph: &SealedGraphView,
+    control: &mut Cooperate<'_, Yield>,
+) -> Result<KernelOutput>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    control.tick().await?;
+    let mut output = DegreeCentrality::new(graph.node_count())?;
+    for source in 0..graph.node_count() {
+        control.tick().await?;
+        output.push(graph.degree(source))?;
+    }
+    control.tick().await?;
+    output.finish()
 }
 
 // The heap and its exclusively borrowed repair both belong to this future.
