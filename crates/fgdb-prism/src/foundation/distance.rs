@@ -8,6 +8,9 @@
 //! Harmonic sums replay one addition per reached vertex in ascending distance.
 //! Worker replication targets 64 MiB of aggregate scratch, with one mandatory
 //! worker as the minimum. Partitioned results and final output are separate.
+//! Retained logical workers follow the graph and versioned policy even on one
+//! CPU; physical threads only group that fixed layout. Workspace evidence must
+//! not change when a certificate is replayed under different CPU availability.
 
 use crate::execute::{
     FnxMeter, KernelOutput, KernelValues, MAX_GATHER_THREADS, arithmetic_rows, reserve,
@@ -216,7 +219,6 @@ struct Worker<const W: usize, const HARMONIC: bool> {
 /// exceeds the target. Source scores partition n slots across all workers.
 fn worker_count<const W: usize, const HARMONIC: bool, C>(
     n: usize,
-    available: usize,
 ) -> Result<usize, FnxExecutionError<C>> {
     if n == 0 {
         return Ok(1);
@@ -245,8 +247,12 @@ fn worker_count<const W: usize, const HARMONIC: bool, C>(
         .and_then(|bytes| bytes.checked_add(batch_bytes))
         .and_then(|bytes| bytes.checked_add(size_of::<Worker<W, HARMONIC>>()))
         .ok_or(FnxExecutionError::SizeOverflow)?;
-    Ok(available
-        .clamp(1, MAX_GATHER_THREADS)
+    let policy_workers = if n < PARALLEL_SOURCES {
+        1
+    } else {
+        POLICY_THREADS.min(MAX_GATHER_THREADS)
+    };
+    Ok(policy_workers
         .min(n.div_ceil(width))
         .min((WORKER_SCRATCH_TARGET / per_worker).max(1)))
 }
@@ -518,7 +524,8 @@ fn run_scheduled<const W: usize, const HARMONIC: bool, C>(
     threads: usize,
 ) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
     let n = graph.node_count();
-    let threads = worker_count::<W, HARMONIC, C>(n, threads)?;
+    let logical_workers = worker_count::<W, HARMONIC, C>(n)?;
+    let threads = threads.clamp(1, MAX_GATHER_THREADS).min(logical_workers);
     let algorithm = if HARMONIC {
         "harmonic_centrality"
     } else {
@@ -546,10 +553,11 @@ fn run_scheduled<const W: usize, const HARMONIC: bool, C>(
     let width = (W * 64).max(1);
     let batches = n.div_ceil(width);
     checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
-    let mut workers = reserve(threads)?;
+    let mut workers = reserve(logical_workers)?;
     let mut first_batch = 0;
-    for worker in 0..threads {
-        let count = batches / threads + usize::from(worker < batches % threads);
+    for worker in 0..logical_workers {
+        let count = batches / logical_workers
+            + usize::from(worker < batches % logical_workers);
         let first = first_batch * width;
         first_batch += count;
         let end = first_batch
@@ -573,7 +581,7 @@ fn run_scheduled<const W: usize, const HARMONIC: bool, C>(
     }
     let mut ends = [0; MAX_GATHER_THREADS];
     for (index, end) in ends[..threads].iter_mut().enumerate() {
-        *end = index + 1;
+        *end = logical_workers * (index + 1) / threads;
     }
     arithmetic_rows(
         &mut workers,
@@ -582,6 +590,9 @@ fn run_scheduled<const W: usize, const HARMONIC: bool, C>(
         |_, workers, poll| {
             for worker in workers {
                 worker.error = worker.run(graph, poll).err();
+                if worker.error.is_some() {
+                    break;
+                }
             }
         },
     )?;

@@ -91,7 +91,7 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
     assert!(foundation.parameters.is_empty());
     assert_eq!(
         foundation.execution_kernel,
-        "fgdb-prism/brandes-csr-source-order-v1"
+        "fgdb-prism/brandes-csr-source-order-v2"
     );
     // Katz stays unregistered: its checked foundation entry drops the result
     // and witness on non-convergence, so a refusal would have to invent one.

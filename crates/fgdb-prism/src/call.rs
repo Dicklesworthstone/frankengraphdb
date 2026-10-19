@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 11;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 12;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -290,21 +290,21 @@ const SIGNATURES: &[FnxSignature] = &[
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; Wasserman-Faust reachable-set closeness per connected component",
         "O(|V| * (|V| + |E|))",
-        "fgdb-prism/closeness-csr-batched-policy-v1",
+        "fgdb-prism/closeness-csr-batched-policy-v2",
     ),
     foundation(
         "fnx.harmonic_centrality",
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; sum of reciprocal hop distances to every other reachable vertex",
         "O(|V| * (|V| + |E|))",
-        "fgdb-prism/harmonic-csr-batched-policy-v1",
+        "fgdb-prism/harmonic-csr-batched-policy-v2",
     ),
     foundation(
         "fnx.betweenness_centrality",
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; Brandes shortest-path betweenness, normalized by (|V|-1)(|V|-2)/2",
         "O(|V| * |E|)",
-        "fgdb-prism/brandes-csr-source-order-v1",
+        "fgdb-prism/brandes-csr-source-order-v2",
     ),
     foundation(
         "fnx.eigenvector_centrality",

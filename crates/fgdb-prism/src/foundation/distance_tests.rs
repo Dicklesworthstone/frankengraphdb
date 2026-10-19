@@ -345,21 +345,21 @@ fn replicated_scratch_chooser_respects_budget_boundaries_without_changing_batche
             // or allocation is needed to exercise the overflow/budget policy.
             let last_n = (WORKER_SCRATCH_TARGET / count - fixed) / per_vertex;
             let admitted =
-                worker_count::<W, HARMONIC, Infallible>(last_n, MAX_GATHER_THREADS).unwrap();
+                worker_count::<W, HARMONIC, Infallible>(last_n).unwrap();
             let declined =
-                worker_count::<W, HARMONIC, Infallible>(last_n + 1, MAX_GATHER_THREADS).unwrap();
+                worker_count::<W, HARMONIC, Infallible>(last_n + 1).unwrap();
             assert!(admitted >= count);
             assert!(declined < count);
             assert!(admitted * (last_n * per_vertex + fixed) <= WORKER_SCRATCH_TARGET);
         }
         let oversized = WORKER_SCRATCH_TARGET / per_vertex + 1;
         assert_eq!(
-            worker_count::<W, HARMONIC, Infallible>(oversized, 8).unwrap(),
+            worker_count::<W, HARMONIC, Infallible>(oversized).unwrap(),
             1
         );
-        assert_eq!(worker_count::<W, HARMONIC, Infallible>(0, 8).unwrap(), 1);
+        assert_eq!(worker_count::<W, HARMONIC, Infallible>(0).unwrap(), 1);
         assert!(matches!(
-            worker_count::<W, HARMONIC, Infallible>(usize::MAX, 8),
+            worker_count::<W, HARMONIC, Infallible>(usize::MAX),
             Err(FnxExecutionError::SizeOverflow)
         ));
     }
@@ -371,12 +371,66 @@ fn replicated_scratch_chooser_respects_budget_boundaries_without_changing_batche
     let graph = graph(513, &(1..513).map(|target| (0, target)).collect::<Vec<_>>());
     for available in [1, 2, 4, 8] {
         assert_eq!(
-            worker_count::<1, false, Infallible>(513, available).unwrap(),
-            available
+            worker_count::<1, false, Infallible>(513).unwrap(),
+            POLICY_THREADS
         );
         assert_oracle::<1, false>(&graph, available);
         assert_oracle::<1, true>(&graph, available);
     }
+}
+
+#[test]
+fn physical_threads_preserve_exact_workspace_for_scalar_and_bit_parallel_lanes() {
+    fn check<const W: usize, const HARMONIC: bool>(graph: &SnapshotGraphView) {
+        let n = graph.node_count();
+        let logical = worker_count::<W, HARMONIC, Infallible>(n).unwrap();
+        let width = (64 * W).max(1);
+        let batches = n.div_ceil(width);
+        // Count concrete retained arrays independently of Worker::bytes:
+        // final and partitioned scores, worker descriptors, replicated BFS
+        // rows/queues, and only the actual live per-batch counters.
+        let mut expected_workspace = if n == 0 {
+            0
+        } else {
+            2 * n * size_of::<f64>()
+                + logical * size_of::<Worker<W, HARMONIC>>()
+                + logical * n * (3 * size_of::<[u64; W]>() + 2 * size_of::<usize>())
+        };
+        let mut first_batch = 0;
+        if W != 0 && n != 0 {
+            for worker in 0..logical {
+                let count = batches / logical + usize::from(worker < batches % logical);
+                let first = first_batch * width;
+                first_batch += count;
+                let sources = (first_batch * width).min(n) - first;
+                expected_workspace += width.min(sources)
+                    * size_of::<usize>()
+                    * if HARMONIC { 1 } else { 2 };
+            }
+        }
+        let expected = oracle::<HARMONIC>(graph, W);
+        for threads in [1, 2, 8] {
+            let (actual, workspace) =
+                run_scheduled::<W, HARMONIC, Infallible>(graph, &mut Unstoppable, threads)
+                    .unwrap();
+            assert_eq!(bits(&actual), expected.0);
+            assert_eq!(actual.witness, expected.1);
+            assert_eq!(workspace, expected_workspace, "W={W}, threads={threads}");
+        }
+    }
+    check::<0, false>(&graph(0, &[]));
+    check::<8, true>(&graph(0, &[]));
+    let edges: Vec<_> = (1..512)
+        .filter(|v| v % 97 != 0)
+        .map(|v| (v - 1, v))
+        .collect();
+    let graph = graph(513, &edges);
+    check::<0, false>(&graph);
+    check::<0, true>(&graph);
+    check::<1, false>(&graph);
+    check::<1, true>(&graph);
+    check::<8, false>(&graph);
+    check::<8, true>(&graph);
 }
 
 #[test]
@@ -515,11 +569,13 @@ fn serial_paths_and_probe_propagate_every_live_refusal_without_another_call() {
             .map(|target| (target - 1, target))
             .collect::<Vec<_>>(),
     );
-    for arm in 0..3 {
+    let grouped = graph(513, &[]);
+    for arm in 0..4 {
         let invoke = |cut: &mut Cut| -> Result<(), FnxExecutionError<usize>> {
             match arm {
                 0 => run_scheduled::<0, false, usize>(&small, cut, 1).map(|_| ()),
                 1 => run_scheduled::<2, true, usize>(&small, cut, 1).map(|_| ()),
+                2 => run_scheduled::<1, true, usize>(&grouped, cut, 1).map(|_| ()),
                 _ => lane_width(&large, cut).map(|_| ()),
             }
         };

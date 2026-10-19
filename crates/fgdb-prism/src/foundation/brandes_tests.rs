@@ -85,7 +85,8 @@ fn assert_reference(graph: &SnapshotGraphView, schedules: &[(usize, usize)]) {
         .map(|score| score.score.to_bits())
         .collect();
     for &(threads, window) in schedules {
-        let (actual, _) = run_with_schedule(graph, &mut Unstoppable, threads, window).unwrap();
+        let (actual, workspace) =
+            run_with_schedule(graph, &mut Unstoppable, threads, window).unwrap();
         assert_eq!(
             bits(&actual),
             expected_bits,
@@ -93,6 +94,21 @@ fn assert_reference(graph: &SnapshotGraphView, schedules: &[(usize, usize)]) {
         );
         assert_eq!(actual.row_count, graph.node_count());
         assert_eq!(actual.witness, expected.witness);
+        let n = graph.node_count();
+        let window = window.clamp(1, n.max(1));
+        let logical_workers = window.min(MAX_GATHER_THREADS);
+        // Count each retained allocation independently: output, descriptors,
+        // sigma/distance/queue per logical worker, then exactly window deltas.
+        let expected_workspace = if n == 0 {
+            0
+        } else {
+            n * size_of::<f64>()
+                + logical_workers
+                    * (size_of::<Worker>()
+                        + n * (size_of::<f64>() + 2 * size_of::<usize>()))
+                + window * n * size_of::<f64>()
+        };
+        assert_eq!(workspace, expected_workspace);
     }
 }
 
@@ -131,6 +147,37 @@ fn worker_counts_and_result_windows_preserve_parallel_fnx_source_reduction() {
         for edges in [path, hub, mixed] {
             assert_reference(&graph(n, &edges), &[(1, 1), (2, 7), (4, 37), (8, n)]);
         }
+    }
+}
+
+#[test]
+fn production_policy_replays_workspace_bits_and_witness_across_cpu_counts() {
+    assert_eq!(source_window::<Infallible>(0).unwrap(), 1);
+    assert_eq!(source_window::<Infallible>(499).unwrap(), 1);
+    assert_eq!(source_window::<Infallible>(500).unwrap(), 500);
+    for n in [513, 2896, 2897, 10_000, 1_000_000] {
+        let window = source_window::<Infallible>(n).unwrap();
+        assert!((1..=n).contains(&window));
+        assert!(window * n * size_of::<f64>() <= DELTA_WINDOW_BYTES);
+    }
+    assert!(matches!(
+        source_window::<Infallible>(usize::MAX),
+        Err(FnxExecutionError::SizeOverflow)
+    ));
+
+    for n in [0usize, 1, 499, 500, 513] {
+        let edges: Vec<_> = (1..n.saturating_sub(1)).map(|v| (0, v)).collect();
+        let graph = graph(n, &edges);
+        let expected = run_with_threads(&graph, &mut Unstoppable, 1).unwrap();
+        for threads in [2, 8] {
+            let (actual, workspace) =
+                run_with_threads(&graph, &mut Unstoppable, threads).unwrap();
+            assert_eq!(bits(&actual), bits(&expected.0));
+            assert_eq!(actual.witness, expected.0.witness);
+            assert_eq!(workspace, expected.1, "n={n}, physical threads={threads}");
+        }
+        let window = source_window::<Infallible>(n).unwrap();
+        assert_reference(&graph, &[(1, window), (2, window), (8, window)]);
     }
 }
 

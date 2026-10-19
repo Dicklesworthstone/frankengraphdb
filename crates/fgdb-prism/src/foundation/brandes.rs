@@ -6,6 +6,9 @@
 //! accumulator still receives contributions in the pinned reverse BFS order.
 //! Parallel sources own disjoint scratch and deltas, then the caller reduces
 //! those deltas in source order. Live control stays on the calling thread.
+//! Logical workers and result windows depend only on the graph and this
+//! versioned policy. Physical CPU availability changes how those workers are
+//! grouped, never their retained allocations or the certified workspace.
 
 use crate::execute::{
     FnxMeter, KernelOutput, KernelValues, MAX_GATHER_THREADS, arithmetic_rows, reserve,
@@ -260,14 +263,26 @@ pub(super) fn run<C>(
             .map_or(1, std::num::NonZeroUsize::get)
             .min(MAX_GATHER_THREADS)
     };
+    run_with_threads(graph, checkpoint, threads)
+}
+
+fn source_window<C>(n: usize) -> Result<usize, FnxExecutionError<C>> {
     let bytes_per_delta = n
         .checked_mul(size_of::<f64>())
         .ok_or(FnxExecutionError::SizeOverflow)?;
-    let window = if threads == 1 || n == 0 {
+    Ok(if n < PARALLEL_SOURCES {
         1
     } else {
         (DELTA_WINDOW_BYTES / bytes_per_delta).max(1).min(n)
-    };
+    })
+}
+
+fn run_with_threads<C>(
+    graph: &SnapshotGraphView,
+    checkpoint: &mut impl FnxMeter<C>,
+    threads: usize,
+) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
+    let window = source_window::<C>(graph.node_count())?;
     run_with_schedule(graph, checkpoint, threads, window)
 }
 
@@ -299,13 +314,18 @@ fn run_with_schedule<C>(
     }
 
     let window = window.clamp(1, n);
-    let threads = threads.clamp(1, MAX_GATHER_THREADS).min(window);
+    // Retain the same logical layout even when one CPU executes every source.
+    // The window contains useful result slots only: small graphs do not pad
+    // their deltas to 64 MiB. Physical scheduling never changes this capacity.
+    let logical_workers = window.min(MAX_GATHER_THREADS);
+    let threads = threads.clamp(1, MAX_GATHER_THREADS).min(logical_workers);
     checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
-    let mut workers = reserve(threads)?;
-    for worker in 0..threads {
+    let mut workers = reserve(logical_workers)?;
+    for worker in 0..logical_workers {
         // Divide the bounded result window exactly: rounding every worker's
         // allotment upward would exceed the advertised aggregate delta bound.
-        let sources = window / threads + usize::from(worker < window % threads);
+        let sources = window / logical_workers
+            + usize::from(worker < window % logical_workers);
         workers.push(Worker::new(n, sources, checkpoint)?);
     }
     let mut workspace = vector_bytes(&scores)?
@@ -318,9 +338,6 @@ fn run_with_schedule<C>(
     }
 
     let mut ends = [0; MAX_GATHER_THREADS];
-    for (at, end) in ends[..threads].iter_mut().enumerate() {
-        *end = at + 1;
-    }
     let mut next_source = 0;
     while next_source < n {
         let mut active = 0;
@@ -331,13 +348,20 @@ fn run_with_schedule<C>(
             next_source += worker.sources;
             active += usize::from(worker.sources != 0);
         }
+        let physical_workers = threads.min(active);
+        for (at, end) in ends[..physical_workers].iter_mut().enumerate() {
+            *end = active * (at + 1) / physical_workers;
+        }
         arithmetic_rows(
             &mut workers[..active],
-            &ends[..active],
+            &ends[..physical_workers],
             checkpoint,
             |_, workers, poll| {
                 for worker in workers {
                     worker.error = worker.run(graph, poll).err();
+                    if worker.error.is_some() {
+                        break;
+                    }
                 }
             },
         )?;

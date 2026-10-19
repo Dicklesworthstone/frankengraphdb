@@ -186,7 +186,7 @@ fn native_betweenness_is_certified_with_its_kernel_and_the_foundation_witness() 
     let certificate = &result.certificate;
     assert_eq!(
         certificate.execution_kernel,
-        "fgdb-prism/brandes-csr-source-order-v1"
+        "fgdb-prism/brandes-csr-source-order-v2"
     );
     assert_eq!(certificate.registry_version, FNX_SIGNATURE_REGISTRY_VERSION);
     assert_eq!(certificate.vertices, 4);
@@ -746,11 +746,11 @@ fn native_distance_calls_certify_vertex_scratch_and_stop_at_every_live_poll() {
     for (name, kernel) in [
         (
             "closeness_centrality",
-            "fgdb-prism/closeness-csr-batched-policy-v1",
+            "fgdb-prism/closeness-csr-batched-policy-v2",
         ),
         (
             "harmonic_centrality",
-            "fgdb-prism/harmonic-csr-batched-policy-v1",
+            "fgdb-prism/harmonic-csr-batched-policy-v2",
         ),
     ] {
         let mut workspace = None;
