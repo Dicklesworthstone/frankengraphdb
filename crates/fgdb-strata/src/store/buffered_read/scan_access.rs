@@ -153,9 +153,9 @@ impl<V: Vfs> BufferedPartition<V> {
         Ok(BufferedValue::from_reserved(image, charge))
     }
 
-    // Endpoint resolution shares the edge cursor's allowance. Range metadata
-    // excludes unrelated payloads, not versions of the requested identity.
-    // This is still a descriptor scan, not an indexed vertex point-lookup claim.
+    // Endpoint resolution shares the edge cursor's allowance. Its immutable
+    // interval directory prunes unrelated metadata and payloads, while every
+    // possibly matching history still enters the ordinary same-cut resolver.
     pub(crate) async fn edge_scan_vertex<C: Send>(
         &mut self,
         cx: &QueryCx,
@@ -165,8 +165,12 @@ impl<V: Vfs> BufferedPartition<V> {
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedValue<VertexRow>>, BufferedScanError<C>> {
         let mut result: Option<BufferedValue<VertexRow>> = None;
-        for at in 0..self.patches.len() {
-            work.step(cx, observe)?;
+        let mut winner_at = 0;
+        let mut candidates = self.patch_directory.candidates(vid);
+        while let Some(at) = self
+            .patch_directory
+            .next(&mut candidates, &mut || work.step(cx, observe))?
+        {
             let descriptor = self.patches[at];
             if self.root.vertex_patches[at].first_seq > as_of || !descriptor.may_contain(vid) {
                 continue;
@@ -199,7 +203,7 @@ impl<V: Vfs> BufferedPartition<V> {
                     && row.created_at <= as_of
                     && result
                         .as_ref()
-                        .is_none_or(|old| old.created_at <= row.created_at)
+                        .is_none_or(|old| (old.created_at, winner_at) <= (row.created_at, at))
                 {
                     match result.as_mut() {
                         Some(old) => old.value = row.clone(),
@@ -208,6 +212,7 @@ impl<V: Vfs> BufferedPartition<V> {
                             result = Some(BufferedValue::from_reserved(row.clone(), charge));
                         }
                     }
+                    winner_at = at;
                 }
             }
         }

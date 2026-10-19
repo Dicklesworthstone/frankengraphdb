@@ -9,6 +9,7 @@
 //! format changes or permission to reclaim objects follow from this reader.
 
 mod admission;
+mod patch_directory;
 mod scan_access;
 
 use super::{BlockStore, RootReadEvent, RootWalk, StoreError};
@@ -64,7 +65,8 @@ pub struct BufferedReadLimits {
     pub max_source_bytes: usize,
     pub max_blocks: usize,
     pub max_vertex_patches: usize,
-    /// Object visits plus decoded row visits, separately per open/read call.
+    /// Object/decoded-row visits and interval-directory construction/inspection,
+    /// separately per open/read call.
     /// Scans also count head initialization/consumption and share this one
     /// cumulative ceiling across every pull, including edge endpoint reads.
     pub max_work: usize,
@@ -360,6 +362,7 @@ pub struct BufferedPartition<V: Vfs> {
     root: PartitionRoot,
     blocks: Vec<BlockDescriptor>,
     patches: Vec<PatchDescriptor>,
+    patch_directory: patch_directory::PatchDirectory,
     buffer: ExtentBuffer,
     limits: BufferedReadLimits,
     _metadata: MemoryCharge,
@@ -567,6 +570,12 @@ impl<V: Vfs + Clone> BlockStore<V> {
         drop(vertex_history);
         drop(walk);
         drop(history_charges);
+        let patch_directory =
+            patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut || {
+                cx.buffered_checkpoint()
+                    .map_err(BufferedReadError::Interrupted)?;
+                advance(&mut work, 1, limits.max_work)
+            })?;
         cx.buffered_checkpoint()
             .map_err(BufferedReadError::Interrupted)?;
         Ok(BufferedPartition {
@@ -575,6 +584,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
             root,
             blocks,
             patches,
+            patch_directory,
             buffer,
             limits,
             _metadata: metadata,
@@ -662,9 +672,10 @@ impl<V: Vfs> BufferedPartition<V> {
         }
     }
 
-    /// Resolve one vertex through authenticated identity ranges. Every patch
-    /// that can restate its history remains in publication order; unrelated
-    /// patch payloads do not enter the cache or the decode workspace.
+    /// Resolve one vertex through an admitted interval directory. Every patch
+    /// that can restate its history remains a candidate; publication ordinal
+    /// breaks equal-version ties independently of directory traversal order.
+    /// Unrelated patch payloads do not enter the cache or decode workspace.
     pub async fn vertex_at(
         &mut self,
         cx: &QueryCx,
@@ -673,11 +684,13 @@ impl<V: Vfs> BufferedPartition<V> {
     ) -> Result<Option<BufferedValue<VertexRow>>, BufferedReadError> {
         self.begin(cx, as_of)?;
         let result_charge = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
-        let mut result: Option<VertexRow> = None;
+        let mut result: Option<(VertexRow, usize)> = None;
         let mut work = 0;
-        for at in 0..self.patches.len() {
+        let mut candidates = self.patch_directory.candidates(vid);
+        while let Some(at) = self.patch_directory.next(&mut candidates, &mut || {
             cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, self.limits.max_work)?;
+            advance(&mut work, 1, self.limits.max_work)
+        })? {
             let descriptor = self.patches[at];
             if self.root.vertex_patches[at].first_seq.0 > as_of.0 || !descriptor.may_contain(vid) {
                 continue;
@@ -700,18 +713,18 @@ impl<V: Vfs> BufferedPartition<V> {
             for row in &rows {
                 if row.vid == vid
                     && row.created_at.0 <= as_of.0
-                    && result
-                        .as_ref()
-                        .is_none_or(|old| old.created_at.0 <= row.created_at.0)
+                    && result.as_ref().is_none_or(|(old, old_at)| {
+                        (old.created_at, *old_at) <= (row.created_at, at)
+                    })
                 {
-                    result = Some(row.clone());
+                    result = Some((row.clone(), at));
                 }
             }
         }
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         Ok(result
-            .filter(|row| row.visible_at(as_of))
-            .map(|value| BufferedValue {
+            .filter(|(row, _)| row.visible_at(as_of))
+            .map(|(value, _)| BufferedValue {
                 value,
                 _charge: result_charge,
             }))

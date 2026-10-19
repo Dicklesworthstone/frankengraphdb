@@ -1446,6 +1446,170 @@ fn a_keyed_root_cannot_bypass_cross_object_identity_history() {
 }
 
 #[test]
+fn interval_point_and_endpoint_reads_preserve_publication_winners_and_future_fences() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let definitions = [
+            vec![scan_vertex(50, 1, None, 10)],
+            vec![
+                scan_vertex(20, 1, None, 20),
+                scan_vertex(50, 1, Some(3), 10),
+                scan_vertex(70, 1, None, 70),
+            ],
+            vec![
+                scan_vertex(0, 1, None, 0),
+                scan_vertex(50, 3, None, 11),
+                scan_vertex(100, 1, None, 100),
+            ],
+            vec![scan_vertex(50, 3, Some(5), 11)],
+            vec![scan_vertex(50, 5, None, 12)],
+            vec![
+                scan_vertex(1, 6, None, 1),
+                scan_vertex(50, 5, Some(6), 12),
+                scan_vertex(u128::MAX, 6, None, 99),
+            ],
+            vec![scan_vertex(30, 7, None, 30), scan_vertex(60, 7, None, 60)],
+        ];
+        let mut patches = Vec::new();
+        for rows in &definitions {
+            let patch = store
+                .put_patch(&commit, &encode_patch(rows).unwrap())
+                .await
+                .unwrap();
+            patches.push(PatchRef {
+                patch_id: patch.0,
+                first_seq: rows.iter().map(|row| row.created_at).min().unwrap(),
+                last_seq: rows
+                    .iter()
+                    .map(|row| row.retired_at.unwrap_or(row.created_at).max(row.created_at))
+                    .max()
+                    .unwrap(),
+            });
+        }
+        let future_patch = patches.last().unwrap().patch_id;
+        // A deliberately dangling late edge exercises the source's existing
+        // typed endpoint failure, after the newest vertex statement retires.
+        let edge_image = edge(99, 50, 50, 1, None);
+        let block = store
+            .put(&commit, &encode_block(0, None, &[edge_image]).unwrap())
+            .await
+            .unwrap();
+        let id = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(7),
+                    blocks: vec![BlockRef {
+                        block_id: block.0,
+                        first_seq: CommitSeq(1),
+                        last_seq: CommitSeq(1),
+                    }],
+                    vertex_patches: patches,
+                },
+            )
+            .await
+            .unwrap();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        for cut in 0..=7 {
+            let expected = match cut {
+                1 | 2 => Some(scan_vertex(50, 1, Some(3), 10)),
+                3 | 4 => Some(scan_vertex(50, 3, Some(5), 11)),
+                5 => Some(scan_vertex(50, 5, Some(6), 12)),
+                _ => None,
+            };
+            let found = view.vertex_at(&cx, VId(50), CommitSeq(cut)).await.unwrap();
+            assert_eq!(found.as_deref(), expected.as_ref(), "point cut {cut}");
+            drop(found);
+            assert!(
+                view.vertex_at(&cx, VId(49), CommitSeq(cut))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "an interval hit is not a vertex: cut {cut}"
+            );
+            let extreme = view
+                .vertex_at(&cx, VId(u128::MAX), CommitSeq(cut))
+                .await
+                .unwrap();
+            assert_eq!(extreme.is_some(), cut >= 6);
+            drop(extreme);
+            if cut == 0 {
+                continue;
+            }
+            let mut scan = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
+            let candidate = scan
+                .next_with_endpoints(&cx, None, &mut |_| Ok::<_, ()>(()))
+                .await;
+            if let Some(expected) = expected {
+                let endpoints = candidate.unwrap().unwrap().row.unwrap();
+                assert_eq!(endpoints.source_vertex(), &expected, "endpoint cut {cut}");
+                assert_eq!(endpoints.target_vertex(), &expected);
+                drop(endpoints);
+            } else {
+                assert!(matches!(
+                    candidate,
+                    Err(BufferedScanError::Read(BufferedReadError::DanglingEndpoint))
+                ));
+            }
+            assert!(
+                scan.next_with_endpoints(&cx, None, &mut |_| Ok::<_, ()>(()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drop(scan);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+        // Start with no resident extents, then damage a future-only patch whose
+        // conservative range includes V50 but whose rows do not contain it.
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let path = store.path(future_patch);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        let found = view
+            .vertex_at(&cx, VId(50), CommitSeq(5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&*found, &scan_vertex(50, 5, Some(6), 12));
+        drop(found);
+        assert!(matches!(
+            view.vertex_at(&cx, VId(50), CommitSeq(7)).await,
+            Err(BufferedReadError::Buffer(BufferError::ChecksumMismatch))
+        ));
+        let retained = pool.used();
+        assert!(matches!(
+            store
+                .open_buffered_root(&cx, id, pool.clone(), limits())
+                .await,
+            Err(BufferedReadError::Store(_))
+        ));
+        assert_eq!(
+            pool.used(),
+            retained,
+            "failed full admission refunds all state"
+        );
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn vertex_property_history_larger_than_the_resident_cap_opens_and_refaults() {
     const COUNT: usize = 240;
     const PAYLOAD: usize = 14_000;

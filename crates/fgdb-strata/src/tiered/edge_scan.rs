@@ -512,7 +512,10 @@ fn heap_pop<T: Ord, E>(
     sift(values, 0, len, control)?;
     Ok(first)
 }
-fn sort<T: Ord, E>(values: &mut [T], control: &mut impl FnMut() -> Result<(), E>) -> Result<(), E> {
+pub(crate) fn sort<T: Ord, E>(
+    values: &mut [T],
+    control: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     let len = values.len();
     for start in (0..len / 2).rev() {
         sift(values, start, len, control)?;
