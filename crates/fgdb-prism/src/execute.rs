@@ -947,9 +947,7 @@ impl FnxCallSpec {
                 Some(crate::shortest_path::estimated_work::<C>(n, arcs)?)
             }
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
-                Some(crate::clustering::estimated_work(graph, &mut || {
-                    checkpoint.unit()
-                })?)
+                Some(crate::clustering::estimated_work(graph, &mut checkpoint)?)
             }
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs)
@@ -1010,7 +1008,7 @@ impl FnxCallSpec {
                 }
             }
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
-                let output = crate::clustering::run(graph, &mut || checkpoint.unit())?;
+                let output = crate::clustering::run(graph, &mut checkpoint)?;
                 let values = if matches!(algorithm, FnxAlgorithm::Triangles) {
                     KernelValues::Counts(output.triangles)
                 } else {

@@ -9,8 +9,8 @@
 
 use crate::execute::{admit, reserve};
 use crate::{
-    ComplexityWitness, FnxExecutionError, FnxExecutionLimits, FnxGraphKind, GraphView,
-    SnapshotGraphView,
+    ComplexityWitness, FNX_METER_RUN, FnxExecutionError, FnxExecutionLimits, FnxGraphKind,
+    FnxMeter, GraphView, SnapshotGraphView,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,9 +31,9 @@ pub struct TriangleStatistics {
 pub fn triangle_statistics<C>(
     graph: &SnapshotGraphView,
     limits: FnxExecutionLimits,
-    mut checkpoint: impl FnMut() -> Result<(), C>,
+    mut checkpoint: impl FnxMeter<C>,
 ) -> Result<TriangleStatistics, FnxExecutionError<C>> {
-    checkpoint().map_err(FnxExecutionError::Cancelled)?;
+    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
     if graph.is_directed() {
         return Err(FnxExecutionError::GraphKind {
             required: FnxGraphKind::Undirected,
@@ -66,14 +66,14 @@ fn add<C>(counter: &mut usize, value: usize) -> Result<(), FnxExecutionError<C>>
 /// includes building the scratch CSR, even when the graph has no triangles.
 pub(crate) fn estimated_work<C>(
     graph: &SnapshotGraphView,
-    checkpoint: &mut impl FnMut() -> Result<(), C>,
+    checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<usize, FnxExecutionError<C>> {
     let mut work = graph
         .node_count()
         .checked_mul(4)
         .ok_or(FnxExecutionError::SizeOverflow)?;
     for source in 0..graph.node_count() {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let row = graph
             .neighbors_indices(source)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
@@ -85,7 +85,7 @@ pub(crate) fn estimated_work<C>(
         )?;
         add(&mut work, bits(row.len()))?;
         for &target in row {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
             if source < target {
                 let other = graph
                     .neighbors_indices(target)
@@ -145,7 +145,7 @@ fn can_participate(row: &[usize], source: usize) -> bool {
 fn forward_rows<C>(
     graph: &SnapshotGraphView,
     witness: &mut ComplexityWitness,
-    checkpoint: &mut impl FnMut() -> Result<(), C>,
+    checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<ForwardRows, FnxExecutionError<C>> {
     let n = graph.node_count();
     let mut offsets = reserve(n.checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?)?;
@@ -154,7 +154,7 @@ fn forward_rows<C>(
     let mut has_wedges = false;
     offsets.push(0);
     for source in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         add(&mut witness.nodes_touched, 1)?;
         let row = graph
             .neighbors_indices(source)
@@ -164,7 +164,7 @@ fn forward_rows<C>(
             continue;
         }
         for &target in row {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
             add(&mut witness.edges_scanned, 1)?;
             let other = graph
                 .neighbors_indices(target)
@@ -191,9 +191,40 @@ fn forward_rows<C>(
     })
 }
 
+/// Visit a row in bounded runs with the original logical charge transcript.
+/// The caller proves its visitor cannot refuse within a multi-edge run; use
+/// a one-edge run otherwise. Keep a possible witness overflow on its original
+/// unit too, rather than charging past the first failing edge.
+fn visit_counted<C>(
+    row: &[usize],
+    maximum_run: usize,
+    witness: &mut ComplexityWitness,
+    checkpoint: &mut impl FnxMeter<C>,
+    mut visit: impl FnMut(usize) -> Result<(), FnxExecutionError<C>>,
+) -> Result<(), FnxExecutionError<C>> {
+    let mut start = 0;
+    while start < row.len() {
+        let proposed = (row.len() - start).min(maximum_run);
+        let count = if witness.edges_scanned.checked_add(proposed).is_some() {
+            proposed
+        } else {
+            1
+        };
+        checkpoint
+            .units(count)
+            .map_err(FnxExecutionError::Cancelled)?;
+        for &vertex in &row[start..start + count] {
+            add(&mut witness.edges_scanned, 1)?;
+            visit(vertex)?;
+        }
+        start += count;
+    }
+    Ok(())
+}
+
 pub(crate) fn run<C>(
     graph: &SnapshotGraphView,
-    checkpoint: &mut impl FnMut() -> Result<(), C>,
+    checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<TriangleStatistics, FnxExecutionError<C>> {
     let n = graph.node_count();
     let mut witness = ComplexityWitness {
@@ -210,42 +241,58 @@ pub(crate) fn run<C>(
     } else {
         Vec::new()
     };
-    for _ in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        triangles.push(0u64);
+    for start in (0..n).step_by(FNX_METER_RUN) {
+        let count = (n - start).min(FNX_METER_RUN);
+        checkpoint
+            .units(count)
+            .map_err(FnxExecutionError::Cancelled)?;
+        triangles.resize(start + count, 0u64);
         if forward.has_wedges {
-            marked.push(usize::MAX);
+            marked.resize(start + count, usize::MAX);
         }
     }
     // Every triangle has one highest endpoint with two forward neighbors.
     // Without such a row, all counts are already known and no marks are needed.
     if forward.has_wedges {
+        // In a simple graph each vertex belongs to at most (n-1)*(n-2)/2
+        // triangles. For n <= u32::MAX this fits u64, so an inner run cannot
+        // hit a count overflow. Larger domains keep the exact scalar error
+        // ordering instead of paying future units before a possible overflow.
+        let count_run = if u32::try_from(n).is_ok() {
+            FNX_METER_RUN
+        } else {
+            1
+        };
         for source in 0..n {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
             add(&mut witness.nodes_touched, 1)?;
             let row = forward.row(source);
             if row.len() < 2 {
                 continue;
             }
-            for &target in row {
-                checkpoint().map_err(FnxExecutionError::Cancelled)?;
-                add(&mut witness.edges_scanned, 1)?;
+            visit_counted(row, FNX_METER_RUN, &mut witness, checkpoint, |target| {
                 marked[target] = source;
-            }
+                Ok(())
+            })?;
             for &target in row {
-                checkpoint().map_err(FnxExecutionError::Cancelled)?;
+                checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
                 add(&mut witness.edges_scanned, 1)?;
-                for &third in forward.row(target) {
-                    checkpoint().map_err(FnxExecutionError::Cancelled)?;
-                    add(&mut witness.edges_scanned, 1)?;
-                    if marked[third] == source {
-                        for vertex in [source, target, third] {
-                            triangles[vertex] = triangles[vertex]
-                                .checked_add(1)
-                                .ok_or(FnxExecutionError::SizeOverflow)?;
+                visit_counted(
+                    forward.row(target),
+                    count_run,
+                    &mut witness,
+                    checkpoint,
+                    |third| {
+                        if marked[third] == source {
+                            for vertex in [source, target, third] {
+                                triangles[vertex] = triangles[vertex]
+                                    .checked_add(1)
+                                    .ok_or(FnxExecutionError::SizeOverflow)?;
+                            }
                         }
-                    }
-                }
+                        Ok(())
+                    },
+                )?;
             }
         }
     }
@@ -253,7 +300,7 @@ pub(crate) fn run<C>(
     drop(marked);
     let mut clustering = reserve(n)?;
     for node in 0..n {
-        checkpoint().map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let row = graph
             .neighbors_indices(node)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
@@ -267,7 +314,7 @@ pub(crate) fn run<C>(
         let mut high = row.len();
         let mut has_loop = false;
         while low < high {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
             add(&mut witness.edges_scanned, 1)?;
             let middle = low + (high - low) / 2;
             match row[middle].cmp(&node) {
@@ -449,6 +496,215 @@ mod tests {
             max_iterations: 0,
             max_result_rows: 10000,
             max_estimated_work: 1 << 26,
+        }
+    }
+
+    #[derive(Default)]
+    struct MeterCounts {
+        units: usize,
+        calls: usize,
+        largest_run: usize,
+    }
+
+    struct BulkMeter<'a> {
+        counts: &'a mut MeterCounts,
+        allowance: usize,
+    }
+
+    impl FnxMeter<usize> for BulkMeter<'_> {
+        fn unit(&mut self) -> Result<(), usize> {
+            self.units(1)
+        }
+
+        fn poll(&mut self) -> Result<(), usize> {
+            Ok(())
+        }
+
+        fn units(&mut self, count: usize) -> Result<(), usize> {
+            assert!(count > 0 && count <= FNX_METER_RUN);
+            self.counts.calls += 1;
+            self.counts.largest_run = self.counts.largest_run.max(count);
+            if count > self.allowance.saturating_sub(self.counts.units) {
+                self.counts.units = self.allowance + 1;
+                return Err(self.counts.units);
+            }
+            self.counts.units += count;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn bulk_meter_preserves_triangle_results_and_every_small_graph_refusal_prefix() {
+        for view in [
+            graph(0, &[]),
+            graph(5, &[]),
+            graph(5, &[(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]),
+            graph(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]),
+            graph(5, &[(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 3)]),
+        ] {
+            let mut total = 0;
+            let expected = triangle_statistics(&view, limits(), || {
+                total += 1;
+                Ok::<(), usize>(())
+            })
+            .unwrap();
+            for allowance in 0..=total {
+                let mut counts = MeterCounts::default();
+                let result = triangle_statistics(
+                    &view,
+                    limits(),
+                    BulkMeter {
+                        counts: &mut counts,
+                        allowance,
+                    },
+                );
+                if allowance < total {
+                    assert!(matches!(
+                        result,
+                        Err(FnxExecutionError::Cancelled(unit)) if unit == allowance + 1
+                    ));
+                    assert_eq!(counts.units, allowance + 1);
+                } else {
+                    let actual = result.unwrap();
+                    assert_eq!(actual, expected);
+                    assert!(
+                        actual
+                            .clustering
+                            .iter()
+                            .zip(&expected.clustering)
+                            .all(|(actual, expected)| actual.to_bits() == expected.to_bits())
+                    );
+                    assert_eq!(counts.units, total);
+                }
+            }
+            // Admission still precedes arithmetic, including the callback on
+            // the first refusing unit. A bulk meter cannot defer either limit.
+            for cap in [
+                FnxExecutionLimits {
+                    max_result_rows: 0,
+                    ..limits()
+                },
+                FnxExecutionLimits {
+                    max_estimated_work: 0,
+                    ..limits()
+                },
+            ] {
+                let mut scalar_units = 0;
+                let scalar = triangle_statistics(&view, cap, || {
+                    scalar_units += 1;
+                    Ok::<(), usize>(())
+                });
+                let mut counts = MeterCounts::default();
+                let bulk = triangle_statistics(
+                    &view,
+                    cap,
+                    BulkMeter {
+                        counts: &mut counts,
+                        allowance: usize::MAX,
+                    },
+                );
+                assert_eq!(format!("{bulk:?}"), format!("{scalar:?}"));
+                assert_eq!(counts.units, scalar_units);
+            }
+        }
+    }
+
+    #[test]
+    fn dense_triangles_use_bounded_runs_without_changing_work_or_coefficient_bits() {
+        let n = FNX_METER_RUN + 9;
+        let edges: Vec<_> = (0..n)
+            .flat_map(|source| (source..n).map(move |target| (source, target)))
+            .collect();
+        let view = graph(n, &edges);
+        let mut scalar_units = 0;
+        let expected = triangle_statistics(&view, limits(), || {
+            scalar_units += 1;
+            Ok::<(), usize>(())
+        })
+        .unwrap();
+        let mut counts = MeterCounts::default();
+        let actual = triangle_statistics(
+            &view,
+            limits(),
+            BulkMeter {
+                counts: &mut counts,
+                allowance: usize::MAX,
+            },
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert!(
+            actual
+                .clustering
+                .iter()
+                .zip(&expected.clustering)
+                .all(|(actual, expected)| actual.to_bits() == expected.to_bits())
+        );
+        assert!(
+            actual
+                .triangles
+                .iter()
+                .all(|&count| count == ((n - 1) * (n - 2) / 2) as u64)
+        );
+        assert!(
+            actual
+                .clustering
+                .iter()
+                .all(|score| score.to_bits() == 1.0f64.to_bits())
+        );
+        assert_eq!(counts.units, scalar_units);
+        assert_eq!(counts.largest_run, FNX_METER_RUN);
+        assert!(counts.calls * 2 < counts.units);
+        for allowance in [0, 1, 63, 64, 65, scalar_units / 2, scalar_units - 1] {
+            let mut counts = MeterCounts::default();
+            assert!(matches!(
+                triangle_statistics(
+                    &view,
+                    limits(),
+                    BulkMeter { counts: &mut counts, allowance }
+                ),
+                Err(FnxExecutionError::Cancelled(unit)) if unit == allowance + 1
+            ));
+            assert_eq!(counts.units, allowance + 1);
+        }
+    }
+
+    #[test]
+    fn counted_rows_keep_overflow_on_its_exact_original_unit() {
+        let row = [0, 1, 2, 3, 4];
+        for allowance in [2, 3, 4, usize::MAX] {
+            let mut witness = ComplexityWitness {
+                algorithm: String::new(),
+                complexity_claim: String::new(),
+                nodes_touched: 0,
+                edges_scanned: usize::MAX - 3,
+                queue_peak: 0,
+            };
+            let mut counts = MeterCounts::default();
+            let mut visited = Vec::new();
+            let result = visit_counted(
+                &row,
+                FNX_METER_RUN,
+                &mut witness,
+                &mut BulkMeter {
+                    counts: &mut counts,
+                    allowance,
+                },
+                |vertex| {
+                    visited.push(vertex);
+                    Ok(())
+                },
+            );
+            if allowance < 4 {
+                assert!(
+                    matches!(result, Err(FnxExecutionError::Cancelled(unit)) if unit == allowance + 1)
+                );
+                assert_eq!(counts.units, allowance + 1);
+            } else {
+                assert!(matches!(result, Err(FnxExecutionError::SizeOverflow)));
+                assert_eq!(counts.units, 4);
+            }
+            assert_eq!(visited, row[..allowance.min(3)]);
         }
     }
 

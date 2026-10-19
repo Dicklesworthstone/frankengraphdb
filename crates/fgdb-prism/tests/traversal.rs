@@ -370,6 +370,162 @@ fn component_runs_keep_every_work_refusal_and_witness_on_hubs() {
 }
 
 #[test]
+fn bfs_runs_preserve_discovery_refusals_and_every_work_prefix() {
+    // A hub crosses two run boundaries, followed by a cycle and an isolate.
+    // Duplicate edges and self loops must not consume result-row capacity.
+    let n = 2 * FNX_METER_RUN + 7;
+    let vertices: Vec<_> = (0..n)
+        .map(|index| VId((index as u128) << 64 | 17))
+        .collect();
+    let mut pairs: Vec<_> = (1..n - 3).map(|target| (0, target)).collect();
+    pairs.extend([
+        (0, 0),
+        (0, 1),
+        (n - 4, n - 3),
+        (n - 3, n - 2),
+        (n - 2, n - 4),
+        (n - 2, 1),
+    ]);
+    let edges: Vec<_> = pairs
+        .iter()
+        .enumerate()
+        .map(|(eid, &(source, target))| ProjectionEdge {
+            eid: EId(eid as u128),
+            source: vertices[source],
+            target: vertices[target],
+            weight: -1.0,
+        })
+        .collect();
+
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        let view = graph(&vertices, &edges, direction);
+        // An independent map/queue walk of the INPUT pairs pins both the
+        // answer and the exact checkpoint preceding a row-limit refusal.
+        // Comparing two meters alone would miss both prepaying past it.
+        let mut adjacency = vec![std::collections::BTreeSet::new(); n];
+        for &(source, target) in &pairs {
+            match direction {
+                Directedness::Directed => {
+                    adjacency[source].insert(target);
+                }
+                Directedness::Reversed => {
+                    adjacency[target].insert(source);
+                }
+                Directedness::Undirected => {
+                    adjacency[source].insert(target);
+                    adjacency[target].insert(source);
+                }
+            }
+        }
+        let source = if direction == Directedness::Reversed {
+            n - 2
+        } else {
+            0
+        };
+        for cutoff in [Some(0), Some(1), None] {
+            for cap in [0, 1, 2, 63, 64, 65, n - 4, n - 2, n - 1, n, n + 1] {
+                let mut expected = BTreeMap::new();
+                let mut refused = (cap == 0).then_some(1);
+                let mut units = 1 + n; // call entry and degree admission
+                if refused.is_none() {
+                    units += n; // distance initialization
+                    expected.insert(source, 0usize);
+                    let mut queue = std::collections::VecDeque::from([source]);
+                    'walk: while let Some(vertex) = queue.pop_front() {
+                        units += 1;
+                        let depth = expected[&vertex];
+                        if cutoff.is_some_and(|limit| depth >= limit) {
+                            continue;
+                        }
+                        for &neighbor in &adjacency[vertex] {
+                            units += 1;
+                            if expected.contains_key(&neighbor) {
+                                continue;
+                            }
+                            if expected.len() == cap {
+                                refused = Some(cap + 1);
+                                break 'walk;
+                            }
+                            expected.insert(neighbor, depth + 1);
+                            queue.push_back(neighbor);
+                        }
+                    }
+                    if refused.is_none() {
+                        units += n + 2; // result conversion and boundaries
+                    }
+                }
+                let call =
+                    FnxCallSpec::single_source_shortest_path_length(vertices[source], cutoff);
+                let limits = FnxExecutionLimits {
+                    max_result_rows: cap,
+                    ..limits()
+                };
+                let mut meter = ComponentMeter::default();
+                let result = call.execute(&view, limits, &mut meter);
+                assert_eq!(meter.observed, units, "{direction:?} {cutoff:?} cap={cap}");
+                if let Some(requested) = refused {
+                    assert!(matches!(result, Err(FnxExecutionError::LimitExceeded {
+                        resource: "result rows", requested: actual, ..
+                    }) if actual == requested));
+                } else {
+                    let result = result.unwrap();
+                    let expected: BTreeMap<_, _> = expected
+                        .iter()
+                        .map(|(&vertex, &depth)| (vertices[vertex], depth as u64))
+                        .collect();
+                    assert_eq!(distances(result.clone()), expected);
+                    let mut scalar_units = 0;
+                    let scalar = call
+                        .execute(&view, limits, || {
+                            scalar_units += 1;
+                            Ok::<(), usize>(())
+                        })
+                        .unwrap();
+                    assert_eq!(result, scalar); // every certificate field too
+                    assert_eq!(scalar_units, units);
+                    assert!(meter.calls < units);
+                    if direction == Directedness::Directed && cutoff.is_none() && cap >= n {
+                        assert!(
+                            meter.full_runs >= 4,
+                            "initialization and hub arcs both batch"
+                        );
+                    }
+                }
+
+                // Include the first ordinal AFTER a native refusal. It must
+                // stay a row refusal, never become a later work cancellation.
+                for stop in 1..=units + 1 {
+                    let mut meter = ComponentMeter {
+                        stop: Some(stop),
+                        ..ComponentMeter::default()
+                    };
+                    let result = call.execute(&view, limits, &mut meter);
+                    if stop <= units {
+                        assert!(
+                            matches!(result, Err(FnxExecutionError::Cancelled(at)) if at == stop)
+                        );
+                        assert_eq!(meter.observed, stop);
+                    } else {
+                        assert_eq!(meter.observed, units);
+                        if let Some(requested) = refused {
+                            assert!(matches!(result, Err(FnxExecutionError::LimitExceeded {
+                                resource: "result rows", requested: actual, ..
+                            }) if actual == requested));
+                        } else {
+                            assert!(result.is_ok());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn every_three_vertex_projection_matches_pinned_fnx_traversals() {
     let vertices = [VId(0), VId(17), VId(u128::MAX)];
     for mask in 0u16..512 {
