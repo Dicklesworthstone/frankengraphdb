@@ -234,6 +234,136 @@ fn every_descriptor_seek_control_can_refuse_before_inspection() {
     }
 }
 
+fn ordered_edges(bounds: &[(u128, u128)]) -> Vec<EdgeRange> {
+    let mut ranges: Vec<_> = bounds
+        .iter()
+        .enumerate()
+        .map(|(block, &(first, last))| EdgeRange {
+            first: EId(first),
+            last: EId(last),
+            block,
+            maximum: EId(last),
+        })
+        .collect();
+    crate::tiered::edge_scan::sort(&mut ranges, &mut || Ok::<_, ()>(())).unwrap();
+    augment_edges(&mut ranges, &mut || Ok::<_, ()>(())).unwrap();
+    ranges
+}
+
+fn edge_lookup(ranges: &[EdgeRange], eid: u128) -> (Vec<usize>, usize) {
+    let mut candidates = EdgeCandidates::new(ranges.len(), EId(eid));
+    let mut work = 0;
+    let mut result = Vec::new();
+    while let Some(block) = candidates
+        .next(ranges, &mut || {
+            work += 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+    {
+        result.push(block);
+    }
+    result.sort_unstable();
+    (result, work)
+}
+
+#[test]
+fn edge_intervals_equal_linear_oracle_with_overlaps_and_full_width_identities() {
+    let mut bounds = vec![
+        (0, 0),
+        (u128::MAX, u128::MAX),
+        (0, u128::MAX),
+        (7, 7),
+        (7, 7),
+        (3, 19),
+        (1, u128::MAX - 1),
+    ];
+    let mut seed = 0xed6e_a928_615bu128;
+    for at in 0..256 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let first = seed;
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let last = seed;
+        bounds.push(if at % 3 == 0 {
+            (first.min(last) % 31, first.max(last) % 31 + 31)
+        } else {
+            (first.min(last), first.max(last))
+        });
+    }
+    let ranges = ordered_edges(&bounds);
+    let mut probes = vec![0, 1, 7, 31, u128::MAX];
+    for &(first, last) in &bounds {
+        for value in [first, last] {
+            probes.extend([value.saturating_sub(1), value, value.saturating_add(1)]);
+        }
+    }
+    for eid in probes {
+        let expected: Vec<_> = bounds
+            .iter()
+            .enumerate()
+            .filter_map(|(block, &(first, last))| {
+                (first <= eid && eid <= last).then_some(block)
+            })
+            .collect();
+        let (actual, _) = edge_lookup(&ranges, eid);
+        assert_eq!(actual, expected, "{eid}");
+        assert!(actual.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+    assert_eq!(edge_lookup(&[], u128::MAX), (vec![], 0));
+}
+
+#[test]
+fn edge_interval_point_work_is_logarithmic_or_proportional_to_overlaps() {
+    let count: usize = 4096;
+    let bounds: Vec<_> = (0..count)
+        .rev()
+        .map(|at| (at as u128 * 4, at as u128 * 4 + 1))
+        .collect();
+    let ranges = ordered_edges(&bounds);
+    for eid in [0, 1, 2, 17, 1023, 4097, 16381, 16382, u128::MAX] {
+        let (actual, work) = edge_lookup(&ranges, eid);
+        let expected: Vec<_> = bounds
+            .iter()
+            .enumerate()
+            .filter_map(|(block, &(first, last))| {
+                (first <= eid && eid <= last).then_some(block)
+            })
+            .collect();
+        assert_eq!(actual, expected);
+        assert!(work <= 2 * (count.ilog2() as usize + 1), "{eid}: {work}");
+    }
+    let wide = ordered_edges(&vec![(0, u128::MAX); count]);
+    let (actual, work) = edge_lookup(&wide, 7);
+    assert_eq!(actual, (0..count).collect::<Vec<_>>());
+    assert_eq!(work, count);
+    assert!(size_of::<EdgeCandidates>() <= 2048, "no allocated overlap bag");
+}
+
+#[test]
+fn every_edge_interval_control_can_refuse_before_inspection() {
+    let ranges = ordered_edges(&[(7, 7), (0, 9), (0, u128::MAX), (3, 19)]);
+    for eid in [0, 7, 8, 20, u128::MAX] {
+        let (_, total) = edge_lookup(&ranges, eid);
+        for stop in 1..=total {
+            let mut cursor = EdgeCandidates::new(ranges.len(), EId(eid));
+            let mut calls = 0;
+            loop {
+                match cursor.next(&ranges, &mut || {
+                    calls += 1;
+                    if calls == stop { Err(stop) } else { Ok(()) }
+                }) {
+                    Ok(Some(_)) => {}
+                    Err(at) => {
+                        assert_eq!((at, calls), (stop, stop));
+                        break;
+                    }
+                    Ok(None) => panic!("refusal {stop} skipped"),
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn routing_construction_is_charged_before_allocation_and_every_refusal_refunds() {
     let (_, report) = run_async_under_lab(0xb0_13, |root| async move {
@@ -263,7 +393,8 @@ fn routing_construction_is_charged_before_allocation_and_every_refusal_refunds()
             summary: None,
             rows: 0,
         });
-        let bytes = blocks.len() * (size_of::<Outgoing>() + size_of::<Incoming>());
+        let bytes = blocks.len()
+            * (size_of::<Outgoing>() + size_of::<Incoming>() + size_of::<EdgeRange>());
         let short = MemoryPool::new(bytes - 1, 0).unwrap();
         let mut calls = 0;
         assert!(matches!(
@@ -283,8 +414,12 @@ fn routing_construction_is_charged_before_allocation_and_every_refusal_refunds()
         })
         .unwrap();
         assert_eq!(
-            (directory.outgoing.len(), directory.incoming.len()),
-            (17, 17)
+            (
+                directory.outgoing.len(),
+                directory.incoming.len(),
+                directory.edges.len(),
+            ),
+            (17, 17, 17)
         );
         assert_eq!(pool.used(), bytes);
         drop(directory);

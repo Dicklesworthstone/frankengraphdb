@@ -420,6 +420,120 @@ fn extent_visits(stats: BufferStats) -> u64 {
 }
 
 #[test]
+fn edge_point_and_adjacency_routes_keep_publication_winners_before_liveness() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let first = propertied_block(
+            &store,
+            &commit,
+            None,
+            &[edge(10, 7, 10, 1, None), edge(50, 7, 50, 1, None)],
+            &[Some(100), Some(500)],
+        )
+        .await;
+        // Both interval families put this later publication at their root.
+        // Retirement restatements tie on created_at, but retain this ordinal.
+        let later = propertied_block(
+            &store,
+            &commit,
+            Some(first),
+            &[edge(50, 7, 50, 1, Some(3)), edge(90, 7, 90, 3, None)],
+            &[Some(500), Some(900)],
+        )
+        .await;
+        let id = store
+            .put_root(
+                &commit,
+                &PartitionRoot {
+                    graph: GraphId(1),
+                    branch: BranchId(2),
+                    partition: 0,
+                    published_at: CommitSeq(3),
+                    blocks: vec![
+                        BlockRef {
+                            block_id: first.0,
+                            first_seq: CommitSeq(1),
+                            last_seq: CommitSeq(1),
+                        },
+                        BlockRef {
+                            block_id: later.0,
+                            first_seq: CommitSeq(1),
+                            last_seq: CommitSeq(3),
+                        },
+                    ],
+                    vertex_patches: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&query, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let before = extent_visits(view.stats());
+        let old = view
+            .edge_at(&query, EId(50), CommitSeq(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.entry, edge(50, 7, 50, 1, Some(3)));
+        assert_eq!(old.props, vec![(PropertyKeyId(11), CanonicalScalar::Int(500))]);
+        assert_eq!(extent_visits(view.stats()) - before, 3);
+        drop(old);
+        let before = extent_visits(view.stats());
+        assert!(view.edge_at(&query, EId(50), CommitSeq(3)).await.unwrap().is_none());
+        assert_eq!(
+            extent_visits(view.stats()) - before,
+            2,
+            "retired winner has no sidecar read"
+        );
+        for relation in [None, Some(REL)] {
+            for (cut, expected) in [
+                (1, vec![edge(10, 7, 10, 1, None), edge(50, 7, 50, 1, Some(3))]),
+                (3, vec![edge(10, 7, 10, 1, None), edge(90, 7, 90, 3, None)]),
+            ] {
+                let before = extent_visits(view.stats());
+                let found = view
+                    .adjacency_at(&query, VId(7), relation, false, CommitSeq(cut), 3)
+                    .await
+                    .unwrap();
+                assert_eq!(found.as_ref(), &expected);
+                assert_eq!(extent_visits(view.stats()) - before, 2, "topology only");
+            }
+            for (cut, expected) in [
+                (1, vec![edge(50, 7, 50, 1, Some(3))]),
+                (3, vec![]),
+            ] {
+                let before = extent_visits(view.stats());
+                let found = view
+                    .adjacency_at(&query, VId(50), relation, true, CommitSeq(cut), 1)
+                    .await
+                    .unwrap();
+                assert_eq!(found.as_ref(), &expected);
+                assert_eq!(
+                    extent_visits(view.stats()) - before,
+                    2,
+                    "complete historical candidates"
+                );
+            }
+        }
+        assert!(matches!(
+            view.adjacency_at(&query, VId(7), None, false, CommitSeq(3), 2).await,
+            Err(BufferedReadError::Limit {
+                resource: "buffered adjacency identities",
+                requested: 3,
+                limit: 2,
+            })
+        ));
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn cold_points_select_all_matching_histories_and_only_the_winning_property_patch() {
     run(|contexts, dir| async move {
         let (store, id) = routed_fixture(&contexts, &dir).await;
