@@ -52,7 +52,8 @@ enum RootCandidates {
         roots: [Option<IndexMap<VId, ()>>; 2],
         equality: RootEquality,
     },
-    Range(range::RangeCandidates),
+    // Boxed: a range cursor is several times the size of every other arm.
+    Range(Box<range::RangeCandidates>),
     Prefix(prefix::PrefixCandidates),
 }
 
@@ -137,7 +138,8 @@ impl SnapshotVertexSource<'_> {
         }
         let Some((key, value)) = equality else {
             if let Some(bounds) = bounds {
-                self.candidates = RootCandidates::Range(range::RangeCandidates::new(bounds));
+                self.candidates =
+                    RootCandidates::Range(Box::new(range::RangeCandidates::new(bounds)));
             }
             return self;
         };

@@ -4,7 +4,7 @@
 //! type checks and the 64-head capacity are decided before output. Histories
 //! remain the complete fallback; scoped admission retains the selected prefix.
 
-use super::{index_successor, range};
+use super::{EqualityKey, index_successor, range};
 use crate::gql_exec::source::{PropertyEqualityIndex, PropertyRange, prefix_range};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::scan_stream::SourceStep;
@@ -132,7 +132,7 @@ fn key_at_or_after<'a, C>(
     encoded: &[u8],
     inclusive: bool,
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
-) -> Result<Option<&'a (PropertyKeyId, Arc<[u8]>)>, C> {
+) -> Result<Option<&'a EqualityKey>, C> {
     let mut node = index.candidates.0.as_deref();
     let mut found = None;
     while let Some(current) = node {
