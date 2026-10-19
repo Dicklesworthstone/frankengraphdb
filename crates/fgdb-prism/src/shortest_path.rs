@@ -197,6 +197,76 @@ impl HeapMutation<'_> {
         }
         self.complete.then_some(self.output)
     }
+
+    /// Complete a synchronous repair with its exact step count. The moving
+    /// entry sees only untouched ancestors/descendants during the lookahead,
+    /// so it chooses the same path as `step`. That path has at most one step
+    /// per binary-heap level; no graph-sized work or scratch is prepaid.
+    fn finish_metered<C>(
+        mut self,
+        checkpoint: &mut impl FnxMeter<C>,
+    ) -> Result<Option<Entry>, HeapError<C>> {
+        if self.complete {
+            // Empty/singleton pops and rejected offers still have one step.
+            checkpoint.unit().map_err(HeapError::Cancelled)?;
+            return Ok(self.output);
+        }
+        let entry = self.heap.entries[self.position];
+        let mut end = self.position;
+        let mut swaps = 0usize;
+        if self.upwards {
+            while end > 0 {
+                let parent = (end - 1) / 2;
+                if !IndexedHeap::before(entry, self.heap.entries[parent]) {
+                    break;
+                }
+                end = parent;
+                swaps += 1;
+            }
+        } else {
+            while end < self.heap.entries.len() / 2 {
+                let left = 2 * end + 1;
+                let right = left + 1;
+                let child = if right < self.heap.entries.len()
+                    && IndexedHeap::before(self.heap.entries[right], self.heap.entries[left])
+                {
+                    right
+                } else {
+                    left
+                };
+                if !IndexedHeap::before(self.heap.entries[child], entry) {
+                    break;
+                }
+                end = child;
+                swaps += 1;
+            }
+        }
+        // The scalar driver charges once for every swap, then once more for
+        // the terminal comparison. Keep the refusing unit before any replay.
+        let mut unpaid = swaps + 1;
+        while unpaid != 0 {
+            let run = unpaid.min(FNX_METER_RUN);
+            checkpoint.units(run).map_err(HeapError::Cancelled)?;
+            unpaid -= run;
+        }
+        if self.upwards {
+            while self.position != end {
+                let parent = (self.position - 1) / 2;
+                self.heap.swap(self.position, parent);
+                self.position = parent;
+            }
+        } else {
+            // A one-based binary-heap index encodes the complete root path.
+            // Its prefixes recover each descendant without another compare.
+            let path = end + 1;
+            for remaining in (0..swaps).rev() {
+                let child = (path >> remaining) - 1;
+                self.heap.swap(self.position, child);
+                self.position = child;
+            }
+        }
+        Ok(self.output)
+    }
 }
 
 #[derive(Debug)]
@@ -298,6 +368,22 @@ impl IndexedHeap {
         }
     }
 
+    fn offer_metered<C>(
+        &mut self,
+        node: usize,
+        cost: f64,
+        checkpoint: &mut impl FnxMeter<C>,
+    ) -> Result<(), HeapError<C>> {
+        #[cfg(test)]
+        if tests::scalar_heap() {
+            return self.offer(node, cost, &mut || checkpoint.unit());
+        }
+        checkpoint.unit().map_err(HeapError::Cancelled)?;
+        self.offer_steps::<C>(node, cost)?
+            .finish_metered(checkpoint)?;
+        Ok(())
+    }
+
     /// Begin the same strict/epsilon relaxation used by both scheduling modes.
     /// The driver must checkpoint before this mutation and before EACH step.
     pub(crate) fn offer_steps<C>(
@@ -370,6 +456,18 @@ impl IndexedHeap {
                 return Ok(output);
             }
         }
+    }
+
+    fn pop_metered<C>(
+        &mut self,
+        checkpoint: &mut impl FnxMeter<C>,
+    ) -> Result<Option<Entry>, HeapError<C>> {
+        #[cfg(test)]
+        if tests::scalar_heap() {
+            return self.pop(&mut || checkpoint.unit());
+        }
+        checkpoint.unit().map_err(HeapError::Cancelled)?;
+        self.pop_steps().finish_metered(checkpoint)
     }
 
     pub(crate) fn pop_steps(&mut self) -> HeapMutation<'_> {
@@ -513,7 +611,7 @@ pub(crate) fn run<C>(
         distances.push(None);
         overflowed.push(false);
     }
-    heap.offer(source, 0.0, &mut || checkpoint.unit())?;
+    heap.offer_metered(source, 0.0, checkpoint)?;
     let mut discovered = 1usize;
     let mut witness = ComplexityWitness {
         algorithm: "single_source_dijkstra_indexed_heap".to_owned(),
@@ -524,7 +622,7 @@ pub(crate) fn run<C>(
     };
     loop {
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-        let Some(Entry { node, cost, .. }) = heap.pop(&mut || checkpoint.unit())? else {
+        let Some(Entry { node, cost, .. }) = heap.pop_metered(checkpoint)? else {
             break;
         };
         distances[node] = Some(cost);
@@ -566,7 +664,7 @@ pub(crate) fn run<C>(
                 admit("result rows", requested, row_limit)?;
                 discovered = requested;
             }
-            heap.offer(target, candidate, &mut || checkpoint.unit())?;
+            heap.offer_metered(target, candidate, checkpoint)?;
             witness.queue_peak = witness.queue_peak.max(heap.len());
         }
     }
@@ -598,10 +696,26 @@ mod tests {
 
     thread_local! {
         static INCUMBENT_WEIGHT_SCAN: Cell<bool> = const { Cell::new(false) };
+        static INCUMBENT_HEAP: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(super) fn scan_incumbent_weights() -> bool {
         INCUMBENT_WEIGHT_SCAN.with(Cell::get)
+    }
+
+    pub(super) fn scalar_heap() -> bool {
+        INCUMBENT_HEAP.with(Cell::get)
+    }
+
+    fn with_scalar_heap<R>(incumbent: bool, work: impl FnOnce() -> R) -> R {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                INCUMBENT_HEAP.with(|mode| mode.set(self.0));
+            }
+        }
+        let _reset = Reset(INCUMBENT_HEAP.with(|mode| mode.replace(incumbent)));
+        work()
     }
 
     fn with_weight_scan<R>(incumbent: bool, work: impl FnOnce() -> R) -> R {
@@ -620,6 +734,7 @@ mod tests {
         seen: usize,
         polls: usize,
         largest_run: usize,
+        runs: usize,
     }
 
     struct ExactMeter<'a> {
@@ -634,6 +749,7 @@ mod tests {
 
         fn units(&mut self, n: usize) -> Result<(), &'static str> {
             assert!((1..=FNX_METER_RUN).contains(&n));
+            self.trace.runs += 1;
             self.trace.largest_run = self.trace.largest_run.max(n);
             if let Some(stop) = self.stop
                 && self.trace.seen + n >= stop
@@ -1058,6 +1174,109 @@ mod tests {
     }
 
     #[test]
+    fn metered_heap_preserves_complete_calls_and_every_refusal_prefix() {
+        let mut edges: Vec<_> = (1..13)
+            .map(|target| (0, target, 2.0 + (target % 5) as f64))
+            .collect();
+        for source in 1..13 {
+            for (offset, weight) in [(1, 0.25), (2, 1.0), (3, 5e-13)] {
+                edges.push((source, 1 + (source - 1 + offset) % 12, weight));
+            }
+        }
+        edges.extend([(0, 0, 0.0), (13, 14, 1.0)]);
+        let mut observed_batch = false;
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let view = graph(15, &edges, direction);
+            for comparison in [DijkstraComparison::Strict, DijkstraComparison::FnxEpsilon] {
+                for source in [0, 14] {
+                    for cutoff in [None, Some(0.0), Some(4.0)] {
+                        let call = FnxCallSpec::single_source_dijkstra_path_length(
+                            options(&view, source, cutoff).with_comparison(comparison),
+                        );
+                        for max_result_rows in [0, 1, 5, 15] {
+                            let cap = FnxExecutionLimits {
+                                max_result_rows,
+                                ..limits()
+                            };
+                            let compare = |stop| {
+                                let (expected, before) = with_scalar_heap(true, || {
+                                    full_call(&view, &call, cap, false, stop)
+                                });
+                                let (actual, after) = with_scalar_heap(false, || {
+                                    full_call(&view, &call, cap, false, stop)
+                                });
+                                assert_eq!(
+                                    actual, expected,
+                                    "{direction:?} {comparison:?} {source} {cutoff:?} rows={max_result_rows} stop={stop:?}"
+                                );
+                                assert_eq!((after.seen, after.polls), (before.seen, before.polls));
+                                (before, after)
+                            };
+                            let (before, after) = compare(None);
+                            observed_batch |= after.runs < before.runs;
+                            for stop in 1..=before.seen + 1 {
+                                compare(Some(stop));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            observed_batch,
+            "the complete call must exercise a bulk repair"
+        );
+    }
+
+    #[test]
+    fn metered_heap_keeps_terminal_steps_and_leading_error_precedence() {
+        for case in 0..5 {
+            for stop in [None, Some(1), Some(2), Some(3), Some(4)] {
+                let execute = |incumbent| {
+                    let mut heap =
+                        IndexedHeap::new(2, DijkstraComparison::Strict, &mut || Ok::<_, ()>(()))
+                            .unwrap();
+                    if case != 4 {
+                        heap.offer(0, 1.0, &mut || Ok::<_, ()>(())).unwrap();
+                    }
+                    heap.sequence = u64::MAX;
+                    let mut trace = Trace::default();
+                    let result = with_scalar_heap(incumbent, || {
+                        let mut meter = ExactMeter {
+                            trace: &mut trace,
+                            stop,
+                        };
+                        match case {
+                            // Invalid ordinal and accepted-offer sequence
+                            // overflow must follow only the leading unit.
+                            0 => heap.offer_metered(2, 1.0, &mut meter).map(|_| None),
+                            1 => heap.offer_metered(1, 1.0, &mut meter).map(|_| None),
+                            // A rejected offer must not inspect the exhausted
+                            // sequence. It still charges its terminal step.
+                            2 => heap.offer_metered(0, 2.0, &mut meter).map(|_| None),
+                            // Singleton and empty pop also retain that step.
+                            _ => heap.pop_metered(&mut meter),
+                        }
+                    })
+                    .map(|entry| {
+                        entry.map(|entry| (entry.node, entry.cost.to_bits(), entry.sequence))
+                    })
+                    .map_err(|error| format!("{error:?}"));
+                    (result, trace.seen)
+                };
+                assert_eq!(execute(false), execute(true), "case={case} stop={stop:?}");
+                if stop.is_none() {
+                    assert_eq!(execute(false).1, if case < 2 { 1 } else { 2 });
+                }
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "manual same-invocation complete Prism-call performance comparison"]
     fn cached_validation_paired_full_call_performance() {
         use std::hint::black_box;
@@ -1231,11 +1450,14 @@ mod tests {
                 let mut stepped = init.finish().unwrap();
                 let mut synchronous =
                     IndexedHeap::new(n, comparison, &mut || Ok::<_, ()>(())).unwrap();
+                let mut metered = IndexedHeap::new(n, comparison, &mut || Ok::<_, ()>(())).unwrap();
                 // Independent O(n) minimum queue: no sift code or inverse map.
                 let mut dense: Vec<Option<(f64, u64)>> = vec![None; n];
                 let mut sequence = 0u64;
                 let mut state = 17u64;
                 for turn in 0..512 + n {
+                    let mut scalar_units = 0usize;
+                    let mut trace = Trace::default();
                     state = state
                         .wrapping_mul(6_364_136_223_846_793_005)
                         .wrapping_add(1);
@@ -1258,7 +1480,18 @@ mod tests {
                                 }
                             }
                         };
-                        let sync = synchronous.pop(&mut || Ok::<_, ()>(())).unwrap();
+                        let sync = synchronous
+                            .pop(&mut || {
+                                scalar_units += 1;
+                                Ok::<_, ()>(())
+                            })
+                            .unwrap();
+                        let bulk = metered
+                            .pop_metered(&mut ExactMeter {
+                                trace: &mut trace,
+                                stop: None,
+                            })
+                            .unwrap();
                         let tuple =
                             |entry: Entry| (entry.node, entry.cost.to_bits(), entry.sequence);
                         assert_eq!(
@@ -1266,6 +1499,7 @@ mod tests {
                             expected.map(|(v, c, s)| (v, c.to_bits(), s))
                         );
                         assert_eq!(actual.map(tuple), sync.map(tuple));
+                        assert_eq!(actual.map(tuple), bulk.map(tuple));
                         if let Some((node, _, _)) = expected {
                             dense[node] = None;
                         }
@@ -1301,9 +1535,33 @@ mod tests {
                             }
                         }
                         synchronous
-                            .offer(node, cost, &mut || Ok::<_, ()>(()))
+                            .offer(node, cost, &mut || {
+                                scalar_units += 1;
+                                Ok::<_, ()>(())
+                            })
+                            .unwrap();
+                        metered
+                            .offer_metered(
+                                node,
+                                cost,
+                                &mut ExactMeter {
+                                    trace: &mut trace,
+                                    stop: None,
+                                },
+                            )
                             .unwrap();
                     }
+                    assert_eq!(trace.seen, scalar_units, "{comparison:?} {n} {turn}");
+                    assert_eq!(metered.positions, stepped.positions);
+                    assert_eq!(metered.sequence, stepped.sequence);
+                    assert_eq!(metered.len(), stepped.len());
+                    for (bulk, scalar) in metered.entries.iter().zip(&stepped.entries) {
+                        assert_eq!(
+                            (bulk.node, bulk.cost.to_bits(), bulk.sequence),
+                            (scalar.node, scalar.cost.to_bits(), scalar.sequence)
+                        );
+                    }
+                    check_inverse(&metered);
                     assert_eq!(
                         stepped.len(),
                         dense.iter().filter(|entry| entry.is_some()).count()
