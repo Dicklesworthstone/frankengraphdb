@@ -1397,3 +1397,263 @@ fn authorized_reads_refuse_identity_functions_at_every_text_entry_point() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn range_and_prefix_streams_keep_scoped_quotas_across_capacity_and_type_fallbacks() {
+    let ((), report) = run_async_under_lab(0x5ec0_6201, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let issuer = authority();
+        for prefix in [false, true] {
+            // Two roots fit. Hidden and stale distinct values cross the fixed
+            // source capacity; a hidden nontext value separately forces the
+            // prefix safety fallback. Neither changes visible candidate cost.
+            for population in [0_u128, 1, 70] {
+                let mut db =
+                    Database::open_memory(&commit, DatabaseKeys::new([1; 32], NS, [2; 32]))
+                        .await
+                        .unwrap();
+                let make_value = |number: i64| {
+                    if prefix {
+                        CanonicalScalar::ucs_basic_text(&format!("ok-{number}")).unwrap()
+                    } else {
+                        CanonicalScalar::Int(number)
+                    }
+                };
+                let outside = || {
+                    if prefix {
+                        CanonicalScalar::ucs_basic_text("outside").unwrap()
+                    } else {
+                        CanonicalScalar::Int(0)
+                    }
+                };
+                let mut batch = WriteBatch::new(RelationId(1));
+                batch.create_vertex(
+                    VId(0),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(1), outside())],
+                );
+                for (id, value) in [(1, 20), (u128::MAX, 30)] {
+                    batch.create_vertex(
+                        VId(id),
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), make_value(value))],
+                    );
+                }
+                for id in 0..population {
+                    batch.create_vertex(
+                        VId(100 + id),
+                        vec![LabelId(99)],
+                        vec![(PropertyKeyId(1), make_value(200 + id as i64))],
+                    );
+                    batch.create_vertex(
+                        VId(1000 + id),
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(1), make_value(500 + id as i64))],
+                    );
+                }
+                if prefix && population == 1 {
+                    batch.create_vertex(
+                        VId(999),
+                        vec![LabelId(99)],
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(0))],
+                    );
+                }
+                db.write(&commit, batch).await.unwrap();
+                if population != 0 {
+                    let mut change = WriteBatch::new(RelationId(1));
+                    for id in 0..population {
+                        change.set_vertex_property(
+                            VId(1000 + id),
+                            PropertyKeyId(1),
+                            Some(outside()),
+                        );
+                    }
+                    db.write(&commit, change).await.unwrap();
+                }
+                let filter = if prefix {
+                    "n.p STARTS WITH 'ok-'"
+                } else {
+                    "n.p >= 10 AND n.p < 1000"
+                };
+                let row_text = format!("MATCH (n) WHERE {filter} RETURN n AS id");
+                let aggregate_text = format!("MATCH (n) WHERE {filter} RETURN COUNT(*) AS total");
+                let args = GqlParameters::new();
+                let broad_token = issuer.issue_at(&grant(), 100).unwrap();
+                let eager = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        &broad_token,
+                        "main",
+                        symbols,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap()
+                    .query(&cx, &row_text, &args)
+                    .unwrap();
+                let expected = vec![
+                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(1))]),
+                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(u128::MAX))]),
+                ];
+                let mut exact = grant();
+                exact.limits.max_nodes = 2;
+                let token = issuer.issue_at(&exact, 100).unwrap();
+                let mut session = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        symbols,
+                        GqlQueryPolicy::new(2, 2, 1_000_000, 1000),
+                        || 100,
+                    )
+                    .unwrap();
+                let prepared = session.prepare(&cx, &row_text, &args).unwrap();
+                for send in [false, true] {
+                    let (columns, rows) = if send {
+                        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
+                        fn is_send<T: Send>(_: &T) {}
+                        is_send(&cursor);
+                        let columns = cursor.columns().to_vec();
+                        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                        (columns, rows)
+                    } else {
+                        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+                        let columns = cursor.columns().to_vec();
+                        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                        (columns, rows)
+                    };
+                    assert_eq!(
+                        rows, expected,
+                        "prefix={prefix}, population={population}, send={send}"
+                    );
+                    assert_eq!(rows_result(&columns, rows), eager);
+                }
+                let prepared = session.prepare(&cx, &aggregate_text, &args).unwrap();
+                for driver in 0..3 {
+                    let rows = match driver {
+                        0 => {
+                            let mut cursor =
+                                session.stream_aggregate(&cx, &prepared, &args).unwrap();
+                            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                            rows
+                        }
+                        1 => {
+                            let mut cursor = session
+                                .stream_aggregate_send(&cx, &prepared, &args)
+                                .unwrap();
+                            fn is_send<T: Send>(_: &T) {}
+                            is_send(&cursor);
+                            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                            rows
+                        }
+                        _ => {
+                            let mut cursor = session
+                                .stream_aggregate_async(&cx, &prepared, &args)
+                                .unwrap();
+                            fn is_send<T: Send>(_: &T) {}
+                            is_send(&cursor);
+                            let mut rows = Vec::new();
+                            while let Some(row) = cursor.next_row().await.unwrap() {
+                                rows.push(row);
+                            }
+                            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                            rows
+                        }
+                    };
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(
+                        rows[0].values()[0].as_count(),
+                        Some(2),
+                        "prefix={prefix}, population={population}, driver={driver}"
+                    );
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn denied_range_and_prefix_keys_keep_the_same_native_record_refusal() {
+    let ((), report) = run_async_under_lab(0x5ec0_6202, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        for prefix in [false, true] {
+            for matches in [false, true] {
+                let mut db =
+                    Database::open_memory(&commit, DatabaseKeys::new([1; 32], NS, [2; 32]))
+                        .await
+                        .unwrap();
+                let value = if prefix {
+                    CanonicalScalar::ucs_basic_text(if matches { "Ad" } else { "other" }).unwrap()
+                } else {
+                    CanonicalScalar::Int(if matches { 55 } else { 99 })
+                };
+                let mut batch = WriteBatch::new(RelationId(1));
+                for id in 1..=2 {
+                    batch.create_vertex(
+                        VId(id),
+                        vec![LabelId(1)],
+                        vec![(PropertyKeyId(2), value.clone())],
+                    );
+                }
+                db.write(&commit, batch).await.unwrap();
+                let filter = if prefix {
+                    "n.hidden STARTS WITH 'Ad'"
+                } else {
+                    "n.hidden >= 50 AND n.hidden < 60"
+                };
+                let text = format!("MATCH (n) WHERE {filter} RETURN n AS id");
+                let args = GqlParameters::new();
+                let mut session = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        symbols,
+                        GqlQueryPolicy::new(1, 2, 1_000_000, 1000),
+                        || 100,
+                    )
+                    .unwrap();
+                let prepared = session.prepare(&cx, &text, &args).unwrap();
+                for send in [false, true] {
+                    let error = if send {
+                        let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
+                        let error = cursor.next().unwrap().unwrap_err();
+                        assert_eq!(cursor.state(), VertexScanState::Failed);
+                        assert!(cursor.next().is_none());
+                        error
+                    } else {
+                        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+                        let error = cursor.next().unwrap().unwrap_err();
+                        assert_eq!(cursor.state(), VertexScanState::Failed);
+                        assert!(cursor.next().is_none());
+                        error
+                    };
+                    assert!(
+                        matches!(error,
+                            QueryError::Stream(GqlQueryError::Rows(error))
+                                if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                                    && error.limit == 1 && error.observed == 2
+                        ),
+                        "prefix={prefix}, matches={matches}, send={send}"
+                    );
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

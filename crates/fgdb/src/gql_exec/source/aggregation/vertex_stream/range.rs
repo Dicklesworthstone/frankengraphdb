@@ -16,11 +16,11 @@ use fgdb_gql::stream::VertexScanEvent;
 use fgdb_strata::vertex::VertexPatchRows;
 use fgdb_types::{CanonicalScalar, VId};
 
-const MAX_RANGE_HEADS: usize = 64;
+pub(super) const MAX_RANGE_HEADS: usize = 64;
 
-struct Head {
-    vid: VId,
-    root: IndexMap<VId, ()>,
+pub(super) struct Head {
+    pub(super) vid: VId,
+    pub(super) root: IndexMap<VId, ()>,
 }
 
 enum Frontier {
@@ -139,7 +139,7 @@ where
 /// visitor declines another bucket. The existing u32 tree cardinality bounds
 /// recursion depth below 47; every visited node is governed. No iterator stack
 /// or candidate-ID collection is allocated.
-fn visit_range<C, F, Visit>(
+pub(super) fn visit_range<C, F, Visit>(
     index: &EqualityCandidates,
     range: &PropertyRange,
     control: &mut F,
@@ -244,7 +244,7 @@ fn history_matches<C>(
 }
 
 /// Min-heap insertion with all comparisons and growth admitted before mutation.
-fn push_head<C>(
+pub(super) fn push_head<C>(
     heads: &mut Vec<Head>,
     head: Head,
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
@@ -272,7 +272,7 @@ fn push_head<C>(
 /// Replace the minimum with its next identity, or remove an exhausted bucket.
 /// Determine the complete repair path before mutating so a refused comparison
 /// cannot leave an invalid heap behind. The fixed path has no graph-sized growth.
-fn advance_head<C>(
+pub(super) fn advance_head<C>(
     heads: &mut Vec<Head>,
     next: Option<VId>,
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,

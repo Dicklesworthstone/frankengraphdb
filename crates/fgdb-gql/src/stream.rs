@@ -97,6 +97,25 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             })
     }
 
+    /// A direct STARTS WITH conjunct in the first Boolean expression, after
+    /// only infallible root predicates. A source must prove that its property
+    /// index contains only compatible text before pruning candidates: nontext
+    /// values must still reach the ordinary Boolean evaluator. Later Boolean
+    /// expressions and probes are never crossed by this accessor.
+    #[must_use]
+    pub fn leading_root_prefix(&self) -> Option<(PropertyKeyId, &str)> {
+        for test in self.tests.iter() {
+            match test {
+                Test::Predicate(_) | Test::Identity(_) => {}
+                Test::Binding(GlaOperator::SelectBoolean { expression }) => {
+                    return expression.starts_with_conjunct();
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
     // Private to this operator family. A checked global numeric aggregate may
     // consume an unordered value projection; ordinary row streams still prove
     // the requested canonical order through their sealed output profile.

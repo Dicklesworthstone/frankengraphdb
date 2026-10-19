@@ -128,6 +128,12 @@ impl VertexAggregatePlan {
         self.input.leading_root_predicates()
     }
 
+    /// The first eligible Boolean prefix from this aggregate's input scan.
+    #[must_use]
+    pub fn leading_root_prefix(&self) -> Option<(PropertyKeyId, &str)> {
+        self.input.leading_root_prefix()
+    }
+
     /// Names addressing GraphAggregateRow::values(), not grouping keys.
     #[must_use]
     pub fn columns(&self) -> &[String] {

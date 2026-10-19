@@ -40,7 +40,8 @@ fn open_global<'q>(
             after: None,
             candidates: RootCandidates::Histories,
         }
-        .with_root_equality_predicates(plan.leading_root_predicates(), |_| true),
+        .with_root_equality_predicates(plan.leading_root_predicates(), |_| true)
+        .with_root_prefix(plan.leading_root_prefix(), |_| true),
         plan.clone(),
         policy,
         move || cx.with_restriction(|| cx.checkpoint()),

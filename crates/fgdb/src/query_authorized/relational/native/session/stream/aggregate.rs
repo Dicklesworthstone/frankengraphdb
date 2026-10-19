@@ -307,6 +307,9 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
         .map_err(QueryError::Read)?
         .with_root_equality_predicates(plan.leading_root_predicates(), |key| {
             execution.borrow().permit.predicates().allows_property(key)
+        })
+        .with_root_prefix(plan.leading_root_prefix(), |key| {
+            execution.borrow().permit.predicates().allows_property(key)
         });
     let source = ScopedSource {
         inner,

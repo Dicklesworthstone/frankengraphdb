@@ -432,3 +432,78 @@ fn native_streams_keep_exact_budgets_typed_late_failures_and_nondraining_close()
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn range_and_prefix_aggregate_streams_bound_count_and_sum_inputs() {
+    let ((), report) = run_async_under_lab(0xa66e_1201, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        for prefix in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for id in 100..356_u128 {
+                let tag = if prefix {
+                    CanonicalScalar::ucs_basic_text(&format!("z{id}")).unwrap()
+                } else {
+                    CanonicalScalar::Int(id as i64)
+                };
+                batch.create_vertex(
+                    VId(id),
+                    vec![LABEL],
+                    vec![(SCORE, CanonicalScalar::Int(id as i64)), (TAG, tag)],
+                );
+            }
+            for (id, value, score) in [(0, 7, -9), (u128::MAX, 8, 14)] {
+                let tag = if prefix {
+                    CanonicalScalar::ucs_basic_text(&format!("Ad{value}")).unwrap()
+                } else {
+                    CanonicalScalar::Int(value)
+                };
+                batch.create_vertex(
+                    VId(id),
+                    vec![LABEL],
+                    vec![(SCORE, CanonicalScalar::Int(score)), (TAG, tag)],
+                );
+            }
+            db.write(&commit, batch).await.unwrap();
+            for absent in [false, true] {
+                let filter = match (prefix, absent) {
+                    (false, false) => "n.tag >= 7 AND n.tag < 9",
+                    (false, true) => "n.tag >= 50 AND n.tag < 51",
+                    (true, false) => "n.tag STARTS WITH 'Ad'",
+                    (true, true) => "n.tag STARTS WITH 'absent'",
+                };
+                let text = format!(
+                    "MATCH (n:L) WHERE {filter} RETURN COUNT(*) AS total, SUM(n.score) AS sum"
+                );
+                let args = GqlParameters::new();
+                let records = if absent { 0 } else { 2 };
+                let QueryResult::Rows { columns, rows } =
+                    db.query(&cx, &text, &args, symbols(), wide()).unwrap()
+                else {
+                    panic!("aggregate returned a write");
+                };
+                let mut cursor = db
+                    .query_aggregate_stream(
+                        &cx,
+                        &text,
+                        &args,
+                        symbols(),
+                        GqlQueryPolicy::new(records, 1, 1_000_000, 1000),
+                    )
+                    .unwrap();
+                assert_eq!(cursor.columns(), columns);
+                assert_eq!(cursor.row_stats().snapshot_records, 0);
+                let row = cursor.next().unwrap().unwrap();
+                assert_eq!(row.values()[0].as_count(), Some(records));
+                assert_eq!(row.values()[1].as_integer(), (!absent).then_some(5));
+                assert_eq!(rows, vec![row.values().to_vec()]);
+                assert_eq!(cursor.row_stats().snapshot_records, records);
+                assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                assert!(cursor.next().is_none());
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

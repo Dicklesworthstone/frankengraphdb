@@ -27,6 +27,7 @@ use fgdb_types::{CanonicalScalar, CommitSeq, EId, QueryCx, VId};
 use std::sync::Arc;
 
 mod global_aggregate;
+mod prefix;
 mod range;
 
 type Cancel = Box<asupersync::error::Error>;
@@ -52,6 +53,7 @@ enum RootCandidates {
         equality: RootEquality,
     },
     Range(range::RangeCandidates),
+    Prefix(prefix::PrefixCandidates),
 }
 
 /// Public only because it is a parameter of the returned public cursor. The
@@ -67,15 +69,31 @@ pub struct SnapshotVertexSource<'q> {
 }
 
 impl SnapshotVertexSource<'_> {
-    /// Prefer an admitted leading equality, otherwise intersect leading numeric
-    /// constraints on one allowed property. Fallible predicates, including
-    /// string-prefix expressions, retain their ordinary evaluation order.
+    /// Prefer an admitted leading equality, then numeric constraints on one
+    /// allowed property, then a safe leading prefix. Later fallible predicates
+    /// retain their ordinary evaluation order.
     pub(crate) fn with_root_equality<Row: VertexScanOutput>(
         self,
         plan: &VertexScanPlan<Row>,
         allows_property: impl Fn(PropertyKeyId) -> bool,
     ) -> Self {
-        self.with_root_equality_predicates(plan.leading_root_predicates(), allows_property)
+        self.with_root_equality_predicates(plan.leading_root_predicates(), &allows_property)
+            .with_root_prefix(plan.leading_root_prefix(), allows_property)
+    }
+
+    pub(crate) fn with_root_prefix(
+        mut self,
+        prefix: Option<(PropertyKeyId, &str)>,
+        allows_property: impl Fn(PropertyKeyId) -> bool,
+    ) -> Self {
+        if matches!(self.candidates, RootCandidates::Histories)
+            && let Some((key, prefix)) = prefix
+            && allows_property(key)
+            && let Some(prefix) = prefix::PrefixCandidates::new(key, prefix)
+        {
+            self.candidates = RootCandidates::Prefix(prefix);
+        }
+        self
     }
 
     /// Aggregate inputs expose the same admitted prefix without exporting a
@@ -219,6 +237,13 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                             control,
                         );
                     }
+                    RootCandidates::Prefix(prefix) => {
+                        return prefix.next(
+                            self.view.snapshot.property_index(),
+                            self.after,
+                            control,
+                        );
+                    }
                     RootCandidates::Pending { .. } => {
                         unreachable!("candidate roots resolved above")
                     }
@@ -243,6 +268,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                 equality.key
             }
             RootCandidates::Range(range) => range.key(),
+            RootCandidates::Prefix(prefix) => prefix.key(),
         };
         // This poll-only recheck is for the scoped adapter's private candidate
         // admission. The native cursor later meters its ordinary full predicate
@@ -265,6 +291,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                                 Some(&equality.value),
                             ),
                         RootCandidates::Range(range) => range.accepts(&row.properties[mid].1),
+                        RootCandidates::Prefix(prefix) => prefix.accepts(&row.properties[mid].1),
                         RootCandidates::Histories => unreachable!("history roots admit every row"),
                     });
                 }
