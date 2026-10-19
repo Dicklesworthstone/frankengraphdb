@@ -4785,9 +4785,7 @@ mod initial_root_predicate_tests {
             |kind, name| match (kind, name) {
                 (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
                 (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
-                (GraphSymbolKind::Property, "n") => {
-                    Some(GraphSymbol::Property(PropertyKeyId(1)))
-                }
+                (GraphSymbolKind::Property, "n") => Some(GraphSymbol::Property(PropertyKeyId(1))),
                 _ => None,
             },
         )

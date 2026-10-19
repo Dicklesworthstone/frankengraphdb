@@ -1086,7 +1086,11 @@ fn prefix_selection_keeps_nontext_unknowns_and_boolean_boundaries() {
             );
             // Mixed-type UNKNOWNs do not disable a direct prefix seek. OR,
             // NOT and NULL operands remain independently ineligible.
-            let records = if predicate == "n.p STARTS WITH 'A'" { 1 } else { 5 };
+            let records = if predicate == "n.p STARTS WITH 'A'" {
+                1
+            } else {
+                5
+            };
             assert_eq!(stream.row_stats().snapshot_records, records, "{predicate}");
             assert_eq!(stream.state(), VertexScanState::Exhausted);
         }

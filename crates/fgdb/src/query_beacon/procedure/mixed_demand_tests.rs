@@ -135,7 +135,11 @@ fn parameters(accept: bool) -> GqlParameters {
     GqlParameters::new()
         .with_list(
             "eligible",
-            if accept { vec![GraphValue::Vertex(HIGH)] } else { Vec::new() },
+            if accept {
+                vec![GraphValue::Vertex(HIGH)]
+            } else {
+                Vec::new()
+            },
         )
         .unwrap()
 }
@@ -154,9 +158,7 @@ fn prepare(statement: &str, parameters: &GqlParameters) -> PreparedGraphSet {
         .unwrap()
 }
 
-fn missing(
-    result: Result<Vec<GraphHybridHit>, BeaconReadError<ReadError, Cancel>>,
-) {
+fn missing(result: Result<Vec<GraphHybridHit>, BeaconReadError<ReadError, Cancel>>) {
     assert!(
         matches!(
             result,
@@ -201,7 +203,11 @@ fn mixed_demand_keeps_exact_diagnostics_without_preparing_the_full_directory() {
             let request = query(vector, text, 1);
             let expected = cold
                 .beacon_search_graph_indexed_filtered(
-                    &cx, &definition(), request, expansion(), |id| id == HIGH,
+                    &cx,
+                    &definition(),
+                    request,
+                    expansion(),
+                    |id| id == HIGH,
                 )
                 .unwrap();
             assert_eq!(expected.len(), 1);
@@ -216,25 +222,28 @@ fn mixed_demand_keeps_exact_diagnostics_without_preparing_the_full_directory() {
                 (100 + u128::from(vector) + u128::from(text), 61),
             );
             assert_eq!(
-                db.beacon_search_graph_demand_filtered(
-                    &cx, &bounded, request, spec, |id| id == HIGH,
-                )
-                .unwrap(),
+                db.beacon_search_graph_demand_filtered(&cx, &bounded, request, spec, |id| id
+                    == HIGH,)
+                    .unwrap(),
                 expected,
             );
             assert_eq!(
-                pin.beacon_search_graph_demand_filtered(
-                    &cx, &bounded, request, spec, |id| id == HIGH,
-                )
-                .unwrap(),
+                pin.beacon_search_graph_demand_filtered(&cx, &bounded, request, spec, |id| id
+                    == HIGH,)
+                    .unwrap(),
                 expected,
             );
             assert!(matches!(
                 cold.beacon_search_graph_indexed_filtered(
-                    &cx, &bounded, request, expansion(), |id| id == HIGH,
+                    &cx,
+                    &bounded,
+                    request,
+                    expansion(),
+                    |id| id == HIGH,
                 ),
                 Err(BeaconReadError::Index(BeaconError::ResourceLimit {
-                    resource: "staged vertices", limit: 3,
+                    resource: "staged vertices",
+                    limit: 3,
                 }))
             ));
         }
@@ -250,53 +259,69 @@ fn mixed_demand_keeps_exact_diagnostics_without_preparing_the_full_directory() {
         assert_eq!(reached.rows.snapshot_records, 3);
         assert_eq!(incumbent.rows.snapshot_records, 132);
         assert_eq!(
-            pin.execute_graph_set_governed(&cx, &plan, policy()).unwrap(),
+            pin.execute_graph_set_governed(&cx, &plan, policy())
+                .unwrap(),
             reached,
         );
         let local = GqlQueryPolicy::new(3, 100, 10_000_000, 1_000_000);
         assert_eq!(
-            db.execute_graph_set_governed(&cx, &plan, local).unwrap().value,
+            db.execute_graph_set_governed(&cx, &plan, local)
+                .unwrap()
+                .value,
             reached.value,
         );
         assert!(
-            db.execute_graph_set_governed(&cx, &prepare(&indexed, &args), local).is_err(),
+            db.execute_graph_set_governed(&cx, &prepare(&indexed, &args), local)
+                .is_err(),
             "the indexed profile must still admit its full selected directory",
         );
 
         // The outer property read must use the SAME pin as all three lanes.
         let with_property = CALL.replace("RETURN node,", "RETURN node.x AS x,");
-        let before = pin.query(&cx, &with_property, &args, symbols, policy()).unwrap();
+        let before = pin
+            .query(&cx, &with_property, &args, symbols, policy())
+            .unwrap();
         let mut edit = WriteBatch::new(R);
         edit.set_vertex_property(HIGH, BODY, Some(text("unrelated")));
         edit.set_vertex_property(HIGH, X, Some(CanonicalScalar::Int(30)));
         edit.delete_edge(EId(2));
         edit.add_edge(EId(20), VId(0), HIGH, vec![]);
         db.write(&c.commit(), edit).await.unwrap();
-        let current = db.query(&cx, &with_property, &args, symbols, policy()).unwrap();
+        let current = db
+            .query(&cx, &with_property, &args, symbols, policy())
+            .unwrap();
         assert_ne!(current, before);
         assert_eq!(
             current,
             db.query(
                 &cx,
                 &with_property.replace("graph_access => 'demand'", "graph_access => 'indexed'"),
-                &args, symbols, policy(),
+                &args,
+                symbols,
+                policy(),
             )
             .unwrap(),
         );
         let mut historical = definition();
         historical.as_of = Some(at);
         missing(db.beacon_search_graph_demand_filtered(
-            &cx, &historical, query(true, true, 1), expansion(), |id| id == HIGH,
+            &cx,
+            &historical,
+            query(true, true, 1),
+            expansion(),
+            |id| id == HIGH,
         ));
         assert_eq!(
-            pin.query(&cx, &with_property, &args, symbols, policy()).unwrap(),
+            pin.query(&cx, &with_property, &args, symbols, policy())
+                .unwrap(),
             before,
         );
         db.compact(&c.commit()).await.unwrap();
         db.unregister_beacon_index(&cx, &handle).unwrap();
         drop(db);
         assert_eq!(
-            pin.query(&cx, &with_property, &args, symbols, policy()).unwrap(),
+            pin.query(&cx, &with_property, &args, symbols, policy())
+                .unwrap(),
             before,
         );
         assert_eq!(
@@ -317,9 +342,7 @@ fn missing_mismatched_historical_and_failed_generations_refuse_without_rebuildin
         let request = query(true, true, 1);
         missing(direct(&cold, &cx, &definition(), request));
         assert!(matches!(
-            cold.execute_graph_set_governed(
-                &cx, &prepare(CALL, &parameters(true)), policy(),
-            ),
+            cold.execute_graph_set_governed(&cx, &prepare(CALL, &parameters(true)), policy(),),
             Err(GqlQueryError::Source(GraphSetExecutionError::Source(
                 GqlError::Procedure(ProcedureError::Search(HybridCallError::Index(
                     BeaconError::InvalidQuery(
@@ -332,7 +355,10 @@ fn missing_mismatched_historical_and_failed_generations_refuse_without_rebuildin
             .register_beacon_index(
                 &cx,
                 &definition(),
-                ReadPolicy { max_work_units: 0, ..ReadPolicy::default() },
+                ReadPolicy {
+                    max_work_units: 0,
+                    ..ReadPolicy::default()
+                },
             )
             .unwrap();
         let healthy = db.read_session().unwrap();
@@ -348,7 +374,8 @@ fn missing_mismatched_historical_and_failed_generations_refuse_without_rebuildin
                 3 => changed.projection.encoding = VectorEncoding::CoordinatesRoundedF32,
                 4 => changed.index.text.as_mut().unwrap().k1 = 0.4,
                 5 => {
-                    changed.index.vector = Some(HnswConfig::new(1, DistanceMetric::NegativeDotProduct));
+                    changed.index.vector =
+                        Some(HnswConfig::new(1, DistanceMetric::NegativeDotProduct));
                 }
                 6 => changed.index.max_documents = 1,
                 _ => unreachable!(),
@@ -387,14 +414,25 @@ fn missing_mismatched_historical_and_failed_generations_refuse_without_rebuildin
         let mut edit = WriteBatch::new(R);
         edit.set_vertex_property(HIGH, X, Some(CanonicalScalar::Int(7)));
         db.write(&c.commit(), edit).await.unwrap();
-        assert!(db.beacon_index_status(&cx, &handle).unwrap().failure.is_some());
+        assert!(
+            db.beacon_index_status(&cx, &handle)
+                .unwrap()
+                .failure
+                .is_some()
+        );
         let failed = db.read_session().unwrap();
         missing(direct(&failed, &cx, &definition(), request));
-        assert_eq!(direct(&healthy, &cx, &definition(), request).unwrap(), expected);
+        assert_eq!(
+            direct(&healthy, &cx, &definition(), request).unwrap(),
+            expected
+        );
         db.rebuild_beacon_index(&cx, &handle, ReadPolicy::default(), ReadPolicy::default())
             .unwrap();
         let repaired = db.read_session().unwrap();
-        assert_ne!(direct(&repaired, &cx, &definition(), request).unwrap(), expected);
+        assert_ne!(
+            direct(&repaired, &cx, &definition(), request).unwrap(),
+            expected
+        );
         missing(direct(&failed, &cx, &definition(), request));
         let mut historical = definition();
         historical.as_of = Some(healthy.frontier());
@@ -408,9 +446,9 @@ fn missing_mismatched_historical_and_failed_generations_refuse_without_rebuildin
         historical.as_of = Some(healthy.frontier());
         let graph = GraphHybridQuery::graph_only(1, 1, 100, 60).unwrap();
         let graph_rows = repaired
-            .beacon_search_graph_demand_filtered(
-                &cx, &historical, graph, expansion(), |id| id == HIGH,
-            )
+            .beacon_search_graph_demand_filtered(&cx, &historical, graph, expansion(), |id| {
+                id == HIGH
+            })
             .unwrap();
         assert_eq!(graph_rows[0].graph_hops, Some(2));
         assert_eq!(c.outstanding_obligations(), 0);
@@ -424,7 +462,8 @@ fn mixed_demand_charges_one_source_and_kernel_allowance_even_for_empty_results()
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
         let mut db = fixture(&c.commit(), 0, false).await;
-        db.register_beacon_index(&cx, &definition(), ReadPolicy::default()).unwrap();
+        db.register_beacon_index(&cx, &definition(), ReadPolicy::default())
+            .unwrap();
         let view = db.read_session().unwrap();
         for k in [0, 1] {
             for accept in [false, true] {
@@ -446,7 +485,11 @@ fn mixed_demand_charges_one_source_and_kernel_allowance_even_for_empty_results()
                     |id| accept && id == HIGH,
                 )
                 .unwrap();
-                assert_eq!(nodes.get(), 3, "transit is independent of output eligibility");
+                assert_eq!(
+                    nodes.get(),
+                    3,
+                    "transit is independent of output eligibility"
+                );
                 assert_eq!(expected.len(), usize::from(accept) * k);
                 let units = 1_000_000 - work.into_inner().remaining();
                 let mut exact = definition();
@@ -455,7 +498,11 @@ fn mixed_demand_charges_one_source_and_kernel_allowance_even_for_empty_results()
                 assert!(scratch > 0);
                 assert_eq!(
                     view.beacon_search_graph_demand_filtered(
-                        &cx, &exact, request, expansion(), |id| accept && id == HIGH,
+                        &cx,
+                        &exact,
+                        request,
+                        expansion(),
+                        |id| accept && id == HIGH,
                     )
                     .unwrap(),
                     expected,
@@ -463,31 +510,44 @@ fn mixed_demand_charges_one_source_and_kernel_allowance_even_for_empty_results()
                 exact.policy.max_work_units -= 1;
                 assert!(matches!(
                     view.beacon_search_graph_demand_filtered(
-                        &cx, &exact, request, expansion(), |id| accept && id == HIGH,
+                        &cx,
+                        &exact,
+                        request,
+                        expansion(),
+                        |id| accept && id == HIGH,
                     ),
                     Err(BeaconReadError::Index(BeaconError::WorkBudgetExceeded))
                 ));
                 exact.policy.max_work_units += 1;
                 for limit in 0..usize::try_from(scratch).unwrap() {
                     exact.policy.max_source_scratch = limit;
-                    assert!(matches!(
-                        view.beacon_search_graph_demand_filtered(
-                            &cx, &exact, request, expansion(), |id| accept && id == HIGH,
+                    assert!(
+                        matches!(
+                            view.beacon_search_graph_demand_filtered(
+                                &cx,
+                                &exact,
+                                request,
+                                expansion(),
+                                |id| accept && id == HIGH,
+                            ),
+                            Err(BeaconReadError::Index(BeaconError::ResourceLimit {
+                                resource: "demand graph source admissions",
+                                ..
+                            }))
                         ),
-                        Err(BeaconReadError::Index(BeaconError::ResourceLimit {
-                            resource: "demand graph source admissions", ..
-                        }))
-                    ), "k={k}, accept={accept}, source scratch={limit}");
+                        "k={k}, accept={accept}, source scratch={limit}"
+                    );
                 }
                 exact.policy.max_source_scratch = usize::try_from(scratch).unwrap();
                 let mut shared = expansion();
                 shared.limits.max_source_scratch = exact.policy.max_source_scratch - 1;
                 assert!(matches!(
-                    view.beacon_search_graph_demand_filtered(
-                        &cx, &exact, request, shared, |id| accept && id == HIGH,
-                    ),
+                    view.beacon_search_graph_demand_filtered(&cx, &exact, request, shared, |id| {
+                        accept && id == HIGH
+                    },),
                     Err(BeaconReadError::Index(BeaconError::ResourceLimit {
-                        resource: "demand graph source admissions", ..
+                        resource: "demand graph source admissions",
+                        ..
                     }))
                 ));
             }
@@ -510,14 +570,17 @@ fn mixed_demand_charges_one_source_and_kernel_allowance_even_for_empty_results()
                 4 => spec.limits.max_seed_ids = limit,
                 _ => unreachable!(),
             }
-            assert!(matches!(
-                view.beacon_search_graph_demand_filtered(
-                    &cx, &options, empty, spec, |_| false,
+            assert!(
+                matches!(
+                    view.beacon_search_graph_demand_filtered(
+                        &cx, &options, empty, spec, |_| false,
+                    ),
+                    Err(BeaconReadError::Index(BeaconError::ResourceLimit {
+                        resource: actual, limit: observed,
+                    })) if actual == resource && observed == limit
                 ),
-                Err(BeaconReadError::Index(BeaconError::ResourceLimit {
-                    resource: actual, limit: observed,
-                })) if actual == resource && observed == limit
-            ), "case {case}");
+                "case {case}"
+            );
         }
         let mut disabled = query(true, true, 1);
         disabled.graph_weight = 0;
@@ -531,9 +594,7 @@ fn mixed_demand_charges_one_source_and_kernel_allowance_even_for_empty_results()
         let mut options = definition();
         options.policy.max_staging_rows = 0;
         let rows = view
-            .beacon_search_graph_demand_filtered(
-                &cx, &options, disabled, no_graph, |id| id == HIGH,
-            )
+            .beacon_search_graph_demand_filtered(&cx, &options, disabled, no_graph, |id| id == HIGH)
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].graph_hops, None);
@@ -550,7 +611,8 @@ fn native_mixed_demand_replays_parent_limits_and_every_live_checkpoint() {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
         let mut db = fixture(&c.commit(), 0, false).await;
-        db.register_beacon_index(&cx, &definition(), ReadPolicy::default()).unwrap();
+        db.register_beacon_index(&cx, &definition(), ReadPolicy::default())
+            .unwrap();
         let at = db.frontier().unwrap();
         for accept in [false, true] {
             let args = parameters(accept);
@@ -589,14 +651,18 @@ fn native_mixed_demand_replays_parent_limits_and_every_live_checkpoint() {
                         expected.evaluator.scratch_entries - 1,
                     ),
                 };
-                assert!(db.execute_graph_set_governed(&cx, &plan, short).is_err(),
-                    "accept={accept}, short dimension={dimension}");
+                assert!(
+                    db.execute_graph_set_governed(&cx, &plan, short).is_err(),
+                    "accept={accept}, short dimension={dimension}"
+                );
             }
             let single = prepare(CALL, &args);
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let successful = db
                 .execute_graph_set_governed(
-                    &cx.with_checkpoint_probe(Arc::clone(&probe)), &single, policy(),
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    &single,
+                    policy(),
                 )
                 .unwrap();
             let checkpoints = probe.calls();
@@ -604,14 +670,23 @@ fn native_mixed_demand_replays_parent_limits_and_every_live_checkpoint() {
             for stop in 1..=checkpoints {
                 let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
                 let result = db.execute_graph_set_governed(
-                    &cx.with_checkpoint_probe(Arc::clone(&probe)), &single, policy(),
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    &single,
+                    policy(),
                 );
-                assert!(matches!(result, Err(GqlQueryError::Interrupted(_))),
-                    "accept={accept}, checkpoint={stop}: {result:?}");
-                assert_eq!(probe.calls(), stop, "work continued after a refused live gate");
+                assert!(
+                    matches!(result, Err(GqlQueryError::Interrupted(_))),
+                    "accept={accept}, checkpoint={stop}: {result:?}"
+                );
+                assert_eq!(
+                    probe.calls(),
+                    stop,
+                    "work continued after a refused live gate"
+                );
             }
             assert_eq!(
-                db.execute_graph_set_governed(&cx, &single, policy()).unwrap(),
+                db.execute_graph_set_governed(&cx, &single, policy())
+                    .unwrap(),
                 successful,
             );
         }
@@ -631,24 +706,35 @@ fn authorized_and_staged_mixed_demand_never_borrow_a_privileged_corpus() {
         let mut global = definition();
         global.vertex_label = None;
         for db in [&mut clean, &mut full] {
-            db.register_beacon_index(&cx, &global, ReadPolicy::default()).unwrap();
+            db.register_beacon_index(&cx, &global, ReadPolicy::default())
+                .unwrap();
         }
         let statement = CALL.replace("label => 'Doc', ", "");
         let indexed = statement.replace("graph_access => 'demand'", "graph_access => 'indexed'");
         let args = parameters(true);
         // The hidden document genuinely changes unmasked corpus diagnostics.
         assert_ne!(
-            clean.query(&cx, &indexed, &args, symbols, policy()).unwrap(),
+            clean
+                .query(&cx, &indexed, &args, symbols, policy())
+                .unwrap(),
             full.query(&cx, &indexed, &args, symbols, policy()).unwrap(),
         );
         let authority = Authority::new(
-            AuthKey::from_seed(5505), NS, "mixed-demand", SchemaEpoch(0), 1,
+            AuthKey::from_seed(5505),
+            NS,
+            "mixed-demand",
+            SchemaEpoch(0),
+            1,
         )
         .unwrap();
         let mut grant = Grant::read_only(
             "main",
             1000,
-            QueryLimits { max_nodes: 100, max_work: 10_000_000, max_rows: 100 },
+            QueryLimits {
+                max_nodes: 100,
+                max_work: 10_000_000,
+                max_rows: 100,
+            },
         );
         grant.labels = Scope::only([DOC]);
         grant.relations = Scope::only([R]);
@@ -658,31 +744,37 @@ fn authorized_and_staged_mixed_demand_never_borrow_a_privileged_corpus() {
         let mut refusals = Vec::new();
         for db in [&clean, &full] {
             let mut session = db
-                .authorized_read_session(
-                    &cx, &authority, &token, "main", symbols, policy(), || 100,
-                )
+                .authorized_read_session(&cx, &authority, &token, "main", symbols, policy(), || 100)
                 .unwrap();
             let prepared = session.prepare(&cx, &statement, &args).unwrap();
             let error = session.execute(&cx, &prepared, &args).unwrap_err();
-            assert!(matches!(
-                &error,
-                crate::QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Source(
-                    GqlError::Procedure(ProcedureError::Search(HybridCallError::Index(
-                        BeaconError::InvalidQuery(
-                            "index-free retrieval cannot discard an enabled text or vector lane"
-                        )
+            assert!(
+                matches!(
+                    &error,
+                    crate::QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Source(
+                        GqlError::Procedure(ProcedureError::Search(HybridCallError::Index(
+                            BeaconError::InvalidQuery(
+                                "index-free retrieval cannot discard an enabled text or vector lane"
+                            )
+                        )))
                     )))
-                )))
-            ), "{error:?}");
+                ),
+                "{error:?}"
+            );
             refusals.push(format!("{error:?}"));
             assert!(!session.is_closed());
             outputs.push(session.query(&cx, &indexed, &args).unwrap());
         }
         assert_eq!(refusals[0], refusals[1]);
-        assert_eq!(outputs[0], outputs[1], "the ordinary authorized source remains masked");
+        assert_eq!(
+            outputs[0], outputs[1],
+            "the ordinary authorized source remains masked"
+        );
 
         // A committed generation cannot stand in for staged property edits.
-        let before = clean.query(&cx, &indexed, &args, symbols, policy()).unwrap();
+        let before = clean
+            .query(&cx, &indexed, &args, symbols, policy())
+            .unwrap();
         let mut txn = clean.begin(&c.txn()).unwrap();
         let mut edit = WriteBatch::new(R);
         edit.set_vertex_property(HIGH, X, Some(CanonicalScalar::Int(55)));
@@ -692,9 +784,7 @@ fn authorized_and_staged_mixed_demand_never_borrow_a_privileged_corpus() {
             txn.execute_graph_set_governed(&clean, &cx, &plan, policy()),
             Err(GqlQueryError::Source(GraphSetExecutionError::Source(
                 crate::WriteTxnError::Gql(GqlError::Procedure(ProcedureError::Search(
-                    HybridCallError::Combination(
-                        "demand graph access requires a graph-only read"
-                    )
+                    HybridCallError::Combination("demand graph access requires a graph-only read")
                 )))
             )))
         ));
@@ -706,12 +796,15 @@ fn authorized_and_staged_mixed_demand_never_borrow_a_privileged_corpus() {
             .unwrap();
         assert_ne!(staged.value, committed.value);
         assert_eq!(
-            clean.query(&cx, &indexed, &args, symbols, policy()).unwrap(),
+            clean
+                .query(&cx, &indexed, &args, symbols, policy())
+                .unwrap(),
             before,
         );
         txn.finish(&mut clean, &c.commit()).await.unwrap();
         assert_eq!(
-            clean.execute_graph_set_governed(&cx, &prepare(&statement, &args), policy())
+            clean
+                .execute_graph_set_governed(&cx, &prepare(&statement, &args), policy())
                 .unwrap()
                 .value,
             staged.value,

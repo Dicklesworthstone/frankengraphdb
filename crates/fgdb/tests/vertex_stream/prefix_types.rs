@@ -45,10 +45,21 @@ fn prefix_streams_and_native_aggregates_seek_mixed_type_properties_exactly() {
         let commit = c.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let values = vec![
-            text(""), text("pre"), text("prefix"), text("prelude"), text("outside"),
-            text("é"), text("e\u{301}"), text("\u{d7ff}"), text("\u{d7ff}z"),
-            text("\u{e000}"), text("\u{10ffff}"), text("\u{10ffff}z"),
-            CanonicalScalar::Null, CanonicalScalar::Int(7), CanonicalScalar::Bool(false),
+            text(""),
+            text("pre"),
+            text("prefix"),
+            text("prelude"),
+            text("outside"),
+            text("é"),
+            text("e\u{301}"),
+            text("\u{d7ff}"),
+            text("\u{d7ff}z"),
+            text("\u{e000}"),
+            text("\u{10ffff}"),
+            text("\u{10ffff}z"),
+            CanonicalScalar::Null,
+            CanonicalScalar::Int(7),
+            CanonicalScalar::Bool(false),
             CanonicalScalar::bytes(vec![1, 2]).unwrap(),
         ];
         let mut batch = WriteBatch::new(R);
@@ -56,7 +67,10 @@ fn prefix_streams_and_native_aggregates_seek_mixed_type_properties_exactly() {
             batch.create_vertex(
                 VId((values.len() - at) as u128),
                 vec![],
-                vec![(KEY, value.clone()), (PropertyKeyId(8), CanonicalScalar::Int(1))],
+                vec![
+                    (KEY, value.clone()),
+                    (PropertyKeyId(8), CanonicalScalar::Int(1)),
+                ],
             );
         }
         batch.create_vertex(VId(0), vec![], vec![(KEY, text("prefix"))]);
@@ -66,10 +80,13 @@ fn prefix_streams_and_native_aggregates_seek_mixed_type_properties_exactly() {
         for spelling in ["", "pre", "é", "\u{d7ff}", "\u{10ffff}", "absent"] {
             let ids: Vec<_> = rows
                 .iter()
-                .filter(|row| row.props.iter().any(|(key, value)| {
-                    *key == KEY && matches!(value, CanonicalScalar::Text(value)
+                .filter(|row| {
+                    row.props.iter().any(|(key, value)| {
+                        *key == KEY
+                            && matches!(value, CanonicalScalar::Text(value)
                         if value.as_str().starts_with(spelling))
-                }))
+                    })
+                })
                 .map(|row| row.vid)
                 .collect();
             let expected = identities(&ids);
@@ -77,7 +94,9 @@ fn prefix_streams_and_native_aggregates_seek_mixed_type_properties_exactly() {
             let scan = VertexScanPlan::compile(query.plan()).unwrap();
             assert_eq!(scan.leading_root_prefix(), Some((KEY, spelling)));
             assert_eq!(
-                db.execute_graph_pattern_governed(&cx, &query, wide()).unwrap().value,
+                db.execute_graph_pattern_governed(&cx, &query, wide())
+                    .unwrap()
+                    .value,
                 expected,
             );
             let mut cursor = db
@@ -89,15 +108,17 @@ fn prefix_streams_and_native_aggregates_seek_mixed_type_properties_exactly() {
                 .unwrap();
             assert_eq!(cursor.evaluator_stats().work_units, 0);
             assert_eq!(cursor.evaluator_stats().scratch_entries, 0);
-            assert_eq!(cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), expected);
+            assert_eq!(
+                cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected
+            );
             assert_eq!(cursor.row_stats().snapshot_records, ids.len() as u64);
             assert_eq!(cursor.state(), VertexScanState::Exhausted);
         }
         let symbols = || RelationBind::new().with_property("p", KEY);
         for (spelling, expected) in [("pre", 4), ("absent", 0)] {
-            let statement = format!(
-                "MATCH (n) WHERE n.p STARTS WITH '{spelling}' RETURN COUNT(*) AS total"
-            );
+            let statement =
+                format!("MATCH (n) WHERE n.p STARTS WITH '{spelling}' RETURN COUNT(*) AS total");
             let args = GqlParameters::new();
             let fgdb::QueryResult::Rows { rows, .. } =
                 db.query(&cx, &statement, &args, symbols(), wide()).unwrap()
@@ -133,15 +154,27 @@ fn prefix_eligibility_never_hides_arithmetic_in_either_conjunct_order() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut batch = WriteBatch::new(R);
         batch.create_vertex(
-            VId(0), vec![],
-            vec![(KEY, text("outside")), (PropertyKeyId(8), CanonicalScalar::Int(0))],
+            VId(0),
+            vec![],
+            vec![
+                (KEY, text("outside")),
+                (PropertyKeyId(8), CanonicalScalar::Int(0)),
+            ],
         );
         batch.create_vertex(
-            VId(1), vec![],
-            vec![(KEY, text("prefix")), (PropertyKeyId(8), CanonicalScalar::Int(1))],
+            VId(1),
+            vec![],
+            vec![
+                (KEY, text("prefix")),
+                (PropertyKeyId(8), CanonicalScalar::Int(1)),
+            ],
         );
         db.write(&commit, batch).await.unwrap();
-        for value in [text("outside"), CanonicalScalar::Null, CanonicalScalar::Int(7)] {
+        for value in [
+            text("outside"),
+            CanonicalScalar::Null,
+            CanonicalScalar::Int(7),
+        ] {
             let mut changes = WriteBatch::new(R);
             changes.set_vertex_property(VId(0), KEY, Some(value));
             db.write(&commit, changes).await.unwrap();
@@ -150,45 +183,67 @@ fn prefix_eligibility_never_hides_arithmetic_in_either_conjunct_order() {
                 "MATCH (n) WHERE n.p STARTS WITH 'pre' AND 10 / n.q > 0 RETURN n",
             ] {
                 let query = prepared(statement);
-                assert!(VertexScanPlan::compile(query.plan()).unwrap().leading_root_prefix().is_none());
+                assert!(
+                    VertexScanPlan::compile(query.plan())
+                        .unwrap()
+                        .leading_root_prefix()
+                        .is_none()
+                );
                 assert!(matches!(
                     db.execute_graph_pattern_governed(&cx, &query, wide()),
                     Err(GqlQueryError::Data(error))
                         if error.kind == GraphIntegerErrorKind::DivisionByZero
                 ));
-                let mut cursor = db.stream_graph_values_governed(&cx, &query, wide()).unwrap();
-                assert!(matches!(
-                    cursor.next(),
-                    Some(Err(GqlQueryError::Data(error)))
-                        if error.kind == GraphIntegerErrorKind::DivisionByZero
-                ), "{statement}");
+                let mut cursor = db
+                    .stream_graph_values_governed(&cx, &query, wide())
+                    .unwrap();
+                assert!(
+                    matches!(
+                        cursor.next(),
+                        Some(Err(GqlQueryError::Data(error)))
+                            if error.kind == GraphIntegerErrorKind::DivisionByZero
+                    ),
+                    "{statement}"
+                );
                 assert_eq!(cursor.row_stats().snapshot_records, 1);
                 assert_eq!(cursor.state(), VertexScanState::Failed);
                 assert!(cursor.next().is_none());
             }
         }
-        let disjunction = prepared(
-            "MATCH (n) WHERE n.p STARTS WITH 'pre' OR n.q = 0 RETURN n",
+        let disjunction = prepared("MATCH (n) WHERE n.p STARTS WITH 'pre' OR n.q = 0 RETURN n");
+        assert!(
+            VertexScanPlan::compile(disjunction.plan())
+                .unwrap()
+                .leading_root_prefix()
+                .is_none()
         );
-        assert!(VertexScanPlan::compile(disjunction.plan()).unwrap().leading_root_prefix().is_none());
         assert_eq!(
             db.stream_graph_values_governed(&cx, &disjunction, wide())
-                .unwrap().collect::<Result<Vec<_>, _>>().unwrap(),
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
             identities(&[VId(0), VId(1)]),
         );
-        let negated = prepared(
-            "MATCH (n) WHERE NOT (n.p STARTS WITH 'absent') RETURN n",
+        let negated = prepared("MATCH (n) WHERE NOT (n.p STARTS WITH 'absent') RETURN n");
+        assert!(
+            VertexScanPlan::compile(negated.plan())
+                .unwrap()
+                .leading_root_prefix()
+                .is_none()
         );
-        assert!(VertexScanPlan::compile(negated.plan()).unwrap().leading_root_prefix().is_none());
         assert_eq!(
             db.stream_graph_values_governed(&cx, &negated, wide())
-                .unwrap().collect::<Result<Vec<_>, _>>().unwrap(),
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
             identities(&[VId(1)]),
         );
         // Mixed types are UNKNOWN, not a user-visible NonText error.
         assert_eq!(
             db.stream_graph_values_governed(&cx, &prefix("pre", None), wide())
-                .unwrap().collect::<Result<Vec<_>, _>>().unwrap(),
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
             identities(&[VId(1)]),
         );
     });
@@ -206,16 +261,22 @@ fn retired_numeric_values_keep_native_prefix_candidate_admission_bounded() {
         batch.create_vertex(VId(0), vec![], vec![(KEY, CanonicalScalar::Int(0))]);
         batch.create_vertex(VId(1), vec![], vec![(KEY, text("pre-old"))]);
         for id in 100..228_u128 {
-            batch.create_vertex(VId(id), vec![], vec![(KEY, CanonicalScalar::Int(id as i64))]);
+            batch.create_vertex(
+                VId(id),
+                vec![],
+                vec![(KEY, CanonicalScalar::Int(id as i64))],
+            );
         }
         batch.create_vertex(
-            VId(u128::MAX), vec![], vec![(KEY, CanonicalScalar::bytes(vec![1]).unwrap())],
+            VId(u128::MAX),
+            vec![],
+            vec![(KEY, CanonicalScalar::bytes(vec![1]).unwrap())],
         );
         let first = db.write(&commit, batch).await.unwrap();
         let query = prefix("pre", None);
-        let pinned = db.stream_graph_values_governed(
-            &cx, &query, GqlQueryPolicy::new(1, 1, 100_000, 1000),
-        ).unwrap();
+        let pinned = db
+            .stream_graph_values_governed(&cx, &query, GqlQueryPolicy::new(1, 1, 100_000, 1000))
+            .unwrap();
         let mut changes = WriteBatch::new(R);
         changes.set_vertex_property(VId(0), KEY, Some(text("pre-new")));
         changes.set_vertex_property(VId(1), KEY, Some(text("outside")));
@@ -231,22 +292,33 @@ fn retired_numeric_values_keep_native_prefix_candidate_admission_bounded() {
                 (second, vec![VId(0)]),
             ] {
                 let expected = identities(&ids);
-                let mut cursor = db.stream_graph_values_governed_at(
-                    &cx, &query, at, GqlQueryPolicy::new(2, 2, 100_000, 1000),
-                ).unwrap();
+                let mut cursor = db
+                    .stream_graph_values_governed_at(
+                        &cx,
+                        &query,
+                        at,
+                        GqlQueryPolicy::new(2, 2, 100_000, 1000),
+                    )
+                    .unwrap();
                 assert_eq!(
                     cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
-                    expected, "compact={compact}, at={at:?}",
+                    expected,
+                    "compact={compact}, at={at:?}",
                 );
                 assert_eq!(cursor.row_stats().snapshot_records, 2);
                 assert_eq!(
-                    db.execute_graph_pattern_governed_at(&cx, &query, at, wide()).unwrap().value,
+                    db.execute_graph_pattern_governed_at(&cx, &query, at, wide())
+                        .unwrap()
+                        .value,
                     expected,
                 );
             }
         }
         drop(db);
-        assert_eq!(pinned.collect::<Result<Vec<_>, _>>().unwrap(), identities(&[VId(1)]));
+        assert_eq!(
+            pinned.collect::<Result<Vec<_>, _>>().unwrap(),
+            identities(&[VId(1)])
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

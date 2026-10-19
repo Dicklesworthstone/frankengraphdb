@@ -10,12 +10,17 @@ impl CollationResolver for ReverseSpelling {
         true
     }
     fn canonical_sort_key_len(
-        &self, _: &NonBinaryTextBinding, text: &str,
+        &self,
+        _: &NonBinaryTextBinding,
+        text: &str,
     ) -> Result<usize, CollationResolverError> {
         Ok(text.len())
     }
     fn write_canonical_sort_key(
-        &self, _: &NonBinaryTextBinding, text: &str, output: &mut [u8],
+        &self,
+        _: &NonBinaryTextBinding,
+        text: &str,
+        output: &mut [u8],
     ) -> Result<usize, CollationResolverError> {
         for (target, byte) in output.iter_mut().zip(text.bytes().rev()) {
             *target = byte;
@@ -23,7 +28,10 @@ impl CollationResolver for ReverseSpelling {
         Ok(text.len())
     }
     fn canonical_sort_key_matches(
-        &self, _: &NonBinaryTextBinding, text: &str, candidate: &[u8],
+        &self,
+        _: &NonBinaryTextBinding,
+        text: &str,
+        candidate: &[u8],
     ) -> Result<bool, CollationResolverError> {
         Ok(candidate.iter().copied().eq(text.bytes().rev()))
     }
@@ -38,16 +46,17 @@ impl TzdbResolver for ReverseSpelling {
 }
 fn collated(value: &str) -> CanonicalScalar {
     let binding = NonBinaryTextBinding::new(
-        ObjectId([1; 32]), ObjectId([2; 32]), ObjectId([3; 32]), ObjectId([4; 32]),
+        ObjectId([1; 32]),
+        ObjectId([2; 32]),
+        ObjectId([3; 32]),
+        ObjectId([4; 32]),
     );
     CanonicalScalar::Text(CanonicalText::new_non_binary(value, binding, &ReverseSpelling).unwrap())
 }
 fn resolved_patch(mut rows: Vec<VertexRow>) -> VertexPatchRows {
     rows.sort_by_key(|row| (row.vid, row.created_at));
-    fgdb_strata::vertex::decode_patch_with_resolver(
-        &encode_patch(&rows).unwrap(), &ReverseSpelling,
-    )
-    .unwrap()
+    fgdb_strata::vertex::decode_patch_with_resolver(&encode_patch(&rows).unwrap(), &ReverseSpelling)
+        .unwrap()
 }
 
 #[test]
@@ -59,7 +68,11 @@ fn numeric_history_and_other_properties_do_not_disable_selective_prefixes() {
     let mut unrelated = row(VId(10_000), 1, CanonicalScalar::Null);
     unrelated.props = vec![(PropertyKeyId(8), collated("Ab"))];
     rows.push(unrelated);
-    rows.push(row(VId(u128::MAX), 1, CanonicalScalar::bytes(vec![1]).unwrap()));
+    rows.push(row(
+        VId(u128::MAX),
+        1,
+        CanonicalScalar::bytes(vec![1]).unwrap(),
+    ));
     let patches = vec![
         resolved_patch(rows),
         resolved_patch(vec![
@@ -71,10 +84,13 @@ fn numeric_history_and_other_properties_do_not_disable_selective_prefixes() {
     let expected: Vec<_> = patches
         .iter()
         .flat_map(|patch| patch.iter())
-        .filter(|row| row.props.iter().any(|(key, value)| {
-            *key == KEY && matches!(value, CanonicalScalar::Text(value)
+        .filter(|row| {
+            row.props.iter().any(|(key, value)| {
+                *key == KEY
+                    && matches!(value, CanonicalScalar::Text(value)
                 if value.as_str().starts_with("Ab"))
-        }))
+            })
+        })
         .map(|row| row.vid)
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -95,7 +111,10 @@ fn numeric_history_and_other_properties_do_not_disable_selective_prefixes() {
     assert_eq!(output, vec![VId(0), VId(3000)]);
     assert!(matches!(source.frontier, Frontier::Buckets(_)));
     assert_eq!(scratch, 2);
-    assert!(work < 256, "prefix inspected unrelated historical values: {work}");
+    assert!(
+        work < 256,
+        "prefix inspected unrelated historical values: {work}"
+    );
 }
 
 #[test]
@@ -139,7 +158,10 @@ fn each_mixed_or_collated_control_refusal_keeps_a_complete_retry() {
         })
         .unwrap();
         assert_eq!(output, expected);
-        assert_eq!(matches!(complete.frontier, Frontier::Histories), alternate_binding);
+        assert_eq!(
+            matches!(complete.frontier, Frontier::Histories),
+            alternate_binding
+        );
         assert!(!complete.accepts(&CanonicalScalar::Int(0)));
         assert!(!complete.accepts(&CanonicalScalar::Null));
         assert!(!complete.accepts(&collated("outside")));
@@ -158,9 +180,14 @@ fn each_mixed_or_collated_control_refusal_keeps_a_complete_retry() {
             );
             assert_eq!(seen, stop);
             assert_eq!(output, expected[..output.len()]);
-            drain(&mut source, &index, &mut after, &mut output, &mut |_| Ok::<_, usize>(()))
-                .unwrap();
-            assert_eq!(output, expected, "alternate={alternate_binding}, stop={stop}");
+            drain(&mut source, &index, &mut after, &mut output, &mut |_| {
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+            assert_eq!(
+                output, expected,
+                "alternate={alternate_binding}, stop={stop}"
+            );
         }
     }
 }

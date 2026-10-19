@@ -12,12 +12,17 @@ impl CollationResolver for ReverseSpelling {
         true
     }
     fn canonical_sort_key_len(
-        &self, _: &NonBinaryTextBinding, text: &str,
+        &self,
+        _: &NonBinaryTextBinding,
+        text: &str,
     ) -> Result<usize, CollationResolverError> {
         Ok(text.len())
     }
     fn write_canonical_sort_key(
-        &self, _: &NonBinaryTextBinding, text: &str, output: &mut [u8],
+        &self,
+        _: &NonBinaryTextBinding,
+        text: &str,
+        output: &mut [u8],
     ) -> Result<usize, CollationResolverError> {
         for (target, byte) in output.iter_mut().zip(text.bytes().rev()) {
             *target = byte;
@@ -25,7 +30,10 @@ impl CollationResolver for ReverseSpelling {
         Ok(text.len())
     }
     fn canonical_sort_key_matches(
-        &self, _: &NonBinaryTextBinding, text: &str, candidate: &[u8],
+        &self,
+        _: &NonBinaryTextBinding,
+        text: &str,
+        candidate: &[u8],
     ) -> Result<bool, CollationResolverError> {
         Ok(candidate.iter().copied().eq(text.bytes().rev()))
     }
@@ -43,7 +51,10 @@ fn text(value: &str) -> CanonicalScalar {
 }
 fn collated(value: &str) -> CanonicalScalar {
     let binding = NonBinaryTextBinding::new(
-        ObjectId([1; 32]), ObjectId([2; 32]), ObjectId([3; 32]), ObjectId([4; 32]),
+        ObjectId([1; 32]),
+        ObjectId([2; 32]),
+        ObjectId([3; 32]),
+        ObjectId([4; 32]),
     );
     CanonicalScalar::Text(CanonicalText::new_non_binary(value, binding, &ReverseSpelling).unwrap())
 }
@@ -59,14 +70,22 @@ async fn prefix_database(cx: &CommitCx, hidden: u8) -> Database<MemVfs> {
         (VId(3), text("outside")),
         (VId(5), text("pre-stale")),
         (VId(7), CanonicalScalar::Null),
-        (VId(u128::MAX), if hidden == 3 { collated("pre-b") } else { text("pre-b") }),
+        (
+            VId(u128::MAX),
+            if hidden == 3 {
+                collated("pre-b")
+            } else {
+                text("pre-b")
+            },
+        ),
     ] {
         batch.create_vertex(vid, vec![LabelId(1)], vec![(PropertyKeyId(1), value)]);
     }
     batch.create_vertex(VId(9), vec![LabelId(1)], vec![]);
     for id in 100..228_u128 {
         batch.create_vertex(
-            VId(id), vec![LabelId(1)],
+            VId(id),
+            vec![LabelId(1)],
             vec![(PropertyKeyId(1), text(&format!("outside-{id}")))],
         );
     }
@@ -74,7 +93,8 @@ async fn prefix_database(cx: &CommitCx, hidden: u8) -> Database<MemVfs> {
         // Hidden values alone switch from the small heap to the broad route.
         for id in 0..80_u128 {
             batch.create_vertex(
-                VId(1000 + id), vec![LabelId(99)],
+                VId(1000 + id),
+                vec![LabelId(99)],
                 vec![(PropertyKeyId(1), text(&format!("pre-hidden-{id}")))],
             );
         }
@@ -82,7 +102,9 @@ async fn prefix_database(cx: &CommitCx, hidden: u8) -> Database<MemVfs> {
     if hidden > 1 {
         // This hidden alternate binding switches again to an unfiltered scan.
         batch.create_vertex(
-            VId(2000), vec![LabelId(99)], vec![(PropertyKeyId(1), collated("pre-hidden"))],
+            VId(2000),
+            vec![LabelId(99)],
+            vec![(PropertyKeyId(1), collated("pre-hidden"))],
         );
     }
     db.write(cx, batch).await.unwrap();
@@ -94,18 +116,19 @@ async fn prefix_database(cx: &CommitCx, hidden: u8) -> Database<MemVfs> {
 fn expected(hidden: u8) -> Vec<GraphValueRow> {
     [(VId(1), "pre-a"), (VId(u128::MAX), "pre-b")]
         .into_iter()
-        .map(|(vid, value)| GraphValueRow::from_owned_values(vec![
-            GraphValue::Vertex(vid),
-            GraphValue::Scalar(if hidden == 3 && vid == VId(u128::MAX) {
-                collated(value)
-            } else {
-                text(value)
-            }),
-        ]))
+        .map(|(vid, value)| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(vid),
+                GraphValue::Scalar(if hidden == 3 && vid == VId(u128::MAX) {
+                    collated(value)
+                } else {
+                    text(value)
+                }),
+            ])
+        })
         .collect()
 }
-const PREFIX: &str =
-    "MATCH (n:L) WHERE n.p STARTS WITH 'pre' RETURN n AS id, n.p AS p";
+const PREFIX: &str = "MATCH (n:L) WHERE n.p STARTS WITH 'pre' RETURN n AS id, n.p AS p";
 
 #[test]
 fn authorized_prefixes_preserve_scope_limits_and_pins_in_every_driver() {
@@ -123,11 +146,18 @@ fn authorized_prefixes_preserve_scope_limits_and_pins_in_every_driver() {
             let mut db = prefix_database(&commit, hidden).await;
             let eager = db
                 .authorized_read_session(&cx, &issuer, &broad, "main", symbols, policy(), || 100)
-                .unwrap().query(&cx, PREFIX, &args).unwrap();
+                .unwrap()
+                .query(&cx, PREFIX, &args)
+                .unwrap();
             let mut session = db
                 .authorized_read_session(
-                    &cx, &issuer, &token, "main", symbols,
-                    GqlQueryPolicy::new(2, 2, 1_000_000, 10_000), || 100,
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols,
+                    GqlQueryPolicy::new(2, 2, 1_000_000, 10_000),
+                    || 100,
                 )
                 .unwrap();
             let prepared = session.prepare(&cx, PREFIX, &args).unwrap();
@@ -140,21 +170,30 @@ fn authorized_prefixes_preserve_scope_limits_and_pins_in_every_driver() {
             drop(local);
             let aggregate = session
                 .prepare(
-                    &cx, "MATCH (n:L) WHERE n.p STARTS WITH 'pre' RETURN COUNT(*) AS total", &args,
+                    &cx,
+                    "MATCH (n:L) WHERE n.p STARTS WITH 'pre' RETURN COUNT(*) AS total",
+                    &args,
                 )
                 .unwrap();
             for driver in 0..3 {
                 let rows = match driver {
-                    0 => session.stream_aggregate(&cx, &aggregate, &args).unwrap()
-                        .collect::<Result<Vec<_>, _>>().unwrap(),
+                    0 => session
+                        .stream_aggregate(&cx, &aggregate, &args)
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap(),
                     1 => {
-                        let cursor = session.stream_aggregate_send(&cx, &aggregate, &args).unwrap();
+                        let cursor = session
+                            .stream_aggregate_send(&cx, &aggregate, &args)
+                            .unwrap();
                         fn is_send<T: Send>(_: &T) {}
                         is_send(&cursor);
                         cursor.collect::<Result<Vec<_>, _>>().unwrap()
                     }
                     _ => {
-                        let mut cursor = session.stream_aggregate_async(&cx, &aggregate, &args).unwrap();
+                        let mut cursor = session
+                            .stream_aggregate_async(&cx, &aggregate, &args)
+                            .unwrap();
                         fn is_send<T: Send>(_: &T) {}
                         is_send(&cursor);
                         let mut rows = Vec::new();
@@ -179,7 +218,10 @@ fn authorized_prefixes_preserve_scope_limits_and_pins_in_every_driver() {
             db.write(&commit, update).await.unwrap();
             db.compact(&commit).await.unwrap();
             drop(db);
-            assert_eq!(sent.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), expected(hidden));
+            assert_eq!(
+                sent.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected(hidden)
+            );
             assert_eq!(sent.state(), VertexScanState::Exhausted);
             assert!(sent.next().is_none());
         }
@@ -205,13 +247,20 @@ fn hidden_collation_cannot_change_native_or_signed_prefix_refusals() {
             let cursor = session.stream(&cx, &prepared, &args);
             cursor.and_then(|cursor| cursor.collect::<Result<Vec<_>, _>>())
         };
-        assert_eq!(run(&visible, &token, policy()).unwrap(), run(&hidden, &token, policy()).unwrap());
+        assert_eq!(
+            run(&visible, &token, policy()).unwrap(),
+            run(&hidden, &token, policy()).unwrap()
+        );
         let threshold = |admits: &dyn Fn(u64) -> bool| {
             let (mut low, mut high) = (0, 1_000_000);
             assert!(admits(high));
             while low < high {
                 let middle = low + (high - low) / 2;
-                if admits(middle) { high = middle; } else { low = middle + 1; }
+                if admits(middle) {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
             }
             low
         };
@@ -234,7 +283,9 @@ fn hidden_collation_cannot_change_native_or_signed_prefix_refusals() {
         }
         let signed = |db: &Database<MemVfs>| {
             threshold(&|limit| match run(
-                db, &token.attenuate(Restriction::MaxWork(limit)).unwrap(), policy(),
+                db,
+                &token.attenuate(Restriction::MaxWork(limit)).unwrap(),
+                policy(),
             ) {
                 Ok(_) => true,
                 Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Work))) => false,
@@ -258,11 +309,14 @@ fn hidden_collation_cannot_change_native_or_signed_prefix_refusals() {
             ] {
                 let prepared = session.prepare(&cx, statement, &args).unwrap();
                 let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
-                assert!(matches!(
-                    cursor.next(),
-                    Some(Err(QueryError::Stream(GqlQueryError::Data(error))))
-                        if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
-                ), "{statement}");
+                assert!(
+                    matches!(
+                        cursor.next(),
+                        Some(Err(QueryError::Stream(GqlQueryError::Data(error))))
+                            if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero
+                    ),
+                    "{statement}"
+                );
                 assert_eq!(cursor.state(), VertexScanState::Failed);
                 assert!(cursor.next().is_none());
             }
@@ -285,19 +339,30 @@ fn denied_prefix_properties_keep_local_and_send_refusals_identical() {
             let mut batch = WriteBatch::new(RelationId(1));
             for id in 1..=2 {
                 batch.create_vertex(
-                    VId(id), vec![LabelId(1)], vec![(PropertyKeyId(2), value.clone())],
+                    VId(id),
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(2), value.clone())],
                 );
             }
             db.write(&commit, batch).await.unwrap();
             let mut session = db
                 .authorized_read_session(
-                    &cx, &issuer, &token, "main", symbols,
-                    GqlQueryPolicy::new(1, 2, 1_000_000, 10_000), || 100,
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    symbols,
+                    GqlQueryPolicy::new(1, 2, 1_000_000, 10_000),
+                    || 100,
                 )
                 .unwrap();
-            let prepared = session.prepare(
-                &cx, "MATCH (n:L) WHERE n.hidden STARTS WITH 'pre' RETURN n AS id", &args,
-            ).unwrap();
+            let prepared = session
+                .prepare(
+                    &cx,
+                    "MATCH (n:L) WHERE n.hidden STARTS WITH 'pre' RETURN n AS id",
+                    &args,
+                )
+                .unwrap();
             let mut local = session.stream(&cx, &prepared, &args).unwrap();
             assert!(matches!(
                 local.next(),

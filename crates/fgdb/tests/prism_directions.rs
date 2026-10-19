@@ -782,7 +782,9 @@ fn sealed_degree_directory_preserves_reductions_history_pins_and_exact_limits() 
     runtime.block_on(async {
         let commit = contexts.commit();
         let query = contexts.query();
-        let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
         let original = db.write(&commit, fixture()).await.unwrap();
         let mut update = WriteBatch::new(RelationId(1));
         update.create_vertex(VId(40), vec![LabelId(1)], vec![]);
@@ -815,7 +817,11 @@ fn sealed_degree_directory_preserves_reductions_history_pins_and_exact_limits() 
                 let workspace = n * size_of::<f64>();
                 let work = n + 2;
                 let result_bytes = procedure.outputs().len() * size_of::<String>()
-                    + procedure.outputs().iter().map(|column| column.name.len()).sum::<usize>()
+                    + procedure
+                        .outputs()
+                        .iter()
+                        .map(|column| column.name.len())
+                        .sum::<usize>()
                     + n * (size_of::<Vec<FnxValue>>()
                         + procedure.outputs().len() * size_of::<FnxValue>());
                 let exact_memory = FnxMemoryLimits {
@@ -846,8 +852,19 @@ fn sealed_degree_directory_preserves_reductions_history_pins_and_exact_limits() 
                 assert_eq!(actual.certificate.estimated_work, work);
                 assert_eq!(actual.certificate.witness.nodes_touched, n);
                 assert_eq!(actual.certificate.witness.edges_scanned, 0);
-                assert!(!actual.certificate.witness.complexity_claim.contains("incoming"));
-                for resource in ["result rows", "estimated work", "kernel workspace bytes", "result bytes"] {
+                assert!(
+                    !actual
+                        .certificate
+                        .witness
+                        .complexity_claim
+                        .contains("incoming")
+                );
+                for resource in [
+                    "result rows",
+                    "estimated work",
+                    "kernel workspace bytes",
+                    "result bytes",
+                ] {
                     let mut limits = exact_limits;
                     let mut memory = exact_memory;
                     match resource {
@@ -857,12 +874,15 @@ fn sealed_degree_directory_preserves_reductions_history_pins_and_exact_limits() 
                         "result bytes" => memory.max_result_bytes -= 1,
                         _ => unreachable!(),
                     }
-                    assert!(matches!(
-                        procedure.execute_sealed(&query, &graph, limits, memory),
-                        Err(FnxSealedExecutionError::Execution(
-                            FnxExecutionError::LimitExceeded { resource: observed, .. }
-                        )) if observed == resource
-                    ), "{resource}");
+                    assert!(
+                        matches!(
+                            procedure.execute_sealed(&query, &graph, limits, memory),
+                            Err(FnxSealedExecutionError::Execution(
+                                FnxExecutionError::LimitExceeded { resource: observed, .. }
+                            )) if observed == resource
+                        ),
+                        "{resource}"
+                    );
                 }
                 // The native stored-source entrypoint admits this procedure too.
                 let native = db
@@ -889,7 +909,9 @@ fn sealed_degree_directory_preserves_reductions_history_pins_and_exact_limits() 
         drop(db);
         for (graph, limits, memory, expected) in retained {
             assert_eq!(
-                procedure.execute_sealed(&query, &graph, limits, memory).unwrap(),
+                procedure
+                    .execute_sealed(&query, &graph, limits, memory)
+                    .unwrap(),
                 expected
             );
         }
@@ -905,7 +927,9 @@ fn sealed_degree_empty_singleton_and_retained_loops_match_the_catalog_contract()
         let commit = contexts.commit();
         let query = contexts.query();
         let procedure = call(DEGREE);
-        let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
         let mut opt = options(Directedness::Undirected);
         opt.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
         let graph = project(&db, &query, opt).await;
@@ -937,7 +961,9 @@ fn sealed_degree_empty_singleton_and_retained_loops_match_the_catalog_contract()
         assert_eq!(graph.adjacency_entry_count(), 1);
         assert!(matches!(
             procedure.execute_sealed(&query, &graph, opt.execution_limits, memory()),
-            Err(FnxSealedExecutionError::Execution(FnxExecutionError::SelfLoopRefused))
+            Err(FnxSealedExecutionError::Execution(
+                FnxExecutionError::SelfLoopRefused
+            ))
         ));
         opt.projection.self_loops = SelfLoopPolicy::Drop;
         let dropped = project(&db, &query, opt).await;

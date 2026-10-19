@@ -974,7 +974,10 @@ pub(crate) fn privileged(
     };
     let result = (|| {
         if let Some(registry) = registry
-            && matches!(search.graph_access, GraphAccess::Indexed | GraphAccess::Demand)
+            && matches!(
+                search.graph_access,
+                GraphAccess::Indexed | GraphAccess::Demand
+            )
         {
             let filter = EndpointFilter::prepare(
                 eligible,
