@@ -372,6 +372,126 @@ impl FnxMeter<NativeStop> for &mut NativeControl {
     }
 }
 
+fn counted_foundation_call(
+    name: &str,
+    graph: &SnapshotGraphView,
+) -> Result<FnxResult, FnxExecutionError<Infallible>> {
+    use fnx_algorithms::GraphView;
+    struct Count<'a> {
+        units: &'a mut usize,
+        polls: &'a mut usize,
+    }
+    impl FnxMeter<Infallible> for Count<'_> {
+        fn unit(&mut self) -> Result<(), Infallible> {
+            *self.units += 1;
+            Ok(())
+        }
+        fn poll(&mut self) -> Result<(), Infallible> {
+            *self.polls += 1;
+            Ok(())
+        }
+    }
+    let (mut units, mut polls) = (0, 0);
+    let result = call(name).execute(
+        graph,
+        limits(1 << 30),
+        Count {
+            units: &mut units,
+            polls: &mut polls,
+        },
+    );
+    if result.is_ok() {
+        // Initial/admission/delivery units plus the former constructor's
+        // 2*n and the unchanged pre/post foundation-kernel units.
+        assert_eq!(units, 4 * graph.node_count() + 5, "{name}");
+        let expected: usize = (0..graph.node_count())
+            .map(|source| {
+                graph
+                    .neighbors_indices(source)
+                    .unwrap()
+                    .len()
+                    .div_ceil(FNX_METER_RUN)
+            })
+            .sum();
+        assert_eq!(polls, expected, "{name}");
+    }
+    result
+}
+
+fn assert_legacy_scores(
+    name: &str,
+    graph: &SnapshotGraphView,
+    scores: Vec<fnx_algorithms::CentralityScore>,
+    witness: fnx_algorithms::ComplexityWitness,
+) {
+    use fnx_algorithms::GraphView;
+    let actual = counted_foundation_call(name, graph).unwrap();
+    let mut expected: Vec<_> = scores
+        .into_iter()
+        .map(|score| {
+            (
+                u128::from_str_radix(&score.node, 16).unwrap(),
+                score.score.to_bits(),
+            )
+        })
+        .collect();
+    expected.sort_unstable_by_key(|&(vertex, _)| vertex);
+    let rows: Vec<_> = actual
+        .rows
+        .iter()
+        .map(|row| match row.as_slice() {
+            [FnxValue::Vertex(vertex), FnxValue::Score(score)] => (vertex.0, score.to_bits()),
+            _ => panic!("unexpected {name} row: {row:?}"),
+        })
+        .collect();
+    assert_eq!(rows.len(), graph.node_count());
+    assert_eq!(rows, expected, "{name}");
+    assert_eq!(actual.certificate.witness, witness, "{name}");
+    assert_eq!(actual.certificate.projection_digest, graph.digest());
+    assert_eq!(actual.certificate.snapshot, graph.binding());
+    assert_eq!(actual.certificate.vertices, graph.node_count());
+    assert_eq!(actual.certificate.edges, graph.edge_count());
+    assert_eq!(actual.certificate.adapter, AdapterPath::DecodedCache);
+}
+
+#[test]
+fn delegated_foundation_calls_match_legacy_constructor_bits_and_witnesses() {
+    for n in [0usize, 1, 2, 7, 65, 130] {
+        let mut vertices: Vec<u128> = (0..n)
+            .map(|i| (1u128 << 100) + (((n - i) as u128) << 64) + i as u128)
+            .collect();
+        if let Some(first) = vertices.first_mut() {
+            *first = u128::MAX;
+        }
+        let mut seed = 0x6a09_e667_f3bc_c909u64;
+        let mut edges = Vec::new();
+        for source in 0..n {
+            for target in source + 1..n.saturating_sub(1) {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                if source == 0 || seed >> 61 == 0 {
+                    let edge = if seed & 1 == 0 {
+                        (vertices[source], vertices[target])
+                    } else {
+                        (vertices[target], vertices[source])
+                    };
+                    edges.push(edge);
+                }
+            }
+        }
+        let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+        let reference = copied_graph(&graph);
+        macro_rules! scores {
+            ($name:literal, $function:ident) => {{
+                let expected = fnx_algorithms::$function(&reference);
+                assert_legacy_scores($name, &graph, expected.scores, expected.witness);
+            }};
+        }
+        scores!("closeness_centrality", closeness_centrality);
+        scores!("harmonic_centrality", harmonic_centrality);
+        scores!("betweenness_centrality", betweenness_centrality);
+    }
+}
+
 #[test]
 fn native_degree_and_core_match_pinned_fnx_on_every_five_vertex_topology() {
     // Enumeration includes isolates, disconnected cores, dense ties and hubs.
