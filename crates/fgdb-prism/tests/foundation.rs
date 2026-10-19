@@ -1,5 +1,5 @@
 //! Foundation procedures and their declared native fast paths. Degree, core
-//! and eigenvector run over the admitted CSR and are checked against pinned fnx
+//! eigenvector and betweenness run over the admitted CSR and are checked against pinned fnx
 //! and independent expectations. Other procedures retain the foundation copy.
 //! All paths keep canonical VId mapping, admission, refusals and provenance.
 
@@ -181,12 +181,12 @@ fn centralities_and_cores_match_independently_computed_values() {
 }
 
 #[test]
-fn a_foundation_call_is_certified_with_the_foundation_kernel_and_witness() {
+fn native_betweenness_is_certified_with_its_kernel_and_the_foundation_witness() {
     let result = run("betweenness_centrality", &path());
     let certificate = &result.certificate;
     assert_eq!(
         certificate.execution_kernel,
-        "fnx-algorithms/betweenness_centrality"
+        "fgdb-prism/brandes-csr-source-order-v1"
     );
     assert_eq!(certificate.registry_version, FNX_SIGNATURE_REGISTRY_VERSION);
     assert_eq!(certificate.vertices, 4);
@@ -413,7 +413,11 @@ fn counted_foundation_call(
                     .div_ceil(FNX_METER_RUN)
             })
             .sum();
-        assert_eq!(polls, expected, "{name}");
+        if name == "betweenness_centrality" {
+            assert!(polls > 0, "native Brandes must check live control");
+        } else {
+            assert_eq!(polls, expected, "{name}");
+        }
     }
     result
 }
@@ -669,7 +673,12 @@ fn native_foundation_preserves_every_logical_refusal_and_loop_precedence() {
         view(&[u128::MAX], &[], SelfLoopPolicy::Keep),
         path(),
     ] {
-        for name in ["degree_centrality", "core_number", "eigenvector_centrality"] {
+        for name in [
+            "degree_centrality",
+            "core_number",
+            "eigenvector_centrality",
+            "betweenness_centrality",
+        ] {
             let mut complete = NativeControl::default();
             let actual = call(name)
                 .execute(&graph, limits(1 << 20), &mut complete)
@@ -700,7 +709,12 @@ fn native_foundation_preserves_every_logical_refusal_and_loop_precedence() {
     // The loop is in canonical row 1. Its row checkpoint precedes validation;
     // the next row's work refusal must never overtake the self-loop refusal.
     let loop_unit = 2 * kept.node_count() + 1 + 2;
-    for name in ["degree_centrality", "core_number", "eigenvector_centrality"] {
+    for name in [
+        "degree_centrality",
+        "core_number",
+        "eigenvector_centrality",
+        "betweenness_centrality",
+    ] {
         for ordinal in [loop_unit, loop_unit + 1] {
             let stop = NativeStop::Work(ordinal);
             let mut control = NativeControl {

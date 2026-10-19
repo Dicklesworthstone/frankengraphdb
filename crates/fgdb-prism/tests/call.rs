@@ -61,7 +61,7 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 7);
+    assert_eq!(FnxSignatureRegistry::version(), 8);
     assert_eq!(FnxSignatureRegistry::signatures().len(), 14);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
@@ -84,13 +84,14 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
         signature.implementation,
         FnxImplementationClass::InCoreDecodedCache
     );
-    // A foundation row runs fnx-algorithms itself over an undirected projection.
+    // A native foundation row keeps its undirected law and identifies its
+    // own CSR kernel, with pinned fnx serving as the semantics oracle.
     let foundation = FnxSignatureRegistry::lookup("fnx.betweenness_centrality").unwrap();
     assert_eq!(foundation.graph_kind, FnxGraphKind::Undirected);
     assert!(foundation.parameters.is_empty());
     assert_eq!(
         foundation.execution_kernel,
-        "fnx-algorithms/betweenness_centrality"
+        "fgdb-prism/brandes-csr-source-order-v1"
     );
     // Katz stays unregistered: its checked foundation entry drops the result
     // and witness on non-convergence, so a refusal would have to invent one.

@@ -1,6 +1,7 @@
 //! The pinned franken_networkx catalog and its differential native kernels.
 //!
-//! Degree centrality, core decomposition and eigenvector power iteration
+//! Degree centrality, core decomposition, eigenvector power iteration and
+//! Brandes betweenness
 //! borrow the admitted CSR directly. They preserve the catalog's logical
 //! charges and check live control during arithmetic. Certificates identify
 //! these kernels and their actual vector allocation peak; the projection
@@ -16,6 +17,7 @@
 //! remains unregistered because its checked entry drops the result and
 //! witness on non-convergence.
 
+mod brandes;
 mod eigenvector;
 mod native;
 
@@ -123,6 +125,7 @@ pub(crate) fn run<C>(
         FoundationAlgorithm::DegreeCentrality
             | FoundationAlgorithm::CoreNumber
             | FoundationAlgorithm::EigenvectorCentrality
+            | FoundationAlgorithm::BetweennessCentrality
     ) {
         // Retain the copy path's node and source-row charge phases, including
         // the exact self-loop refusal checkpoint. No node names are created.
@@ -145,6 +148,7 @@ pub(crate) fn run<C>(
             FoundationAlgorithm::DegreeCentrality => native::degree(graph, checkpoint)?,
             FoundationAlgorithm::CoreNumber => native::core(graph, checkpoint)?,
             FoundationAlgorithm::EigenvectorCentrality => eigenvector::run(graph, checkpoint)?,
+            FoundationAlgorithm::BetweennessCentrality => brandes::run(graph, checkpoint)?,
             _ => return Err(FnxExecutionError::InvalidUpstreamResult),
         };
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
@@ -163,13 +167,10 @@ pub(crate) fn run<C>(
             let result = fnx_algorithms::harmonic_centrality(&copy);
             scores(graph, result.scores, result.witness)?
         }
-        FoundationAlgorithm::BetweennessCentrality => {
-            let result = fnx_algorithms::betweenness_centrality(&copy);
-            scores(graph, result.scores, result.witness)?
-        }
         FoundationAlgorithm::DegreeCentrality
         | FoundationAlgorithm::CoreNumber
-        | FoundationAlgorithm::EigenvectorCentrality => {
+        | FoundationAlgorithm::EigenvectorCentrality
+        | FoundationAlgorithm::BetweennessCentrality => {
             return Err(FnxExecutionError::InvalidUpstreamResult);
         }
     };

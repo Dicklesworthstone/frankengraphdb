@@ -312,7 +312,7 @@ impl<C, F: FnMut() -> Result<(), C>> FnxMeter<C> for F {
 /// Walks of at least this many arcs gather on scoped threads.
 const PARALLEL_GATHER_ARCS: usize = 1 << 18;
 /// The most threads one gather uses.
-const MAX_GATHER_THREADS: usize = 8;
+pub(crate) const MAX_GATHER_THREADS: usize = 8;
 
 /// Precharged arithmetic checks live control after at most this many scalar
 /// rows/arcs. This is independent of the logical meter's 64-unit charge runs.
@@ -345,11 +345,11 @@ struct ArithmeticWorker {
 /// worker. A worker reports each bounded chunk and waits for the parent to
 /// poll live control before acknowledging it. Merely polling before joins
 /// would allow a whole hub row to run after a cancellation.
-fn arithmetic_rows<C>(
-    rows: &mut [f64],
+pub(crate) fn arithmetic_rows<T: Send, C>(
+    rows: &mut [T],
     ends: &[usize],
     meter: &mut impl FnxMeter<C>,
-    run: impl Fn(usize, &mut [f64], &mut dyn FnMut() -> bool) + Sync,
+    run: impl Fn(usize, &mut [T], &mut dyn FnMut() -> bool) + Sync,
 ) -> Result<(), FnxExecutionError<C>> {
     if ends.len() <= 1 {
         let mut failure = None;
@@ -1167,6 +1167,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("foundation.rs"));
         hash_text(&mut hash, include_str!("foundation/native.rs"));
         hash_text(&mut hash, include_str!("foundation/eigenvector.rs"));
+        hash_text(&mut hash, include_str!("foundation/brandes.rs"));
         hash.finalize()
     })
 }
