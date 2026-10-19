@@ -182,6 +182,10 @@ fn every_registered_kernel_uses_the_same_scoped_projection_and_explicit_laws() {
                 "CALL fnx.clustering_coefficient() YIELD score,vertex",
                 Directedness::Undirected,
             ),
+            (
+                "CALL fnx.directed_clustering_coefficient() YIELD score,vertex",
+                Directedness::Directed,
+            ),
         ];
         for (text, direction) in calls {
             let opt = options(direction);

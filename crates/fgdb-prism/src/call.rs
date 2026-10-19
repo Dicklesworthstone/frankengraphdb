@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 10;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 11;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -333,6 +333,19 @@ const SIGNATURES: &[FnxSignature] = &[
         complexity: "O(|V| + |E| + k * (|V| + |E|)) time; O(|V|) kernel workspace",
         execution_kernel: "fgdb-prism/cdlp-synchronous-csr-v1",
     },
+    FnxSignature {
+        name: "fnx.directed_clustering_coefficient",
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Score],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Directed,
+        numeric_profile: "fgdb-directed-clustering-exact-count-f64-ratio-v1",
+        rng_policy: "none",
+        graph_laws: "explicit directed simple projection; unweighted; self-loops ignored; neighbors are the union of predecessors and successors; directed arcs among distinct neighbors / (d*(d-1)); degree below two yields zero",
+        complexity: "O(|V| + |E| + sum_v deg_weak(v) * deg_out(v))",
+        execution_kernel: "fgdb-prism/directed-clustering-neighbor-union-v1",
+    },
 ];
 
 /// A catalog row: one undirected, unweighted, parameter-free graph input
@@ -573,6 +586,8 @@ pub enum FnxAlgorithm {
     Cdlp {
         max_iter: usize,
     },
+    /// Directed arcs among the union of each vertex's in/out neighbors.
+    DirectedClusteringCoefficient,
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -587,6 +602,7 @@ impl FnxAlgorithm {
             Self::ClusteringCoefficient => 7,
             Self::Foundation(algorithm) => 8 + algorithm as usize,
             Self::Cdlp { .. } => 14,
+            Self::DirectedClusteringCoefficient => 15,
         }]
     }
 }
@@ -650,6 +666,10 @@ impl FnxCallSpec {
     /// The count is required; this kernel does not use a convergence stop.
     pub fn cdlp(max_iter: usize) -> Self {
         Self::new(FnxAlgorithm::Cdlp { max_iter })
+    }
+    /// Directed neighbor-union coefficient; requires a directed projection.
+    pub fn directed_clustering_coefficient() -> Self {
+        Self::new(FnxAlgorithm::DirectedClusteringCoefficient)
     }
     fn new(algorithm: FnxAlgorithm) -> Self {
         Self::compiled(algorithm, default_outputs(algorithm.signature()))
@@ -932,6 +952,7 @@ impl FnxCallSpec {
             "fnx.strongly_connected_components" => FnxAlgorithm::StronglyConnectedComponents,
             "fnx.triangles" => FnxAlgorithm::Triangles,
             "fnx.clustering_coefficient" => FnxAlgorithm::ClusteringCoefficient,
+            "fnx.directed_clustering_coefficient" => FnxAlgorithm::DirectedClusteringCoefficient,
             "fnx.degree_centrality" => {
                 FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
             }

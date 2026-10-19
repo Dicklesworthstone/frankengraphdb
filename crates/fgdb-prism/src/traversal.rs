@@ -207,6 +207,7 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::Triangles
         | FnxAlgorithm::ClusteringCoefficient
         | FnxAlgorithm::Cdlp { .. }
+        | FnxAlgorithm::DirectedClusteringCoefficient
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
 }

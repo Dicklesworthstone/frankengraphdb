@@ -22,6 +22,8 @@ pub struct FnxExecutionLimits {
     /// row bound per undirected edge, plus initialization and conversion.
     /// CDLP includes graph-law checks, histogram initialization, all synchronous
     /// passes and result conversion, including a zero-iteration result.
+    /// Directed clustering bounds each outgoing row's scans by its vertex's
+    /// incoming plus outgoing degree, with neighborhood preparation included.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -979,6 +981,9 @@ impl FnxCallSpec {
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 Some(crate::clustering::estimated_work(graph, &mut checkpoint)?)
             }
+            FnxAlgorithm::DirectedClusteringCoefficient => Some(
+                crate::directed_clustering::estimated_work(graph, &mut checkpoint)?,
+            ),
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs)
             }
@@ -1000,7 +1005,7 @@ impl FnxCallSpec {
                 crate::clustering::workspace_bytes::<C>(n, graph.edge_count())?
             }
             // Native catalog kernels return their reserved vector peak.
-            FnxAlgorithm::Foundation(_) => 0,
+            FnxAlgorithm::Foundation(_) | FnxAlgorithm::DirectedClusteringCoefficient => 0,
             _ => {
                 let bytes_per_vertex = match algorithm {
                     FnxAlgorithm::SingleSourceShortestPathLength { .. } => {
@@ -1061,6 +1066,12 @@ impl FnxCallSpec {
             FnxAlgorithm::Cdlp { max_iter } => {
                 let (output, workspace_bytes) =
                     crate::traversal::cdlp(graph, max_iter, &mut checkpoint)?;
+                kernel_workspace_bytes = workspace_bytes;
+                output
+            }
+            FnxAlgorithm::DirectedClusteringCoefficient => {
+                let (output, workspace_bytes) =
+                    crate::directed_clustering::run(graph, &mut checkpoint)?;
                 kernel_workspace_bytes = workspace_bytes;
                 output
             }
@@ -1182,6 +1193,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("call.rs"));
         hash_text(&mut hash, include_str!("shortest_path.rs"));
         hash_text(&mut hash, include_str!("clustering.rs"));
+        hash_text(&mut hash, include_str!("directed_clustering.rs"));
         hash_text(&mut hash, include_str!("foundation.rs"));
         hash_text(&mut hash, include_str!("foundation/native.rs"));
         hash_text(&mut hash, include_str!("foundation/eigenvector.rs"));
