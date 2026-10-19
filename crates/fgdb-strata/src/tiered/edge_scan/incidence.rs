@@ -337,10 +337,11 @@ impl<V: Vfs> Driver<'_, V> {
             active: None,
             initialized: true,
             incidence: retained.then_some(request),
-            _head_charge: self
-                .root
-                .partition
-                .reserve_scan_bytes(cx, 1024 + size_of_val(&blocks))?,
+            _head_charge: Some(
+                self.root
+                    .partition
+                    .reserve_scan_bytes(cx, 1024 + size_of_val(&blocks))?,
+            ),
         };
         loop {
             let block = self.root.partition.edge_scan_next_incidence_block(
@@ -382,20 +383,21 @@ impl<V: Vfs> Driver<'_, V> {
                 }
             }
             if let Some(head) = head {
-                state
+                let charge = state
                     ._head_charge
-                    .grow(cx, 512)
-                    .map_err(BufferedReadError::Memory)?;
+                    .as_mut()
+                    .expect("incidence heap reservation precedes every head");
+                charge.grow(cx, 512).map_err(BufferedReadError::Memory)?;
                 state.heads.try_reserve(1).map_err(|_| {
                     BufferedReadError::Memory(MemoryError::AllocationFailed {
-                        requested: state._head_charge.bytes(),
+                        requested: charge.bytes(),
                     })
                 })?;
                 if state
                     .heads
                     .capacity()
                     .checked_mul(size_of::<Reverse<Head>>())
-                    .is_none_or(|bytes| bytes > state._head_charge.bytes())
+                    .is_none_or(|bytes| bytes > charge.bytes())
                 {
                     return Err(BufferedReadError::SizeOverflow.into());
                 }

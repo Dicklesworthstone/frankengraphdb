@@ -112,12 +112,15 @@ struct State {
     // A retained incidence merge filters each refault's position permutation,
     // never its property locators or the versions of a matching identity.
     incidence: Option<incidence::Incidence>,
-    _head_charge: MemoryCharge,
+    // Root heads are admitted only when the root stream is first demanded.
+    // Incidence positions own their smaller, independently reserved heaps.
+    _head_charge: Option<MemoryCharge>,
 }
 
-/// A canonical k-way merge of immutable edge histories. Construction reserves
-/// O(block count) metadata, without reading payloads. First pull inserts the
-/// authenticated minimum key of each block. Each refault decodes at most one
+/// A canonical k-way merge of immutable edge histories. Construction creates
+/// an empty position without reserving its O(block count) root heap. First root
+/// pull reserves that heap and inserts each authenticated minimum key.
+/// Each refault decodes at most one
 /// format-bounded block and sorts its original positions, with controls before
 /// comparisons. Refault frequency can be up to once per historical row; this
 /// is bounded resident execution, not an optimal sequential-I/O claim.
@@ -157,32 +160,17 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         blocks: usize,
         limit: usize,
     ) -> Result<Self, BufferedReadError> {
-        let bytes = blocks
-            .checked_mul(512)
-            .and_then(|n| n.checked_add(1024))
-            .ok_or(BufferedReadError::SizeOverflow)?;
-        let charge = partition.reserve_scan_bytes(cx, bytes)?;
-        let mut heads: Vec<Reverse<Head>> = Vec::new();
-        heads
-            .try_reserve_exact(blocks)
-            .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
-        if heads
-            .capacity()
-            .checked_mul(size_of::<Reverse<Head>>())
-            .is_none_or(|allocated| allocated > bytes)
-        {
-            return Err(BufferedReadError::SizeOverflow);
-        }
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         Ok(Self {
             partition,
             as_of,
             blocks,
             state: Some(State {
-                heads,
+                heads: Vec::new(),
                 active: None,
                 initialized: false,
                 incidence: None,
-                _head_charge: charge,
+                _head_charge: None,
             }),
             work: EdgeScanWork { used: 0, limit },
         })
@@ -264,6 +252,31 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
         if !state.initialized {
+            if self.blocks != 0 {
+                // A caller may convert this position into a selective
+                // incidence stream without ever using the global root heap.
+                // Admit its complete backing only on actual root demand,
+                // before allocation or any authenticated head is consumed.
+                let bytes = self
+                    .blocks
+                    .checked_mul(512)
+                    .and_then(|n| n.checked_add(1024))
+                    .ok_or(BufferedReadError::SizeOverflow)?;
+                let charge = self.partition.reserve_scan_bytes(cx, bytes)?;
+                let mut heads: Vec<Reverse<Head>> = Vec::new();
+                heads.try_reserve_exact(self.blocks).map_err(|_| {
+                    BufferedReadError::Memory(MemoryError::AllocationFailed { requested: bytes })
+                })?;
+                if heads
+                    .capacity()
+                    .checked_mul(size_of::<Reverse<Head>>())
+                    .is_none_or(|allocated| allocated > bytes)
+                {
+                    return Err(BufferedReadError::SizeOverflow.into());
+                }
+                state.heads = heads;
+                state._head_charge = Some(charge);
+            }
             for block in 0..self.blocks {
                 self.work.step(cx, observe)?;
                 if let Some((eid, created)) = self.partition.edge_scan_first(block) {

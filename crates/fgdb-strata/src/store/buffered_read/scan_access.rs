@@ -12,8 +12,8 @@ pub(crate) type BufferedBlockImage = (Vec<AdjacencyEntry>, Option<BlockProps>);
 type BufferedBlockKeys = (Vec<AdjacencyEntry>, Option<Vec<u8>>);
 
 impl<V: Vfs> BufferedPartition<V> {
-    /// Open a pull-driven scan in stable EId order at one retained cut. Only
-    /// the head capacity is reserved here; no payload is read before demand.
+    /// Open a pull-driven scan in stable EId order at one retained cut. Root
+    /// head capacity and payload reads are deferred until actual root demand.
     /// Initial authenticated admission supplied each block's minimum EId, not
     /// its first adjacency-ordered entry. The cursor never builds an edge table.
     pub fn edge_scan(

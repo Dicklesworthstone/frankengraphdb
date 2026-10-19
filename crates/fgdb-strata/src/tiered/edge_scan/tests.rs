@@ -471,10 +471,26 @@ fn metadata_and_candidate_admission_precede_payloads_and_future_cuts_refuse() {
             .unwrap();
         let baseline = pool.used();
         let held = pool.reserve(&cx, pool.available() - 100).unwrap();
+        let held_baseline = pool.used();
+        let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+        assert_eq!(pool.used(), held_baseline, "opening reserves no root heap");
+        drop(scan.next(&cx));
+        assert!(!scan.is_finished());
+        assert_eq!(scan.work_used(), 0);
+        assert_eq!(pool.used(), held_baseline, "unpolled pull has no demand");
         assert!(matches!(
-            view.edge_scan(&cx, CommitSeq(5)),
-            Err(BufferedReadError::Buffer(BufferError::Memory(_)))
+            scan.next_candidate_with(&cx, &mut |_| -> Result<(), ()> {
+                panic!("root heap admission precedes head consumption")
+            })
+            .await,
+            Err(BufferedScanError::Read(BufferedReadError::Buffer(
+                BufferError::Memory(_)
+            )))
         ));
+        assert!(scan.is_finished());
+        assert!(scan.next(&cx).await.unwrap().is_none());
+        drop(scan);
+        assert_eq!(pool.used(), held_baseline);
         drop(held);
         assert_eq!(pool.used(), baseline);
         assert!(matches!(
@@ -500,6 +516,84 @@ fn metadata_and_candidate_admission_precede_payloads_and_future_cuts_refuse() {
         assert!(scan.is_finished());
         drop(scan);
         assert_eq!(view.stats().misses, 0);
+        assert_eq!(pool.used(), baseline);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn selective_incidence_does_not_reserve_an_unused_global_root_heap() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let endpoint = VId(u128::MAX); // absent from every endpoint fence
+        let root_bytes = view.root().blocks.len() * 512 + 1024;
+        let incidence_bytes = 1024
+            + size_of_val(&view.edge_scan_incidence_blocks(
+                endpoint,
+                None,
+                BufferedEdgeDirection::Outgoing,
+            ));
+        assert!(incidence_bytes < root_bytes);
+        let held = pool.reserve(&cx, pool.available() - (root_bytes - 1)).unwrap();
+        let held_baseline = pool.used();
+        for direction in [
+            BufferedEdgeDirection::Outgoing,
+            BufferedEdgeDirection::Incoming,
+            BufferedEdgeDirection::Undirected,
+        ] {
+            let mut join = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_join_scan();
+            assert_eq!(pool.used(), held_baseline);
+            assert!(
+                join.next_incident_with_endpoints(
+                    &cx,
+                    endpoint,
+                    None,
+                    direction,
+                    None,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
+            assert_eq!(pool.used(), held_baseline, "selective scratch is refunded");
+            assert!(matches!(
+                join.next_with_endpoints(&cx, None, &mut |_| -> Result<(), ()> {
+                    panic!("whole-root heap must refuse before consuming a head")
+                })
+                .await,
+                Err(BufferedScanError::Read(BufferedReadError::Buffer(
+                    BufferError::Memory(_)
+                )))
+            ));
+            assert!(join.is_closed());
+            drop(join);
+            assert_eq!(pool.used(), held_baseline);
+
+            let mut incidence = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_incidence_scan(
+                endpoint,
+                None,
+                direction,
+                None,
+            );
+            drop(incidence.next(&cx));
+            assert!(!incidence.is_finished());
+            assert_eq!(pool.used(), held_baseline, "conversion has no root charge");
+            assert!(incidence.next(&cx).await.unwrap().is_none());
+            assert!(incidence.is_finished());
+            drop(incidence);
+            assert_eq!(pool.used(), held_baseline);
+        }
+        assert_eq!(view.stats().misses, 0, "no unrelated payload was faulted");
+        drop(held);
         assert_eq!(pool.used(), baseline);
         drop(view);
         assert_eq!(pool.used(), 0);

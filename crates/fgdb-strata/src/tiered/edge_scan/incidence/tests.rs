@@ -560,11 +560,11 @@ fn routing_and_history_refusals_drop_the_whole_driver_and_keep_exact_work_limits
         // while a frame is resident. A scratch request for the whole pool
         // evicts every unpinned frame before it returns, whether it then
         // admits or refuses, and its charge (if any) is released at once.
-        // Opening the scan charges only scratch and loads no frame, so a hold
-        // that then leaves 512 bytes sits below the opening head/seek scan
-        // reservation, with nothing left to evict. A scratch refusal reports
-        // through the buffer manager as Buffer(Memory(ResourceExhausted)),
-        // and the requested bytes name the opening head/seek reservation.
+        // Opening the scan loads no frame, so a hold that then leaves 512
+        // bytes sits below the initial incidence seek reservation, with
+        // nothing left to evict. A scratch refusal reports through the buffer
+        // manager as Buffer(Memory(ResourceExhausted)), and the requested
+        // bytes name that incidence seek reservation.
         drop(view.reserve_scan_bytes(&cx, pool.limit()));
         let evicted = pool.used();
         let routing_scratch = 1024
