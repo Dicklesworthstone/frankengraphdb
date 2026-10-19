@@ -61,8 +61,9 @@ fn symbol_id<T: TryFrom<i64>, C>(
     T::try_from(*value).map_err(|_| invalid(index, "projection identity is out of range"))
 }
 
-/// Positional calls retain their existing signature. Named calls supply the
-/// positional kernel list through args, alongside explicit projection fields.
+/// Named calls select registered kernel arguments alongside projection fields,
+/// or supply the original positional kernel list through `args`. Mixing those
+/// two kernel forms refuses instead of silently choosing one.
 pub(crate) fn bind_procedure<C>(
     call: &PreparedProcedureCall,
     arguments: &[GraphValue],
@@ -87,6 +88,8 @@ pub(crate) fn bind_procedure<C>(
     }
     let mut kernel_arguments = if named { &[][..] } else { arguments };
     let mut args_index = None;
+    let mut named_kernel_arguments = Vec::new();
+    let mut kernel_positions = Vec::new();
     if named {
         if names.len() != arguments.len() {
             return Err(invalid(0, "projection argument names and values disagree"));
@@ -94,7 +97,11 @@ pub(crate) fn bind_procedure<C>(
         let mut seen = 0_u16;
         for (index, (name, value)) in names.iter().zip(arguments).enumerate() {
             let Some(field) = FIELDS.iter().position(|field| *field == name.as_str()) else {
-                return Err(invalid(index, "unknown Prism projection argument"));
+                // The kernel registry validates names, duplicates and exact
+                // argument domains after the projection recipe is separated.
+                named_kernel_arguments.push((name.as_str(), value));
+                kernel_positions.push(index);
+                continue;
             };
             let bit = 1_u16 << field;
             if seen & bit != 0 {
@@ -110,12 +117,25 @@ pub(crate) fn bind_procedure<C>(
             }
         }
     }
-    let spec = bind_kernel(call, kernel_arguments).map_err(|error| match error {
+    if args_index.is_some() && !named_kernel_arguments.is_empty() {
+        return Err(invalid(
+            kernel_positions[0],
+            "args cannot be combined with named kernel arguments",
+        ));
+    }
+    let bound = if named_kernel_arguments.is_empty() {
+        bind_kernel(call, kernel_arguments)
+    } else {
+        bind_named_kernel(call, &named_kernel_arguments)
+    };
+    let spec = bound.map_err(|error| match error {
         GqlQueryError::Source(GqlError::Procedure(ProcedureError::Bind(mut error))) => {
-            if let Some(index) = args_index
-                && matches!(error.site, FnxCallSite::Argument(_))
-            {
-                error.site = FnxCallSite::Argument(index);
+            if let FnxCallSite::Argument(index) = error.site {
+                if let Some(args_index) = args_index {
+                    error.site = FnxCallSite::Argument(args_index);
+                } else if let Some(&original) = kernel_positions.get(index) {
+                    error.site = FnxCallSite::Argument(original);
+                }
             }
             refuse(ProcedureError::Bind(error))
         }
@@ -166,7 +186,8 @@ pub(crate) fn bind_procedure<C>(
                     _ => return Err(invalid(index, "unknown missing-weight policy")),
                 };
             }
-            _ => return Err(invalid(index, "unknown Prism projection argument")),
+            // Already admitted as a registered named kernel parameter above.
+            _ => {}
         }
     }
     if let Some(key) = weight {

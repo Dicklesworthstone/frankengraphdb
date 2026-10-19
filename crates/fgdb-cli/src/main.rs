@@ -851,8 +851,31 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
             "--overwrite only applies to query --certify-to",
         ));
     }
-    let fnx_call = command == "query" && text.as_deref().is_some_and(fnx::is_call);
+    let mut fnx_call = command == "query"
+        && text
+            .as_deref()
+            .is_some_and(|text| fnx::is_call(text, &raw_params));
     fnx.validate()?;
+    if fnx_call
+        && !buffered.enabled()
+        && budget != QueryBudget::default()
+        && text
+            .as_deref()
+            .is_some_and(fgdb_gql::starts_fnx_graph_projection)
+    {
+        // These named calls previously used the native query host, whose
+        // limits have different domains from Prism's projection/kernel caps.
+        // Keep that host when requested, or refuse an incompatible flag mix.
+        // Buffered analytics instead checks its supported limits in prepare:
+        // work bounds physical source admission/scans; other native caps refuse.
+        if !fnx.is_empty() {
+            return Err(Failure::usage(
+                "native query limits cannot be combined with projection or --sealed flags \
+                 on a named CALL fnx; remove those flags to retain native limit enforcement",
+            ));
+        }
+        fnx_call = false;
+    }
     buffered.validate()?;
     if buffered.enabled() && (stream || certify_to.is_some()) {
         return Err(Failure::usage(

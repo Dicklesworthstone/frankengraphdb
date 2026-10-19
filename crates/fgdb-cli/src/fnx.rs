@@ -36,9 +36,15 @@ use std::io::Write;
 /// case); the procedure namespace `fnx.` is case-sensitive, like the
 /// registry. A call that continues past its YIELD list (WHERE, WITH, MATCH,
 /// RETURN, ...) or supplies a native projection is an ordinary native read.
-pub(super) fn is_call(text: &str) -> bool {
+/// Kernel-only named arguments use the same standalone route as positional
+/// arguments, bound against the actual typed parameters before opening storage.
+pub(super) fn is_call(text: &str, raw_params: &[(String, String)]) -> bool {
     if fgdb_gql::starts_fnx_graph_projection(text) {
-        return false;
+        // The shared lexer also recognizes every named argument envelope.
+        // Only the registry's binder can distinguish a complete kernel call
+        // from native projection fields/maps or a continuing read pipeline.
+        return arguments(raw_params)
+            .is_ok_and(|parameters| FnxCallSpec::bind(text, &parameters).is_ok());
     }
     let text = text.trim_start();
     text.get(..4)
@@ -475,17 +481,149 @@ mod tests {
     #[test]
     fn projection_envelopes_use_the_native_host_and_positional_calls_keep_their_route() {
         assert!(is_call(
-            "CALL fnx.connected_components() YIELD vertex, component"
+            "CALL fnx.connected_components() YIELD vertex, component",
+            &[],
         ));
         for text in [
             "CALL fnx.connected_components() YIELD vertex RETURN vertex",
+            "CALL fnx.connected_components({}) YIELD vertex",
             "CALL fnx.connected_components({}) YIELD vertex RETURN vertex",
+            "CALL fnx.connected_components(args => []) YIELD vertex",
             "CALL fnx.connected_components(args => []) YIELD vertex RETURN vertex",
+            "CALL fnx.pagerank(label => 'L', iterations => 2) YIELD vertex,score",
+            "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD score RETURN score",
             "CALL fnx.degree(label => 'L') YIELD vertex RETURN vertex",
             "/* leading */ CALL fnx.degree ( args /* split */ => [] ) YIELD vertex RETURN vertex",
             "CALL fnx.degree({unknown: 'invalid'}) YIELD vertex RETURN vertex",
         ] {
-            assert!(!is_call(text), "{text}");
+            assert!(!is_call(text, &[]), "{text}");
         }
+    }
+
+    #[test]
+    fn kernel_named_calls_keep_the_standalone_route_with_actual_rebound_parameters() {
+        for text in [
+            "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score",
+            "/* leading */ cAlL fnx.pagerank ( weighted => false, iterations /* count */ => 2 ) YIELD score AS rank",
+            "CALL fnx.pagerank(alpha => 0.85, max_iter => 100, tol => 1e-6, weighted => false)",
+        ] {
+            assert!(is_call(text, &[]), "{text}");
+        }
+        let text =
+            "CALL fnx.pagerank(iterations => $steps, weighted => $weighted) YIELD vertex,score";
+        for steps in [1, 2, 5] {
+            let raw = [
+                ("steps".to_owned(), format!("int:{steps}")),
+                ("weighted".to_owned(), "bool:false".to_owned()),
+            ];
+            assert!(is_call(text, &raw), "steps={steps}");
+            assert!(!is_call(&format!("{text} RETURN vertex,score"), &raw));
+        }
+        assert!(!is_call(text, &[]), "routing must not invent parameters");
+        for value in ["int:0", "int:-1", "float:2", "null", "int:overflow"] {
+            let raw = [
+                ("steps".to_owned(), value.to_owned()),
+                ("weighted".to_owned(), "bool:false".to_owned()),
+            ];
+            assert!(!is_call(text, &raw), "{value}");
+        }
+        assert!(is_call(
+            "CALL fnx.single_source_shortest_path_length(source => $source, cutoff => 2) YIELD vertex,distance",
+            &[("source".to_owned(), format!("vertex:{}", u128::MAX))],
+        ));
+        assert!(!is_call(
+            "CALL fnx.pagerank(label => $label, iterations => 2) YIELD vertex,score",
+            &[("label".to_owned(), "text:Person".to_owned())],
+        ));
+    }
+
+    #[test]
+    fn native_limits_keep_named_calls_native_or_refuse_projection_flags_before_open() {
+        let parse_query = |text: &str, flags: &[&str]| {
+            let mut args: Vec<String> = [
+                "--db",
+                "never-opened-database",
+                "--key-file",
+                "never-opened-key",
+                "--param",
+                "steps=int:2",
+                text,
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            args.extend(flags.iter().map(|flag| (*flag).to_owned()));
+            super::super::parse(&args, "query")
+        };
+        for text in [
+            "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score",
+            "CALL fnx.pagerank(iterations => $steps, weighted => false) YIELD vertex,score",
+        ] {
+            assert!(parse_query(text, &[]).unwrap().fnx_call);
+            for flag in [
+                "--max-snapshot-records",
+                "--max-result-rows",
+                "--max-work-units",
+                "--max-scratch-entries",
+            ] {
+                let options = parse_query(text, &[flag, "0"]).unwrap();
+                assert!(!options.fnx_call, "{flag}: native limits remain active");
+                assert!(options.budget != super::super::QueryBudget::default());
+                for projection in [
+                    vec!["--graph-relation", "KNOWS"],
+                    vec!["--sealed", "--graph-relation", "KNOWS"],
+                ] {
+                    let mut flags = projection;
+                    flags.extend_from_slice(&[flag, "0"]);
+                    let Err(failure) = parse_query(text, &flags) else {
+                        panic!("incompatible native/Prism limits admitted: {flags:?}");
+                    };
+                    assert_eq!(failure.code, 2);
+                    assert_eq!(failure.class, "usage");
+                }
+            }
+            // Buffered analytics admits a physical work cap, including zero,
+            // and refuses native row/record/scratch domains before storage.
+            for projection in [
+                vec![],
+                vec!["--relation", "KNOWS=1", "--graph-relation", "KNOWS"],
+            ] {
+                for work in ["0", "10000000"] {
+                    let mut flags = vec!["--buffered", "--max-work-units", work];
+                    flags.extend_from_slice(&projection);
+                    let options = parse_query(text, &flags).unwrap();
+                    assert!(options.fnx_call, "{flags:?}");
+                    super::prepare(&options).unwrap();
+                    let (_, limits) = options.buffered.admission(options.budget.policy()).unwrap();
+                    assert_eq!(limits.max_work, work.parse::<usize>().unwrap());
+                }
+                for flag in [
+                    "--max-snapshot-records",
+                    "--max-result-rows",
+                    "--max-scratch-entries",
+                ] {
+                    let mut flags = vec!["--buffered", flag, "0"];
+                    flags.extend_from_slice(&projection);
+                    let options = parse_query(text, &flags).unwrap();
+                    assert!(options.fnx_call, "{flags:?}");
+                    let Err(failure) = super::prepare(&options) else {
+                        panic!("incompatible buffered analytics limits admitted: {flags:?}");
+                    };
+                    assert_eq!(failure.code, 2);
+                    assert_eq!(failure.class, "usage");
+                    assert!(
+                        failure
+                            .message
+                            .contains("do not apply to buffered analytics")
+                    );
+                }
+            }
+        }
+        // This routing correction leaves the established positional path alone.
+        assert!(
+            parse_query("CALL fnx.pagerank()", &["--max-result-rows", "0"])
+                .unwrap()
+                .fnx_call
+        );
     }
 }

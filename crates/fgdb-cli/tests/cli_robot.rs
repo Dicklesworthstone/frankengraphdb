@@ -2479,6 +2479,10 @@ fn buffered_prism_cli_preserves_analytics_projection_history_and_delivery() {
             "CALL fnx.pagerank(0.85,1000,1e-9,true) YIELD vertex,score AS rank",
         ),
         (
+            "directed",
+            "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score AS rank",
+        ),
+        (
             "reversed",
             "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
         ),
@@ -2619,6 +2623,34 @@ fn buffered_prism_cli_enforces_physical_and_selected_graph_limits_before_columns
     db.command("query", &["--buffered", "--as-of", "999", call])
         .failure(3, "query");
     buffered_analytics_matches_decoded(&db, &[call]);
+    for named in [
+        "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score",
+        "CALL fnx.pagerank(iterations => $steps, weighted => false) YIELD vertex,score",
+    ] {
+        let args = ["--graph-relation", "KNOWS", "--param", "steps=int:2", named];
+        let decoded = db.command("query", &args);
+        decoded.success();
+        let mut admitted = vec!["--buffered", "--max-work-units", "10000000"];
+        admitted.extend_from_slice(&args);
+        let buffered = db.command("query", &admitted);
+        buffered.success();
+        assert_eq!(buffered.events, decoded.events);
+        for flag in [
+            "--max-work-units",
+            "--max-snapshot-records",
+            "--max-result-rows",
+            "--max-scratch-entries",
+        ] {
+            let mut refused = vec!["--buffered", flag, "0"];
+            refused.extend_from_slice(&args);
+            let (code, class) = if flag == "--max-work-units" {
+                (4, "open")
+            } else {
+                (2, "usage")
+            };
+            db.command("query", &refused).failure(code, class);
+        }
+    }
 }
 
 #[test]
@@ -2654,6 +2686,10 @@ fn sealed_prism_cli_matches_decoded_algorithms_and_historical_weights() {
         (
             "directed",
             "CALL fnx.pagerank(0.85,1000,1e-9,true) YIELD vertex,score AS rank",
+        ),
+        (
+            "directed",
+            "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score AS rank",
         ),
         (
             "directed",
@@ -2710,6 +2746,76 @@ fn sealed_prism_cli_matches_decoded_algorithms_and_historical_weights() {
         }
     }
 
+    // Rebind the same named call across processes. The independent transition
+    // matrix is A -> {B,D}, B -> C, C -> A, with D and E dangling. The selected
+    // population excludes X and the OTHER edge; weights are explicitly ignored.
+    let fixed = "CALL fnx.pagerank(iterations => $steps, weighted => $weighted) \
+                 YIELD vertex,score AS rank";
+    for steps in [1, 2, 5] {
+        let parameter = format!("steps=int:{steps}");
+        let mut args = projection.to_vec();
+        args.extend_from_slice(&[
+            "--param",
+            &parameter,
+            "--param",
+            "weighted=bool:false",
+            fixed,
+        ]);
+        let output = sealed_analytics_matches_decoded(&db, &args);
+        let buffered = buffered_analytics_matches_decoded(&db, &args);
+        assert_eq!(buffered.events, output.events);
+        assert_eq!(output.sequence("rows"), basis);
+        assert_eq!(output.terminal().get("count").unsigned(), 5);
+        let scores: BTreeMap<String, f64> = output
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .map(|event| {
+                let cells = event.get("cells").array();
+                assert_eq!(cells[0].get("type").string(), "vertex");
+                assert_eq!(cells[1].get("type").string(), "float");
+                (
+                    cells[0].get("value").string().to_owned(),
+                    cells[1].get("value").string().parse().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(scores.len(), 5);
+        let mut expected = [0.2_f64; 5];
+        for _ in 0..steps {
+            let initial = (1.0 - 0.85) / 5.0 + 0.85 * (expected[3] + expected[4]) / 5.0;
+            expected = [
+                initial + 0.85 * expected[2],
+                initial + 0.85 * expected[0] / 2.0,
+                initial + 0.85 * expected[1],
+                initial + 0.85 * expected[0] / 2.0,
+                initial,
+            ];
+        }
+        for (name, expected) in ["A", "B", "C", "D", "E"].into_iter().zip(expected) {
+            let actual = scores[&id[name]];
+            assert!(
+                (actual - expected).abs() < 1e-14,
+                "iterations={steps}, vertex={name}: {actual} != {expected}"
+            );
+        }
+    }
+    // A native cap without Prism flags keeps the native query host. Routing
+    // this call through default Prism limits would incorrectly return rows.
+    db.command(
+        "query",
+        &[
+            "--max-result-rows",
+            "0",
+            "--param",
+            "steps=int:2",
+            "--param",
+            "weighted=bool:false",
+            fixed,
+        ],
+    )
+    .failure(3, "query");
+
     let current =
         db.write(&["MATCH (a:Person {name:'A'})-[e:KNOWS]->(b:Person {name:'B'}) SET e.born=9"]);
     let old_cut = basis.to_string();
@@ -2748,6 +2854,31 @@ fn sealed_prism_cli_preflights_before_writable_open() {
     let call = "CALL fnx.pagerank() YIELD vertex";
     let cases: &[(&[&str], i32, &str)] = &[
         (&["--sealed", call], 2, "usage"),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--max-work-units",
+                "0",
+                "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score",
+            ],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--graph-relation",
+                "KNOWS",
+                "--max-result-rows",
+                "0",
+                "--param",
+                "steps=int:2",
+                "CALL fnx.pagerank(iterations => $steps, weighted => false) YIELD vertex,score",
+            ],
+            2,
+            "usage",
+        ),
         (
             &[
                 "--sealed",

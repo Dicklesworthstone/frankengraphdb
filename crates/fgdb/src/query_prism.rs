@@ -123,20 +123,7 @@ fn bind_kernel<C>(
 ) -> Result<FnxCallSpec, GqlQueryError<GqlError, C>> {
     let mut supplied = Vec::with_capacity(arguments.len());
     for (index, value) in arguments.iter().enumerate() {
-        let argument = match value {
-            GraphValue::Scalar(CanonicalScalar::Null) => FnxArgument::Null,
-            GraphValue::Scalar(CanonicalScalar::Bool(value)) => FnxArgument::Boolean(*value),
-            GraphValue::Scalar(CanonicalScalar::Int(value)) => FnxArgument::Integer(*value),
-            GraphValue::Scalar(CanonicalScalar::Float(value)) => FnxArgument::Float(value.get()),
-            GraphValue::Vertex(vertex) => FnxArgument::Vertex(*vertex),
-            _ => {
-                return Err(refuse(ProcedureError::Bind(FnxCallError {
-                    site: FnxCallSite::Argument(index),
-                    kind: FnxBindErrorKind::InvalidArgument("no Prism argument domain"),
-                })));
-            }
-        };
-        supplied.push(argument);
+        supplied.push(kernel_argument(value, index)?);
     }
     let yields: Vec<(&str, &str)> = call
         .outputs()
@@ -145,6 +132,52 @@ fn bind_kernel<C>(
         .collect();
     let spec = FnxCallSpec::from_arguments(call.namespace(), call.name(), &supplied, &yields)
         .map_err(|error| refuse(ProcedureError::Bind(error)))?;
+    check_kernel_outputs(call, spec)
+}
+
+/// Named kernel arguments use the same typed registry as standalone calls.
+/// The caller maps their local argument ordinals back around projection fields.
+fn bind_named_kernel<C>(
+    call: &PreparedProcedureCall,
+    arguments: &[(&str, &GraphValue)],
+) -> Result<FnxCallSpec, GqlQueryError<GqlError, C>> {
+    let mut supplied = Vec::with_capacity(arguments.len());
+    for (index, &(name, value)) in arguments.iter().enumerate() {
+        supplied.push((name, kernel_argument(value, index)?));
+    }
+    let yields: Vec<(&str, &str)> = call
+        .outputs()
+        .iter()
+        .map(|name| (name.as_str(), name.as_str()))
+        .collect();
+    let spec = FnxCallSpec::from_named_arguments(call.namespace(), call.name(), &supplied, &yields)
+        .map_err(|error| refuse(ProcedureError::Bind(error)))?;
+    check_kernel_outputs(call, spec)
+}
+
+fn kernel_argument<C>(
+    value: &GraphValue,
+    index: usize,
+) -> Result<FnxArgument, GqlQueryError<GqlError, C>> {
+    Ok(match value {
+        GraphValue::Scalar(CanonicalScalar::Null) => FnxArgument::Null,
+        GraphValue::Scalar(CanonicalScalar::Bool(value)) => FnxArgument::Boolean(*value),
+        GraphValue::Scalar(CanonicalScalar::Int(value)) => FnxArgument::Integer(*value),
+        GraphValue::Scalar(CanonicalScalar::Float(value)) => FnxArgument::Float(value.get()),
+        GraphValue::Vertex(vertex) => FnxArgument::Vertex(*vertex),
+        _ => {
+            return Err(refuse(ProcedureError::Bind(FnxCallError {
+                site: FnxCallSite::Argument(index),
+                kind: FnxBindErrorKind::InvalidArgument("no Prism argument domain"),
+            })));
+        }
+    })
+}
+
+fn check_kernel_outputs<C>(
+    call: &PreparedProcedureCall,
+    spec: FnxCallSpec,
+) -> Result<FnxCallSpec, GqlQueryError<GqlError, C>> {
     // The statement matches these outputs as vertices (fgdb-luq0b). Vertex
     // and component cells are vertex identities; anything else refuses here
     // rather than matching nothing and dropping every row.
