@@ -1,7 +1,8 @@
 //! `query 'CALL fnx.<procedure>(...) YIELD ...'`: registered Prism analytics
 //! over the admitted generation. The default uses the decoded adapter on a
-//! read-only open; --sealed explicitly seals one pinned source and executes
-//! Prism's compressed cursors through a writable embedded database.
+//! read-only open; --buffered builds only the selected decoded projection
+//! through authenticated checkpoint cursors; --sealed explicitly seals one
+//! pinned source and executes compressed cursors through a writable database.
 //!
 //! The graph a procedure sees is an EXPLICIT projection chosen by flags, never
 //! an implicit collapse of the stored multigraph:
@@ -18,8 +19,9 @@
 //! `fnx.connected_components` over a directed projection) is refused by Prism,
 //! never silently converted. Arguments are typed `--param` values:
 //! `int:`, `float:`, `bool:`, `null` and `vertex:<id>` for a source vertex.
-use super::{Failure, Options, decimal_usize, float_text, render_rows};
-use fgdb::{Database, EmbeddedReadView};
+use super::{Failure, Options, decimal_usize, float_text, render_rows_iter};
+use asupersync::fs::Vfs;
+use fgdb::{BufferedReadView, Database, EmbeddedReadView};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
     Directedness, FnxArgument, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions,
@@ -58,6 +60,8 @@ pub(super) struct ProjectionFlags {
     parallel: Option<ParallelEdgePolicy>,
     self_loops: Option<SelfLoopPolicy>,
     as_of: Option<CommitSeq>,
+    graph_staging_bytes: Option<usize>,
+    graph_workspace_bytes: Option<usize>,
     sealed: bool,
     sealed_kernel_bytes: Option<usize>,
     sealed_result_bytes: Option<usize>,
@@ -68,7 +72,7 @@ pub(super) struct ProjectionFlags {
 }
 
 impl ProjectionFlags {
-    pub(super) const FLAGS: [&str; 14] = [
+    pub(super) const FLAGS: [&str; 16] = [
         "--graph-label",
         "--graph-relation",
         "--weight",
@@ -77,6 +81,8 @@ impl ProjectionFlags {
         "--parallel-edges",
         "--self-loops",
         "--as-of",
+        "--graph-staging-bytes",
+        "--graph-workspace-bytes",
         "--sealed-kernel-bytes",
         "--sealed-result-bytes",
         "--sealed-image-bytes",
@@ -94,6 +100,8 @@ impl ProjectionFlags {
             && self.parallel.is_none()
             && self.self_loops.is_none()
             && self.as_of.is_none()
+            && self.graph_staging_bytes.is_none()
+            && self.graph_workspace_bytes.is_none()
             && !self.sealed
             && !self.has_sealed_limits()
     }
@@ -198,6 +206,16 @@ impl ProjectionFlags {
                 let seq = value.parse().map_err(|_| bad())?;
                 once(&mut self.as_of, CommitSeq(seq), flag)
             }
+            "--graph-staging-bytes" => once(
+                &mut self.graph_staging_bytes,
+                decimal_usize(flag, value)?,
+                flag,
+            ),
+            "--graph-workspace-bytes" => once(
+                &mut self.graph_workspace_bytes,
+                decimal_usize(flag, value)?,
+                flag,
+            ),
             "--sealed-kernel-bytes" => once(
                 &mut self.sealed_kernel_bytes,
                 decimal_usize(flag, value)?,
@@ -251,7 +269,13 @@ impl ProjectionFlags {
         };
         // Unset flags keep the canonical whole graph, including its refusal
         // of an implicit multigraph collapse, and its default admission.
-        let base = FnxReadOptions::whole_graph(self.as_of);
+        let mut base = FnxReadOptions::whole_graph(self.as_of);
+        if let Some(limit) = self.graph_staging_bytes {
+            base.source_limits.max_staging_bytes = limit;
+        }
+        if let Some(limit) = self.graph_workspace_bytes {
+            base.projection_limits.max_workspace_bytes = limit;
+        }
         Ok(FnxReadOptions {
             selection: FnxSelection {
                 vertex_label: lookup(&self.label, &bindings.labels, "label")?.map(LabelId),
@@ -325,6 +349,23 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     let read = options.fnx.options(options)?;
     let call = FnxCallSpec::bind(&options.text, &parameters).map_err(Failure::query)?;
     let sealed = options.fnx.sealed_limits();
+    if options.buffered.enabled() {
+        if sealed.is_some() {
+            return Err(Failure::usage(
+                "--buffered cannot be combined with --sealed",
+            ));
+        }
+        if options.budget.records.is_some()
+            || options.budget.rows.is_some()
+            || options.budget.scratch.is_some()
+        {
+            return Err(Failure::usage(
+                "native --max-snapshot-records, --max-result-rows and --max-scratch-entries \
+                 do not apply to buffered analytics; use --buffer-*, --graph-staging-bytes \
+                 and --graph-workspace-bytes limits",
+            ));
+        }
+    }
     if sealed.is_some() {
         // These checks must precede the writable open needed for the temporary
         // seal. Unsupported algorithms never fall back to decoded adjacency.
@@ -356,6 +397,22 @@ pub(super) fn run(
     render(result, robot, out)
 }
 
+/// The extent cache and graph source use the buffered view's allowances;
+/// selected staging, decoded CSR and execution retain their Prism limits.
+pub(super) async fn run_buffered<V: Vfs + Clone>(
+    view: &mut BufferedReadView<V>,
+    cx: &QueryCx,
+    prepared: &Prepared,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let result = view
+        .execute_fnx(cx, &prepared.call, prepared.read)
+        .await
+        .map_err(super::execution_failure)?;
+    render(result, robot, out)
+}
+
 /// The temporary seal is bound to the engine's pinned source and is not
 /// published as durable graph authority. Its resident preparation and the
 /// projection directory retain their separate engine admissions.
@@ -378,12 +435,12 @@ pub(super) async fn run_sealed(
 
 fn render(result: FnxReadResult, robot: bool, out: &mut impl Write) -> Result<(), Failure> {
     let analytics = result.analytics;
-    let cells = analytics
-        .rows
-        .iter()
-        .map(|row| row.iter().map(|value| cell(*value, robot)).collect())
-        .collect();
-    render_rows(
+    let cells = analytics.rows.iter().map(|row| {
+        row.iter()
+            .map(|value| cell(*value, robot))
+            .collect::<Vec<_>>()
+    });
+    render_rows_iter(
         &analytics.columns,
         cells,
         analytics.certificate.snapshot.as_of.0,

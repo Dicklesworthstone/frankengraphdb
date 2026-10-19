@@ -2433,6 +2433,194 @@ fn sealed_analytics_matches_decoded(db: &TestDb, args: &[&str]) -> Outcome {
     sealed
 }
 
+fn buffered_analytics_matches_decoded(db: &TestDb, args: &[&str]) -> Outcome {
+    let decoded = db.command("query", args);
+    decoded.success();
+    let mut buffered_args = vec!["--buffered", "--buffer-memory-bytes", "8388608"];
+    buffered_args.extend_from_slice(args);
+    let buffered = db.command("query", &buffered_args);
+    buffered.success();
+    assert_eq!(buffered.events, decoded.events, "{args:?}");
+    buffered
+}
+
+#[test]
+fn buffered_prism_cli_preserves_analytics_projection_history_and_delivery() {
+    let db = TestDb::new("prism-buffered");
+    db.create();
+    // Invalid weights outside either induced selection must never be observed.
+    // E remains an isolate even though an excluded relation touches it.
+    let basis = db.write(&[
+        "--relation",
+        "OTHER=2",
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (d:Person {name:'D'}),(e:Person {name:'E'}),(x {name:'X'}),\
+         (a)-[:KNOWS {born:2}]->(b),(b)-[:KNOWS {born:3}]->(c),\
+         (c)-[:KNOWS {born:4}]->(a),(a)-[:KNOWS {born:7}]->(d),\
+         (e)-[:OTHER {born:'not a weight'}]->(a),(a)-[:KNOWS {born:'not a weight'}]->(x)",
+    ]);
+    let id = vertex_ids(&db);
+    let source = format!("source=vertex:{}", id["A"]);
+    let projection = [
+        "--graph-label",
+        "Person",
+        "--graph-relation",
+        "KNOWS",
+        "--weight",
+        "born",
+        "--param",
+        &source,
+    ];
+    let dijkstra =
+        "CALL fnx.single_source_dijkstra_path_length($source,NULL,true) YIELD vertex,distance";
+    for (direction, call) in [
+        (
+            "directed",
+            "CALL fnx.pagerank(0.85,1000,1e-9,true) YIELD vertex,score AS rank",
+        ),
+        (
+            "reversed",
+            "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
+        ),
+        ("directed", dijkstra),
+        (
+            "directed",
+            "CALL fnx.weakly_connected_components() YIELD vertex,component",
+        ),
+        (
+            "reversed",
+            "CALL fnx.strongly_connected_components() YIELD component AS group_id,vertex",
+        ),
+        (
+            "undirected",
+            "CALL fnx.connected_components() YIELD vertex,component",
+        ),
+        ("undirected", "CALL fnx.triangles() YIELD vertex,triangles"),
+        (
+            "undirected",
+            "CALL fnx.clustering_coefficient() YIELD vertex,score AS coefficient",
+        ),
+    ] {
+        let mut args = projection.to_vec();
+        args.extend_from_slice(&["--direction", direction, call]);
+        let output = buffered_analytics_matches_decoded(&db, &args);
+        assert_eq!(output.sequence("rows"), basis);
+        if call == dijkstra {
+            let distances: BTreeMap<_, f64> = output
+                .events
+                .iter()
+                .filter(|event| event.get("event").string() == "row")
+                .map(|event| {
+                    let cells = event.get("cells").array();
+                    (
+                        cells[0].get("value").string().to_owned(),
+                        cells[1].get("value").string().parse().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                distances,
+                BTreeMap::from([
+                    (id["A"].clone(), 0.0),
+                    (id["B"].clone(), 2.0),
+                    (id["C"].clone(), 5.0),
+                    (id["D"].clone(), 7.0),
+                ])
+            );
+        }
+        if call.contains("connected_components") {
+            assert_eq!(output.terminal().get("count").unsigned(), 5);
+        }
+    }
+    let current =
+        db.write(&["MATCH (a:Person {name:'A'})-[e:KNOWS]->(b:Person {name:'B'}) SET e.born=9"]);
+    db.command("compact", &[]).success();
+    let old_cut = basis.to_string();
+    let mut old_args = projection.to_vec();
+    old_args.extend_from_slice(&["--as-of", &old_cut, dijkstra]);
+    let old = buffered_analytics_matches_decoded(&db, &old_args);
+    assert_eq!(old.sequence("rows"), basis);
+    let mut current_args = projection.to_vec();
+    current_args.push(dijkstra);
+    let latest = buffered_analytics_matches_decoded(&db, &current_args);
+    assert_eq!(latest.sequence("rows"), current);
+    let distance_to_b = |output: &Outcome| {
+        output
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .find_map(|event| {
+                let cells = event.get("cells").array();
+                (cells[0].get("value").string() == id["B"])
+                    .then(|| cells[1].get("value").string().parse::<f64>().unwrap())
+            })
+            .unwrap()
+    };
+    assert_eq!(distance_to_b(&old), 2.0);
+    assert_eq!(distance_to_b(&latest), 9.0);
+}
+
+#[test]
+fn buffered_prism_cli_preflights_incompatible_or_unbound_inputs_before_open() {
+    let missing = TestDb::new("prism-buffered-preflight");
+    let call = "CALL fnx.pagerank() YIELD vertex,score";
+    for args in [
+        vec!["--buffered", "--sealed", call],
+        vec!["--buffered", "--spill-dir", ".", call],
+        vec!["--buffered", "--max-snapshot-records", "100000", call],
+        vec!["--buffered", "--max-result-rows", "100000", call],
+        vec!["--buffered", "--max-scratch-entries", "10000000", call],
+        vec!["--buffered", "--graph-staging-bytes", "-1", call],
+        vec![
+            "--buffered",
+            "--graph-workspace-bytes",
+            "1",
+            "--graph-workspace-bytes",
+            "2",
+            call,
+        ],
+        vec!["--graph-staging-bytes", "0", "MATCH (n) RETURN n"],
+    ] {
+        missing.command("query", &args).failure(2, "usage");
+        assert!(!std::path::Path::new(&missing.db).exists());
+    }
+    for call in [
+        "CALL fnx.not_registered() YIELD vertex",
+        "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
+        "CALL fnx.pagerank(true) YIELD vertex,score",
+    ] {
+        missing
+            .command("query", &["--buffered", call])
+            .failure(3, "query");
+        assert!(!std::path::Path::new(&missing.db).exists());
+    }
+}
+
+#[test]
+fn buffered_prism_cli_enforces_physical_and_selected_graph_limits_before_columns() {
+    let db = TestDb::new("prism-buffered-limits");
+    db.create();
+    db.write(&["INSERT (a:Person),(b:Person),(a)-[:KNOWS]->(b)"]);
+    let call = "CALL fnx.pagerank() YIELD vertex,score";
+    for flag in [
+        "--buffer-memory-bytes",
+        "--buffer-source-bytes",
+        "--max-work-units",
+    ] {
+        db.command("query", &["--buffered", flag, "0", call])
+            .failure(4, "open");
+    }
+    for flag in ["--graph-staging-bytes", "--graph-workspace-bytes"] {
+        db.command("query", &["--buffered", flag, "0", call])
+            .failure(3, "query");
+        // The graph limits are explicit Prism limits on the resident route too.
+        db.command("query", &[flag, "0", call]).failure(3, "query");
+    }
+    db.command("query", &["--buffered", "--as-of", "999", call])
+        .failure(3, "query");
+    buffered_analytics_matches_decoded(&db, &[call]);
+}
+
 #[test]
 fn sealed_prism_cli_matches_decoded_algorithms_and_historical_weights() {
     let db = TestDb::new("prism-sealed");
