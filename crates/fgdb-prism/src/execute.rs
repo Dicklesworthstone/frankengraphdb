@@ -904,9 +904,8 @@ fn pagerank_with_threads<C>(
 }
 
 impl FnxCallSpec {
-    /// Execute a bound in-core call. Native kernels check live cancellation
-    /// within graph passes; catalog entries still delegated to fnx observe
-    /// it before and after the foundation computation. Kernel workspace
+    /// Execute a bound in-core call. Native kernels, including catalog entries,
+    /// check live cancellation within graph passes. Kernel workspace
     /// depends on the kernel; weighted PageRank retains O(n+m) scratch while
     /// borrowing the projection's adjacency.
     /// The callback may cancel but this synchronous API does not provide an
@@ -1000,8 +999,7 @@ impl FnxCallSpec {
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 crate::clustering::workspace_bytes::<C>(n, graph.edge_count())?
             }
-            // Native catalog kernels return their reserved vector peak;
-            // delegated entries retain the explicit graph-copy estimate.
+            // Native catalog kernels return their reserved vector peak.
             FnxAlgorithm::Foundation(_) => 0,
             _ => {
                 let bytes_per_vertex = match algorithm {
@@ -1188,6 +1186,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("foundation/native.rs"));
         hash_text(&mut hash, include_str!("foundation/eigenvector.rs"));
         hash_text(&mut hash, include_str!("foundation/brandes.rs"));
+        hash_text(&mut hash, include_str!("foundation/distance.rs"));
         hash.finalize()
     })
 }

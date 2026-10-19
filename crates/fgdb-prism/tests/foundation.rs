@@ -1,6 +1,6 @@
-//! Foundation procedures and their declared native fast paths. Degree, core
-//! eigenvector and betweenness run over the admitted CSR and are checked against pinned fnx
-//! and independent expectations. Other procedures retain the foundation copy.
+//! Foundation procedures and their declared native fast paths. Every registered
+//! foundation kernel borrows the admitted CSR and is checked against pinned fnx
+//! and independent expectations.
 //! All paths keep canonical VId mapping, admission, refusals and provenance.
 
 use fgdb_prism::*;
@@ -404,20 +404,7 @@ fn counted_foundation_call(
         // Initial/admission/delivery units plus the former constructor's
         // 2*n and the unchanged pre/post foundation-kernel units.
         assert_eq!(units, 4 * graph.node_count() + 5, "{name}");
-        let expected: usize = (0..graph.node_count())
-            .map(|source| {
-                graph
-                    .neighbors_indices(source)
-                    .unwrap()
-                    .len()
-                    .div_ceil(FNX_METER_RUN)
-            })
-            .sum();
-        if name == "betweenness_centrality" {
-            assert!(polls > 0, "native Brandes must check live control");
-        } else {
-            assert_eq!(polls, expected, "{name}");
-        }
+        assert!(polls > 0, "native {name} must check live control");
     }
     result
 }
@@ -678,6 +665,8 @@ fn native_foundation_preserves_every_logical_refusal_and_loop_precedence() {
             "core_number",
             "eigenvector_centrality",
             "betweenness_centrality",
+            "closeness_centrality",
+            "harmonic_centrality",
         ] {
             let mut complete = NativeControl::default();
             let actual = call(name)
@@ -714,6 +703,8 @@ fn native_foundation_preserves_every_logical_refusal_and_loop_precedence() {
         "core_number",
         "eigenvector_centrality",
         "betweenness_centrality",
+        "closeness_centrality",
+        "harmonic_centrality",
     ] {
         for ordinal in [loop_unit, loop_unit + 1] {
             let stop = NativeStop::Work(ordinal);
@@ -738,6 +729,73 @@ fn native_foundation_preserves_every_logical_refusal_and_loop_precedence() {
                 .execute(&dropped, limits(1 << 20), &mut NativeControl::default())
                 .is_ok()
         );
+    }
+}
+
+#[test]
+fn native_distance_calls_certify_vertex_scratch_and_stop_at_every_live_poll() {
+    let n = 65;
+    let vertices: Vec<_> = (0..n).map(|i| ((i as u128) << 64) | 17).collect();
+    let star: Vec<_> = (1..n)
+        .map(|target| (vertices[0], vertices[target]))
+        .collect();
+    let clique: Vec<_> = (0..n)
+        .flat_map(|source| (source + 1..n).map(move |target| (source, target)))
+        .map(|(source, target)| (vertices[source], vertices[target]))
+        .collect();
+    for (name, kernel) in [
+        (
+            "closeness_centrality",
+            "fgdb-prism/closeness-csr-batched-policy-v1",
+        ),
+        (
+            "harmonic_centrality",
+            "fgdb-prism/harmonic-csr-batched-policy-v1",
+        ),
+    ] {
+        let mut workspace = None;
+        for edges in [&[][..], star.as_slice(), clique.as_slice()] {
+            let graph = view(&vertices, edges, SelfLoopPolicy::Keep);
+            let result = run(name, &graph);
+            assert_eq!(result.certificate.execution_kernel, kernel);
+            assert_eq!(
+                result.certificate.registry_version,
+                FNX_SIGNATURE_REGISTRY_VERSION
+            );
+            // Fixed source batches need the same backing for isolates, a hub
+            // and a clique. No copied edge arrays hide in this certificate.
+            if let Some(bytes) = workspace {
+                assert_eq!(result.certificate.kernel_workspace_bytes, bytes);
+            } else {
+                workspace = Some(result.certificate.kernel_workspace_bytes);
+            }
+            assert!(result.certificate.kernel_workspace_bytes >= n * size_of::<f64>());
+        }
+        assert_eq!(
+            run(name, &view(&[], &[], SelfLoopPolicy::Keep))
+                .certificate
+                .kernel_workspace_bytes,
+            0
+        );
+
+        let graph = path();
+        let mut complete = NativeControl::default();
+        call(name)
+            .execute(&graph, limits(1 << 20), &mut complete)
+            .unwrap();
+        assert!(!complete.polls.is_empty());
+        for ordinal in 1..=complete.polls.len() {
+            let stop = NativeStop::Poll(ordinal);
+            let mut control = NativeControl {
+                stop: Some(stop),
+                ..Default::default()
+            };
+            assert!(
+                matches!(call(name).execute(&graph, limits(1 << 20), &mut control), Err(FnxExecutionError::Cancelled(observed)) if observed == stop)
+            );
+            assert_eq!(control.polls.len(), ordinal);
+            assert!(control.stopped);
+        }
     }
 }
 

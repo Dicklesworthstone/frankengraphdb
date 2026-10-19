@@ -1,29 +1,31 @@
 //! The pinned franken_networkx catalog and its differential native kernels.
 //!
-//! Degree centrality, core decomposition, eigenvector power iteration and
-//! Brandes betweenness
+//! Degree centrality, core decomposition, eigenvector power iteration,
+//! Brandes betweenness, closeness and harmonic centrality
 //! borrow the admitted CSR directly. They preserve the catalog's logical
 //! charges and check live control during arithmetic. Certificates identify
 //! these kernels and their actual vector allocation peak; the projection
 //! remains an in-core DECODED_CACHE.
 //!
-//! The remaining foundation entry points take `&fnx_classes::Graph` and need
-//! a second, string-keyed graph copy. Validated bulk construction avoids
-//! per-edge names, compatibility records and linear adjacency duplicate scans;
-//! fixed name scratch and live polls bound construction batches. Those calls
-//! observe cancellation before and after the foundation computation, whose
-//! allocations and kernels remain synchronous. Native eigenvector iteration matches
+//! No registered foundation entry constructs a second graph. Distance
+//! centralities retain bit-parallel BFS for favorable graphs and use
+//! independent source traversals for high-diameter or disconnected inputs.
+//! Native eigenvector iteration matches
 //! the checked foundation entry's convergence and refusal semantics. Katz
 //! remains unregistered because its checked entry drops the result and
 //! witness on non-convergence.
 
 mod brandes;
+mod distance;
 mod eigenvector;
 mod native;
 
-use crate::execute::{FnxMeter, KernelOutput, KernelValues};
-use crate::{FNX_METER_RUN, FnxExecutionError, FoundationAlgorithm, SnapshotGraphView};
-use fnx_algorithms::{CentralityScore, ComplexityWitness, GraphView};
+#[cfg(test)]
+use crate::FNX_METER_RUN;
+use crate::execute::{FnxMeter, KernelOutput};
+use crate::{FnxExecutionError, FoundationAlgorithm, SnapshotGraphView};
+use fnx_algorithms::GraphView;
+#[cfg(test)]
 use fnx_classes::Graph;
 
 const EIGENVECTOR_MAX_ITERATIONS: usize = 100;
@@ -48,19 +50,12 @@ pub(crate) fn estimated_work(
     }
 }
 
-/// The copy's own backing: one owned 32-hex name per vertex, and one entry
-/// per adjacency slot. fnx's internal working vectors are not counted.
-pub(crate) fn copy_bytes(n: usize, arcs: usize) -> Option<usize> {
-    let per_vertex = 32usize.checked_add(size_of::<String>())?;
-    n.checked_mul(per_vertex)?
-        .checked_add(arcs.checked_mul(size_of::<usize>())?)
-}
-
 /// Keep the original charged order: one unit per node, then one per source
 /// row. Live polls bound each edge-copy batch without inventing charged edge
 /// units. The copy stays private on refusal, including a failure after only
 /// part of a node batch was charged. Allocator calls inside fnx remain
 /// synchronous; this does not claim to preempt its allocations or kernels.
+#[cfg(test)]
 fn copy_graph<C>(
     graph: &SnapshotGraphView,
     checkpoint: &mut impl FnxMeter<C>,
@@ -116,100 +111,37 @@ fn copy_graph<C>(
 pub(crate) fn run<C>(
     graph: &SnapshotGraphView,
     algorithm: FoundationAlgorithm,
-    arcs: usize,
+    _arcs: usize,
     checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
     let n = graph.node_count();
-    if matches!(
-        algorithm,
-        FoundationAlgorithm::DegreeCentrality
-            | FoundationAlgorithm::CoreNumber
-            | FoundationAlgorithm::EigenvectorCentrality
-            | FoundationAlgorithm::BetweennessCentrality
-    ) {
-        // Retain the copy path's node and source-row charge phases, including
-        // the exact self-loop refusal checkpoint. No node names are created.
-        for _ in 0..n {
-            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-        }
-        for source in 0..n {
-            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-            let row = graph
-                .neighbors_indices(source)
-                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-            // Projection rows are sorted, simple and immutable. A degree
-            // query need not scan every arc merely to reject a self-loop.
-            if row.binary_search(&source).is_ok() {
-                return Err(FnxExecutionError::SelfLoopRefused);
-            }
-        }
+    // Retain the copy path's node and source-row charge phases, including
+    // the exact self-loop refusal checkpoint. No node names are created.
+    for _ in 0..n {
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-        let result = match algorithm {
-            FoundationAlgorithm::DegreeCentrality => native::degree(graph, checkpoint)?,
-            FoundationAlgorithm::CoreNumber => native::core(graph, checkpoint)?,
-            FoundationAlgorithm::EigenvectorCentrality => eigenvector::run(graph, checkpoint)?,
-            FoundationAlgorithm::BetweennessCentrality => brandes::run(graph, checkpoint)?,
-            _ => return Err(FnxExecutionError::InvalidUpstreamResult),
-        };
-        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-        return Ok(result);
     }
-
-    let workspace = copy_bytes(n, arcs).ok_or(FnxExecutionError::SizeOverflow)?;
-    let copy = copy_graph(graph, checkpoint)?;
+    for source in 0..n {
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+        let row = graph
+            .neighbors_indices(source)
+            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        // Projection rows are sorted, simple and immutable. Self-loop
+        // validation needs no extra traversal of all admitted arcs.
+        if row.binary_search(&source).is_ok() {
+            return Err(FnxExecutionError::SelfLoopRefused);
+        }
+    }
     checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-    let output = match algorithm {
-        FoundationAlgorithm::ClosenessCentrality => {
-            let result = fnx_algorithms::closeness_centrality(&copy);
-            scores(graph, result.scores, result.witness)?
-        }
-        FoundationAlgorithm::HarmonicCentrality => {
-            let result = fnx_algorithms::harmonic_centrality(&copy);
-            scores(graph, result.scores, result.witness)?
-        }
-        FoundationAlgorithm::DegreeCentrality
-        | FoundationAlgorithm::CoreNumber
-        | FoundationAlgorithm::EigenvectorCentrality
-        | FoundationAlgorithm::BetweennessCentrality => {
-            return Err(FnxExecutionError::InvalidUpstreamResult);
-        }
+    let result = match algorithm {
+        FoundationAlgorithm::DegreeCentrality => native::degree(graph, checkpoint)?,
+        FoundationAlgorithm::CoreNumber => native::core(graph, checkpoint)?,
+        FoundationAlgorithm::EigenvectorCentrality => eigenvector::run(graph, checkpoint)?,
+        FoundationAlgorithm::BetweennessCentrality => brandes::run(graph, checkpoint)?,
+        FoundationAlgorithm::ClosenessCentrality => distance::run::<false, C>(graph, checkpoint)?,
+        FoundationAlgorithm::HarmonicCentrality => distance::run::<true, C>(graph, checkpoint)?,
     };
     checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-    Ok((output, workspace))
-}
-
-/// One finite score per projected vertex, indexed by its canonical ordinal.
-fn scores<C>(
-    graph: &SnapshotGraphView,
-    scores: Vec<CentralityScore>,
-    witness: ComplexityWitness,
-) -> Result<KernelOutput, FnxExecutionError<C>> {
-    let n = graph.node_count();
-    let mut values = vec![None; n];
-    for entry in scores {
-        let index = graph
-            .get_node_index(&entry.node)
-            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-        if !entry.score.is_finite() {
-            return Err(FnxExecutionError::InvalidNumericResult);
-        }
-        if values[index].replace(entry.score).is_some() {
-            return Err(FnxExecutionError::InvalidUpstreamResult);
-        }
-    }
-    Ok(KernelOutput {
-        values: KernelValues::Scores(complete(values)?),
-        row_count: n,
-        witness,
-    })
-}
-
-/// Every vertex answered exactly once; a missing one is an upstream defect.
-fn complete<T, C>(values: Vec<Option<T>>) -> Result<Vec<T>, FnxExecutionError<C>> {
-    values
-        .into_iter()
-        .collect::<Option<Vec<T>>>()
-        .ok_or(FnxExecutionError::InvalidUpstreamResult)
+    Ok(result)
 }
 
 #[cfg(test)]

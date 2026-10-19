@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 9;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 10;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -290,14 +290,14 @@ const SIGNATURES: &[FnxSignature] = &[
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; Wasserman-Faust reachable-set closeness per connected component",
         "O(|V| * (|V| + |E|))",
-        "fnx-algorithms/closeness_centrality",
+        "fgdb-prism/closeness-csr-batched-policy-v1",
     ),
     foundation(
         "fnx.harmonic_centrality",
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; sum of reciprocal hop distances to every other reachable vertex",
         "O(|V| * (|V| + |E|))",
-        "fnx-algorithms/harmonic_centrality",
+        "fgdb-prism/harmonic-csr-batched-policy-v1",
     ),
     foundation(
         "fnx.betweenness_centrality",
@@ -337,7 +337,7 @@ const SIGNATURES: &[FnxSignature] = &[
 
 /// A catalog row: one undirected, unweighted, parameter-free graph input
 /// over the admitted decoded projection, with results in VId order. Its
-/// execution identity distinguishes native CSR kernels from fnx graph copies.
+/// execution identity names the native CSR kernel and its numeric profile.
 const fn foundation(
     name: &'static str,
     value: FnxOutput,
@@ -592,8 +592,8 @@ impl FnxAlgorithm {
 }
 
 /// Catalog algorithms over the admitted in-core DECODED_CACHE. Each signature
-/// identifies whether a native CSR kernel or a copied-Graph fnx entry executes
-/// the computation. The ordinal selects the row after the first eight kernels.
+/// identifies the native CSR kernel and its pinned numeric profile. The ordinal
+/// selects the row after the first eight kernels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FoundationAlgorithm {
