@@ -20,6 +20,7 @@ use fgdb_prism::{
 pub(super) enum AnalyticSource {
     Components(components::ComponentRelation),
     CoreNumbers(RelationId),
+    TriangleCounts(RelationId),
 }
 
 /// The compiler and subscription footprint share one source-free admission.
@@ -72,6 +73,11 @@ pub(super) fn analytic_procedure(
                 FnxOutput::Core,
             )
         }
+        FnxAlgorithm::Triangles if options.projection.self_loops == SelfLoopPolicy::Drop => (
+            AnalyticSource::TriangleCounts(relation),
+            GraphSetColumnType::Scalar,
+            FnxOutput::Triangles,
+        ),
         _ => return Err(StandingQueryError::Unsupported),
     };
     let mut projection = Vec::with_capacity(bound.outputs().len());
@@ -230,6 +236,12 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                     self.database
                         .prepare_standing_core_numbers(cx, relation, policy, true)?,
                 )),
+                AnalyticSource::TriangleCounts(relation) => {
+                    StandingQuery::TriangleCounts(Box::new(
+                        self.database
+                            .prepare_standing_triangle_counts(cx, relation, policy)?,
+                    ))
+                }
             };
             let input = self.append(state);
             checkpoint()?;
@@ -580,6 +592,7 @@ fn rebuild_checked<V: Vfs + Clone>(
             StandingQuery::Window(query) => mark(query.input, inherited)?,
             StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {}
             StandingQuery::CoreNumbers(query) if query.has_value_rows() => {}
+            StandingQuery::TriangleCounts(_) => {}
             StandingQuery::Components(query)
                 if matches!(
                     query.relation,
@@ -627,6 +640,11 @@ fn rebuild_checked<V: Vfs + Clone>(
                     )?,
                 ))
             }
+            StandingQuery::TriangleCounts(query) => StandingQuery::TriangleCounts(Box::new(
+                staged
+                    .database
+                    .prepare_standing_triangle_counts(cx, query.relation, policy)?,
+            )),
             StandingQuery::Rows { output, .. } => {
                 staged
                     .database
@@ -827,3 +845,6 @@ mod component_tests;
 
 #[cfg(test)]
 mod core_tests;
+
+#[cfg(test)]
+mod triangle_tests;

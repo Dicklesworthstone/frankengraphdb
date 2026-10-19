@@ -76,6 +76,12 @@ impl PreparedNativeRead {
     /// under the same projection profile with self-loops explicitly dropped.
     /// Their checked integer rows and derivatives are retained only for native
     /// registration; typed core-number views do not acquire a second row sink.
+    /// Triangle CALLs under the explicit undirected/unit/collapse/drop profile
+    /// maintain exact per-vertex counts, including live zero-count isolates.
+    /// The source retains linear vertex result/incidence state and consumes
+    /// signed triangle changes; it does not retain the typed triple table or
+    /// rescan it per tick. Bootstrap still materializes the initial triangle
+    /// derivative, and changed-triangle scratch remains governed by policy.
     /// Historical selectors refuse: a fixed historical answer is not a current
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
     /// Set registration owns a bounded row/set/join/projection tree; admission and

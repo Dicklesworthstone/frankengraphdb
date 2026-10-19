@@ -187,7 +187,7 @@ fn owner_count_limits_and_output_expressions_keep_the_native_finalizer() {
         let mut db = Database::open_memory(&contexts.commit(), keys())
             .await
             .unwrap();
-        history(&mut db, &contexts.commit()).await;
+        let _ = history(&mut db, &contexts.commit()).await;
         let view = db.read_session().unwrap();
         for text in [
             "MATCH (n) RETURN COUNT(*) AS total",
@@ -239,7 +239,7 @@ fn owner_count_limits_and_output_expressions_keep_the_native_finalizer() {
             let records = full.rows.snapshot_records;
             assert!(matches!(
                 db.execute_graph_aggregate_governed(&contexts.query(), &query, GqlQueryPolicy::new(records - 1, u64::MAX, u64::MAX, u64::MAX)),
-                Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords && error.observed == u128::from(records)
+                Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords && error.observed == records
             ));
             if full.rows.result_rows > 0 {
                 assert!(matches!(
@@ -296,7 +296,7 @@ fn owner_count_history_fences_precede_cancellation_and_empty_page_limits() {
                 let mut db = Database::open_memory(&contexts.commit(), keys())
                     .await
                     .unwrap();
-                history(&mut db, &contexts.commit()).await;
+                let _ = history(&mut db, &contexts.commit()).await;
                 let view = db.read_session().unwrap();
                 let query = aggregate("MATCH (n) RETURN COUNT(*) AS total LIMIT 0");
                 let refused = GqlQueryPolicy::new(0, 0, 0, 0);
