@@ -144,10 +144,7 @@ fn aggregate_equality_cannot_hide_an_earlier_fallible_filter() {
         let mut cursor = db
             .query_aggregate_stream(&cx, text, &GqlParameters::new(), symbols(), wide())
             .unwrap();
-        assert!(matches!(
-            cursor.next(),
-            Some(Err(QueryError::AggregateStream(GqlQueryError::Data(_))))
-        ));
+        assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Data(_)))));
         assert_eq!(cursor.row_stats().snapshot_records, 1);
         assert_eq!(cursor.state(), VertexScanState::Failed);
         assert!(cursor.next().is_none());

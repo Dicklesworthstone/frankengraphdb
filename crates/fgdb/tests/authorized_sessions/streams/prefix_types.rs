@@ -161,13 +161,16 @@ fn authorized_prefixes_preserve_scope_limits_and_pins_in_every_driver() {
                 )
                 .unwrap();
             let prepared = session.prepare(&cx, PREFIX, &args).unwrap();
-            let mut local = session.stream(&cx, &prepared, &args).unwrap();
-            let columns = local.columns().to_vec();
-            let rows = local.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
-            assert_eq!(rows, expected(hidden), "hidden={hidden}");
-            assert_eq!(rows_result(&columns, rows), eager);
-            assert_eq!(local.state(), VertexScanState::Exhausted);
-            drop(local);
+            // Scoped, not dropped: the local cursor is not Send, and a binding
+            // that outlives an await keeps the lab future from being Send.
+            {
+                let mut local = session.stream(&cx, &prepared, &args).unwrap();
+                let columns = local.columns().to_vec();
+                let rows = local.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                assert_eq!(rows, expected(hidden), "hidden={hidden}");
+                assert_eq!(rows_result(&columns, rows), eager);
+                assert_eq!(local.state(), VertexScanState::Exhausted);
+            }
             let aggregate = session
                 .prepare(
                     &cx,

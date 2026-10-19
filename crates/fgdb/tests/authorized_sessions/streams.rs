@@ -82,13 +82,16 @@ fn authorized_equality_streams_seek_only_admitted_candidates_in_both_drivers() {
             )
             .unwrap();
         let prepared = session.prepare(&cx, text, &args).unwrap();
-        let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
-        let columns = cursor.columns().to_vec();
-        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(rows, expected);
-        assert_eq!(rows_result(&columns, rows), eager);
-        assert_eq!(cursor.state(), VertexScanState::Exhausted);
-        drop(cursor);
+        // Scoped, not dropped: the local cursor is not Send, and a binding
+        // that outlives an await keeps the lab future from being Send.
+        {
+            let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
+            let columns = cursor.columns().to_vec();
+            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(rows, expected);
+            assert_eq!(rows_result(&columns, rows), eager);
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        }
         let mut cursor = session.stream_send(&cx, &prepared, &args).unwrap();
         fn assert_send<T: Send>(_: &T) {}
         assert_send(&cursor);
