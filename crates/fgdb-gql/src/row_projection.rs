@@ -24,8 +24,18 @@ mod unwind;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowProjectionBuildError {
-    InputWidth { observed: usize },
-    ColumnCount { input: usize, columns: usize },
+    InputWidth {
+        observed: usize,
+    },
+    ColumnCount {
+        input: usize,
+        columns: usize,
+    },
+    OutputType {
+        column: usize,
+        inferred: GraphSetColumnType,
+        declared: GraphSetColumnType,
+    },
     Projection(GraphSetProjectionError),
     Filter(GraphSetFilterError),
 }
@@ -102,6 +112,34 @@ impl RowProjectionSpec {
             filter: Box::new([]),
             expand_last: false,
         })
+    }
+
+    /// Widen only the declared output domains of already-checked expressions.
+    /// Native procedure schemas can expose Any while a registered kernel
+    /// proves a concrete domain. Every requested domain must contain the
+    /// inferred one; this never narrows Any or converts a value. Input
+    /// admission, expressions, filters and occurrence semantics stay intact.
+    pub fn widen_output_types(
+        mut self,
+        output: Vec<GraphSetColumnType>,
+    ) -> Result<Self, RowProjectionBuildError> {
+        if output.len() != self.types.len() {
+            return Err(RowProjectionBuildError::ColumnCount {
+                input: self.types.len(),
+                columns: output.len(),
+            });
+        }
+        for (column, (&inferred, &declared)) in self.types.iter().zip(&output).enumerate() {
+            if inferred.common_set_domain(declared) != Some(declared) {
+                return Err(RowProjectionBuildError::OutputType {
+                    column,
+                    inferred,
+                    declared,
+                });
+            }
+        }
+        self.types = output.into();
+        Ok(self)
     }
 
     /// Select complete input rows without renaming, deduplicating or changing

@@ -9,7 +9,71 @@ use fgdb_gql::PreparedGraphSetAggregate;
 use fgdb_gql::row_join::RowJoinKind;
 use fgdb_gql::row_projection::RowProjectionSpec;
 use fgdb_gql::row_window::RowWindowSpec;
-use fgdb_gql::{GraphSetOperation, GraphSetQuantifier, PreparedGraphSet};
+use fgdb_gql::{
+    GraphSetColumnType, GraphSetExecutionError, GraphSetOperation, GraphSetProjection,
+    GraphSetQuantifier, GraphSetValue, PreparedGraphSet,
+};
+use fgdb_prism::{FnxAlgorithm, FnxOutput, FnxWeightSpec, ParallelEdgePolicy, SelfLoopPolicy};
+
+/// The compiler and subscription footprint share one source-free admission.
+/// Only the complete, explicit topology contract has an existing derivative;
+/// future duplicates or self-loops cannot silently defeat a Reject policy.
+pub(super) fn component_procedure(
+    query: &PreparedGraphSet,
+) -> Result<Option<(components::ComponentRelation, RowProjectionSpec)>, StandingQueryError> {
+    let Some(call) = query.incremental_procedure() else {
+        return Ok(None);
+    };
+    let bound = crate::query::bind_procedure(call, &[]).map_err(|error| {
+        prepare_error(QueryError::Set(
+            error.map_source(GraphSetExecutionError::Source),
+        ))
+    })?;
+    // Read the immutable input recipe only; no source is pinned or executed
+    // at this placeholder cut. The component owner admits the live snapshot.
+    let options = bound.options_at(CommitSeq(0));
+    let Some(relation) = options.selection.relation else {
+        return Err(StandingQueryError::Unsupported);
+    };
+    if options.selection.vertex_label.is_some()
+        || options.selection.weight != FnxWeightSpec::Unit
+        || options.projection.parallel_edges != ParallelEdgePolicy::CollapseUnit
+        || options.projection.self_loops != SelfLoopPolicy::Drop
+    {
+        return Err(StandingQueryError::Unsupported);
+    }
+    // The shared binder already enforced the registered graph-kind law.
+    // Reversal preserves weak and strong component membership exactly.
+    let relation = match bound.algorithm() {
+        FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => {
+            components::ComponentRelation::Weak(relation)
+        }
+        FnxAlgorithm::StronglyConnectedComponents => {
+            components::ComponentRelation::Strong(relation)
+        }
+        _ => return Err(StandingQueryError::Unsupported),
+    };
+    let mut projection = Vec::with_capacity(bound.outputs().len());
+    for (column, name) in bound.outputs().iter().zip(query.columns()) {
+        let input = match column.field {
+            FnxOutput::Vertex => 0,
+            FnxOutput::Component => 1,
+            _ => return Err(StandingQueryError::Unsupported),
+        };
+        projection.push(GraphSetProjection::new(
+            name.clone(),
+            GraphSetValue::Column(input),
+        ));
+    }
+    let output = RowProjectionSpec::new(
+        vec![GraphSetColumnType::Vertex; 2],
+        projection,
+        GraphSetQuantifier::All,
+    )
+    .and_then(|spec| spec.widen_output_types(query.column_types().to_vec()))
+    .map_err(StandingQueryError::ProjectionSchema)?;
+    Ok(Some((relation, output)))
+}
 
 struct Staging<'a, V: Vfs + Clone> {
     database: &'a mut Database<V>,
@@ -135,6 +199,22 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 .database
                 .prepare_registered_rows(cx, pattern.clone(), policy)?;
             self.append(query)
+        } else if let Some((relation, spec)) = component_procedure(query)? {
+            let state = self
+                .database
+                .prepare_standing_components(cx, relation, policy)?;
+            let input = self.append(StandingQuery::Components(Box::new(state)));
+            checkpoint()?;
+            // Keep aliases, column selection/order and Any procedure domains
+            // in an ordinary maintained projection.
+            let state = self.database.prepare_standing_projection(
+                cx,
+                input,
+                spec,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            self.append(StandingQuery::Projection(Box::new(state)))
         } else if let Some(definition) = query.incremental_group() {
             // Keep the entire selected child relation. The existing exact
             // reducer and checked row sink publish one atomic derivative;
@@ -471,6 +551,12 @@ fn rebuild_checked<V: Vfs + Clone>(
             StandingQuery::Projection(query) => mark(query.input, inherited)?,
             StandingQuery::Window(query) => mark(query.input, inherited)?,
             StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {}
+            StandingQuery::Components(query)
+                if matches!(
+                    query.relation,
+                    components::ComponentRelation::Weak(_)
+                        | components::ComponentRelation::Strong(_)
+                ) => {}
             _ => return Err(StandingQueryError::Unsupported),
         }
     }
@@ -489,6 +575,19 @@ fn rebuild_checked<V: Vfs + Clone>(
                     .database
                     .prepare_standing_constant(cx, query.definition.clone(), policy)?,
             )),
+            StandingQuery::Components(query)
+                if matches!(
+                    query.relation,
+                    components::ComponentRelation::Weak(_)
+                        | components::ComponentRelation::Strong(_)
+                ) =>
+            {
+                StandingQuery::Components(Box::new(staged.database.prepare_standing_components(
+                    cx,
+                    query.relation,
+                    policy,
+                )?))
+            }
             StandingQuery::Rows { output, .. } => {
                 staged
                     .database
@@ -683,3 +782,6 @@ mod join_tests;
 
 #[cfg(test)]
 mod selected_join_tests;
+
+#[cfg(test)]
+mod component_tests;

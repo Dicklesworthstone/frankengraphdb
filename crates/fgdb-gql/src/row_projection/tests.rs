@@ -376,3 +376,69 @@ fn changed_key_work_is_independent_of_unrelated_support_and_occurrence_counts() 
     }
     assert_eq!(results[0], results[1]);
 }
+
+#[test]
+fn output_widening_preserves_vertex_values_multiplicities_and_input_admission() {
+    let typed = RowProjectionSpec::new(
+        vec![GraphSetColumnType::Vertex],
+        vec![GraphSetProjection::new("node", GraphSetValue::Column(0))],
+        GraphSetQuantifier::All,
+    )
+    .unwrap();
+    let widened = typed
+        .clone()
+        .widen_output_types(vec![GraphSetColumnType::Any])
+        .unwrap();
+    assert_eq!(widened.input_types(), &[GraphSetColumnType::Vertex]);
+    assert_eq!(widened.column_types(), &[GraphSetColumnType::Any]);
+    assert_eq!(widened.columns().collect::<Vec<_>>(), vec!["node"]);
+    assert_eq!(widened.quantifier(), GraphSetQuantifier::All);
+
+    let mut typed_rows = IncrementalRowProjection::new(typed.clone());
+    let mut any_rows = IncrementalRowProjection::new(widened);
+    let vertex = GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(u128::MAX))]);
+    for count in [7, -3, -4] {
+        let delta = ZSet::from_updates(
+            [(vertex.clone(), ZWeight::from_i128(count))],
+            LIMBS,
+            &mut allow,
+        )
+        .unwrap();
+        assert_eq!(apply(&mut any_rows, &delta), apply(&mut typed_rows, &delta));
+        assert_eq!(any_rows.rows(), typed_rows.rows());
+        assert_eq!(any_rows.total(), typed_rows.total());
+    }
+    assert!(any_rows.rows().is_empty());
+    // A wider OUTPUT contract never authorizes another INPUT domain.
+    assert!(matches!(
+        any_rows.prepare(&z(&[(Some(1), 1)]), LIMBS, None, &mut allow),
+        Err(RowProjectionError::InputSchema)
+    ));
+    assert!(any_rows.rows().is_empty());
+    assert!(matches!(
+        typed.clone().widen_output_types(vec![]),
+        Err(RowProjectionBuildError::ColumnCount { .. })
+    ));
+    assert!(matches!(
+        typed.widen_output_types(vec![GraphSetColumnType::Scalar]),
+        Err(RowProjectionBuildError::OutputType {
+            column: 0,
+            inferred: GraphSetColumnType::Vertex,
+            declared: GraphSetColumnType::Scalar,
+        })
+    ));
+    let unknown = RowProjectionSpec::new(
+        vec![GraphSetColumnType::Any],
+        vec![GraphSetProjection::new("value", GraphSetValue::Column(0))],
+        GraphSetQuantifier::All,
+    )
+    .unwrap();
+    assert!(matches!(
+        unknown.widen_output_types(vec![GraphSetColumnType::Vertex]),
+        Err(RowProjectionBuildError::OutputType {
+            column: 0,
+            inferred: GraphSetColumnType::Any,
+            declared: GraphSetColumnType::Vertex,
+        })
+    ));
+}
