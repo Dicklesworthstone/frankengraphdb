@@ -875,7 +875,10 @@ impl BoundBooleanExpression {
                     Instruction::Compare { left, right, .. } => ([Some(left), Some(right)], &[]),
                     Instruction::IsNull { operand, .. } => ([Some(operand), None], &[]),
                     Instruction::Expression { columns, .. } => ([None, None], columns),
-                    _ => ([None, None], &[]),
+                    Instruction::Truth(_)
+                    | Instruction::And
+                    | Instruction::Or
+                    | Instruction::Not => ([None, None], &[]),
                 };
             pair.into_iter().flatten().chain(columns)
         })
@@ -906,6 +909,20 @@ impl BoundBooleanExpression {
         self.operands().filter_map(|operand| match operand {
             Operand::Property { variable, key } => Some((*variable, *key)),
             _ => None,
+        })
+    }
+
+    /// Captured-edge properties are a separate domain from vertex properties,
+    /// including eager scalar inputs that do not determine the final truth.
+    pub(crate) fn referenced_edge_properties(
+        &self,
+    ) -> impl Iterator<Item = (BindingSlot, PropertyKeyId)> + '_ {
+        self.operands().filter_map(|operand| match operand {
+            Operand::EdgeProperty { variable, key } => Some((*variable, *key)),
+            Operand::Vertex(_)
+            | Operand::Edge(_)
+            | Operand::Property { .. }
+            | Operand::Literal(_) => None,
         })
     }
 

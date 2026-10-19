@@ -745,6 +745,44 @@ pub(super) struct BoundBooleanTemplate {
 }
 
 impl BoundBooleanTemplate {
+    /// Inspect the same resolved property operands and eager scalar columns
+    /// that binding supplies to the Boolean evaluator. No argument value can
+    /// erase a read, and names distinguish domains rather than entity aliases.
+    /// Keyless scalar columns are element identities; other graph projections
+    /// are refused by `boolean_scalar_expression` before this template exists.
+    pub(super) fn selects_on_any_property(
+        &self,
+        mut property: impl FnMut(crate::GraphSetColumnType, PropertyKeyId) -> bool,
+    ) -> bool {
+        let mut reads = |variable: &str, key| {
+            let kind = if self.edge_variables.iter().any(|name| name == variable) {
+                crate::GraphSetColumnType::Edge
+            } else {
+                crate::GraphSetColumnType::Vertex
+            };
+            property(kind, key)
+        };
+        self.program.iter().any(|item| match item {
+            Item::Atom(atom) => match atom {
+                Atom::Property { variable, key, .. }
+                | Atom::Scalar { variable, key, .. }
+                | Atom::Null { variable, key, .. } => reads(variable, *key),
+                Atom::Properties {
+                    left,
+                    left_key,
+                    right,
+                    right_key,
+                    ..
+                } => reads(left, *left_key) || reads(right, *right_key),
+                Atom::VertexNull { .. } | Atom::Identity { .. } => false,
+            },
+            Item::Expression { columns, .. } => columns
+                .iter()
+                .any(|(variable, key)| key.is_some_and(|key| reads(variable, key))),
+            Item::Truth(_) | Item::And | Item::Or | Item::Not => false,
+        })
+    }
+
     /// Append the resolved unbound program: variable/property identities,
     /// comparisons and structure only. Numeric operands encode as typed
     /// literals or parameter indices through the shared helper; scalar

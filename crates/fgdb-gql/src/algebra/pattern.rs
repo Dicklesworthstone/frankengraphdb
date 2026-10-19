@@ -9,6 +9,7 @@ use super::{
     BindingSlot, EdgeRelation, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphMatchMode,
     GraphPathFunction, GraphWalkSearch, IntegerComparison, VertexPredicate,
 };
+use crate::GraphSetColumnType;
 #[cfg(test)]
 use fgdb_delta_types::RelationId;
 use fgdb_delta_types::{LabelId, PropertyKeyId};
@@ -374,10 +375,11 @@ impl GraphPatternBuilder {
     /// Inspect the bounded selection footprint without compiling or binding
     /// the pattern. Alias names cannot establish disjoint element identities,
     /// so a caller compares fields across every variable in this scope.
-    /// A general Boolean expression conservatively reads every field.
+    /// Boolean operands retain their property keys and vertex/edge domains;
+    /// identity operands do not read mutable properties or labels.
     pub(crate) fn selects_on_any_field(
         &self,
-        mut property: impl FnMut(PropertyKeyId) -> bool,
+        mut property: impl FnMut(GraphSetColumnType, PropertyKeyId) -> bool,
         mut label: impl FnMut(LabelId) -> bool,
     ) -> bool {
         self.variables.iter().any(|variable| {
@@ -385,7 +387,9 @@ impl GraphPatternBuilder {
                 VertexPredicate::HasLabel(value) => label(*value),
                 VertexPredicate::IntegerProperty { key, .. }
                 | VertexPredicate::ScalarProperty { key, .. }
-                | VertexPredicate::PropertyNull { key, .. } => property(*key),
+                | VertexPredicate::PropertyNull { key, .. } => {
+                    property(GraphSetColumnType::Vertex, *key)
+                }
             })
         }) || self
             .property_comparisons
@@ -395,8 +399,18 @@ impl GraphPatternBuilder {
                     left_key,
                     right_key,
                     ..
-                } => property(*left_key) || property(*right_key),
-                PropertyComparison::Boolean(_) => true,
+                } => {
+                    property(GraphSetColumnType::Vertex, *left_key)
+                        || property(GraphSetColumnType::Vertex, *right_key)
+                }
+                PropertyComparison::Boolean(expression) => {
+                    expression
+                        .referenced_vertex_properties()
+                        .any(|(_, key)| property(GraphSetColumnType::Vertex, key))
+                        || expression
+                            .referenced_edge_properties()
+                            .any(|(_, key)| property(GraphSetColumnType::Edge, key))
+                }
             })
     }
 

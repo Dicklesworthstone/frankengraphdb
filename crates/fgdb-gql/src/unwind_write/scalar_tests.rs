@@ -56,7 +56,20 @@ fn multirow_mutations_refuse_selection_feedback_across_fields_aliases_and_scopes
         "MATCH (a:Entity), (b:Entity {id:row.id}) SET a.id=row.p",
         "MATCH (a:Entity) OPTIONAL MATCH (a)-[:R]->(b {id:row.id}) SET a.id=row.p",
         "MATCH (a:Entity) WHERE EXISTS { MATCH (a)-[:R]->(b {id:row.id}) } SET a.id=row.p",
-        "MATCH (n:Entity) WHERE n.id=row.id OR n.p=0 SET n.name='changed'",
+        "MATCH (n:Entity) WHERE n.id=row.id OR n.p=0 SET n.id=row.p",
+        "MATCH (n:Entity) WHERE NOT (n.id=row.id) REMOVE n.id",
+        "MATCH (n:Entity) WHERE abs(n.id)=row.id SET n.id=row.p",
+        "MATCH (n:Entity) WHERE coalesce(0,n.id)=row.id SET n.id=row.p",
+        "MATCH (n:Entity) WHERE upper(n.name)='X' SET n.name='changed'",
+        "MATCH (n:Entity) WHERE n.id IN [row.id,NULL] SET n += {id:row.p}",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p",
+        "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e += {id:row.p}",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id IS NULL SET e.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE abs(e.id)=row.id SET e.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=a.p SET a.p=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=a.p REMOVE e.id",
+        "MATCH (a:Entity) OPTIONAL MATCH (a)-[:R]->(b) WHERE coalesce(b.id,0)=row.id SET a.id=row.p",
+        "MATCH (a:Entity) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE b.id=row.id OR b.p=0 } SET a.id=row.p",
         "MATCH (n:Entity {id:row.id})-[:R]->(m) DETACH DELETE n",
         "MATCH (n:Entity {id:row.id}), (anchor:Entity {id:1}) DETACH DELETE n",
         "MATCH (n:Entity {id:row.id}), (anchor:Entity {id:1}) DELETE n",
@@ -99,6 +112,116 @@ fn disjoint_updates_single_vertex_deletion_and_merges_keep_their_native_programs
         assert_eq!(actual.argument_sets(), 3, "{tail}");
         assert_eq!(actual.program().statements().len(), 3, "{tail}");
     }
+}
+
+#[test]
+fn compound_membership_preserves_disjoint_keys_domains_and_native_statements() {
+    let input = rows(vec![
+        object(vec![("id", int(1)), ("p", int(7))]),
+        object(vec![("id", int(2)), ("p", int(8))]),
+    ]);
+    let frozen = input.canonical_bytes();
+    for tail in [
+        "MATCH (n:Entity) WHERE n.id=row.id OR n.p=0 SET n.name='changed'",
+        "MATCH (n:Entity) WHERE NOT (n.id=row.id) SET n.p=row.p",
+        "MATCH (n:Entity) WHERE abs(n.id)=row.id SET n.p=n.p+row.p",
+        "MATCH (n:Entity) WHERE coalesce(n.id,0)=row.id SET n += {p:row.p}",
+        "MATCH (n:Entity) WHERE n.id IN [row.id,NULL] SET n.name='changed'",
+        "MATCH (n:Entity) WHERE n.id=row.id OR n.id IS NULL SET n:Other",
+        "MATCH (n:Entity) WHERE n.id=row.id OR n.id IS NULL REMOVE n.p",
+        "MATCH (n:Entity) WHERE id(n)=row.id SET n.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE id(e)=row.id SET e.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET a.id=row.p",
+        "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET a.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id IS NULL SET a.id=row.p",
+        "MATCH (a:Entity {id:row.id})-[e:R]->(b) SET e.id=row.p",
+        "MATCH (a:Entity {id:row.id})-[e:R]->(b) SET e += {id:row.p}",
+        "MATCH (a:Entity) OPTIONAL MATCH (a)-[e:R]->(b) WHERE coalesce(e.id,0)=row.id SET a.id=row.p",
+        "MATCH (a:Entity) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE b.id=row.id OR b.p=0 } SET a.name='changed'",
+        "MATCH (a:Entity) WHERE NOT EXISTS { MATCH (a)-[e:R]->(b) WHERE e.id=row.id } SET a.id=row.p",
+    ] {
+        let text = format!("UNWIND $rows AS row {tail}");
+        let definition = GraphUnwindWriteText::parse(&text).unwrap();
+        let actual = definition
+            .bind(&input, RelationId(1), symbols)
+            .unwrap_or_else(|error| panic!("{tail}: {error:?}"));
+        assert_eq!(actual.argument_sets(), 2, "{tail}");
+
+        // The accepted adapter must retain the ordinary native statements,
+        // including each row's values, rather than weakening its predicates.
+        let native_text = tail.replace("row.id", "$id").replace("row.p", "$p");
+        let declarations: Vec<_> = [("id", "row.id"), ("p", "row.p")]
+            .into_iter()
+            .filter(|(_, field)| tail.contains(*field))
+            .map(|(name, _)| (name, GqlParameterType::Scalar(CanonicalScalarKind::Int)))
+            .collect();
+        let native = PreparedGraphWriteScript::prepare_with_parameter_types(
+            &native_text,
+            RelationId(1),
+            &declarations,
+            symbols,
+        )
+        .unwrap();
+        for (row, (id, p)) in [(1, 7), (2, 8)].into_iter().enumerate() {
+            let mut arguments = GqlParameters::new();
+            for (name, value) in [("id", id), ("p", p)] {
+                if declarations.iter().any(|(declared, _)| *declared == name) {
+                    arguments = arguments
+                        .with_scalar(name, CanonicalScalar::Int(value))
+                        .unwrap();
+                }
+            }
+            let expected = native.bind_parameters(&arguments).unwrap();
+            assert_eq!(
+                &actual.program().statements()[row],
+                &expected.statements()[0],
+                "{tail}, row {row}"
+            );
+        }
+        assert_eq!(input.canonical_bytes(), frozen);
+    }
+}
+
+#[test]
+fn nullable_first_rows_never_hide_later_boolean_property_dependencies() {
+    let input = rows(vec![
+        object(vec![("id", null()), ("p", int(2))]),
+        object(vec![("id", int(2)), ("p", int(3))]),
+    ]);
+    let frozen = input.canonical_bytes();
+    for tail in [
+        "MATCH (n:Entity) WHERE n.id=row.id OR n.p=0 SET n.id=row.p",
+        "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e.id=row.p",
+        "MATCH (a:Entity) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE coalesce(b.id,0)=row.id } SET a.id=row.p",
+    ] {
+        let definition =
+            GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}")).unwrap();
+        assert!(matches!(
+            definition.bind(&input, RelationId(1), symbols),
+            Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+        ));
+    }
+    let disjoint = GraphUnwindWriteText::parse(
+        "UNWIND $rows AS row MATCH (n:Entity) WHERE n.id=row.id OR n.id IS NULL SET n.p=row.p",
+    )
+    .unwrap();
+    assert_eq!(
+        disjoint
+            .bind(&input, RelationId(1), symbols)
+            .unwrap()
+            .argument_sets(),
+        2
+    );
+    for tail in [
+        "MATCH (n:Entity {id:row.id}) SET n += row.p",
+        "MATCH (n:Entity {id:row.id}) SET n = row.p",
+    ] {
+        if let Ok(definition) = GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}"))
+        {
+            assert!(definition.bind(&input, RelationId(1), symbols).is_err());
+        }
+    }
+    assert_eq!(input.canonical_bytes(), frozen);
 }
 
 #[test]

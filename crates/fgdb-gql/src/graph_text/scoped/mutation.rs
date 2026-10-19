@@ -703,23 +703,37 @@ impl PreparedGraphMutationText {
     /// data and argument values, not a proof that aliases identify different
     /// elements. RHS-only projections do not restrict the MATCH domain.
     pub(crate) fn feeds_own_match(&self) -> bool {
-        let writes_property = |read| {
+        let writes_property = |read_kind, read| {
             self.actions.iter().any(|action| {
-                let key = match action {
-                    MutationActionTemplate::ParameterProperty { key, .. }
-                    | MutationActionTemplate::IntegerProperty { key, .. }
-                    | MutationActionTemplate::CompositeProperty { key, .. }
+                let (target, key) = match action {
+                    MutationActionTemplate::ParameterProperty { target, key, .. }
+                    | MutationActionTemplate::IntegerProperty { target, key, .. }
+                    | MutationActionTemplate::CompositeProperty { target, key, .. }
                     | MutationActionTemplate::Bound(
-                        GraphMutationAction::SetProperty { key, .. }
-                        | GraphMutationAction::RemoveProperty { key, .. },
-                    ) => Some(*key),
+                        GraphMutationAction::SetProperty { target, key, .. }
+                        | GraphMutationAction::RemoveProperty { target, key },
+                    ) => (*target, *key),
                     MutationActionTemplate::Bound(
                         GraphMutationAction::SetLabel { .. }
                         | GraphMutationAction::DetachDelete { .. }
                         | GraphMutationAction::Delete { .. },
-                    ) => None,
+                    ) => return false,
                 };
-                key == Some(read)
+                if key != read {
+                    return false;
+                }
+                // Action targets are resolved element columns, not RHS
+                // projections. Unknown future target shapes stay conservative.
+                let written_kind = self.selection.columns.get(target).and_then(|column| {
+                    match (column.key, column.path) {
+                        (None, None) => Some(crate::GraphSetColumnType::Vertex),
+                        (None, Some(GraphPathFunction::Edge)) => {
+                            Some(crate::GraphSetColumnType::Edge)
+                        }
+                        _ => None,
+                    }
+                });
+                written_kind.is_none_or(|kind| kind == read_kind)
             })
         };
         let writes_label = |read| {
@@ -746,8 +760,12 @@ impl PreparedGraphMutationText {
         let reads_written_field = |builder: &GraphPatternBuilder, filters: &[BoundFilter]| {
             builder.selects_on_any_field(writes_property, writes_label)
                 || filters.iter().any(|filter| match filter {
-                    BoundFilter::Property { key, .. } => writes_property(*key),
-                    BoundFilter::Boolean(_) => true,
+                    BoundFilter::Property { key, .. } => {
+                        writes_property(crate::GraphSetColumnType::Vertex, *key)
+                    }
+                    BoundFilter::Boolean(expression) => {
+                        expression.selects_on_any_property(writes_property)
+                    }
                     BoundFilter::PathLength { .. } => false,
                 })
         };

@@ -234,6 +234,164 @@ fn rekey_label_and_cascade_feedback_refuse_before_staging_while_disjoint_updates
 }
 
 #[test]
+fn compound_and_edge_filtered_disjoint_batches_preserve_values_and_commit_together() {
+    let ((), report) = run_async_under_lab(0x7363_6123, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for (id, p) in [(1, 10), (2, 0)] {
+            seed.create_vertex(
+                VId(id),
+                vec![ENTITY],
+                vec![
+                    (ID, CanonicalScalar::Int(id as i64)),
+                    (P, CanonicalScalar::Int(p)),
+                ],
+            );
+        }
+        for (id, source, destination, p) in [(1, 1, 2, 50), (2, 2, 1, 60)] {
+            seed.add_edge(
+                EId(id),
+                VId(source),
+                VId(destination),
+                vec![
+                    (ID, CanonicalScalar::Int(id as i64)),
+                    (P, CanonicalScalar::Int(p)),
+                ],
+            );
+        }
+        db.write(&commit, seed).await.unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(99), vec![], vec![]);
+        txn.write(&mut db, prefix).unwrap();
+
+        for (tail, values) in [
+            (
+                "MATCH (n:Entity) WHERE n.id=row.id OR n.p=0 SET n.name='changed'",
+                [(1, 0), (2, 0)],
+            ),
+            (
+                "MATCH (n:Entity) WHERE abs(n.id)=row.id OR n.id=0 SET n.p=n.p+row.p",
+                [(1, 2), (1, 3)],
+            ),
+            (
+                "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET a.id=row.p",
+                [(1, 11), (2, 12)],
+            ),
+            (
+                "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET a.p=coalesce(a.p,0)+row.p",
+                [(1, 100), (2, 200)],
+            ),
+            (
+                "MATCH (a:Entity {id:row.id})-[e:R]->(b) SET e += {id:row.p}",
+                [(11, 101), (12, 102)],
+            ),
+        ] {
+            let input = args(
+                values
+                    .into_iter()
+                    .map(|(id, p)| object(vec![("id", int(id)), ("p", int(p))]))
+                    .collect(),
+            );
+            let frozen = input.canonical_bytes();
+            staged(
+                txn.query_write(
+                    &mut db,
+                    &cx,
+                    &format!("UNWIND $rows AS row {tail}"),
+                    &input,
+                    symbols,
+                    R,
+                    policy(16, 0),
+                    no_allocation,
+                )
+                .unwrap_or_else(|error| panic!("{tail}: {error:?}")),
+                2,
+            );
+            assert_eq!(input.canonical_bytes(), frozen);
+            assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+        }
+
+        // The same edge key remains unsafe when it is also the selection
+        // predicate. Refusal must preserve all successful batches and prefix.
+        let digest = txn.staged_effect_digest().unwrap();
+        let input = args(vec![
+            object(vec![("id", int(101)), ("p", int(102))]),
+            object(vec![("id", int(102)), ("p", int(103))]),
+        ]);
+        for tail in [
+            "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id OR e.p=0 SET e.id=row.p",
+            "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e += {id:row.p}",
+            "MATCH (a:Entity)-[e:R]->(b) WHERE abs(e.id)=row.id SET e.id=row.p",
+        ] {
+            let error = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    &format!("UNWIND $rows AS row {tail}"),
+                    &input,
+                    symbols,
+                    R,
+                    policy(16, 0),
+                    no_allocation,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                QueryWriteError::UnwindBinding(GraphUnwindWriteError::RowFeedsLaterMatch {
+                    statement: 0
+                })
+            ));
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+        }
+        assert_eq!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(2)
+            }
+        );
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+        assert_eq!(db.vertices().unwrap().len(), 3);
+        assert!(db.vertex(VId(99)).unwrap().is_some());
+        for (id, key, p) in [(1, 11, 115), (2, 12, 200)] {
+            assert_eq!(
+                db.vertex(VId(id)).unwrap().unwrap().props,
+                [
+                    (ID, CanonicalScalar::Int(key)),
+                    (P, CanonicalScalar::Int(p)),
+                    (NAME, CanonicalScalar::ucs_basic_text("changed").unwrap()),
+                ]
+            );
+        }
+        assert_eq!(db.edges().unwrap().len(), 2);
+        for (id, key, p) in [(1, 101, 50), (2, 102, 60)] {
+            assert_eq!(
+                db.edge(EId(id)).unwrap().unwrap().props,
+                [
+                    (ID, CanonicalScalar::Int(key)),
+                    (P, CanonicalScalar::Int(p)),
+                ]
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn scalar_upserts_matrix_updates_and_correlated_tags_publish_one_durable_commit() {
     let ((), report) = run_async_under_lab(0x7363_6101, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
