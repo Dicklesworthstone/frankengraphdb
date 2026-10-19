@@ -1,6 +1,7 @@
 //! `query 'CALL fnx.<procedure>(...) YIELD ...'`: registered Prism analytics
-//! over the admitted generation, through the embedded `EmbeddedReadView::call_fnx`
-//! on a read-only open.
+//! over the admitted generation. The default uses the decoded adapter on a
+//! read-only open; --sealed explicitly seals one pinned source and executes
+//! Prism's compressed cursors through a writable embedded database.
 //!
 //! The graph a procedure sees is an EXPLICIT projection chosen by flags, never
 //! an implicit collapse of the stored multigraph:
@@ -17,13 +18,15 @@
 //! `fnx.connected_components` over a directed projection) is refused by Prism,
 //! never silently converted. Arguments are typed `--param` values:
 //! `int:`, `float:`, `bool:`, `null` and `vertex:<id>` for a source vertex.
-use super::{Failure, Options, float_text, render_rows};
-use fgdb::EmbeddedReadView;
+use super::{Failure, Options, decimal_usize, float_text, render_rows};
+use fgdb::{Database, EmbeddedReadView};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
-    Directedness, FnxArgument, FnxParameters, FnxReadOptions, FnxSelection, FnxValue,
-    FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy, ProjectionSpec, SelfLoopPolicy,
+    Directedness, FnxArgument, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions,
+    FnxReadResult, FnxSelection, FnxValue, FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy,
+    ProjectionSpec, SelfLoopPolicy,
 };
+use fgdb_strata::tiered::sealed::SealedLimits;
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::io::Write;
 
@@ -55,10 +58,17 @@ pub(super) struct ProjectionFlags {
     parallel: Option<ParallelEdgePolicy>,
     self_loops: Option<SelfLoopPolicy>,
     as_of: Option<CommitSeq>,
+    sealed: bool,
+    sealed_kernel_bytes: Option<usize>,
+    sealed_result_bytes: Option<usize>,
+    sealed_image_bytes: Option<usize>,
+    sealed_property_bytes: Option<usize>,
+    sealed_rows: Option<usize>,
+    sealed_incidences: Option<usize>,
 }
 
 impl ProjectionFlags {
-    pub(super) const FLAGS: [&str; 8] = [
+    pub(super) const FLAGS: [&str; 14] = [
         "--graph-label",
         "--graph-relation",
         "--weight",
@@ -67,6 +77,12 @@ impl ProjectionFlags {
         "--parallel-edges",
         "--self-loops",
         "--as-of",
+        "--sealed-kernel-bytes",
+        "--sealed-result-bytes",
+        "--sealed-image-bytes",
+        "--sealed-property-bytes",
+        "--sealed-max-rows",
+        "--sealed-max-incidences",
     ];
 
     pub(super) fn is_empty(&self) -> bool {
@@ -78,6 +94,53 @@ impl ProjectionFlags {
             && self.parallel.is_none()
             && self.self_loops.is_none()
             && self.as_of.is_none()
+            && !self.sealed
+            && !self.has_sealed_limits()
+    }
+
+    pub(super) fn enable_sealed(&mut self) -> Result<(), Failure> {
+        if self.sealed {
+            return Err(Failure::usage("--sealed is allowed once"));
+        }
+        self.sealed = true;
+        Ok(())
+    }
+
+    fn has_sealed_limits(&self) -> bool {
+        self.sealed_kernel_bytes.is_some()
+            || self.sealed_result_bytes.is_some()
+            || self.sealed_image_bytes.is_some()
+            || self.sealed_property_bytes.is_some()
+            || self.sealed_rows.is_some()
+            || self.sealed_incidences.is_some()
+    }
+
+    pub(super) fn validate(&self) -> Result<(), Failure> {
+        if !self.sealed && self.has_sealed_limits() {
+            return Err(Failure::usage("--sealed-* limits require --sealed"));
+        }
+        Ok(())
+    }
+
+    fn sealed_limits(&self) -> Option<(FnxMemoryLimits, SealedLimits)> {
+        if !self.sealed {
+            return None;
+        }
+        let defaults = SealedLimits::default();
+        Some((
+            FnxMemoryLimits {
+                max_kernel_workspace_bytes: self.sealed_kernel_bytes.unwrap_or(64 << 20),
+                max_result_bytes: self.sealed_result_bytes.unwrap_or(64 << 20),
+            },
+            SealedLimits {
+                max_rows: self.sealed_rows.unwrap_or(defaults.max_rows),
+                max_incidences: self.sealed_incidences.unwrap_or(defaults.max_incidences),
+                max_image_bytes: self.sealed_image_bytes.unwrap_or(defaults.max_image_bytes),
+                max_property_bytes: self
+                    .sealed_property_bytes
+                    .unwrap_or(defaults.max_property_bytes),
+            },
+        ))
     }
 
     /// Each flag is accepted once; an unknown value is a usage error.
@@ -135,6 +198,32 @@ impl ProjectionFlags {
                 let seq = value.parse().map_err(|_| bad())?;
                 once(&mut self.as_of, CommitSeq(seq), flag)
             }
+            "--sealed-kernel-bytes" => once(
+                &mut self.sealed_kernel_bytes,
+                decimal_usize(flag, value)?,
+                flag,
+            ),
+            "--sealed-result-bytes" => once(
+                &mut self.sealed_result_bytes,
+                decimal_usize(flag, value)?,
+                flag,
+            ),
+            "--sealed-image-bytes" => once(
+                &mut self.sealed_image_bytes,
+                decimal_usize(flag, value)?,
+                flag,
+            ),
+            "--sealed-property-bytes" => once(
+                &mut self.sealed_property_bytes,
+                decimal_usize(flag, value)?,
+                flag,
+            ),
+            "--sealed-max-rows" => once(&mut self.sealed_rows, decimal_usize(flag, value)?, flag),
+            "--sealed-max-incidences" => once(
+                &mut self.sealed_incidences,
+                decimal_usize(flag, value)?,
+                flag,
+            ),
             _ => Err(Failure::usage("unknown analytics flag")),
         }
     }
@@ -219,28 +308,75 @@ fn arguments(raw: &[(String, String)]) -> Result<FnxParameters, Failure> {
 /// A call's typed arguments and resolved projection, bound before the
 /// database opens so a refused input never touches storage.
 pub(super) struct Prepared {
-    parameters: FnxParameters,
+    call: FnxCallSpec,
     read: FnxReadOptions,
+    sealed: Option<(FnxMemoryLimits, SealedLimits)>,
+}
+
+impl Prepared {
+    pub(super) fn is_sealed(&self) -> bool {
+        self.sealed.is_some()
+    }
 }
 
 pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
-    Ok(Prepared {
-        parameters: arguments(&options.raw_params)?,
-        read: options.fnx.options(options)?,
-    })
+    options.fnx.validate()?;
+    let parameters = arguments(&options.raw_params)?;
+    let read = options.fnx.options(options)?;
+    let call = FnxCallSpec::bind(&options.text, &parameters).map_err(Failure::query)?;
+    let sealed = options.fnx.sealed_limits();
+    if sealed.is_some() {
+        // These checks must precede the writable open needed for the temporary
+        // seal. Unsupported algorithms never fall back to decoded adjacency.
+        if read.selection.relation.is_none() {
+            return Err(Failure::usage("--sealed requires --graph-relation"));
+        }
+        if options.budget != super::QueryBudget::default() {
+            return Err(Failure::usage(
+                "native --max-snapshot-records, --max-result-rows, --max-work-units \
+                 and --max-scratch-entries do not apply to --sealed; use --sealed-* limits",
+            ));
+        }
+        call.validate_sealed_projection(read.projection.directedness)
+            .map_err(Failure::query)?;
+    }
+    Ok(Prepared { call, read, sealed })
 }
 
 pub(super) fn run(
     view: &EmbeddedReadView,
     cx: &QueryCx,
-    text: &str,
-    prepared: Prepared,
+    prepared: &Prepared,
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let result = view
-        .call_fnx(cx, text, &prepared.parameters, prepared.read)
+        .execute_fnx(cx, &prepared.call, prepared.read)
         .map_err(Failure::query)?;
+    render(result, robot, out)
+}
+
+/// The temporary seal is bound to the engine's pinned source and is not
+/// published as durable graph authority. Its resident preparation and the
+/// projection directory retain their separate engine admissions.
+pub(super) async fn run_sealed(
+    db: &Database,
+    cx: &QueryCx,
+    prepared: &Prepared,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let (memory, sealing) = prepared
+        .sealed
+        .ok_or_else(|| Failure::usage("compressed analytics requires --sealed"))?;
+    let result = db
+        .execute_fnx_sealed(cx, &prepared.call, prepared.read, memory, sealing)
+        .await
+        .map_err(Failure::query)?;
+    render(result, robot, out)
+}
+
+fn render(result: FnxReadResult, robot: bool, out: &mut impl Write) -> Result<(), Failure> {
     let analytics = result.analytics;
     let cells = analytics
         .rows

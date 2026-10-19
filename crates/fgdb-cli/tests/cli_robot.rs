@@ -2420,6 +2420,304 @@ fn prism_analytics_run_through_query_with_an_explicit_projection() {
     assert_eq!(components(&[]), 1, "the frontier sees one");
 }
 
+/// Compare complete public deliveries from separate fresh processes. The
+/// decoded call is the incumbent for the same committed source and projection.
+fn sealed_analytics_matches_decoded(db: &TestDb, args: &[&str]) -> Outcome {
+    let decoded = db.command("query", args);
+    decoded.success();
+    let mut sealed_args = vec!["--sealed"];
+    sealed_args.extend_from_slice(args);
+    let sealed = db.command("query", &sealed_args);
+    sealed.success();
+    assert_eq!(sealed.events, decoded.events, "{args:?}");
+    sealed
+}
+
+#[test]
+fn sealed_prism_cli_matches_decoded_algorithms_and_historical_weights() {
+    let db = TestDb::new("prism-sealed");
+    db.create();
+    // A weighted cycle, a leaf and an isolate. The OTHER edge and unlabeled
+    // endpoint must remain outside the selected induced graph.
+    let basis = db.write(&[
+        "--relation",
+        "OTHER=2",
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (d:Person {name:'D'}),(e:Person {name:'E'}),(x {name:'X'}),\
+         (a)-[:KNOWS {born:2}]->(b),(b)-[:KNOWS {born:3}]->(c),\
+         (c)-[:KNOWS {born:4}]->(a),(a)-[:KNOWS {born:7}]->(d),\
+         (e)-[:OTHER {born:1}]->(a),(a)-[:KNOWS {born:1}]->(x)",
+    ]);
+    let id = vertex_ids(&db);
+    let source = format!("source=vertex:{}", id["A"]);
+    let projection = [
+        "--graph-label",
+        "Person",
+        "--graph-relation",
+        "KNOWS",
+        "--weight",
+        "born",
+        "--param",
+        &source,
+    ];
+    let dijkstra =
+        "CALL fnx.single_source_dijkstra_path_length($source,NULL,true) YIELD vertex,distance";
+    for (direction, call) in [
+        (
+            "directed",
+            "CALL fnx.pagerank(0.85,1000,1e-9,true) YIELD vertex,score AS rank",
+        ),
+        (
+            "directed",
+            "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
+        ),
+        ("directed", dijkstra),
+        (
+            "directed",
+            "CALL fnx.weakly_connected_components() YIELD vertex,component",
+        ),
+        (
+            "directed",
+            "CALL fnx.strongly_connected_components() YIELD component AS group_id,vertex",
+        ),
+        (
+            "undirected",
+            "CALL fnx.connected_components() YIELD vertex,component",
+        ),
+        ("undirected", "CALL fnx.triangles() YIELD vertex,triangles"),
+        (
+            "undirected",
+            "CALL fnx.clustering_coefficient() YIELD vertex,score AS coefficient",
+        ),
+    ] {
+        let mut args = projection.to_vec();
+        args.extend_from_slice(&["--direction", direction, call]);
+        let output = sealed_analytics_matches_decoded(&db, &args);
+        assert_eq!(output.sequence("rows"), basis);
+        if call == dijkstra {
+            let distances: BTreeMap<String, f64> = output
+                .events
+                .iter()
+                .filter(|event| event.get("event").string() == "row")
+                .map(|event| {
+                    let cells = event.get("cells").array();
+                    assert_eq!(cells[1].get("type").string(), "float");
+                    (
+                        cells[0].get("value").string().to_owned(),
+                        cells[1].get("value").string().parse().unwrap(),
+                    )
+                })
+                .collect();
+            // Independent weighted shortest-path oracle, including both
+            // reachable-only output and exclusion of the unlabeled endpoint.
+            assert_eq!(
+                distances,
+                BTreeMap::from([
+                    (id["A"].clone(), 0.0),
+                    (id["B"].clone(), 2.0),
+                    (id["C"].clone(), 5.0),
+                    (id["D"].clone(), 7.0),
+                ])
+            );
+        }
+    }
+
+    let current =
+        db.write(&["MATCH (a:Person {name:'A'})-[e:KNOWS]->(b:Person {name:'B'}) SET e.born=9"]);
+    let old_cut = basis.to_string();
+    let mut old = projection.to_vec();
+    old.extend_from_slice(&["--as-of", &old_cut, dijkstra]);
+    let historical = sealed_analytics_matches_decoded(&db, &old);
+    assert_eq!(historical.sequence("rows"), basis);
+    let mut now = projection.to_vec();
+    now.push(dijkstra);
+    let latest = sealed_analytics_matches_decoded(&db, &now);
+    assert_eq!(latest.sequence("rows"), current);
+    let distance_to_b = |output: &Outcome| {
+        output
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .find_map(|event| {
+                let cells = event.get("cells").array();
+                (cells[0].get("value").string() == id["B"])
+                    .then(|| cells[1].get("value").string().parse::<f64>().unwrap())
+            })
+            .unwrap()
+    };
+    assert_eq!(distance_to_b(&historical), 2.0);
+    assert_eq!(distance_to_b(&latest), 9.0);
+    let unchanged = db.command("query", &["MATCH (p:Person) RETURN COUNT(*) AS count"]);
+    assert_eq!(unchanged.sequence("rows"), current);
+    assert_rows(&unchanged, r#"[[{"type":"count","value":"5"}]]"#);
+}
+
+#[test]
+fn sealed_prism_cli_preflights_before_writable_open() {
+    // Valid keys, but deliberately no database. A usage or graph-law refusal
+    // must win over the missing database, and must not create it.
+    let db = TestDb::new("prism-sealed-preflight");
+    let call = "CALL fnx.pagerank() YIELD vertex";
+    let cases: &[(&[&str], i32, &str)] = &[
+        (&["--sealed", call], 2, "usage"),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.degree_centrality() YIELD vertex,score",
+            ],
+            3,
+            "query",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.connected_components() YIELD vertex,component",
+            ],
+            3,
+            "query",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.no_such_procedure() YIELD vertex",
+            ],
+            3,
+            "query",
+        ),
+        (&["--sealed", "--sealed", call], 2, "usage"),
+        (&["--sealed-result-bytes", "1", call], 2, "usage"),
+        (
+            &["--sealed", "--sealed-result-bytes", "-1", call],
+            2,
+            "usage",
+        ),
+        (
+            &["--sealed", "--sealed-result-bytes", "1.5", call],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--sealed",
+                "--sealed-result-bytes",
+                "184467440737095516160",
+                call,
+            ],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--sealed",
+                "--sealed-image-bytes",
+                "1",
+                "--sealed-image-bytes",
+                "2",
+                call,
+            ],
+            2,
+            "usage",
+        ),
+        (&["--sealed", "--stream", call], 2, "usage"),
+        (&["--sealed", "--buffered", call], 2, "usage"),
+        (&["--sealed", "--spill-dir", "unused", call], 2, "usage"),
+        (&["--sealed", "--certify-to", "unused", call], 2, "usage"),
+        (&["--sealed", "MATCH (p:Person) RETURN p"], 2, "usage"),
+        (
+            &["--sealed", "CALL fnx.pagerank() YIELD vertex RETURN vertex"],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--max-work-units",
+                "0",
+                call,
+            ],
+            2,
+            "usage",
+        ),
+    ];
+    assert!(!std::path::Path::new(&db.db).exists());
+    for (args, code, class) in cases {
+        db.command("query", args).failure(*code, class);
+        assert!(!std::path::Path::new(&db.db).exists(), "{args:?}");
+    }
+    db.command("create", &["--sealed"]).failure(2, "usage");
+    assert!(!std::path::Path::new(&db.db).exists());
+}
+
+#[test]
+fn sealed_prism_cli_preserves_reductions_and_enforces_every_image_and_kernel_limit() {
+    let db = TestDb::new("prism-sealed-limits");
+    db.create();
+    db.write(&[
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (a)-[:KNOWS {born:7}]->(b),(a)-[:KNOWS {born:2}]->(b),\
+         (b)-[:KNOWS {born:3}]->(c),(c)-[:KNOWS {born:true}]->(c)",
+    ]);
+    let id = vertex_ids(&db);
+    let source = format!("source=vertex:{}", id["A"]);
+    let projection = [
+        "--graph-label",
+        "Person",
+        "--graph-relation",
+        "KNOWS",
+        "--weight",
+        "born",
+        "--param",
+        &source,
+    ];
+    let call =
+        "CALL fnx.single_source_dijkstra_path_length($source,NULL,true) YIELD vertex,distance";
+    let mut admitted = projection.to_vec();
+    admitted.extend_from_slice(&["--parallel-edges", "min", "--self-loops", "drop", call]);
+    let minimum = sealed_analytics_matches_decoded(&db, &admitted);
+
+    // The same graph is valid under explicit collapse even with a retained
+    // nonnumeric loop: collapse declares unit weights before observing values.
+    let mut collapse = projection.to_vec();
+    collapse.extend_from_slice(&["--parallel-edges", "collapse", call]);
+    let collapsed = sealed_analytics_matches_decoded(&db, &collapse);
+    assert_ne!(minimum.events, collapsed.events);
+
+    for laws in [
+        ["--parallel-edges", "reject", "--self-loops", "drop"],
+        ["--parallel-edges", "min", "--self-loops", "keep"],
+    ] {
+        let mut args = projection.to_vec();
+        args.extend_from_slice(&laws);
+        args.push(call);
+        db.command("query", &args).failure(3, "query");
+        args.insert(0, "--sealed");
+        db.command("query", &args).failure(3, "query");
+    }
+
+    // Each zero is a real limit. The valid decoded control above would
+    // succeed if the compressed route ignored an admission or retried it.
+    for flag in [
+        "--sealed-kernel-bytes",
+        "--sealed-result-bytes",
+        "--sealed-image-bytes",
+        "--sealed-property-bytes",
+        "--sealed-max-rows",
+        "--sealed-max-incidences",
+    ] {
+        let mut args = vec!["--sealed", flag, "0"];
+        args.extend_from_slice(&admitted);
+        db.command("query", &args).failure(3, "query");
+    }
+}
+
 #[test]
 fn prism_refuses_instead_of_silently_reshaping_the_graph() {
     let db = TestDb::new("prism-refusals");
