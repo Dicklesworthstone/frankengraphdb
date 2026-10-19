@@ -78,10 +78,10 @@ impl PreparedGraphSet {
                 // sequence requirements belong to the separately compiled
                 // child; an outer window cannot erase that child admission.
                 SetNode::Aggregate(_) => (false, false),
-                // A procedure can have a host-provided bag derivative, but
-                // this layer cannot prove its implicit result sequence. Admit
-                // no positional page merely because the call is unadorned.
-                SetNode::ProcedureCall(_) => (false, true),
+                // The executor admits and canonically sorts procedure rows
+                // exactly like pattern rows. A page can preserve that order;
+                // the host must still admit the complete CALL derivative.
+                SetNode::ProcedureCall(_) => (false, false),
                 SetNode::Owned => (true, true),
                 // Hidden-key output preserves a sequence no longer expressible
                 // by its visible cells. An inherited canonical window would

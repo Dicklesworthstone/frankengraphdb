@@ -168,6 +168,31 @@ fn all_component_calls_and_downstream_operators_match_fresh_queries_after_mutati
              YIELD component AS group_id,vertex AS node RETURN group_id,node"
                 .into(),
         ]);
+        let kept_first = cases.len();
+        cases.extend(
+            [
+                "connected_components",
+                "weakly_connected_components",
+                "strongly_connected_components",
+            ]
+            .map(|name| {
+                format!(
+                    "CALL fnx.{name}({{relations:['R'],parallel:'collapse',self_loops:'keep'}}) \
+                     YIELD component AS group_id,vertex AS node RETURN group_id,node"
+                )
+            }),
+        );
+        let pages = [(0, 1), (1, 2), (1, 0)];
+        let page_first = cases.len();
+        for (skip, count) in pages {
+            // The omitted self-loop policy defaults to Keep. No ORDER BY is
+            // needed: ordinary CALL admission sorts the projected source rows.
+            cases.push(format!(
+                "CALL fnx.connected_components({{relations:['R'],parallel:'collapse'}}) \
+                 YIELD component AS group_id,vertex AS node \
+                 RETURN group_id,node SKIP {skip} LIMIT {count}"
+            ));
+        }
         let params = GqlParameters::new();
         let mut handles = Vec::new();
         for text in &cases {
@@ -189,20 +214,43 @@ fn all_component_calls_and_downstream_operators_match_fresh_queries_after_mutati
         );
         // Check the initial graph and every committed mutation, including the
         // last one. Every isolate and full-width identity remains visible.
-        for tick in 0..=10 {
+        for tick in 0..=12 {
             for (index, (text, handle)) in cases.iter().zip(&handles).enumerate() {
                 let (frontier, actual) = db.standing_native_bag(&cx, handle, policy()).unwrap();
                 assert_eq!(frontier, db.frontier().unwrap());
                 assert_eq!(actual, eager(&db, &cx, text), "tick {tick}: {text}");
-                if index < 3 || index == 7 {
+                if index < 3 || index == 7 || (kept_first..page_first).contains(&index) {
                     assert_eq!(
                         actual,
-                        oracle(&db, index == 2 || index == 7),
+                        oracle(&db, index == 2 || index == 7 || index == kept_first + 2),
                         "independent reachability oracle, tick {tick}: {text}"
                     );
                 }
+                if index >= page_first {
+                    let (skip, count) = pages[index - page_first];
+                    let complete = oracle(&db, false);
+                    let expected = ZSet::from_updates(
+                        complete
+                            .iter()
+                            .skip(skip)
+                            .take(count)
+                            .map(|(row, _)| (row.clone(), ZWeight::ONE)),
+                        LIMBS,
+                        &mut |_| Ok::<_, ()>(()),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        actual, expected,
+                        "canonical occurrence window, tick {tick}: {text}"
+                    );
+                    assert_eq!(
+                        db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                        db.query(&cx, text, &params, symbols, policy()).unwrap(),
+                        "exact selected sequence, tick {tick}: {text}"
+                    );
+                }
             }
-            if tick == 10 {
+            if tick == 12 {
                 break;
             }
             let mut change = WriteBatch::new(R);
@@ -243,9 +291,15 @@ fn all_component_calls_and_downstream_operators_match_fresh_queries_after_mutati
                 8 => {
                     change.delete_edge(EId(17));
                 }
-                _ => {
+                9 => {
                     change.add_edge(EId(18), VId(u128::MAX), VId(2), vec![]);
                     change.add_edge(EId(19), VId(2), VId(u128::MAX), vec![]);
+                }
+                10 => {
+                    change.add_edge(EId(20), VId(2), VId(2), vec![]);
+                }
+                _ => {
+                    change.delete_edge(EId(20));
                 }
             }
             db.write(&commit, change).await.unwrap();
@@ -369,7 +423,7 @@ fn component_subscription_replays_exact_retractions_empty_ticks_and_rebaselines(
 }
 
 #[test]
-fn unsupported_component_contracts_and_implicit_pages_refuse_before_publication() {
+fn unsupported_component_contracts_and_unbounded_pages_refuse_before_publication() {
     let ((), report) = run_async_under_lab(0x6e63_6103, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -386,7 +440,6 @@ fn unsupported_component_contracts_and_implicit_pages_refuse_before_publication(
         let mut bodies = vec![
             "CALL fnx.connected_components()".to_string(),
             "CALL fnx.connected_components({relations:['R'],self_loops:'drop'})".into(),
-            "CALL fnx.connected_components({relations:['R'],parallel:'collapse'})".into(),
             "CALL fnx.connected_components({relations:['R'],parallel:'collapse',self_loops:'reject'})".into(),
             "CALL fnx.connected_components({relations:['R'],labels:['L'],parallel:'collapse',self_loops:'drop'})".into(),
             "CALL fnx.connected_components({relations:['R'],weight:'p',parallel:'collapse',self_loops:'drop'})".into(),
@@ -401,25 +454,27 @@ fn unsupported_component_contracts_and_implicit_pages_refuse_before_publication(
             bodies.push(format!("CALL fnx.{name}({INPUT})"));
         }
         for body in bodies {
-            // An empty, explicitly ordered page cannot hide an unsupported
-            // descendant or bypass complete projection/argument validation.
-            let text = format!("{body} YIELD vertex RETURN vertex ORDER BY vertex LIMIT 0");
-            if let Ok(prepared) = PreparedNativeRead::prepare(&text, &params, symbols) {
+            // Neither explicit nor canonical empty windows may hide an
+            // unsupported descendant or erase projection/argument admission.
+            for page in ["ORDER BY vertex LIMIT 0", "SKIP 1 LIMIT 0"] {
+                let text = format!("{body} YIELD vertex RETURN vertex {page}");
+                if let Ok(prepared) = PreparedNativeRead::prepare(&text, &params, symbols) {
+                    assert!(
+                        prepared.subscription_footprint(&cx, &params).is_err(),
+                        "footprint admitted {text}"
+                    );
+                }
                 assert!(
-                    prepared.subscription_footprint(&cx, &params).is_err(),
-                    "footprint admitted {text}"
+                    db.register_standing_native(&cx, &text, &params, symbols, policy())
+                        .is_err(),
+                    "{text}"
                 );
+                assert_eq!(db.standing_queries.len(), before);
             }
-            assert!(
-                db.register_standing_native(&cx, &text, &params, symbols, policy())
-                    .is_err(),
-                "{text}"
-            );
-            assert_eq!(db.standing_queries.len(), before);
         }
         for text in [
-            format!("{accepted} LIMIT 1"),
-            format!("{accepted} SKIP 1 LIMIT 0"),
+            format!("{accepted} ORDER BY node"),
+            format!("{accepted} SKIP 1"),
             format!(
                 "{accepted} UNION ALL MATCH (n) FOR SYSTEM_TIME AS OF SEQ 0 \
                  RETURN n AS group_id,n AS node"

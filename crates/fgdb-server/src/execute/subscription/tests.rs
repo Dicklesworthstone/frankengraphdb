@@ -328,3 +328,218 @@ fn source_free_grouping_keeps_private_input_rows_with_zero_signed_nodes() {
     });
     assert!(report.lab_test_passed());
 }
+
+#[test]
+fn component_calls_subscribe_over_native_replay_with_full_width_vertex_outputs() {
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::{EId, VId};
+
+    let ((), report) = run_async_under_lab(0x79a0_03c1, |root| async move {
+        let (mut server, token, _) = served(&root, "subscription-components").await;
+        let served = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+        served
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Relation, "R", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let wide = 1_u128 << 100;
+        let mut seed = vertex(1);
+        for id in [2, 3, wide] {
+            seed.create_vertex(VId(id), vec![], vec![]);
+        }
+        for (eid, from, to) in [(1, 1, 2), (2, 2, 3), (3, 1, 2), (4, wide, wide)] {
+            seed.add_edge(EId(eid), VId(from), VId(to), vec![]);
+        }
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), seed)
+            .await
+            .unwrap();
+        let statement = request(
+            "SUBSCRIBE TO CALL fnx.strongly_connected_components(\
+             {relations:['R'],parallel:'collapse'}) \
+             YIELD component AS root,vertex AS member \
+             RETURN member,root SKIP 1 LIMIT 3",
+        );
+        let mut subscription = success(subscribe(&root, db, &token, &statement).await);
+        assert_eq!(subscription.columns, ["member", "root"]);
+        let initial = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert!(initial.batch.is_snapshot());
+        assert_eq!(
+            initial.entries,
+            [2, 3, wide]
+                .map(|id| (1, vec![WireValue::Vertex(id), WireValue::Vertex(id)]))
+                .to_vec()
+        );
+
+        // Keep the baseline pending while two committed SCC changes accumulate.
+        // The ordinary CALL's canonical page still includes the wide isolate.
+        let mut cycle = fgdb::WriteBatch::new(RelationId(1));
+        cycle.add_edge(EId(5), VId(3), VId(1), vec![]);
+        let merged = db
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), cycle)
+            .await
+            .unwrap();
+        let mut split = fgdb::WriteBatch::new(RelationId(1));
+        split.delete_edge(EId(2));
+        let split = db
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), split)
+            .await
+            .unwrap();
+        let repeat = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert!(Arc::ptr_eq(&initial.batch, &repeat.batch));
+        assert_eq!(initial.entries, repeat.entries);
+        subscription
+            .consumer
+            .acknowledge(initial.batch.receipt())
+            .unwrap();
+        let row = |member, component| vec![WireValue::Vertex(member), WireValue::Vertex(component)];
+        let first = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert_eq!(
+            (first.batch.from(), first.batch.frontier()),
+            (Some(initial.batch.frontier()), merged)
+        );
+        assert_eq!(
+            first.entries,
+            vec![
+                (1, row(2, 1)),
+                (-1, row(2, 2)),
+                (1, row(3, 1)),
+                (-1, row(3, 3)),
+            ]
+        );
+        subscription
+            .consumer
+            .acknowledge(first.batch.receipt())
+            .unwrap();
+        let second = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert_eq!(
+            (second.batch.from(), second.batch.frontier()),
+            (Some(first.batch.frontier()), split)
+        );
+        assert_eq!(
+            second.entries,
+            vec![
+                (-1, row(2, 1)),
+                (1, row(2, 2)),
+                (-1, row(3, 1)),
+                (1, row(3, 3)),
+            ]
+        );
+        subscription
+            .consumer
+            .acknowledge(second.batch.receipt())
+            .unwrap();
+        assert!(success(poll(&root, db, &token, &mut subscription).await).is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn component_subscription_scope_and_projection_refusals_precede_registration() {
+    use fgdb_delta_types::{LabelId, RelationId};
+    use fgdb_types::{EId, VId};
+    use fgdb_warden::Scope;
+
+    let ((), report) = run_async_under_lab(0x79a0_03c2, |root| async move {
+        let (mut server, token, _) = served(&root, "subscription-component-scope").await;
+        let served = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+        served
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Relation, "R", 1)
+            .unwrap();
+        served
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Label, "L", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let statement = request(
+            "SUBSCRIBE TO CALL fnx.connected_components(\
+             {relations:['R'],parallel:'collapse'}) YIELD node,component",
+        );
+        let scoped = [
+            token
+                .attenuate(Restriction::Labels(Scope::only([LabelId(1)])))
+                .unwrap(),
+            token
+                .attenuate(Restriction::Relations(Scope::only([RelationId(1)])))
+                .unwrap(),
+            token
+                .attenuate(Restriction::Properties(Scope::only([])))
+                .unwrap(),
+        ];
+        for hidden in [false, true] {
+            if hidden {
+                let mut seed = vertex(1);
+                seed.create_vertex(VId(2), vec![], vec![]);
+                seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+                db.db
+                    .write(&root)
+                    .await
+                    .unwrap()
+                    .write(&contexts.commit(), seed)
+                    .await
+                    .unwrap();
+            }
+            for capability in &scoped {
+                refused(
+                    subscribe(&root, db, capability, &statement).await,
+                    ErrorCode::PermissionDenied,
+                );
+                assert_eq!(db.subscriptions.load(Ordering::Acquire), 0);
+            }
+        }
+        for text in [
+            "SUBSCRIBE TO CALL fnx.connected_components(\
+             {relations:['R']}) YIELD node,component",
+            "SUBSCRIBE TO CALL fnx.connected_components(\
+             {relations:['R'],parallel:'collapse',labels:['L']}) YIELD node,component",
+            "SUBSCRIBE TO CALL fnx.connected_components(\
+             {relations:['R'],parallel:'collapse',direction:'directed'}) YIELD node,component",
+            "SUBSCRIBE TO CALL fnx.connected_components(\
+             {relations:['R'],parallel:'collapse',self_loops:'reject'}) YIELD node,component",
+            "SUBSCRIBE TO CALL fnx.degree_centrality(\
+             {relations:['R'],parallel:'collapse'}) YIELD node,score LIMIT 0",
+        ] {
+            refused(
+                subscribe(&root, db, &token, &request(text)).await,
+                ErrorCode::Statement,
+            );
+            assert_eq!(db.subscriptions.load(Ordering::Acquire), 0);
+        }
+        let tiny = token.attenuate(Restriction::MaxRows(1)).unwrap();
+        refused(
+            subscribe(&root, db, &tiny, &statement).await,
+            ErrorCode::Budget,
+        );
+        assert_eq!(db.subscriptions.load(Ordering::Acquire), 0);
+        let mut subscription = success(subscribe(&root, db, &token, &statement).await);
+        assert_eq!(db.subscriptions.load(Ordering::Acquire), 1);
+        // A later narrowed capability cannot read or consume a pending result.
+        refused(
+            poll(&root, db, &scoped[0], &mut subscription).await,
+            ErrorCode::PermissionDenied,
+        );
+        let delivered = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert_eq!(
+            delivered.entries,
+            vec![
+                (1, vec![WireValue::Vertex(1), WireValue::Vertex(1)]),
+                (1, vec![WireValue::Vertex(2), WireValue::Vertex(1)]),
+            ]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

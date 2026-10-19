@@ -38,12 +38,13 @@ pub(super) fn component_procedure(
     if options.selection.vertex_label.is_some()
         || options.selection.weight != FnxWeightSpec::Unit
         || options.projection.parallel_edges != ParallelEdgePolicy::CollapseUnit
-        || options.projection.self_loops != SelfLoopPolicy::Drop
+        || options.projection.self_loops == SelfLoopPolicy::Reject
     {
         return Err(StandingQueryError::Unsupported);
     }
     // The shared binder already enforced the registered graph-kind law.
-    // Reversal preserves weak and strong component membership exactly.
+    // Reversal and retaining self-loops preserve weak and strong membership;
+    // neither changes reachability between distinct vertices.
     let relation = match bound.algorithm() {
         FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => {
             components::ComponentRelation::Weak(relation)

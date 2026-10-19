@@ -70,7 +70,7 @@ impl PreparedNativeRead {
     /// Zero-argument connected/weakly-connected/strongly-connected component
     /// CALLs reuse the component delta engines for one explicit relation and
     /// all live vertices, with unit weights, collapsed parallel edges and
-    /// dropped self-loops. YIELD aliases and downstream row stages retain
+    /// kept or dropped self-loops. YIELD aliases and downstream row stages retain
     /// their native schema; unsupported projection recipes refuse.
     /// Historical selectors refuse: a fixed historical answer is not a current
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
