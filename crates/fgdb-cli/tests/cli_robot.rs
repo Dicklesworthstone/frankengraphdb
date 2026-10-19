@@ -2482,6 +2482,7 @@ fn buffered_prism_cli_preserves_analytics_projection_history_and_delivery() {
             "directed",
             "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score AS rank",
         ),
+        ("directed", "CALL fnx.cdlp(2) YIELD vertex,component"),
         (
             "reversed",
             "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
@@ -2535,6 +2536,57 @@ fn buffered_prism_cli_preserves_analytics_projection_history_and_delivery() {
         if call.contains("connected_components") {
             assert_eq!(output.terminal().get("count").unsigned(), 5);
         }
+    }
+
+    // Rebind the same named CDLP call, comparing complete deliveries from
+    // fresh decoded/buffered processes and a separate scalar label oracle.
+    // Directed incoming and outgoing neighbors are A:{B,C,D}, B:{A,C},
+    // C:{A,B}, D:{A}; E retains its identity. The excluded edges cannot vote.
+    let community_call = "CALL fnx.cdlp(max_iter => $rounds) YIELD vertex,component AS community";
+    let ids = ["A", "B", "C", "D", "E"].map(|name| id[name].parse::<u128>().unwrap());
+    let neighbors: [&[usize]; 5] = [&[1, 2, 3], &[0, 2], &[0, 1], &[0], &[]];
+    for rounds in [0, 1, 2, 5] {
+        let parameter = format!("rounds=int:{rounds}");
+        let mut args = projection.to_vec();
+        args.extend_from_slice(&["--param", &parameter, community_call]);
+        let output = buffered_analytics_matches_decoded(&db, &args);
+        assert_eq!(output.sequence("rows"), basis);
+        assert_eq!(output.terminal().get("count").unsigned(), 5);
+        let mut expected = ids;
+        for _ in 0..rounds {
+            let previous = expected;
+            expected = std::array::from_fn(|vertex| {
+                let mut votes = BTreeMap::<u128, usize>::new();
+                for &neighbor in neighbors[vertex] {
+                    *votes.entry(previous[neighbor]).or_default() += 1;
+                }
+                let highest = votes.values().copied().max().unwrap_or(0);
+                votes
+                    .into_iter()
+                    .find_map(|(label, count)| (count == highest).then_some(label))
+                    .unwrap_or(previous[vertex])
+            });
+        }
+        let labels: BTreeMap<u128, u128> = output
+            .events
+            .iter()
+            .filter(|event| event.get("event").string() == "row")
+            .map(|event| {
+                let cells = event.get("cells").array();
+                assert_eq!(cells.len(), 2);
+                assert_eq!(cells[0].get("type").string(), "vertex");
+                assert_eq!(cells[1].get("type").string(), "vertex");
+                (
+                    cells[0].get("value").string().parse().unwrap(),
+                    cells[1].get("value").string().parse().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            ids.into_iter().zip(expected).collect::<BTreeMap<_, _>>(),
+            "CDLP round {rounds}"
+        );
     }
     let current =
         db.write(&["MATCH (a:Person {name:'A'})-[e:KNOWS]->(b:Person {name:'B'}) SET e.born=9"]);
@@ -2592,6 +2644,8 @@ fn buffered_prism_cli_preflights_incompatible_or_unbound_inputs_before_open() {
         "CALL fnx.not_registered() YIELD vertex",
         "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
         "CALL fnx.pagerank(true) YIELD vertex,score",
+        "CALL fnx.cdlp() YIELD vertex,component",
+        "CALL fnx.cdlp(-1) YIELD vertex,component",
     ] {
         missing
             .command("query", &["--buffered", call])
@@ -2626,6 +2680,8 @@ fn buffered_prism_cli_enforces_physical_and_selected_graph_limits_before_columns
     for named in [
         "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score",
         "CALL fnx.pagerank(iterations => $steps, weighted => false) YIELD vertex,score",
+        "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
+        "CALL fnx.cdlp(max_iter => $steps) YIELD vertex,component",
     ] {
         let args = ["--graph-relation", "KNOWS", "--param", "steps=int:2", named];
         let decoded = db.command("query", &args);
@@ -2878,6 +2934,16 @@ fn sealed_prism_cli_preflights_before_writable_open() {
             ],
             2,
             "usage",
+        ),
+        (
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
+            ],
+            3,
+            "query",
         ),
         (
             &[

@@ -524,7 +524,7 @@ fn cooperative_bfs_and_pagerank_preserve_rows_scalar_bits_and_certificates_acros
 }
 
 #[test]
-fn fixed_iteration_pagerank_reaches_public_and_prepared_authorized_calls() {
+fn fixed_iteration_pagerank_and_cdlp_reach_public_and_prepared_authorized_calls() {
     use asupersync::lab::run_async_under_lab;
     use asupersync::security::key::AuthKey;
     use fgdb::{QueryResult, QueryValue};
@@ -716,6 +716,108 @@ fn fixed_iteration_pagerank_reaches_public_and_prepared_authorized_calls() {
                     "prepared fixed iteration count {steps}"
                 );
             }
+        }
+
+        // CDLP uses the same signed population, with an explicitly simple,
+        // loop-free graph. Removing the loop and collapsing the parallel pair
+        // leaves a directed three-cycle and the full-width isolated identity.
+        let mut community_options = native_options;
+        community_options.selection.weight = FnxWeightSpec::Unit;
+        community_options.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+        community_options.projection.self_loops = SelfLoopPolicy::Drop;
+        let community_text = "CALL fnx.cdlp(max_iter => $rounds, label => 'Visible', \
+                              relation => 'R', parallel => 'collapse', self_loops => 'drop') \
+                              YIELD vertex,component AS community \
+                              RETURN vertex,community ORDER BY vertex";
+        let community_parameters = GqlParameters::new().with_int64("rounds", 2).unwrap();
+        let community_prepared = session
+            .prepare(&cx, community_text, &community_parameters)
+            .unwrap();
+        let ids = [1_u128, 2, 3, u128::MAX];
+        for rounds in [0, 1, 2, 5] {
+            // Every cycle vertex has two distinct neighbors. Equal-frequency
+            // ties take the smaller previous-round label; this independent
+            // transition neither calls Prism nor reads a projection.
+            let mut expected = ids;
+            for _ in 0..rounds {
+                expected = [
+                    expected[1].min(expected[2]),
+                    expected[0].min(expected[2]),
+                    expected[0].min(expected[1]),
+                    expected[3],
+                ];
+            }
+            let standalone = format!("CALL fnx.cdlp(max_iter => {rounds}) YIELD vertex,component");
+            let actual = db
+                .call_fnx_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    &standalone,
+                    &FnxParameters::new(),
+                    community_options,
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(actual.len(), ids.len());
+            for ((row, id), label) in actual.iter().zip(ids).zip(expected) {
+                assert_eq!(
+                    row.as_slice(),
+                    &[FnxValue::Vertex(VId(id)), FnxValue::Vertex(VId(label))],
+                    "CDLP round {rounds}"
+                );
+            }
+            let parameters = GqlParameters::new().with_int64("rounds", rounds).unwrap();
+            let expected_rows: Vec<_> = ids
+                .into_iter()
+                .zip(expected)
+                .map(|(id, label)| {
+                    vec![
+                        QueryValue::Value(GraphValue::Vertex(VId(id))),
+                        QueryValue::Value(GraphValue::Vertex(VId(label))),
+                    ]
+                })
+                .collect();
+            for result in [
+                db.query(&cx, community_text, &parameters, symbols, policy)
+                    .unwrap(),
+                session
+                    .execute(&cx, &community_prepared, &parameters)
+                    .unwrap(),
+            ] {
+                let QueryResult::Rows { rows, .. } = result else {
+                    panic!("CDLP returned a write receipt");
+                };
+                assert_eq!(rows, expected_rows, "prepared CDLP round {rounds}");
+            }
+        }
+        let mut community_limited = community_options;
+        community_limited.execution_limits.max_iterations = 0;
+        assert!(matches!(
+            db.call_fnx_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                "CALL fnx.cdlp(max_iter => 1)",
+                &FnxParameters::new(),
+                community_limited,
+                || 100,
+            ),
+            Err(FnxReadError::Execution(FnxExecutionError::LimitExceeded {
+                resource: "iterations",
+                limit: 0,
+                requested: 1,
+            }))
+        ));
+        for arguments in ["", "max_iter => -1", "max_iter => 1.5", "max_iter => NULL"] {
+            let text = format!("CALL fnx.cdlp({arguments}) YIELD vertex RETURN vertex LIMIT 0");
+            assert!(
+                db.query(&cx, &text, &GqlParameters::new(), symbols, policy)
+                    .is_err(),
+                "{text}"
+            );
         }
 
         // The exact count is still admitted against native limits. It never
