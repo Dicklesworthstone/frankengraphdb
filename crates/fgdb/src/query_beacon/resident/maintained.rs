@@ -11,7 +11,7 @@ use super::{
 use asupersync::fs::Vfs;
 use fgdb_beacon::expansion::ExpansionSpec;
 use fgdb_beacon::read::{ReadPolicy, Rows, Search};
-use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, WorkControl};
+use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, IndexSnapshot, WorkControl};
 use fgdb_delta_types::{LogicalDeltaBatch, RelationId};
 use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::cell::RefCell;
@@ -139,16 +139,51 @@ struct Entry {
     failure: Option<MaintainedBeaconFailure>,
 }
 
+/// Immutable query-only pins. The graph source is deliberately absent: a
+/// read view may retain these pins without retaining other read views or
+/// forming a chain through graph-enabled registrations. Cloning is O(1).
+#[derive(Clone, Default)]
+pub(crate) struct QueryIndexes {
+    entries: Arc<[QueryIndex]>,
+}
+
+struct QueryIndex {
+    definition: Arc<Options>,
+    source_sequence: CommitSeq,
+    index: IndexSnapshot,
+}
+
 /// Bounded slots, rather than an append-only history of removed registrations.
 #[derive(Default)]
 pub(crate) struct Registry {
     entries: Vec<Option<Entry>>,
+    queries: QueryIndexes,
 }
 
 #[path = "maintained/reuse.rs"]
 mod reuse;
 
 impl Registry {
+    pub(crate) fn query_indexes(&self) -> &QueryIndexes {
+        &self.queries
+    }
+
+    fn refresh_query_indexes(&mut self) {
+        self.queries = QueryIndexes {
+            entries: self
+                .entries
+                .iter()
+                .flatten()
+                .filter(|entry| entry.failure.is_none())
+                .map(|entry| QueryIndex {
+                    definition: Arc::clone(&entry.resident.definition),
+                    source_sequence: entry.resident.source_sequence,
+                    index: entry.resident.index.snapshot(),
+                })
+                .collect(),
+        };
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.iter().all(Option::is_none)
     }
@@ -236,6 +271,7 @@ impl Registry {
                 }
             }
         }
+        self.refresh_query_indexes();
     }
 }
 
@@ -329,6 +365,7 @@ impl<V: Vfs + Clone> Database<V> {
             } else {
                 self.maintained_beacon.entries[slot] = Some(entry);
             }
+            self.maintained_beacon.refresh_query_indexes();
             Ok(handle)
         })
     }
@@ -465,6 +502,7 @@ impl<V: Vfs + Clone> Database<V> {
             };
             checkpoint(cx)?;
             self.maintained_beacon.entries[handle.slot] = Some(replacement);
+            self.maintained_beacon.refresh_query_indexes();
             Ok(current)
         })
     }
@@ -483,6 +521,7 @@ impl<V: Vfs + Clone> Database<V> {
             self.maintained_beacon.entry(&self.handle_owner, handle)?;
             checkpoint(cx)?;
             self.maintained_beacon.entries[handle.slot] = None;
+            self.maintained_beacon.refresh_query_indexes();
             Ok(())
         })
     }
@@ -542,6 +581,7 @@ mod tests {
                     },
                     failure: None,
                 })],
+                ..Registry::default()
             };
             // These isolated registries let the test deliver real committed
             // batches out of order without changing the product commit hook.

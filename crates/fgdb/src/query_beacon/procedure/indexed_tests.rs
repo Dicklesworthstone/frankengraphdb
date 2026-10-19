@@ -439,6 +439,13 @@ fn every_native_indexed_checkpoint_can_cancel_even_when_filter_rejects_all() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+fn cold_view(db: &Database<MemVfs>) -> crate::EmbeddedReadView {
+    crate::EmbeddedReadView {
+        snapshot: std::sync::Arc::clone(&db.snapshot),
+        beacon_indexes: Default::default(),
+    }
+}
+
 #[test]
 fn current_text_call_reuses_registered_corpus_with_measured_probe_allowance() {
     let ((), report) = run_async_under_lab(0xbeac_3710, |root| async move {
@@ -486,6 +493,7 @@ fn current_text_call_reuses_registered_corpus_with_measured_probe_allowance() {
             db.query(&c.query(), statement, &params, symbols, policy())
                 .unwrap(),
         );
+        let cold_source = cold_view(&db);
         db.register_beacon_index(
             &c.query(),
             &Options::text(TEXT),
@@ -517,14 +525,19 @@ fn current_text_call_reuses_registered_corpus_with_measured_probe_allowance() {
                 expected
             );
         }
-        // A pinned view has no registry: its independent native build cannot
-        // fit the measured query-only allowance. This is a logical-work test,
-        // not an elapsed-time benchmark or an ANN sublinear-search claim.
+        // Retain the independent source before registration. A newly
+        // acquired read view shares the same immutable query-only pins.
         assert!(
+            cold_source
+                .execute_graph_set_governed(&c.query(), &bound, tight)
+                .is_err()
+        );
+        assert_eq!(
             db.read_session()
                 .unwrap()
                 .execute_graph_set_governed(&c.query(), &bound, tight)
-                .is_err()
+                .unwrap(),
+            warm,
         );
         assert_eq!(c.outstanding_obligations(), 0);
     });
@@ -718,7 +731,7 @@ fn maintained_indexed_graph_and_call_keep_exact_cut_and_expansion_semantics() {
             )
             .unwrap();
             let compare = |db: &Database<MemVfs>| {
-                let view = db.read_session().unwrap();
+                let view = cold_view(db);
                 for (vector, text) in [(false, false), (true, false), (false, true), (true, true)] {
                     for (direction, relation, hops) in [
                         (ExpansionDirection::Outgoing, Some(R), 2),
@@ -849,6 +862,7 @@ fn maintained_indexed_graph_keeps_source_quotas_work_and_live_refusal() {
             .execute_graph_set_governed(&c.query(), &bound, policy())
             .unwrap();
         assert_eq!(cold.value.len(), 1);
+        let cold_source = cold_view(&db);
         let request = search(true, true);
         db.register_beacon_index(
             &c.query(),
@@ -874,13 +888,20 @@ fn maintained_indexed_graph_keeps_source_quotas_work_and_live_refusal() {
             warm.value,
         );
         assert!(
-            db.read_session()
-                .unwrap()
+            cold_source
                 .execute_graph_set_governed(&c.query(), &bound, tight)
                 .is_err()
         );
+        assert_eq!(
+            db.read_session()
+                .unwrap()
+                .execute_graph_set_governed(&c.query(), &bound, tight)
+                .unwrap()
+                .value,
+            warm.value,
+        );
 
-        let view = db.read_session().unwrap();
+        let view = cold_source;
         for case in 0..6 {
             let mut options = request.options.clone();
             let mut expansion = request.expansion();

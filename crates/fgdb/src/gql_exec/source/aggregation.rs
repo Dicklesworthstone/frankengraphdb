@@ -219,7 +219,7 @@ impl<V: Vfs + Clone> Database<V> {
                     if crate::query::is_hybrid(call) {
                         return crate::query::hybrid_procedure(
                             &self.snapshot,
-                            Some(&self.maintained_beacon),
+                            Some(self.maintained_beacon.query_indexes()),
                             as_of,
                             call,
                             arguments,
@@ -286,7 +286,7 @@ impl EmbeddedReadView {
                     if crate::query::is_hybrid(call) {
                         return crate::query::hybrid_procedure(
                             &self.snapshot,
-                            None,
+                            Some(&self.beacon_indexes),
                             as_of,
                             call,
                             arguments,

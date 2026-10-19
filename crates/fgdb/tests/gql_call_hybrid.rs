@@ -1426,3 +1426,80 @@ fn transaction_eligible_shares_budgets_and_never_publishes_a_refused_prefix() {
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
+
+/// A privileged maintained corpus must never supply a scoped query's BM25
+/// statistics, candidate ranks or observable read allowance.
+#[test]
+fn registered_privileged_search_indexes_do_not_change_authorized_retrieval() {
+    run(async |commit, cx| {
+        let mut full = open(commit, true).await;
+        let clean = open(commit, false).await;
+        full.register_beacon_index(cx, &options(true, false), ReadPolicy::default())
+            .unwrap();
+        let authority =
+            Authority::new(AuthKey::from_seed(4402), NS, "main", SchemaEpoch(0), 1).unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 1000,
+                max_work: 100_000_000,
+                max_rows: 100,
+            },
+        );
+        grant.labels = Scope::only([DOC]);
+        grant.properties = Scope::only([BODY]);
+        let token = authority.issue_at(&grant, 100).unwrap();
+        let statement = "CALL hybrid.search(text => 'analytical engine', text_property => 'body', \
+             candidates => 6, k => 6) YIELD node, score, text_rank, text_score \
+             RETURN node, score, text_rank, text_score";
+        let params = GqlParameters::new();
+        let expected = clean
+            .query(cx, statement, &params, symbols, policy())
+            .unwrap();
+        let unscoped = full
+            .query(cx, statement, &params, symbols, policy())
+            .unwrap();
+        assert_ne!(
+            unscoped, expected,
+            "hidden corpus must be a live oracle mutation"
+        );
+        let scoped = full
+            .query_authorized(
+                cx,
+                &authority,
+                &token,
+                "main",
+                statement,
+                &params,
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap();
+        assert_eq!(scoped, expected);
+        let mut update = WriteBatch::new(CITES);
+        update.set_vertex_property(
+            VId(90),
+            BODY,
+            Some(text("analytical engine ".repeat(20).as_str())),
+        );
+        full.write(commit, update).await.unwrap();
+        assert_eq!(
+            full.query_authorized(
+                cx,
+                &authority,
+                &token,
+                "main",
+                statement,
+                &params,
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap(),
+            expected,
+            "a maintained tick over hidden data cannot alter scoped scores or ranks"
+        );
+    });
+}

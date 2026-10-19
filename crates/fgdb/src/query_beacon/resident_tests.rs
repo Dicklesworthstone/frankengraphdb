@@ -793,6 +793,15 @@ fn every_public_refresh_checkpoint_preserves_typed_interruption_and_retry() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+fn cold_view(db: &Database<crate::MemVfs>) -> crate::EmbeddedReadView {
+    // This test-only source deliberately omits maintained query pins, so
+    // comparisons retain the independently built source after registration.
+    crate::EmbeddedReadView {
+        snapshot: std::sync::Arc::clone(&db.snapshot),
+        beacon_indexes: super::QueryIndexes::default(),
+    }
+}
+
 #[test]
 fn maintained_automatic_reads_match_fresh_exact_corpus_after_commits_and_compaction() {
     let ((), report) = run_async_under_lab(0xbeac_1310, |root| async move {
@@ -825,7 +834,7 @@ fn maintained_automatic_reads_match_fresh_exact_corpus_after_commits_and_compact
             }),
         ];
         let compare = |db: &Database<crate::MemVfs>| {
-            let view = db.read_session().unwrap();
+            let view = cold_view(db);
             let mut reused = definition.clone();
             // No source scratch or document staging is permitted. The source
             // oracle must instead use the original independent build policy.
@@ -996,7 +1005,7 @@ fn maintained_automatic_reads_fall_back_for_mismatch_history_ann_and_failed_tick
         let mut changed = definition.clone();
         changed.index.max_documents -= 1;
         mismatches.push(changed);
-        let view = db.read_session().unwrap();
+        let view = cold_view(&db);
         for mut changed in mismatches {
             let expected = view.beacon_search(&query, &changed, hybrid).unwrap();
             assert_eq!(
@@ -1050,8 +1059,7 @@ fn maintained_automatic_reads_fall_back_for_mismatch_history_ann_and_failed_tick
         assert!(db.beacon_search(&query, &no_build, hybrid).is_err());
         assert_eq!(
             db.beacon_search(&query, &definition, hybrid).unwrap(),
-            db.read_session()
-                .unwrap()
+            cold_view(&db)
                 .beacon_search(&query, &definition, hybrid)
                 .unwrap()
         );

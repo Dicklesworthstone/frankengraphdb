@@ -33,12 +33,12 @@ pub use authorized::{
     AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
     AuthorizedSpoolCursor,
 };
-pub(crate) use beacon::BeaconRegistry;
 pub(crate) use beacon::procedure::{
     EndpointFilter, HybridSearch, is_hybrid, privileged as hybrid_procedure,
     refuse as hybrid_refusal,
 };
 pub use beacon::procedure::{HYBRID_SEARCH_OUTPUTS, HybridCallError};
+pub(crate) use beacon::{BeaconQueryIndexes, BeaconRegistry};
 pub use beacon::{
     MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
     MaintainedBeaconIndex, MaintainedBeaconStatus, PinnedIndex, RefreshReport, ResidentIndex,

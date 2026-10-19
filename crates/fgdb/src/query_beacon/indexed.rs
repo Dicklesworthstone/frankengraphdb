@@ -2,7 +2,9 @@
 //! The graph lane retains selected vertices and BFS state, never an edge copy.
 //! Text/vector construction and exact candidate fusion remain the native paths.
 
-use super::{BeaconRegistry, Cancel, Meter, Options, Scan, SharedWork, build_selected_optional};
+use super::{
+    BeaconQueryIndexes, Cancel, Meter, Options, Scan, SharedWork, build_selected_optional,
+};
 use crate::gql_exec::source::SourceEvent;
 use crate::{Database, EmbeddedReadView, ReadError, Snapshot, VertexRow};
 use asupersync::fs::Vfs;
@@ -266,8 +268,8 @@ pub(crate) fn evaluate_filtered(
     )
 }
 
-/// Only a privileged Database supplies its own registry. Capability-scoped
-/// execution always enters evaluate_filtered and builds the admitted corpus.
+/// A privileged Database or read view supplies its own immutable query pins.
+/// Capability-scoped execution always builds the admitted corpus.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_privileged(
     snapshot: &Snapshot,
@@ -276,7 +278,7 @@ pub(crate) fn evaluate_privileged(
     query: GraphHybridQuery<'_>,
     expansion: ExpansionSpec<'_, RelationId>,
     work: &RefCell<impl WorkControl>,
-    registry: &BeaconRegistry,
+    registry: &BeaconQueryIndexes,
     admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
     eligible: impl Fn(VId) -> bool,
 ) -> Result<Vec<GraphHybridHit>, BeaconError> {
@@ -306,7 +308,7 @@ fn evaluate_with_registry(
     query: GraphHybridQuery<'_>,
     expansion: ExpansionSpec<'_, RelationId>,
     work: &RefCell<impl WorkControl>,
-    registry: Option<&BeaconRegistry>,
+    registry: Option<&BeaconQueryIndexes>,
     mut scan: Scan<'_>,
     admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
     label_allowed: impl FnMut(LabelId) -> bool,
@@ -504,7 +506,7 @@ impl<V: Vfs + Clone> Database<V> {
                 query,
                 expansion,
                 &work,
-                &self.maintained_beacon,
+                self.maintained_beacon.query_indexes(),
                 |_| Ok(true),
                 eligible,
             );
@@ -544,19 +546,15 @@ impl EmbeddedReadView {
             let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
                 cx.checkpoint()
             }));
-            let result = evaluate_filtered(
+            let result = evaluate_privileged(
                 &self.snapshot,
                 at,
                 options,
                 query,
                 expansion,
                 &work,
-                Scan::Metered,
+                &self.beacon_indexes,
                 |_| Ok(true),
-                |_| true,
-                |_| true,
-                |_| true,
-                || Ok(()),
                 eligible,
             );
             work.into_inner().finish(result)

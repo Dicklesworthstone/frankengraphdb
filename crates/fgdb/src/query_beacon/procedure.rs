@@ -61,10 +61,10 @@
 //! defaults and indexed/materialized accounting are unchanged. Storage itself
 //! remains resident; this does not claim spill or physical timing isolation.
 //!
-//! Privileged current text/vector calls reuse a compatible healthy maintained
-//! generation with fresh query accounting; no source projection is repeated.
-//! Historical, approximate, masked and transaction reads retain their exact
-//! source build. Endpoint eligibility never changes the reused BM25 corpus.
+//! Privileged text/vector calls reuse a compatible healthy maintained
+//! generation at the database or read view's exact cut with fresh accounting.
+//! Older historical selectors, approximate, masked and transaction reads retain
+//! their source build. Endpoint eligibility never changes the reused BM25 corpus.
 //! This is exact fusion of selected candidates, not an exhaustive hybrid
 //! top-k; `ann` remains approximate. It is not a durable index definition.
 
@@ -935,7 +935,7 @@ pub(crate) fn failure<C>(error: BeaconReadError<ReadError, C>) -> GqlQueryError<
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn privileged(
     snapshot: &Snapshot,
-    registry: Option<&super::BeaconRegistry>,
+    registry: Option<&super::BeaconQueryIndexes>,
     at: CommitSeq,
     call: &PreparedProcedureCall,
     arguments: &[GraphValue],

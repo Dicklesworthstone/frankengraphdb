@@ -33,11 +33,11 @@ mod graph;
 
 #[path = "resident/maintained.rs"]
 mod maintained;
-pub(crate) use maintained::Registry;
 pub use maintained::{
     MAX_MAINTAINED_BEACON_INDEXES, MaintainedBeaconError, MaintainedBeaconFailure,
     MaintainedBeaconIndex, MaintainedBeaconStatus,
 };
+pub(crate) use maintained::{QueryIndexes, Registry};
 
 #[cfg(test)]
 #[path = "resident_tests.rs"]
@@ -525,6 +525,7 @@ impl ResidentIndex {
             work.borrow_mut().charge(1)?;
             Some(EmbeddedReadView {
                 snapshot: Arc::clone(snapshot),
+                beacon_indexes: QueryIndexes::default(),
             })
         } else {
             None
@@ -639,7 +640,10 @@ impl<V: Vfs + Clone> Database<V> {
                 )?;
                 let graph_source = if graph_enabled {
                     work.borrow_mut().charge(1)?;
-                    Some(self.read_session().map_err(Error::Source)?)
+                    Some(EmbeddedReadView {
+                        snapshot: Arc::clone(&self.snapshot),
+                        beacon_indexes: QueryIndexes::default(),
+                    })
                 } else {
                     None
                 };

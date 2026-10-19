@@ -2081,8 +2081,9 @@ impl Snapshot {
 
 /// An immutable, in-process view of one already-authenticated published root.
 ///
-/// Acquiring a view clones one [`Arc`], not the decoded blocks. A later write
-/// uses copy-on-write only when it must preserve an older live view, while
+/// Acquiring a view clones the snapshot and maintained-search [`Arc`] pins
+/// in O(1), not the decoded blocks or index contents. A later write uses
+/// copy-on-write only when it must preserve an older live view, while
 /// compaction publishes a replacement generation without mutating the pinned
 /// one. This is deliberately not the plan's posture-closed
 /// `ReadSnapshot<Role>`: it has no authority binding, protocol cut, graph
@@ -2094,6 +2095,9 @@ impl Snapshot {
 #[must_use = "an embedded read view has no effect unless its pinned generation is read"]
 pub struct EmbeddedReadView {
     snapshot: Arc<Snapshot>,
+    // Privileged, immutable query pins from this same opened handle/cut.
+    // Read-only opens and graph-only resident source views carry no registry.
+    beacon_indexes: query::BeaconQueryIndexes,
 }
 
 impl EmbeddedReadView {
@@ -2841,6 +2845,7 @@ impl<V: Vfs + Clone> Database<V> {
         match Self::bind_with_vfs(cx, vfs, path, keys.clone(), false).await {
             Ok(database) => Ok(EmbeddedReadView {
                 snapshot: Arc::clone(&database.snapshot),
+                beacon_indexes: database.maintained_beacon.query_indexes().clone(),
             }),
             Err(OpenError::Commit(CommitError::WriterAlreadyOpen)) if lagging.is_some() => {
                 Self::read_published(cx, &keys, lagging.expect("guarded")).await
@@ -2933,6 +2938,7 @@ impl<V: Vfs + Clone> Database<V> {
             snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
             Ok(EmbeddedReadView {
                 snapshot: Arc::new(snapshot),
+                beacon_indexes: query::BeaconQueryIndexes::default(),
             })
         })
     }
@@ -3211,6 +3217,7 @@ impl<V: Vfs + Clone> Database<V> {
         self.ensure_readable()?;
         Ok(EmbeddedReadView {
             snapshot: Arc::clone(&self.snapshot),
+            beacon_indexes: self.maintained_beacon.query_indexes().clone(),
         })
     }
 

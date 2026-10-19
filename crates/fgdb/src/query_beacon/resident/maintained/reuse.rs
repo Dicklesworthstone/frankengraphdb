@@ -1,20 +1,22 @@
-//! Definition-based reuse is confined to privileged, current database reads.
+//! Definition-based reuse is confined to privileged, exact-cut database reads.
+//! Query-only pins may belong to a retained read view's older frontier.
 //! Authorized readers must build their masked corpus: an endpoint predicate
 //! cannot remove hidden documents from BM25 statistics or ANN routing.
 
-use super::{Options, Registry};
+use super::{Options, QueryIndexes};
 use fgdb_beacon::read::Search;
 use fgdb_beacon::{BeaconError, IndexConfig, IndexSnapshot, VectorSearch, WorkControl};
 use fgdb_types::CommitSeq;
 
-impl Registry {
+impl QueryIndexes {
     /// Select the first healthy, compatible current generation in bounded slot
     /// order. A miss precedes execution and chooses the ordinary native build;
     /// a refused lookup/search is never retried with a fresh work allowance.
     ///
-    /// The containing Database owns both this registry and the supplied source
-    /// frontier. Historical views and staged write overlays have no access to
-    /// this shortcut. Incremental ANN topology is not equivalent to a rebuild,
+    /// The Database or read view owns both these immutable pins and the
+    /// supplied source frontier. A historical selector must still match that
+    /// pinned frontier; staged overlays never receive these pins.
+    /// Incremental ANN topology is not equivalent to a rebuild,
     /// even with equal HNSW settings, so approximate requests always miss.
     pub(crate) fn lookup_exact(
         &self,
@@ -28,12 +30,12 @@ impl Registry {
         if at != current || !exact_request(query) {
             return Ok(None);
         }
-        for entry in self.entries.iter().flatten() {
+        for entry in self.entries.iter() {
             work.charge(1)?;
-            if entry.failure.is_some() || entry.resident.source_sequence != at {
+            if entry.source_sequence != at {
                 continue;
             }
-            let definition = &entry.resident.definition;
+            let definition = &entry.definition;
             if definition.vertex_label != options.vertex_label
                 || (config.text.is_some() && definition.projection.text != options.projection.text)
             {
@@ -85,7 +87,7 @@ impl Registry {
                     continue;
                 }
             }
-            return Ok(Some(entry.resident.index.snapshot()));
+            return Ok(Some(entry.index.clone()));
         }
         Ok(None)
     }
