@@ -601,6 +601,7 @@ impl<'a> Parser<'a> {
             leading: Vec::new(),
             leading_types: Vec::new(),
             correlations: Vec::new(),
+            row_fields: Vec::new(),
         })
     }
 
@@ -638,6 +639,7 @@ impl<'a> Parser<'a> {
             self.syntax.return_at = self.current.at;
         }
         let correlations = core::mem::take(&mut self.read_correlations);
+        let row_fields = core::mem::take(&mut self.read_row_fields);
         let width = schema.len();
         let rebound = self
             .syntax
@@ -799,6 +801,13 @@ impl<'a> Parser<'a> {
         if !aggregate {
             self.end()?;
         }
+        if !row_fields.is_empty() {
+            self.capacity(
+                width + inputs.len() + row_fields.len() - 1,
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+        }
         self.syntax.columns = inputs
             .into_iter()
             .map(|source| Column {
@@ -819,6 +828,7 @@ impl<'a> Parser<'a> {
                 leading,
                 leading_types: vec![GraphSetColumnType::Any; width],
                 correlations: bound_correlations,
+                row_fields,
             },
             tail,
         ))
@@ -1175,6 +1185,7 @@ impl<'a> Parser<'a> {
                 leading: Vec::new(),
                 leading_types: Vec::new(),
                 correlations: Vec::new(),
+                row_fields: Vec::new(),
             });
         }
         if inputs.is_empty() {
@@ -1206,6 +1217,7 @@ impl<'a> Parser<'a> {
             leading: Vec::new(),
             leading_types: Vec::new(),
             correlations: Vec::new(),
+            row_fields: Vec::new(),
         })
     }
 
@@ -2552,6 +2564,47 @@ impl<'a> Parser<'a> {
 }
 
 impl BoundSetTextInput {
+    /// Derive every imported join operand once per leading occurrence. The
+    /// caller removes these private cells after equality filtering, leaving
+    /// every previously compiled CREATE/RETURN column at its original slot.
+    pub(crate) fn bind_row_fields(
+        &self,
+        input: PreparedGraphSet,
+        values: &[GqlParameterValue],
+    ) -> Result<PreparedGraphSet, GraphSetTextError> {
+        if self.row_fields.is_empty() {
+            return Ok(input);
+        }
+        let mut projection: Vec<_> = input
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(column, name)| {
+                GraphSetProjection::new(name.clone(), GraphSetValue::Column(column))
+            })
+            .collect();
+        for value in &self.row_fields {
+            let mut ordinal = projection.len();
+            let name = loop {
+                let name = format!("__fg_match_key_{ordinal}");
+                if projection.iter().all(|column| column.name() != name) {
+                    break name;
+                }
+                ordinal += 1;
+            };
+            projection.push(GraphSetProjection::new(
+                name,
+                bind_read_value(value, values)?,
+            ));
+        }
+        input
+            .project_ordered_output(projection)
+            .map_err(|kind| GraphSetTextError {
+                offset: self.return_at,
+                kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+            })
+    }
+
     pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] {
         &self.parameters
     }
@@ -2606,6 +2659,8 @@ impl BoundSetTextInput {
         } else {
             let mut leading = bind_stages(PreparedGraphSet::singleton(), &self.leading, values)?;
             if let Some(selection) = &self.selection {
+                let imported_width = leading.column_types().len();
+                leading = self.bind_row_fields(leading, values)?;
                 let width = leading.column_types().len();
                 leading = leading
                     .cross_join(selection.bind_values(values)?.into())
@@ -2628,6 +2683,28 @@ impl BoundSetTextInput {
                     leading = leading.filter(&code).map_err(|kind| GraphSetTextError {
                         offset: self.return_at,
                         kind: GraphSetTextErrorKind::FilterBuild(kind),
+                    })?;
+                }
+                if !self.row_fields.is_empty() {
+                    let projection = (0..imported_width)
+                        .chain(width..leading.column_types().len())
+                        .enumerate()
+                        .map(|(output, column)| {
+                            // The preexisting cross product permits names
+                            // shared by its children. These are private input
+                            // cells, so give them unique compiler names before
+                            // the public projection restores user aliases.
+                            GraphSetProjection::new(
+                                format!("__fg_match_input_{output}"),
+                                GraphSetValue::Column(column),
+                            )
+                        })
+                        .collect();
+                    leading = leading.project_ordered_output(projection).map_err(|kind| {
+                        GraphSetTextError {
+                            offset: self.return_at,
+                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                        }
                     })?;
                 }
             }

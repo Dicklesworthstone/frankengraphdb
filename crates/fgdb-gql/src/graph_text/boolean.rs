@@ -340,6 +340,9 @@ impl<'a> Parser<'a> {
     fn row_correlation(
         &mut self,
     ) -> Result<Option<(Name<'a>, Option<Name<'a>>, usize, usize)>, GraphPatternTextError> {
+        if let Some(correlation) = self.row_field_correlation()? {
+            return Ok(Some(correlation));
+        }
         if self.read_row_bindings.is_empty() {
             return Ok(None);
         }
@@ -529,6 +532,7 @@ impl<'a> Parser<'a> {
                         && !after_dot
                         && [
                             "AND", "OR", "RETURN", "SET", "REMOVE", "WITH", "MATCH", "OPTIONAL",
+                            "CREATE", "INSERT", "DELETE", "DETACH", "MERGE",
                         ]
                         .iter()
                         .any(|keyword| word.eq_ignore_ascii_case(keyword))

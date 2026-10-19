@@ -758,14 +758,16 @@ impl PreparedGraphInsertText {
             let column = parser.mutation_projection(&mut parsed.projections, variable, key)?;
             correlations.push((row, column));
         }
+        let row_fields = core::mem::take(&mut parser.read_row_fields);
         let input_types = parser.insertion_input_types(&row_schema, &parsed.projections);
-        if row_input && input_types.len() > MAX_PATTERN_VERTICES {
+        let joined_width = input_types.len() + row_fields.len();
+        if row_input && joined_width > MAX_PATTERN_VERTICES {
             return Err(error(
                 at,
                 GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
                     dimension: crate::algebra::PatternLimitDimension::Columns,
                     limit: MAX_PATTERN_VERTICES,
-                    observed: input_types.len(),
+                    observed: joined_width,
                 }),
             )
             .into());
@@ -843,14 +845,21 @@ impl PreparedGraphInsertText {
                 singleton: true,
                 leading,
                 correlations: Vec::new(),
+                row_fields,
             };
             // Compile all source and property expression shapes before any
             // catalog callback, including statically unreachable empty lists.
             let values = shape_arguments(&syntax.parameters);
             let shape = input.bind_values(&values)?;
+            if !input.row_fields.is_empty() {
+                input.bind_row_fields(shape.clone(), &values)?;
+            }
             // A matched child adds a cross product and, when correlated, a
             // filter. Admit those ancestors BEFORE any catalog callback.
-            let ancestors = 1 + usize::from(matched) + usize::from(!correlations.is_empty());
+            let ancestors = 1
+                + usize::from(matched)
+                + usize::from(!correlations.is_empty())
+                + 2 * usize::from(!input.row_fields.is_empty());
             shape.check_ancestor_depth(ancestors).map_err(|kind| {
                 insertion_build(at, GraphInsertBuildError::RelationalInput(kind))
             })?;
@@ -880,6 +889,19 @@ impl PreparedGraphInsertText {
             }
             Some(input)
         };
+        if relational
+            .as_ref()
+            .is_some_and(|input| !input.row_fields.is_empty())
+        {
+            for (key, slot) in &syntax.element_keys {
+                slot.resolve(
+                    match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                        Some(GraphSymbol::Property(key)) => Some(key),
+                        _ => None,
+                    },
+                );
+            }
+        }
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());

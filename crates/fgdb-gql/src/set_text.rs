@@ -697,6 +697,17 @@ impl BoundSetTextInput {
         fn ordinal(bytes: &mut Vec<u8>, value: usize) {
             bytes.extend_from_slice(&(value as u64).to_be_bytes());
         }
+        if !self.row_fields.is_empty() {
+            // Input tags 0/1 are the original selection, 2/3 are multipart
+            // owners. Keep every existing definition byte-identical while
+            // giving computed join keys a distinct, self-delimiting domain.
+            bytes.push(4);
+            bytes.extend_from_slice(b"fgdb:gql:row-field-correlations:v1\0");
+            ordinal(bytes, self.row_fields.len());
+            for value in &self.row_fields {
+                value.append_template_transcript(bytes);
+            }
+        }
         match &self.selection {
             None => bytes.push(0),
             Some(selection) => {
@@ -860,6 +871,7 @@ pub(crate) struct BoundSetTextInput {
     pub(crate) singleton: bool,
     pub(crate) leading: Vec<ReadStageTemplate>,
     pub(crate) correlations: Vec<(usize, usize)>,
+    pub(crate) row_fields: Vec<ReadValueTemplate>,
 }
 
 // A token view, not a lexer. Only graph_text's existing Lexer constructs these.
