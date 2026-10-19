@@ -301,9 +301,7 @@ fn edge_intervals_equal_linear_oracle_with_overlaps_and_full_width_identities() 
         let expected: Vec<_> = bounds
             .iter()
             .enumerate()
-            .filter_map(|(block, &(first, last))| {
-                (first <= eid && eid <= last).then_some(block)
-            })
+            .filter_map(|(block, &(first, last))| (first <= eid && eid <= last).then_some(block))
             .collect();
         let (actual, _) = edge_lookup(&ranges, eid);
         assert_eq!(actual, expected, "{eid}");
@@ -325,9 +323,7 @@ fn edge_interval_point_work_is_logarithmic_or_proportional_to_overlaps() {
         let expected: Vec<_> = bounds
             .iter()
             .enumerate()
-            .filter_map(|(block, &(first, last))| {
-                (first <= eid && eid <= last).then_some(block)
-            })
+            .filter_map(|(block, &(first, last))| (first <= eid && eid <= last).then_some(block))
             .collect();
         assert_eq!(actual, expected);
         assert!(work <= 2 * (count.ilog2() as usize + 1), "{eid}: {work}");
@@ -336,7 +332,10 @@ fn edge_interval_point_work_is_logarithmic_or_proportional_to_overlaps() {
     let (actual, work) = edge_lookup(&wide, 7);
     assert_eq!(actual, (0..count).collect::<Vec<_>>());
     assert_eq!(work, count);
-    assert!(size_of::<EdgeCandidates>() <= 2048, "no allocated overlap bag");
+    assert!(
+        size_of::<EdgeCandidates>() <= 2048,
+        "no allocated overlap bag"
+    );
 }
 
 #[test]
@@ -393,8 +392,8 @@ fn routing_construction_is_charged_before_allocation_and_every_refusal_refunds()
             summary: None,
             rows: 0,
         });
-        let bytes = blocks.len()
-            * (size_of::<Outgoing>() + size_of::<Incoming>() + size_of::<EdgeRange>());
+        let bytes =
+            blocks.len() * (size_of::<Outgoing>() + size_of::<Incoming>() + size_of::<EdgeRange>());
         let short = MemoryPool::new(bytes - 1, 0).unwrap();
         let mut calls = 0;
         assert!(matches!(

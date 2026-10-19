@@ -556,8 +556,7 @@ fn run_scheduled<const W: usize, const HARMONIC: bool, C>(
     let mut workers = reserve(logical_workers)?;
     let mut first_batch = 0;
     for worker in 0..logical_workers {
-        let count = batches / logical_workers
-            + usize::from(worker < batches % logical_workers);
+        let count = batches / logical_workers + usize::from(worker < batches % logical_workers);
         let first = first_batch * width;
         first_batch += count;
         let end = first_batch

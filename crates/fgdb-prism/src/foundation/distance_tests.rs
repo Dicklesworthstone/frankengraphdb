@@ -344,10 +344,8 @@ fn replicated_scratch_chooser_respects_budget_boundaries_without_changing_batche
             // Last n at which exactly count full workers fit. No large graph
             // or allocation is needed to exercise the overflow/budget policy.
             let last_n = (WORKER_SCRATCH_TARGET / count - fixed) / per_vertex;
-            let admitted =
-                worker_count::<W, HARMONIC, Infallible>(last_n).unwrap();
-            let declined =
-                worker_count::<W, HARMONIC, Infallible>(last_n + 1).unwrap();
+            let admitted = worker_count::<W, HARMONIC, Infallible>(last_n).unwrap();
+            let declined = worker_count::<W, HARMONIC, Infallible>(last_n + 1).unwrap();
             assert!(admitted >= count);
             assert!(declined < count);
             assert!(admitted * (last_n * per_vertex + fixed) <= WORKER_SCRATCH_TARGET);
@@ -403,16 +401,14 @@ fn physical_threads_preserve_exact_workspace_for_scalar_and_bit_parallel_lanes()
                 let first = first_batch * width;
                 first_batch += count;
                 let sources = (first_batch * width).min(n) - first;
-                expected_workspace += width.min(sources)
-                    * size_of::<usize>()
-                    * if HARMONIC { 1 } else { 2 };
+                expected_workspace +=
+                    width.min(sources) * size_of::<usize>() * if HARMONIC { 1 } else { 2 };
             }
         }
         let expected = oracle::<HARMONIC>(graph, W);
         for threads in [1, 2, 8] {
             let (actual, workspace) =
-                run_scheduled::<W, HARMONIC, Infallible>(graph, &mut Unstoppable, threads)
-                    .unwrap();
+                run_scheduled::<W, HARMONIC, Infallible>(graph, &mut Unstoppable, threads).unwrap();
             assert_eq!(bits(&actual), expected.0);
             assert_eq!(actual.witness, expected.1);
             assert_eq!(workspace, expected_workspace, "W={W}, threads={threads}");

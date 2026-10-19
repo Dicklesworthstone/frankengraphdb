@@ -480,11 +480,19 @@ fn edge_point_and_adjacency_routes_keep_publication_winners_before_liveness() {
             .unwrap()
             .unwrap();
         assert_eq!(old.entry, edge(50, 7, 50, 1, Some(3)));
-        assert_eq!(old.props, vec![(PropertyKeyId(11), CanonicalScalar::Int(500))]);
+        assert_eq!(
+            old.props,
+            vec![(PropertyKeyId(11), CanonicalScalar::Int(500))]
+        );
         assert_eq!(extent_visits(view.stats()) - before, 3);
         drop(old);
         let before = extent_visits(view.stats());
-        assert!(view.edge_at(&query, EId(50), CommitSeq(3)).await.unwrap().is_none());
+        assert!(
+            view.edge_at(&query, EId(50), CommitSeq(3))
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             extent_visits(view.stats()) - before,
             2,
@@ -492,7 +500,10 @@ fn edge_point_and_adjacency_routes_keep_publication_winners_before_liveness() {
         );
         for relation in [None, Some(REL)] {
             for (cut, expected) in [
-                (1, vec![edge(10, 7, 10, 1, None), edge(50, 7, 50, 1, Some(3))]),
+                (
+                    1,
+                    vec![edge(10, 7, 10, 1, None), edge(50, 7, 50, 1, Some(3))],
+                ),
                 (3, vec![edge(10, 7, 10, 1, None), edge(90, 7, 90, 3, None)]),
             ] {
                 let before = extent_visits(view.stats());
@@ -503,10 +514,7 @@ fn edge_point_and_adjacency_routes_keep_publication_winners_before_liveness() {
                 assert_eq!(found.as_ref(), &expected);
                 assert_eq!(extent_visits(view.stats()) - before, 2, "topology only");
             }
-            for (cut, expected) in [
-                (1, vec![edge(50, 7, 50, 1, Some(3))]),
-                (3, vec![]),
-            ] {
+            for (cut, expected) in [(1, vec![edge(50, 7, 50, 1, Some(3))]), (3, vec![])] {
                 let before = extent_visits(view.stats());
                 let found = view
                     .adjacency_at(&query, VId(50), relation, true, CommitSeq(cut), 1)
@@ -521,7 +529,8 @@ fn edge_point_and_adjacency_routes_keep_publication_winners_before_liveness() {
             }
         }
         assert!(matches!(
-            view.adjacency_at(&query, VId(7), None, false, CommitSeq(3), 2).await,
+            view.adjacency_at(&query, VId(7), None, false, CommitSeq(3), 2)
+                .await,
             Err(BufferedReadError::Limit {
                 resource: "buffered adjacency identities",
                 requested: 3,

@@ -104,8 +104,7 @@ fn assert_reference(graph: &SnapshotGraphView, schedules: &[(usize, usize)]) {
         } else {
             n * size_of::<f64>()
                 + logical_workers
-                    * (size_of::<Worker>()
-                        + n * (size_of::<f64>() + 2 * size_of::<usize>()))
+                    * (size_of::<Worker>() + n * (size_of::<f64>() + 2 * size_of::<usize>()))
                 + window * n * size_of::<f64>()
         };
         assert_eq!(workspace, expected_workspace);
@@ -170,8 +169,7 @@ fn production_policy_replays_workspace_bits_and_witness_across_cpu_counts() {
         let graph = graph(n, &edges);
         let expected = run_with_threads(&graph, &mut Unstoppable, 1).unwrap();
         for threads in [2, 8] {
-            let (actual, workspace) =
-                run_with_threads(&graph, &mut Unstoppable, threads).unwrap();
+            let (actual, workspace) = run_with_threads(&graph, &mut Unstoppable, threads).unwrap();
             assert_eq!(bits(&actual), bits(&expected.0));
             assert_eq!(actual.witness, expected.0.witness);
             assert_eq!(workspace, expected.1, "n={n}, physical threads={threads}");

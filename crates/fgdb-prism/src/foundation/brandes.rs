@@ -324,8 +324,7 @@ fn run_with_schedule<C>(
     for worker in 0..logical_workers {
         // Divide the bounded result window exactly: rounding every worker's
         // allotment upward would exceed the advertised aggregate delta bound.
-        let sources = window / logical_workers
-            + usize::from(worker < window % logical_workers);
+        let sources = window / logical_workers + usize::from(worker < window % logical_workers);
         workers.push(Worker::new(n, sources, checkpoint)?);
     }
     let mut workspace = vector_bytes(&scores)?

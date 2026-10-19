@@ -773,11 +773,9 @@ impl<V: Vfs> BufferedPartition<V> {
             for (index, entry) in entries.iter().enumerate() {
                 if entry.eid == eid
                     && entry.created_at.0 <= as_of.0
-                    && result
-                        .as_ref()
-                        .is_none_or(|(old, old_at, _)| {
-                            (old.created_at, *old_at) <= (entry.created_at, at)
-                        })
+                    && result.as_ref().is_none_or(|(old, old_at, _)| {
+                        (old.created_at, *old_at) <= (entry.created_at, at)
+                    })
                 {
                     let locator = locators.as_ref().map_or(0, |locators| locators[index]);
                     result = Some((*entry, at, locator));
@@ -865,9 +863,7 @@ impl<V: Vfs> BufferedPartition<V> {
                 }
                 if candidates
                     .get(&entry.eid)
-                    .is_none_or(|(old, old_at)| {
-                        (old.created_at, *old_at) <= (entry.created_at, at)
-                    })
+                    .is_none_or(|(old, old_at)| (old.created_at, *old_at) <= (entry.created_at, at))
                 {
                     candidates.insert(entry.eid, (entry, at));
                 }
@@ -1264,10 +1260,8 @@ mod tests {
     #[test]
     fn indexed_point_and_adjacency_reads_fit_a_sublinear_metadata_allowance() {
         const COUNT: usize = 256;
-        let dir = std::env::temp_dir().join(format!(
-            "fgdb-cold-indexed-work-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-cold-indexed-work-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (_, report) = run_async_under_lab(0xb0_14, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -1366,7 +1360,12 @@ mod tests {
             }
             let before = visits(view.stats());
             for eid in [EId(1), EId(u128::MAX), entries[COUNT - 1].eid] {
-                assert!(view.edge_at(&query, eid, CommitSeq(1)).await.unwrap().is_none());
+                assert!(
+                    view.edge_at(&query, eid, CommitSeq(1))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
             }
             for (endpoint, relation, incoming) in [
                 (VId(1), None, false),
@@ -1380,7 +1379,11 @@ mod tests {
                     .unwrap();
                 assert!(found.is_empty());
             }
-            assert_eq!(visits(view.stats()), before, "absent and future candidates do no I/O");
+            assert_eq!(
+                visits(view.stats()),
+                before,
+                "absent and future candidates do no I/O"
+            );
             let future = view
                 .edge_at(&query, entries[COUNT - 1].eid, CommitSeq(2))
                 .await
