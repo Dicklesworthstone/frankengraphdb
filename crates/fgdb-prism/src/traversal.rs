@@ -199,9 +199,7 @@ pub(crate) fn run<C>(
         }
         FnxAlgorithm::ConnectedComponents => components(graph, false, checkpoint),
         FnxAlgorithm::WeaklyConnectedComponents => components(graph, true, checkpoint),
-        FnxAlgorithm::StronglyConnectedComponents => {
-            strongly_connected(graph, &mut || checkpoint.unit())
-        }
+        FnxAlgorithm::StronglyConnectedComponents => strongly_connected(graph, checkpoint),
         FnxAlgorithm::PageRank(_)
         | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
         | FnxAlgorithm::Triangles
@@ -376,6 +374,189 @@ fn components<C>(
 /// reused as the second-pass component queue and member list. Each vector is
 /// reserved once for at most n entries; incoming rows are already in the cache.
 fn strongly_connected<C>(
+    graph: &SnapshotGraphView,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<KernelOutput, FnxExecutionError<C>> {
+    let n = graph.node_count();
+    let mut seen = reserve(n)?;
+    let mut labels = reserve(n)?;
+    let mut order = reserve(n)?;
+    let mut stack = reserve(n)?;
+    while seen.len() < n {
+        let count = (n - seen.len()).min(FNX_METER_RUN);
+        if count == 1 {
+            checkpoint.unit()
+        } else {
+            checkpoint.units(count)
+        }
+        .map_err(FnxExecutionError::Cancelled)?;
+        seen.resize(seen.len() + count, false);
+        labels.resize(labels.len() + count, usize::MAX);
+    }
+    let mut witness = witness("strongly_connected_components_iterative_kosaraju");
+    let mut next_root = 0;
+    while next_root < n {
+        // Already-seen roots have no intervening work. Include at most the
+        // first unseen root, since its DFS must finish before the next charge.
+        let proposed = (n - next_root).min(FNX_METER_RUN);
+        let count = seen[next_root..next_root + proposed]
+            .iter()
+            .position(|&visited| !visited)
+            .map_or(proposed, |offset| offset + 1);
+        if count == 1 {
+            checkpoint.unit()
+        } else {
+            checkpoint.units(count)
+        }
+        .map_err(FnxExecutionError::Cancelled)?;
+        next_root += count;
+        let root = next_root - 1;
+        if seen[root] {
+            continue;
+        }
+        seen[root] = true;
+        stack.push((root, 0usize));
+        witness.queue_peak = witness.queue_peak.max(stack.len());
+        while let Some(&(vertex, offset)) = stack.last() {
+            let row = graph.neighbors_indices(vertex);
+            // Look ahead through at most 64 already-seen neighbors, stopping
+            // at the first DFS descent. Those edges cannot change `seen`, so
+            // this is the exact original DFS and finish order. A row failure
+            // or witness overflow still follows its original one-unit charge.
+            let proposed = row.map_or(1, |row| {
+                let remaining = row.len() - offset;
+                // Sparse rows and DFS completion need no lookahead. Retain
+                // the one-unit specialization instead of scanning a singleton
+                // once here and once again after its checkpoint.
+                if remaining <= 1 {
+                    return 1;
+                }
+                let count = remaining.min(FNX_METER_RUN);
+                row[offset..offset + count]
+                    .iter()
+                    .position(|&neighbor| !seen[neighbor])
+                    .map_or(count, |offset| offset + 1)
+            });
+            let count = if witness.edges_scanned.checked_add(proposed).is_some() {
+                proposed
+            } else {
+                1
+            };
+            if count == 1 {
+                checkpoint.unit()
+            } else {
+                checkpoint.units(count)
+            }
+            .map_err(FnxExecutionError::Cancelled)?;
+            let row = row.ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            if offset < row.len() {
+                witness.edges_scanned = witness
+                    .edges_scanned
+                    .checked_add(count)
+                    .ok_or(FnxExecutionError::SizeOverflow)?;
+                let last = stack.len() - 1;
+                stack[last].1 += count;
+                let neighbor = row[offset + count - 1];
+                if !seen[neighbor] {
+                    seen[neighbor] = true;
+                    stack.push((neighbor, 0));
+                    witness.queue_peak = witness.queue_peak.max(stack.len());
+                }
+            } else {
+                stack.pop();
+                order.push(vertex);
+                increment(&mut witness.nodes_touched)?;
+            }
+        }
+    }
+    let mut next_root = n;
+    while next_root > 0 {
+        // Reverse finish order is unchanged; only consecutive roots already
+        // assigned to a component can share the following root's charge run.
+        let proposed = next_root.min(FNX_METER_RUN);
+        let count = order[next_root - proposed..next_root]
+            .iter()
+            .rev()
+            .position(|&root| labels[root] == usize::MAX)
+            .map_or(proposed, |offset| offset + 1);
+        if count == 1 {
+            checkpoint.unit()
+        } else {
+            checkpoint.units(count)
+        }
+        .map_err(FnxExecutionError::Cancelled)?;
+        next_root -= count;
+        let root = order[next_root];
+        if labels[root] != usize::MAX {
+            continue;
+        }
+        stack.clear();
+        stack.push((root, 0));
+        labels[root] = root;
+        let mut minimum = root;
+        let mut head = 0;
+        witness.queue_peak = witness.queue_peak.max(1);
+        while head < stack.len() {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            let vertex = stack[head].0;
+            head += 1;
+            increment(&mut witness.nodes_touched)?;
+            let mut row = graph
+                .in_neighbors_indices(vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            while !row.is_empty() {
+                // Every result row was admitted before this kernel. No
+                // discovery can refuse inside a run; retain witness overflow
+                // precedence by staying scalar if its counter is near MAX.
+                let proposed = row.len().min(FNX_METER_RUN);
+                let count = if witness.edges_scanned.checked_add(proposed).is_some() {
+                    proposed
+                } else {
+                    1
+                };
+                if count == 1 {
+                    checkpoint.unit()
+                } else {
+                    checkpoint.units(count)
+                }
+                .map_err(FnxExecutionError::Cancelled)?;
+                witness.edges_scanned = witness
+                    .edges_scanned
+                    .checked_add(count)
+                    .ok_or(FnxExecutionError::SizeOverflow)?;
+                for &neighbor in &row[..count] {
+                    if labels[neighbor] == usize::MAX {
+                        labels[neighbor] = root;
+                        minimum = minimum.min(neighbor);
+                        stack.push((neighbor, 0));
+                        witness.queue_peak = witness.queue_peak.max(stack.len() - head);
+                    }
+                }
+                row = &row[count..];
+            }
+        }
+        for members in stack.chunks(FNX_METER_RUN) {
+            if members.len() == 1 {
+                checkpoint.unit()
+            } else {
+                checkpoint.units(members.len())
+            }
+            .map_err(FnxExecutionError::Cancelled)?;
+            for &(vertex, _) in members {
+                labels[vertex] = minimum;
+            }
+        }
+    }
+    Ok(KernelOutput {
+        values: KernelValues::Components(labels),
+        row_count: n,
+        witness,
+    })
+}
+
+/// Exact scalar predecessor retained for differential and paired controls.
+#[cfg(test)]
+fn strongly_connected_incumbent<C>(
     graph: &SnapshotGraphView,
     checkpoint: &mut impl FnMut() -> Result<(), C>,
 ) -> Result<KernelOutput, FnxExecutionError<C>> {
@@ -636,6 +817,154 @@ mod tests {
             ) => assert_eq!((a, b, c), (x, y, z)),
             (Err(actual), Err(expected)) => panic!("unexpected refusals: {actual:?}, {expected:?}"),
             (Err(error), Ok(_)) | (Ok(_), Err(error)) => panic!("different outcome: {error:?}"),
+        }
+    }
+
+    fn same_components(
+        actual: Result<KernelOutput, FnxExecutionError<usize>>,
+        expected: Result<KernelOutput, FnxExecutionError<usize>>,
+    ) {
+        match (actual, expected) {
+            (Ok(actual), Ok(expected)) => {
+                let (
+                    KernelValues::Components(actual_rows),
+                    KernelValues::Components(expected_rows),
+                ) = (actual.values, expected.values)
+                else {
+                    panic!("SCC produces component labels");
+                };
+                assert_eq!(actual_rows, expected_rows);
+                assert_eq!(actual.row_count, expected.row_count);
+                assert_eq!(actual.witness, expected.witness);
+            }
+            (
+                Err(FnxExecutionError::Cancelled(actual)),
+                Err(FnxExecutionError::Cancelled(expected)),
+            ) => assert_eq!(actual, expected),
+            (Err(actual), Err(expected)) => panic!("unexpected refusals: {actual:?}, {expected:?}"),
+            (Err(error), Ok(_)) | (Ok(_), Err(error)) => panic!("different outcome: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn scc_runs_match_scalar_and_independent_reachability_on_every_small_digraph() {
+        // This oracle uses only the input pairs and transitive closure, not
+        // either traversal's CSR, DFS order, or component bookkeeping.
+        for n in 0..=4 {
+            let pairs: Vec<_> = (0..n)
+                .flat_map(|source| {
+                    (0..n)
+                        .filter(move |&target| source != target)
+                        .map(move |target| (source, target))
+                })
+                .collect();
+            for mask in 0usize..1usize << pairs.len() {
+                let edges: Vec<_> = pairs
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| mask & (1 << bit) != 0)
+                    .map(|(_, &pair)| pair)
+                    .collect();
+                let mut reachable = vec![vec![false; n]; n];
+                for (vertex, row) in reachable.iter_mut().enumerate() {
+                    row[vertex] = true;
+                }
+                for &(source, target) in &edges {
+                    reachable[source][target] = true;
+                }
+                for middle in 0..n {
+                    for source in 0..n {
+                        for target in 0..n {
+                            reachable[source][target] |=
+                                reachable[source][middle] && reachable[middle][target];
+                        }
+                    }
+                }
+                let expected: Vec<_> = (0..n)
+                    .map(|vertex| {
+                        (0..n)
+                            .find(|&other| reachable[vertex][other] && reachable[other][vertex])
+                            .unwrap()
+                    })
+                    .collect();
+                let view = graph(n, &edges, Directedness::Directed);
+                let mut bulk = Meter::default();
+                let actual = strongly_connected(&view, &mut bulk).unwrap();
+                let KernelValues::Components(actual_rows) = &actual.values else {
+                    panic!("SCC produces component labels");
+                };
+                assert_eq!(actual_rows, &expected, "n={n} mask={mask}");
+                assert_eq!(actual.witness.nodes_touched, 2 * n);
+                assert_eq!(actual.witness.edges_scanned, 2 * edges.len());
+                assert_eq!(bulk.units, 6 * n + 2 * edges.len());
+                let mut scalar = Meter::default();
+                let prior = strongly_connected_incumbent(&view, &mut || scalar.unit());
+                same_components(Ok(actual), prior);
+                assert_eq!(bulk.units, scalar.units);
+            }
+        }
+    }
+
+    #[test]
+    fn scc_runs_keep_every_scalar_refusal_and_dfs_boundary() {
+        let n = 2 * FNX_METER_RUN + 7;
+        let mut hub = vec![(0, 0), (0, 1), (0, 1)];
+        for vertex in 1..n - 2 {
+            hub.push((0, vertex));
+            hub.push((vertex, 0));
+            // Deep DFS descents and long already-seen prefixes alternate.
+            hub.push((vertex, (vertex + 1) % (n - 2)));
+        }
+        let cases = [
+            (0, Vec::new()),
+            (n, Vec::new()),
+            (n, hub),
+            (n, (1..n).map(|vertex| (vertex - 1, vertex)).collect()),
+            (
+                8,
+                (0..8)
+                    .flat_map(|source| (0..8).map(move |target| (source, target)))
+                    .collect(),
+            ),
+            // The first member reached in the second pass is not its minimum
+            // ordinal, and later finish-order roots are already assigned.
+            (7, vec![(6, 2), (2, 4), (4, 6), (5, 1), (1, 3), (3, 5)]),
+        ];
+        for (n, edges) in cases {
+            for direction in [Directedness::Directed, Directedness::Reversed] {
+                let view = graph(n, &edges, direction);
+                let mut scalar = Meter::default();
+                let prior = strongly_connected_incumbent(&view, &mut || scalar.unit());
+                let mut bulk = Meter::default();
+                let actual = strongly_connected(&view, &mut bulk);
+                same_components(actual, prior);
+                assert_eq!(bulk.units, scalar.units);
+                if n >= FNX_METER_RUN {
+                    assert!(bulk.calls < scalar.calls);
+                    assert!(bulk.full_runs >= n / FNX_METER_RUN);
+                }
+                if n >= FNX_METER_RUN && edges.len() > 2 * n {
+                    assert!(
+                        bulk.full_runs > n / FNX_METER_RUN,
+                        "DFS, transpose, roots, and relabeling must batch beyond initialization"
+                    );
+                }
+                for stop in 1..=scalar.units + 1 {
+                    let mut scalar = Meter {
+                        stop: Some(stop),
+                        ..Meter::default()
+                    };
+                    let prior = strongly_connected_incumbent(&view, &mut || scalar.unit());
+                    let mut bulk = Meter {
+                        stop: Some(stop),
+                        ..Meter::default()
+                    };
+                    let actual = strongly_connected(&view, &mut bulk);
+                    same_components(actual, prior);
+                    assert_eq!(bulk.units, scalar.units, "n={n} {direction:?} stop={stop}");
+                    assert_eq!(bulk.stopped, scalar.stopped);
+                }
+            }
         }
     }
 

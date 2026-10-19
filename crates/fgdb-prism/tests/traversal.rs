@@ -370,6 +370,122 @@ fn component_runs_keep_every_work_refusal_and_witness_on_hubs() {
 }
 
 #[test]
+fn scc_public_runs_preserve_complete_results_admission_and_every_refusal() {
+    let width = 2 * FNX_METER_RUN + 3;
+    let n = width + 4;
+    let vertices: Vec<_> = (0..n)
+        .map(|vertex| VId((vertex as u128) << 64 | 31))
+        .collect();
+    let mut pairs = vec![(0, 0), (0, 1), (0, 1)];
+    for vertex in 1..width {
+        pairs.extend([(0, vertex), (vertex, 0), (vertex, (vertex + 1) % width)]);
+    }
+    // A one-way bridge separates two SCCs; the final vertex remains isolated.
+    pairs.extend([
+        (0, width),
+        (width, width + 1),
+        (width + 1, width + 2),
+        (width + 2, width),
+    ]);
+    let edges: Vec<_> = pairs
+        .iter()
+        .enumerate()
+        .map(|(eid, &(source, target))| ProjectionEdge {
+            eid: EId((eid as u128) << 64 | 43),
+            source: vertices[source],
+            target: vertices[target],
+            weight: -3.0,
+        })
+        .collect();
+    let expected: BTreeMap<_, _> = vertices
+        .iter()
+        .enumerate()
+        .map(|(vertex, &id)| {
+            let minimum = if vertex < width {
+                0
+            } else if vertex < n - 1 {
+                width
+            } else {
+                vertex
+            };
+            (id, vertices[minimum])
+        })
+        .collect();
+    let call = FnxCallSpec::strongly_connected_components();
+    for direction in [Directedness::Directed, Directedness::Reversed] {
+        let view = graph(&vertices, &edges, direction);
+        let mut scalar_units = 0;
+        let scalar = call
+            .execute(&view, limits(), || {
+                scalar_units += 1;
+                Ok::<(), usize>(())
+            })
+            .unwrap();
+        let mut bulk = ComponentMeter::default();
+        let actual = call.execute(&view, limits(), &mut bulk).unwrap();
+        assert_eq!(actual, scalar, "every row and certificate field");
+        assert_eq!(bulk.observed, scalar_units);
+        assert!(bulk.calls < scalar_units);
+        assert!(bulk.full_runs > n / FNX_METER_RUN);
+        assert_eq!(bulk.largest_run, FNX_METER_RUN);
+        let arcs: usize = (0..n)
+            .map(|vertex| view.neighbors_indices(vertex).unwrap().len())
+            .sum();
+        assert_eq!(actual.certificate.witness.nodes_touched, 2 * n);
+        assert_eq!(actual.certificate.witness.edges_scanned, 2 * arcs);
+        assert_eq!(scalar_units, 8 * n + 2 * arcs + 3);
+        assert_eq!(labels(actual.clone()), expected);
+
+        for stop in 1..=scalar_units {
+            let mut observed = 0;
+            let scalar = call.execute(&view, limits(), || {
+                assert!(observed < stop, "no scalar callback after refusal");
+                observed += 1;
+                if observed == stop { Err(stop) } else { Ok(()) }
+            });
+            let mut bulk = ComponentMeter {
+                stop: Some(stop),
+                ..ComponentMeter::default()
+            };
+            let candidate = call.execute(&view, limits(), &mut bulk);
+            assert!(matches!(scalar, Err(FnxExecutionError::Cancelled(at)) if at == stop));
+            assert!(matches!(candidate, Err(FnxExecutionError::Cancelled(at)) if at == stop));
+            assert_eq!(observed, stop);
+            assert_eq!(bulk.observed, stop);
+            assert!(bulk.stopped);
+        }
+        for (row_limit, work_limit, resource, requested, units) in [
+            (n - 1, usize::MAX, "result rows", n, 1),
+            (
+                n,
+                actual.certificate.estimated_work - 1,
+                "estimated work",
+                actual.certificate.estimated_work,
+                n + 1,
+            ),
+        ] {
+            let mut meter = ComponentMeter::default();
+            let refusal = call.execute(
+                &view,
+                FnxExecutionLimits {
+                    max_result_rows: row_limit,
+                    max_estimated_work: work_limit,
+                    ..limits()
+                },
+                &mut meter,
+            );
+            assert!(matches!(refusal, Err(FnxExecutionError::LimitExceeded {
+                resource: actual_resource, requested: actual_requested, ..
+            }) if actual_resource == resource && actual_requested == requested));
+            assert_eq!(
+                meter.observed, units,
+                "refuse before SCC allocation and work"
+            );
+        }
+    }
+}
+
+#[test]
 fn bfs_runs_preserve_discovery_refusals_and_every_work_prefix() {
     // A hub crosses two run boundaries, followed by a cycle and an isolate.
     // Duplicate edges and self loops must not consume result-row capacity.
