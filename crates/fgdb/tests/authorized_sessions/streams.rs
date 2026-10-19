@@ -1407,8 +1407,8 @@ fn range_and_prefix_streams_keep_scoped_quotas_across_capacity_and_type_fallback
         let issuer = authority();
         for prefix in [false, true] {
             // Two roots fit. Hidden and stale distinct values cross the fixed
-            // source capacity; a hidden nontext value separately forces the
-            // prefix safety fallback. Neither changes visible candidate cost.
+            // source capacity; a hidden nontext value is independently
+            // UNKNOWN. Neither changes visible candidate cost.
             for population in [0_u128, 1, 70] {
                 let mut db =
                     Database::open_memory(&commit, DatabaseKeys::new([1; 32], NS, [2; 32]))
@@ -1657,3 +1657,6 @@ fn denied_range_and_prefix_keys_keep_the_same_native_record_refusal() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[path = "streams/prefix_types.rs"]
+mod prefix_types;

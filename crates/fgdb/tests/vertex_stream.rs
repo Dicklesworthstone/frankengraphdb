@@ -1084,9 +1084,10 @@ fn prefix_selection_keeps_nontext_unknowns_and_boolean_boundaries() {
                 expected_ids,
                 "{predicate}"
             );
-            // A mixed-type history prevents prefix pruning; OR, NOT and NULL
-            // operands are independently ineligible for a direct prefix seek.
-            assert_eq!(stream.row_stats().snapshot_records, 5, "{predicate}");
+            // Mixed-type UNKNOWNs do not disable a direct prefix seek. OR,
+            // NOT and NULL operands remain independently ineligible.
+            let records = if predicate == "n.p STARTS WITH 'A'" { 1 } else { 5 };
+            assert_eq!(stream.row_stats().snapshot_records, records, "{predicate}");
             assert_eq!(stream.state(), VertexScanState::Exhausted);
         }
     });
@@ -1141,3 +1142,6 @@ fn prefix_and_range_selection_cannot_hide_earlier_arithmetic_errors() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[path = "vertex_stream/prefix_types.rs"]
+mod prefix_types;

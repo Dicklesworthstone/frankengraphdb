@@ -110,7 +110,7 @@ fn every_prefix_refusal_preserves_the_full_ordered_retry_at_the_capacity_boundar
 }
 
 #[test]
-fn prefix_type_fallback_and_unicode_successors_preserve_the_storage_domain() {
+fn prefix_unknown_types_and_unicode_successors_preserve_the_storage_domain() {
     let spellings = [
         "",
         "Ad",
@@ -146,7 +146,11 @@ fn prefix_type_fallback_and_unicode_successors_preserve_the_storage_domain() {
         .unwrap();
         assert_eq!(output, expected, "prefix={prefix:?}");
     }
-    for incompatible in [CanonicalScalar::Int(0), CanonicalScalar::Bool(false)] {
+    for incompatible in [
+        CanonicalScalar::Int(0),
+        CanonicalScalar::Bool(false),
+        CanonicalScalar::bytes(vec![1, 2]).unwrap(),
+    ] {
         let patches = vec![patch(vec![
             row(VId(0), 1, incompatible.clone()),
             row(VId(1), 1, text("Ab")),
@@ -159,10 +163,12 @@ fn prefix_type_fallback_and_unicode_successors_preserve_the_storage_domain() {
             Ok::<_, ()>(())
         })
         .unwrap();
-        assert_eq!(output, vec![VId(0), VId(1), VId(u128::MAX)]);
-        assert!(matches!(source.frontier, Frontier::Histories));
-        assert!(source.accepts(&incompatible));
+        assert_eq!(output, vec![VId(1)]);
+        assert!(matches!(source.frontier, Frontier::Buckets(_)));
+        assert!(!source.accepts(&incompatible));
         assert!(!source.accepts(&CanonicalScalar::Null));
         assert!(!source.accepts(&text("outside")));
     }
 }
+
+mod mixed_types;

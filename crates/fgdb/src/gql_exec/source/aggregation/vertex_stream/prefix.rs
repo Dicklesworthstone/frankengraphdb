@@ -39,11 +39,12 @@ impl PrefixCandidates {
 
     pub(super) fn accepts(&self, value: &CanonicalScalar) -> bool {
         match value {
-            CanonicalScalar::Null => false,
             CanonicalScalar::Text(value) => value.as_str().starts_with(self.prefix.as_ref()),
-            // Type fallback retains the ordinary Boolean evaluator's UNKNOWN
-            // and candidate charging. It never interprets a nontext value.
-            _ => true,
+            // The admitted Boolean program contains only direct STARTS WITH
+            // scalar conjuncts: nontext/NULL are UNKNOWN and no sibling can
+            // raise an arithmetic exception. Label admission precedes this
+            // private recheck in scoped sources.
+            _ => false,
         }
     }
 
@@ -106,24 +107,22 @@ impl PrefixCandidates {
     }
 }
 
-/// Prefix byte order is valid only in UCS_BASIC. Two controlled boundary
-/// seeks exclude other nonnull scalar types and nonbinary text bindings.
+/// Prefix byte order is valid only in UCS_BASIC. Nontext values are UNKNOWN
+/// in the admitted Boolean program, including values from retired statements.
+/// Only a historical nonbinary text binding requires the ordinary scan.
 fn types_are_safe<C>(
     index: &PropertyEqualityIndex,
     range: &PropertyRange,
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
 ) -> Result<bool, C> {
-    let null = CanonicalScalar::Null.encode().expect("null encoding");
-    if let Some((key, encoded)) = key_at_or_after(index, range.key, &null, false, control)?
-        && *key == range.key
-        && encoded.as_ref() < &range.lower[..2]
-    {
-        return Ok(false);
-    }
+    // Every alternate binding follows UCS_BASIC inside the text tag. A
+    // successor in a later scalar domain or property is not a text hazard.
+    // One governed descent proves this without a history scan or allocation.
     let after_binary = [range.lower[0], range.lower[1] + 1];
     Ok(!matches!(
         key_at_or_after(index, range.key, &after_binary, true, control)?,
-        Some((key, _)) if *key == range.key
+        Some((key, encoded))
+            if *key == range.key && encoded.first() == range.lower.first()
     ))
 }
 

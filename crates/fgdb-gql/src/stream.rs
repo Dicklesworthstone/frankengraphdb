@@ -98,10 +98,10 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
     }
 
     /// A direct STARTS WITH conjunct in the first Boolean expression, after
-    /// only infallible root predicates. A source must prove that its property
-    /// index contains only compatible text before pruning candidates: nontext
-    /// values must still reach the ordinary Boolean evaluator. Later Boolean
-    /// expressions and probes are never crossed by this accessor.
+    /// only infallible root predicates. Every scalar-expression conjunct must
+    /// be a direct prefix test, so nontext values are UNKNOWN and no arithmetic
+    /// sibling can be skipped. A source must prove compatible text ordering.
+    /// Later Boolean expressions and probes are never crossed by this accessor.
     #[must_use]
     pub fn leading_root_prefix(&self) -> Option<(PropertyKeyId, &str)> {
         for test in self.tests.iter() {
