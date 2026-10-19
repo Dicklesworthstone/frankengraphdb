@@ -709,6 +709,10 @@ fn pagerank<C>(
     let (in_offsets, in_sources) = graph.incoming_face();
     let mut face_ok = in_offsets.len() == n + 1 && in_offsets[n] == in_sources.len();
     let threads = gather_threads(in_sources.len());
+    // Contributions visit each source once, independent of its degree. A
+    // graph with many arcs can justify parallel gathering while its much
+    // smaller source fill is faster without another scoped worker group.
+    let contribution_threads = gather_threads(n).min(threads);
     let mut contrib = reserve(n)?;
     // The rows with nothing to spread, ascending: each pass's dangling mass
     // sums exactly these, in the order a full walk would meet them.
@@ -825,7 +829,7 @@ fn pagerank<C>(
             &ranks,
             graph.outgoing_offsets(),
             &mut contrib,
-            threads,
+            contribution_threads,
             meter,
         )?;
         // The walk's units are one stream: a row's unit, then its arcs, row
@@ -1701,6 +1705,85 @@ mod tests {
                 assert_eq!(values[0], 0.25);
                 assert!(values[1..].iter().all(|value| value.is_nan()));
                 assert_eq!(meter.polls, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn gather_live_windows_preserve_the_scalar_completed_row_prefix() {
+        struct LiveOnly {
+            polls: usize,
+            stop: usize,
+        }
+        impl FnxMeter<&'static str> for LiveOnly {
+            fn unit(&mut self) -> Result<(), &'static str> {
+                panic!("precharged arithmetic must not spend another unit")
+            }
+            fn poll(&mut self) -> Result<(), &'static str> {
+                self.polls += 1;
+                if self.polls == self.stop {
+                    Err("live stop")
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let n = 10_000;
+        let mut offsets = vec![0];
+        for row in 0..n {
+            let degree = match row {
+                137 => ARITHMETIC_RUN + 37,
+                6549 => 3 * ARITHMETIC_RUN + 55,
+                _ => row * 7 % 5,
+            };
+            offsets.push(offsets.last().unwrap() + degree);
+        }
+        let arcs = *offsets.last().unwrap();
+        let sources: Vec<_> = (0..arcs).map(|arc| arc * 13 % 19).collect();
+        let contrib: Vec<_> = (0..19).map(|source| 1.0 / (source + 3) as f64).collect();
+        let shares: Vec<_> = (0..arcs).map(|arc| (arc % 7) as f64 / 8.0).collect();
+        for weighted in [false, true] {
+            let mut expected = vec![0.125; n];
+            for (row, slot) in expected.iter_mut().enumerate() {
+                for arc in offsets[row]..offsets[row + 1] {
+                    *slot += if weighted {
+                        contrib[sources[arc]] * shares[arc]
+                    } else {
+                        contrib[sources[arc]]
+                    };
+                }
+            }
+            let total = n + arcs;
+            for stop in 1..=total.div_ceil(ARITHMETIC_RUN) {
+                let mut actual = vec![f64::NAN; n];
+                let mut meter = LiveOnly { polls: 0, stop };
+                let result = gather_pass(
+                    &offsets,
+                    &sources,
+                    &contrib,
+                    weighted.then_some(shares.as_slice()),
+                    0.125,
+                    &mut actual,
+                    1,
+                    &mut meter,
+                );
+                assert!(matches!(
+                    result,
+                    Err(FnxExecutionError::Cancelled("live stop"))
+                ));
+                assert_eq!(meter.polls, stop);
+                // Polls admit windows before arithmetic starts. The scalar
+                // prefix includes one operation per row and per arc, and a
+                // row completed exactly at the cut must already be visible.
+                let cutoff = (stop - 1) * ARITHMETIC_RUN;
+                for row in 0..n {
+                    if row + 1 + offsets[row + 1] <= cutoff {
+                        assert_eq!(actual[row].to_bits(), expected[row].to_bits());
+                    } else {
+                        assert!(actual[row].is_nan());
+                    }
+                }
             }
         }
     }

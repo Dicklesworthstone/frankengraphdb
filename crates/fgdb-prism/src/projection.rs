@@ -595,10 +595,14 @@ impl SnapshotGraphView {
         );
         for edge in &work {
             poll(&mut checkpoint)?;
-            hash.update(&edge.eid.0.to_le_bytes());
-            hash.update(&edge.source.0.to_le_bytes());
-            hash.update(&edge.target.0.to_le_bytes());
-            hash.update(&edge.weight.to_bits().to_le_bytes());
+            // Feed one canonical record per call without changing the byte
+            // transcript or moving an edge's cancellation checkpoint.
+            let mut bytes = [0u8; 56];
+            bytes[..16].copy_from_slice(&edge.eid.0.to_le_bytes());
+            bytes[16..32].copy_from_slice(&edge.source.0.to_le_bytes());
+            bytes[32..48].copy_from_slice(&edge.target.0.to_le_bytes());
+            bytes[48..].copy_from_slice(&edge.weight.to_bits().to_le_bytes());
+            hash.update(&bytes);
         }
 
         sort_by_key(
