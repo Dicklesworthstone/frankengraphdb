@@ -5,6 +5,33 @@ use super::*;
 use fgdb_gql::PreparedGraphAggregate;
 use fgdb_gql::algebra::ValueProjection;
 
+// Group-output evaluation may fail inside an element read before the engine
+// settles its pending work run. Restore the original control error at either
+// checkpoint seam, without charging or polling after the failed read, while
+// retaining the native visitor's existing batched-work behavior.
+struct ElementCheckpoint<'a, K, C> {
+    checkpoint: K,
+    failure: &'a RefCell<Option<C>>,
+}
+
+impl<K: GovernedCheckpoint<C>, C> GovernedCheckpoint<C> for ElementCheckpoint<'_, K, C> {
+    const RUNS: bool = K::RUNS;
+
+    fn unit(&mut self) -> Result<(), C> {
+        if let Some(error) = self.failure.borrow_mut().take() {
+            return Err(error);
+        }
+        self.checkpoint.unit()
+    }
+
+    fn units(&mut self, units: u64) -> Result<(), C> {
+        if let Some(error) = self.failure.borrow_mut().take() {
+            return Err(error);
+        }
+        self.checkpoint.units(units)
+    }
+}
+
 pub(super) fn graph_at<Clock: FnMut() -> u64>(
     snapshot: &Arc<Snapshot>,
     at: CommitSeq,
@@ -15,7 +42,7 @@ pub(super) fn graph_at<Clock: FnMut() -> u64>(
 ) -> Result<Vec<GraphAggregateRow>, QueryError> {
     graph_execution_at(snapshot, at, query, scope, execution, policy)
         .map(|result| result.value)
-        .map_err(aggregate_error)
+        .map_err(aggregate_gql_error)
 }
 
 pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
@@ -27,15 +54,16 @@ pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
     policy: GqlQueryPolicy,
 ) -> Result<
     fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
-    GqlQueryError<GraphAggregateError<ReadError>, QueryError>,
+    GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
 > {
+    let element_failure = RefCell::new(None);
     // Plain, uncaptured aggregate inputs consume binding VISIT order, not the
     // sorted projected bag of a standalone pattern. COLLECT (including its
     // first-occurrence DISTINCT form) exposes that distinction. Computed and
     // relational inputs deliberately retain their own completed-row semantics.
     // Identified-edge plans materialize unless the visitor answers them exactly
     // from topology, as the owner path routes them (fgdb-xtsw3).
-    if query.input_relation().is_none()
+    let result = if query.input_relation().is_none()
         && query.input_projection().is_none()
         && (!query.input_pattern().plan().requires_identified_edges()
             || query.answers_identified_edges_from_topology())
@@ -44,15 +72,48 @@ pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
                 column,
                 ValueProjection::Vertex { .. } | ValueProjection::Property { .. }
             )
-        })
-    {
-        return visit_at(snapshot, at, query, scope, execution, policy);
+        }) {
+        visit_at(
+            snapshot,
+            at,
+            query,
+            scope,
+            execution,
+            &element_failure,
+            policy,
+        )
+    } else {
+        query.execute_with_element_source_governed(
+            policy,
+            fgdb_gql::WithElementReads {
+                source: |pattern: &PreparedGraphPattern<GraphValueRow>, remaining| {
+                    pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                        .map_err(|error| error.map_source(GqlError::Read))
+                },
+                elements: |element, key| {
+                    scoped_element_property(
+                        snapshot,
+                        at,
+                        scope,
+                        execution,
+                        &element_failure,
+                        element,
+                        key,
+                    )
+                },
+            },
+            || {
+                if let Some(error) = element_failure.borrow_mut().take() {
+                    return Err(error);
+                }
+                execution.borrow_mut().checkpoint()
+            },
+        )
+    };
+    match element_failure.into_inner() {
+        Some(error) => Err(GqlQueryError::Interrupted(error)),
+        None => result,
     }
-    query.execute_with_source_governed(
-        policy,
-        |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
-        || execution.borrow_mut().checkpoint(),
-    )
 }
 
 // Reuse the SAME source admission and masking as pattern_at, then the ordinary
@@ -64,10 +125,11 @@ fn visit_at<Clock: FnMut() -> u64>(
     query: &PreparedGraphAggregate,
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,
+    element_failure: &RefCell<Option<QueryError>>,
     policy: GqlQueryPolicy,
 ) -> Result<
     fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
-    GqlQueryError<GraphAggregateError<ReadError>, QueryError>,
+    GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
 > {
     // Admission and evaluation are one phase: their signed work is charged
     // in runs.
@@ -115,15 +177,32 @@ fn visit_at<Clock: FnMut() -> u64>(
                     usage.observe::<ReadError, QueryError>(policy, event)
                 },
             )
-            .map_err(|error| error.map_source(GraphAggregateError::Source))?;
-            return usage.finish(
-                policy,
-                count.execute_governed(
-                    core.records,
-                    usage.remaining(policy),
-                    WorkCheckpoint(execution),
-                ),
+            .map_err(|error| {
+                error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
+            })?;
+            let result = count.execute_governed_with_element_reads(
+                core.records,
+                |element, key| {
+                    scoped_element_property(
+                        snapshot,
+                        at,
+                        scope,
+                        execution,
+                        element_failure,
+                        element,
+                        key,
+                    )
+                },
+                usage.remaining(policy),
+                ElementCheckpoint {
+                    checkpoint: WorkCheckpoint(execution),
+                    failure: element_failure,
+                },
             );
+            if let Some(error) = element_failure.borrow_mut().take() {
+                return Err(GqlQueryError::Interrupted(error));
+            }
+            return usage.finish(policy, result);
         }
         // A graph aggregate reads its edges as triples alone.
         let mut tables = Tables::admit(
@@ -152,9 +231,25 @@ fn visit_at<Clock: FnMut() -> u64>(
                 usage.observe::<ReadError, QueryError>(policy, event)
             },
         )
-        .map_err(|error| error.map_source(GraphAggregateError::Source))?;
+        .map_err(|error| {
+            error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
+        })?;
         let remaining = usage.remaining(policy);
-        let checkpoint = WorkCheckpoint(execution);
+        let checkpoint = ElementCheckpoint {
+            checkpoint: WorkCheckpoint(execution),
+            failure: element_failure,
+        };
+        let elements = |element, key| {
+            scoped_element_property(
+                snapshot,
+                at,
+                scope,
+                execution,
+                element_failure,
+                element,
+                key,
+            )
+        };
         // A vertex-only aggregate tests and reads the vertex its scan has just
         // yielded: `scan` remembers it, so neither finds it again (count_vertices
         // 1.9-2.3x). An edge-reading one keeps the plain lookups. Its endpoint
@@ -166,12 +261,13 @@ fn visit_at<Clock: FnMut() -> u64>(
         let result = match tables.positioned_graph() {
             // Edges by position: the evaluator keeps per-vertex state in
             // arrays. Every reader is a pure table lookup.
-            Some(graph) => query.execute_governed_positioned(
+            Some(graph) => query.execute_governed_positioned_with_element_reads(
                 tables.records,
                 &graph,
                 |vid, required| Ok(tables.matches(vid, required, scope)),
                 |at, required| Ok(tables.matches_at(at, required, scope)),
                 |vid, key| Ok(tables.property(vid, key, scope)),
+                elements,
                 remaining,
                 checkpoint,
             ),
@@ -185,7 +281,7 @@ fn visit_at<Clock: FnMut() -> u64>(
                         .map(|&((_, from, relation, to), _)| (from, relation, to))
                 };
                 if let Some(inline) = tables.inline_triples() {
-                    query.execute_governed(
+                    query.execute_governed_with_element_reads(
                         tables.records,
                         tables.vertices.iter().map(|&(vid, _)| vid),
                         inline
@@ -193,33 +289,39 @@ fn visit_at<Clock: FnMut() -> u64>(
                             .map(|&(_, from, relation, to)| (from, relation, to)),
                         |vid, required| Ok(tables.matches(vid, required, scope)),
                         |vid, key| Ok(tables.property(vid, key, scope)),
+                        elements,
                         remaining,
                         checkpoint,
                     )
                 } else if query.input_pattern().plan().reads_edges() {
-                    query.execute_governed(
+                    query.execute_governed_with_element_reads(
                         tables.records,
                         tables.vertices.iter().map(|&(vid, _)| vid),
                         owned_edges(),
                         |vid, required| Ok(tables.matches(vid, required, scope)),
                         |vid, key| Ok(tables.property(vid, key, scope)),
+                        elements,
                         remaining,
                         checkpoint,
                     )
                 } else {
                     let last = std::cell::Cell::new(None);
-                    query.execute_governed(
+                    query.execute_governed_with_element_reads(
                         tables.records,
                         tables.scan(&last),
                         owned_edges(),
                         |vid, required| Ok(tables.matches_after(&last, vid, required, scope)),
                         |vid, key| Ok(tables.property_after(&last, vid, key, scope)),
+                        elements,
                         remaining,
                         checkpoint,
                     )
                 }
             }
         };
+        if let Some(error) = element_failure.borrow_mut().take() {
+            return Err(GqlQueryError::Interrupted(error));
+        }
         usage.finish(policy, result)
     })
 }

@@ -52,7 +52,8 @@ impl WriteTxn {
                     GqlQueryError::Source(GraphAggregateError::Source(WriteTxnError::Read(error)))
                 },
             )?;
-            let result = aggregate.execute_governed_with_element_maps(
+            let element_failure = std::cell::RefCell::new(None);
+            let result = aggregate.execute_governed_with_element_maps_and_reads(
                 source.snapshot_records as u64,
                 source.vertex_ids(),
                 source.identified_edges(),
@@ -63,9 +64,27 @@ impl WriteTxn {
                 |eid| names.edge_type(eid),
                 |vid| Ok(maps.vertices.get(&vid)),
                 |eid| Ok(maps.edges.get(&eid)),
+                |element, key| {
+                    self.element_property_with_checkpoint(
+                        database,
+                        cx,
+                        &element_failure,
+                        element,
+                        key,
+                    )
+                },
                 usage.remaining(policy),
-                || cx.checkpoint(),
+                || {
+                    let stopped = element_failure.borrow_mut().take();
+                    match stopped {
+                        Some(error) => Err(error),
+                        None => cx.checkpoint(),
+                    }
+                },
             );
+            if let Some(error) = element_failure.into_inner() {
+                return Err(GqlQueryError::Interrupted(error));
+            }
             let result = usage.finish(policy, result)?;
             source.accept_observations();
             Ok(result)

@@ -117,6 +117,14 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
     let mut usage = AdmissionUsage::default();
+    let elements = |element, key| {
+        crate::gql_exec::read_element_property(
+            element,
+            key,
+            |vid| reader.gql_vertex_at(vid, as_of),
+            |eid| reader.gql_edge_at(eid, as_of),
+        )
+    };
     // The same MVCC visitors can admit a plain count without retaining their
     // winning rows a second time. Shape admission excludes every input reader,
     // filter and metadata projection; the original aggregate finalizer still
@@ -131,10 +139,13 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
         let count = aggregate
             .prepare_count_summary(source, examined, matching)
             .expect("the checked source counts only its admitted live occurrences");
-        let result = count.execute_governed(examined, usage.remaining(policy), checkpoint);
-        return usage
-            .finish(policy, result)
-            .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)));
+        let result = count.execute_governed_with_element_reads(
+            examined,
+            elements,
+            usage.remaining(policy),
+            checkpoint,
+        );
+        return usage.finish(policy, result);
     }
     admitted
         .materialize(&mut |event| {
@@ -158,23 +169,22 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
             |error| GqlQueryError::Source(GraphAggregateError::Source(error)),
         )
         .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
-    let result = aggregate.execute_governed_with_element_maps(
+    let result = aggregate.execute_governed_with_element_maps_and_reads(
         admitted.snapshot_records,
         admitted.vertex_ids(),
         admitted.identified_edges(),
-        |vid, predicates| admitted.matches(vid, predicates),
+        |vid, predicates| admitted.matches(vid, predicates).map_err(GqlError::Read),
         |vid, key| Ok(admitted.property(vid, key)),
         |eid, key| Ok(admitted.edge_property(eid, key)),
         |vid| Ok(admitted.cached_labels.get(&vid).map(Vec::as_slice)),
         |eid| Ok(admitted.cached_types.get(&eid)),
         |vid| Ok(admitted.property_maps.vertices.get(&vid)),
         |eid| Ok(admitted.property_maps.edges.get(&eid)),
+        elements,
         usage.remaining(policy),
         checkpoint,
     );
-    usage
-        .finish(policy, result)
-        .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))
+    usage.finish(policy, result)
 }
 
 // Preserve scan_vertices/scan_edges' full admission transcript, including the

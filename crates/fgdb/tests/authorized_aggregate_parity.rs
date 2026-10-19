@@ -566,3 +566,565 @@ fn large_tables_drop_hidden_endpoint_edges_as_the_visible_only_graph_does() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+mod aggregate_output_properties {
+    use super::*;
+    use fgdb_delta_types::ElementId;
+    use fgdb_gql::GraphCountSource;
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
+    const COUNT_OUTPUT: &str = "MATCH (n) RETURN COUNT(*) AS n, \
+        [item IN $elements | item.p] AS values, \
+        [item IN $elements | item.hidden] AS denied";
+
+    fn values(items: &[Option<i64>]) -> GraphAggregateValue {
+        GraphAggregateValue::Value(GraphValue::List(
+            items
+                .iter()
+                .map(|item| {
+                    GraphValue::Scalar(item.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                })
+                .collect(),
+        ))
+    }
+
+    fn parameters(elements: &[ElementId]) -> GqlParameters {
+        GqlParameters::new()
+            .with_list(
+                "elements",
+                elements
+                    .iter()
+                    .map(|element| match element {
+                        ElementId::Vertex(id) => GraphValue::Vertex(*id),
+                        ElementId::Edge(id) => GraphValue::Edge(*id),
+                    })
+                    .collect(),
+            )
+            .unwrap()
+    }
+
+    fn prepare_output(text: &str, args: &GqlParameters) -> PreparedGraphAggregateText {
+        let declarations: Vec<_> = args.parameter_types().collect();
+        PreparedGraphAggregateText::prepare_with_parameter_types(text, &declarations, symbols)
+            .unwrap()
+    }
+
+    fn open_grant() -> Grant {
+        let mut grant = grant();
+        grant.labels = Scope::All;
+        grant.relations = Scope::All;
+        grant.properties = Scope::All;
+        grant
+    }
+
+    async fn graph(cx: &CommitCx, visible_only: bool) -> Database<MemVfs> {
+        let mut db = database(cx, visible_only).await;
+        let mut properties = WriteBatch::new(RelationId(1));
+        for (id, value) in [(10, 17), (11, 11), (12, 901), (13, 902), (14, 17), (15, 13)] {
+            if visible_only && matches!(id, 12 | 13) {
+                continue;
+            }
+            properties.set_edge_property(EId(id), P, Some(CanonicalScalar::Int(value)));
+            if !visible_only {
+                properties.set_edge_property(
+                    EId(id),
+                    H,
+                    Some(CanonicalScalar::Int(1000 + id as i64)),
+                );
+            }
+        }
+        db.write(cx, properties).await.unwrap();
+        if !visible_only {
+            let mut hidden = WriteBatch::new(RelationId(99));
+            hidden.add_edge(
+                EId(16),
+                VId(0),
+                VId(1),
+                vec![
+                    (P, CanonicalScalar::Int(903)),
+                    (H, CanonicalScalar::Int(1016)),
+                ],
+            );
+            db.write(cx, hidden).await.unwrap();
+        }
+        db
+    }
+
+    #[test]
+    fn collected_output_properties_preserve_native_order_and_visible_graph_parity() {
+        let ((), report) = run_async_under_lab(0x5ec0_8505, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let cx = c.query();
+            let db = graph(&c.commit(), false).await;
+            let reference = graph(&c.commit(), true).await;
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let args = GqlParameters::new();
+            let mut session = db
+                .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+                .unwrap();
+            for text in [
+                "MATCH (n) RETURN [item IN COLLECT(n) | item.p] AS values, \
+                    [item IN COLLECT(n) | item.hidden] AS denied",
+                "MATCH (a)-[edge:R]->(b) RETURN [item IN COLLECT(edge) | item.p] AS values, \
+                    [item IN COLLECT(edge) | item.hidden] AS denied",
+            ] {
+                let template = prepare_output(text, &args);
+                let query = template.bind_parameters(&args).unwrap();
+                let expected = reference
+                    .execute_graph_aggregate_governed(&cx, &query, policy())
+                    .unwrap()
+                    .value;
+                assert_eq!(expected.len(), 1);
+                assert_eq!(expected[0].values()[1], values(&[None; 4]));
+                if !query.input_pattern().plan().reads_edges() {
+                    assert_eq!(
+                        expected[0].values()[0],
+                        values(&[Some(7), Some(3), Some(7), None]),
+                        "output lookup must retain native COLLECT visit order and the null element"
+                    );
+                    assert_ne!(
+                        expected[0].values()[0],
+                        values(&[Some(3), Some(7), Some(7), None]),
+                        "a sorted input bag changes the public result"
+                    );
+                } else {
+                    let GraphAggregateValue::Value(GraphValue::List(items)) =
+                        &expected[0].values()[0]
+                    else {
+                        panic!("edge output must retain its list: {expected:?}")
+                    };
+                    let mut scalars: Vec<_> = items
+                        .iter()
+                        .map(|item| item.as_scalar().unwrap().clone())
+                        .collect();
+                    scalars.sort();
+                    assert_eq!(
+                        scalars,
+                        [11, 13, 17, 17].map(CanonicalScalar::Int),
+                        "parallel edges and the loop survive; hidden endpoint edges do not"
+                    );
+                }
+                let actual = db
+                    .execute_graph_aggregate_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        &query,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap();
+                assert_eq!(actual, expected, "{text}");
+                let prepared = session.prepare(&cx, text, &args).unwrap();
+                assert_eq!(
+                    session.execute(&cx, &prepared, &args).unwrap(),
+                    materialize(
+                        template.columns().to_vec(),
+                        template.output_slots(),
+                        expected
+                    ),
+                    "prepared {text}"
+                );
+            }
+            session.close();
+            assert_eq!(c.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn count_output_reads_supplied_elements_with_full_masks_rebinding_and_saved_cuts() {
+        let ((), report) = run_async_under_lab(0x5ec0_8506, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let cx = c.query();
+            let mut db = graph(&c.commit(), false).await;
+            let at = db.frontier().unwrap();
+            let issuer = authority();
+            let scoped = issuer.issue_at(&grant(), 100).unwrap();
+            let open = issuer.issue_at(&open_grant(), 100).unwrap();
+            let args = parameters(&[
+                ElementId::Vertex(VId(3)),
+                ElementId::Vertex(VId(2)),
+                ElementId::Vertex(VId(404)),
+                ElementId::Edge(EId(10)),
+                ElementId::Edge(EId(12)),
+                ElementId::Edge(EId(13)),
+                ElementId::Edge(EId(16)),
+                ElementId::Edge(EId(15)),
+                ElementId::Edge(EId(404)),
+                ElementId::Vertex(VId(u128::MAX)),
+            ]);
+            let template = prepare_output(COUNT_OUTPUT, &args);
+            let query = template.bind_parameters(&args).unwrap();
+            assert_eq!(
+                query.count_summary_source(),
+                Some(GraphCountSource::Vertices)
+            );
+            let scoped_values = [
+                Some(7),
+                None,
+                None,
+                Some(17),
+                None,
+                None,
+                None,
+                Some(13),
+                None,
+                None,
+            ];
+            let open_values = [
+                Some(7),
+                Some(999),
+                None,
+                Some(17),
+                Some(901),
+                Some(902),
+                Some(903),
+                Some(13),
+                None,
+                None,
+            ];
+            let open_hidden = [
+                Some(66),
+                Some(66),
+                None,
+                Some(1010),
+                Some(1012),
+                Some(1013),
+                Some(1016),
+                Some(1015),
+                None,
+                Some(66),
+            ];
+            // The owner's snapshot-count path retains only source counts.
+            // Its output still resolves the supplied identities through the
+            // same stored-property reader, including identities outside the
+            // counted vertex source. A saved owner view must retain this cut.
+            let owner_values = [
+                GraphAggregateValue::Count(5),
+                values(&open_values),
+                values(&open_hidden),
+            ];
+            let owner = db
+                .execute_graph_aggregate_governed(&cx, &query, policy())
+                .unwrap();
+            assert_eq!(owner.value.len(), 1);
+            assert_eq!(owner.value[0].values(), &owner_values);
+            let owner_view = db.read_session().unwrap();
+            assert_eq!(
+                owner_view
+                    .execute_graph_aggregate_governed(&cx, &query, policy())
+                    .unwrap()
+                    .value,
+                owner.value
+            );
+            // The first unrestricted execution admits a reusable exact-cut
+            // source core. Later full-scope counts may replay it, while the
+            // same supplied identities must still obey a narrower permit.
+            for (token, count, properties, hidden) in [
+                (&open, 5, open_values, open_hidden),
+                (&open, 5, open_values, open_hidden),
+                (&scoped, 4, scoped_values, [None; 10]),
+            ] {
+                let result = db
+                    .execute_graph_aggregate_authorized(
+                        &cx,
+                        &issuer,
+                        token,
+                        "main",
+                        &query,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap();
+                assert_eq!(result.len(), 1);
+                assert_eq!(
+                    result[0].values(),
+                    &[
+                        GraphAggregateValue::Count(count),
+                        values(&properties),
+                        values(&hidden)
+                    ]
+                );
+            }
+            // Vertex 3 and every supplied edge lie outside these matched
+            // rows. The output reader is pinned to the whole visible cut,
+            // rather than to the aggregate's last binding or admitted table.
+            let filtered = prepare_output(
+                "MATCH (n) WHERE n.p = 3 RETURN COUNT(*) AS n, \
+                    [item IN $elements | item.p] AS values",
+                &args,
+            )
+            .bind_parameters(&args)
+            .unwrap();
+            let result = db
+                .execute_graph_aggregate_authorized(
+                    &cx,
+                    &issuer,
+                    &scoped,
+                    "main",
+                    &filtered,
+                    policy(),
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(
+                result[0].values(),
+                &[GraphAggregateValue::Count(1), values(&scoped_values)]
+            );
+
+            let mut saved = db
+                .authorized_read_session(&cx, &issuer, &scoped, "main", symbols, policy(), || 100)
+                .unwrap();
+            let prepared = saved.prepare(&cx, COUNT_OUTPUT, &args).unwrap();
+            let old = saved.execute(&cx, &prepared, &args).unwrap();
+            let rebound = parameters(&[ElementId::Vertex(VId(1)), ElementId::Edge(EId(11))]);
+            assert_eq!(
+                saved.execute(&cx, &prepared, &rebound).unwrap(),
+                QueryResult::Rows {
+                    columns: template.columns().to_vec(),
+                    rows: vec![vec![
+                        GraphAggregateValue::Count(4),
+                        values(&[Some(3), Some(11)]),
+                        values(&[None; 2]),
+                    ]],
+                }
+            );
+            let mut changes = WriteBatch::new(RelationId(1));
+            changes.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(70)));
+            changes.set_vertex_label(VId(0), LabelId(1), false);
+            changes.delete_edge(EId(15));
+            db.write(&c.commit(), changes).await.unwrap();
+            assert_eq!(saved.execute(&cx, &prepared, &args).unwrap(), old);
+            assert_eq!(
+                owner_view
+                    .execute_graph_aggregate_governed(&cx, &query, policy())
+                    .unwrap()
+                    .value[0]
+                    .values(),
+                &owner_values
+            );
+            assert_eq!(
+                db.execute_graph_aggregate_governed_at(&cx, &query, at, policy())
+                    .unwrap()
+                    .value[0]
+                    .values(),
+                &owner_values
+            );
+            let mut current_open_values = open_values;
+            current_open_values[0] = Some(70);
+            current_open_values[7] = None;
+            let mut current_open_hidden = open_hidden;
+            current_open_hidden[7] = None;
+            assert_eq!(
+                db.execute_graph_aggregate_governed(&cx, &query, policy())
+                    .unwrap()
+                    .value[0]
+                    .values(),
+                &[
+                    GraphAggregateValue::Count(5),
+                    values(&current_open_values),
+                    values(&current_open_hidden),
+                ]
+            );
+            let historical = db
+                .execute_graph_aggregate_authorized_at(
+                    &cx,
+                    &issuer,
+                    &scoped,
+                    "main",
+                    &query,
+                    at,
+                    policy(),
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(
+                materialize(
+                    template.columns().to_vec(),
+                    template.output_slots(),
+                    historical
+                ),
+                old
+            );
+            let current = db
+                .execute_graph_aggregate_authorized(
+                    &cx,
+                    &issuer,
+                    &scoped,
+                    "main",
+                    &query,
+                    policy(),
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(
+                current[0].values(),
+                &[
+                    GraphAggregateValue::Count(3),
+                    values(&[
+                        Some(70),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None
+                    ]),
+                    values(&[None; 10]),
+                ],
+                "new property winners, hidden endpoints and edge tombstones all use the current cut"
+            );
+            saved.close();
+            drop(owner_view);
+            assert_eq!(c.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn native_and_warm_count_output_property_interruptions_keep_exact_checkpoint_prefixes() {
+        let ((), report) = run_async_under_lab(0x5ec0_8507, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let cx = c.query();
+            let db = graph(&c.commit(), false).await;
+            let issuer = authority();
+            let scoped = issuer.issue_at(&grant(), 100).unwrap();
+            let open = issuer.issue_at(&open_grant(), 100).unwrap();
+            let args = parameters(&[ElementId::Vertex(VId(3)), ElementId::Edge(EId(10))]);
+            for (text, token, summary) in [
+                (
+                    "MATCH (n) RETURN [item IN COLLECT(n) | item.p] AS values",
+                    &scoped,
+                    None,
+                ),
+                (COUNT_OUTPUT, &open, Some(GraphCountSource::Vertices)),
+                (
+                    "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n, [item IN $elements | item.p] AS values",
+                    &open,
+                    Some(GraphCountSource::Relation(RelationId(1))),
+                ),
+                (
+                    "MATCH (n) RETURN COUNT(*) AS n, [item IN $elements | item.p] AS values LIMIT 0",
+                    &open,
+                    Some(GraphCountSource::Vertices),
+                ),
+            ] {
+                let query = prepare_output(text, &args).bind_parameters(&args).unwrap();
+                assert_eq!(query.count_summary_source(), summary, "{text}");
+                let expected = db
+                    .execute_graph_aggregate_authorized(
+                        &cx,
+                        &issuer,
+                        token,
+                        "main",
+                        &query,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap();
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                assert_eq!(
+                    db.execute_graph_aggregate_authorized(
+                        &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                        &issuer,
+                        token,
+                        "main",
+                        &query,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap(),
+                    expected
+                );
+                let calls = probe.calls();
+                assert!(calls > 0);
+                for stop in 1..=calls {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                    let result = db.execute_graph_aggregate_authorized(
+                        &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                        &issuer,
+                        token,
+                        "main",
+                        &query,
+                        policy(),
+                        || 100,
+                    );
+                    assert!(
+                        matches!(
+                            result,
+                            Err(QueryError::Pattern(GqlQueryError::Interrupted(_)))
+                        ),
+                        "{text}, stop={stop}: {result:?}"
+                    );
+                    assert_eq!(
+                        probe.calls(),
+                        stop,
+                        "{text}: restore the original interruption before deferred work settles"
+                    );
+                }
+                assert_eq!(
+                    db.execute_graph_aggregate_authorized(
+                        &cx,
+                        &issuer,
+                        token,
+                        "main",
+                        &query,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap(),
+                    expected,
+                    "retry {text}"
+                );
+                if summary.is_some() {
+                    // The owner uses its count-only MVCC source directly;
+                    // authorization's admitted-core replay is a separate
+                    // host. Check both through the same definition and data,
+                    // including output evaluation under LIMIT 0.
+                    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                    assert_eq!(
+                        db.execute_graph_aggregate_governed(
+                            &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                            &query,
+                            policy(),
+                        )
+                        .unwrap()
+                        .value,
+                        expected
+                    );
+                    let calls = probe.calls();
+                    assert!(calls > 0);
+                    for stop in 1..=calls {
+                        let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                        let result = db.execute_graph_aggregate_governed(
+                            &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                            &query,
+                            policy(),
+                        );
+                        assert!(
+                            matches!(result, Err(GqlQueryError::Interrupted(_))),
+                            "owner {text}, stop={stop}: {result:?}"
+                        );
+                        assert_eq!(probe.calls(), stop, "owner {text}, stop={stop}");
+                    }
+                    assert_eq!(
+                        db.execute_graph_aggregate_governed(&cx, &query, policy())
+                            .unwrap()
+                            .value,
+                        expected,
+                        "owner retry {text}"
+                    );
+                }
+            }
+            assert_eq!(c.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

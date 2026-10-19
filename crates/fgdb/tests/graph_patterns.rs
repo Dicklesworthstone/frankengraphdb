@@ -1201,7 +1201,7 @@ fn indexed_overlay_native_match_write_commits_only_the_bounded_target() {
                     &cx,
                     statement,
                     &params,
-                    |kind, name| match (kind, name) {
+                    |kind: GraphSymbolKind, name: &str| match (kind, name) {
                         (GraphSymbolKind::Label, "Node") => Some(GraphSymbol::Label(L)),
                         (GraphSymbolKind::Property, "n") => Some(GraphSymbol::Property(N)),
                         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),

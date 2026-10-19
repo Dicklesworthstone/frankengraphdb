@@ -477,6 +477,22 @@ mod transaction_element_properties {
         RETURN COUNT(value) AS n, SUM(value) AS total";
     const MATERIALIZED: &str = "UNWIND $elements AS element \
         WITH element.p AS value ORDER BY value RETURN COUNT(value) AS n, SUM(value) AS total";
+    const OUTPUT: &str = "UNWIND $elements AS element \
+        RETURN [item IN COLLECT(element) | item.p] AS values";
+    const VERTEX_OUTPUT: &str = "MATCH (n) RETURN [item IN COLLECT(n) | item.p] AS values";
+    const EDGE_OUTPUT: &str = "MATCH (a)-[e:R]->(b) RETURN [item IN COLLECT(e) | item.p] AS values";
+
+    fn scalar_list(values: &[Option<i64>]) -> QueryValue {
+        QueryValue::Value(GraphValue::List(
+            values
+                .iter()
+                .map(|value| {
+                    GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        ))
+    }
 
     fn parameters(elements: &[ElementId]) -> GqlParameters {
         GqlParameters::new()
@@ -534,6 +550,179 @@ mod transaction_element_properties {
         edges.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(7))]);
         edges.add_edge(EId(11), VId(2), VId(3), vec![(P, CanonicalScalar::Int(8))]);
         db.write(cx, edges).await.unwrap();
+    }
+
+    #[test]
+    fn aggregate_output_reads_collected_and_supplied_elements_at_the_selected_cut() {
+        let ((), report) = run_async_under_lab(0x71f0_0105, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let cx = c.query();
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed_edges(&mut db, &c.commit()).await;
+            let basis = db.frontier().unwrap();
+            let pinned = db.read_session().unwrap();
+            let params = parameters(&[
+                ElementId::Vertex(VId(4)),
+                ElementId::Vertex(VId(9)),
+                ElementId::Edge(EId(10)),
+                ElementId::Edge(EId(11)),
+                ElementId::Edge(EId(90)),
+                ElementId::Edge(EId(999)),
+            ]);
+            let statements = [
+                VERTEX_OUTPUT,
+                EDGE_OUTPUT,
+                // Neither the zero-valued vertex nor any edge is an input
+                // binding here. Their properties still come from this cut.
+                "MATCH (n) WHERE n.p > 0 RETURN COUNT(*) AS n, \
+                    [item IN $elements | item.p] AS values",
+                OUTPUT,
+                "MATCH (n) RETURN n.p AS key, \
+                    [item IN COLLECT(n) | item.p] AS values ORDER BY key DESC LIMIT 2",
+                "UNWIND $elements AS element RETURN DISTINCT \
+                    [item IN COLLECT(element) | item.p] AS values ORDER BY values LIMIT 0",
+            ];
+            let old = vec![
+                vec![vec![scalar_list(&[Some(1), Some(2), Some(3), Some(0)])]],
+                vec![vec![scalar_list(&[Some(7), Some(8)])]],
+                vec![vec![
+                    QueryValue::Count(3),
+                    scalar_list(&[Some(0), None, Some(7), Some(8), None, None]),
+                ]],
+                vec![vec![scalar_list(&[
+                    Some(0),
+                    None,
+                    Some(7),
+                    Some(8),
+                    None,
+                    None,
+                ])]],
+                vec![
+                    vec![
+                        QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(3))),
+                        scalar_list(&[Some(3)]),
+                    ],
+                    vec![
+                        QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2))),
+                        scalar_list(&[Some(2)]),
+                    ],
+                ],
+                vec![],
+            ];
+            let check = |db: &Database<MemVfs>, expected: &[Vec<Vec<QueryValue>>]| {
+                for (index, text) in statements.iter().enumerate() {
+                    let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+                    assert_eq!(
+                        rows(prepared.execute(db, &cx, &params, policy()).unwrap()),
+                        expected[index],
+                        "current {text}"
+                    );
+                    assert_eq!(
+                        rows(pinned.query(&cx, text, &params, symbols, policy()).unwrap()),
+                        old[index],
+                        "saved {text}"
+                    );
+                    let native = match prepared {
+                        PreparedNativeRead::Aggregate(template) => {
+                            Some(template.bind_parameters(&params).unwrap())
+                        }
+                        PreparedNativeRead::PipelineAggregate(template)
+                            if !template.requires_relational_input() =>
+                        {
+                            Some(template.bind_parameters(&params).unwrap())
+                        }
+                        _ => None,
+                    };
+                    let Some(native) = native else { continue };
+                    let historical = db
+                        .execute_graph_aggregate_governed_at(&cx, &native, basis, policy())
+                        .unwrap();
+                    let saved = pinned
+                        .execute_graph_aggregate_governed(&cx, &native, policy())
+                        .unwrap();
+                    assert_eq!(historical.value, saved.value, "historical {text}");
+                    let measured = db
+                        .execute_graph_aggregate_governed(&cx, &native, policy())
+                        .unwrap();
+                    let caps = [
+                        measured.rows.snapshot_records,
+                        measured.rows.result_rows,
+                        measured.evaluator.work_units,
+                        measured.evaluator.scratch_entries,
+                    ];
+                    assert_eq!(
+                        db.execute_graph_aggregate_governed(
+                            &cx,
+                            &native,
+                            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                        )
+                        .unwrap(),
+                        measured
+                    );
+                    for dimension in 0..4 {
+                        let mut smaller = caps;
+                        assert!(smaller[dimension] > 0);
+                        smaller[dimension] -= 1;
+                        assert!(
+                            db.execute_graph_aggregate_governed(
+                                &cx,
+                                &native,
+                                GqlQueryPolicy::new(smaller[0], smaller[1], smaller[2], smaller[3]),
+                            )
+                            .is_err(),
+                            "{text}, dimension={dimension}"
+                        );
+                    }
+                }
+            };
+            check(&db, &old);
+            let mut later = WriteBatch::new(R);
+            later.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(10)));
+            later.set_vertex_property(VId(2), P, None);
+            later.set_vertex_property(VId(4), P, Some(CanonicalScalar::Null));
+            later.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(70)));
+            later.delete_vertex(VId(3));
+            later.create_vertex(VId(9), vec![], vec![(P, CanonicalScalar::Int(90))]);
+            later.add_edge(
+                EId(90),
+                VId(1),
+                VId(9),
+                vec![(P, CanonicalScalar::Int(900))],
+            );
+            db.write(&c.commit(), later).await.unwrap();
+            let current = vec![
+                vec![vec![scalar_list(&[Some(10), None, None, Some(90)])]],
+                vec![vec![scalar_list(&[Some(70), Some(900)])]],
+                vec![vec![
+                    QueryValue::Count(2),
+                    scalar_list(&[None, Some(90), Some(70), None, Some(900), None]),
+                ]],
+                vec![vec![scalar_list(&[
+                    None,
+                    Some(90),
+                    Some(70),
+                    None,
+                    Some(900),
+                    None,
+                ])]],
+                vec![
+                    vec![
+                        QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(90))),
+                        scalar_list(&[Some(90)]),
+                    ],
+                    vec![
+                        QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(10))),
+                        scalar_list(&[Some(10)]),
+                    ],
+                ],
+                vec![],
+            ];
+            check(&db, &current);
+            db.compact(&c.commit()).await.unwrap();
+            check(&db, &current);
+            assert_eq!(pinned.frontier(), basis);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]
@@ -764,6 +953,35 @@ mod transaction_element_properties {
                     vec![vec![QueryValue::Count(5), QueryValue::Integer(1150)]]
                 );
             }
+            for (text, values) in [
+                (
+                    OUTPUT,
+                    vec![
+                        Some(10),
+                        None,
+                        None,
+                        None,
+                        Some(80),
+                        Some(90),
+                        None,
+                        Some(70),
+                        None,
+                        Some(900),
+                        None,
+                    ],
+                ),
+                (
+                    VERTEX_OUTPUT,
+                    vec![Some(10), None, None, Some(80), Some(90)],
+                ),
+                (EDGE_OUTPUT, vec![Some(70), Some(900)]),
+            ] {
+                assert_eq!(
+                    rows(read(&txn, &db, &c.query(), text, &params)),
+                    vec![vec![scalar_list(&values)]],
+                    "staged aggregate output {text}"
+                );
+            }
             // Path-produced values use the same callback as supplied identities.
             let path = "MATCH path = (a)-[:R]->(b) \
                 RETURN [n IN nodes(path) | n.p] AS vertices, \
@@ -821,6 +1039,35 @@ mod transaction_element_properties {
                     vec![vec![QueryValue::Count(7), QueryValue::Integer(101)]]
                 );
             }
+            for (text, values) in [
+                (
+                    OUTPUT,
+                    vec![
+                        Some(1),
+                        Some(2),
+                        Some(3),
+                        Some(0),
+                        Some(80),
+                        None,
+                        None,
+                        Some(7),
+                        Some(8),
+                        None,
+                        None,
+                    ],
+                ),
+                (
+                    VERTEX_OUTPUT,
+                    vec![Some(1), Some(2), Some(3), Some(0), Some(80)],
+                ),
+                (EDGE_OUTPUT, vec![Some(7), Some(8)]),
+            ] {
+                assert_eq!(
+                    rows(read(&txn, &db, &c.query(), text, &params)),
+                    vec![vec![scalar_list(&values)]],
+                    "rolled-back aggregate output at saved basis {text}"
+                );
+            }
             txn.abort();
             assert_eq!(c.outstanding_obligations(), 0);
         });
@@ -848,6 +1095,9 @@ mod transaction_element_properties {
                     ROWS,
                     FOLDED,
                     MATERIALIZED,
+                    OUTPUT,
+                    "UNWIND $elements AS element \
+                        RETURN [item IN COLLECT(element) | item.p] AS values LIMIT 0",
                     "UNWIND $elements AS element RETURN element.p LIMIT 0",
                 ] {
                     let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
@@ -931,7 +1181,14 @@ mod transaction_element_properties {
     fn every_property_checkpoint_preserves_interruption_retry_and_refused_read_witnesses() {
         let ((), report) = run_async_under_lab(0x71f0_0103, |root| async move {
             let c = PurposeContexts::narrow_runtime_root(&root);
-            for text in [ROWS, FOLDED, MATERIALIZED] {
+            for text in [
+                ROWS,
+                FOLDED,
+                MATERIALIZED,
+                OUTPUT,
+                "MATCH (n) WHERE n.p = 99 RETURN COUNT(*) AS n, \
+                    [item IN $elements | item.p] AS values",
+            ] {
                 let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
                 seed_edges(&mut db, &c.commit()).await;
                 let mut txn = db.begin(&c.txn()).unwrap();

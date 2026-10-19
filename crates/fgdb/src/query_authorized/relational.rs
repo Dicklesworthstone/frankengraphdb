@@ -36,10 +36,6 @@ fn set_error(error: GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>)
     }
 }
 
-fn aggregate_error(error: GqlQueryError<GraphAggregateError<ReadError>, QueryError>) -> QueryError {
-    aggregate_gql_error(error.map_source(|error| error.map_source(GqlError::Read)))
-}
-
 fn aggregate_gql_error(
     error: GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
 ) -> QueryError {

@@ -263,9 +263,7 @@ impl<'a> BoundDiff<'a> {
                     })
                     .map_err(|error| {
                         error.map_source(|source| {
-                            QueryError::Aggregate(GqlQueryError::Source(
-                                source.map_source(GqlError::Read),
-                            ))
+                            QueryError::Aggregate(GqlQueryError::Source(source))
                         })
                     }),
                     Input::Relational(query, slots) => aggregate_execution_at(
