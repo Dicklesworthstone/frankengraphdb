@@ -885,7 +885,9 @@ fn maintained_automatic_reads_keep_fresh_limits_and_every_typed_checkpoint() {
         let commit = contexts.commit();
         let query = contexts.query();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        db.write(&commit, document(1, "graph storage", 0, 1)).await.unwrap();
+        db.write(&commit, document(1, "graph storage", 0, 1))
+            .await
+            .unwrap();
         let definition = options();
         let expected = db.beacon_search(&query, &definition, text_query()).unwrap();
         let mut delivery = definition.clone();
@@ -894,7 +896,10 @@ fn maintained_automatic_reads_keep_fresh_limits_and_every_typed_checkpoint() {
         assert!(db.beacon_search(&query, &delivery, text_query()).is_err());
         db.register_beacon_index(&query, &definition, ReadPolicy::default())
             .unwrap();
-        assert_eq!(db.beacon_search(&query, &delivery, text_query()).unwrap(), expected);
+        assert_eq!(
+            db.beacon_search(&query, &delivery, text_query()).unwrap(),
+            expected
+        );
 
         let mut exhausted = delivery.clone();
         exhausted.policy.max_work_units = 0;
@@ -914,19 +919,27 @@ fn maintained_automatic_reads_keep_fresh_limits_and_every_typed_checkpoint() {
 
         let probe = Arc::new(SimulationCheckpointProbe::new(None));
         let measured = query.with_checkpoint_probe(Arc::clone(&probe));
-        assert_eq!(db.beacon_search(&measured, &delivery, text_query()).unwrap(), expected);
+        assert_eq!(
+            db.beacon_search(&measured, &delivery, text_query())
+                .unwrap(),
+            expected
+        );
         let calls = probe.calls();
         assert!(calls > 2);
         for stop in 1..=calls {
             let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
             let interrupted = query.with_checkpoint_probe(Arc::clone(&probe));
-            assert!(matches!(
-                db.beacon_search(&interrupted, &delivery, text_query()),
-                Err(SearchError::Interrupted(_))
-            ), "checkpoint {stop}");
+            assert!(
+                matches!(
+                    db.beacon_search(&interrupted, &delivery, text_query()),
+                    Err(SearchError::Interrupted(_))
+                ),
+                "checkpoint {stop}"
+            );
             assert_eq!(probe.calls(), stop, "first interruption is retained");
             assert_eq!(
-                db.beacon_search(&interrupted, &delivery, text_query()).unwrap(),
+                db.beacon_search(&interrupted, &delivery, text_query())
+                    .unwrap(),
                 expected,
                 "the refused query cannot poison its shared generation"
             );
@@ -945,7 +958,9 @@ fn maintained_automatic_reads_fall_back_for_mismatch_history_ann_and_failed_tick
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let first = db.write(&commit, document(1, "graph", 1, 2)).await.unwrap();
         let definition = options();
-        let handle = db.register_beacon_index(&query, &definition, ReadPolicy::default()).unwrap();
+        let handle = db
+            .register_beacon_index(&query, &definition, ReadPolicy::default())
+            .unwrap();
         let hybrid = Search::Hybrid(ExactHybridQuery {
             vector: &[0.0, 0.0],
             text: "graph storage",
@@ -984,7 +999,10 @@ fn maintained_automatic_reads_fall_back_for_mismatch_history_ann_and_failed_tick
         let view = db.read_session().unwrap();
         for mut changed in mismatches {
             let expected = view.beacon_search(&query, &changed, hybrid).unwrap();
-            assert_eq!(db.beacon_search(&query, &changed, hybrid).unwrap(), expected);
+            assert_eq!(
+                db.beacon_search(&query, &changed, hybrid).unwrap(),
+                expected
+            );
             changed.policy.max_staging_rows = 0;
             assert!(db.beacon_search(&query, &changed, hybrid).is_err());
         }
@@ -997,7 +1015,9 @@ fn maintained_automatic_reads_fall_back_for_mismatch_history_ann_and_failed_tick
             mode: VectorSearch::Approximate { ef_search: 8 },
         };
         assert!(db.beacon_search(&query, &no_build, ann).is_err());
-        db.write(&commit, document(2, "storage", 0, 1)).await.unwrap();
+        db.write(&commit, document(2, "storage", 0, 1))
+            .await
+            .unwrap();
         let mut historical = definition.clone();
         historical.as_of = Some(first);
         assert_eq!(
@@ -1008,17 +1028,32 @@ fn maintained_automatic_reads_fall_back_for_mismatch_history_ann_and_failed_tick
         assert!(db.beacon_search(&query, &historical, hybrid).is_err());
 
         db.unregister_beacon_index(&query, &handle).unwrap();
-        let handle = db.register_beacon_index(
-            &query,
-            &definition,
-            ReadPolicy { max_work_units: 0, ..ReadPolicy::default() },
-        ).unwrap();
-        db.write(&commit, document(3, "graph graph storage", 0, 0)).await.unwrap();
-        assert!(db.beacon_index_status(&query, &handle).unwrap().failure.is_some());
+        let handle = db
+            .register_beacon_index(
+                &query,
+                &definition,
+                ReadPolicy {
+                    max_work_units: 0,
+                    ..ReadPolicy::default()
+                },
+            )
+            .unwrap();
+        db.write(&commit, document(3, "graph graph storage", 0, 0))
+            .await
+            .unwrap();
+        assert!(
+            db.beacon_index_status(&query, &handle)
+                .unwrap()
+                .failure
+                .is_some()
+        );
         assert!(db.beacon_search(&query, &no_build, hybrid).is_err());
         assert_eq!(
             db.beacon_search(&query, &definition, hybrid).unwrap(),
-            db.read_session().unwrap().beacon_search(&query, &definition, hybrid).unwrap()
+            db.read_session()
+                .unwrap()
+                .beacon_search(&query, &definition, hybrid)
+                .unwrap()
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

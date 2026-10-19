@@ -249,8 +249,20 @@ pub(crate) fn evaluate_filtered(
     eligible: impl Fn(VId) -> bool,
 ) -> Result<Vec<GraphHybridHit>, BeaconError> {
     evaluate_with_registry(
-        snapshot, at, options, query, expansion, work, None, scan, admit, label_allowed,
-        property_allowed, relation_allowed, admit_edge, eligible,
+        snapshot,
+        at,
+        options,
+        query,
+        expansion,
+        work,
+        None,
+        scan,
+        admit,
+        label_allowed,
+        property_allowed,
+        relation_allowed,
+        admit_edge,
+        eligible,
     )
 }
 
@@ -325,8 +337,7 @@ fn evaluate_with_registry(
         None
     };
     let reused = match (registry, config.as_ref()) {
-        // Seeded graph requests keep their existing selected-source build.
-        (Some(registry), Some(config)) if !query.graph_enabled() => registry.lookup_exact(
+        (Some(registry), Some(config)) => registry.lookup_exact(
             at,
             snapshot.frontier,
             options,
@@ -336,20 +347,23 @@ fn evaluate_with_registry(
         )?,
         _ => None,
     };
-    let index = if let Some(index) = reused {
+    let index = if reused.is_some() && selected.is_none() {
         // No graph lane needs a vertex directory. The generation already owns
         // the exact current corpus and its complete live BM25 statistics.
-        Some(index)
+        reused
     } else {
         let vertex_scan = match &mut scan {
             Scan::Metered => Scan::Metered,
             Scan::Unmetered(poll) => Scan::Unmetered(&mut **poll),
         };
-        build_selected_optional(
+        // Retain this physical profile's selected-vertex admission and graph
+        // limits. Reuse removes only text/vector projection and construction;
+        // it never substitutes resident_graph's different demand limits.
+        let built = build_selected_optional(
             snapshot,
             at,
             options,
-            config,
+            if reused.is_some() { None } else { config },
             work,
             vertex_scan,
             admit,
@@ -361,8 +375,8 @@ fn evaluate_with_registry(
                 }
                 Ok(())
             },
-        )?
-        .map(|index| index.snapshot())
+        )?;
+        built.map(|index| index.snapshot()).or(reused)
     };
     let scratch = Cell::new(0usize);
     let graph_hits = if let Some(graph) = selected {
@@ -416,12 +430,9 @@ fn evaluate_with_registry(
         },
     };
     let rows = match index {
-        Some(index) => index.hybrid_search_graph_filtered(
-            query,
-            &graph_hits,
-            eligible,
-            &mut kernel,
-        )?,
+        Some(index) => {
+            index.hybrid_search_graph_filtered(query, &graph_hits, eligible, &mut kernel)?
+        }
         None => query.fuse_graph_only(&graph_hits, eligible, &mut kernel)?,
     };
     work.borrow_mut().charge(1)?;
@@ -441,8 +452,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// No edge properties are read and no per-query adjacency copy is built.
     /// Text/vector corpus preparation still scans selected vertex history;
     /// decoded source/index and visited state remain resident, not spill-backed.
-    /// With the graph lane disabled, compatible healthy maintained text/exact-
-    /// vector lanes skip source projection and index construction.
+    /// Compatible healthy maintained text/exact-vector lanes skip property
+    /// projection and index construction. Graph-enabled calls keep the selected
+    /// vertex scan and its original staging/vertex/source limits; graph-disabled
+    /// calls need no source scan. Both modalities use this same exact cut.
     /// GraphHybridQuery::graph_only skips property projection and index creation,
     /// but keeps the selected vertex directory and all source/vertex limits.
     ///

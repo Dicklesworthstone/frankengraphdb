@@ -443,19 +443,25 @@ fn every_native_indexed_checkpoint_can_cancel_even_when_filter_rejects_all() {
 fn current_text_call_reuses_registered_corpus_with_measured_probe_allowance() {
     let ((), report) = run_async_under_lab(0xbeac_3710, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
-        let mut db = Database::open_memory(
-            &c.commit(),
-            DatabaseKeys::new([0x73; 32], NS, [0x75; 32]),
-        ).await.unwrap();
+        let mut db =
+            Database::open_memory(&c.commit(), DatabaseKeys::new([0x73; 32], NS, [0x75; 32]))
+                .await
+                .unwrap();
         let mut batch = WriteBatch::new(R);
         for id in 0..512 {
             batch.create_vertex(
                 VId(id as u128),
                 vec![LabelId(1)],
                 vec![
-                    (TEXT, CanonicalScalar::ucs_basic_text(
-                        if id == 0 { "needle background" } else { "background" }
-                    ).unwrap()),
+                    (
+                        TEXT,
+                        CanonicalScalar::ucs_basic_text(if id == 0 {
+                            "needle background"
+                        } else {
+                            "background"
+                        })
+                        .unwrap(),
+                    ),
                     (X, CanonicalScalar::Int(id as i64)),
                 ],
             );
@@ -471,35 +477,55 @@ fn current_text_call_reuses_registered_corpus_with_measured_probe_allowance() {
             panic!("hybrid CALL must prepare as a relational source");
         };
         let bound = prepared.bind_parameters(&params).unwrap();
-        let cold = db.execute_graph_set_governed(&c.query(), &bound, policy()).unwrap();
+        let cold = db
+            .execute_graph_set_governed(&c.query(), &bound, policy())
+            .unwrap();
         assert_eq!(cold.value.len(), 1);
         assert!(cold.rows.snapshot_records >= 512);
-        let expected = rows(db.query(&c.query(), statement, &params, symbols, policy()).unwrap());
+        let expected = rows(
+            db.query(&c.query(), statement, &params, symbols, policy())
+                .unwrap(),
+        );
         db.register_beacon_index(
             &c.query(),
             &Options::text(TEXT),
             fgdb_beacon::read::ReadPolicy::default(),
-        ).unwrap();
-        let warm = db.execute_graph_set_governed(&c.query(), &bound, policy()).unwrap();
+        )
+        .unwrap();
+        let warm = db
+            .execute_graph_set_governed(&c.query(), &bound, policy())
+            .unwrap();
         assert_eq!(warm.value, cold.value);
-        assert_eq!(warm.rows.snapshot_records, 0, "no vertex corpus is revisited");
+        assert_eq!(
+            warm.rows.snapshot_records, 0,
+            "no vertex corpus is revisited"
+        );
         assert!(warm.evaluator.work_units < cold.evaluator.work_units);
         let mut tight = policy();
         tight.evaluator.max_work_units = warm.evaluator.work_units;
         for _ in 0..2 {
-            let repeated = db.execute_graph_set_governed(&c.query(), &bound, tight).unwrap();
+            let repeated = db
+                .execute_graph_set_governed(&c.query(), &bound, tight)
+                .unwrap();
             assert_eq!(repeated.value, warm.value);
             assert_eq!(repeated.evaluator.work_units, warm.evaluator.work_units);
             assert_eq!(
-                rows(db.query(&c.query(), statement, &params, symbols, tight).unwrap()),
+                rows(
+                    db.query(&c.query(), statement, &params, symbols, tight)
+                        .unwrap()
+                ),
                 expected
             );
         }
         // A pinned view has no registry: its independent native build cannot
         // fit the measured query-only allowance. This is a logical-work test,
         // not an elapsed-time benchmark or an ANN sublinear-search claim.
-        assert!(db.read_session().unwrap()
-            .execute_graph_set_governed(&c.query(), &bound, tight).is_err());
+        assert!(
+            db.read_session()
+                .unwrap()
+                .execute_graph_set_governed(&c.query(), &bound, tight)
+                .is_err()
+        );
         assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -520,40 +546,71 @@ fn registered_full_corpus_cannot_change_authorized_scores_or_unmask_properties()
             &c.query(),
             &definition,
             fgdb_beacon::read::ReadPolicy::default(),
-        ).unwrap();
+        )
+        .unwrap();
         let authority = Authority::new(
-            AuthKey::from_seed(3711), NS, "maintained-hybrid", SchemaEpoch(0), 1,
-        ).unwrap();
-        let mut grant = Grant::read_only("main", 1000, QueryLimits {
-            max_nodes: 1000,
-            max_work: 10_000_000,
-            max_rows: 10,
-        });
+            AuthKey::from_seed(3711),
+            NS,
+            "maintained-hybrid",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 1000,
+                max_work: 10_000_000,
+                max_rows: 10,
+            },
+        );
         grant.labels = Scope::only([LabelId(1)]);
         grant.relations = Scope::only([R]);
         grant.properties = Scope::only([TEXT, X]);
         let token = authority.issue_at(&grant, 100).unwrap();
-        let mut session = full.authorized_read_session(
-            &c.query(), &authority, &token, "main", symbols, policy(), || 100,
-        ).unwrap();
-        let call = |modalities: &str| format!(
-            "CALL hybrid.search({modalities} eligible => $eligible, candidates => 1, k => 1) \
+        let mut session = full
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap();
+        let call = |modalities: &str| {
+            format!(
+                "CALL hybrid.search({modalities} eligible => $eligible, candidates => 1, k => 1) \
              YIELD node, score, vector_rank, text_rank, vector_distance, text_score \
              RETURN node.x AS x, score, vector_rank, text_rank, vector_distance, text_score"
-        );
+            )
+        };
         for (modalities, has_text) in [
             ("text => 'graph', text_property => 'body',", true),
             ("vector => [0], vector_properties => ['x'],", false),
-            ("text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x'],", true),
+            (
+                "text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x'],",
+                true,
+            ),
         ] {
             let statement = call(modalities);
-            let expected = rows(clean.query(
-                &c.query(), &statement, &params(&[3]), symbols, policy(),
-            ).unwrap());
+            let expected = rows(
+                clean
+                    .query(&c.query(), &statement, &params(&[3]), symbols, policy())
+                    .unwrap(),
+            );
             assert_eq!(expected.len(), 1);
-            let prepared = session.prepare(&c.query(), &statement, &params(&[90, 3])).unwrap();
+            let prepared = session
+                .prepare(&c.query(), &statement, &params(&[90, 3]))
+                .unwrap();
             assert_eq!(
-                rows(session.execute(&c.query(), &prepared, &params(&[90, 3])).unwrap()),
+                rows(
+                    session
+                        .execute(&c.query(), &prepared, &params(&[90, 3]))
+                        .unwrap()
+                ),
                 expected
             );
             if has_text {
@@ -561,9 +618,10 @@ fn registered_full_corpus_cannot_change_authorized_scores_or_unmask_properties()
                 // despite selecting the same visible endpoint. This mutation
                 // control makes the authorization comparison non-vacuous.
                 assert_ne!(
-                    rows(full.query(
-                        &c.query(), &statement, &params(&[3]), symbols, policy(),
-                    ).unwrap()),
+                    rows(
+                        full.query(&c.query(), &statement, &params(&[3]), symbols, policy(),)
+                            .unwrap()
+                    ),
                     expected
                 );
             }
@@ -577,21 +635,333 @@ fn registered_full_corpus_cannot_change_authorized_scores_or_unmask_properties()
         clean.write(&c.commit(), remove).await.unwrap();
         grant.properties = Scope::only([X]);
         let token = authority.issue_at(&grant, 100).unwrap();
-        let mut session = full.authorized_read_session(
-            &c.query(), &authority, &token, "main", symbols, policy(), || 100,
-        ).unwrap();
+        let mut session = full
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap();
         let statement = call(
-            "text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x'],"
+            "text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x'],",
         );
-        let expected = rows(clean.query(
-            &c.query(), &statement, &params(&[3]), symbols, policy(),
-        ).unwrap());
-        let prepared = session.prepare(&c.query(), &statement, &params(&[90, 3])).unwrap();
+        let expected = rows(
+            clean
+                .query(&c.query(), &statement, &params(&[3]), symbols, policy())
+                .unwrap(),
+        );
+        let prepared = session
+            .prepare(&c.query(), &statement, &params(&[90, 3]))
+            .unwrap();
         assert_eq!(
-            rows(session.execute(&c.query(), &prepared, &params(&[90, 3])).unwrap()),
+            rows(
+                session
+                    .execute(&c.query(), &prepared, &params(&[90, 3]))
+                    .unwrap()
+            ),
             expected,
             "the maintained text lane cannot supply a masked property"
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn maintained_graph_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+    match (kind, name) {
+        (GraphSymbolKind::Label, "Doc") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+        _ => symbols(kind, name),
+    }
+}
+
+const MAINTAINED_GRAPH_CALL: &str = "CALL hybrid.search(text => 'graph', text_property => 'body', \
+     vector => [0], vector_properties => ['x'], label => 'Doc', \
+     seeds => [1], relation => 'R', max_hops => 2, eligible => $eligible, \
+     candidates => 1, graph_candidates => 1, graph_weight => 100, k => 1) \
+     YIELD node, score, vector_rank, text_rank, graph_rank, graph_hops, vector_distance, text_score \
+     RETURN node.x AS x, score, vector_rank, text_rank, graph_rank, graph_hops, vector_distance, text_score";
+
+#[test]
+fn maintained_indexed_graph_and_call_keep_exact_cut_and_expansion_semantics() {
+    let ((), report) = run_async_under_lab(0xbeac_3712, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        for retain_graph in [false, true] {
+            let mut db = fixture(&c.commit(), 8, false).await;
+            let mut other = WriteBatch::new(RelationId(99));
+            other.add_edge(EId(60), VId(1), VId(9), vec![]);
+            db.write(&c.commit(), other).await.unwrap();
+            let definition = search(true, true).options;
+            if retain_graph {
+                db.register_beacon_graph_index(
+                    &c.query(),
+                    &definition,
+                    fgdb_beacon::read::ReadPolicy::default(),
+                )
+                .unwrap();
+            } else {
+                db.register_beacon_index(
+                    &c.query(),
+                    &definition,
+                    fgdb_beacon::read::ReadPolicy::default(),
+                )
+                .unwrap();
+            }
+            let parameters = params(&[3]);
+            let prepared = crate::PreparedNativeRead::prepare(
+                MAINTAINED_GRAPH_CALL,
+                &parameters,
+                maintained_graph_symbols,
+            )
+            .unwrap();
+            let compare = |db: &Database<MemVfs>| {
+                let view = db.read_session().unwrap();
+                for (vector, text) in [(false, false), (true, false), (false, true), (true, true)] {
+                    for (direction, relation, hops) in [
+                        (ExpansionDirection::Outgoing, Some(R), 2),
+                        (ExpansionDirection::Undirected, None, 1),
+                        (ExpansionDirection::Incoming, Some(R), 2),
+                    ] {
+                        let mut request = search(vector, text);
+                        request.direction = direction;
+                        request.relation = relation;
+                        request.max_hops = hops;
+                        let expected = view
+                            .beacon_search_graph_indexed_filtered(
+                                &c.query(),
+                                &request.options,
+                                request.query(),
+                                request.expansion(),
+                                |id| id == VId(3) || id == VId(9),
+                            )
+                            .unwrap();
+                        assert_eq!(
+                            db.beacon_search_graph_indexed_filtered(
+                                &c.query(),
+                                &request.options,
+                                request.query(),
+                                request.expansion(),
+                                |id| id == VId(3) || id == VId(9),
+                            )
+                            .unwrap(),
+                            expected,
+                            "vector={vector}, text={text}, direction={direction:?}, relation={relation:?}",
+                        );
+                    }
+                }
+                assert_eq!(
+                    rows(
+                        db.query(
+                            &c.query(),
+                            MAINTAINED_GRAPH_CALL,
+                            &parameters,
+                            maintained_graph_symbols,
+                            policy(),
+                        )
+                        .unwrap()
+                    ),
+                    rows(
+                        prepared
+                            .execute_in_view(&view, &c.query(), &parameters, policy())
+                            .unwrap()
+                    )
+                );
+            };
+            compare(&db);
+            let old = db.read_session().unwrap();
+            let mut request = search(true, true);
+            request.relation = Some(R);
+            let historical = old
+                .beacon_search_graph_indexed_filtered(
+                    &c.query(),
+                    &request.options,
+                    request.query(),
+                    request.expansion(),
+                    |id| id == VId(3),
+                )
+                .unwrap();
+            assert_eq!(historical.len(), 1);
+            assert_eq!(historical[0].graph_hops, Some(2));
+
+            let mut changes = WriteBatch::new(R);
+            changes.delete_edge(EId(2));
+            changes.add_edge(EId(50), VId(1), VId(3), vec![]);
+            changes.set_vertex_property(VId(3), X, Some(CanonicalScalar::Int(30)));
+            changes.set_vertex_property(
+                VId(3),
+                TEXT,
+                Some(CanonicalScalar::ucs_basic_text("graph storage").unwrap()),
+            );
+            changes.set_vertex_label(VId(2), LabelId(1), false);
+            db.write(&c.commit(), changes).await.unwrap();
+            compare(&db);
+            let mut historical_options = request.options.clone();
+            historical_options.as_of = Some(old.frontier());
+            assert_eq!(
+                db.beacon_search_graph_indexed_filtered(
+                    &c.query(),
+                    &historical_options,
+                    request.query(),
+                    request.expansion(),
+                    |id| id == VId(3),
+                )
+                .unwrap(),
+                historical,
+                "current maintained lanes must never join historical graph edges",
+            );
+
+            let mut changes = WriteBatch::new(R);
+            changes.delete_vertex(VId(3));
+            changes.add_edge(EId(51), VId(1), VId(9), vec![]);
+            db.write(&c.commit(), changes).await.unwrap();
+            compare(&db);
+            db.compact(&c.commit()).await.unwrap();
+            compare(&db);
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn maintained_indexed_graph_keeps_source_quotas_work_and_live_refusal() {
+    use fgdb_beacon::read::ReadError as SearchError;
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
+    let ((), report) = run_async_under_lab(0xbeac_3713, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = fixture(&c.commit(), 0, false).await;
+        let parameters = params(&[3]);
+        let crate::PreparedNativeRead::Set(prepared) = crate::PreparedNativeRead::prepare(
+            MAINTAINED_GRAPH_CALL,
+            &parameters,
+            maintained_graph_symbols,
+        )
+        .unwrap() else {
+            panic!("hybrid CALL must prepare as a relational source");
+        };
+        let bound = prepared.bind_parameters(&parameters).unwrap();
+        let cold = db
+            .execute_graph_set_governed(&c.query(), &bound, policy())
+            .unwrap();
+        assert_eq!(cold.value.len(), 1);
+        let request = search(true, true);
+        db.register_beacon_index(
+            &c.query(),
+            &request.options,
+            fgdb_beacon::read::ReadPolicy::default(),
+        )
+        .unwrap();
+        let warm = db
+            .execute_graph_set_governed(&c.query(), &bound, policy())
+            .unwrap();
+        assert_eq!(warm.value, cold.value);
+        assert_eq!(
+            warm.rows, cold.rows,
+            "the selected directory still admits every source vertex"
+        );
+        assert!(warm.evaluator.work_units < cold.evaluator.work_units);
+        let mut tight = policy();
+        tight.evaluator.max_work_units = warm.evaluator.work_units;
+        assert_eq!(
+            db.execute_graph_set_governed(&c.query(), &bound, tight)
+                .unwrap()
+                .value,
+            warm.value,
+        );
+        assert!(
+            db.read_session()
+                .unwrap()
+                .execute_graph_set_governed(&c.query(), &bound, tight)
+                .is_err()
+        );
+
+        let view = db.read_session().unwrap();
+        for case in 0..6 {
+            let mut options = request.options.clone();
+            let mut expansion = request.expansion();
+            match case {
+                0 => options.policy.max_staging_rows = 0,
+                1 => expansion.limits.max_vertices = 3,
+                2 => expansion.limits.max_visited_vertices = 1,
+                3 => expansion.limits.max_input_edges = 0,
+                4 => expansion.limits.max_seed_ids = 0,
+                5 => expansion.limits.max_source_scratch = 0,
+                _ => unreachable!(),
+            }
+            let expected = view
+                .beacon_search_graph_indexed_filtered(
+                    &c.query(),
+                    &options,
+                    request.query(),
+                    expansion,
+                    |_| false,
+                )
+                .unwrap_err();
+            let actual = db
+                .beacon_search_graph_indexed_filtered(
+                    &c.query(),
+                    &options,
+                    request.query(),
+                    expansion,
+                    |_| false,
+                )
+                .unwrap_err();
+            assert_eq!(
+                format!("{actual:?}"),
+                format!("{expected:?}"),
+                "source quota {case}"
+            );
+        }
+
+        let cx = c.query();
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let measured = cx.with_checkpoint_probe(Arc::clone(&probe));
+        let expected = db
+            .beacon_search_graph_indexed_filtered(
+                &measured,
+                &request.options,
+                request.query(),
+                request.expansion(),
+                |id| id == VId(3),
+            )
+            .unwrap();
+        assert_eq!(expected.len(), 1);
+        let calls = probe.calls();
+        for stop in 1..=calls {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let interrupted = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(
+                matches!(
+                    db.beacon_search_graph_indexed_filtered(
+                        &interrupted,
+                        &request.options,
+                        request.query(),
+                        request.expansion(),
+                        |id| id == VId(3),
+                    ),
+                    Err(SearchError::Interrupted(_))
+                ),
+                "graph checkpoint {stop}"
+            );
+            assert_eq!(probe.calls(), stop);
+        }
+        assert_eq!(
+            db.beacon_search_graph_indexed_filtered(
+                &cx,
+                &request.options,
+                request.query(),
+                request.expansion(),
+                |id| id == VId(3),
+            )
+            .unwrap(),
+            expected,
+        );
+        assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
