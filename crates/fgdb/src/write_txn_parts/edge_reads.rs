@@ -257,10 +257,9 @@ impl WriteTxn {
                     if accepts(entry.src, entry.relation, entry.dst) {
                         // Filter topology before touching unrelated payloads,
                         // including in the authorized collector's pair probe.
-                        self.read_set.borrow_mut().extend([
-                            ElementId::Edge(entry.eid),
-                            ElementId::Vertex(entry.src),
-                        ]);
+                        self.read_set
+                            .borrow_mut()
+                            .extend([ElementId::Edge(entry.eid), ElementId::Vertex(entry.src)]);
                         let mut props = Vec::new();
                         for property in
                             query_source::edge_properties_at(&snapshot.block_props, block, row)
@@ -331,10 +330,9 @@ impl WriteTxn {
                             for eid in sorted_retired_incident_edges {
                                 checkpoint().map_err(GqlQueryError::Interrupted)?;
                                 if edges.remove(eid).is_some() {
-                                    self.read_set.borrow_mut().extend([
-                                        ElementId::Edge(*eid),
-                                        ElementId::Vertex(*vid),
-                                    ]);
+                                    self.read_set
+                                        .borrow_mut()
+                                        .extend([ElementId::Edge(*eid), ElementId::Vertex(*vid)]);
                                 }
                             }
                             continue;

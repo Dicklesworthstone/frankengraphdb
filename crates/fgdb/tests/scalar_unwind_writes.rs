@@ -13,7 +13,7 @@ use fgdb_gql::{
     GraphWriteProgramPolicy, GraphWriteScriptExecutionError,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion,
+    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
     PurposeContexts, VId,
 };
 use std::convert::Infallible;
@@ -335,6 +335,101 @@ fn a_late_scalar_execution_failure_restores_the_outer_prefix_and_original_record
             db.vertex(VId(1)).unwrap().unwrap().props,
             vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(20))]
         );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn keyed_edge_unwind_admits_only_endpoint_unions_and_pair_edges() {
+    let ((), report) = run_async_under_lab(0x7363_6110, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=600_u128 {
+            seed.create_vertex(
+                VId(id),
+                vec![ENTITY],
+                vec![(ID, CanonicalScalar::Int(id as i64))],
+            );
+            if id > 1 {
+                seed.add_edge(EId(id), VId(id - 1), VId(id), vec![]);
+            }
+        }
+        db.write(&commit, seed).await.unwrap();
+        let mut pairs = (100..110)
+            .map(|id| object(vec![("a", int(id)), ("b", int(id + 100))]))
+            .collect::<Vec<_>>();
+        pairs.insert(1, pairs[0].clone());
+        let values = args(pairs);
+        let statement = "UNWIND $rows AS row \
+            MATCH (a:Entity {id:row.a}), (b:Entity {id:row.b}) \
+            MERGE (a)-[:R]->(b)";
+        let bounded = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(100, 100, 10_000_000, 10_000_000),
+            20,
+            0,
+            20,
+        );
+        let issued = AtomicU64::new(10_000);
+        let allocate = |request: GraphWriteIdentityRequest| {
+            assert!(matches!(request.request, GraphInsertRequest::Edge { .. }));
+            Ok::<_, Infallible>(ElementId::Edge(EId(u128::from(
+                issued.fetch_add(1, Ordering::Relaxed),
+            ))))
+        };
+        for pass in 0..2 {
+            let result = db
+                .query_write(
+                    &txcx, &cx, &commit, statement, &values, symbols, R, bounded, allocate,
+                )
+                .await
+                .unwrap();
+            let QueryResult::Write {
+                receipt,
+                completion,
+            } = result
+            else {
+                panic!("edge UNWIND keeps its ordinary native write receipt");
+            };
+            assert_eq!(receipt.stats().completed_statements, 11);
+            assert_eq!(
+                receipt.stats().created_edges,
+                if pass == 0 { 10 } else { 0 }
+            );
+            assert_eq!(
+                receipt.stats().selection.snapshot_records,
+                if pass == 0 { 23 } else { 33 },
+                "two indexed endpoints per row plus each existing pair edge"
+            );
+            if pass == 0 {
+                assert!(matches!(
+                    completion,
+                    Some(EmbeddedTxnCompletion::WriteCommitted { .. })
+                ));
+            } else {
+                assert!(matches!(
+                    completion,
+                    Some(EmbeddedTxnCompletion::ReadClosed { .. })
+                ));
+            }
+            assert_eq!(issued.load(Ordering::Relaxed), 10_010);
+        }
+        let loaded = db
+            .edges()
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.entry.eid.0 >= 10_000)
+            .map(|edge| (edge.entry.src, edge.entry.dst))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            loaded,
+            (100..110_u128).map(|id| (VId(id), VId(id + 100))).collect()
+        );
+        assert_eq!(db.edges().unwrap().len(), 609);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

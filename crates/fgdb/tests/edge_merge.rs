@@ -360,9 +360,7 @@ fn indexed_pair_probe_preserves_parallel_properties_orientation_and_staged_rollb
         // Even with complete vertex admission this leaves room for only the
         // pair's two records, not the other 600 relationships. Independent
         // indexed-root admission can further reduce the vertex side.
-        let bounded = GraphEdgeMergePolicy::new(GqlQueryPolicy::new(
-            602, 10, 5_000_000, 5_000_000,
-        ));
+        let bounded = GraphEdgeMergePolicy::new(GqlQueryPolicy::new(602, 10, 5_000_000, 5_000_000));
         let mut txn = db.begin(&txcx).unwrap();
         txn.savepoint(&db, "before-pair-edits").unwrap();
         for merge in [

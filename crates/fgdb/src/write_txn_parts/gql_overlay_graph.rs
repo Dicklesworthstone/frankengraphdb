@@ -126,7 +126,7 @@ mod query_source {
     struct BoundOverlay<'a> {
         vertices: BTreeSet<VId>,
         edges: OverlayEdges<'a>,
-        root_observation: usize,
+        root_observations: Vec<usize>,
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -222,6 +222,36 @@ mod query_source {
         Ok(target)
     }
 
+    fn indexed_predicates<E>(
+        predicates: &[VertexPredicate],
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        use fgdb_gql::algebra::IntegerComparison;
+        for predicate in predicates {
+            control(SourceEvent::Work)?;
+            let indexed = match predicate {
+                VertexPredicate::IntegerProperty { comparison, .. } => {
+                    *comparison != IntegerComparison::NotEqual
+                }
+                VertexPredicate::ScalarProperty { predicate, .. } => {
+                    let comparison = predicate.comparison();
+                    (comparison == IntegerComparison::Equal
+                        && !matches!(predicate.value(), CanonicalScalar::Null))
+                        || (comparison != IntegerComparison::NotEqual
+                            && matches!(
+                                predicate.value(),
+                                CanonicalScalar::Int(_) | CanonicalScalar::Float(_)
+                            ))
+                }
+                _ => false,
+            };
+            if indexed {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Per-execution label and type names for `labels(n)` and `type(r)`. An
     /// element whose id the plan's catalog cannot name keeps that id, and
     /// refuses only when its own labels or type are read: a staged label on
@@ -269,7 +299,7 @@ mod query_source {
         edges: Vec<(IdentifiedEdge, EdgeView<'a>)>,
         pub(super) snapshot_records: usize,
         // Incomplete until THIS execution and its final allowance check pass.
-        scan_observation: Option<(&'a WriteTxn, usize)>,
+        scan_observations: Vec<(&'a WriteTxn, usize)>,
     }
     impl<'a, Row> core::ops::Deref for OverlayQuerySource<'a, Row> {
         type Target = OverlayGraphTables<'a>;
@@ -280,7 +310,7 @@ mod query_source {
     }
     impl<Row: GlaOutput> OverlayQuerySource<'_, Row> {
         fn accept_observations(&self) {
-            if let Some((transaction, index)) = self.scan_observation {
+            for &(transaction, index) in &self.scan_observations {
                 transaction
                     .point_reads
                     .borrow_mut()
@@ -475,8 +505,8 @@ mod query_source {
         /// final overlay even when a preceding statement deleted an edge or
         /// vertex. The existing effect application then removes those rows.
         ///
-        /// Nested/independent scopes and quantified paths retain complete
-        /// admission until their overlay closure has its own completeness law.
+        /// Scoped bodies, independent edge components and quantified paths
+        /// retain complete admission until their closure has a completeness law.
         fn bound_query_source<'a, E, Row>(
             &'a self,
             snapshot: &'a Snapshot,
@@ -519,31 +549,7 @@ mod query_source {
                 // edge candidates. A label-only left endpoint must not hide
                 // an indexed key on the right endpoint. Do not add a witness
                 // until a selection can seek the index.
-                let mut indexed = false;
-                for predicate in predicates {
-                    control(SourceEvent::Work)?;
-                    use fgdb_gql::algebra::IntegerComparison;
-                    indexed = match predicate {
-                        VertexPredicate::IntegerProperty { comparison, .. } => {
-                            *comparison != IntegerComparison::NotEqual
-                        }
-                        VertexPredicate::ScalarProperty { predicate, .. } => {
-                            let comparison = predicate.comparison();
-                            (comparison == IntegerComparison::Equal
-                                && !matches!(predicate.value(), CanonicalScalar::Null))
-                                || (comparison != IntegerComparison::NotEqual
-                                    && matches!(
-                                        predicate.value(),
-                                        CanonicalScalar::Int(_) | CanonicalScalar::Float(_)
-                                    ))
-                        }
-                        _ => false,
-                    };
-                    if indexed {
-                        break;
-                    }
-                }
-                if indexed {
+                if indexed_predicates(predicates, control)? {
                     root_selection = Some((root_slot, operator, predicates));
                     break;
                 }
@@ -664,10 +670,153 @@ mod query_source {
                     }
                 }
             }
+            control(SourceEvent::ScratchEntry)?;
             Ok(Some(BoundOverlay {
                 vertices,
                 edges,
-                root_observation,
+                root_observations: vec![root_observation],
+            }))
+        }
+
+        /// Independent positive vertex roots share one admitted table. Its
+        /// safe bound is the UNION of every root's indexed candidates, not the
+        /// intersection and not the first root alone. The unchanged algebra
+        /// still applies each root's own predicate and preserves the product.
+        ///
+        /// Every root must have a primitive indexed selection before any
+        /// fallible Boolean selection. Scoped bodies, extra binding kinds and
+        /// unindexed roots retain complete admission. Register all membership
+        /// domains before probing any index, including empty or refused probes.
+        fn bound_vertex_sources<'a, E, Row>(
+            &'a self,
+            snapshot: &'a Snapshot,
+            logical: &GlaPlan<Row>,
+            record_membership: bool,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<Option<BoundOverlay<'a>>, E> {
+            let mut roots: Vec<Option<&GlaOperator>> = Vec::new();
+            let mut selections_open = true;
+            let mut projected = false;
+            for operator in logical.operators() {
+                control(SourceEvent::Work)?;
+                match operator {
+                    GlaOperator::ScanVertices if selections_open && !projected => {
+                        control(SourceEvent::ScratchEntry)?;
+                        roots.push(None);
+                    }
+                    GlaOperator::Select { slot, predicates } if !projected => {
+                        if selections_open {
+                            let Ok(slot) = usize::try_from(slot.ordinal()) else {
+                                return Ok(None);
+                            };
+                            let Some(root) = roots.get_mut(slot) else {
+                                return Ok(None);
+                            };
+                            if root.is_none() && indexed_predicates(predicates, control)? {
+                                *root = Some(operator);
+                            }
+                        }
+                    }
+                    GlaOperator::VertexIdentity { .. } if !projected => {}
+                    GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }
+                        if !projected =>
+                    {
+                        selections_open = false;
+                    }
+                    GlaOperator::Project { .. }
+                    | GlaOperator::ProjectBindings { .. }
+                    | GlaOperator::ProjectValues { .. }
+                    | GlaOperator::Distinct
+                    | GlaOperator::OrderByVertexId
+                    | GlaOperator::OrderByBindings
+                    | GlaOperator::OrderByValues
+                    | GlaOperator::OrderByValueColumns { .. }
+                    | GlaOperator::Limit { .. } => projected = true,
+                    _ => return Ok(None),
+                }
+            }
+            if roots.is_empty() || roots.iter().any(Option::is_none) {
+                return Ok(None);
+            }
+            let mut root_observations = Vec::new();
+            let mut keys = BTreeSet::new();
+            let mut labels = BTreeSet::new();
+            for selection in roots.iter().flatten() {
+                if record_membership {
+                    let selections = core::slice::from_ref(*selection);
+                    super::VertexScanRead::charge_definition(selections, control)?;
+                    let observation = self.point_reads.borrow_mut().begin_vertex_scan(selections);
+                    control(SourceEvent::ScratchEntry)?;
+                    root_observations.push(observation);
+                }
+                if let GlaOperator::Select { predicates, .. } = selection {
+                    for predicate in predicates {
+                        control(SourceEvent::Work)?;
+                        if let Some(key) = predicate.property_key()
+                            && !keys.contains(&key)
+                        {
+                            control(SourceEvent::ScratchEntry)?;
+                            keys.insert(key);
+                        }
+                        if let VertexPredicate::HasLabel(label) = predicate
+                            && !labels.contains(label)
+                        {
+                            control(SourceEvent::ScratchEntry)?;
+                            labels.insert(*label);
+                        }
+                    }
+                }
+            }
+            let mut vertices = BTreeSet::new();
+            for selection in roots.into_iter().flatten() {
+                let GlaOperator::Select { predicates, .. } = selection else {
+                    unreachable!("only primitive root selections were retained");
+                };
+                let Some(candidates) =
+                    source::indexed_roots(snapshot, predicates, self.basis, control)?
+                else {
+                    return Ok(None);
+                };
+                for vid in candidates {
+                    control(SourceEvent::Work)?;
+                    if !vertices.contains(&vid) {
+                        control(SourceEvent::ScratchEntry)?;
+                        vertices.insert(vid);
+                    }
+                }
+            }
+            if let Some(prepared) = &self.prepared {
+                for coordinate in prepared.template.coordinate_entries() {
+                    control(SourceEvent::Work)?;
+                    for effect in &coordinate.rows {
+                        control(SourceEvent::Work)?;
+                        let candidate = match effect {
+                            DeltaRow::CreateVertex { vid, .. } => Some(*vid),
+                            DeltaRow::LabelMembership { vid, label, .. }
+                                if labels.contains(label) =>
+                            {
+                                Some(*vid)
+                            }
+                            DeltaRow::Property {
+                                elem: ElementId::Vertex(vid),
+                                property,
+                                ..
+                            } if keys.contains(property) => Some(*vid),
+                            _ => None,
+                        };
+                        if let Some(vid) = candidate
+                            && !vertices.contains(&vid)
+                        {
+                            control(SourceEvent::ScratchEntry)?;
+                            vertices.insert(vid);
+                        }
+                    }
+                }
+            }
+            Ok(Some(BoundOverlay {
+                vertices,
+                edges: OverlayEdges::new(),
+                root_observations,
             }))
         }
 
@@ -698,10 +847,10 @@ mod query_source {
         /// Run one scalar or correlated binding projection over the original
         /// basis plus canonical staged effects. All shapes retain the same
         /// source, witnesses and one shared source/evaluator allowance.
-        /// Single-vertex selections retain insertion/membership witnesses
-        /// plus full reads of matching and staged vertices. Indexed flat
-        /// expansions admit their basis/staged adjacency closure and retain a
-        /// root-membership witness. Other shapes keep conservative scans.
+        /// Single-vertex selections and indexed independent roots retain
+        /// membership witnesses plus full reads of matching/staged vertices.
+        /// Indexed flat expansions admit their basis/staged adjacency closure
+        /// and retain root-membership witnesses. Other shapes keep scans.
         /// Refusals keep a broad vertex-domain witness; no prior getter, failed
         /// scan or savepoint observation is narrowed.
         pub fn execute_graph_pattern_governed<V: Vfs + Clone, Row: GlaOutput>(
@@ -841,14 +990,15 @@ mod query_source {
             let predicates = logical
                 .filter(|_| precise)
                 .and_then(super::VertexScanRead::predicates);
-            let mut scan_observation = if let Some(predicates) = predicates {
+            let mut scan_observations = if let Some(predicates) = predicates {
                 // Charge the bounded definition copy before allocation or graph
                 // reads. A failure here has learned nothing from the database.
                 super::VertexScanRead::charge_definition(predicates, control)?;
                 let index = self.point_reads.borrow_mut().begin_vertex_scan(predicates);
-                Some((self, index))
+                control(SourceEvent::ScratchEntry)?;
+                vec![(self, index)]
             } else {
-                None
+                Vec::new()
             };
             let edge_scan = logical.is_some_and(GlaPlan::scans_edges);
             // An edge root does not imply an endpoint-only vertex domain.
@@ -876,7 +1026,22 @@ mod query_source {
                     None => self.scanned_edges.set(true),
                 }
             }
-            if vertex_scan && scan_observation.is_none() {
+            // Eligible vertex-only roots establish every membership domain
+            // before touching index candidates. An unfinished domain retains
+            // the old conservative refusal semantics; a completed domain does
+            // not need an additional whole-table insertion witness. A precise
+            // single-root selection already has its full predicate witness.
+            let vertex_bound = if precise && !reads_edges {
+                match logical {
+                    Some(logical) => {
+                        self.bound_vertex_sources(snapshot, logical, predicates.is_none(), control)?
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            if vertex_scan && scan_observations.is_empty() && vertex_bound.is_none() {
                 // An edge endpoint's label cannot constrain an independent
                 // vertex root. Keep its insertion gap even for empty results.
                 if let Some(label) = required_vertex_label.filter(|_| !edge_scan) {
@@ -894,7 +1059,8 @@ mod query_source {
             // with the caller's label, or the scan stays broad.
             let witness_label = required_vertex_label.filter(|label| {
                 !edge_scan
-                    && scan_observation.is_none()
+                    && scan_observations.is_empty()
+                    && vertex_bound.is_none()
                     && logical.is_some_and(|plan| {
                         plan.vertex_scan_domain()
                             == fgdb_gql::algebra::VertexScanDomain::Label(*label)
@@ -932,13 +1098,20 @@ mod query_source {
                     }
                 }
             }
-            let bound = match logical.filter(|_| reads_edges) {
-                Some(logical) => self.bound_query_source(snapshot, logical, control)?,
+            let bound = match logical {
+                Some(logical) if reads_edges => {
+                    self.bound_query_source(snapshot, logical, control)?
+                }
+                Some(_) if precise => vertex_bound,
+                Some(logical) => self.bound_vertex_sources(snapshot, logical, true, control)?,
                 None => None,
             };
             let (mut edges, vertex_candidates) = if let Some(bound) = bound {
                 if precise {
-                    scan_observation = Some((self, bound.root_observation));
+                    for observation in bound.root_observations {
+                        control(SourceEvent::ScratchEntry)?;
+                        scan_observations.push((self, observation));
+                    }
                 }
                 for (&eid, (src, relation, dst, _)) in &bound.edges {
                     control(SourceEvent::Work)?;
@@ -1026,7 +1199,7 @@ mod query_source {
                     for effect in &coordinate.rows {
                         control(SourceEvent::Work)?;
                         if vertex_scan {
-                            if (scan_observation.is_some() || witness_label.is_some())
+                            if (!scan_observations.is_empty() || witness_label.is_some())
                                 && let Some(vid) = super::VertexScanRead::target(effect)
                             {
                                 // Staged overrides are transaction-local, not
@@ -1154,7 +1327,7 @@ mod query_source {
                 vertices: vertex_rows,
                 edges: edge_rows,
                 snapshot_records,
-                scan_observation,
+                scan_observations,
             })
         }
     }
