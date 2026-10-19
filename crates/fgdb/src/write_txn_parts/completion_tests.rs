@@ -162,7 +162,13 @@ fn dropped_guard_classifies_real_durability_fences_and_never_recovers_from_drop(
                     (phase == 2).then_some(DerivedPublicationStage::FoldCommittedTemplate);
                 let result = guard
                     .database
-                    .commit_template(&cx, prepared.template, crash, publication_failure, None)
+                    .commit_template(
+                        &cx,
+                        prepared.template.clone(),
+                        crash,
+                        publication_failure,
+                        None,
+                    )
                     .await;
                 assert_eq!(result.is_ok(), phase == 3);
                 suspended.store(true, Ordering::SeqCst);

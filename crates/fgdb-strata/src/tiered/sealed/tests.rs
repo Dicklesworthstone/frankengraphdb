@@ -1010,7 +1010,7 @@ fn benchmark_sealed_history_decode_elision_against_unfiltered() {
             };
             let mut old = [Duration::ZERO; 9];
             let mut new = [Duration::ZERO; 9];
-            for round in 0..9 {
+            for round in 0_usize..9 {
                 if round.is_multiple_of(2) {
                     old[round] = measure(false, expected_old);
                     new[round] = measure(true, expected_new);
