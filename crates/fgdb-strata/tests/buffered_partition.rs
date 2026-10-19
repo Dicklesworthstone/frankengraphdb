@@ -63,6 +63,23 @@ fn limits() -> BufferedReadLimits {
     }
 }
 
+// Directory construction has a different allowance from a later cursor's
+// source work. Keep its retained reservation explicit in resident-cap laws.
+fn patch_directory_overhead(patches: usize) -> (usize, usize) {
+    // Each Range holds three VIds and a patch ordinal, including trailing
+    // alignment padding. Admission reserves one full entry per patch.
+    let (entry, _) = std::alloc::Layout::new::<[VId; 3]>()
+        .extend(std::alloc::Layout::new::<usize>())
+        .unwrap();
+    let reserved_bytes = patches * entry.pad_to_align().size();
+    // Fill and augment each visit at most P entries. Heapify plus extraction
+    // invokes at most 3P/2 sifts, each with two controls per tree level;
+    // extraction also spends at most P controls on swaps.
+    let height = patches.checked_ilog2().unwrap_or(0) as usize;
+    let work = patches * (3 * height + 3);
+    (reserved_bytes, work)
+}
+
 fn edge(eid: u128, src: u128, dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
     AdjacencyEntry {
         eid: EId(eid),
@@ -1002,9 +1019,10 @@ fn vertex_scan_is_lazy_and_does_not_rescan_every_patch_for_every_identity() {
             .unwrap();
         let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
         let mut bounded = limits();
-        // Linear admission suffices for the entire cursor. A point-read loop
-        // over every candidate would revisit 32 patches per output and refuse.
-        bounded.max_work = count * 4;
+        // Authenticate one object and row per patch, then build the directory.
+        // The later cursor must still use exactly four source events per row.
+        let (_, directory_work) = patch_directory_overhead(count);
+        bounded.max_work = 2 * count + directory_work;
         let mut view = store
             .open_buffered_root(&cx, id, pool.clone(), bounded)
             .await
@@ -1033,23 +1051,40 @@ fn vertex_scan_is_lazy_and_does_not_rescan_every_patch_for_every_identity() {
         drop(held);
         assert_eq!(pool.used(), 0);
 
-        bounded.max_work -= 1;
         let mut view = store
             .open_buffered_root(&cx, id, pool.clone(), bounded)
             .await
             .unwrap();
         let mut scan = view.vertex_scan(&cx, CommitSeq(1)).unwrap();
-        for _ in 1..count {
-            assert!(scan.next(&cx).await.unwrap().is_some());
+        // The hosted-query control applies a tighter cursor allowance without
+        // lowering the already completed constructor's directory allowance.
+        let scan_limit = count * 4 - 1;
+        let mut admitted_work = 0usize;
+        let mut observe = |event| {
+            if event == BufferedScanEvent::Work {
+                let requested = admitted_work + 1;
+                if requested > scan_limit {
+                    return Err((requested, scan_limit));
+                }
+                admitted_work = requested;
+            }
+            Ok(())
+        };
+        for index in 1..count {
+            let candidate = scan
+                .next_candidate_with(&cx, &mut observe)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(candidate.vid, VId(index as u128));
+            assert!(candidate.row.is_some());
         }
         assert!(matches!(
-            scan.next(&cx).await,
-            Err(BufferedReadError::Limit {
-                resource: "buffered source work",
-                requested: 128,
-                limit: 127,
-            })
+            scan.next_candidate_with(&cx, &mut observe).await,
+            Err(BufferedScanError::Control((128, 127)))
         ));
+        assert_eq!(admitted_work, scan_limit);
+        assert_eq!(scan.work_used(), scan_limit);
         assert!(
             scan.next(&cx).await.unwrap().is_none(),
             "a work error fuses the cursor"
@@ -1659,12 +1694,16 @@ fn vertex_property_history_larger_than_the_resident_cap_opens_and_refaults() {
         bounded.max_root_bytes = 16 * 1024;
         bounded.max_source_bytes = source_bytes;
         bounded.max_vertex_patches = COUNT;
-        bounded.max_work = COUNT * 4;
+        let (directory_bytes, directory_work) = patch_directory_overhead(COUNT);
+        bounded.max_work = 2 * COUNT + directory_work;
         let mut view = store
             .open_buffered_root(&query, id, pool.clone(), bounded)
             .await
             .unwrap();
-        assert_eq!(pool.used(), bounded.metadata_bytes().unwrap());
+        assert_eq!(
+            pool.used(),
+            bounded.metadata_bytes().unwrap() + directory_bytes
+        );
         for index in [1, COUNT, 1] {
             let found = view
                 .vertex_at(&query, VId(index as u128), CommitSeq(1))
@@ -1754,12 +1793,19 @@ fn vertex_restatements_bound_residency_and_meter_every_authenticated_birth_refau
         bounded.max_vertex_patches = COUNT;
         bounded.max_source_bytes = source_bytes + (COUNT - 1) * birth_bytes;
         // Each incoming patch and each refault has one object plus two rows.
-        bounded.max_work = 3 * COUNT + 3 * (COUNT - 1);
+        // Retain this exact authenticated-refault boundary independently of
+        // the directory construction that follows successful admission.
+        let admission_work = 3 * COUNT + 3 * (COUNT - 1);
+        let (directory_bytes, directory_work) = patch_directory_overhead(COUNT);
+        bounded.max_work = admission_work + directory_work;
         let mut view = store
             .open_buffered_root(&query, id, pool.clone(), bounded)
             .await
             .unwrap();
-        assert_eq!(pool.used(), bounded.metadata_bytes().unwrap());
+        assert_eq!(
+            pool.used(),
+            bounded.metadata_bytes().unwrap() + directory_bytes
+        );
         let found = view
             .vertex_at(&query, VId(1), CommitSeq(1))
             .await
@@ -1777,11 +1823,11 @@ fn vertex_restatements_bound_residency_and_meter_every_authenticated_birth_refau
         assert_eq!(pool.used(), 0);
 
         let mut too_little = bounded;
-        too_little.max_work -= 1;
+        too_little.max_work = admission_work - 1;
         assert!(matches!(
             store.open_buffered_root(&query, id, pool.clone(), too_little).await,
             Err(BufferedReadError::Limit { resource: "buffered source work", requested, limit })
-                if requested == bounded.max_work && limit == bounded.max_work - 1
+                if requested == admission_work && limit == admission_work - 1
         ));
         assert_eq!(pool.used(), 0);
         too_little = bounded;
