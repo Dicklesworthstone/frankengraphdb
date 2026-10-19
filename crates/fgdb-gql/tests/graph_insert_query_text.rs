@@ -757,7 +757,7 @@ fn bulk_map_document_creates_edges_through_one_native_input_above_scalar_literal
                 ("weight".into(), int(weight)),
                 (
                     "payload".into(),
-                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("x".repeat(512)).unwrap()),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text(&"x".repeat(512)).unwrap()),
                 ),
             ])
             .unwrap()

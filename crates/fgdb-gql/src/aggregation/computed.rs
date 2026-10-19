@@ -510,9 +510,9 @@ impl PreparedGraphAggregate {
         })
     }
 
-    pub(super) fn summarize_projected_rows<'a, E, C>(
+    pub(super) fn summarize_projected_rows<E, C>(
         &self,
-        input: &'a [GraphValueRow],
+        input: &[GraphValueRow],
         control: &mut impl FnMut(
             GlaExecutionEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,

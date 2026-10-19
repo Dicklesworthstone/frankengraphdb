@@ -31,7 +31,7 @@ mod cache;
 #[path = "query_prism/projection.rs"]
 mod projection;
 pub(crate) use cache::{
-    CACHE_BYTES as PROJECTION_CACHE_BYTES, LiveCache, ProjectionCache, Request as ProjectionRequest,
+    CACHE_BYTES as PROJECTION_CACHE_BYTES, LiveCache, Request as ProjectionRequest,
 };
 pub(crate) use projection::{bind_procedure, procedure_options};
 
