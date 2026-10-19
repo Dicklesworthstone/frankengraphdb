@@ -595,7 +595,9 @@ pub struct WriteTxn {
     handle_owner: std::sync::Arc<()>,
     basis: CommitSeq,
     staged: Vec<WriteBatch>,
-    prepared: Option<PreparedWrite>,
+    // Program guards and savepoints retain this exact immutable prefix. Staging
+    // replaces the handle; it never copies the accumulated delta to save it.
+    prepared: Option<std::sync::Arc<PreparedWrite>>,
     savepoints: Vec<EmbeddedSavepoint>,
     /// Enabled only while a mixed write program owns its rollback workspace.
     program_multi_relation: bool,

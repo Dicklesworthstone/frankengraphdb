@@ -7,7 +7,7 @@
 struct MutationProgramWorkspace<'txn> {
     txn: &'txn mut WriteTxn,
     staged_len: usize,
-    prepared: Option<PreparedWrite>,
+    prepared: Option<std::sync::Arc<PreparedWrite>>,
     program_multi_relation: bool,
     accepted: bool,
 }
@@ -15,8 +15,8 @@ impl<'txn> MutationProgramWorkspace<'txn> {
     fn new(txn: &'txn mut WriteTxn) -> Self {
         let staged_len = txn.staged.len();
         // Keep the exact already-validated prefix, not a recipe that could be
-        // re-prepared against a different basis on failure. The current copy is
-        // still needed by the first statement's canonical overlay selection.
+        // re-prepared against a different basis on failure. Sharing this immutable
+        // value keeps nested row/action guards independent of the prefix's size.
         let prepared = txn.prepared.clone();
         let program_multi_relation = txn.program_multi_relation;
         Self {
@@ -48,9 +48,10 @@ impl Drop for MutationProgramWorkspace<'_> {
         // before discarding the prepared effects. Failed ordinary preparations
         // already retain their own observations in WriteTxn::write.
         if appended && let Some(prepared) = discarded {
-            prepared
-                .dependencies
-                .retain_observations(&mut self.txn.read_set.borrow_mut());
+            self.txn
+                .read_set
+                .borrow_mut()
+                .extend(prepared.dependencies.observations());
         }
     }
 }
@@ -68,8 +69,8 @@ impl WriteTxn {
     /// ordinary transaction commit. A successful empty program result invents no
     /// empty write or marker. Existing relation-group restrictions still apply.
     /// The policy sums query/proposal costs across steps, including work later
-    /// canceled out by another step. It does not price cloning the starting
-    /// prepared workspace, repeated storage preparation, cascades or commit I/O.
+    /// canceled out by another step. The starting prepared prefix is shared;
+    /// repeated storage preparation, cascades and commit I/O are not priced.
     pub fn execute_graph_mutation_program_governed<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -152,10 +153,23 @@ mod mutation_program_workspace_tests {
                 db.write(&commit, seed).await.unwrap();
                 let mut txn = db.begin(&txcx).unwrap();
                 let mut prefix = WriteBatch::new(RelationId(1));
-                prefix.create_vertex(VId(777), vec![], vec![]);
+                for id in 777..1289 {
+                    prefix.create_vertex(VId(id), vec![], vec![]);
+                }
                 txn.write(&mut db, prefix).unwrap();
+                let retained = std::sync::Arc::clone(txn.prepared.as_ref().unwrap());
+                for index in 0..16 {
+                    txn.savepoint(&db, &format!("shared-{index}")).unwrap();
+                }
+                assert!(txn.savepoints.iter().all(|saved| {
+                    std::sync::Arc::ptr_eq(saved.prepared.as_ref().unwrap(), &retained)
+                }));
                 let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let workspace = MutationProgramWorkspace::new(&mut txn);
+                    assert!(std::sync::Arc::ptr_eq(
+                        workspace.prepared.as_ref().unwrap(),
+                        &retained
+                    ));
                     let mut step = WriteBatch::new(RelationId(1));
                     // Equal-to-current: canonicalization removes the effect but
                     // cannot erase the preparation's before-image observation.
@@ -168,6 +182,11 @@ mod mutation_program_workspace_tests {
                     panic!("injected unwind before program acceptance");
                 }));
                 assert!(failure.is_err());
+                assert!(std::sync::Arc::ptr_eq(
+                    txn.prepared.as_ref().unwrap(),
+                    &retained
+                ));
+                drop(retained);
                 if change_observed_vertex {
                     let mut winner = WriteBatch::new(RelationId(1));
                     winner.set_vertex_property(

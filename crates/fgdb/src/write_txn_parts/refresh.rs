@@ -130,18 +130,44 @@ impl WriteTxn {
             }
         }
         drop(prepared_reads);
+        // Refresh changes a prefix's basis, so prepare those values privately.
+        // Repeated savepoints of the same prefix must continue sharing one value.
+        // All copies and allocations precede the final cancellation boundary.
+        let (prepared, saved_prepared) = {
+            let mut refreshed: Vec<(
+                std::sync::Arc<PreparedWrite>,
+                std::sync::Arc<PreparedWrite>,
+            )> = Vec::with_capacity(self.savepoints.len() + 1);
+            let mut at_frontier = |original: &std::sync::Arc<PreparedWrite>| {
+                if let Some((_, next)) = refreshed
+                    .iter()
+                    .find(|(previous, _)| std::sync::Arc::ptr_eq(previous, original))
+                {
+                    return std::sync::Arc::clone(next);
+                }
+                let mut next = original.as_ref().clone();
+                next.basis = frontier;
+                let next = std::sync::Arc::new(next);
+                refreshed.push((std::sync::Arc::clone(original), std::sync::Arc::clone(&next)));
+                next
+            };
+            checkpoint()?;
+            let prepared = self.prepared.as_ref().map(&mut at_frontier);
+            let mut saved_prepared = Vec::with_capacity(self.savepoints.len());
+            for saved in &self.savepoints {
+                checkpoint()?;
+                saved_prepared.push(saved.prepared.as_ref().map(&mut at_frontier));
+            }
+            (prepared, saved_prepared)
+        };
         checkpoint()?;
         // Sole acceptance point. All fallible work is over and the immutable
         // database borrow prevents publication from moving the validated cut.
         // Templates/dependencies are byte-identical; only their proven cut moves.
-        for saved in &mut self.savepoints {
-            if let Some(prepared) = &mut saved.prepared {
-                prepared.basis = frontier;
-            }
+        for (saved, prepared) in self.savepoints.iter_mut().zip(saved_prepared) {
+            saved.prepared = prepared;
         }
-        if let Some(prepared) = &mut self.prepared {
-            prepared.basis = frontier;
-        }
+        self.prepared = prepared;
         self.basis = frontier;
         Ok(frontier)
     }
@@ -259,9 +285,13 @@ mod snapshot_refresh_tests {
             txn.write_ordered(&mut database, vec![first, second])
                 .unwrap();
             txn.savepoint(&database, "kept").unwrap();
+            txn.savepoint(&database, "same-prefix").unwrap();
             let saved = txn.prepared.as_ref().unwrap().template.clone();
+            let retained = std::sync::Arc::clone(txn.prepared.as_ref().unwrap());
+            let old_basis = txn.basis();
             let created = txn.vertex(&database, VId(20)).unwrap().unwrap();
             txn.write(&mut database, set_vertex(3, 30)).unwrap();
+            txn.savepoint(&database, "full").unwrap();
             let full = txn.prepared.as_ref().unwrap().template.clone();
             let reads = txn.read_set.borrow().clone();
             database.write(&cx, set_vertex(6, 60)).await.unwrap();
@@ -269,6 +299,16 @@ mod snapshot_refresh_tests {
             txn.refresh_snapshot(&database, &txcx).unwrap();
             assert_eq!(txn.prepared.as_ref().unwrap().template, full);
             assert_eq!(txn.prepared.as_ref().unwrap().basis(), frontier);
+            assert!(std::sync::Arc::ptr_eq(
+                txn.prepared.as_ref().unwrap(),
+                txn.savepoints[2].prepared.as_ref().unwrap()
+            ));
+            assert!(std::sync::Arc::ptr_eq(
+                txn.savepoints[0].prepared.as_ref().unwrap(),
+                txn.savepoints[1].prepared.as_ref().unwrap()
+            ));
+            assert_eq!(retained.basis(), old_basis);
+            assert_eq!(retained.template, saved);
             assert_eq!(txn.savepoints[0].prepared.as_ref().unwrap().template, saved);
             assert_eq!(
                 txn.savepoints[0].prepared.as_ref().unwrap().basis(),
@@ -467,6 +507,9 @@ mod snapshot_refresh_tests {
                 let basis = txn.basis();
                 let frontier = database.frontier().unwrap();
                 let template = txn.prepared.as_ref().unwrap().template.clone();
+                let retained = std::sync::Arc::clone(txn.prepared.as_ref().unwrap());
+                let saved_prefix =
+                    std::sync::Arc::clone(txn.savepoints[0].prepared.as_ref().unwrap());
                 let saved = txn.savepoints[0]
                     .prepared
                     .as_ref()
@@ -492,6 +535,14 @@ mod snapshot_refresh_tests {
                     "stop={stop}"
                 );
                 assert_eq!(seen, stop);
+                assert!(std::sync::Arc::ptr_eq(
+                    txn.prepared.as_ref().unwrap(),
+                    &retained
+                ));
+                assert!(std::sync::Arc::ptr_eq(
+                    txn.savepoints[0].prepared.as_ref().unwrap(),
+                    &saved_prefix
+                ));
                 assert_eq!(txn.basis(), basis);
                 assert_eq!(txn.prepared.as_ref().unwrap().basis(), basis);
                 assert_eq!(txn.prepared.as_ref().unwrap().template, template);

@@ -298,6 +298,10 @@ impl WriteTxn {
         checkpoint()?;
         let completion = if let Some(prepared) = attempt.transaction.prepared.take() {
             attempt.transaction.staged.clear();
+            // Completion consumes every rollback point. Release their shared
+            // prefixes before taking ownership for the ordinary commit path.
+            attempt.transaction.savepoints.clear();
+            let prepared = std::sync::Arc::unwrap_or_clone(prepared);
             // Set before polling the cancellable publication future. Drop
             // consults its retained database fence, never guesses rollback.
             attempt.entered_commit = true;
