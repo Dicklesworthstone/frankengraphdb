@@ -72,6 +72,10 @@ impl PreparedNativeRead {
     /// all live vertices, with unit weights, collapsed parallel edges and
     /// kept or dropped self-loops. YIELD aliases and downstream row stages retain
     /// their native schema; unsupported projection recipes refuse.
+    /// Core-number CALLs use the existing exact affected-component maintainer
+    /// under the same projection profile with self-loops explicitly dropped.
+    /// Their checked integer rows and derivatives are retained only for native
+    /// registration; typed core-number views do not acquire a second row sink.
     /// Historical selectors refuse: a fixed historical answer is not a current
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
     /// Set registration owns a bounded row/set/join/projection tree; admission and

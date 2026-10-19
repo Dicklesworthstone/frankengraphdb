@@ -13,14 +13,21 @@ use fgdb_gql::{
     GraphSetColumnType, GraphSetExecutionError, GraphSetOperation, GraphSetProjection,
     GraphSetQuantifier, GraphSetValue, PreparedGraphSet,
 };
-use fgdb_prism::{FnxAlgorithm, FnxOutput, FnxWeightSpec, ParallelEdgePolicy, SelfLoopPolicy};
+use fgdb_prism::{
+    FnxAlgorithm, FnxOutput, FnxWeightSpec, FoundationAlgorithm, ParallelEdgePolicy, SelfLoopPolicy,
+};
+
+pub(super) enum AnalyticSource {
+    Components(components::ComponentRelation),
+    CoreNumbers(RelationId),
+}
 
 /// The compiler and subscription footprint share one source-free admission.
 /// Only the complete, explicit topology contract has an existing derivative;
 /// future duplicates or self-loops cannot silently defeat a Reject policy.
-pub(super) fn component_procedure(
+pub(super) fn analytic_procedure(
     query: &PreparedGraphSet,
-) -> Result<Option<(components::ComponentRelation, RowProjectionSpec)>, StandingQueryError> {
+) -> Result<Option<(AnalyticSource, RowProjectionSpec)>, StandingQueryError> {
     let Some(call) = query.incremental_procedure() else {
         return Ok(None);
     };
@@ -30,7 +37,7 @@ pub(super) fn component_procedure(
         ))
     })?;
     // Read the immutable input recipe only; no source is pinned or executed
-    // at this placeholder cut. The component owner admits the live snapshot.
+    // at this placeholder cut. The analytic owner admits the live snapshot.
     let options = bound.options_at(CommitSeq(0));
     let Some(relation) = options.selection.relation else {
         return Err(StandingQueryError::Unsupported);
@@ -45,12 +52,25 @@ pub(super) fn component_procedure(
     // The shared binder already enforced the registered graph-kind law.
     // Reversal and retaining self-loops preserve weak and strong membership;
     // neither changes reachability between distinct vertices.
-    let relation = match bound.algorithm() {
-        FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => {
-            components::ComponentRelation::Weak(relation)
-        }
-        FnxAlgorithm::StronglyConnectedComponents => {
-            components::ComponentRelation::Strong(relation)
+    let (source, value_type, value_field) = match bound.algorithm() {
+        FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => (
+            AnalyticSource::Components(components::ComponentRelation::Weak(relation)),
+            GraphSetColumnType::Vertex,
+            FnxOutput::Component,
+        ),
+        FnxAlgorithm::StronglyConnectedComponents => (
+            AnalyticSource::Components(components::ComponentRelation::Strong(relation)),
+            GraphSetColumnType::Vertex,
+            FnxOutput::Component,
+        ),
+        FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber)
+            if options.projection.self_loops == SelfLoopPolicy::Drop =>
+        {
+            (
+                AnalyticSource::CoreNumbers(relation),
+                GraphSetColumnType::Scalar,
+                FnxOutput::Core,
+            )
         }
         _ => return Err(StandingQueryError::Unsupported),
     };
@@ -58,7 +78,7 @@ pub(super) fn component_procedure(
     for (column, name) in bound.outputs().iter().zip(query.columns()) {
         let input = match column.field {
             FnxOutput::Vertex => 0,
-            FnxOutput::Component => 1,
+            field if field == value_field => 1,
             _ => return Err(StandingQueryError::Unsupported),
         };
         projection.push(GraphSetProjection::new(
@@ -67,13 +87,13 @@ pub(super) fn component_procedure(
         ));
     }
     let output = RowProjectionSpec::new(
-        vec![GraphSetColumnType::Vertex; 2],
+        vec![GraphSetColumnType::Vertex, value_type],
         projection,
         GraphSetQuantifier::All,
     )
     .and_then(|spec| spec.widen_output_types(query.column_types().to_vec()))
     .map_err(StandingQueryError::ProjectionSchema)?;
-    Ok(Some((relation, output)))
+    Ok(Some((source, output)))
 }
 
 struct Staging<'a, V: Vfs + Clone> {
@@ -200,11 +220,18 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 .database
                 .prepare_registered_rows(cx, pattern.clone(), policy)?;
             self.append(query)
-        } else if let Some((relation, spec)) = component_procedure(query)? {
-            let state = self
-                .database
-                .prepare_standing_components(cx, relation, policy)?;
-            let input = self.append(StandingQuery::Components(Box::new(state)));
+        } else if let Some((source, spec)) = analytic_procedure(query)? {
+            let state = match source {
+                AnalyticSource::Components(relation) => StandingQuery::Components(Box::new(
+                    self.database
+                        .prepare_standing_components(cx, relation, policy)?,
+                )),
+                AnalyticSource::CoreNumbers(relation) => StandingQuery::CoreNumbers(Box::new(
+                    self.database
+                        .prepare_standing_core_numbers(cx, relation, policy, true)?,
+                )),
+            };
+            let input = self.append(state);
             checkpoint()?;
             // Keep aliases, column selection/order and Any procedure domains
             // in an ordinary maintained projection.
@@ -552,6 +579,7 @@ fn rebuild_checked<V: Vfs + Clone>(
             StandingQuery::Projection(query) => mark(query.input, inherited)?,
             StandingQuery::Window(query) => mark(query.input, inherited)?,
             StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {}
+            StandingQuery::CoreNumbers(query) if query.has_value_rows() => {}
             StandingQuery::Components(query)
                 if matches!(
                     query.relation,
@@ -588,6 +616,16 @@ fn rebuild_checked<V: Vfs + Clone>(
                     query.relation,
                     policy,
                 )?))
+            }
+            StandingQuery::CoreNumbers(query) if query.has_value_rows() => {
+                StandingQuery::CoreNumbers(Box::new(
+                    staged.database.prepare_standing_core_numbers(
+                        cx,
+                        query.relation,
+                        policy,
+                        true,
+                    )?,
+                ))
             }
             StandingQuery::Rows { output, .. } => {
                 staged
@@ -786,3 +824,6 @@ mod selected_join_tests;
 
 #[cfg(test)]
 mod component_tests;
+
+#[cfg(test)]
+mod core_tests;

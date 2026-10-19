@@ -91,8 +91,8 @@ fn circuit(cx: &QueryCx, query: &PreparedGraphSet) -> Result<Footprint, Standing
             source_width: pattern_width(pattern),
         });
     }
-    if set::component_procedure(query)?.is_some() {
-        // One topology/membership owner plus its exact YIELD projection.
+    if set::analytic_procedure(query)?.is_some() {
+        // One topology/analytics owner plus its exact YIELD projection.
         // The source binding has the two endpoint identity columns; outer
         // projection, grouping and rank owners are counted by their branches.
         return Ok(Footprint {

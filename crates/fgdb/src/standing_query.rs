@@ -644,9 +644,14 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Components(query) => StandingQuery::Components(Box::new(
                 self.prepare_standing_components(cx, query.relation, policy)?,
             )),
-            StandingQuery::CoreNumbers(query) => StandingQuery::CoreNumbers(Box::new(
-                self.prepare_standing_core_numbers(cx, query.relation, policy)?,
-            )),
+            StandingQuery::CoreNumbers(query) => {
+                StandingQuery::CoreNumbers(Box::new(self.prepare_standing_core_numbers(
+                    cx,
+                    query.relation,
+                    policy,
+                    query.has_value_rows(),
+                )?))
+            }
             StandingQuery::Set(query) => StandingQuery::Set(Box::new(self.prepare_standing_set(
                 cx,
                 query.inputs,
