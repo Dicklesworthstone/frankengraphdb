@@ -1,4 +1,6 @@
-//! `fgdb remote`: run one statement against an `fgdbd` server over FGP.
+//! `fgdb remote`: run a statement against an `fgdbd` server over FGP.
+//! A query argument file reuses one prepared read on one connection, with
+//! independently completed answers in file order and each execution's cut.
 //!
 //! Output is the local `query`/`write` contract: robot `columns`, `row` and
 //! `result` records with the same cell encoding (kinds `rows` and `written`),
@@ -40,7 +42,8 @@ struct RemoteOptions {
     /// `subscribe` stops after this many batches (default: until interrupted).
     max_batches: Option<u64>,
     tls: Option<RemoteTls>,
-    /// A complete typed argument file for one atomic write-batch request.
+    /// A complete typed argument file: one atomic write batch, or repeated
+    /// prepared reads with one completed result block per argument set.
     rows_file: Option<PathBuf>,
     /// Explicit CSV column types; absent means the typed JSON file format.
     csv_types: Option<batch::CsvSchema>,
@@ -151,9 +154,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     if max_batches.is_some() && mode != ExecuteMode::Subscribe {
         return Err(Failure::usage("--max-batches applies only to subscribe"));
     }
-    if rows_file.is_some() && (mode != ExecuteMode::Write || !parameters.is_empty()) {
+    if rows_file.is_some() && (mode == ExecuteMode::Subscribe || !parameters.is_empty()) {
         return Err(Failure::usage(
-            "--rows-file applies only to write and cannot be combined with --param",
+            "--rows-file applies only to query or write and cannot be combined with --param",
         ));
     }
     if csv_types.is_some() && rows_file.is_none() {
@@ -434,7 +437,13 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
                 .select(&cx, &options.database)
                 .await
                 .map_err(failure)?;
-            batch.execute(&cx, &mut client, robot, out).await?;
+            if options.mode == ExecuteMode::Write {
+                batch.execute(&cx, &mut client, robot, out).await?;
+            } else {
+                batch
+                    .execute_reads(&cx, &mut client, options.mode, robot, out)
+                    .await?;
+            }
             let _ = client.close(&cx).await;
             Ok(())
         });

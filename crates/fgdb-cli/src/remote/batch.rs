@@ -1,7 +1,8 @@
-//! A finite, typed file becomes ONE remote native write batch, never a loop
-//! of independently committed EXECUTEs. Complete local admission precedes
-//! authentication; the server still owns binding, authority, budgets and the
-//! sole commit. A lost response never authorizes replay of the batch.
+//! A finite typed file is admitted before authentication. Writes become one
+//! atomic native batch; queries reuse one prepared read on one connection.
+//! Every read has its own current or explicitly selected snapshot and complete
+//! output block, in file order. The server owns binding, authority and budgets.
+//! Refusals never retry, reprepare or switch execution modes.
 
 use super::{Failure, Json, emit, failure, parameter, parse_json};
 use asupersync::Cx;
@@ -10,7 +11,8 @@ use fgdb_gql::csv_parameters::{CsvParameterLimits, decode_csv_parameters};
 use fgdb_gql::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters};
 use fgdb_protocol::MAX_HEADER_LEN;
 use fgdb_protocol::body::{
-    Body, ExecuteBatch, MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS, Outcome, WireValue,
+    Body, ExecuteBatch, ExecuteMode, MAX_BATCH_ARGUMENT_SETS, MAX_NAME_BYTES, MAX_PARAMETERS,
+    Outcome, PreparedReadMode, WireValue,
 };
 use fgdb_protocol::client::{CLIENT_MAX_FRAME, Client, ClientError};
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
@@ -66,8 +68,9 @@ impl CsvSchema {
     }
 }
 
-/// No Clone or payload-bearing Debug: consumption transfers this one request
-/// to the native client exactly once. This is not a durable prepared handle.
+/// No Clone or payload-bearing Debug: consumption transfers the argument file
+/// exactly once. The bounded codec envelope is shared by both commands; it is
+/// sent as ExecuteBatch only for writes. This is not a server prepared handle.
 pub(super) struct PreparedBatch {
     body: ExecuteBatch,
 }
@@ -188,7 +191,7 @@ impl PreparedBatch {
         Self::admit(statement, argument_sets, checkpoint)
     }
 
-    /// Both file grammars share wire admission and the single submission path.
+    /// Both file grammars share wire/value admission and a total input bound.
     fn admit(
         statement: &str,
         argument_sets: Vec<Vec<(String, WireValue)>>,
@@ -315,6 +318,75 @@ impl PreparedBatch {
                     error.message
                 ))
             })
+    }
+
+    /// Prepare once, then stream each independently completed read without
+    /// retaining an answer bag or granting a fresh fallback after refusal.
+    /// The first argument set supplies structural operand types to PREPARE;
+    /// every execution, including the first, binds its actual values again.
+    pub(super) async fn execute_reads(
+        self,
+        cx: &Cx,
+        client: &mut Client,
+        mode: ExecuteMode,
+        robot: bool,
+        out: &mut impl Write,
+    ) -> Result<(), Failure> {
+        let mode = match mode {
+            ExecuteMode::Read => PreparedReadMode::Buffered,
+            ExecuteMode::ReadStream => PreparedReadMode::SourceStream,
+            ExecuteMode::ReadOrdered => PreparedReadMode::OrderedStream,
+            _ => {
+                return Err(Failure::usage(
+                    "prepared argument files require a read mode",
+                ));
+            }
+        };
+        cx.checkpoint().map_err(Failure::query)?;
+        let representative = self
+            .body
+            .argument_sets
+            .first()
+            .ok_or_else(|| Failure::usage("--rows-file needs at least one argument set"))?
+            .clone();
+        let handle = client
+            .prepare_read(cx, &self.body.statement, representative)
+            .await
+            .map_err(failure)?;
+        for (index, parameters) in self.body.argument_sets.into_iter().enumerate() {
+            cx.checkpoint().map_err(Failure::query)?;
+            let sink = std::sync::Mutex::new(super::ReadOutput {
+                out: &mut *out,
+                robot,
+                width: None,
+                sent: 0,
+                failed: None,
+            });
+            let lock = || {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            };
+            let result = client
+                .execute_prepared_streaming(
+                    cx,
+                    mode,
+                    handle,
+                    parameters,
+                    |columns| lock().columns(cx, columns),
+                    |row| lock().row(cx, &row),
+                )
+                .await;
+            sink.into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finish(result)
+                .map_err(|mut error| {
+                    error.message = format!("argument set {}: {}", index + 1, error.message);
+                    error
+                })?;
+        }
+        // The caller closes this one connection, which releases its template.
+        // No extra release round trip is needed after the final flushed answer.
+        Ok(())
     }
 }
 
@@ -645,7 +717,7 @@ mod csv_tests {
     }
 
     #[test]
-    fn csv_flags_require_an_exclusive_remote_write_file() {
+    fn csv_flags_require_an_exclusive_remote_query_or_write_file() {
         let options = |verb: &str, flags: &[&str]| {
             let mut args: Vec<String> = [
                 verb,
@@ -697,14 +769,21 @@ mod csv_tests {
         ] {
             assert_eq!(options("write", &bad).err().unwrap().code, 2);
         }
-        for verb in ["query", "subscribe"] {
-            assert_eq!(
-                options(verb, &["--rows-file", "a", "--csv-types", "name=text"])
-                    .err()
-                    .unwrap()
-                    .code,
-                2
-            );
-        }
+        assert!(
+            options("query", &["--rows-file", "a", "--csv-types", "name=text"])
+                .unwrap_or_else(|error| panic!("{}", error.message))
+                .csv_types
+                .is_some()
+        );
+        assert_eq!(
+            options(
+                "subscribe",
+                &["--rows-file", "a", "--csv-types", "name=text"]
+            )
+            .err()
+            .unwrap()
+            .code,
+            2
+        );
     }
 }
