@@ -204,6 +204,158 @@ impl WriteTxn {
         Ok(basis.into_values().collect())
     }
 
+    /// The selected MERGE pair's complete existence domain. Resolve incident
+    /// identities at the transaction cut, then apply the same canonical net
+    /// effects as ordinary edge reads. Parallel EIds and property payloads are
+    /// retained for the collector's unchanged matching and ambiguity rules.
+    ///
+    /// The two relation incidence gaps precede even an empty lookup. Earlier
+    /// broad observations remain intact; a later refusal or savepoint rollback
+    /// cannot erase these gaps or the full records already inspected. Physical
+    /// traversal polls the caller while the collector continues to own source,
+    /// comparison, result and creation admission at its existing boundaries.
+    fn merge_candidate_edges<V: Vfs + Clone, C>(
+        &self,
+        database: &Database<V>,
+        merge: &fgdb_gql::PreparedGraphEdgeMerge,
+        source: VId,
+        destination: VId,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<Vec<EdgeRecord>, fgdb_gql::GqlQueryError<WriteTxnError, C>> {
+        use crate::gql_exec::source::{self as query_source, SourceEvent};
+        use fgdb_delta_types::DeltaRow;
+        use fgdb_gql::{GqlQueryError, algebra::GlaDirection};
+        use std::collections::BTreeMap;
+
+        let snapshot = self
+            .query_snapshot(database)
+            .map_err(GqlQueryError::Source)?;
+        checkpoint().map_err(GqlQueryError::Interrupted)?;
+        for incoming in [false, true] {
+            self.point_reads.borrow_mut().record(
+                ElementId::Vertex(source),
+                PointReadField::Adjacency {
+                    relation: merge.relation(),
+                    incoming,
+                },
+            );
+        }
+        let accepts = |src, relation, dst| {
+            relation == merge.relation()
+                && merge.accepts_orientation((source, destination), (src, dst))
+        };
+        let mut edges = BTreeMap::new();
+        snapshot
+            .adjacency_index()
+            .visit(
+                &snapshot.blocks,
+                source,
+                GlaDirection::Undirected,
+                self.basis,
+                &mut |_| checkpoint(),
+                |entry, block, row, control| {
+                    if accepts(entry.src, entry.relation, entry.dst) {
+                        // Filter topology before touching unrelated payloads,
+                        // including in the authorized collector's pair probe.
+                        self.read_set.borrow_mut().extend([
+                            ElementId::Edge(entry.eid),
+                            ElementId::Vertex(entry.src),
+                        ]);
+                        let mut props = Vec::new();
+                        for property in
+                            query_source::edge_properties_at(&snapshot.block_props, block, row)
+                        {
+                            control(SourceEvent::Work)?;
+                            props.push(property.clone());
+                        }
+                        edges.insert(
+                            entry.eid,
+                            EdgeRecord {
+                                entry: entry.seen_at(self.basis),
+                                props,
+                            },
+                        );
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(GqlQueryError::Interrupted)?;
+
+        // Raw intentions add negative identity reads, never query rows. In
+        // particular an ENSURE alias that preparation discarded stays absent.
+        for batch in &self.staged {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            for pending in &batch.rows {
+                checkpoint().map_err(GqlQueryError::Interrupted)?;
+                match pending {
+                    PendingRow::Edge { eid, src, dst, .. }
+                        if accepts(*src, batch.relation, *dst) =>
+                    {
+                        self.read_set.borrow_mut().insert(ElementId::Edge(*eid));
+                    }
+                    PendingRow::DeleteEdge { eid, .. }
+                    | PendingRow::SetEdgeProperty { eid, .. }
+                    | PendingRow::CompareAndSet {
+                        elem: ElementId::Edge(eid),
+                        ..
+                    } => {
+                        self.read_set.borrow_mut().insert(ElementId::Edge(*eid));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(prepared) = &self.prepared {
+            for coordinate in prepared.template.coordinate_entries() {
+                checkpoint().map_err(GqlQueryError::Interrupted)?;
+                for effect in &coordinate.rows {
+                    checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    let eid = match effect {
+                        DeltaRow::CreateEdge {
+                            eid,
+                            src,
+                            relation,
+                            dst,
+                            ..
+                        } if accepts(*src, *relation, *dst) => *eid,
+                        DeltaRow::DeleteEdge { eid, .. }
+                        | DeltaRow::Property {
+                            elem: ElementId::Edge(eid),
+                            ..
+                        } if edges.contains_key(eid) => *eid,
+                        DeltaRow::DeleteVertex {
+                            vid,
+                            sorted_retired_incident_edges,
+                            ..
+                        } => {
+                            for eid in sorted_retired_incident_edges {
+                                checkpoint().map_err(GqlQueryError::Interrupted)?;
+                                if edges.remove(eid).is_some() {
+                                    self.read_set.borrow_mut().extend([
+                                        ElementId::Edge(*eid),
+                                        ElementId::Vertex(*vid),
+                                    ]);
+                                }
+                            }
+                            continue;
+                        }
+                        _ => continue,
+                    };
+                    self.read_set.borrow_mut().insert(ElementId::Edge(eid));
+                    let mut overlay = edges.remove(&eid);
+                    if let Some(vertex) = self.apply_edge_effect(eid, &mut overlay, effect) {
+                        self.read_set.borrow_mut().insert(ElementId::Vertex(vertex));
+                    }
+                    if let Some(record) = overlay {
+                        edges.insert(eid, record);
+                    }
+                }
+            }
+        }
+        checkpoint().map_err(GqlQueryError::Interrupted)?;
+        Ok(edges.into_values().collect())
+    }
+
     /// Read outgoing neighbours from the pinned basis plus prepared net
     /// effects. Parallel edges keep a neighbour live until its last edge is
     /// removed; the returned vertex identities are sorted and deduplicated.

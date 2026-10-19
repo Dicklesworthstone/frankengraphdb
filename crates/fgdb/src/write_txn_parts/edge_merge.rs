@@ -675,7 +675,11 @@ impl WriteTxn {
                 |pattern, allowance| {
                     self.execute_graph_pattern_governed(database, cx, pattern, allowance)
                 },
-                |_, _| self.edges(database).map_err(GqlQueryError::Source),
+                |source, destination| {
+                    self.merge_candidate_edges(database, merge, source, destination, || {
+                        cx.checkpoint()
+                    })
+                },
                 allocate,
                 || cx.checkpoint(),
             )?;

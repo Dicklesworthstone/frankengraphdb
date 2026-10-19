@@ -469,15 +469,16 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
                         )));
                     }
                 }
-                // Retain the native scan witness even when no edge exists.
-                // Raw records stay private. Only exact pair/relation candidates
-                // (either orientation for an undirected MERGE) reach the shared
-                // collector's counts and uniqueness reducer; every such edge
-                // has the two admitted endpoints above.
+                // Retain the native incidence gaps even when no edge exists.
+                // Raw records stay private. The exact pair/relation source
+                // checks topology before reading payloads; only its admitted
+                // edges reach the shared counts and uniqueness reducer.
                 let edges = transaction
-                    .edges(&database.borrow())
-                    .map_err(redacted)
-                    .map_err(GqlQueryError::Source)?;
+                    .merge_candidate_edges(&database.borrow(), merge, src, dst, || {
+                        cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                        controls.borrow_mut().poll()
+                    })
+                    .map_err(|error| error.map_source(redacted))?;
                 let mut admitted = Vec::new();
                 for record in edges {
                     cx.checkpoint()

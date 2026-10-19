@@ -177,7 +177,9 @@ impl WriteTxn {
                         rows: GqlExecutionStats { snapshot_records: records, result_rows: 1 },
                         evaluator: stats.evaluator,
                     }),
-                    |_, _| workspace.txn.edges(database).map_err(GqlQueryError::Source),
+                    |source, destination| workspace.txn.merge_candidate_edges(
+                        database, upsert.merge(), source, destination, || cx.checkpoint(),
+                    ),
                     |_| allocate(fgdb_gql::insertion::GraphInsertRequest::Edge {
                         row: row_at,
                         edge: 0,
