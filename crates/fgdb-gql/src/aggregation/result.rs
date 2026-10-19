@@ -673,6 +673,7 @@ impl PreparedGraphAggregate {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn finish_groups<'a, E, C>(
         &self,
         groups: &BTreeMap<Vec<ValueRef<'a>>, Vec<Accumulator<'a>>>,
@@ -680,8 +681,19 @@ impl PreparedGraphAggregate {
             GlaExecutionEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.finish_groups_with_elements(groups, &mut crate::set_ops::no_element_reads, control)
+    }
+
+    pub(super) fn finish_groups_with_elements<'a, E, C>(
+        &self,
+        groups: &BTreeMap<Vec<ValueRef<'a>>, Vec<Accumulator<'a>>>,
+        read: &mut crate::set_ops::ElementRead<'_, E>,
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
         if let Some(projection) = &self.output_projection {
-            return self.finish_projected_groups(groups, projection, control);
+            return self.finish_projected_groups(groups, projection, read, control);
         }
         if self.needs_output_distinct() {
             return self.finish_distinct_groups(groups, control);

@@ -180,7 +180,7 @@ impl PreparedGraphAggregate {
         &self,
         columns: &[usize],
         policy: GqlQueryPolicy,
-        source: impl crate::GraphSetSource<E, C>,
+        mut source: impl crate::GraphSetSource<E, C>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, Failure<E, C>> {
         let mut groups = Groups::new();
@@ -193,7 +193,10 @@ impl PreparedGraphAggregate {
             .fold_repeated_governed(
                 columns,
                 policy,
-                source,
+                crate::set_ops::BorrowedSource {
+                    source: &mut source,
+                    elements: None,
+                },
                 &mut checkpoint,
                 |row, repetitions, control| {
                     if deferred.is_some() {
@@ -237,6 +240,7 @@ impl PreparedGraphAggregate {
             rows,
             evaluator,
             FoldedGroups::Rows(groups),
+            &mut |element, key| source.element_property(element, key),
         )
     }
 }

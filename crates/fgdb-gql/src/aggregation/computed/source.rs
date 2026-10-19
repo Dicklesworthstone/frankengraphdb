@@ -32,10 +32,24 @@ impl PreparedGraphAggregate {
     pub fn execute_with_source_governed<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        mut source: impl FnMut(
+        source: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> ResultOf<GqlQueryExecution<GraphAggregateRow>, E, C> {
+        self.execute_with_element_source_governed(policy, source, checkpoint)
+    }
+
+    /// Execute through a complete source, retaining its element-property reader
+    /// through computed inputs, grouping and aggregate-output expressions. Every
+    /// source capability uses the same pinned cut and authorization scope as
+    /// [`Self::execute_with_source_governed`]. An unavailable reader remains a
+    /// typed expression error; it is never interpreted as an absent property.
+    pub fn execute_with_element_source_governed<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        mut source: impl crate::GraphSetSource<E, C>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> ResultOf<GqlQueryExecution<GraphAggregateRow>, E, C> {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
@@ -48,10 +62,16 @@ impl PreparedGraphAggregate {
             ),
             evaluator: policy.evaluator,
         };
-        let mut input = source(&self.input, source_policy)
+        let mut input = source
+            .pattern(&self.input, source_policy)
             .map_err(|error| error.map_source(GraphAggregateError::Source))?;
         admit_input(&self.input, &mut input, policy, &mut checkpoint)?;
-        self.finish_materialized_governed(input, policy, checkpoint)
+        self.finish_materialized_governed(
+            input,
+            &mut |element, key| source.element_property(element, key),
+            policy,
+            checkpoint,
+        )
     }
 }
 

@@ -232,6 +232,48 @@ pub trait GraphSetSource<E, C> {
     }
 }
 
+/// Borrow a host through a consuming row phase, then reuse that same host for
+/// the aggregate's output expressions. Iterator entrypoints can attach their
+/// optional element reader without turning an unsupported read into NULL.
+pub(crate) struct BorrowedSource<'s, 'r, E, C> {
+    pub(crate) source: &'s mut dyn GraphSetSource<E, C>,
+    pub(crate) elements: Option<&'s mut super::projection::ElementRead<'r, E>>,
+}
+
+impl<E, C> GraphSetSource<E, C> for BorrowedSource<'_, '_, E, C> {
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+        self.source.pattern(pattern, policy)
+    }
+
+    fn procedure(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.procedure(call, arguments, policy)
+    }
+
+    fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
+        self.source.owned()
+    }
+
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<CanonicalScalar>, E>> {
+        match &mut self.elements {
+            Some(read) => read(element, key),
+            None => self.source.element_property(element, key),
+        }
+    }
+}
+
 /// A caller's pattern callback, erased at a governed set boundary so the
 /// set engine is compiled once per error pair, not once per caller closure
 /// (fgdb-2goz).

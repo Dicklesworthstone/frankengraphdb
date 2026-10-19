@@ -31,7 +31,7 @@ use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
     GqlQueryExecution, GqlQueryPolicy,
 };
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1068,6 +1068,38 @@ impl PreparedGraphAggregate {
             None::<(&PositionedGraph<'_, ()>, NoTest<E>)>,
             test_vertex,
             property,
+            &mut crate::set_ops::no_element_reads,
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// Execute the ordinary binding stream with stored-property reads for
+    /// element values in aggregate output expressions. `elements` must use the
+    /// same pinned cut and visibility scope as the input readers, including for
+    /// an element supplied as a parameter or literal outside the matched rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_element_reads<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl crate::GovernedCheckpoint<C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        type NoTest<E> = fn(u32, &[VertexPredicate]) -> Result<bool, E>;
+        self.execute_input(
+            snapshot_records,
+            vertices,
+            edges,
+            None::<(&PositionedGraph<'_, ()>, NoTest<E>)>,
+            test_vertex,
+            property,
+            &mut |element, key| Some(elements(element, key)),
             policy,
             checkpoint,
         )
@@ -1099,6 +1131,36 @@ impl PreparedGraphAggregate {
             Some((graph, test_at)),
             test_vertex,
             property,
+            &mut crate::set_ops::no_element_reads,
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// The positioned binding visitor with the same pinned element reader as
+    /// [`Self::execute_governed_with_element_reads`]. Input order, multiplicity
+    /// and the positioned visitor's resource transcript remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_positioned_with_element_reads<'a, T, E, C>(
+        &self,
+        snapshot_records: u64,
+        graph: &PositionedGraph<'_, T>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        test_at: impl FnMut(u32, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl crate::GovernedCheckpoint<C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.execute_input(
+            snapshot_records,
+            graph.vertices(),
+            graph.triples(),
+            Some((graph, test_at)),
+            test_vertex,
+            property,
+            &mut |element, key| Some(elements(element, key)),
             policy,
             checkpoint,
         )
@@ -1113,6 +1175,7 @@ impl PreparedGraphAggregate {
         positioned: Option<(&PositionedGraph<'_, T>, A)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -1139,6 +1202,7 @@ impl PreparedGraphAggregate {
                 edges,
                 test_vertex,
                 property,
+                elements,
                 policy,
                 || checkpoint.unit(),
             );
@@ -1150,6 +1214,7 @@ impl PreparedGraphAggregate {
                 edges,
                 test_vertex,
                 property,
+                elements,
                 policy,
                 || checkpoint.unit(),
             );
@@ -1251,7 +1316,9 @@ impl PreparedGraphAggregate {
         let finished = visited.and_then(|()| {
             let value = match streaming {
                 Some(streaming) => streaming.finish(&mut control)?,
-                None => self.finish_groups(&groups.into_tree(), &mut control)?,
+                None => {
+                    self.finish_groups_with_elements(&groups.into_tree(), elements, &mut control)?
+                }
             };
             // Even empty and zero-count outputs observe a terminal checkpoint.
             control(GlaExecutionEvent::Work)?;

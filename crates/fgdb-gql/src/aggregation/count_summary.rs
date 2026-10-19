@@ -129,6 +129,41 @@ impl PreparedGraphCount<'_> {
         &self,
         snapshot_records: u64,
         policy: GqlQueryPolicy,
+        checkpoint: impl crate::GovernedCheckpoint<C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.execute_with_reads(
+            snapshot_records,
+            &mut crate::set_ops::no_element_reads,
+            policy,
+            checkpoint,
+        )
+    }
+
+    /// Finalize an exact source count with the host's pinned element-property
+    /// reader. Output expressions still execute after the original scan work,
+    /// including for empty sources and LIMIT 0.
+    pub fn execute_governed_with_element_reads<E, C>(
+        &self,
+        snapshot_records: u64,
+        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl crate::GovernedCheckpoint<C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.execute_with_reads(
+            snapshot_records,
+            &mut |element, key| Some(elements(element, key)),
+            policy,
+            checkpoint,
+        )
+    }
+
+    fn execute_with_reads<E, C>(
+        &self,
+        snapshot_records: u64,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
+        policy: GqlQueryPolicy,
         mut checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
@@ -166,9 +201,11 @@ impl PreparedGraphCount<'_> {
         let finished = visited.and_then(|()| {
             let mut groups = BTreeMap::new();
             groups.insert(Vec::new(), state);
-            let value = self
-                .query
-                .finish_groups(&groups, &mut |event| charges.event(event))?;
+            let value =
+                self.query
+                    .finish_groups_with_elements(&groups, elements, &mut |event| {
+                        charges.event(event)
+                    })?;
             charges.event(GlaExecutionEvent::Work)?;
             Ok(value)
         });

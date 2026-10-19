@@ -156,7 +156,7 @@ impl PreparedGraphAggregate {
     pub(super) fn execute_relational_folded<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        source: impl crate::GraphSetSource<E, C>,
+        mut source: impl crate::GraphSetSource<E, C>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, Failure<E, C>> {
         let relation = self
@@ -165,7 +165,14 @@ impl PreparedGraphAggregate {
             .expect("admitted relational fold");
         if self.uses_factorized_cardinality() {
             let (cardinality, rows, evaluator) = relation
-                .count_governed(policy, source, &mut checkpoint)
+                .count_governed(
+                    policy,
+                    crate::set_ops::BorrowedSource {
+                        source: &mut source,
+                        elements: None,
+                    },
+                    &mut checkpoint,
+                )
                 .map_err(|error| error.map_source(GraphAggregateError::InputRelation))?;
             return self.finish_relational_folded(
                 policy,
@@ -173,6 +180,7 @@ impl PreparedGraphAggregate {
                 rows,
                 evaluator,
                 FoldedGroups::Cardinality(cardinality),
+                &mut |element, key| source.element_property(element, key),
             );
         }
         let columns = self.repeated_columns();
@@ -183,28 +191,36 @@ impl PreparedGraphAggregate {
         let mut largest_key = 0;
         let mut deferred = None;
         let (rows, evaluator) = relation
-            .fold_governed(policy, source, &mut checkpoint, |row, control| {
-                if deferred.is_some() {
-                    return Ok(());
-                }
-                let result = push(self, &mut groups, &mut largest_key, row, &mut |event| {
-                    control(event)
-                        .map_err(|error| error.map_source(GraphAggregateError::InputRelation))
-                });
-                match result {
-                    // Complete upstream row phases before exposing an aggregate
-                    // data failure. A later UNWIND/projection/source error has
-                    // the same precedence as in the materialized implementation.
-                    Err(GqlQueryError::Source(error)) => {
-                        deferred = Some(error);
-                        Ok(())
+            .fold_governed(
+                policy,
+                crate::set_ops::BorrowedSource {
+                    source: &mut source,
+                    elements: None,
+                },
+                &mut checkpoint,
+                |row, control| {
+                    if deferred.is_some() {
+                        return Ok(());
                     }
-                    Err(error) => {
-                        Err(error.map_source(|_| unreachable!("source arm handled above")))
+                    let result = push(self, &mut groups, &mut largest_key, row, &mut |event| {
+                        control(event)
+                            .map_err(|error| error.map_source(GraphAggregateError::InputRelation))
+                    });
+                    match result {
+                        // Complete upstream row phases before exposing an aggregate
+                        // data failure. A later UNWIND/projection/source error has
+                        // the same precedence as in the materialized implementation.
+                        Err(GqlQueryError::Source(error)) => {
+                            deferred = Some(error);
+                            Ok(())
+                        }
+                        Err(error) => {
+                            Err(error.map_source(|_| unreachable!("source arm handled above")))
+                        }
+                        Ok(()) => Ok(()),
                     }
-                    Ok(()) => Ok(()),
-                }
-            })
+                },
+            )
             .map_err(|error| error.map_source(GraphAggregateError::InputRelation))?;
         if let Some(error) = deferred {
             return Err(GqlQueryError::Source(error));
@@ -216,6 +232,7 @@ impl PreparedGraphAggregate {
             rows,
             evaluator,
             FoldedGroups::Rows(groups),
+            &mut |element, key| source.element_property(element, key),
         )
     }
 
@@ -226,6 +243,7 @@ impl PreparedGraphAggregate {
         mut rows: GqlExecutionStats,
         mut evaluator: GlaExecutionStats,
         input: FoldedGroups,
+        elements: &mut crate::set_ops::ElementRead<'_, E>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, Failure<E, C>> {
         // Continue the original allowance, not a fresh quota for the result
         // stage. Private row occurrences did not consume ResultRows above.
@@ -284,9 +302,10 @@ impl PreparedGraphAggregate {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 values.push(state.finish_governed(&mut |event| control(input_event(event)))?);
             }
-            ranking.push(
+            ranking.push_with_elements(
                 self,
                 GraphAggregateRow::from_group_values(keys, values),
+                elements,
                 &mut control,
             )?;
         }

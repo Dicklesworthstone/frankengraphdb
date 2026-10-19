@@ -524,8 +524,23 @@ impl GraphSetProjection {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         arithmetic: impl FnOnce(usize, GraphIntegerError) -> E,
     ) -> Result<GraphValueRow, E> {
-        evaluate(row, projection, None, control, &mut no_element_reads).map_err(|error| match error
-        {
+        Self::evaluate_row_with_control_and_elements(
+            row,
+            projection,
+            control,
+            &mut no_element_reads,
+            arithmetic,
+        )
+    }
+
+    pub(crate) fn evaluate_row_with_control_and_elements<E>(
+        row: &GraphValueRow,
+        projection: &[Self],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        read: &mut ElementRead<'_, E>,
+        arithmetic: impl FnOnce(usize, GraphIntegerError) -> E,
+    ) -> Result<GraphValueRow, E> {
+        evaluate(row, projection, None, control, read).map_err(|error| match error {
             ProjectionFailure::Control(error) => error,
             ProjectionFailure::Arithmetic { column, error } => arithmetic(column, error),
         })

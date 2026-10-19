@@ -194,13 +194,23 @@ impl StreamedGroupRanking {
         row: GraphAggregateRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<(), QueryError<E, C>> {
+        self.push_with_elements(query, row, &mut crate::set_ops::no_element_reads, control)
+    }
+
+    pub(crate) fn push_with_elements<E, C>(
+        &mut self,
+        query: &PreparedGraphAggregate,
+        row: GraphAggregateRow,
+        read: &mut crate::set_ops::ElementRead<'_, E>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
+    ) -> Result<(), QueryError<E, C>> {
         if !query.qualifies_streamed_output(&row, control)? {
             return Ok(());
         }
         // Evaluate even a losing, skipped, or LIMIT-0 group's expressions.
         // Early rank elimination must never conceal a later typed failure.
         let projected = if query.transforms_streamed_columns() {
-            Some(query.project_complete_output(&row, control)?)
+            Some(query.project_complete_output_with_elements(&row, read, control)?)
         } else {
             None
         };

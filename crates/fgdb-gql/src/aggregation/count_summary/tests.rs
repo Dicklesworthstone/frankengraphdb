@@ -17,6 +17,121 @@ fn query(text: &str) -> PreparedGraphAggregate {
     .unwrap()
 }
 
+#[test]
+fn count_summary_keeps_external_element_reads_and_the_complete_control_transcript() {
+    use crate::{GraphElementKey, GraphSetProjection, GraphSetValue};
+
+    fn compare<const RUNS: bool>(size: usize, hidden: bool) {
+        let query = query(if hidden {
+            "MATCH (n) RETURN COUNT(*) AS n LIMIT 0"
+        } else {
+            "MATCH (n) RETURN COUNT(*) AS n"
+        })
+        .with_output_projection(vec![
+            GraphSetProjection::new("n", GraphSetValue::Column(0)),
+            GraphSetProjection::new(
+                "outside",
+                GraphSetValue::MapGet {
+                    map: Box::new(GraphSetValue::Value(GraphValue::Vertex(VId(u128::MAX)))),
+                    key: "p".into(),
+                    property: GraphElementKey::Property(PropertyKeyId(1)),
+                },
+            ),
+            GraphSetProjection::new(
+                "missing",
+                GraphSetValue::MapGet {
+                    map: Box::new(GraphSetValue::Value(GraphValue::Edge(EId(u128::MAX)))),
+                    key: "p".into(),
+                    property: GraphElementKey::Property(PropertyKeyId(1)),
+                },
+            ),
+        ])
+        .unwrap();
+        let policy = GqlQueryPolicy::new(100, 1, 100_000, 100_000);
+        let run = |summary: bool, stop: Option<usize>, fail: bool| {
+            let mut calls = Vec::new();
+            let mut reads = Vec::new();
+            let host = Host::<RUNS> {
+                calls: &mut calls,
+                stop,
+                refused: false,
+            };
+            let elements = |element, key| {
+                assert_eq!(key, PropertyKeyId(1));
+                reads.push(element);
+                match element {
+                    ElementId::Vertex(VId(u128::MAX)) => Ok(Some(CanonicalScalar::Int(33))),
+                    ElementId::Edge(EId(u128::MAX)) if fail => Err("late element read"),
+                    ElementId::Edge(EId(u128::MAX)) => Ok(None),
+                    _ => panic!("only supplied output identities are read"),
+                }
+            };
+            let result = if summary {
+                query
+                    .prepare_count_summary(GraphCountSource::Vertices, size as u64, size as u64)
+                    .unwrap()
+                    .execute_governed_with_element_reads(size as u64, elements, policy, host)
+            } else {
+                query.execute_governed_with_element_reads(
+                    size as u64,
+                    (0..size).map(|at| VId(at as u128)),
+                    [],
+                    |_, _| -> Result<bool, &'static str> { panic!("filterless input") },
+                    |_, _| -> Result<Option<&CanonicalScalar>, &'static str> {
+                        panic!("output properties must not use the input column reader")
+                    },
+                    elements,
+                    policy,
+                    host,
+                )
+            };
+            (result, calls, reads)
+        };
+        let reference = run(false, None, false);
+        assert_eq!(run(true, None, false), reference);
+        assert_eq!(
+            reference.2,
+            [
+                ElementId::Vertex(VId(u128::MAX)),
+                ElementId::Edge(EId(u128::MAX))
+            ]
+        );
+        let result = reference.0.as_ref().unwrap();
+        assert_eq!(result.value.len(), usize::from(!hidden));
+        if !hidden {
+            assert_eq!(result.value[0].values()[0].as_count(), Some(size as u64));
+            assert_eq!(
+                result.value[0].values()[1]
+                    .as_value()
+                    .and_then(GraphValue::as_scalar),
+                Some(&CanonicalScalar::Int(33))
+            );
+            assert!(result.value[0].values()[2].is_null());
+        }
+        let failure = run(false, None, true);
+        assert_eq!(run(true, None, true), failure);
+        assert!(matches!(
+            failure.0,
+            Err(GqlQueryError::Source(GraphAggregateError::Source(
+                "late element read"
+            )))
+        ));
+        for stop in 1..=reference.1.len() {
+            let ordinary = run(false, Some(stop), false);
+            assert_eq!(run(true, Some(stop), false), ordinary);
+            assert!(matches!(ordinary.0, Err(GqlQueryError::Interrupted(at)) if at == stop));
+            assert_eq!(ordinary.1.len(), stop);
+        }
+    }
+
+    for size in [0, 3] {
+        for hidden in [false, true] {
+            compare::<false>(size, hidden);
+            compare::<true>(size, hidden);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Call {
     Unit,
