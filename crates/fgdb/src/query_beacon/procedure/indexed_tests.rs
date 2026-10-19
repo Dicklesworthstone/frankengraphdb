@@ -438,3 +438,160 @@ fn every_native_indexed_checkpoint_can_cancel_even_when_filter_rejects_all() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn current_text_call_reuses_registered_corpus_with_measured_probe_allowance() {
+    let ((), report) = run_async_under_lab(0xbeac_3710, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(
+            &c.commit(),
+            DatabaseKeys::new([0x73; 32], NS, [0x75; 32]),
+        ).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 0..512 {
+            batch.create_vertex(
+                VId(id as u128),
+                vec![LabelId(1)],
+                vec![
+                    (TEXT, CanonicalScalar::ucs_basic_text(
+                        if id == 0 { "needle background" } else { "background" }
+                    ).unwrap()),
+                    (X, CanonicalScalar::Int(id as i64)),
+                ],
+            );
+        }
+        db.write(&c.commit(), batch).await.unwrap();
+        let statement = "CALL hybrid.search(text => 'needle', text_property => 'body', \
+            candidates => 1, k => 1) YIELD node, score, text_rank, text_score \
+            RETURN node.x AS x, score, text_rank, text_score";
+        let params = GqlParameters::new();
+        let crate::PreparedNativeRead::Set(prepared) =
+            crate::PreparedNativeRead::prepare(statement, &params, symbols).unwrap()
+        else {
+            panic!("hybrid CALL must prepare as a relational source");
+        };
+        let bound = prepared.bind_parameters(&params).unwrap();
+        let cold = db.execute_graph_set_governed(&c.query(), &bound, policy()).unwrap();
+        assert_eq!(cold.value.len(), 1);
+        assert!(cold.rows.snapshot_records >= 512);
+        let expected = rows(db.query(&c.query(), statement, &params, symbols, policy()).unwrap());
+        db.register_beacon_index(
+            &c.query(),
+            &Options::text(TEXT),
+            fgdb_beacon::read::ReadPolicy::default(),
+        ).unwrap();
+        let warm = db.execute_graph_set_governed(&c.query(), &bound, policy()).unwrap();
+        assert_eq!(warm.value, cold.value);
+        assert_eq!(warm.rows.snapshot_records, 0, "no vertex corpus is revisited");
+        assert!(warm.evaluator.work_units < cold.evaluator.work_units);
+        let mut tight = policy();
+        tight.evaluator.max_work_units = warm.evaluator.work_units;
+        for _ in 0..2 {
+            let repeated = db.execute_graph_set_governed(&c.query(), &bound, tight).unwrap();
+            assert_eq!(repeated.value, warm.value);
+            assert_eq!(repeated.evaluator.work_units, warm.evaluator.work_units);
+            assert_eq!(
+                rows(db.query(&c.query(), statement, &params, symbols, tight).unwrap()),
+                expected
+            );
+        }
+        // A pinned view has no registry: its independent native build cannot
+        // fit the measured query-only allowance. This is a logical-work test,
+        // not an elapsed-time benchmark or an ANN sublinear-search claim.
+        assert!(db.read_session().unwrap()
+            .execute_graph_set_governed(&c.query(), &bound, tight).is_err());
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn registered_full_corpus_cannot_change_authorized_scores_or_unmask_properties() {
+    let ((), report) = run_async_under_lab(0xbeac_3711, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let mut clean = fixture(&c.commit(), 0, false).await;
+        let mut full = fixture(&c.commit(), 0, true).await;
+        let mut definition = Options::text(TEXT);
+        definition.projection.vector = vec![X];
+        definition.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
+        // No label selector: the maintained corpus includes the hidden row.
+        // These are the same projections requested by the calls below.
+        full.register_beacon_index(
+            &c.query(),
+            &definition,
+            fgdb_beacon::read::ReadPolicy::default(),
+        ).unwrap();
+        let authority = Authority::new(
+            AuthKey::from_seed(3711), NS, "maintained-hybrid", SchemaEpoch(0), 1,
+        ).unwrap();
+        let mut grant = Grant::read_only("main", 1000, QueryLimits {
+            max_nodes: 1000,
+            max_work: 10_000_000,
+            max_rows: 10,
+        });
+        grant.labels = Scope::only([LabelId(1)]);
+        grant.relations = Scope::only([R]);
+        grant.properties = Scope::only([TEXT, X]);
+        let token = authority.issue_at(&grant, 100).unwrap();
+        let mut session = full.authorized_read_session(
+            &c.query(), &authority, &token, "main", symbols, policy(), || 100,
+        ).unwrap();
+        let call = |modalities: &str| format!(
+            "CALL hybrid.search({modalities} eligible => $eligible, candidates => 1, k => 1) \
+             YIELD node, score, vector_rank, text_rank, vector_distance, text_score \
+             RETURN node.x AS x, score, vector_rank, text_rank, vector_distance, text_score"
+        );
+        for (modalities, has_text) in [
+            ("text => 'graph', text_property => 'body',", true),
+            ("vector => [0], vector_properties => ['x'],", false),
+            ("text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x'],", true),
+        ] {
+            let statement = call(modalities);
+            let expected = rows(clean.query(
+                &c.query(), &statement, &params(&[3]), symbols, policy(),
+            ).unwrap());
+            assert_eq!(expected.len(), 1);
+            let prepared = session.prepare(&c.query(), &statement, &params(&[90, 3])).unwrap();
+            assert_eq!(
+                rows(session.execute(&c.query(), &prepared, &params(&[90, 3])).unwrap()),
+                expected
+            );
+            if has_text {
+                // A post-filtered global corpus has different BM25 statistics
+                // despite selecting the same visible endpoint. This mutation
+                // control makes the authorization comparison non-vacuous.
+                assert_ne!(
+                    rows(full.query(
+                        &c.query(), &statement, &params(&[3]), symbols, policy(),
+                    ).unwrap()),
+                    expected
+                );
+            }
+        }
+        drop(session);
+
+        let mut remove = WriteBatch::new(R);
+        for id in [1, 2, 3, 9] {
+            remove.set_vertex_property(VId(id), TEXT, None);
+        }
+        clean.write(&c.commit(), remove).await.unwrap();
+        grant.properties = Scope::only([X]);
+        let token = authority.issue_at(&grant, 100).unwrap();
+        let mut session = full.authorized_read_session(
+            &c.query(), &authority, &token, "main", symbols, policy(), || 100,
+        ).unwrap();
+        let statement = call(
+            "text => 'graph', text_property => 'body', vector => [0], vector_properties => ['x'],"
+        );
+        let expected = rows(clean.query(
+            &c.query(), &statement, &params(&[3]), symbols, policy(),
+        ).unwrap());
+        let prepared = session.prepare(&c.query(), &statement, &params(&[90, 3])).unwrap();
+        assert_eq!(
+            rows(session.execute(&c.query(), &prepared, &params(&[90, 3])).unwrap()),
+            expected,
+            "the maintained text lane cannot supply a masked property"
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

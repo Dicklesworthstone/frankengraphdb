@@ -1,8 +1,8 @@
 //! Native snapshot -> bounded scalar projection -> Beacon search. Historical
 //! winners are selected by the SAME visitor as GLA, before any label/property
-//! projection. One-shot searches build per execution; `resident` retains and
-//! explicitly refreshes generations. Neither is a new authority, a durable
-//! index descriptor, or an external-memory claim.
+//! projection. Current privileged reads reuse compatible healthy maintained
+//! generations; other reads build from their exact admitted source. Neither
+//! path is a new authority, a durable index descriptor, or a spill claim.
 
 use crate::gql_exec::source::{self, SourceEvent};
 use crate::{Database, EmbeddedReadView, ReadError, Snapshot, VertexRow};
@@ -295,6 +295,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// label changes and tombstones. No asynchronous stale index is consulted.
     /// This is a privileged API, like read_session; use beacon_search_authorized
     /// when serving capability holders. No graph/value/clock is fabricated.
+    /// A compatible healthy maintained generation at that exact frontier skips
+    /// projection and construction for text/exact-vector queries. Historical,
+    /// mismatched, unavailable and approximate requests use the native build.
     pub fn beacon_search(
         &self,
         cx: &QueryCx,
@@ -319,9 +322,43 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Rows, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
-            self.read_session()
-                .map_err(Error::Read)?
-                .beacon_search_filtered(cx, options, query, eligible)
+            let current = self.frontier().map_err(Error::Read)?;
+            let at = options.as_of.unwrap_or(current);
+            self.snapshot.check_frontier(at).map_err(Error::Read)?;
+            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
+                cx.checkpoint()
+            }));
+            let result = (|| {
+                work.borrow_mut().charge(1)?;
+                let config = options.config_for(query)?;
+                query.validate(&config, &mut SharedWork(&work))?;
+                let index = match self.maintained_beacon.lookup_exact(
+                    at,
+                    current,
+                    options,
+                    &config,
+                    query,
+                    &mut SharedWork(&work),
+                )? {
+                    Some(index) => index,
+                    None => build(
+                        &self.snapshot,
+                        at,
+                        options,
+                        config,
+                        &work,
+                        Scan::Metered,
+                        |_| Ok(true),
+                        |_| true,
+                        |_| true,
+                    )?
+                    .snapshot(),
+                };
+                let rows = query.execute_filtered(&index, eligible, &mut SharedWork(&work))?;
+                work.borrow_mut().charge(1)?;
+                Ok(rows)
+            })();
+            work.into_inner().finish(result)
         })
     }
 }

@@ -2,7 +2,7 @@
 //! The graph lane retains selected vertices and BFS state, never an edge copy.
 //! Text/vector construction and exact candidate fusion remain the native paths.
 
-use super::{Cancel, Meter, Options, Scan, SharedWork, build_selected_optional};
+use super::{BeaconRegistry, Cancel, Meter, Options, Scan, SharedWork, build_selected_optional};
 use crate::gql_exec::source::SourceEvent;
 use crate::{Database, EmbeddedReadView, ReadError, Snapshot, VertexRow};
 use asupersync::fs::Vfs;
@@ -240,6 +240,61 @@ pub(crate) fn evaluate_filtered(
     query: GraphHybridQuery<'_>,
     expansion: ExpansionSpec<'_, RelationId>,
     work: &RefCell<impl WorkControl>,
+    scan: Scan<'_>,
+    admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
+    label_allowed: impl FnMut(LabelId) -> bool,
+    property_allowed: impl FnMut(PropertyKeyId) -> bool,
+    relation_allowed: impl FnMut(RelationId) -> bool,
+    admit_edge: impl FnMut() -> Result<(), BeaconError>,
+    eligible: impl Fn(VId) -> bool,
+) -> Result<Vec<GraphHybridHit>, BeaconError> {
+    evaluate_with_registry(
+        snapshot, at, options, query, expansion, work, None, scan, admit, label_allowed,
+        property_allowed, relation_allowed, admit_edge, eligible,
+    )
+}
+
+/// Only a privileged Database supplies its own registry. Capability-scoped
+/// execution always enters evaluate_filtered and builds the admitted corpus.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_privileged(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    options: &Options,
+    query: GraphHybridQuery<'_>,
+    expansion: ExpansionSpec<'_, RelationId>,
+    work: &RefCell<impl WorkControl>,
+    registry: &BeaconRegistry,
+    admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
+    eligible: impl Fn(VId) -> bool,
+) -> Result<Vec<GraphHybridHit>, BeaconError> {
+    evaluate_with_registry(
+        snapshot,
+        at,
+        options,
+        query,
+        expansion,
+        work,
+        Some(registry),
+        Scan::Metered,
+        admit,
+        |_| true,
+        |_| true,
+        |_| true,
+        || Ok(()),
+        eligible,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_with_registry(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    options: &Options,
+    query: GraphHybridQuery<'_>,
+    expansion: ExpansionSpec<'_, RelationId>,
+    work: &RefCell<impl WorkControl>,
+    registry: Option<&BeaconRegistry>,
     mut scan: Scan<'_>,
     admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
     label_allowed: impl FnMut(LabelId) -> bool,
@@ -269,27 +324,46 @@ pub(crate) fn evaluate_filtered(
         // Disabled lanes cannot consume seeds, topology, or graph allowances.
         None
     };
-    let vertex_scan = match &mut scan {
-        Scan::Metered => Scan::Metered,
-        Scan::Unmetered(poll) => Scan::Unmetered(&mut **poll),
+    let reused = match (registry, config.as_ref()) {
+        // Seeded graph requests keep their existing selected-source build.
+        (Some(registry), Some(config)) if !query.graph_enabled() => registry.lookup_exact(
+            at,
+            snapshot.frontier,
+            options,
+            config,
+            Search::Hybrid(query.source_query()),
+            &mut SharedWork(work),
+        )?,
+        _ => None,
     };
-    let index = build_selected_optional(
-        snapshot,
-        at,
-        options,
-        config,
-        work,
-        vertex_scan,
-        admit,
-        label_allowed,
-        property_allowed,
-        |row| {
-            if let Some(graph) = &mut selected {
-                graph.insert_vertex(row.vid, &mut SharedWork(work))?;
-            }
-            Ok(())
-        },
-    )?;
+    let index = if let Some(index) = reused {
+        // No graph lane needs a vertex directory. The generation already owns
+        // the exact current corpus and its complete live BM25 statistics.
+        Some(index)
+    } else {
+        let vertex_scan = match &mut scan {
+            Scan::Metered => Scan::Metered,
+            Scan::Unmetered(poll) => Scan::Unmetered(&mut **poll),
+        };
+        build_selected_optional(
+            snapshot,
+            at,
+            options,
+            config,
+            work,
+            vertex_scan,
+            admit,
+            label_allowed,
+            property_allowed,
+            |row| {
+                if let Some(graph) = &mut selected {
+                    graph.insert_vertex(row.vid, &mut SharedWork(work))?;
+                }
+                Ok(())
+            },
+        )?
+        .map(|index| index.snapshot())
+    };
     let scratch = Cell::new(0usize);
     let graph_hits = if let Some(graph) = selected {
         let mut source = IndexedNeighbors {
@@ -342,7 +416,7 @@ pub(crate) fn evaluate_filtered(
         },
     };
     let rows = match index {
-        Some(index) => index.snapshot().hybrid_search_graph_filtered(
+        Some(index) => index.hybrid_search_graph_filtered(
             query,
             &graph_hits,
             eligible,
@@ -367,6 +441,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// No edge properties are read and no per-query adjacency copy is built.
     /// Text/vector corpus preparation still scans selected vertex history;
     /// decoded source/index and visited state remain resident, not spill-backed.
+    /// With the graph lane disabled, compatible healthy maintained text/exact-
+    /// vector lanes skip source projection and index construction.
     /// GraphHybridQuery::graph_only skips property projection and index creation,
     /// but keeps the selected vertex directory and all source/vertex limits.
     ///
@@ -402,9 +478,24 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Vec<GraphHybridHit>, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
-            self.read_session()
-                .map_err(Error::Read)?
-                .beacon_search_graph_indexed_filtered(cx, options, query, expansion, eligible)
+            let current = self.frontier().map_err(Error::Read)?;
+            let at = options.as_of.unwrap_or(current);
+            self.snapshot.check_frontier(at).map_err(Error::Read)?;
+            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
+                cx.checkpoint()
+            }));
+            let result = evaluate_privileged(
+                &self.snapshot,
+                at,
+                options,
+                query,
+                expansion,
+                &work,
+                &self.maintained_beacon,
+                |_| Ok(true),
+                eligible,
+            );
+            work.into_inner().finish(result)
         })
     }
 }

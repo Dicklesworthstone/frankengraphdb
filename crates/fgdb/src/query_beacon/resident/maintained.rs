@@ -145,6 +145,9 @@ pub(crate) struct Registry {
     entries: Vec<Option<Entry>>,
 }
 
+#[path = "maintained/reuse.rs"]
+mod reuse;
+
 impl Registry {
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.iter().all(Option::is_none)

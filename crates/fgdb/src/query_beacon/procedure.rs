@@ -61,7 +61,10 @@
 //! defaults and indexed/materialized accounting are unchanged. Storage itself
 //! remains resident; this does not claim spill or physical timing isolation.
 //!
-//! Requested indexes are built for this one execution from the read's snapshot.
+//! Privileged current text/vector calls reuse a compatible healthy maintained
+//! generation with fresh query accounting; no source projection is repeated.
+//! Historical, approximate, masked and transaction reads retain their exact
+//! source build. Endpoint eligibility never changes the reused BM25 corpus.
 //! This is exact fusion of selected candidates, not an exhaustive hybrid
 //! top-k; `ann` remains approximate. It is not a durable index definition.
 
@@ -929,8 +932,10 @@ pub(crate) fn failure<C>(error: BeaconReadError<ReadError, C>) -> GqlQueryError<
 
 /// The privileged host: the whole snapshot at `at`, metered against the
 /// read's remaining allowance like every other privileged source.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn privileged(
     snapshot: &Snapshot,
+    registry: Option<&super::BeaconRegistry>,
     at: CommitSeq,
     call: &PreparedProcedureCall,
     arguments: &[GraphValue],
@@ -945,21 +950,48 @@ pub(crate) fn privileged(
         spent.set(spent.get().saturating_add(units as u64));
         cx.checkpoint()
     }));
-    let result = search.execute_filtered(
-        eligible,
-        remaining,
-        snapshot,
-        at,
-        &work,
-        Scan::Metered,
-        |_| {
-            admitted.set(admitted.get() + 1);
-            Ok(true)
-        },
-        |_| true,
-        |_| true,
-        |_| true,
-    );
+    let admit = |_: &VertexRow| {
+        admitted.set(admitted.get() + 1);
+        Ok(true)
+    };
+    let result = (|| {
+        if let Some(registry) = registry
+            && search.graph_access == GraphAccess::Indexed
+        {
+            let filter = EndpointFilter::prepare(
+                eligible,
+                search.k,
+                remaining.evaluator.max_scratch_entries,
+                &mut SharedWork(&work),
+            )?;
+            let result = indexed::evaluate_privileged(
+                snapshot,
+                at,
+                &search.options,
+                search.query(),
+                search.expansion(),
+                &work,
+                registry,
+                admit,
+                |id| filter.admits(id, &work),
+            );
+            return filter
+                .finish(result)
+                .map(|hits| (hits, filter.scratch_entries()));
+        }
+        search.execute_filtered(
+            eligible,
+            remaining,
+            snapshot,
+            at,
+            &work,
+            Scan::Metered,
+            admit,
+            |_| true,
+            |_| true,
+            |_| true,
+        )
+    })();
     let (hits, filter_entries) = work
         .into_inner()
         .finish::<ReadError, _>(result)
