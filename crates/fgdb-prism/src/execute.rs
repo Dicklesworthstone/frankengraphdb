@@ -690,9 +690,25 @@ fn pagerank<C>(
     arcs: usize,
     meter: &mut impl FnxMeter<C>,
 ) -> Result<(Vec<f64>, ComplexityWitness, usize), FnxExecutionError<C>> {
+    pagerank_with_threads(
+        graph,
+        options,
+        arcs,
+        gather_threads(graph.incoming_face().1.len()),
+        meter,
+    )
+}
+
+fn pagerank_with_threads<C>(
+    graph: &SnapshotGraphView,
+    options: crate::PageRankOptions,
+    arcs: usize,
+    threads: usize,
+    meter: &mut impl FnxMeter<C>,
+) -> Result<(Vec<f64>, ComplexityWitness, usize), FnxExecutionError<C>> {
     let n = graph.node_count();
     let mut witness = ComplexityWitness {
-        algorithm: "pagerank_power_iteration".to_owned(),
+        algorithm: options.witness_algorithm().to_owned(),
         complexity_claim: "O(k * (|V| + |E|))".to_owned(),
         nodes_touched: 0,
         edges_scanned: 0,
@@ -708,7 +724,6 @@ fn pagerank<C>(
     // walk below; the face is checked there row by row.
     let (in_offsets, in_sources) = graph.incoming_face();
     let mut face_ok = in_offsets.len() == n + 1 && in_offsets[n] == in_sources.len();
-    let threads = gather_threads(in_sources.len());
     // Contributions visit each source once, independent of its degree. A
     // graph with many arcs can justify parallel gathering while its much
     // smaller source fill is faster without another scoped worker group.
@@ -811,7 +826,7 @@ fn pagerank<C>(
     }
     drop(cursor);
     let base = (1.0 - options.alpha()) / population;
-    for _ in 0..options.max_iter() {
+    for iteration in 0..options.max_iter() {
         // Each pass spends one unit per vertex or arc, as before, but asks
         // the meter for up to FNX_METER_RUN of them at once; the arithmetic
         // and its order are unchanged.
@@ -873,7 +888,7 @@ fn pagerank<C>(
             .edges_scanned
             .checked_add(arcs)
             .ok_or(FnxExecutionError::SizeOverflow)?;
-        if delta < population * options.tolerance() {
+        if options.iteration_complete(iteration + 1, delta, population) {
             return Ok((ranks, witness, workspace_bytes));
         }
     }
@@ -1530,7 +1545,8 @@ mod tests {
     /// **A GATHER'S SUMS DO NOT DEPEND ON ITS THREADS.** Over a 2,000-vertex
     /// graph with a hub, with and without per-arc shares, every thread count
     /// from 1 to 8 leaves every target's sum bit-identical to one thread's,
-    /// whatever the chunk boundaries.
+    /// whatever the chunk boundaries. Full fixed-step PageRank also retains
+    /// every score bit, witness count and scratch bound across those workers.
     #[test]
     fn gather_is_bit_identical_on_every_thread_count() {
         let n = 2_000usize;
@@ -1621,6 +1637,32 @@ mod tests {
                         .all(|(a, b)| a.to_bits() == b.to_bits()),
                     "weighted={weighted} {threads} threads"
                 );
+            }
+            for iterations in [2, 7] {
+                let options =
+                    PageRankOptions::fixed_iterations(0.85, iterations, weighted).unwrap();
+                let (one, witness, workspace) =
+                    pagerank_with_threads(&graph, options, sources.len(), 1, &mut || {
+                        Ok::<(), Infallible>(())
+                    })
+                    .unwrap();
+                assert_eq!(witness.nodes_touched, n * iterations);
+                assert_eq!(witness.edges_scanned, sources.len() * iterations);
+                for threads in 2..=8 {
+                    let (many, many_witness, many_workspace) =
+                        pagerank_with_threads(&graph, options, sources.len(), threads, &mut || {
+                            Ok::<(), Infallible>(())
+                        })
+                        .unwrap();
+                    assert!(
+                        one.iter()
+                            .zip(&many)
+                            .all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "fixed iterations={iterations} weighted={weighted} threads={threads}"
+                    );
+                    assert_eq!(many_witness, witness);
+                    assert_eq!(many_workspace, workspace);
+                }
             }
         }
     }

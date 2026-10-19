@@ -280,7 +280,11 @@ impl DegreeCentrality {
             nodes,
             // The pinned fnx kernel multiplies by this reciprocal. Per-row
             // division can produce different score bits.
-            reciprocal: if nodes > 1 { 1.0 / (nodes - 1) as f64 } else { 1.0 },
+            reciprocal: if nodes > 1 {
+                1.0 / (nodes - 1) as f64
+            } else {
+                1.0
+            },
         })
     }
 
@@ -336,7 +340,7 @@ fn pagerank(
 ) -> Result<KernelOutput> {
     let n = graph.node_count();
     let mut witness = ComplexityWitness {
-        algorithm: "pagerank_power_iteration".to_owned(),
+        algorithm: options.witness_algorithm().to_owned(),
         complexity_claim: "O(k * (|V| log(1+H) + H log(1+|V|))) compressed row visits".to_owned(),
         nodes_touched: 0,
         edges_scanned: 0,
@@ -378,7 +382,7 @@ fn pagerank(
         next.push(0.0);
     }
     let base = (1.0 - options.alpha()) / population;
-    for _ in 0..options.max_iter() {
+    for iteration in 0..options.max_iter() {
         let mut dangling_mass = 0.0;
         for source in 0..n {
             checkpoint()?;
@@ -424,7 +428,7 @@ fn pagerank(
         }
         std::mem::swap(&mut ranks, &mut next);
         witness.nodes_touched = add(witness.nodes_touched, n)?;
-        if delta < population * options.tolerance() {
+        if options.iteration_complete(iteration + 1, delta, population) {
             return Ok(KernelOutput {
                 values: KernelValues::Scores(ranks),
                 row_count: n,
@@ -1224,7 +1228,9 @@ mod tests {
             let result = degree_centrality(&DegreeRows(&graph), &mut || {
                 seen += 1;
                 if seen == stop {
-                    Err(Error::Cancelled(std::io::Error::other("degree stop").into()))
+                    Err(Error::Cancelled(
+                        std::io::Error::other("degree stop").into(),
+                    ))
                 } else {
                     Ok(())
                 }
@@ -1262,6 +1268,47 @@ mod tests {
                 }
                 assert_eq!(output.witness.nodes_touched, oracle.witness.nodes_touched);
                 assert_eq!(output.witness.edges_scanned, oracle.witness.edges_scanned);
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_fixed_iteration_pagerank_matches_decoded_bits_on_every_three_node_topology() {
+        for mask in 0..512 {
+            let graph = projection(mask);
+            for weighted in [false, true] {
+                for iterations in [1, 2, 5] {
+                    let options =
+                        PageRankOptions::fixed_iterations(0.85, iterations, weighted).unwrap();
+                    let decoded = FnxCallSpec::pagerank(options)
+                        .execute(&graph, limits(), || Ok::<(), std::convert::Infallible>(()))
+                        .unwrap();
+                    let output = pagerank(&DecodedRows(&graph), options, &mut || Ok(())).unwrap();
+                    let KernelValues::Scores(scores) = output.values else {
+                        panic!("scores");
+                    };
+                    assert_eq!(scores.len(), decoded.rows.len());
+                    for (&actual, row) in scores.iter().zip(&decoded.rows) {
+                        let crate::FnxValue::Score(expected) = row[1] else {
+                            panic!("decoded score");
+                        };
+                        assert_eq!(
+                            actual.to_bits(),
+                            expected.to_bits(),
+                            "mask={mask} weighted={weighted} iterations={iterations}"
+                        );
+                    }
+                    assert_eq!(output.witness.algorithm, "pagerank_fixed_iterations");
+                    assert_eq!(
+                        output.witness.nodes_touched,
+                        decoded.certificate.witness.nodes_touched
+                    );
+                    assert_eq!(
+                        output.witness.edges_scanned,
+                        decoded.certificate.witness.edges_scanned
+                    );
+                    assert_eq!(output.witness.nodes_touched, 3 * iterations);
+                }
             }
         }
     }

@@ -42,7 +42,7 @@ pub use call::{
     FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallError, FnxCallSite, FnxCallSpec,
     FnxGraphKind, FnxImplementationClass, FnxOutput, FnxOutputColumn, FnxParameterSpec,
     FnxParameterType, FnxParameters, FnxSignature, FnxSignatureRegistry, FoundationAlgorithm,
-    MAX_FNX_CALL_BYTES, PageRankOptions,
+    MAX_FNX_CALL_BYTES, PageRankOptions, PageRankStoppingRule,
 };
 pub use clustering::{TriangleStatistics, triangle_statistics};
 pub use execute::{

@@ -12,10 +12,10 @@
 //! made cooperative by this module.
 
 use super::{
-    ComplexityWitness, DegreeCentrality, EncodedRows, Error, ExecutionError, FnxAlgorithm, FnxCallSpec,
-    FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, PageRankOptions,
-    QueryCx, Result, ResultAdmission, SealedGraphView, SealedNeighborCursor, add, admit,
-    checkpoint, execution_pass_work, finish_encoded, mul, require_loop_free_degree, reserve,
+    ComplexityWitness, DegreeCentrality, EncodedRows, Error, ExecutionError, FnxAlgorithm,
+    FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues,
+    PageRankOptions, QueryCx, Result, ResultAdmission, SealedGraphView, SealedNeighborCursor, add,
+    admit, checkpoint, execution_pass_work, finish_encoded, mul, require_loop_free_degree, reserve,
 };
 use crate::sealed_control::Control;
 use crate::shortest_path::{Entry, IndexedHeap};
@@ -787,7 +787,7 @@ where
 {
     let n = graph.node_count();
     let mut witness = ComplexityWitness {
-        algorithm: "pagerank_power_iteration".to_owned(),
+        algorithm: options.witness_algorithm().to_owned(),
         complexity_claim: "O(k * (|V| log(1+H) + H log(1+|V|))) compressed row visits".to_owned(),
         nodes_touched: 0,
         edges_scanned: 0,
@@ -829,7 +829,7 @@ where
         next.push(0.0);
     }
     let base = (1.0 - options.alpha()) / population;
-    for _ in 0..options.max_iter() {
+    for iteration in 0..options.max_iter() {
         control.tick().await?;
         let mut dangling_mass = 0.0;
         for source in 0..n {
@@ -876,7 +876,7 @@ where
         }
         std::mem::swap(&mut ranks, &mut next);
         witness.nodes_touched = add(witness.nodes_touched, n)?;
-        if delta < population * options.tolerance() {
+        if options.iteration_complete(iteration + 1, delta, population) {
             return Ok(KernelOutput {
                 values: KernelValues::Scores(ranks),
                 row_count: n,

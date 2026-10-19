@@ -70,6 +70,7 @@ mod set_aggregate_queries {
                         if crate::query::is_hybrid(call) {
                             return crate::query::hybrid_procedure(
                                 &self.snapshot,
+                                Some(self.maintained_beacon.query_indexes()),
                                 as_of,
                                 call,
                                 arguments,
@@ -127,6 +128,7 @@ mod set_aggregate_queries {
                         if crate::query::is_hybrid(call) {
                             return crate::query::hybrid_procedure(
                                 &self.snapshot,
+                                Some(&self.beacon_indexes),
                                 as_of,
                                 call,
                                 arguments,

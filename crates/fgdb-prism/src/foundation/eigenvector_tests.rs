@@ -1,5 +1,7 @@
 //! Differential and interruption laws for the borrowed-CSR eigenvector kernel.
 
+#![cfg(test)]
+
 use super::*;
 use crate::{
     Directedness, ParallelEdgePolicy, ProjectionEdge, ProjectionLimits, ProjectionSpec,
@@ -41,7 +43,7 @@ fn view_with_ids(ids: &[VId], pairs: &[(usize, usize)]) -> SnapshotGraphView {
         .iter()
         .enumerate()
         .map(|(i, &(source, target))| ProjectionEdge {
-            eid: EId((1u128 << 112) | i as u128 + 1),
+            eid: EId((1u128 << 112) | (i as u128 + 1)),
             source: ids[source],
             target: ids[target],
             weight: 1.0,
