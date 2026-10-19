@@ -72,7 +72,10 @@ if command -v br >/dev/null 2>&1 && ls .beads/*.db >/dev/null 2>&1; then
   db_available=1
 fi
 
-resolve_in_export() { printf '%s\n' "$export_ids" | grep -qxF -- "$1"; }
+# A here-string, never `printf ... | grep -q`: under pipefail, grep -q exits at
+# its first match and a printf still writing the list dies of SIGPIPE, which
+# reported a tracked id as unresolved (fgdb-rc1017-bridge-wvze5.3).
+resolve_in_export() { grep -qxF -- "$1" <<< "$export_ids"; }
 resolve_in_db() { [ "$db_available" -eq 1 ] && br show "$1" >/dev/null 2>&1; }
 resolve_adjudicated() {
   printf '%s\n' "$ADJUDICATED" | awk -F'\t' -v id="$1" '$1 == id { print $2 "\t" $3; found = 1 } END { exit !found }'
