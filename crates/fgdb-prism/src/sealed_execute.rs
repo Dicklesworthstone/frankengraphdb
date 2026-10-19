@@ -24,6 +24,8 @@ mod clustering;
 mod components;
 #[path = "sealed_cooperative.rs"]
 mod cooperative;
+#[path = "sealed_core.rs"]
+mod core_number;
 #[path = "sealed_shortest_path.rs"]
 mod shortest_path;
 
@@ -530,7 +532,9 @@ impl FnxCallSpec {
                 | FnxAlgorithm::StronglyConnectedComponents
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
-                | FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+                | FnxAlgorithm::Foundation(
+                    FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::CoreNumber
+                )
         )
     }
 
@@ -554,9 +558,10 @@ impl FnxCallSpec {
     }
 
     /// Execute registered ranks, distances, components and local triangles or
-    /// clustering directly from authenticated compressed rows. Degree centrality
-    /// uses the admitted degree directory without opening rows. Every graph pass
-    /// and row pull is fallible; component labels and sources are stable VIds.
+    /// clustering or core numbers directly from authenticated compressed rows.
+    /// Degree centrality uses the admitted degree directory without opening
+    /// rows; core peeling opens each row once with O(|V|) integer workspace.
+    /// Every graph pass and row pull is fallible; identities remain stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
     /// This synchronous API does not claim async scheduling or disk spill.
     pub fn execute_sealed(
@@ -604,6 +609,12 @@ impl FnxCallSpec {
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient
         ) {
             return clustering::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber)
+        ) {
+            return core_number::execute(self, cx, graph, limits, memory, &admission);
         }
         let pass = execution_pass_work(self, graph)?;
         let (kernel, estimated_work, workspace, source) = match self.algorithm() {
@@ -850,6 +861,7 @@ impl EncodedRows {
                 (FnxOutput::Distance, FnxValue::Float(value)) => FnxValue::Float(value),
                 (FnxOutput::Component, FnxValue::Vertex(value)) => FnxValue::Vertex(value),
                 (FnxOutput::Triangles, FnxValue::Integer(value)) => FnxValue::Integer(value),
+                (FnxOutput::Core, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
             };
             match value {
@@ -983,6 +995,7 @@ fn source_digest() -> Digest {
         for source in [
             include_str!("sealed_execute.rs"),
             include_str!("sealed_cooperative.rs"),
+            include_str!("sealed_core.rs"),
             include_str!("sealed_clustering.rs"),
             include_str!("sealed_components.rs"),
             include_str!("sealed_shortest_path.rs"),
@@ -1561,6 +1574,11 @@ mod tests {
                 FnxCallSpec::clustering_coefficient(),
                 FnxCallSpec::bind(
                     "CALL fnx.degree_centrality() YIELD vertex,score",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
+                FnxCallSpec::bind(
+                    "CALL fnx.core_number() YIELD vertex,core",
                     &FnxParameters::new(),
                 )
                 .unwrap(),

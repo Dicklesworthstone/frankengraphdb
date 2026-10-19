@@ -479,6 +479,43 @@ mod tests {
     use super::is_call;
 
     #[test]
+    fn sealed_core_preflight_accepts_only_the_registered_undirected_projection() {
+        for direction in ["directed", "reversed", "undirected"] {
+            let args: Vec<String> = [
+                "--db",
+                "never-opened-database",
+                "--key-file",
+                "never-opened-key",
+                "--sealed",
+                "--relation",
+                "KNOWS=1",
+                "--graph-relation",
+                "KNOWS",
+                "--direction",
+                direction,
+                "CALL fnx.core_number() YIELD core AS level, node AS id",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            let options = super::super::parse(&args, "query").unwrap();
+            assert!(options.fnx_call);
+            match super::prepare(&options) {
+                Ok(prepared) => {
+                    assert_eq!(direction, "undirected");
+                    assert!(prepared.is_sealed());
+                    assert!(prepared.call.supports_sealed_execution());
+                }
+                Err(failure) => {
+                    assert_ne!(direction, "undirected");
+                    assert_eq!(failure.code, 3);
+                    assert_eq!(failure.class, "query");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn projection_envelopes_use_the_native_host_and_positional_calls_keep_their_route() {
         assert!(is_call(
             "CALL fnx.connected_components() YIELD vertex, component",
