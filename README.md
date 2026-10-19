@@ -308,6 +308,7 @@ fgdb transaction --db mydb.fgdbdir --key-file fgdb.keys --label Doc=1 --property
 # Bulk CSV import, NDJSON delta load with checkpoints, compaction
 fgdb import-csv --db mydb.fgdbdir --key-file fgdb.keys --input edges.csv "<gql>"
 fgdb load       --db mydb.fgdbdir --key-file fgdb.keys --input batch.ndjson
+# (--input also takes a JSON array of the same row objects; a leading '[' selects it)
 fgdb compact    --db mydb.fgdbdir --key-file fgdb.keys
 
 # Inputs past the default 1,000,000 rows or 64 MiB of keys name their own bounds
@@ -360,6 +361,14 @@ fgdb query --db mydb.fgdbdir --key-file fgdb.keys --property title=1 --property 
 # ...or the same packed property through the search command
 fgdb search --db mydb.fgdbdir --key-file fgdb.keys --property emb=3 \
   --vector 0.1,0.8,0.1 --vector-encoding packed --vector-property emb --metric cosine --k 5
+# (--vector-encoding coordinates-rounded explicitly rounds stored integer, float and
+#  decimal coordinates to f32; the default encoding refuses any decimal and any value
+#  f32 cannot hold exactly)
+
+# Graph-only neighborhood: seeds and an explicit hop bound are a complete request
+# (docs/cli_graph_only_search.md); inside GQL, hybrid.search's
+# graph_access => 'demand' reads only the probed histories, with no index build
+fgdb search --db mydb.fgdbdir --key-file fgdb.keys --expand-from 101,205 --max-hops 2 --k 20
 # (hybrid.search rows are in canonical vertex order unless the query orders them:
 #  ORDER BY score DESC returns them in rank order)
 
@@ -380,6 +389,10 @@ fgdbd serve --listen 127.0.0.1:7687 --database social=mydb.fgdbdir --key-file fg
 fgdbd token --key-file fgdb.keys --issuer-key-file issuer.key --rights read-write > token && chmod 600 token
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social query "MATCH (p:Person) RETURN p.name"
 
+# One prepared read, many argument sets: a JSON array of typed objects, or CSV with --csv-types
+fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
+  --rows-file names.json query 'MATCH (p:Person {name: $name}) RETURN p.name'
+
 # Live changefeed: a baseline, then one exact delta per commit
 fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
   subscribe "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"
@@ -388,7 +401,8 @@ fgdb remote --addr 127.0.0.1:7687 --token-file token --database social \
 curl -H "Authorization: Bearer $(cat token)" -d '{"statement":"MATCH (p:Person) RETURN p.name"}' \
   http://127.0.0.1:7474/v1/databases/social/query
 
-# ...or from any official Neo4j driver, read-only (add --bolt-listen 127.0.0.1:7688)
+# ...or from any official Neo4j driver: reads, plus bounded no-RETURN autocommit writes
+# (add --bolt-listen 127.0.0.1:7688)
 python3 -c 'from neo4j import GraphDatabase, bearer_auth
 d = GraphDatabase.driver("bolt://127.0.0.1:7688", auth=bearer_auth(open("token").read().strip()))
 print(d.execute_query("MATCH (p:Person) RETURN p LIMIT 3").records)'
