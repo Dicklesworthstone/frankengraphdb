@@ -61,8 +61,8 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 8);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 14);
+    assert_eq!(FnxSignatureRegistry::version(), 9);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 15);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 5);
@@ -97,6 +97,97 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
     // and witness on non-convergence, so a refusal would have to invent one.
     assert!(FnxSignatureRegistry::lookup("fnx.katz_centrality").is_none());
     assert!(FnxSignatureRegistry::lookup("pagerank").is_none());
+}
+
+#[test]
+fn cdlp_binds_required_nonnegative_iterations_without_losing_call_identity() {
+    let registration = FnxSignatureRegistry::lookup("fnx.cdlp").unwrap();
+    assert_eq!(registration.graph_kind, FnxGraphKind::Any);
+    assert_eq!(registration.numeric_profile, FNX_DISCRETE_PROFILE);
+    assert_eq!(registration.rng_policy, "none");
+    assert_eq!(
+        registration.parameters,
+        &[FnxParameterSpec {
+            name: "max_iter",
+            value_type: FnxParameterType::NonNegativeInteger,
+            positional: true,
+            default: None,
+        }]
+    );
+    assert_eq!(
+        registration.outputs,
+        &[FnxOutput::Vertex, FnxOutput::Component]
+    );
+    assert_eq!(
+        registration.execution_kernel,
+        "fgdb-prism/cdlp-synchronous-csr-v1"
+    );
+    for max_iter in [0, 1, 5] {
+        let call = FnxCallSpec::cdlp(max_iter);
+        assert_eq!(bind(&format!("CALL fnx.cdlp({max_iter})")), call);
+        assert_eq!(
+            bind(&format!("CALL fnx.cdlp(max_iter => {max_iter})")),
+            call
+        );
+        assert_eq!(call.algorithm(), FnxAlgorithm::Cdlp { max_iter });
+        let parameters =
+            FnxParameters::from([("steps".to_owned(), FnxArgument::Integer(max_iter as i64))]);
+        assert_eq!(
+            FnxCallSpec::bind("CALL fnx.cdlp(max_iter => $steps)", &parameters).unwrap(),
+            call
+        );
+        assert!(!call.supports_sealed_execution());
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            assert!(matches!(
+                call.validate_sealed_projection(direction),
+                Err(FnxSealedExecutionError::UnsupportedAlgorithm(
+                    FnxAlgorithm::Cdlp { .. }
+                ))
+            ));
+        }
+    }
+    assert_ne!(FnxCallSpec::cdlp(0).digest(), FnxCallSpec::cdlp(1).digest());
+    assert_ne!(FnxCallSpec::cdlp(1).digest(), FnxCallSpec::cdlp(5).digest());
+    let aliased = bind("CALL fnx.cdlp(2) YIELD component AS community,node AS member");
+    assert_eq!(aliased.outputs()[0].field, FnxOutput::Component);
+    assert_eq!(aliased.outputs()[0].name, "community");
+    assert_eq!(aliased.outputs()[1].field, FnxOutput::Vertex);
+    assert_ne!(aliased.digest(), FnxCallSpec::cdlp(2).digest());
+    assert_eq!(
+        FnxCallSpec::bind("CALL fnx.cdlp()", &FnxParameters::new())
+            .unwrap_err()
+            .kind,
+        FnxBindErrorKind::MissingArgument("max_iter")
+    );
+    for argument in [
+        FnxArgument::Integer(-1),
+        FnxArgument::Float(2.0),
+        FnxArgument::Boolean(false),
+        FnxArgument::Null,
+        FnxArgument::Vertex(VId(u128::MAX)),
+    ] {
+        let error =
+            FnxCallSpec::from_named_arguments("fnx", "cdlp", &[("max_iter", argument)], &[])
+                .unwrap_err();
+        assert_eq!(error.site, FnxCallSite::Argument(0));
+        assert!(matches!(error.kind, FnxBindErrorKind::InvalidArgument(_)));
+    }
+    for text in [
+        "CALL fnx.cdlp(1,2)",
+        "CALL fnx.cdlp(iterations => 2)",
+        "CALL fnx.cdlp(max_iter => 1,max_iter => 2)",
+        "CALL fnx.cdlp(340282366920938463463374607431768211455)",
+        "CALL fnx.cdlp(2) YIELD score",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
 }
 
 /// fgdb-luq0b: `node` is the openCypher spelling of the vertex output. The

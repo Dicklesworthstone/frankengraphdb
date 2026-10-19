@@ -1,6 +1,7 @@
 //! Checkpointed analytics over immutable decoded rows. Native kernels are
-//! differentially checked against the pinned foundation; certificates identify
-//! their own source instead of claiming that fnx executed the computation.
+//! differentially checked against their registered reference semantics;
+//! certificates identify their own source instead of claiming that fnx
+//! executed the computation.
 
 use crate::{
     AdapterPath, FNX_IMPLEMENTATION_REVISION, FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm,
@@ -19,6 +20,8 @@ pub struct FnxExecutionLimits {
     /// WCC n + 2*arcs, SCC 2*(n + arcs). Dijkstra includes heap sift height;
     /// Triangle kernels include forward-CSR construction and a lower-degree
     /// row bound per undirected edge, plus initialization and conversion.
+    /// CDLP includes graph-law checks, histogram initialization, all synchronous
+    /// passes and result conversion, including a zero-iteration result.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -148,7 +151,9 @@ pub enum FnxValue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnxCertificate {
     pub registry_version: u16,
-    /// Pinned foundation used as the differential semantics oracle.
+    /// Pinned algorithm foundation revision. Native kernels also name their
+    /// own execution source; CDLP's oracle is Graphalytics, whose synchronous
+    /// label semantics differ from the foundation's community algorithm.
     pub implementation_revision: &'static str,
     /// Actual executing kernel, distinct from the foundation oracle revision.
     pub execution_kernel: &'static str,
@@ -930,8 +935,14 @@ impl FnxCallSpec {
             }
             _ => {}
         }
-        if let FnxAlgorithm::PageRank(options) = algorithm {
-            admit("iterations", options.max_iter(), limits.max_iterations)?;
+        match algorithm {
+            FnxAlgorithm::PageRank(options) => {
+                admit("iterations", options.max_iter(), limits.max_iterations)?;
+            }
+            FnxAlgorithm::Cdlp { max_iter } => {
+                admit("iterations", max_iter, limits.max_iterations)?;
+            }
+            _ => {}
         }
         if !matches!(
             algorithm,
@@ -972,6 +983,9 @@ impl FnxCallSpec {
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs)
             }
+            FnxAlgorithm::Cdlp { max_iter } => {
+                crate::traversal::cdlp_estimated_work(n, arcs, max_iter, graph.is_directed())
+            }
             _ => n.checked_add(arcs),
         }
         .ok_or(FnxExecutionError::SizeOverflow)?;
@@ -979,7 +993,7 @@ impl FnxCallSpec {
         let word = std::mem::size_of::<usize>();
         let mut kernel_workspace_bytes = match algorithm {
             // Successful PageRank returns its measured allocation peak below.
-            FnxAlgorithm::PageRank(_) => 0,
+            FnxAlgorithm::PageRank(_) | FnxAlgorithm::Cdlp { .. } => 0,
             FnxAlgorithm::SingleSourceDijkstraPathLength(_) => {
                 crate::shortest_path::workspace_bytes::<C>(n)?
             }
@@ -1043,6 +1057,12 @@ impl FnxCallSpec {
             FnxAlgorithm::Foundation(algorithm) => {
                 let (output, workspace_bytes) =
                     crate::foundation::run(graph, algorithm, arcs, &mut checkpoint)?;
+                kernel_workspace_bytes = workspace_bytes;
+                output
+            }
+            FnxAlgorithm::Cdlp { max_iter } => {
+                let (output, workspace_bytes) =
+                    crate::traversal::cdlp(graph, max_iter, &mut checkpoint)?;
                 kernel_workspace_bytes = workspace_bytes;
                 output
             }

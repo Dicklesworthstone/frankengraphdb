@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 8;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 9;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -26,6 +26,7 @@ pub type FnxParameters = BTreeMap<String, FnxArgument>;
 pub enum FnxParameterType {
     FiniteFloat,
     PositiveInteger,
+    NonNegativeInteger,
     Boolean,
     Vertex,
     OptionalNonNegativeInteger,
@@ -166,6 +167,12 @@ const DIJKSTRA_PARAMETERS: &[FnxParameterSpec] = &[
         default: Some(FnxArgument::Boolean(false)),
     },
 ];
+const CDLP_PARAMETERS: &[FnxParameterSpec] = &[FnxParameterSpec {
+    name: "max_iter",
+    value_type: FnxParameterType::NonNegativeInteger,
+    positional: true,
+    default: None,
+}];
 const SIGNATURES: &[FnxSignature] = &[
     FnxSignature {
         name: "fnx.pagerank",
@@ -313,6 +320,19 @@ const SIGNATURES: &[FnxSignature] = &[
         "O(|V| + |E|)",
         "fgdb-prism/core-number-bucket-csr-v1",
     ),
+    FnxSignature {
+        name: "fnx.cdlp",
+        graph_input_arity: 1,
+        parameters: CDLP_PARAMETERS,
+        outputs: &[FnxOutput::Vertex, FnxOutput::Component],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Any,
+        numeric_profile: FNX_DISCRETE_PROFILE,
+        rng_policy: "none",
+        graph_laws: "explicit simple projection; self-loops refused; weights ignored; synchronous Graphalytics label propagation for max_iter updates; initial labels are VIds, ties choose the smallest VId, isolates retain their labels; directed in+out incidences count reciprocal neighbors twice",
+        complexity: "O(|V| + |E| + k * (|V| + |E|)) time; O(|V|) kernel workspace",
+        execution_kernel: "fgdb-prism/cdlp-synchronous-csr-v1",
+    },
 ];
 
 /// A catalog row: one undirected, unweighted, parameter-free graph input
@@ -549,6 +569,10 @@ pub enum FnxAlgorithm {
     ClusteringCoefficient,
     /// A pinned catalog procedure whose signature identifies its executor.
     Foundation(FoundationAlgorithm),
+    /// Graphalytics synchronous label propagation, including zero updates.
+    Cdlp {
+        max_iter: usize,
+    },
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -562,6 +586,7 @@ impl FnxAlgorithm {
             Self::Triangles => 6,
             Self::ClusteringCoefficient => 7,
             Self::Foundation(algorithm) => 8 + algorithm as usize,
+            Self::Cdlp { .. } => 14,
         }]
     }
 }
@@ -614,6 +639,17 @@ impl FnxCallSpec {
     }
     pub fn clustering_coefficient() -> Self {
         Self::new(FnxAlgorithm::ClusteringCoefficient)
+    }
+    /// Synchronous Graphalytics community detection over the admitted simple
+    /// projection. Each of exactly `max_iter` rounds reads the previous round;
+    /// reciprocal directed neighbors vote twice and ties choose the smallest
+    /// stable VId. Zero returns initial VId labels, including every isolate.
+    /// The `component` output is the community label, not a WCC identifier.
+    ///
+    /// Text calls use `CALL fnx.cdlp(max_iter => 5) YIELD vertex,component`.
+    /// The count is required; this kernel does not use a convergence stop.
+    pub fn cdlp(max_iter: usize) -> Self {
+        Self::new(FnxAlgorithm::Cdlp { max_iter })
     }
     fn new(algorithm: FnxAlgorithm) -> Self {
         Self::compiled(algorithm, default_outputs(algorithm.signature()))
@@ -912,6 +948,14 @@ impl FnxCallSpec {
                 FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
             }
             "fnx.core_number" => FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber),
+            "fnx.cdlp" => {
+                let max_iter = match arguments[0] {
+                    FnxArgument::Integer(value) if value >= 0 => usize::try_from(value).ok(),
+                    _ => None,
+                }
+                .ok_or_else(|| invalid(0, "nonnegative integer max_iter required"))?;
+                FnxAlgorithm::Cdlp { max_iter }
+            }
             _ => {
                 return Err(error(
                     FnxCallSite::Procedure,
@@ -1124,6 +1168,9 @@ impl FnxCallSpec {
                     }
                 }
                 hash.update(&[options.comparison() as u8]);
+            }
+            FnxAlgorithm::Cdlp { max_iter } => {
+                hash.update(&(max_iter as u128).to_le_bytes());
             }
             _ => {}
         }

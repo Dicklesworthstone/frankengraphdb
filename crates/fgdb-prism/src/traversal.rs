@@ -1,4 +1,4 @@
-//! Exact, checkpointed traversal kernels. They borrow decoded adjacency, never
+//! Exact, checkpointed traversal and label kernels. They borrow decoded adjacency, never
 //! construct a second Graph/DiGraph, recurse on the process stack, or consult
 //! weights that their registered semantics ignore.
 
@@ -23,6 +23,167 @@ fn increment<C>(counter: &mut usize) -> Result<(), FnxExecutionError<C>> {
     Ok(())
 }
 
+/// Charged work for a completed CDLP call: the shared admission/conversion
+/// passes, a loop-law scan, vector initialization, and every label update.
+/// Directed incidence scans read both CSR directions; undirected scans read
+/// the shared symmetric row once. Zero iterations still validates the graph
+/// and initializes all output labels. This is not a CPU-instruction estimate.
+pub(crate) fn cdlp_estimated_work(
+    n: usize,
+    arcs: usize,
+    max_iter: usize,
+    directed: bool,
+) -> Option<usize> {
+    let incidences = arcs.checked_mul(if directed { 2 } else { 1 })?;
+    let iterations = n.checked_add(incidences)?.checked_mul(max_iter)?;
+    let vectors = if max_iter == 0 || n == 0 { 1 } else { 4 };
+    n.checked_mul(3 + vectors)?
+        .checked_add(arcs)?
+        .checked_add(iterations)?
+        .checked_add(3)
+}
+
+/// Graphalytics §2.3.4/A.5, using dense ordinals only because the projection
+/// orders them by the complete VId. The two label buffers prevent any update
+/// from observing labels written during its own round. Epoch-tagged counters
+/// avoid a map allocation or an O(n) histogram clear for every source vertex.
+pub(crate) fn cdlp<C>(
+    graph: &SnapshotGraphView,
+    max_iter: usize,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
+    let n = graph.node_count();
+    // The registered simple-graph law applies even to a zero-iteration call.
+    for source in 0..n {
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+        let row = graph
+            .neighbors_indices(source)
+            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        for batch in row.chunks(FNX_METER_RUN) {
+            checkpoint
+                .units(batch.len())
+                .map_err(FnxExecutionError::Cancelled)?;
+            if batch.contains(&source) {
+                return Err(FnxExecutionError::SelfLoopRefused);
+            }
+        }
+    }
+    let mut labels = reserve(n)?;
+    while labels.len() < n {
+        let start = labels.len();
+        let len = (n - start).min(FNX_METER_RUN);
+        checkpoint
+            .units(len)
+            .map_err(FnxExecutionError::Cancelled)?;
+        labels.extend(start..start + len);
+    }
+    let mut witness = ComplexityWitness {
+        algorithm: "cdlp_synchronous_minimum_vid".to_owned(),
+        complexity_claim: "O(|V| + |E| + k * (|V| + |E|))".to_owned(),
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 0,
+    };
+    let word = std::mem::size_of::<usize>();
+    if n == 0 || max_iter == 0 {
+        let workspace = labels
+            .capacity()
+            .checked_mul(word)
+            .ok_or(FnxExecutionError::SizeOverflow)?;
+        return Ok((
+            KernelOutput {
+                values: KernelValues::Components(labels),
+                row_count: n,
+                witness,
+            },
+            workspace,
+        ));
+    }
+    let mut next = reserve(n)?;
+    let mut counts: Vec<usize> = reserve(n)?;
+    let mut generations: Vec<usize> = reserve(n)?;
+    for values in [&mut next, &mut counts, &mut generations] {
+        while values.len() < n {
+            let len = (n - values.len()).min(FNX_METER_RUN);
+            checkpoint
+                .units(len)
+                .map_err(FnxExecutionError::Cancelled)?;
+            values.resize(values.len() + len, 0);
+        }
+    }
+    let workspace = [
+        labels.capacity(),
+        next.capacity(),
+        counts.capacity(),
+        generations.capacity(),
+    ]
+    .into_iter()
+    .try_fold(0usize, |bytes, capacity| {
+        bytes.checked_add(capacity.checked_mul(word)?)
+    })
+    .ok_or(FnxExecutionError::SizeOverflow)?;
+    let mut generation = 0usize;
+    for _ in 0..max_iter {
+        for source in 0..n {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            generation = generation
+                .checked_add(1)
+                .ok_or(FnxExecutionError::SizeOverflow)?;
+            let mut best = labels[source];
+            let mut best_count = 0;
+            let outgoing = graph
+                .neighbors_indices(source)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            // In an undirected projection every frequency would be doubled
+            // by scanning incoming too; that cannot change the winning label.
+            let incoming = if graph.is_directed() {
+                graph
+                    .in_neighbors_indices(source)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+            } else {
+                &[]
+            };
+            for row in [outgoing, incoming] {
+                for batch in row.chunks(FNX_METER_RUN) {
+                    checkpoint
+                        .units(batch.len())
+                        .map_err(FnxExecutionError::Cancelled)?;
+                    for &neighbor in batch {
+                        let label = labels[neighbor];
+                        if generations[label] != generation {
+                            generations[label] = generation;
+                            counts[label] = 0;
+                        }
+                        let count = counts[label]
+                            .checked_add(1)
+                            .ok_or(FnxExecutionError::SizeOverflow)?;
+                        counts[label] = count;
+                        if count > best_count || (count == best_count && label < best) {
+                            best = label;
+                            best_count = count;
+                        }
+                    }
+                    witness.edges_scanned = witness
+                        .edges_scanned
+                        .checked_add(batch.len())
+                        .ok_or(FnxExecutionError::SizeOverflow)?;
+                }
+            }
+            next[source] = best;
+            increment(&mut witness.nodes_touched)?;
+        }
+        std::mem::swap(&mut labels, &mut next);
+    }
+    Ok((
+        KernelOutput {
+            values: KernelValues::Components(labels),
+            row_count: n,
+            witness,
+        },
+        workspace,
+    ))
+}
+
 pub(crate) fn run<C>(
     graph: &SnapshotGraphView,
     algorithm: FnxAlgorithm,
@@ -45,6 +206,7 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
         | FnxAlgorithm::Triangles
         | FnxAlgorithm::ClusteringCoefficient
+        | FnxAlgorithm::Cdlp { .. }
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
 }

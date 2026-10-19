@@ -975,6 +975,383 @@ fn strong_components_handle_a_deep_chain_and_large_cycle_without_recursion() {
     assert!(labels(cycle).values().all(|&component| component == VId(0)));
 }
 
+fn cdlp_result(view: &SnapshotGraphView, max_iter: usize) -> FnxResult {
+    FnxCallSpec::cdlp(max_iter)
+        .execute(
+            view,
+            FnxExecutionLimits {
+                max_iterations: max_iter,
+                ..limits()
+            },
+            || Ok::<(), Infallible>(()),
+        )
+        .unwrap()
+}
+
+/// Exact official outputs, not regenerated golden values. Source:
+/// https://github.com/ldbc/ldbc_graphalytics/tree/7b8bde76cf7aab5e90b25ecd4b38829e2f98b292/graphalytics-validation/src/main/resources/validation-graphs
+/// `cdlp/{dir,undir}-{input,output}` use five rounds; the two
+/// `example/example-{directed,undirected}-{input,CDLP}` pairs use two.
+#[test]
+fn cdlp_matches_all_four_pinned_graphalytics_validation_outputs() {
+    for (name, input, direction, max_iter, expected) in [
+        (
+            "cdlp directed",
+            "1 2 3 7\n2 1 3\n3 1 2\n4 5 6\n5 4 6 7\n6 5 7\n7 5 6 8\n8 6",
+            Directedness::Directed,
+            5,
+            [1u128, 1, 1, 5, 4, 4, 4, 4].as_slice(),
+        ),
+        (
+            "cdlp undirected",
+            "1 2 3 7\n2 1 3\n3 1 2\n4 5 6 8\n5 4 6 7 8\n6 4 5 7 8\n7 1 5 6 8\n8 4 5 6 7",
+            Directedness::Undirected,
+            5,
+            [1, 1, 1, 4, 4, 4, 4, 4].as_slice(),
+        ),
+        (
+            "example directed",
+            "1 3 5\n2 4 5 10\n3 1 5 8 10\n4\n5 3 4 8\n6 3 4\n7 4\n8 1\n9 4\n10",
+            Directedness::Directed,
+            2,
+            [1, 2, 3, 4, 1, 1, 2, 3, 2, 1].as_slice(),
+        ),
+        (
+            "example undirected",
+            "2 3 4\n3 2 4 5 8\n4 2 3\n5 3 6 8\n6 5 7 8 9 10\n7 6 9\n8 3 5 6\n9 6 7\n10 6",
+            Directedness::Undirected,
+            2,
+            [2, 3, 2, 2, 6, 5, 2, 5, 5].as_slice(),
+        ),
+    ] {
+        let mut vertices = Vec::new();
+        let mut edges = Vec::new();
+        for line in input.lines() {
+            let mut fields = line
+                .split_whitespace()
+                .map(|field| field.parse::<u128>().unwrap());
+            let source = fields.next().unwrap();
+            vertices.push(VId(source));
+            for target in fields {
+                // The official undirected input lists both directions.
+                if direction == Directedness::Undirected && source > target {
+                    continue;
+                }
+                edges.push(ProjectionEdge {
+                    eid: EId(edges.len() as u128),
+                    source: VId(source),
+                    target: VId(target),
+                    weight: -3.0,
+                });
+            }
+        }
+        assert_eq!(vertices.len(), expected.len());
+        let reference: BTreeMap<_, _> = vertices
+            .iter()
+            .copied()
+            .zip(expected.iter().copied().map(VId))
+            .collect();
+        let view = graph(&vertices, &edges, direction);
+        let output = cdlp_result(&view, max_iter);
+        assert_eq!(
+            output.certificate.witness.nodes_touched,
+            vertices.len() * max_iter
+        );
+        assert_eq!(
+            output.certificate.witness.edges_scanned,
+            2 * view.edge_count() * max_iter
+        );
+        assert_eq!(labels(output), reference, "{name}");
+    }
+}
+
+/// Deliberately slow full-VId oracle: inspect every vertex pair against the
+/// original edge list, then build ordered label histograms from scratch.
+/// It shares neither CSR rows, dense labels nor histogram epochs with CDLP.
+fn cdlp_oracle(
+    vertices: &[VId],
+    edges: &[ProjectionEdge],
+    direction: Directedness,
+    max_iter: usize,
+) -> BTreeMap<VId, VId> {
+    let mut previous: BTreeMap<_, _> = vertices.iter().map(|&vertex| (vertex, vertex)).collect();
+    for _ in 0..max_iter {
+        let mut next = BTreeMap::new();
+        for &vertex in vertices {
+            let mut frequencies: BTreeMap<VId, usize> = BTreeMap::new();
+            for &neighbor in vertices {
+                let forward = edges
+                    .iter()
+                    .any(|edge| edge.source == vertex && edge.target == neighbor);
+                let backward = edges
+                    .iter()
+                    .any(|edge| edge.target == vertex && edge.source == neighbor);
+                let votes = if direction == Directedness::Undirected {
+                    usize::from(forward || backward)
+                } else {
+                    usize::from(forward) + usize::from(backward)
+                };
+                if votes != 0 {
+                    *frequencies.entry(previous[&neighbor]).or_default() += votes;
+                }
+            }
+            let maximum = frequencies.values().copied().max().unwrap_or(0);
+            let label = frequencies
+                .iter()
+                .find_map(|(&label, &count)| (count == maximum).then_some(label))
+                .unwrap_or(previous[&vertex]);
+            next.insert(vertex, label);
+        }
+        previous = next;
+    }
+    previous
+}
+
+#[test]
+fn cdlp_matches_scalar_oracle_on_every_three_vertex_graph_and_iteration() {
+    // Unsorted IDs, including two with the same low bits: a label may never
+    // be truncated to a machine word or compared as its decimal spelling.
+    let vertices = [VId(u128::MAX), VId(7), VId((1u128 << 96) + 7)];
+    let pairs: Vec<_> = (0..3)
+        .flat_map(|a| (0..3).filter(move |&b| a != b).map(move |b| (a, b)))
+        .collect();
+    for mask in 0usize..1 << pairs.len() {
+        let edges: Vec<_> = pairs
+            .iter()
+            .enumerate()
+            .filter(|(bit, _)| mask & (1 << bit) != 0)
+            .map(|(bit, &(a, b))| ProjectionEdge {
+                eid: EId(bit as u128),
+                source: vertices[a],
+                target: vertices[b],
+                weight: [-9.0, 0.0, 41.0][bit % 3],
+            })
+            .collect();
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let view = graph(&vertices, &edges, direction);
+            for max_iter in 0..=5 {
+                let output = cdlp_result(&view, max_iter);
+                assert_eq!(output.certificate.witness.nodes_touched, 3 * max_iter);
+                assert_eq!(
+                    labels(output),
+                    cdlp_oracle(&vertices, &edges, direction, max_iter),
+                    "mask={mask}, direction={direction:?}, max_iter={max_iter}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cdlp_preserves_bipartite_oscillation_and_isolate_labels() {
+    let vertices = [VId(3), VId(17), VId(u128::MAX)];
+    let edges = [ProjectionEdge {
+        eid: EId(0),
+        source: vertices[0],
+        target: vertices[1],
+        weight: 1.0,
+    }];
+    let view = graph(&vertices, &edges, Directedness::Directed);
+    for max_iter in 0..=6 {
+        let expected = if max_iter % 2 == 0 {
+            [vertices[0], vertices[1], vertices[2]]
+        } else {
+            [vertices[1], vertices[0], vertices[2]]
+        };
+        let output = cdlp_result(&view, max_iter);
+        assert_eq!(output.certificate.witness.nodes_touched, 3 * max_iter);
+        assert_eq!(labels(output), vertices.into_iter().zip(expected).collect());
+    }
+    let empty = graph(&[], &[], Directedness::Directed);
+    let output = cdlp_result(&empty, usize::MAX);
+    assert!(output.rows.is_empty());
+    assert_eq!(output.certificate.witness.nodes_touched, 0);
+    assert_eq!(output.certificate.witness.edges_scanned, 0);
+}
+
+#[test]
+fn cdlp_charged_work_covers_admission_initialization_and_every_refusal() {
+    let vertices = [VId(5), VId(9), VId(17), VId(u128::MAX)];
+    let edges: Vec<_> = [(0, 1), (1, 0), (1, 2), (2, 0)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (a, b))| ProjectionEdge {
+            eid: EId(index as u128),
+            source: vertices[a],
+            target: vertices[b],
+            weight: 1.0,
+        })
+        .collect();
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        let view = graph(&vertices, &edges, direction);
+        for max_iter in [0, 3] {
+            let call = FnxCallSpec::cdlp(max_iter);
+            let allowed = FnxExecutionLimits {
+                max_iterations: max_iter,
+                ..limits()
+            };
+            let mut units = 0;
+            let scalar = call
+                .execute(&view, allowed, || {
+                    units += 1;
+                    Ok::<(), usize>(())
+                })
+                .unwrap();
+            assert_eq!(scalar.certificate.estimated_work, units);
+            let mut meter = ComponentMeter::default();
+            assert_eq!(call.execute(&view, allowed, &mut meter).unwrap(), scalar);
+            assert_eq!(meter.observed, units);
+            for stop in 1..=units {
+                let mut meter = ComponentMeter {
+                    stop: Some(stop),
+                    ..ComponentMeter::default()
+                };
+                assert!(matches!(
+                    call.execute(&view, allowed, &mut meter),
+                    Err(FnxExecutionError::Cancelled(at)) if at == stop
+                ));
+                assert_eq!(meter.observed, stop);
+                assert!(meter.stopped);
+            }
+            for (row_limit, work_limit, expected_resource) in [
+                (vertices.len() - 1, units, "result rows"),
+                (vertices.len(), units - 1, "estimated work"),
+            ] {
+                assert!(matches!(
+                    call.execute(&view, FnxExecutionLimits {
+                        max_result_rows: row_limit,
+                        max_estimated_work: work_limit,
+                        ..allowed
+                    }, || Ok::<(), Infallible>(())),
+                    Err(FnxExecutionError::LimitExceeded { resource, .. }) if resource == expected_resource
+                ));
+            }
+            assert_eq!(
+                call.execute(
+                    &view,
+                    FnxExecutionLimits {
+                        max_result_rows: vertices.len(),
+                        max_estimated_work: units,
+                        ..allowed
+                    },
+                    || Ok::<(), Infallible>(())
+                )
+                .unwrap(),
+                scalar,
+            );
+        }
+        assert!(matches!(
+            FnxCallSpec::cdlp(3).execute(&view, limits(), || Ok::<(), Infallible>(())),
+            Err(FnxExecutionError::LimitExceeded {
+                resource: "iterations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            FnxCallSpec::cdlp(usize::MAX).execute(
+                &view,
+                FnxExecutionLimits {
+                    max_iterations: usize::MAX,
+                    max_estimated_work: usize::MAX,
+                    ..limits()
+                },
+                || Ok::<(), Infallible>(())
+            ),
+            Err(FnxExecutionError::SizeOverflow)
+        ));
+    }
+}
+
+#[test]
+fn cdlp_batches_high_degree_rows_and_refuses_retained_self_loops() {
+    let vertices: Vec<_> = (0..FNX_METER_RUN + 5)
+        .map(|v| VId((v as u128) << 64))
+        .collect();
+    let edges: Vec<_> = (1..vertices.len())
+        .map(|target| ProjectionEdge {
+            eid: EId(target as u128),
+            source: vertices[0],
+            target: vertices[target],
+            weight: -1.0,
+        })
+        .collect();
+    let view = graph(&vertices, &edges, Directedness::Directed);
+    let call = FnxCallSpec::cdlp(2);
+    let allowed = FnxExecutionLimits {
+        max_iterations: 2,
+        ..limits()
+    };
+    let mut meter = ComponentMeter::default();
+    let output = call.execute(&view, allowed, &mut meter).unwrap();
+    assert_eq!(meter.largest_run, FNX_METER_RUN);
+    assert!(meter.calls < meter.observed);
+    assert_eq!(meter.observed, output.certificate.estimated_work);
+    assert_eq!(
+        labels(output),
+        vertices
+            .iter()
+            .map(|&v| (v, if v == vertices[0] { v } else { vertices[1] }))
+            .collect()
+    );
+    for stop in [
+        FNX_METER_RUN,
+        FNX_METER_RUN + 1,
+        meter.observed - 1,
+        meter.observed,
+    ] {
+        let mut cancelled = ComponentMeter {
+            stop: Some(stop),
+            ..ComponentMeter::default()
+        };
+        assert!(matches!(
+            call.execute(&view, allowed, &mut cancelled),
+            Err(FnxExecutionError::Cancelled(at)) if at == stop
+        ));
+        assert_eq!(cancelled.observed, stop);
+    }
+    let loop_edge = [ProjectionEdge {
+        eid: EId(0),
+        source: vertices[0],
+        target: vertices[0],
+        weight: -1.0,
+    }];
+    let with_loop = graph(&vertices[..1], &loop_edge, Directedness::Directed);
+    for max_iter in [0, 2] {
+        assert!(matches!(
+            FnxCallSpec::cdlp(max_iter).execute(&with_loop, allowed, || Ok::<(), Infallible>(())),
+            Err(FnxExecutionError::SelfLoopRefused)
+        ));
+    }
+    let dropped = SnapshotGraphView::build(
+        with_loop.binding(),
+        &vertices[..1],
+        &loop_edge,
+        ProjectionSpec {
+            self_loops: SelfLoopPolicy::Drop,
+            ..with_loop.spec()
+        },
+        ProjectionLimits {
+            max_vertices: 1,
+            max_input_edges: 1,
+            max_adjacency_entries: 2,
+            max_workspace_bytes: 1 << 20,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        labels(cdlp_result(&dropped, 2)),
+        BTreeMap::from([(vertices[0], vertices[0])])
+    );
+}
+
 #[test]
 fn only_a_tail_after_the_yield_list_makes_a_call_a_read_pipeline() {
     for text in [
