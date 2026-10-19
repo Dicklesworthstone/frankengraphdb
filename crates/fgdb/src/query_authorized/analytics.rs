@@ -5,17 +5,18 @@
 //! it does not confer authority on raw sealed images or publish a reusable view
 //! that could outlive the single live Warden execution allowance.
 //!
-//! An unrestricted scope's projection is retained in a trusted-host sidecar
-//! keyed by the live snapshot allocation (fgdb-0tbrz), never handed to a token
-//! holder. Every reuse spends the build's exact sequence of live calls again,
-//! so it confers nothing a fresh build would not.
+//! Projections are retained in a trusted-host sidecar keyed by the live
+//! snapshot allocation and exact request (fgdb-0tbrz), never handed to a token
+//! holder. Scoped entries also bind every compiled predicate exactly. Every
+//! reuse spends the build's exact sequence of live calls again under its
+//! current permit, so it confers nothing a fresh build would not.
 
 use super::tape::{Step, Tape};
 use super::{Execution, authorized_with_errors};
 use crate::gql_exec::AdmissionUsage;
 use crate::gql_exec::source::{self, SourceEvent};
 use crate::query::prism::{
-    PROJECTION_CACHE_BYTES, ProjectionCache, ProjectionRequest, push_staged, source_admit,
+    LiveCache, PROJECTION_CACHE_BYTES, ProjectionRequest, push_staged, source_admit,
 };
 use crate::{Database, QueryError, ReadError, Snapshot};
 use asupersync::fs::Vfs;
@@ -34,7 +35,61 @@ type Error = FnxReadError<ReadError, QueryError>;
 
 /// Projections reused across authorized calls on one live snapshot
 /// allocation, each with the live calls its build made (fgdb-0tbrz).
-static REUSE: ProjectionCache<Snapshot, Arc<Tape>> = ProjectionCache::new(PROJECTION_CACHE_BYTES);
+static REUSE: LiveCache<Snapshot, ProjectionKey, (SnapshotGraphView, Arc<Tape>)> =
+    LiveCache::new(PROJECTION_CACHE_BYTES);
+
+/// None retains the existing whole-snapshot key: when no field or incidence
+/// is masked, changing only live allowances does not change the graph or its
+/// replay tape. A scoped key keeps the complete, exact compiled program; no
+/// principal, token spelling or digest stands in for its actual predicates.
+#[derive(PartialEq, Eq)]
+struct ProjectionKey {
+    request: ProjectionRequest,
+    predicates: Option<Vec<u8>>,
+}
+
+impl ProjectionKey {
+    fn new(request: ProjectionRequest, scope: &PlannerPredicates) -> Option<Self> {
+        let predicates = if scope.sees_all_incidence() && scope.sees_all_fields() {
+            None
+        } else {
+            Some(scope.cache_identity()?)
+        };
+        Some(Self {
+            request,
+            predicates,
+        })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.predicates.as_ref().map_or(0, Vec::capacity)
+    }
+}
+
+fn remember_projection<Owner>(
+    cache: &LiveCache<Owner, ProjectionKey, (SnapshotGraphView, Arc<Tape>)>,
+    owner: &Arc<Owner>,
+    key: ProjectionKey,
+    graph: &SnapshotGraphView,
+    tape: Tape,
+) {
+    // Retain the ordinary projection cache's source/spec checks as well as
+    // the scoped key and complete-tape requirement. A failed or truncated
+    // build can never seed a different request's reusable entry.
+    if graph.binding() != key.request.binding
+        || graph.spec() != key.request.projection
+        || !tape.is_complete()
+    {
+        return;
+    }
+    if let Some(bytes) = graph
+        .charged_resident_bytes()
+        .checked_add(tape.bytes())
+        .and_then(|bytes| bytes.checked_add(key.retained_bytes()))
+    {
+        cache.remember(owner, key, (graph.clone(), Arc::new(tape)), bytes);
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -223,9 +278,11 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
             .event(SourceEvent::ScratchEntry)
             .map_err(control_error)
     };
-    // An unrestricted scope sees the whole snapshot, so its projection and
-    // live call sequence depend only on the snapshot and this request. A
-    // scoped capability always builds its own.
+    // The graph and its live call sequence are functions of the exact source
+    // allocation/cut, request and compiled masks. Authentication has already
+    // produced this execution's fresh permit; a cached graph grants nothing.
+    // Different principals may share derived data only when those inputs are
+    // exactly equal, and all live charges still reach their own permits.
     let request = ProjectionRequest {
         binding,
         selection: options.selection,
@@ -233,18 +290,30 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
         projection_limits: options.projection_limits,
         source_limits: options.source_limits,
     };
-    let reusable = scope.sees_all_incidence() && scope.sees_all_fields();
+    let key = ProjectionKey::new(request, scope);
     // Admission and the projection's replay or build are one phase: their
     // signed work is charged in runs.
     let graph = super::work_runs(execution, control_error, || {
         Ok::<_, Error>(
-            match reusable.then(|| REUSE.lookup(snapshot, request)).flatten() {
+            match key.as_ref().and_then(|key| REUSE.lookup(snapshot, key)) {
                 Some((graph, tape)) => {
                     replay(&tape, execution, &observe, &work, options, poll, spend)?;
                     graph
                 }
                 None => {
-                    let tape = reusable.then(|| RefCell::new(Tape::default()));
+                    // A fragmented masked history may not run-length encode
+                    // compactly. Bound temporary replay metadata by both the
+                    // source staging ceiling and this cache's allowance. If
+                    // it cannot fit, the build succeeds without caching.
+                    let tape = key.as_ref().map(|key| {
+                        RefCell::new(Tape::bounded(
+                            options
+                                .source_limits
+                                .max_staging_bytes
+                                .min(PROJECTION_CACHE_BYTES)
+                                .saturating_sub(key.retained_bytes()),
+                        ))
+                    });
                     let graph = build(
                         snapshot,
                         binding,
@@ -254,10 +323,9 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
                         poll,
                         spend,
                     )?;
-                    if let Some(tape) = tape {
+                    if let (Some(key), Some(tape)) = (key, tape) {
                         let tape = tape.into_inner().finish();
-                        let bytes = tape.bytes();
-                        REUSE.remember_graph(snapshot, request, &graph, Arc::new(tape), bytes);
+                        remember_projection(&REUSE, snapshot, key, &graph, tape);
                     }
                     graph
                 }

@@ -28,6 +28,102 @@ pub struct PlannerPredicates {
 }
 
 impl PlannerPredicates {
+    /// Exact identity of this compiled program for a trusted host's derived
+    /// data cache. This is neither a capability nor a live authorization
+    /// decision: every reuse still needs a fresh verified execution permit.
+    /// The bytes are process-local metadata, not a durable or public wire
+    /// format. A cache must also bind its actual source owner and request.
+    ///
+    /// Every field participates, including individual conjunctive label
+    /// clauses, unrestricted versus empty scopes, all 64 bits of each ordinal,
+    /// rights, limits and validity. Lengths delimit every variable-size value;
+    /// equality therefore needs no digest-collision assumption. Construction
+    /// is bounded by the authenticated token's caveat/scope ingress limits.
+    /// A retaining cache can charge the returned vector's actual capacity.
+    /// Size overflow, an oversized compiled program, or failed reservation
+    /// returns None; the host must then use its ordinary uncached path.
+    #[must_use]
+    pub fn cache_identity(&self) -> Option<Vec<u8>> {
+        // Intentionally exhaustive: adding a compiled predicate must force a
+        // decision here instead of silently sharing entries across that axis.
+        let Self {
+            branch,
+            label_clauses,
+            relations,
+            properties,
+            denied_properties,
+            rights,
+            limits,
+            not_before_ms,
+            expires_at_ms,
+        } = self;
+        // Nine fixed words, two one-byte tags, and length-delimited
+        // branch/clauses/scopes. All additions precede allocation. The cap
+        // follows the authenticated maximum caveat count and scope size,
+        // with room for the branch and fixed metadata; no cache request can
+        // create an unbounded temporary key even if compilation later grows.
+        let words = label_clauses.iter().try_fold(9usize, |words, clause| {
+            words.checked_add(1)?.checked_add(clause.len())
+        })?;
+        let scope_words = |len: Option<usize>| match len {
+            Some(len) => len.checked_add(1),
+            None => Some(0),
+        };
+        let relation_words = scope_words(match relations {
+            Scope::All => None,
+            Scope::Only(values) => Some(values.len()),
+        })?;
+        let property_words = scope_words(match properties {
+            Scope::All => None,
+            Scope::Only(values) => Some(values.len()),
+        })?;
+        let needed = words
+            .checked_add(relation_words)?
+            .checked_add(property_words)?
+            .checked_add(denied_properties.len())?
+            .checked_mul(size_of::<u64>())?
+            .checked_add(branch.len())?
+            .checked_add(2)?;
+        const MAX_BYTES: usize = size_of::<u64>()
+            * (crate::MAX_CAVEATS * (crate::MAX_SCOPE_ORDINALS + 1) + 32)
+            + crate::MAX_NAME_BYTES;
+        if needed > MAX_BYTES {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(needed).ok()?;
+        let append_word = |bytes: &mut Vec<u8>, word: u64| {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        };
+        append_word(&mut bytes, branch.len() as u64);
+        bytes.extend_from_slice(branch.as_bytes());
+        append_word(&mut bytes, label_clauses.len() as u64);
+        for clause in label_clauses {
+            append_word(&mut bytes, clause.len() as u64);
+            for label in clause {
+                append_word(&mut bytes, label.0);
+            }
+        }
+        append_scope_identity(&mut bytes, relations, |id| id.0);
+        append_scope_identity(&mut bytes, properties, |id| id.0);
+        append_word(&mut bytes, denied_properties.len() as u64);
+        for property in denied_properties {
+            append_word(&mut bytes, property.0);
+        }
+        append_word(&mut bytes, rights.bits());
+        for word in [
+            limits.max_nodes,
+            limits.max_work,
+            limits.max_rows,
+            *not_before_ms,
+            *expires_at_ms,
+        ] {
+            append_word(&mut bytes, word);
+        }
+        debug_assert_eq!(bytes.len(), needed);
+        Some(bytes)
+    }
+
     /// Compare authenticated effective predicates, never token spelling or
     /// public bindings. Every axis must narrow independently; an empty visible
     /// population does not excuse widened metadata, rights, time or budgets.
@@ -168,6 +264,128 @@ impl PlannerPredicates {
             return Err(Error::Expired);
         }
         Ok(())
+    }
+}
+
+fn append_scope_identity<T: Ord>(
+    bytes: &mut Vec<u8>,
+    scope: &Scope<T>,
+    ordinal: impl Fn(&T) -> u64,
+) {
+    match scope {
+        Scope::All => bytes.push(0),
+        Scope::Only(values) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&(values.len() as u64).to_le_bytes());
+            for value in values {
+                bytes.extend_from_slice(&ordinal(value).to_le_bytes());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cache_identity_tests {
+    use super::*;
+
+    fn program() -> PlannerPredicates {
+        PlannerPredicates {
+            branch: "main".into(),
+            label_clauses: vec![[LabelId(1), LabelId(2)].into()],
+            relations: Scope::Only([RelationId(3)].into()),
+            properties: Scope::Only([PropertyKeyId(4)].into()),
+            denied_properties: [PropertyKeyId(5)].into(),
+            rights: Rights::Read,
+            limits: QueryLimits {
+                max_nodes: 6,
+                max_work: 7,
+                max_rows: 8,
+            },
+            not_before_ms: 9,
+            expires_at_ms: 10,
+        }
+    }
+
+    #[test]
+    fn cache_identity_distinguishes_every_compiled_axis_and_full_width_ordinal() {
+        let base = program();
+        let variants: [fn(&mut PlannerPredicates); 17] = [
+            |p| p.branch.push('\0'),
+            |p| p.label_clauses.clear(),
+            |p| p.label_clauses.push(BTreeSet::new()),
+            |p| p.label_clauses[0] = [LabelId(1), LabelId(u64::MAX)].into(),
+            |p| p.relations = Scope::All,
+            |p| p.relations = Scope::Only(BTreeSet::new()),
+            |p| p.relations = Scope::Only([RelationId(3 + (1 << 32))].into()),
+            |p| p.properties = Scope::All,
+            |p| p.properties = Scope::Only(BTreeSet::new()),
+            |p| p.properties = Scope::Only([PropertyKeyId(4 + (1 << 32))].into()),
+            |p| p.denied_properties = [PropertyKeyId(u64::MAX)].into(),
+            |p| p.rights = Rights::ReadWrite,
+            |p| p.limits.max_nodes += 1,
+            |p| p.limits.max_work += 1,
+            |p| p.limits.max_rows += 1,
+            |p| p.not_before_ms += 1,
+            |p| p.expires_at_ms += 1,
+        ];
+        let mut programs = vec![base.clone()];
+        for change in variants {
+            let mut next = base.clone();
+            change(&mut next);
+            programs.push(next);
+        }
+        // Distinct clause partitions with identical flattened ordinals may
+        // admit different multi-label vertices. Empty All/Only scopes above
+        // similarly have opposite meanings despite both holding zero IDs.
+        for clauses in [
+            vec![[LabelId(1), LabelId(2)].into(), [LabelId(3)].into()],
+            vec![[LabelId(1)].into(), [LabelId(2), LabelId(3)].into()],
+            vec![[LabelId(1), LabelId(2), LabelId(3)].into()],
+        ] {
+            let mut next = base.clone();
+            next.label_clauses = clauses;
+            programs.push(next);
+        }
+        for left in &programs {
+            let identity = left.cache_identity().expect("bounded identity");
+            assert_eq!(identity, left.clone().cache_identity().unwrap());
+            for right in &programs {
+                assert_eq!(
+                    identity == right.cache_identity().unwrap(),
+                    left == right,
+                    "identity collision: {left:?} / {right:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cache_identity_size_is_exactly_delimited_and_bounded_before_allocation() {
+        let mut value = program();
+        // Authenticated programs cannot exceed the aggregate caveat ordinal
+        // bound. Exercise it directly, independently of token spelling.
+        value.label_clauses = (0..crate::MAX_CAVEATS)
+            .map(|clause| {
+                (0..crate::MAX_SCOPE_ORDINALS)
+                    .map(|id| LabelId((clause as u64) << 32 | id as u64))
+                    .collect()
+            })
+            .collect();
+        value.relations = Scope::All;
+        value.properties = Scope::All;
+        value.denied_properties.clear();
+        value.branch = "x".repeat(crate::MAX_NAME_BYTES);
+        let identity = value.cache_identity().unwrap();
+        let expected = 9 * 8
+            + 2
+            + value.branch.len()
+            + crate::MAX_CAVEATS * (crate::MAX_SCOPE_ORDINALS + 1) * 8;
+        assert_eq!(identity.len(), expected);
+        assert!(identity.capacity() >= identity.len());
+        // Simulates a future compiler admitting a shape beyond today's
+        // ingress cap: optional reuse declines; no partial identity escapes.
+        value.branch.push_str(&"x".repeat(1 << 20));
+        assert!(value.cache_identity().is_none());
     }
 }
 

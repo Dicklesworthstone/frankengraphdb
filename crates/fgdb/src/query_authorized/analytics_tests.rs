@@ -1,7 +1,8 @@
 //! fgdb-0tbrz: a reused authorized projection is the build it replaces. The
 //! build's live calls replay in order, so rows, every signed refusal point and
 //! every cancellation ordinal agree with a fresh build. Scoped capabilities
-//! never reuse, and a commit never serves the previous generation's graph.
+//! reuse only their exact compiled predicates, and a commit never serves the
+//! previous generation's graph.
 
 use super::*;
 use crate::{DatabaseKeys, MemVfs, WriteBatch};
@@ -103,6 +104,99 @@ fn options(direction: Directedness) -> FnxReadOptions {
             max_result_rows: 1_000,
             max_estimated_work: 1 << 26,
         },
+    }
+}
+
+#[test]
+fn scoped_entries_charge_key_capacity_and_keep_weak_exact_source_ownership() {
+    let options = options(Directedness::Directed);
+    let request = ProjectionRequest {
+        binding: SnapshotBinding {
+            root: fgdb_types::ObjectId([71; 32]),
+            as_of: CommitSeq(1),
+        },
+        selection: options.selection,
+        projection: options.projection,
+        projection_limits: options.projection_limits,
+        source_limits: options.source_limits,
+    };
+    let graph = SnapshotGraphView::build(
+        request.binding,
+        &[VId(1), VId(2)],
+        &[ProjectionEdge {
+            eid: EId(1),
+            source: VId(1),
+            target: VId(2),
+            weight: 1.0,
+        }],
+        request.projection,
+        request.projection_limits,
+    )
+    .unwrap();
+    let key = || {
+        let mut predicates = Vec::with_capacity(512);
+        predicates.extend_from_slice(&[1, 2, 3]);
+        ProjectionKey {
+            request,
+            predicates: Some(predicates),
+        }
+    };
+    let tape = || {
+        let mut tape = Tape::bounded(512);
+        tape.poll();
+        tape.emit(Some(Step::Edge));
+        tape.finish()
+    };
+    let bytes = graph.charged_resident_bytes() + tape().bytes() + key().retained_bytes();
+    for allowance in [bytes - 1, bytes] {
+        let cache = LiveCache::new(allowance);
+        let owner = Arc::new(());
+        remember_projection(&cache, &owner, key(), &graph, tape());
+        assert_eq!(cache.lookup(&owner, &key()).is_some(), allowance == bytes);
+    }
+    let cache = LiveCache::new(bytes);
+    let owner = Arc::new(());
+    let weak = Arc::downgrade(&owner);
+    remember_projection(&cache, &owner, key(), &graph, tape());
+    let same = key();
+    let stored = cache.lookup(&owner, &same).unwrap();
+    assert!(stored.0.shares_cache_with(&graph));
+    let mut changed = key();
+    changed.predicates = Some(vec![1, 2, 4]);
+    assert!(cache.lookup(&owner, &changed).is_none());
+    changed.predicates = None;
+    assert!(cache.lookup(&owner, &changed).is_none());
+    changed = key();
+    changed.request.binding.as_of = CommitSeq(0);
+    assert!(cache.lookup(&owner, &changed).is_none());
+    assert!(cache.lookup(&Arc::new(()), &same).is_none());
+    // A different live key cannot displace or undercharge the retained key.
+    let mut changed = key();
+    changed.predicates = Some(vec![9]);
+    remember_projection(&cache, &owner, changed, &graph, tape());
+    assert!(cache.lookup(&owner, &same).is_some());
+    assert_eq!(Arc::strong_count(&owner), 1);
+    drop(owner);
+    assert!(weak.upgrade().is_none());
+    let replacement = Arc::new(());
+    assert!(cache.lookup(&replacement, &same).is_none());
+    remember_projection(&cache, &replacement, key(), &graph, tape());
+    assert!(cache.lookup(&replacement, &same).is_some());
+
+    for invalid in [0, 1, 2] {
+        let cache = LiveCache::new(bytes);
+        let mut candidate = key();
+        let mut replay = tape();
+        match invalid {
+            0 => replay = Tape::bounded(0).finish(),
+            1 => candidate.request.binding.root = fgdb_types::ObjectId([72; 32]),
+            _ => candidate.request.projection.directedness = Directedness::Reversed,
+        }
+        remember_projection(&cache, &replacement, candidate, &graph, replay);
+        assert!(cache.lookup(&replacement, &same).is_none());
+        // A rejected entry has consumed no cache allowance.
+        remember_projection(&cache, &replacement, key(), &graph, tape());
+        assert!(cache.lookup(&replacement, &same).is_some());
     }
 }
 
@@ -349,39 +443,45 @@ fn a_reused_projection_spends_exactly_what_its_build_spent() {
     let ((), report) = run_async_under_lab(0x0b7b_0003, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
-        let db = database(&c.commit()).await;
-        let token = issuer().issue_at(&open(), 100).unwrap();
-        for (text, direction) in CALLS {
-            let options = options(direction);
-            let before = builds();
-            let cold = footprint(&db, &cx, &token, text, options);
-            assert_eq!(builds(), before + 1, "{text}: the first call builds");
-            assert!(cold.0.starts_with("Ok("), "{cold:?}");
-            let bulk = BULK_RECORDS.with(Cell::get);
-            let warm = footprint(&db, &cx, &token, text, options);
-            assert_eq!(builds(), before + 1, "{text}: the second call reuses");
-            assert_eq!(warm, cold, "{text}");
-            // The hit replays its admitted records in bulk where the meters
-            // cannot refuse, and still spends exactly what the build spent.
-            assert!(
-                BULK_RECORDS.with(Cell::get) > bulk,
-                "{text}: a wide-allowance hit replays its records in bulk"
-            );
-            for stop in 1..=cold.1 {
-                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
-                assert!(
-                    matches!(
-                        call(&db, &controlled, &token, text, options, || 100),
-                        Err(FnxReadError::Cancelled(QueryError::Pattern(
-                            fgdb_gql::GqlQueryError::Interrupted(_)
-                        )))
-                    ),
-                    "{text} stop {stop}"
-                );
-                assert_eq!(probe.calls(), stop, "{text} stop {stop}");
+        for scoped in [false, true] {
+            let db = database(&c.commit()).await;
+            let mut grant = open();
+            if scoped {
+                grant.relations = Scope::only([RelationId(1)]);
             }
-            assert_eq!(builds(), before + 1, "{text}: interrupted hits still reuse");
+            let token = issuer().issue_at(&grant, 100).unwrap();
+            for (text, direction) in CALLS {
+                let options = options(direction);
+                let before = builds();
+                let cold = footprint(&db, &cx, &token, text, options);
+                assert_eq!(builds(), before + 1, "{text}: the first call builds");
+                assert!(cold.0.starts_with("Ok("), "{cold:?}");
+                let bulk = BULK_RECORDS.with(Cell::get);
+                let warm = footprint(&db, &cx, &token, text, options);
+                assert_eq!(builds(), before + 1, "{text}: the second call reuses");
+                assert_eq!(warm, cold, "{text}");
+                // The hit replays its admitted records in bulk where the meters
+                // cannot refuse, and still spends exactly what the build spent.
+                assert!(
+                    BULK_RECORDS.with(Cell::get) > bulk,
+                    "{text}: a wide-allowance hit replays its records in bulk"
+                );
+                for stop in 1..=cold.1 {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                    let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                    assert!(
+                        matches!(
+                            call(&db, &controlled, &token, text, options, || 100),
+                            Err(FnxReadError::Cancelled(QueryError::Pattern(
+                                fgdb_gql::GqlQueryError::Interrupted(_)
+                            )))
+                        ),
+                        "{text} stop {stop}"
+                    );
+                    assert_eq!(probe.calls(), stop, "{text} stop {stop}");
+                }
+                assert_eq!(builds(), before + 1, "{text}: interrupted hits still reuse");
+            }
         }
         assert_eq!(c.outstanding_obligations(), 0);
     });
@@ -845,18 +945,16 @@ fn kernel_live_polls_cancel_without_changing_any_work_accounting() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-/// A capability with any label, relation or property scope builds its own
-/// projection every time: it never sees the unrestricted projection cached
-/// before it, and leaves nothing for an unrestricted caller. A database that
-/// never cached anything is the oracle for its rows.
+/// Each label, relation or property scope reuses its own exact projection,
+/// never the unrestricted projection cached before it. A fresh database is
+/// the independent source/build oracle; a scoped entry cannot serve an open
+/// caller even when both requests have the same snapshot root bytes.
 #[test]
-fn scoped_capabilities_never_reuse_or_populate() {
+fn scoped_capabilities_reuse_only_their_exact_compiled_projection() {
     let _serial = serial();
     let ((), report) = run_async_under_lab(0x0b7b_0005, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
-        let db = database(&c.commit()).await;
-        let pristine = database(&c.commit()).await;
         let open = issuer().issue_at(&open(), 100).unwrap();
         let calls = [
             CALLS[1],
@@ -865,43 +963,158 @@ fn scoped_capabilities_never_reuse_or_populate() {
                 Directedness::Directed,
             ),
         ];
-        let unrestricted: Vec<_> = calls
-            .iter()
-            .map(|&(text, direction)| {
-                format!(
-                    "{:?}",
-                    call(&db, &cx, &open, text, options(direction), || 100)
-                )
-            })
-            .collect();
         for restriction in [
             Restriction::Labels(Scope::only([LabelId(2)])),
             Restriction::Relations(Scope::only([RelationId(2)])),
             Restriction::Properties(Scope::only([PropertyKeyId(5)])),
             Restriction::DenyProperties([W].into()),
         ] {
+            // At most eight live entries: every scope/call pair has room,
+            // and dropping these owners releases the previous pair's slots.
+            let db = database(&c.commit()).await;
+            let pristine = database(&c.commit()).await;
             let token = open.attenuate(restriction.clone()).unwrap();
             let mut masked = false;
-            for (&(text, direction), unrestricted) in calls.iter().zip(&unrestricted) {
+            for (text, direction) in calls {
                 let options = options(direction);
+                let unrestricted = footprint(&db, &cx, &open, text, options);
                 let before = builds();
-                let first = format!("{:?}", call(&db, &cx, &token, text, options, || 100));
+                let first = footprint(&db, &cx, &token, text, options);
+                assert_eq!(builds(), before + 1, "a distinct mask must build");
                 assert_eq!(
-                    format!("{:?}", call(&pristine, &cx, &token, text, options, || 100)),
+                    footprint(&pristine, &cx, &token, text, options),
                     first,
                     "{restriction:?} saw another scope's projection: {text}"
                 );
-                let second = format!("{:?}", call(&db, &cx, &token, text, options, || 100));
+                let second = footprint(&db, &cx, &token, text, options);
                 assert_eq!(first, second);
-                assert_eq!(builds(), before + 3, "{restriction:?} reused: {text}");
-                masked |= *unrestricted != first;
+                assert_eq!(builds(), before + 2, "{restriction:?} must reuse: {text}");
+                masked |= unrestricted.0 != first.0;
+                let before = builds();
+                assert_eq!(
+                    footprint(&pristine, &cx, &open, text, options),
+                    unrestricted
+                );
+                assert_eq!(builds(), before + 1, "a scoped entry served an open caller");
             }
             assert!(masked, "{restriction:?} must change some rows");
         }
-        let (text, direction) = calls[1];
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn changed_scoped_permissions_build_their_own_mask_before_reuse() {
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x0b7b_000d, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let authority = issuer();
+        let mut grant = open();
+        grant.labels = Scope::only([LabelId(1)]);
+        let original = authority.issue_at(&grant, 100).unwrap();
+        let text = "CALL fnx.single_source_dijkstra_path_length(1,NULL,true) YIELD vertex,distance";
+        let options = options(Directedness::Directed);
+        for restriction in [
+            Restriction::Labels(Scope::only([LabelId(2)])),
+            Restriction::Relations(Scope::only([RelationId(2)])),
+            Restriction::DenyProperties([W].into()),
+        ] {
+            let db = database(&c.commit()).await;
+            let cold = database(&c.commit()).await;
+            let before = footprint(&db, &cx, &original, text, options);
+            let changed = original.attenuate(restriction.clone()).unwrap();
+            let builds_before = builds();
+            let first = footprint(&db, &cx, &changed, text, options);
+            assert_eq!(builds(), builds_before + 1, "{restriction:?}");
+            let expected = footprint(&cold, &cx, &changed, text, options);
+            assert_eq!(first, expected, "{restriction:?}");
+            let built = builds();
+            assert_eq!(footprint(&db, &cx, &changed, text, options), expected);
+            assert_eq!(
+                builds(),
+                built,
+                "the changed scope must reuse its own entry"
+            );
+            assert_eq!(footprint(&db, &cx, &original, text, options), before);
+            assert_eq!(
+                builds(),
+                built,
+                "attenuation must not replace the earlier key"
+            );
+            assert_ne!(first.0, before.0, "the fixture must expose {restriction:?}");
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn scoped_hits_preserve_fresh_expiry_retirement_and_rights_checks() {
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x0b7b_000e, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let mut grant = open();
+        grant.labels = Scope::only([LabelId(1)]);
+        let authority = issuer();
+        let token = authority.issue_at(&grant, 100).unwrap();
+        let (text, direction) = CALLS[1];
+        let options = options(direction);
+        call(&db, &cx, &token, text, options, || 100).unwrap();
         let before = builds();
-        call(&pristine, &cx, &open, text, options(direction), || 100).unwrap();
-        assert_eq!(builds(), before + 1, "a scoped build populated the cache");
+        let (_, _, boundaries) = footprint(&db, &cx, &token, text, options);
+        assert_eq!(builds(), before, "the control must be a scoped cache hit");
+        assert!(boundaries > 2);
+        for retirement in [false, true] {
+            for boundary in 1..=boundaries {
+                let authority = issuer();
+                let token = authority.issue_at(&grant, 100).unwrap();
+                let calls = Cell::new(0);
+                let result = db.call_fnx_authorized(
+                    &cx,
+                    &authority,
+                    &token,
+                    BRANCH,
+                    text,
+                    &FnxParameters::new(),
+                    options,
+                    || {
+                        calls.set(calls.get() + 1);
+                        if calls.get() >= boundary {
+                            if retirement {
+                                authority.retire();
+                            } else {
+                                return grant.expires_at_ms;
+                            }
+                        }
+                        100
+                    },
+                );
+                let expected = if retirement {
+                    fgdb_warden::Error::AuthorityRetired
+                } else {
+                    fgdb_warden::Error::Expired
+                };
+                assert!(
+                    matches!(result, Err(Error::Cancelled(QueryError::Authorization(error))) if error == expected),
+                    "boundary {boundary}, retirement {retirement}: {result:?}"
+                );
+                assert_eq!(builds(), before, "a stopped hit must not rebuild");
+            }
+        }
+        let denied = token
+            .attenuate(Restriction::Rights(fgdb_warden::Rights::None))
+            .unwrap();
+        assert!(matches!(
+            call(&db, &cx, &denied, text, options, || 100),
+            Err(Error::Cancelled(QueryError::Authorization(
+                fgdb_warden::Error::PermissionDenied
+            )))
+        ));
+        assert_eq!(builds(), before);
         assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -1039,80 +1252,91 @@ fn a_reused_projection_meets_the_caller_meter_where_its_build_did() {
             db.write(&c.commit(), simple).await.unwrap();
             db
         };
-        let warm = composed().await;
-        let token = issuer().issue_at(&open(), 100).unwrap();
-        let params = GqlParameters::new();
-        let symbols = |_: GraphSymbolKind, _: &str| None;
-        let read = |db: &Database<MemVfs>, text: &str, policy: GqlQueryPolicy| {
-            format!(
-                "{:?}",
-                db.query_authorized(
-                    &cx,
-                    &issuer(),
-                    &token,
-                    BRANCH,
-                    text,
-                    &params,
-                    symbols,
-                    policy,
-                    || 100
+        for scoped in [false, true] {
+            let warm = composed().await;
+            let mut grant = open();
+            if scoped {
+                grant.labels = Scope::only([LabelId(1)]);
+                grant.properties = Scope::only([W]);
+            }
+            let token = issuer().issue_at(&grant, 100).unwrap();
+            let params = GqlParameters::new();
+            let symbols = |_: GraphSymbolKind, _: &str| None;
+            let read = |db: &Database<MemVfs>, text: &str, policy: GqlQueryPolicy| {
+                format!(
+                    "{:?}",
+                    db.query_authorized(
+                        &cx,
+                        &issuer(),
+                        &token,
+                        BRANCH,
+                        text,
+                        &params,
+                        symbols,
+                        policy,
+                        || 100
+                    )
                 )
-            )
-        };
-        let wide = [100_000, 1_000, 1_000_000, 1_000_000];
-        let policy =
-            |limits: [u64; 4]| GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]);
-        for text in [
-            "CALL fnx.pagerank() YIELD vertex, score RETURN vertex, score \
+            };
+            let wide = [100_000, 1_000, 1_000_000, 1_000_000];
+            let policy =
+                |limits: [u64; 4]| GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]);
+            for text in [
+                "CALL fnx.pagerank() YIELD vertex, score RETURN vertex, score \
              ORDER BY score DESC, vertex LIMIT 3",
-            "CALL fnx.weakly_connected_components() YIELD vertex, component \
+                "CALL fnx.weakly_connected_components() YIELD vertex, component \
              RETURN count(DISTINCT component) AS components",
-        ] {
-            assert!(read(&warm, text, policy(wide)).starts_with("Ok("), "{text}");
-            let bulk = BULK_RECORDS.with(Cell::get);
-            assert!(read(&warm, text, policy(wide)).starts_with("Ok("), "{text}");
-            assert!(
-                BULK_RECORDS.with(Cell::get) > bulk,
-                "{text}: a wide-allowance hit replays its records in bulk"
-            );
-            // Snapshot records, evaluator work and evaluator scratch.
-            for dimension in [0, 2, 3] {
-                let at = |n: u64| {
-                    let mut limits = wide;
-                    limits[dimension] = n;
-                    policy(limits)
-                };
-                let (mut low, mut high) = (0, wide[dimension]);
-                while low < high {
-                    let middle = low + (high - low) / 2;
-                    // A fresh database each time: a successful read under a
-                    // new record or scratch allowance keeps a graph, and the
-                    // sidecar's eight entries never displace one.
-                    if read(&composed().await, text, at(middle)).starts_with("Ok(") {
-                        high = middle;
-                    } else {
-                        low = middle + 1;
+            ] {
+                assert!(read(&warm, text, policy(wide)).starts_with("Ok("), "{text}");
+                let bulk = BULK_RECORDS.with(Cell::get);
+                assert!(read(&warm, text, policy(wide)).starts_with("Ok("), "{text}");
+                assert!(
+                    BULK_RECORDS.with(Cell::get) > bulk,
+                    "{text}: a wide-allowance hit replays its records in bulk"
+                );
+                // Snapshot records, evaluator work and evaluator scratch.
+                for dimension in [0, 2, 3] {
+                    let at = |n: u64| {
+                        let mut limits = wide;
+                        limits[dimension] = n;
+                        policy(limits)
+                    };
+                    let (mut low, mut high) = (0, wide[dimension]);
+                    while low < high {
+                        let middle = low + (high - low) / 2;
+                        // A fresh database each time: a successful read under a
+                        // new record or scratch allowance keeps a graph, and the
+                        // sidecar's eight entries never displace one.
+                        if read(&composed().await, text, at(middle)).starts_with("Ok(") {
+                            high = middle;
+                        } else {
+                            low = middle + 1;
+                        }
                     }
-                }
-                assert!(low > 0, "{text}: dimension {dimension}");
-                for n in [low - 1, low] {
-                    let cold = read(&composed().await, text, at(n));
-                    let built = builds();
-                    let first = read(&warm, text, at(n));
-                    if dimension == 2 {
-                        assert_eq!(builds(), built, "{text}: work at {n} reuses the wide graph");
+                    assert!(low > 0, "{text}: dimension {dimension}");
+                    for n in [low - 1, low] {
+                        let cold = read(&composed().await, text, at(n));
+                        let built = builds();
+                        let first = read(&warm, text, at(n));
+                        if dimension == 2 {
+                            assert_eq!(
+                                builds(),
+                                built,
+                                "{text}: work at {n} reuses the wide graph"
+                            );
+                        }
+                        let built = builds();
+                        let again = read(&warm, text, at(n));
+                        if again.starts_with("Ok(") {
+                            assert_eq!(
+                                builds(),
+                                built,
+                                "{text}: dimension {dimension} at {n} reuses"
+                            );
+                        }
+                        assert_eq!(first, cold, "{text}: dimension {dimension} at {n}");
+                        assert_eq!(again, cold, "{text}: dimension {dimension} at {n}");
                     }
-                    let built = builds();
-                    let again = read(&warm, text, at(n));
-                    if again.starts_with("Ok(") {
-                        assert_eq!(
-                            builds(),
-                            built,
-                            "{text}: dimension {dimension} at {n} reuses"
-                        );
-                    }
-                    assert_eq!(first, cold, "{text}: dimension {dimension} at {n}");
-                    assert_eq!(again, cold, "{text}: dimension {dimension} at {n}");
                 }
             }
         }

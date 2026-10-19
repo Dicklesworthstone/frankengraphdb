@@ -19,6 +19,7 @@ use super::{
     EmbeddedReadView, Error, FnxSelection, FnxSourceLimits, ProjectionLimits, ProjectionSpec,
     QueryCx, SnapshotBinding, SnapshotGraphView,
 };
+use std::borrow::Borrow;
 use std::sync::{Arc, Mutex, Weak};
 
 const CACHE_ENTRIES: usize = 8;
@@ -81,14 +82,14 @@ impl<Owner, Key: PartialEq, Value: Clone> LiveCache<Owner, Key, Value> {
         }
     }
 
-    pub(crate) fn lookup(&self, owner: &Arc<Owner>, key: Key) -> Option<Value> {
+    pub(crate) fn lookup(&self, owner: &Arc<Owner>, key: impl Borrow<Key>) -> Option<Value> {
         // Observing a cache must not wait behind another query or escape the
         // caller's cancellation contract through a blocking cache mutex.
         let mut entries = self.entries.try_lock().ok()?;
         Self::prune(&mut entries);
         let owner = Arc::downgrade(owner);
         entries.iter().flatten().find_map(|entry| {
-            (entry.owner.ptr_eq(&owner) && entry.key == key).then(|| entry.value.clone())
+            (entry.owner.ptr_eq(&owner) && &entry.key == key.borrow()).then(|| entry.value.clone())
         })
     }
 
