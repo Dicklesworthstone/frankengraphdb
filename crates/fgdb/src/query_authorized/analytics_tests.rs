@@ -456,11 +456,31 @@ fn kernel_runs_admit_and_refuse_at_the_per_unit_threshold() {
         let cx = c.query();
         let db = database(&c.commit()).await;
         let token = issuer().issue_at(&open(), 100).unwrap();
-        for (text, direction) in CALLS.into_iter().chain([(
-            "CALL fnx.weakly_connected_components() YIELD vertex,component",
-            Directedness::Directed,
-        )]) {
-            let options = options(direction);
+        for (text, direction, self_loops) in CALLS
+            .into_iter()
+            .map(|(text, direction)| (text, direction, SelfLoopPolicy::Keep))
+            .chain([
+                (
+                    "CALL fnx.weakly_connected_components() YIELD vertex,component",
+                    Directedness::Directed,
+                    SelfLoopPolicy::Keep,
+                ),
+                (
+                    "CALL fnx.degree_centrality() YIELD vertex,score",
+                    Directedness::Undirected,
+                    SelfLoopPolicy::Drop,
+                ),
+                (
+                    "CALL fnx.core_number() YIELD vertex,core",
+                    Directedness::Undirected,
+                    SelfLoopPolicy::Drop,
+                ),
+            ])
+        {
+            let mut options = options(direction);
+            // The common database includes a kept self-loop. These simple
+            // undirected procedures must explicitly request its projection drop.
+            options.projection.self_loops = self_loops;
             let threshold = |runs: bool| {
                 super::super::WORK_RUNS.with(|cell| cell.set(runs));
                 let attenuated = |value| token.attenuate(Restriction::MaxWork(value)).unwrap();

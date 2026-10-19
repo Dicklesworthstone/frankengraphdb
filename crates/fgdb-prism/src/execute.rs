@@ -880,10 +880,11 @@ fn pagerank<C>(
 }
 
 impl FnxCallSpec {
-    /// Execute a bound in-core call with cancellation inside every graph pass,
-    /// not merely before/after an uninterruptible foundation call. Kernel
-    /// workspace depends on the kernel; weighted PageRank retains O(n+m)
-    /// scratch while borrowing the projection's adjacency.
+    /// Execute a bound in-core call. Native kernels check live cancellation
+    /// within graph passes; catalog entries still delegated to fnx observe
+    /// it before and after the foundation computation. Kernel workspace
+    /// depends on the kernel; weighted PageRank retains O(n+m) scratch while
+    /// borrowing the projection's adjacency.
     /// The callback may cancel but this synchronous API does not provide an
     /// asynchronous bulkhead, a deadline guarantee or external-memory spill.
     pub fn execute<C>(
@@ -966,9 +967,9 @@ impl FnxCallSpec {
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 crate::clustering::workspace_bytes::<C>(n, graph.edge_count())?
             }
-            FnxAlgorithm::Foundation(_) => {
-                crate::foundation::copy_bytes(n, arcs).ok_or(FnxExecutionError::SizeOverflow)?
-            }
+            // Native catalog kernels return their reserved vector peak;
+            // delegated entries retain the explicit graph-copy estimate.
+            FnxAlgorithm::Foundation(_) => 0,
             _ => {
                 let bytes_per_vertex = match algorithm {
                     FnxAlgorithm::SingleSourceShortestPathLength { .. } => {
@@ -1021,7 +1022,10 @@ impl FnxCallSpec {
                 }
             }
             FnxAlgorithm::Foundation(algorithm) => {
-                crate::foundation::run(graph, algorithm, &mut || checkpoint.unit())?
+                let (output, workspace_bytes) =
+                    crate::foundation::run(graph, algorithm, arcs, &mut checkpoint)?;
+                kernel_workspace_bytes = workspace_bytes;
+                output
             }
             _ => crate::traversal::run(graph, algorithm, limits.max_result_rows, &mut checkpoint)?,
         };
@@ -1142,6 +1146,7 @@ fn kernel_source_digest() -> Digest {
         hash_text(&mut hash, include_str!("shortest_path.rs"));
         hash_text(&mut hash, include_str!("clustering.rs"));
         hash_text(&mut hash, include_str!("foundation.rs"));
+        hash_text(&mut hash, include_str!("foundation/native.rs"));
         hash.finalize()
     })
 }
