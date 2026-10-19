@@ -1,9 +1,11 @@
-//! Graph-only retrieval with demand-driven vertex and incidence admission.
+//! Retrieval with demand-driven vertex and incidence admission.
 //! No complete vertex directory, property projection or search index is built.
+//! Graph-only reads need no index. Privileged mixed reads require a maintained
+//! exact generation at the same pinned cut; they never rebuild on a miss.
 //! Native historical indexes supply the same Beacon BFS and exact fusion used
 //! by other hosts. This is an explicit physical profile, never a fallback.
 
-use super::{Cancel, Meter, Options, Scan};
+use super::{BeaconQueryIndexes, Cancel, Meter, Options, Scan, SharedWork};
 use crate::gql_exec::source::{self, SourceEvent};
 use crate::{Database, EmbeddedReadView, ReadError, Snapshot, VertexRow};
 use asupersync::fs::Vfs;
@@ -11,8 +13,8 @@ use fgdb_beacon::expansion::{
     ExpansionDirection, ExpansionMembership, ExpansionNeighbors, ExpansionSpec,
     expand_from_membership_filtered,
 };
-use fgdb_beacon::read::ReadError as Error;
-use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, WorkControl};
+use fgdb_beacon::read::{ReadError as Error, Search};
+use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, IndexSnapshot, WorkControl};
 use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_gql::{GlaExecutionEvent, algebra::GlaDirection};
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -254,13 +256,121 @@ pub(crate) fn evaluate_filtered(
 ) -> Result<(Vec<GraphHybridHit>, u64), BeaconError> {
     work.borrow_mut().charge(1)?;
     options.validate_graph_only(query)?;
+    evaluate_prepared(
+        snapshot,
+        at,
+        options,
+        query,
+        expansion,
+        None,
+        work,
+        scan,
+        admit,
+        label_allowed,
+        relation_allowed,
+        admit_edge,
+        eligible,
+    )
+}
+
+/// Mixed demand reads have no query-time corpus preparation to fall back to.
+/// Only the privileged owner of these immutable query pins may join their
+/// exact corpus to native membership at the same cut. Capability-scoped and
+/// staged hosts retain the graph-only entry point above.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_privileged(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    options: &Options,
+    query: GraphHybridQuery<'_>,
+    expansion: ExpansionSpec<'_, RelationId>,
+    work: &RefCell<impl WorkControl>,
+    registry: &BeaconQueryIndexes,
+    admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
+    eligible: impl Fn(VId) -> bool,
+) -> Result<(Vec<GraphHybridHit>, u64), BeaconError> {
+    if query.is_graph_only() {
+        // Preserve the existing graph-only admission and checkpoint prefix,
+        // including historical reads and views without any maintained index.
+        return evaluate_filtered(
+            snapshot,
+            at,
+            options,
+            query,
+            expansion,
+            work,
+            Scan::Metered,
+            admit,
+            |_| true,
+            |_| true,
+            || Ok(()),
+            eligible,
+        );
+    }
+    work.borrow_mut().charge(1)?;
+    let config = options.config_for_graph(query)?;
+    let source_query = Search::Hybrid(query.source_query());
+    source_query.validate(&config, &mut SharedWork(work))?;
+    let index = registry
+        .lookup_exact(
+            at,
+            snapshot.frontier,
+            options,
+            &config,
+            source_query,
+            &mut SharedWork(work),
+        )?
+        .ok_or(BeaconError::InvalidQuery(
+            "mixed demand search requires a compatible maintained exact index",
+        ))?;
+    evaluate_prepared(
+        snapshot,
+        at,
+        options,
+        query,
+        expansion,
+        Some(&index),
+        work,
+        Scan::Metered,
+        admit,
+        |_| true,
+        |_| true,
+        || Ok(()),
+        eligible,
+    )
+}
+
+/// Prepared index, if any, and graph source already share one authority/cut.
+/// Every newly retained kernel entry spends the same demand scratch allowance
+/// as native membership and incidence state, including text/vector fusion.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_prepared(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    options: &Options,
+    query: GraphHybridQuery<'_>,
+    expansion: ExpansionSpec<'_, RelationId>,
+    index: Option<&IndexSnapshot>,
+    work: &RefCell<impl WorkControl>,
+    scan: Scan<'_>,
+    admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
+    label_allowed: impl FnMut(LabelId) -> bool,
+    relation_allowed: impl FnMut(RelationId) -> bool,
+    admit_edge: impl FnMut() -> Result<(), BeaconError>,
+    eligible: impl Fn(VId) -> bool,
+) -> Result<(Vec<GraphHybridHit>, u64), BeaconError> {
     let source = SourceControl {
         scan: RefCell::new(scan),
         used: Cell::new(0),
-        limit: options
-            .policy
-            .max_source_scratch
-            .min(expansion.limits.max_source_scratch),
+        limit: if query.graph_enabled() {
+            options
+                .policy
+                .max_source_scratch
+                .min(expansion.limits.max_source_scratch)
+        } else {
+            // A disabled graph lane cannot spend seeds or graph allowances.
+            options.policy.max_source_scratch
+        },
     };
     let membership = Membership {
         snapshot,
@@ -298,18 +408,27 @@ pub(crate) fn evaluate_filtered(
         work,
         source: &source,
     };
-    let graph = expand_from_membership_filtered(
-        expansion.seeds,
-        expansion.max_hops,
-        expansion.include_seeds,
-        query.graph_candidates,
-        expansion.limits,
-        &membership,
-        &mut neighbors,
-        |id, _| Ok(eligible(id)),
-        &mut execution,
-    )?;
-    let rows = query.fuse_graph_only(&graph, eligible, &mut execution)?;
+    let graph = if query.graph_enabled() {
+        expand_from_membership_filtered(
+            expansion.seeds,
+            expansion.max_hops,
+            expansion.include_seeds,
+            query.graph_candidates,
+            expansion.limits,
+            &membership,
+            &mut neighbors,
+            |id, _| Ok(eligible(id)),
+            &mut execution,
+        )?
+    } else {
+        Vec::new()
+    };
+    let rows = match index {
+        Some(index) => {
+            index.hybrid_search_graph_filtered(query, &graph, eligible, &mut execution)?
+        }
+        None => query.fuse_graph_only(&graph, eligible, &mut execution)?,
+    };
     work.borrow_mut().charge(1)?;
     let admissions = u64::try_from(source.used.get())
         .map_err(|_| BeaconError::Invariant("demand source admissions exceed u64"))?;
@@ -317,7 +436,8 @@ pub(crate) fn evaluate_filtered(
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Topology-only retrieval without preparing a complete vertex directory.
+    /// Retrieve through demanded topology without a complete vertex directory.
+    /// Enabled text/vector lanes require a compatible maintained exact index.
     /// See the pinned-view method for this explicit physical profile's limits.
     /// This is privileged, like read_session; use authorized native CALL for a
     /// capability holder. It never silently discards an enabled index modality.
@@ -339,9 +459,18 @@ impl<V: Vfs + Clone> Database<V> {
 }
 
 impl EmbeddedReadView {
-    /// Demand graph-only membership and adjacency at this pinned generation.
-    /// `options.as_of` selects a retained historical cut. No query-time index,
-    /// vertex directory, graph copy, or property projection is constructed.
+    /// Demand membership and adjacency at this pinned generation.
+    /// No query-time index, vertex directory, graph copy, or native property
+    /// projection is constructed. Enabled text/vector lanes require a healthy
+    /// maintained exact index captured at this view's frontier with matching
+    /// label, projection and active index settings. A missing or incompatible
+    /// generation refuses; there is no corpus build or source-profile retry.
+    /// Endpoint eligibility leaves the complete index corpus and BM25 statistics
+    /// intact. Approximate vector requests do not use this profile.
+    ///
+    /// `options.as_of` may select any retained cut for graph-only retrieval.
+    /// Mixed retrieval must select this view's own frontier: use a previously
+    /// pinned view to join historical index and graph generations.
     ///
     /// max_staging_rows, max_documents and max_vertices cap the unique visible
     /// membership cache; max_visited_vertices separately caps traversal. Shared
@@ -371,18 +500,15 @@ impl EmbeddedReadView {
             let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
                 cx.checkpoint()
             }));
-            let result = evaluate_filtered(
+            let result = evaluate_privileged(
                 &self.snapshot,
                 at,
                 options,
                 query,
                 expansion,
                 &work,
-                Scan::Metered,
+                &self.beacon_indexes,
                 |_| Ok(true),
-                |_| true,
-                |_| true,
-                || Ok(()),
                 eligible,
             );
             work.into_inner().finish(result.map(|(rows, _)| rows))

@@ -49,17 +49,20 @@
 //! Both transaction profiles retain conservative global edge-scan witnesses.
 //! Omitted/null access retains the host's default; a nonnull choice needs seeds.
 //!
-//! `graph_access => 'demand'` is an explicit graph-only profile. It
-//! resolves only probed vertex histories and reached incidences, without a full
-//! vertex directory, property projection or index build. Visible membership
-//! entries and incidences share the source allowance; native scratch also
-//! reserves the output capacity. Node admission counts unique visible probes,
-//! not the whole corpus. Transactions use canonical staged membership and the
-//! native/staged incidence merge, retaining negative and edge-scan dependencies.
-//! Mixed-modality demand requests refuse; no index lane or staged change can
-//! be silently discarded. Existing source
-//! defaults and indexed/materialized accounting are unchanged. Storage itself
-//! remains resident; this does not claim spill or physical timing isolation.
+//! `graph_access => 'demand'` resolves only probed vertex histories and
+//! reached incidences, without a full vertex directory, property projection or
+//! index build. Graph-only retrieval needs no index. Privileged immutable reads
+//! may also enable text/vector lanes when a compatible maintained exact index
+//! is pinned at the same cut; a missing, stale or mismatched generation refuses.
+//! The endpoint restriction never changes the index corpus or BM25 statistics.
+//! Visible membership, incidences and kernel buffers share the source allowance;
+//! native scratch also reserves the output capacity. Node admission counts
+//! unique visible probes, not the whole corpus. Transactions retain graph-only
+//! demand over canonical staged membership and the native/staged incidence
+//! merge, with negative and edge-scan dependencies. Capability-scoped demand
+//! retains graph-only execution; a global corpus is never an authority grant.
+//! Existing defaults and indexed/materialized accounting are unchanged. Storage
+//! itself remains resident; this does not claim spill or physical timing isolation.
 //!
 //! Privileged text/vector calls reuse a compatible healthy maintained
 //! generation at the database or read view's exact cut with fresh accounting.
@@ -558,7 +561,10 @@ impl HybridSearch {
         } else {
             GraphAccess::Materialized
         });
-        if graph_access == GraphAccess::Demand && (text.is_some() || vector.is_some()) {
+        if graph_access == GraphAccess::Demand
+            && !indexed_default
+            && (text.is_some() || vector.is_some())
+        {
             return Err(HybridCallError::Combination(
                 "demand graph access requires a graph-only read",
             ));
@@ -826,53 +832,27 @@ impl HybridSearch {
                 || Ok(()),
                 |id| filter.admits(id, work),
             ),
-            GraphAccess::Demand => {
-                // Bound source retention before any point lookup. The parent
-                // owns output rows, so reserve their maximum capacity here and
-                // report unused reserved slots below as well. Replaying with
-                // the reported exact allowance must not leave less source room.
-                let output = u64::try_from(self.k)
-                    .map_err(|_| BeaconError::InvalidQuery("demand result capacity exceeds u64"))?;
-                let available = remaining
-                    .evaluator
-                    .max_scratch_entries
-                    .checked_sub(filter.scratch_entries())
-                    .and_then(|entries| entries.checked_sub(output))
-                    .ok_or(BeaconError::ResourceLimit {
-                        resource: "demand graph scratch entries",
-                        limit: usize::try_from(remaining.evaluator.max_scratch_entries)
-                            .unwrap_or(usize::MAX),
-                    })?;
-                let mut options = self.options.clone();
-                options.policy.max_source_scratch = options
-                    .policy
-                    .max_source_scratch
-                    .min(usize::try_from(available).unwrap_or(usize::MAX));
-                demand::evaluate_filtered(
-                    snapshot,
-                    at,
-                    &options,
-                    self.query(),
-                    self.expansion(),
-                    work,
-                    scan,
-                    admit,
-                    label_allowed,
-                    relation_allowed,
-                    || Ok(()),
-                    |id| filter.admits(id, work),
-                )
-                .and_then(|(hits, admissions)| {
-                    let delivered = u64::try_from(hits.len())
-                        .map_err(|_| BeaconError::Invariant("demand result count exceeds u64"))?;
-                    let retained = output
-                        .checked_sub(delivered)
-                        .and_then(|unused| admissions.checked_add(unused))
-                        .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
-                    source_entries.set(retained);
-                    Ok(hits)
+            GraphAccess::Demand => self
+                .demand_budgeted(remaining, filter.scratch_entries(), |options| {
+                    demand::evaluate_filtered(
+                        snapshot,
+                        at,
+                        options,
+                        self.query(),
+                        self.expansion(),
+                        work,
+                        scan,
+                        admit,
+                        label_allowed,
+                        relation_allowed,
+                        || Ok(()),
+                        |id| filter.admits(id, work),
+                    )
                 })
-            }
+                .map(|(hits, retained)| {
+                    source_entries.set(retained);
+                    hits
+                }),
         };
         filter.finish(result).and_then(|hits| {
             let scratch = filter
@@ -881,6 +861,44 @@ impl HybridSearch {
                 .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
             Ok((hits, scratch))
         })
+    }
+
+    /// Bound demand retention before source access, for either graph-only
+    /// masked execution or a privileged mixed query with an exact index pin.
+    /// The parent owns output rows: reserve their maximum capacity here and
+    /// report unused slots too, so replaying the exact reported allowance
+    /// cannot leave less room for source/kernel state.
+    fn demand_budgeted(
+        &self,
+        remaining: GqlQueryPolicy,
+        filter_entries: u64,
+        run: impl FnOnce(&Options) -> Result<(Vec<GraphHybridHit>, u64), BeaconError>,
+    ) -> Result<(Vec<GraphHybridHit>, u64), BeaconError> {
+        let output = u64::try_from(self.k)
+            .map_err(|_| BeaconError::InvalidQuery("demand result capacity exceeds u64"))?;
+        let available = remaining
+            .evaluator
+            .max_scratch_entries
+            .checked_sub(filter_entries)
+            .and_then(|entries| entries.checked_sub(output))
+            .ok_or(BeaconError::ResourceLimit {
+                resource: "demand graph scratch entries",
+                limit: usize::try_from(remaining.evaluator.max_scratch_entries)
+                    .unwrap_or(usize::MAX),
+            })?;
+        let mut options = self.options.clone();
+        options.policy.max_source_scratch = options
+            .policy
+            .max_source_scratch
+            .min(usize::try_from(available).unwrap_or(usize::MAX));
+        let (hits, admissions) = run(&options)?;
+        let delivered = u64::try_from(hits.len())
+            .map_err(|_| BeaconError::Invariant("demand result count exceeds u64"))?;
+        let retained = output
+            .checked_sub(delivered)
+            .and_then(|unused| admissions.checked_add(unused))
+            .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
+        Ok((hits, retained))
     }
 
     /// Fused hits as rows of exactly the YIELD columns, best first.
@@ -956,7 +974,7 @@ pub(crate) fn privileged(
     };
     let result = (|| {
         if let Some(registry) = registry
-            && search.graph_access == GraphAccess::Indexed
+            && matches!(search.graph_access, GraphAccess::Indexed | GraphAccess::Demand)
         {
             let filter = EndpointFilter::prepare(
                 eligible,
@@ -964,20 +982,41 @@ pub(crate) fn privileged(
                 remaining.evaluator.max_scratch_entries,
                 &mut SharedWork(&work),
             )?;
-            let result = indexed::evaluate_privileged(
-                snapshot,
-                at,
-                &search.options,
-                search.query(),
-                search.expansion(),
-                &work,
-                registry,
-                admit,
-                |id| filter.admits(id, &work),
-            );
-            return filter
-                .finish(result)
-                .map(|hits| (hits, filter.scratch_entries()));
+            let result = if search.graph_access == GraphAccess::Demand {
+                search.demand_budgeted(remaining, filter.scratch_entries(), |options| {
+                    demand::evaluate_privileged(
+                        snapshot,
+                        at,
+                        options,
+                        search.query(),
+                        search.expansion(),
+                        &work,
+                        registry,
+                        admit,
+                        |id| filter.admits(id, &work),
+                    )
+                })
+            } else {
+                indexed::evaluate_privileged(
+                    snapshot,
+                    at,
+                    &search.options,
+                    search.query(),
+                    search.expansion(),
+                    &work,
+                    registry,
+                    admit,
+                    |id| filter.admits(id, &work),
+                )
+                .map(|hits| (hits, 0))
+            };
+            return filter.finish(result).and_then(|(hits, source_entries)| {
+                let scratch = filter
+                    .scratch_entries()
+                    .checked_add(source_entries)
+                    .ok_or(BeaconError::Invariant("demand scratch accounting overflow"))?;
+                Ok((hits, scratch))
+            });
         }
         search.execute_filtered(
             eligible,
@@ -1013,3 +1052,7 @@ pub(crate) fn privileged(
 #[cfg(test)]
 #[path = "procedure/indexed_tests.rs"]
 mod indexed_tests;
+
+#[cfg(test)]
+#[path = "procedure/mixed_demand_tests.rs"]
+mod mixed_demand_tests;
