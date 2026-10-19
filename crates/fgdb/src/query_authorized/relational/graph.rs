@@ -73,6 +73,58 @@ fn visit_at<Clock: FnMut() -> u64>(
     // in runs.
     work_runs(execution, GqlQueryError::Interrupted, || {
         let mut usage = AdmissionUsage::default();
+        // A filterless COUNT may use only the same unrestricted, exact-cut
+        // core that a normal full scan would replay. Bind the checked
+        // definition and counts before spending anything. Missing/contended
+        // cores, unsupported shapes and scoped capabilities retain the normal
+        // source, including its data errors and visibility checks.
+        let count_summary = (scope.sees_all_incidence() && scope.sees_all_fields())
+            .then(|| {
+                let source = query.count_summary_source()?;
+                let core = ADMITTED.lookup(
+                    snapshot,
+                    AdmissionKey {
+                        at,
+                        edges: query.input_pattern().plan().reads_edges(),
+                    },
+                )?;
+                let (examined, matching) = core.count_source(source)?;
+                let count = query.prepare_count_summary(source, examined, matching)?;
+                Some((core, count))
+            })
+            .flatten();
+        if let Some((core, count)) = count_summary {
+            core.replay(
+                &mut || {
+                    execution
+                        .borrow_mut()
+                        .node()
+                        .map_err(GqlQueryError::Interrupted)
+                },
+                &mut || {
+                    execution
+                        .borrow_mut()
+                        .poll()
+                        .map_err(GqlQueryError::Interrupted)
+                },
+                &mut |event| {
+                    execution
+                        .borrow_mut()
+                        .checkpoint()
+                        .map_err(GqlQueryError::Interrupted)?;
+                    usage.observe::<ReadError, QueryError>(policy, event)
+                },
+            )
+            .map_err(|error| error.map_source(GraphAggregateError::Source))?;
+            return usage.finish(
+                policy,
+                count.execute_governed(
+                    core.records,
+                    usage.remaining(policy),
+                    WorkCheckpoint(execution),
+                ),
+            );
+        }
         // A graph aggregate reads its edges as triples alone.
         let mut tables = Tables::admit(
             snapshot,

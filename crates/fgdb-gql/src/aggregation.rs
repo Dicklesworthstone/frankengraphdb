@@ -6,12 +6,14 @@
 //! distinct arguments borrow the admitted input until owned rows are released.
 
 mod computed;
+mod count_summary;
 mod groups;
 mod numeric;
 mod positioned;
 mod relational;
 mod result;
 mod weighted;
+pub use count_summary::{GraphCountSource, PreparedGraphCount};
 pub use numeric::GraphExactAverage;
 pub use positioned::{PositionedEdge, PositionedGraph};
 pub use result::{

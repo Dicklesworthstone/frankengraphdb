@@ -100,10 +100,10 @@ pub use write_script::{
 pub use aggregation::{
     BoundAggregate, GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn,
     GraphAggregateError, GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder,
-    GraphAggregateRow, GraphAggregateTest, GraphAggregateValue, GraphExactAverage,
-    GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
-    MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PositionedEdge, PositionedGraph,
-    PreparedGraphAggregate,
+    GraphAggregateRow, GraphAggregateTest, GraphAggregateValue, GraphCountSource,
+    GraphExactAverage, GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
+    GraphNullPlacement, MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PositionedEdge,
+    PositionedGraph, PreparedGraphAggregate, PreparedGraphCount,
 };
 pub use algebra::GraphMatchMode;
 pub use algebra_exec::{

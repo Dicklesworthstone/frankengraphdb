@@ -51,7 +51,6 @@ pub use relational::{
 };
 
 use admission::{ADMITTED, AdmissionKey, AdmittedCore, CoreEdge, Recording};
-use tape::Step;
 
 #[cfg(test)]
 thread_local! {
@@ -527,11 +526,7 @@ impl<'a> Tables<'a> {
         let mut reused = None;
         if let Some(core) = reusable.then(|| ADMITTED.lookup(snapshot, key)).flatten() {
             // Spend first: every limit refuses before the tables are refilled.
-            core.tape.replay(&mut *poll, |step| match step {
-                Step::Vertex(labels) => charge_vertex(labels as usize, &mut node, control),
-                Step::Edge => charge_edge(control),
-                Step::Checkpoint => Ok(()),
-            })?;
+            core.replay(&mut node, poll, control)?;
             // A reader of triples alone takes a core's positioned edges or
             // sealed inline identities in place instead of copying every edge.
             let in_place = triples_only

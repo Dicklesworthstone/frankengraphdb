@@ -1,0 +1,281 @@
+use super::*;
+use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText};
+use fgdb_delta_types::LabelId;
+
+fn query(text: &str) -> PreparedGraphAggregate {
+    PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
+        GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(match name {
+            "R" => 1,
+            "S" => 2,
+            _ => 3,
+        }))),
+        GraphSymbolKind::Property => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        GraphSymbolKind::Label => Some(GraphSymbol::Label(LabelId(1))),
+    })
+    .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+    .bind_parameters(&GqlParameters::new())
+    .unwrap()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Call {
+    Unit,
+    Units(u64),
+}
+
+struct Host<'calls, const RUNS: bool> {
+    calls: &'calls mut Vec<Call>,
+    stop: Option<usize>,
+    refused: bool,
+}
+
+impl<const RUNS: bool> Host<'_, RUNS> {
+    fn observe(&mut self, call: Call) -> Result<(), usize> {
+        assert!(!self.refused, "host called again after refusing");
+        self.calls.push(call);
+        if self.stop == Some(self.calls.len()) {
+            self.refused = true;
+            Err(self.calls.len())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<const RUNS: bool> crate::GovernedCheckpoint<usize> for Host<'_, RUNS> {
+    const RUNS: bool = RUNS;
+
+    fn unit(&mut self) -> Result<(), usize> {
+        self.observe(Call::Unit)
+    }
+
+    fn units(&mut self, n: u64) -> Result<(), usize> {
+        self.observe(Call::Units(n))
+    }
+}
+
+type Outcome = (
+    Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<()>, usize>>,
+    Vec<Call>,
+);
+
+fn run<const RUNS: bool>(
+    query: &PreparedGraphAggregate,
+    vertices: &[VId],
+    edges: &[(VId, RelationId, VId)],
+    summary: bool,
+    policy: GqlQueryPolicy,
+    stop: Option<usize>,
+) -> Outcome {
+    let source = query.count_summary_source().expect("checked count shape");
+    let examined = match source {
+        GraphCountSource::Vertices => vertices.len() as u64,
+        GraphCountSource::Relation(_) => edges.len() as u64,
+    };
+    let matching = match source {
+        GraphCountSource::Vertices => examined,
+        GraphCountSource::Relation(relation) => edges
+            .iter()
+            .filter(|&&(_, actual, _)| actual == relation)
+            .count() as u64,
+    };
+    let records = vertices.len() as u64
+        + if source == GraphCountSource::Vertices {
+            0
+        } else {
+            examined
+        };
+    let mut calls = Vec::new();
+    let host = Host::<RUNS> {
+        calls: &mut calls,
+        stop,
+        refused: false,
+    };
+    let result = if summary {
+        query
+            .prepare_count_summary(source, examined, matching)
+            .unwrap()
+            .execute_governed(records, policy, host)
+    } else {
+        query.execute_governed(
+            records,
+            vertices.iter().copied(),
+            edges.iter().copied(),
+            |_, _| -> Result<bool, ()> { panic!("filterless input tested a vertex") },
+            |_, _| -> Result<Option<&CanonicalScalar>, ()> {
+                panic!("COUNT(*) read an input property")
+            },
+            policy,
+            host,
+        )
+    };
+    (result, calls)
+}
+
+fn compare<const RUNS: bool>(text: &str, size: usize) {
+    let query = query(text);
+    // Full-width, noncontiguous identities; parallel edges, self-loops and a
+    // second relation. Cardinality cannot use distinct endpoints or triples.
+    let vertices: Vec<_> = (0..size)
+        .map(|at| VId(u128::MAX - at as u128 * 1_000_003))
+        .collect();
+    let edges: Vec<_> = (0..size.saturating_mul(2))
+        .map(|at| {
+            (
+                vertices[at % size],
+                RelationId(if at % 3 == 0 { 2 } else { 1 }),
+                vertices[(at * 7 + 1) % size],
+            )
+        })
+        .collect();
+    let wide = GqlQueryPolicy::new(1_000_000, 100, 100_000_000, 1_000_000);
+    let reference = run::<RUNS>(&query, &vertices, &edges, false, wide, None);
+    assert_eq!(
+        run::<RUNS>(&query, &vertices, &edges, true, wide, None),
+        reference,
+        "{text}, size {size}, runs {RUNS}"
+    );
+    // Small graphs stop at EVERY host observation; large graphs cross many
+    // evaluator runs and cover their beginning, middle and final partial run.
+    let count = reference.1.len();
+    let mut stops: Vec<_> = (1..=count.min(80)).collect();
+    stops.extend([count / 2, count.saturating_sub(1), count]);
+    stops.sort_unstable();
+    stops.dedup();
+    for stop in stops.into_iter().filter(|&stop| stop > 0) {
+        assert_eq!(
+            run::<RUNS>(&query, &vertices, &edges, true, wide, Some(stop)),
+            run::<RUNS>(&query, &vertices, &edges, false, wide, Some(stop)),
+            "{text}, size {size}, stop {stop}, runs {RUNS}"
+        );
+    }
+    let Ok(success) = reference.0 else {
+        // Output-expression errors were already compared, including their
+        // complete call prefix and stops before the data exception.
+        return;
+    };
+    let mut limits: Vec<_> = (0..=success.evaluator.work_units.min(70)).collect();
+    limits.extend([
+        success.evaluator.work_units.saturating_sub(1),
+        success.evaluator.work_units,
+        success.evaluator.work_units + 1,
+        2047,
+        2048,
+        3071,
+        3072,
+    ]);
+    for work in limits {
+        let policy = GqlQueryPolicy::new(1_000_000, 100, work, 1_000_000);
+        assert_eq!(
+            run::<RUNS>(&query, &vertices, &edges, true, policy, None),
+            run::<RUNS>(&query, &vertices, &edges, false, policy, None),
+            "{text}, size {size}, work {work}, runs {RUNS}"
+        );
+    }
+    for scratch in (0..=success.evaluator.scratch_entries + 1).chain([2047, 2048]) {
+        let policy = GqlQueryPolicy::new(1_000_000, 100, 100_000_000, scratch);
+        assert_eq!(
+            run::<RUNS>(&query, &vertices, &edges, true, policy, None),
+            run::<RUNS>(&query, &vertices, &edges, false, policy, None),
+            "{text}, size {size}, scratch {scratch}, runs {RUNS}"
+        );
+    }
+    for policy in [
+        GqlQueryPolicy::new(0, 100, 100_000_000, 1_000_000),
+        GqlQueryPolicy::new(
+            success.rows.snapshot_records.saturating_sub(1),
+            100,
+            100_000_000,
+            1_000_000,
+        ),
+        GqlQueryPolicy::new(success.rows.snapshot_records, 0, 100_000_000, 1_000_000),
+        GqlQueryPolicy::new(success.rows.snapshot_records, 1, 100_000_000, 1_000_000),
+    ] {
+        assert_eq!(
+            run::<RUNS>(&query, &vertices, &edges, true, policy, None),
+            run::<RUNS>(&query, &vertices, &edges, false, policy, None),
+            "{text}, size {size}, row limits, runs {RUNS}"
+        );
+    }
+}
+
+/// Source summaries are the existing visitor's answers, errors, logical
+/// counters AND host call transcript, in per-unit and batched host modes.
+#[test]
+fn counts_keep_the_ordinary_visitor_transcript_and_finalizer() {
+    for text in [
+        "MATCH (n) RETURN COUNT(*) AS n",
+        "MATCH (n) RETURN COUNT(*) AS n, COUNT(*) AS m",
+        "MATCH (n) RETURN COUNT(*) + 1 AS n ORDER BY n DESC LIMIT 1",
+        "MATCH (n) RETURN COUNT(*) AS n HAVING n > 2",
+        "MATCH (n) RETURN COUNT(*) AS n SKIP 1 LIMIT 0",
+        "MATCH (n) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0",
+        "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+        "MATCH (a)<-[:R]-(b) RETURN COUNT(*) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n, COUNT(*) AS m",
+        "MATCH (a)-[:T]->(b) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n HAVING n > 2 LIMIT 0",
+    ] {
+        for size in [0, 1, 7] {
+            compare::<false>(text, size);
+            compare::<true>(text, size);
+        }
+    }
+    for text in [
+        "MATCH (n) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+    ] {
+        compare::<false>(text, 4097);
+        compare::<true>(text, 4097);
+    }
+}
+
+/// Ineligible inputs can fail or change multiplicity before reduction. A
+/// source cardinality must never erase their expression/visibility semantics.
+#[test]
+fn only_plain_filterless_counts_admit_source_summaries() {
+    for text in [
+        "MATCH (n:L) RETURN COUNT(*) AS n",
+        "MATCH (n) WHERE n.p = 1 RETURN COUNT(*) AS n",
+        "MATCH (n) WHERE 1 / n.p = 1 RETURN COUNT(*) AS n",
+        "MATCH (n) RETURN n, COUNT(*) AS nrows GROUP BY n",
+        "MATCH (n) RETURN COUNT(n) AS n",
+        "MATCH (n) RETURN COUNT(DISTINCT n) AS n",
+        "MATCH (n) RETURN SUM(n.p) AS n",
+        "MATCH (a)-[:R]-(b) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R|S]->(b) RETURN COUNT(*) AS n",
+        "MATCH (a)-[r]->(b) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R]->(b)-[:R]->(c) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R]->(b:L) RETURN COUNT(*) AS n",
+    ] {
+        let query = query(text);
+        assert_eq!(query.count_summary_source(), None, "{text}");
+        assert!(
+            query
+                .prepare_count_summary(GraphCountSource::Vertices, 9, 9)
+                .is_none()
+        );
+    }
+    let vertices = query("MATCH (n) RETURN COUNT(*) AS n");
+    assert!(
+        vertices
+            .prepare_count_summary(GraphCountSource::Vertices, 9, 8)
+            .is_none()
+    );
+    assert!(
+        vertices
+            .prepare_count_summary(GraphCountSource::Relation(RelationId(1)), 9, 9)
+            .is_none()
+    );
+    let edges = query("MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n");
+    assert!(
+        edges
+            .prepare_count_summary(GraphCountSource::Relation(RelationId(1)), 8, 9)
+            .is_none()
+    );
+    assert!(
+        edges
+            .prepare_count_summary(GraphCountSource::Relation(RelationId(2)), 9, 9)
+            .is_none()
+    );
+}

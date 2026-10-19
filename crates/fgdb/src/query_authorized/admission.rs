@@ -16,6 +16,7 @@
 //! trusted-host state and is never handed to a token holder.
 
 use super::tape::{Step, Tape};
+use super::{Fault, SourceEvent, charge_edge, charge_vertex};
 use crate::Snapshot;
 use crate::query::prism::LiveCache;
 use fgdb_delta_types::RelationId;
@@ -73,6 +74,11 @@ pub(super) type EdgeIdentity = (EId, VId, RelationId, VId);
 /// edge.
 const POSITIONED_EDGE_BYTES: usize = 512 * 1024 * 1024;
 
+/// A fixed counter-table capacity, not a timing crossover. Counts reuse a
+/// positioned core's relation ordinals and retain at most 32 KiB. A wider
+/// catalog keeps the ordinary exact edge visitor without a summary.
+const COUNT_SUMMARY_RELATIONS: usize = 4096;
+
 /// Lets the admission laws cover cores with and without positioned edges.
 #[cfg(test)]
 pub(super) static POSITIONED_EDGES: std::sync::atomic::AtomicBool =
@@ -93,12 +99,17 @@ fn positioned_edge_bytes() -> usize {
 pub(super) struct PositionedEdges {
     pub(super) relations: Vec<RelationId>,
     pub(super) edges: Vec<fgdb_gql::PositionedEdge>,
+    counts: Option<Vec<u64>>,
 }
 
 impl PositionedEdges {
     fn bytes(&self) -> usize {
         self.relations.capacity() * size_of::<RelationId>()
             + self.edges.capacity() * size_of::<fgdb_gql::PositionedEdge>()
+            + self
+                .counts
+                .as_ref()
+                .map_or(0, |counts| counts.capacity() * size_of::<u64>())
     }
 }
 
@@ -137,6 +148,47 @@ pub(super) struct AdmittedCore {
 }
 
 impl AdmittedCore {
+    /// Spend exactly the live calls of the original admission. A table refill
+    /// and a count summary share this replay; neither may skip source polls,
+    /// signed nodes, native records or scratch on a cache hit.
+    pub(super) fn replay(
+        &self,
+        node: &mut impl FnMut() -> Result<(), Fault>,
+        poll: &mut impl FnMut() -> Result<(), Fault>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+    ) -> Result<(), Fault> {
+        self.tape.replay(poll, |step| match step {
+            Step::Vertex(labels) => charge_vertex(labels as usize, node, control),
+            Step::Edge => charge_edge(control),
+            Step::Checkpoint => Ok(()),
+        })
+    }
+
+    /// Counts of the exact live rows this core admitted, never counts of
+    /// historical identities. Vertex coordinates are the canonical winner
+    /// visitor's unique rows; positioned edges contain only admitted edges
+    /// whose two endpoints passed that same admission.
+    pub(super) fn count_source(&self, source: fgdb_gql::GraphCountSource) -> Option<(u64, u64)> {
+        match source {
+            fgdb_gql::GraphCountSource::Vertices => {
+                let count = u64::try_from(self.vertices.len()).ok()?;
+                Some((count, count))
+            }
+            fgdb_gql::GraphCountSource::Relation(relation) => {
+                if self.edges.is_empty() {
+                    return Some((0, 0));
+                }
+                let positioned = self.positioned.as_ref()?;
+                let counts = positioned.counts.as_ref()?;
+                let matching = positioned
+                    .relations
+                    .binary_search(&relation)
+                    .map_or(0, |at| counts[at]);
+                Some((u64::try_from(self.edges.len()).ok()?, matching))
+            }
+        }
+    }
+
     pub(super) fn bytes(&self) -> usize {
         size_of::<Self>()
             + self.vertices.capacity() * size_of::<(VId, u32, u32)>()
@@ -297,9 +349,15 @@ impl Recording {
                 renumbered[old as usize] = new as u32;
             }
             positioned.relations.sort_unstable();
+            let mut counts = (positioned.relations.len() <= COUNT_SUMMARY_RELATIONS)
+                .then(|| vec![0_u64; positioned.relations.len()]);
             for edge in &mut positioned.edges {
                 edge.relation = renumbered[edge.relation as usize];
+                if let Some(counts) = &mut counts {
+                    counts[edge.relation as usize] += 1;
+                }
             }
+            positioned.counts = counts;
             positioned.edges.shrink_to_fit();
             positioned.relations.shrink_to_fit();
         }

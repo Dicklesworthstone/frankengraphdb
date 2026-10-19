@@ -583,3 +583,81 @@ fn a_single_version_scan_retains_a_constant_size_tape() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A repeated filterless count neither merges history nor refills the vertex
+/// table. A refill initializes the core's shared vertex-position cache, even
+/// when its small-table result is None, so an untouched OnceLock distinguishes
+/// the summary path from merely reusing admission before traversing rows.
+#[test]
+fn filterless_counts_replay_without_refilling_source_tables() {
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x61b1_0007, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let token = issuer().issue_at(&open(), 100).unwrap();
+        for text in [
+            "MATCH (n) RETURN count(*) AS n",
+            "MATCH (a)-[:R]->(b) RETURN count(*) AS n",
+        ] {
+            let db = database(&c.commit()).await;
+            let cold = read(&db, &cx, &token, text, || 100).unwrap();
+            let before = scans();
+            let core = ADMITTED
+                .lookup(
+                    &db.snapshot,
+                    AdmissionKey {
+                        at: db.frontier().unwrap(),
+                        edges: text.contains("[:R]"),
+                    },
+                )
+                .unwrap();
+            assert!(core.positions.get().is_none());
+            assert_eq!(read(&db, &cx, &token, text, || 100).unwrap(), cold);
+            assert_eq!(scans(), before);
+            assert!(core.positions.get().is_none(), "{text}: table was refilled");
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Many relationship types cannot grow an unbounded summary table. Its fixed
+/// capacity is accounted in the existing core, and exceeding it chooses the
+/// ordinary edge visitor while retaining the exact vertex cardinality.
+#[test]
+fn relation_count_summaries_are_bounded_and_accounted() {
+    use super::{COUNT_SUMMARY_RELATIONS, Recording};
+    use fgdb_gql::GraphCountSource;
+    let _serial = serial();
+    for relations in [1, COUNT_SUMMARY_RELATIONS, COUNT_SUMMARY_RELATIONS + 1] {
+        let mut recording = Recording::default();
+        recording.vertex(VId(1), 0, 0, 0);
+        for relation in 0..relations {
+            recording.edge(
+                (
+                    EId(relation as u128),
+                    VId(1),
+                    RelationId(relation as u64),
+                    VId(1),
+                ),
+                0,
+                relation,
+                [0, 0],
+            );
+        }
+        let mut core = recording.finish(relations as u64 + 1).unwrap();
+        assert_eq!(core.count_source(GraphCountSource::Vertices), Some((1, 1)));
+        let expected = (relations <= COUNT_SUMMARY_RELATIONS).then_some((relations as u64, 1));
+        assert_eq!(
+            core.count_source(GraphCountSource::Relation(RelationId(0))),
+            expected
+        );
+        let before = core.bytes();
+        let counts = core.positioned.as_mut().unwrap().counts.take();
+        let bytes = counts
+            .as_ref()
+            .map_or(0, |counts| counts.capacity() * std::mem::size_of::<u64>());
+        assert_eq!(before - core.bytes(), bytes);
+        assert!(bytes <= COUNT_SUMMARY_RELATIONS * std::mem::size_of::<u64>());
+    }
+}

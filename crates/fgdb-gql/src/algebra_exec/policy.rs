@@ -190,6 +190,30 @@ impl<K> Charges<K> {
         self.slow(event)
     }
 
+    /// Consecutive Work events with no intervening reader or data exception.
+    /// Consume an already open run arithmetically, but open and settle runs
+    /// through `event` itself. The host therefore sees precisely the same
+    /// calls, including a partial final run and every per-unit refusal, as
+    /// an event-by-event caller. A host that declines runs still gets every
+    /// unit separately. The wide count cannot overflow before a finite
+    /// evaluator allowance has refused.
+    pub(crate) fn work<E, C>(&mut self, mut units: u128) -> Result<(), GqlQueryError<E, C>>
+    where
+        K: GovernedCheckpoint<C>,
+    {
+        while units > 0 {
+            if self.left > 0 {
+                let take = units.min(u128::from(self.left)) as u64;
+                self.left -= take;
+                units -= u128::from(take);
+            } else {
+                self.event(GlaExecutionEvent::Work)?;
+                units -= 1;
+            }
+        }
+        Ok(())
+    }
+
     /// Every event the fast path does not take. A spent run settles; the
     /// next opens while the host takes runs and the evaluator's work and
     /// scratch allowances each cover two whole runs, so no evaluator refusal
