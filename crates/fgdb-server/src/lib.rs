@@ -18,23 +18,33 @@
 //!
 //! - The handshake `HELLO -> HELLO_ACK -> AUTH -> AUTH_OK -> SELECT_DATABASE
 //!   -> READY`, with the session binding derived from the HELLO/HELLO_ACK/AUTH
-//!   transcript under a per-process server secret before AUTH_OK is encoded.
+//!   transcript under a per-process server secret before AUTH_OK is encoded,
+//!   plus live credential rotation via `AUTH_REFRESH -> AUTH_REFRESHED`.
 //!   A nonexistent and an unauthorized database share one failure surface.
-//! - `EXECUTE` of one GQL read or write statement. A read answers at exactly
-//!   one committed sequence through a read-only authorized session; a write
-//!   is one autocommit program through an authorized write session.
+//! - `EXECUTE` of one GQL read (`Read`, `ReadStream`, or `ReadOrdered` when
+//!   `--query-scratch-dir` is configured), one autocommit write program
+//!   (`Write`), or one live changefeed subscription (`Subscribe` delivering
+//!   `SUBSCRIPTION_BATCH` frames and `SUBSCRIPTION_RESET` on authoritative
+//!   recovery), plus `EXECUTE_BATCH` for atomic parameterized no-`RETURN`
+//!   writes and connection-scoped reusable read templates via
+//!   `PREPARE`/`PREPARED`, `EXECUTE_PREPARED`, and
+//!   `RELEASE_PREPARED`/`PREPARED_RELEASED`.
 //! - Results as the session-owned, ephemeral `SNAPSHOT_RESULT_CHUNK` /
 //!   `SNAPSHOT_RESULT_END` class on a server-minted child stream, under
 //!   per-stream byte-and-row flow credit replenished by `WINDOW_UPDATE`.
-//! - `QUERY_CANCEL` (sender control only), `PING`/`PONG`, `DRAIN`/`GOODBYE`.
-//! - HTTP/1.1 JSON and the read-only Bolt profile over the same authorized
-//!   execution boundary; optional TLS 1.3 protects every configured listener.
+//! - `QUERY_CANCEL` (sender control only), `PING`/`PONG`, `DRAIN`/`GOODBYE`,
+//!   and supervised authoritative recovery per served database.
+//! - HTTP/1.1 JSON (`/v1/health`, `/v1/databases/<name>/schema`, `/query`,
+//!   `/write`, `/write-batch`) and the Bolt-compat profile
+//!   (`BoltCompatProfileV1`: reads, explicit read-only transactions, and
+//!   bounded no-`RETURN` autocommit writes) over the same authorized execution
+//!   boundary; optional TLS 1.3 protects every configured listener.
 //!
 //! Not served, and refused with a typed error rather than approximated: the
 //! durable `PublishedResultStream` class with `RESULT_ACK`/`RESULT_RELEASE`,
-//! `PREPARE`, `AUTH_REFRESH`, explicit multi-statement transactions with
-//! ownership/reattach, durable or masked subscriptions, and HTTP/2, gRPC
-//! and WebSocket adapters.
+//! prepared writes, explicit multi-statement write transactions with
+//! ownership/reattach, durable or capability-masked subscriptions, and HTTP/2,
+//! gRPC and WebSocket adapters.
 //! Because every result is ephemeral, a disconnect can lose undelivered rows
 //! but never a commit: a write's outcome is decided before its first frame.
 //!
