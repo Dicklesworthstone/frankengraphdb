@@ -13,6 +13,9 @@ use fgdb_types::QueryCx;
 mod query;
 pub use query::{BufferedQueryCursor, BufferedQueryError, BufferedQueryRow};
 
+#[path = "query_prism/buffered.rs"]
+mod prism;
+
 /// Failure to acquire an authenticated, bounded cold read view.
 #[derive(Debug)]
 pub enum BufferedOpenError {

@@ -800,14 +800,14 @@ fn finish_sealed_read(
     Ok(FnxReadResult::bind_selection(result, options.selection))
 }
 
-fn source_control(
+pub(crate) fn source_control<S>(
     cx: &QueryCx,
     limits: FnxSourceLimits,
-) -> impl FnMut(SourceEvent) -> Result<(), Error> + '_ {
+) -> impl FnMut(SourceEvent) -> Result<(), FnxReadError<S, Cancel>> + '_ {
     let mut work = 0u64;
     let mut scratch = 0u64;
     move |event| {
-        cx.checkpoint().map_err(Error::Cancelled)?;
+        cx.checkpoint().map_err(FnxReadError::Cancelled)?;
         let (counter, limit, resource) = match event {
             SourceEvent::Work | SourceEvent::SnapshotRecord => {
                 (&mut work, limits.max_work_units, "work units")
@@ -816,16 +816,16 @@ fn source_control(
                 (&mut scratch, limits.max_scratch_entries, "scratch entries")
             }
         };
-        *counter = counter.checked_add(1).ok_or(Error::SizeOverflow)?;
+        *counter = counter.checked_add(1).ok_or(FnxReadError::SizeOverflow)?;
         source_admit(resource, u128::from(*counter), u128::from(limit))
     }
 }
 
-pub(super) fn source_admit<C>(
+pub(super) fn source_admit<S, C>(
     resource: &'static str,
     requested: u128,
     limit: u128,
-) -> Result<(), FnxReadError<ReadError, C>> {
+) -> Result<(), FnxReadError<S, C>> {
     if requested > limit {
         Err(FnxReadError::SourceLimit {
             resource,
@@ -840,14 +840,14 @@ pub(super) fn source_admit<C>(
 /// Geometric growth with count admission BEFORE allocation; never reserve the
 /// caller's entire maximum for a tiny projection. Charge the conservative
 /// old+new backing-store peak while a growth might relocate the allocation.
-pub(crate) fn push_staged<T, C>(
+pub(crate) fn push_staged<T, S, C>(
     output: &mut Vec<T>,
     value: T,
     resource: &'static str,
     maximum: usize,
     staged_bytes: &mut usize,
     byte_limit: usize,
-) -> Result<(), FnxReadError<ReadError, C>> {
+) -> Result<(), FnxReadError<S, C>> {
     let next = output
         .len()
         .checked_add(1)
