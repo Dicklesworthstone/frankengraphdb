@@ -3187,6 +3187,50 @@ fn bound_edge_hops(operators: &[fgdb_gql::algebra::GlaOperator]) -> Option<usize
     Some(hops)
 }
 
+/// Prefer a seekable conjunct while the plan still binds only its initial
+/// roots. Every candidate remains subject to the original algebra filters.
+/// Label-only selections stay available as the ordinary fallback, but must not
+/// hide an indexed predicate on the other endpoint (or a later root selection).
+/// Do not cross expressions, probes, expansions or projection: those can fail
+/// or change the meaning of a slot before a later predicate is evaluated.
+fn initial_root_predicates(
+    operators: &[fgdb_gql::algebra::GlaOperator],
+    width: u32,
+) -> Option<(u32, &[fgdb_gql::algebra::VertexPredicate])> {
+    use fgdb_gql::algebra::{GlaOperator, IntegerComparison, VertexPredicate};
+    let mut fallback = None;
+    for operator in operators {
+        let (slot, predicates) = match operator {
+            GlaOperator::Select { slot, predicates } if slot.ordinal() < width => {
+                (slot.ordinal(), predicates.as_slice())
+            }
+            GlaOperator::VertexIdentity { .. } | GlaOperator::DifferentEdges { .. } => continue,
+            _ => break,
+        };
+        fallback.get_or_insert((slot, predicates));
+        let indexed = predicates.iter().any(|predicate| match predicate {
+            VertexPredicate::IntegerProperty { comparison, .. } => {
+                *comparison != IntegerComparison::NotEqual
+            }
+            VertexPredicate::ScalarProperty { predicate, .. } => {
+                let comparison = predicate.comparison();
+                (comparison == IntegerComparison::Equal
+                    && !matches!(predicate.value(), CanonicalScalar::Null))
+                    || (comparison != IntegerComparison::NotEqual
+                        && matches!(
+                            predicate.value(),
+                            CanonicalScalar::Int(_) | CanonicalScalar::Float(_)
+                        ))
+            }
+            VertexPredicate::HasLabel(_) | VertexPredicate::PropertyNull { .. } => false,
+        });
+        if indexed {
+            return Some((slot, predicates));
+        }
+    }
+    fallback
+}
+
 /// Admit a conservative edge closure for a predicate-bound root. The algebra
 /// still evaluates every predicate/join and owns multiplicity and ordering.
 /// Unbound scans retain the original source and its accounting verbatim.
@@ -3215,25 +3259,7 @@ pub(crate) fn bound_edges<'a, E, Row>(
     if steps.is_none() && hops.is_none() {
         return Ok(None);
     }
-    let predicate = prefix
-        .iter()
-        .take_while(|op| {
-            !matches!(
-                op,
-                GlaOperator::Expand { .. }
-                    | GlaOperator::VarLengthExpand { .. }
-                    | GlaOperator::Probe { .. }
-                    | GlaOperator::Optional { .. }
-                    | GlaOperator::ScanVertices
-            )
-        })
-        .find_map(|op| match op {
-            GlaOperator::Select { slot, predicates } if slot.ordinal() < 2 => {
-                Some((slot.ordinal(), predicates))
-            }
-            _ => None,
-        });
-    let Some((slot, predicates)) = predicate else {
+    let Some((slot, predicates)) = initial_root_predicates(prefix, 2) else {
         return Ok(None);
     };
     let lookup_direction = if slot == 0 {
@@ -4744,3 +4770,65 @@ mod tests {
 
 #[cfg(test)]
 mod edge_merge_tests;
+
+#[cfg(test)]
+mod initial_root_predicate_tests {
+    use super::initial_root_predicates;
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_gql::algebra::GlaOperator;
+    use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+
+    #[test]
+    fn keyed_endpoint_selection_respects_error_and_projection_boundaries() {
+        let prepared = PreparedGraphText::prepare(
+            "MATCH (a:L)-[:R]->(b {n:256}) WHERE 1/0 > 0 RETURN a",
+            |kind, name| match (kind, name) {
+                (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                (GraphSymbolKind::Property, "n") => {
+                    Some(GraphSymbol::Property(PropertyKeyId(1)))
+                }
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let operators = prepared.plan().operators();
+        let selections = operators
+            .iter()
+            .filter(|operator| matches!(operator, GlaOperator::Select { .. }))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(selections.len(), 2);
+        assert_eq!(initial_root_predicates(&selections, 2).unwrap().0, 1);
+        assert_eq!(initial_root_predicates(&selections[..1], 2).unwrap().0, 0);
+
+        let expression = operators
+            .iter()
+            .find(|operator| matches!(operator, GlaOperator::SelectBoolean { .. }))
+            .unwrap()
+            .clone();
+        let projection = operators
+            .iter()
+            .find(|operator| matches!(operator, GlaOperator::ProjectValues { .. }))
+            .unwrap()
+            .clone();
+        for barrier in [
+            expression,
+            projection,
+            GlaOperator::Limit {
+                offset: 1,
+                count: Some(1),
+            },
+        ] {
+            let prefix = [
+                selections[0].clone(),
+                barrier.clone(),
+                selections[1].clone(),
+            ];
+            assert_eq!(initial_root_predicates(&prefix, 2).unwrap().0, 0);
+            assert!(initial_root_predicates(&prefix[1..], 2).is_none());
+        }
+    }
+}

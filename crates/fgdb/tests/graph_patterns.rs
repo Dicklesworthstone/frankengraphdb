@@ -1253,3 +1253,170 @@ fn indexed_overlay_native_match_write_commits_only_the_bounded_target() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+fn indexed_second_endpoint(direction: GlaDirection, keyed: bool) -> PreparedGraphPattern {
+    let mut builder = GraphPatternBuilder::new();
+    builder.vertex("a").unwrap();
+    builder.vertex("b").unwrap();
+    builder.edge("a", R, direction, "b").unwrap();
+    builder.filter("a", VertexPredicate::HasLabel(L)).unwrap();
+    if keyed {
+        builder
+            .filter(
+                "b",
+                VertexPredicate::IntegerProperty {
+                    key: N,
+                    comparison: IntegerComparison::Equal,
+                    value: 256,
+                },
+            )
+            .unwrap();
+    }
+    builder.prepare("a", 0, None).unwrap()
+}
+
+#[test]
+fn keyed_second_endpoint_uses_typed_adjacency_on_live_historical_and_pinned_reads() {
+    let ((), report) = run_async_under_lab(0xc0a4_0020, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed_indexed_overlay_chain(&mut db, &commit).await;
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let bounded = GqlQueryPolicy::new(16, 16, 10_000, 10_000);
+        for (direction, expected, records) in [
+            (GlaDirection::Forward, vec![VId(255)], 3),
+            (GlaDirection::Reverse, vec![VId(257)], 3),
+            (GlaDirection::Undirected, vec![VId(255), VId(257)], 5),
+        ] {
+            let pattern = indexed_second_endpoint(direction, true);
+            assert!(matches!(
+                pattern.plan().operators().first(),
+                Some(fgdb_gql::algebra::GlaOperator::ScanEdges { .. })
+            ));
+            let result = db
+                .execute_graph_pattern_governed(&query, &pattern, bounded)
+                .unwrap();
+            assert_eq!(result.value, expected);
+            assert_eq!(result.rows.snapshot_records, records);
+            assert!(result.evaluator.work_units < 600);
+            let exact = GqlQueryPolicy::new(
+                result.rows.snapshot_records,
+                result.rows.result_rows,
+                result.evaluator.work_units,
+                result.evaluator.scratch_entries,
+            );
+            assert_eq!(
+                db.execute_graph_pattern_governed(&query, &pattern, exact)
+                    .unwrap(),
+                result
+            );
+            assert!(matches!(
+                db.execute_graph_pattern_governed(
+                    &query,
+                    &pattern,
+                    GqlQueryPolicy::new(records - 1, 16, 10_000, 10_000),
+                ),
+                Err(GqlQueryError::Rows(error))
+                    if error.dimension == GqlBudgetDimension::SnapshotRecords
+            ));
+            assert!(matches!(
+                db.execute_graph_pattern_governed(
+                    &query,
+                    &pattern,
+                    GqlQueryPolicy::new(16, 16, result.evaluator.work_units - 1, 10_000),
+                ),
+                Err(GqlQueryError::Evaluator(error))
+                    if error.dimension == GlaLimitDimension::WorkUnits
+            ));
+            assert!(matches!(
+                db.execute_graph_pattern_governed(
+                    &query,
+                    &indexed_second_endpoint(direction, false),
+                    GqlQueryPolicy::new(16, 16, 1_000_000, 1_000_000),
+                ),
+                Err(GqlQueryError::Rows(error))
+                    if error.dimension == GqlBudgetDimension::SnapshotRecords
+            ));
+        }
+
+        // An old indexed value leaves, a new one enters, and the entrant's
+        // former incoming edge retires. Old generations keep their own cut.
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(VId(256), N, Some(CanonicalScalar::Int(-256)));
+        edit.set_vertex_property(VId(300), N, Some(CanonicalScalar::Int(256)));
+        edit.delete_edge(EId(300));
+        edit.add_edge(EId(u128::MAX), VId(400), VId(300), vec![]);
+        db.write(&commit, edit).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        for (direction, before, after) in [
+            (GlaDirection::Forward, vec![VId(255)], vec![VId(400)]),
+            (GlaDirection::Reverse, vec![VId(257)], vec![VId(301)]),
+            (
+                GlaDirection::Undirected,
+                vec![VId(255), VId(257)],
+                vec![VId(301), VId(400)],
+            ),
+        ] {
+            let pattern = indexed_second_endpoint(direction, true);
+            assert_eq!(
+                db.execute_graph_pattern_governed(&query, &pattern, bounded)
+                    .unwrap()
+                    .value,
+                after
+            );
+            assert_eq!(
+                db.execute_graph_pattern_governed_at(&query, &pattern, basis, bounded)
+                    .unwrap()
+                    .value,
+                before
+            );
+            assert_eq!(
+                pinned
+                    .execute_graph_pattern_governed(&query, &pattern, bounded)
+                    .unwrap()
+                    .value,
+                before
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn keyed_endpoint_candidate_selection_does_not_hide_earlier_boolean_errors() {
+    let ((), report) = run_async_under_lab(0xc0a4_0021, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        for condition in ["1/0 > 0 AND b.n = 9999", "b.n = 9999 AND 1/0 > 0"] {
+            let prepared = fgdb_gql::PreparedGraphText::prepare(
+                &format!("MATCH (a:L)-[:R]->(b) WHERE {condition} RETURN a"),
+                |kind, name| match (kind, name) {
+                    (fgdb_gql::GraphSymbolKind::Label, "L") => {
+                        Some(fgdb_gql::GraphSymbol::Label(L))
+                    }
+                    (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                        Some(fgdb_gql::GraphSymbol::Relation(R))
+                    }
+                    (fgdb_gql::GraphSymbolKind::Property, "n") => {
+                        Some(fgdb_gql::GraphSymbol::Property(N))
+                    }
+                    _ => None,
+                },
+            )
+            .unwrap()
+            .bind_parameters(&fgdb_gql::GqlParameters::new())
+            .unwrap();
+            assert!(matches!(
+                db.execute_graph_pattern_governed(&query, &prepared, generous()),
+                Err(GqlQueryError::Data(_))
+            ));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
