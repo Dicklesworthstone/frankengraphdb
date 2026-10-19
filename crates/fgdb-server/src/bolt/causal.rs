@@ -88,7 +88,7 @@ fn require_frontier(pinned: CommitSeq, minimum: CommitSeq) -> Result<(), Failure
     Ok(())
 }
 
-/// read_session obtains frontier and authorized snapshot under the SAME lock.
+/// read_session obtains frontier and authorized snapshot from the SAME view.
 /// The returned owner, not a second lookup, is used for the subsequent query.
 /// An explicit FOR SYSTEM_TIME still selects intentional history within that
 /// session; a bookmark constrains admission, not the statement's time selector.

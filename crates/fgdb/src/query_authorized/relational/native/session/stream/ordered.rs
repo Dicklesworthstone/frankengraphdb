@@ -194,6 +194,85 @@ impl<V: Vfs + Clone> Database<V> {
     }
 }
 
+impl EmbeddedReadView {
+    /// Bind trusted templates and external-sort files to this pinned view.
+    /// Authority, source coherence and physical limits follow
+    /// [`Database::authorized_prepared_ordered_read_session`]. The host must
+    /// retain its recovery fence while this immutable view is in use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorized_prepared_ordered_read_session<'a, R, C, A, B>(
+        &self,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        resolver: R,
+        policy: GqlQueryPolicy,
+        clock: C,
+        selector: Arc<PreparedGraphBranchText>,
+        native: Arc<PreparedNativeRead>,
+        scratch: SpillFile<A>,
+        destination: SpillFile<B>,
+        limits: AuthorizedSortLimits,
+    ) -> Result<(
+        AuthorizedOrderedReadSession<'a, R, C, A, B>,
+        AuthorizedPreparedRead,
+    )>
+    where
+        R: GraphSymbolResolver,
+        C: FnMut() -> u64,
+    {
+        let (session, prepared) = self
+            .authorized_prepared_read_session(
+                cx, authority, token, branch, resolver, policy, clock, selector, native,
+            )
+            .map_err(authorized)?;
+        limits.validate()?;
+        Ok((
+            AuthorizedOrderedReadSession {
+                session,
+                scratch,
+                destination,
+                limits,
+            },
+            prepared,
+        ))
+    }
+
+    /// Bind trusted external-sort files to this exact authorized generation.
+    /// The namespace and live permit checks precede physical-limit admission,
+    /// as in [`Database::authorized_ordered_read_session`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorized_ordered_read_session<'a, R, C, A, B>(
+        &self,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        resolver: R,
+        policy: GqlQueryPolicy,
+        clock: C,
+        scratch: SpillFile<A>,
+        destination: SpillFile<B>,
+        limits: AuthorizedSortLimits,
+    ) -> Result<AuthorizedOrderedReadSession<'a, R, C, A, B>>
+    where
+        R: GraphSymbolResolver,
+        C: FnMut() -> u64,
+    {
+        let session = self
+            .authorized_read_session(cx, authority, token, branch, resolver, policy, clock)
+            .map_err(authorized)?;
+        limits.validate()?;
+        Ok(AuthorizedOrderedReadSession {
+            session,
+            scratch,
+            destination,
+            limits,
+        })
+    }
+}
+
 fn authorized(error: QueryError) -> NativeSpoolError {
     NativeSpoolError::Authorized(Box::new(error))
 }

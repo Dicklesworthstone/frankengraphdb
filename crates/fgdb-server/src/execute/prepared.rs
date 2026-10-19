@@ -54,7 +54,7 @@ pub(crate) async fn prepare_read(
     query
         .checkpoint()
         .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-    let generation = db.db.read(cx).await.map_err(Refusal::from)?.generation();
+    let generation = db.db.generation().map_err(Refusal::from)?;
     let definition = query.with_restriction(|| {
         let parameters = convert::parameters(&request.parameters, None)
             .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
@@ -103,10 +103,9 @@ pub(crate) async fn read_prepared_session<'a>(
     let _operation = prepared.generation.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = crate::query_cx(&contexts);
-    let guard = db.db.read(cx).await.map_err(Refusal::from)?;
+    let (view, generation) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     prepared.generation.check().map_err(Refusal::from)?;
-    let generation = guard.generation();
-    let admitted = guard.authorized_prepared_read_session(
+    let admitted = view.authorized_prepared_read_session(
         &query,
         &db.authority,
         token,
@@ -150,41 +149,14 @@ async fn read_prepared_inner(
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
     let parameters: GqlParameters = convert::parameters(parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-    let selected = prepared
-        .selector
-        .bind_parameters(&parameters)
-        .map_err(branch_error)?;
-    authorized_branch(&selected)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let guard = db.db.read(cx).await.map_err(Refusal::from)?;
+    let (mut session, template) = read_prepared_session(cx, db, token, prepared).await?;
+    let result =
+        session
+            .native
+            .execute_with_snapshot(&crate::query_cx(&contexts), &template, &parameters);
     prepared.generation.check().map_err(Refusal::from)?;
-    let frontier = guard
-        .frontier()
-        .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
-    let result = prepared.native.execute_authorized(
-        &guard,
-        &crate::query_cx(&contexts),
-        &db.authority,
-        token,
-        TRUNK,
-        selected.parameters(),
-        db.query_policy,
-        unix_millis,
-    );
-    prepared.generation.check().map_err(Refusal::from)?;
-    let result = result.map_err(query_refusal)?;
-    // Use the successful execution's bound temporal cut, not the frontier
-    // sampled when this request acquired its read guard. Branch-only arguments
-    // were removed by the same selector used for execution above.
-    let snapshot = contexts
-        .query()
-        .with_restriction(|| {
-            prepared
-                .native
-                .bound_snapshot_seq(selected.parameters(), frontier)
-        })
-        .map_err(query_refusal)?;
-    prepared.generation.check().map_err(Refusal::from)?;
+    let (result, snapshot) = result.map_err(query_refusal)?;
     match result {
         QueryResult::Rows { columns, rows } => Ok(Answer {
             columns,

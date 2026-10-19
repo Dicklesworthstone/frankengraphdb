@@ -442,6 +442,7 @@ fn every_native_indexed_checkpoint_can_cancel_even_when_filter_rejects_all() {
 fn cold_view(db: &Database<MemVfs>) -> crate::EmbeddedReadView {
     crate::EmbeddedReadView {
         snapshot: std::sync::Arc::clone(&db.snapshot),
+        namespace: db.keys.namespace,
         beacon_indexes: Default::default(),
     }
 }

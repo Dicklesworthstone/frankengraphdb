@@ -502,7 +502,15 @@ fn cancelled_causal_session_admission_leaves_no_transaction_or_result_owner() {
         let (server, token, _) = served(&root, "bolt-causal-cancel-admission").await;
         let db = &server.databases["test"];
         let mut reader = connection(&server, token);
-        let held = db.db.write(&root).await.unwrap();
+        let mut held = db.db.write(&root).await.unwrap();
+        // A completed successor has dissociated the otherwise unpinned weak
+        // view, but this write guard has not yet published its replacement.
+        // Admission genuinely waits on the guarded fallback, not on a normal
+        // writer that still owns an immediately pinnable old generation.
+        let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(&root);
+        held.write(&contexts.commit(), crate::recovery::tests::vertex(1))
+            .await
+            .unwrap();
         let input = extra(0);
         let mut admission = Box::pin(reader.begin(&root, &input));
         assert!(
@@ -516,7 +524,7 @@ fn cancelled_causal_session_admission_leaves_no_transaction_or_result_owner() {
         assert!(reader.pending.is_none());
         drop(held);
         reader.begin(&root, &extra(0)).await.unwrap();
-        assert_eq!(reader.transaction.as_ref().unwrap().seq, CommitSeq(0));
+        assert_eq!(reader.transaction.as_ref().unwrap().seq, CommitSeq(1));
         server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");

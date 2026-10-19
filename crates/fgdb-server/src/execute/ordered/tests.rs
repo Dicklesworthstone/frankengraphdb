@@ -73,8 +73,12 @@ fn ordered_admission_is_authenticated_bounded_and_old_cursors_fail_after_recover
             .write(&contexts.commit(), batch)
             .await
             .unwrap();
+        // External-sort admission also pins the published view without
+        // waiting for an otherwise unchanged writer to release its lock.
+        let held = db.db.write(&root).await.unwrap();
         let (mut session, _) =
             accepted(read_ordered_session(&root, db, &token, None, generation.clone()).await);
+        drop(held);
         assert_eq!(
             read_ordered_session(&root, db, &token, None, generation.clone())
                 .await

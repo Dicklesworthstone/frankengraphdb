@@ -798,6 +798,7 @@ fn cold_view(db: &Database<crate::MemVfs>) -> crate::EmbeddedReadView {
     // comparisons retain the independently built source after registration.
     crate::EmbeddedReadView {
         snapshot: std::sync::Arc::clone(&db.snapshot),
+        namespace: db.keys.namespace,
         beacon_indexes: super::QueryIndexes::default(),
     }
 }

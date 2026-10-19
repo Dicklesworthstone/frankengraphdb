@@ -121,10 +121,10 @@ pub(crate) async fn read_ordered_session<'a>(
         result
     });
     let (scratch, destination, lease) = in_generation(&generation, admitted_files).await?;
-    let guard = db.db.read(cx).await.map_err(Refusal::from)?;
+    let (view, _) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     generation.check().map_err(Refusal::from)?;
     let result = match prepared {
-        Some(prepared) => guard
+        Some(prepared) => view
             .authorized_prepared_ordered_read_session(
                 &query,
                 &db.authority,
@@ -140,7 +140,7 @@ pub(crate) async fn read_ordered_session<'a>(
                 host.limits(),
             )
             .map(|(session, template)| (session, Some(template))),
-        None => guard
+        None => view
             .authorized_ordered_read_session(
                 &query,
                 &db.authority,

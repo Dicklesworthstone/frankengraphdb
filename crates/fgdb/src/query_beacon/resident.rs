@@ -525,6 +525,11 @@ impl ResidentIndex {
             work.borrow_mut().charge(1)?;
             Some(EmbeddedReadView {
                 snapshot: Arc::clone(snapshot),
+                namespace: self
+                    .graph_source
+                    .as_ref()
+                    .expect("graph source is present")
+                    .namespace,
                 beacon_indexes: QueryIndexes::default(),
             })
         } else {
@@ -642,6 +647,7 @@ impl<V: Vfs + Clone> Database<V> {
                     work.borrow_mut().charge(1)?;
                     Some(EmbeddedReadView {
                         snapshot: Arc::clone(&self.snapshot),
+                        namespace: self.keys.namespace,
                         beacon_indexes: QueryIndexes::default(),
                     })
                 } else {

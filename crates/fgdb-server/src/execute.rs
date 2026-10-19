@@ -308,14 +308,11 @@ pub(crate) async fn read_session<'a>(
     let _operation = db.db.enter().map_err(Refusal::from)?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = crate::query_cx(&contexts);
-    let guard = db.db.read(cx).await.map_err(Refusal::from)?;
-    let generation = guard.generation();
-    // Under the read lock no write can land between these two reads, so
-    // the session's pinned generation is exactly this frontier.
-    let frontier = guard
-        .frontier()
-        .map_err(|error| Refusal::new(ErrorCode::Execution, error.to_string()))?;
-    let session = guard
+    let (view, generation) = db.db.read_view(cx).await.map_err(Refusal::from)?;
+    // The view owns both graph and frontier; publication can advance without
+    // changing either half of this session's answer.
+    let frontier = view.frontier();
+    let session = view
         .authorized_read_session(
             &query,
             &db.authority,
@@ -326,6 +323,7 @@ pub(crate) async fn read_session<'a>(
             unix_millis as fn() -> u64,
         )
         .map_err(query_refusal)?;
+    generation.check().map_err(Refusal::from)?;
     Ok((
         ReadSession {
             native: session,

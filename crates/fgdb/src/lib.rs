@@ -2095,12 +2095,49 @@ impl Snapshot {
 #[must_use = "an embedded read view has no effect unless its pinned generation is read"]
 pub struct EmbeddedReadView {
     snapshot: Arc<Snapshot>,
+    namespace: DatabaseSecurityNamespaceId,
     // Privileged, immutable query pins from this same opened handle/cut.
     // Read-only opens and graph-only resident source views carry no registry.
     beacon_indexes: query::BeaconQueryIndexes,
 }
 
+/// A non-owning reference to one authenticated embedded generation.
+///
+/// Upgrading pins that exact generation, including its namespace and search
+/// indexes. It never selects a newer one. A writer may dissociate this weak
+/// reference when advancing an otherwise unpinned snapshot; the host must then
+/// obtain a fresh published view through its ordinary admission boundary.
+/// Keeping this handle alone does not force snapshot copy-on-write.
+#[derive(Clone)]
+pub struct WeakEmbeddedReadView {
+    snapshot: std::sync::Weak<Snapshot>,
+    namespace: DatabaseSecurityNamespaceId,
+    beacon_indexes: query::BeaconQueryIndexes,
+}
+
+impl WeakEmbeddedReadView {
+    /// Pin the original generation if its snapshot allocation remains live.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<EmbeddedReadView> {
+        self.snapshot.upgrade().map(|snapshot| EmbeddedReadView {
+            snapshot,
+            namespace: self.namespace,
+            beacon_indexes: self.beacon_indexes.clone(),
+        })
+    }
+}
+
 impl EmbeddedReadView {
+    /// Retain this generation's identity without retaining its snapshot pin.
+    #[must_use]
+    pub fn downgrade(&self) -> WeakEmbeddedReadView {
+        WeakEmbeddedReadView {
+            snapshot: Arc::downgrade(&self.snapshot),
+            namespace: self.namespace,
+            beacon_indexes: self.beacon_indexes.clone(),
+        }
+    }
+
     /// The exact published frontier this view is pinned to.
     #[must_use]
     pub fn frontier(&self) -> CommitSeq {
@@ -2845,6 +2882,7 @@ impl<V: Vfs + Clone> Database<V> {
         match Self::bind_with_vfs(cx, vfs, path, keys.clone(), false).await {
             Ok(database) => Ok(EmbeddedReadView {
                 snapshot: Arc::clone(&database.snapshot),
+                namespace: database.keys.namespace,
                 beacon_indexes: database.maintained_beacon.query_indexes().clone(),
             }),
             Err(OpenError::Commit(CommitError::WriterAlreadyOpen)) if lagging.is_some() => {
@@ -2920,7 +2958,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// Type-erased for the same reason as [`Self::read_current_generation`].
     fn read_published<'a>(
         cx: &'a CommitCx,
-        _keys: &'a DatabaseKeys,
+        keys: &'a DatabaseKeys,
         published: PublishedRead<V>,
     ) -> SendFuture<'a, Result<EmbeddedReadView, OpenError>>
     where
@@ -2938,6 +2976,7 @@ impl<V: Vfs + Clone> Database<V> {
             snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
             Ok(EmbeddedReadView {
                 snapshot: Arc::new(snapshot),
+                namespace: keys.namespace,
                 beacon_indexes: query::BeaconQueryIndexes::default(),
             })
         })
@@ -3217,6 +3256,7 @@ impl<V: Vfs + Clone> Database<V> {
         self.ensure_readable()?;
         Ok(EmbeddedReadView {
             snapshot: Arc::clone(&self.snapshot),
+            namespace: self.keys.namespace,
             beacon_indexes: self.maintained_beacon.query_indexes().clone(),
         })
     }
