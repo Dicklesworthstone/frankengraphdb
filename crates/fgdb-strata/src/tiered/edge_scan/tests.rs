@@ -339,6 +339,355 @@ fn snapshots_preserve_properties_parallel_edges_and_invisible_candidate_admissio
 }
 
 #[test]
+fn relation_roots_preserve_complete_histories_and_reduce_payload_faults() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        for relation in [R, S, RelationId(u64::MAX)] {
+            let scan = view
+                .edge_scan_relation(&cx, CommitSeq(5), relation)
+                .unwrap();
+            assert_eq!(scan.state.as_ref().unwrap().heads.capacity(), 0);
+            assert!(scan.state.as_ref().unwrap()._head_charge.is_none());
+            assert_eq!(pool.used(), baseline, "unused roots retain no workspace");
+            assert_eq!(scan.work_used(), 0);
+            drop(scan);
+            assert_eq!(view.stats().misses, 0, "opening never faults a payload");
+            assert_eq!(pool.used(), baseline);
+        }
+        for cut in 0..=5 {
+            let before = view.stats();
+            let mut all = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
+            let mut all_rows = Vec::new();
+            while let Some(row) = all.next(&cx).await.unwrap() {
+                all_rows.push(row.as_ref().clone());
+            }
+            let all_work = all.work_used();
+            drop(all);
+            let all_faults = view.stats().misses - before.misses;
+            assert_eq!(all_rows, expected(cut));
+            for relation in [R, S, RelationId(u64::MAX)] {
+                let before = view.stats();
+                let mut scan = view
+                    .edge_scan_relation(&cx, CommitSeq(cut), relation)
+                    .unwrap();
+                let mut admitted = Vec::new();
+                let mut visible = Vec::new();
+                while let Some(candidate) = scan
+                    .next_candidate_with(&cx, &mut |event| {
+                        if let BufferedEdgeScanEvent::Identity(eid) = event {
+                            admitted.push(eid);
+                        }
+                        Ok::<_, ()>(())
+                    })
+                    .await
+                    .unwrap()
+                {
+                    if let Some(row) = candidate.row {
+                        visible.push(row.as_ref().clone());
+                    }
+                    if let Some(state) = &scan.state {
+                        let selected_blocks = if relation == R { 3 } else { 1 };
+                        assert_eq!(
+                            state._head_charge.as_ref().unwrap().bytes(),
+                            1024 + selected_blocks * 512
+                        );
+                    }
+                }
+                let expected_ids = if relation == R {
+                    vec![EId(4), EId(6), EId(90), EId(u128::MAX)]
+                } else if relation == S {
+                    vec![EId(0), EId(2), EId(8)]
+                } else {
+                    vec![]
+                };
+                assert_eq!(admitted, expected_ids, "all histories at cut {cut}");
+                assert_eq!(
+                    visible,
+                    expected(cut)
+                        .into_iter()
+                        .filter(|row| row.entry.relation == relation)
+                        .collect::<Vec<_>>(),
+                );
+                assert!(scan.work_used() < all_work);
+                assert!(scan.is_finished());
+                drop(scan);
+                let faults = view.stats().misses - before.misses;
+                assert!(faults < all_faults, "cut {cut}, relation {relation:?}");
+                if relation == RelationId(u64::MAX) {
+                    assert_eq!(faults, 0, "absent relations read no edge payloads");
+                }
+                assert_eq!(pool.used(), baseline);
+            }
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn relation_head_admission_reclaims_cached_extents_before_refusing_memory() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        // Ordinary point reads leave an unpinned resident extent. A root's
+        // selected heap must be able to reclaim it, just like the full heap.
+        drop(view.edge_at(&cx, EId(4), CommitSeq(5)).await.unwrap());
+        let cached = pool.used() - baseline;
+        assert!(cached > 0);
+        let selected_bytes = 1024 + 3 * 512;
+        let available = selected_bytes - cached.min(256);
+        let held = pool.reserve(&cx, pool.available() - available).unwrap();
+        let before = view.stats();
+        let mut scan = view.edge_scan_relation(&cx, CommitSeq(5), R).unwrap();
+        assert!(matches!(
+            scan.next_candidate_with(&cx, &mut |event| {
+                if matches!(event, BufferedEdgeScanEvent::Identity(_)) {
+                    Err(()) // Stop after complete head admission, before payloads.
+                } else {
+                    Ok(())
+                }
+            })
+            .await,
+            Err(BufferedScanError::Control(()))
+        ));
+        assert!(scan.is_finished());
+        drop(scan);
+        assert!(view.stats().evictions > before.evictions);
+        assert_eq!(view.stats().misses, before.misses);
+        drop(held);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn relation_root_does_not_restrict_independent_join_incidence() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let mut scan = view
+            .edge_scan_relation(&cx, CommitSeq(5), R)
+            .unwrap()
+            .into_join_scan();
+        let mut roots = Vec::new();
+        while let Some(root) = scan
+            .next_with_endpoints(&cx, None, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+        {
+            roots.push(root.eid);
+            let nested = scan
+                .next_incident_retained_with_endpoints(
+                    &cx,
+                    VId(2),
+                    Some(S),
+                    BufferedEdgeDirection::Outgoing,
+                    None,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(nested.eid, EId(0));
+            assert_eq!(nested.row.unwrap().edge().entry.relation, S);
+        }
+        assert_eq!(roots, [EId(4), EId(6), EId(90), EId(u128::MAX)]);
+        drop(scan);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn every_relation_root_control_refuses_and_fuses_without_leaking_reservations() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        for relation in [R, RelationId(u64::MAX)] {
+            let mut total = 0;
+            {
+                let mut scan = view
+                    .edge_scan_relation(&cx, CommitSeq(5), relation)
+                    .unwrap();
+                while scan
+                    .next_with_endpoints(&cx, None, &mut |_| {
+                        total += 1;
+                        Ok::<_, usize>(())
+                    })
+                    .await
+                    .unwrap()
+                    .is_some()
+                {}
+            }
+            for stop in 0..total {
+                let mut scan = view
+                    .edge_scan_relation(&cx, CommitSeq(5), relation)
+                    .unwrap();
+                let mut seen = 0;
+                loop {
+                    match scan
+                        .next_with_endpoints(&cx, None, &mut |_| {
+                            let at = seen;
+                            seen += 1;
+                            if at == stop { Err(stop) } else { Ok(()) }
+                        })
+                        .await
+                    {
+                        Ok(Some(_)) => {}
+                        Err(BufferedScanError::Control(at)) => {
+                            assert_eq!(at, stop);
+                            assert_eq!(seen, stop + 1);
+                            break;
+                        }
+                        other => panic!("expected relation refusal {stop}, got {other:?}"),
+                    }
+                }
+                assert!(scan.is_finished());
+                assert!(
+                    scan.next_candidate_with(&cx, &mut |_| -> Result<(), ()> {
+                        panic!("fused relation scan")
+                    })
+                    .await
+                    .unwrap()
+                    .is_none()
+                );
+                drop(scan);
+                assert_eq!(pool.used(), baseline, "control {stop}");
+            }
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn relation_pruning_skips_excluded_faults_but_never_skips_initial_admission() {
+    run(|contexts, path| async move {
+        for property_patch in [false, true] {
+            let path = path.join(if property_patch {
+                "property"
+            } else {
+                "topology"
+            });
+            std::fs::create_dir(&path).unwrap();
+            let (store, id) = fixture(&contexts, &path, false).await;
+            let cx = contexts.query();
+            let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+            let mut view = store
+                .open_buffered_root(&cx, id, pool.clone(), limits())
+                .await
+                .unwrap();
+            let block = view.root().blocks[2].block_id; // the unrelated S family
+            let corrupt = if property_patch {
+                let bytes = store
+                    .get_bytes(&cx, DeltaBlockVersion(block))
+                    .await
+                    .unwrap();
+                crate::decode_block_with_properties(&bytes)
+                    .unwrap()
+                    .1
+                    .unwrap()
+                    .0
+            } else {
+                block
+            };
+            let fault_path = store.path(corrupt);
+            let mut bytes = std::fs::read(&fault_path).unwrap();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+            std::fs::write(&fault_path, bytes).unwrap();
+            let baseline = pool.used();
+            let mut selected = view.edge_scan_relation(&cx, CommitSeq(5), R).unwrap();
+            let mut rows = Vec::new();
+            while let Some(row) = selected.next(&cx).await.unwrap() {
+                rows.push(row.as_ref().clone());
+            }
+            assert_eq!(
+                rows,
+                expected(5)
+                    .into_iter()
+                    .filter(|row| row.entry.relation == R)
+                    .collect::<Vec<_>>()
+            );
+            drop(selected);
+            assert_eq!(pool.used(), baseline);
+            let mut all = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+            assert!(matches!(
+                all.next(&cx).await,
+                Err(BufferedReadError::Buffer(BufferError::ChecksumMismatch))
+            ));
+            assert!(all.next(&cx).await.unwrap().is_none());
+            drop(all);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+            assert!(
+                store
+                    .open_buffered_root(&cx, id, pool.clone(), limits())
+                    .await
+                    .is_err(),
+                "a new open must authenticate even the excluded relation"
+            );
+            assert_eq!(pool.used(), 0);
+        }
+    });
+}
+
+#[test]
+fn relation_scan_never_returns_an_old_version_over_a_corrupt_later_restatement() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let fault_path = store.path(view.root().blocks[3].block_id);
+        let mut bytes = std::fs::read(&fault_path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&fault_path, bytes).unwrap();
+        for cut in [1, 5] {
+            let mut scan = view.edge_scan_relation(&cx, CommitSeq(cut), R).unwrap();
+            assert!(matches!(
+                scan.next(&cx).await,
+                Err(BufferedReadError::Buffer(BufferError::ChecksumMismatch))
+            ));
+            assert!(scan.next(&cx).await.unwrap().is_none());
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn endpoint_images_share_the_cut_and_self_loops_share_one_allocation() {
     run(|contexts, path| async move {
         let (store, id) = fixture(&contexts, &path, false).await;
@@ -542,7 +891,9 @@ fn selective_incidence_does_not_reserve_an_unused_global_root_heap() {
                 BufferedEdgeDirection::Outgoing,
             ));
         assert!(incidence_bytes < root_bytes);
-        let held = pool.reserve(&cx, pool.available() - (root_bytes - 1)).unwrap();
+        let held = pool
+            .reserve(&cx, pool.available() - (root_bytes - 1))
+            .unwrap();
         let held_baseline = pool.used();
         for direction in [
             BufferedEdgeDirection::Outgoing,
@@ -578,12 +929,10 @@ fn selective_incidence_does_not_reserve_an_unused_global_root_heap() {
             drop(join);
             assert_eq!(pool.used(), held_baseline);
 
-            let mut incidence = view.edge_scan(&cx, CommitSeq(5)).unwrap().into_incidence_scan(
-                endpoint,
-                None,
-                direction,
-                None,
-            );
+            let mut incidence = view
+                .edge_scan(&cx, CommitSeq(5))
+                .unwrap()
+                .into_incidence_scan(endpoint, None, direction, None);
             drop(incidence.next(&cx));
             assert!(!incidence.is_finished());
             assert_eq!(pool.used(), held_baseline, "conversion has no root charge");

@@ -24,11 +24,40 @@ impl<V: Vfs> BufferedPartition<V> {
         self.begin(cx, as_of)?;
         let blocks = self.blocks.len();
         let maximum = self.limits.max_work;
-        BufferedEdgeScan::new(self, cx, as_of, blocks, maximum)
+        BufferedEdgeScan::new(self, cx, as_of, blocks, maximum, None)
     }
 
-    pub(crate) fn edge_scan_first(&self, at: usize) -> Option<(EId, CommitSeq)> {
-        self.blocks[at].summary.map(|summary| summary.first_edge)
+    /// Scan one relation in stable EId order without faulting other relations.
+    /// Initial root admission still authenticates every block and property
+    /// patch and proves immutable endpoint/relation identity across histories.
+    /// The admitted block summaries therefore select complete EId histories;
+    /// filtering never substitutes for admission or the selected-row decoders.
+    ///
+    /// Opening allocates and reserves no root workspace. First demand counts
+    /// matching blocks, reserves their heads through cache-aware admission, and
+    /// seeds the merge. Every metadata visit consumes the ordinary work limit.
+    /// Payloads remain lazy, including empty results.
+    pub fn edge_scan_relation(
+        &mut self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+        relation: RelationId,
+    ) -> Result<BufferedEdgeScan<'_, V>, BufferedReadError> {
+        self.begin(cx, as_of)?;
+        let blocks = self.blocks.len();
+        let maximum = self.limits.max_work;
+        BufferedEdgeScan::new(self, cx, as_of, blocks, maximum, Some(relation))
+    }
+
+    pub(crate) fn edge_scan_first(
+        &self,
+        at: usize,
+        relation: Option<RelationId>,
+    ) -> Option<(EId, CommitSeq)> {
+        self.blocks[at]
+            .summary
+            .filter(|summary| relation.is_none_or(|relation| summary.relation == relation))
+            .map(|summary| summary.first_edge)
     }
 
     pub(crate) fn edge_scan_incidence_blocks(

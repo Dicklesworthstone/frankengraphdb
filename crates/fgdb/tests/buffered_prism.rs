@@ -399,20 +399,22 @@ fn buffered_analytics_preserve_graph_law_refusals_and_all_admission_layers() {
                 limit: 0
             }),
         ));
-        // Five vertex identities plus seven edge identities are admitted even
-        // at origin, where none is yet visible. The counter spans both scans.
+        // Five vertex identities plus the six selected-relation edge identities
+        // are admitted even at origin, where none is visible. Unrestricted
+        // relation scans still admit the seventh edge. Both preserve the same
+        // exact boundary rather than silently ignoring invisible candidates.
         opt = options();
         opt.as_of = Some(CommitSeq::ORIGIN);
-        opt.source_limits.max_scratch_entries = 11;
+        opt.source_limits.max_scratch_entries = 10;
         assert!(matches!(
             view.call_fnx(&cx, RANK, &parameters, opt).await,
             Err(FnxReadError::SourceLimit {
                 resource: "scratch entries",
-                requested: 12,
-                limit: 11
+                requested: 11,
+                limit: 10
             }),
         ));
-        opt.source_limits.max_scratch_entries = 12;
+        opt.source_limits.max_scratch_entries = 11;
         assert!(
             view.call_fnx(&cx, RANK, &parameters, opt)
                 .await
@@ -421,6 +423,15 @@ fn buffered_analytics_preserve_graph_law_refusals_and_all_admission_layers() {
                 .rows
                 .is_empty()
         );
+        opt.selection.relation = None;
+        assert!(matches!(
+            view.call_fnx(&cx, RANK, &parameters, opt).await,
+            Err(FnxReadError::SourceLimit {
+                resource: "scratch entries",
+                requested: 12,
+                limit: 11
+            }),
+        ));
         opt = options();
         opt.source_limits.max_staging_bytes = 0;
         assert!(matches!(
@@ -469,6 +480,129 @@ fn buffered_analytics_preserve_graph_law_refusals_and_all_admission_layers() {
             0,
             "failed calls retain no source reservations"
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn selected_relation_analytics_skip_unrelated_payloads_under_a_tighter_source_budget() {
+    let ((), report) = run_async_under_lab(0x6270_7204, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let mut writer =
+            Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+                .await
+                .unwrap();
+        let unrelated = 48_u128;
+        let mut first = WriteBatch::new(R);
+        for vid in [1, 2, 3] {
+            first.create_vertex(VId(vid), vec![L], vec![]);
+        }
+        for vid in 100..100 + unrelated {
+            first.create_vertex(VId(vid), vec![LabelId(11)], vec![]);
+        }
+        for (eid, source, target) in [(0, 1, 2), (1, 2, 3), (2, 3, 1)] {
+            first.add_edge(
+                EId(eid),
+                VId(source),
+                VId(target),
+                vec![(P, CanonicalScalar::Int(1))],
+            );
+        }
+        writer.write(&commit, first).await.unwrap();
+        let mut noise = WriteBatch::new(RelationId(8));
+        for offset in 0..unrelated {
+            noise.add_edge(
+                EId(100 + offset),
+                VId(100 + offset),
+                VId(100 + (offset + 1) % unrelated),
+                // Full native payloads have to be authenticated at open, but
+                // excluded endpoints/relations must not expose a weight error.
+                vec![(
+                    P,
+                    CanonicalScalar::ucs_basic_text(&"x".repeat(1024)).unwrap(),
+                )],
+            );
+        }
+        writer.write(&commit, noise).await.unwrap();
+        let mut change = WriteBatch::new(R);
+        change.set_edge_property(EId(0), P, Some(CanonicalScalar::Int(3)));
+        writer.write(&commit, change).await.unwrap();
+        let source_pool = pool();
+        let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+        let parameters = FnxParameters::new();
+        for cut in 0..=3 {
+            let mut selected = options();
+            selected.as_of = Some(CommitSeq(cut));
+            // Every vertex history, then only the selected relation's three
+            // edge histories. Restatements consume work, not extra identities.
+            selected.source_limits.max_scratch_entries = unrelated as u64 + 6;
+            let before = view.buffer_stats();
+            let selected_graph = view
+                .prism_projection_at(
+                    &cx,
+                    CommitSeq(cut),
+                    selected.selection,
+                    selected.projection,
+                    selected.projection_limits,
+                    selected.source_limits,
+                )
+                .await
+                .unwrap();
+            let selected_faults = view.buffer_stats().misses - before.misses;
+            let mut all = selected;
+            all.selection.relation = None;
+            // The full scan is the incumbent in this invocation. Its induced
+            // graph is identical: all other-relation endpoints lack L.
+            assert!(matches!(
+                view.call_fnx(&cx, RANK, &parameters, all).await,
+                Err(FnxReadError::SourceLimit {
+                    resource: "scratch entries",
+                    ..
+                })
+            ));
+            all.source_limits.max_scratch_entries = 1000;
+            let before = view.buffer_stats();
+            let all_graph = view
+                .prism_projection_at(
+                    &cx,
+                    CommitSeq(cut),
+                    all.selection,
+                    all.projection,
+                    all.projection_limits,
+                    all.source_limits,
+                )
+                .await
+                .unwrap();
+            let all_faults = view.buffer_stats().misses - before.misses;
+            assert_eq!(selected_graph.digest(), all_graph.digest(), "cut {cut}");
+            assert_eq!(selected_graph.vertex_ids(), all_graph.vertex_ids());
+            for ordinal in 0..selected_graph.vertex_ids().len() {
+                assert_eq!(
+                    selected_graph.projected_row(ordinal),
+                    all_graph.projected_row(ordinal)
+                );
+            }
+            assert!(
+                all_faults >= selected_faults + 2 * unrelated as u64,
+                "every excluded block and property patch stays unfaulted: cut {cut}, selected {selected_faults}, all {all_faults}"
+            );
+            let bound = FnxCallSpec::bind(RANK, &parameters).unwrap();
+            assert_eq!(
+                bound
+                    .execute(&selected_graph, selected.execution_limits, || cx
+                        .checkpoint())
+                    .unwrap(),
+                bound
+                    .execute(&all_graph, all.execution_limits, || cx.checkpoint())
+                    .unwrap(),
+            );
+        }
+        drop(view);
+        drop(writer);
+        assert_eq!(source_pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

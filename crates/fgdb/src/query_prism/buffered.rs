@@ -89,6 +89,10 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// Visible selected vertices, including isolates, precede the canonical EId
     /// scan. Relation and both endpoint selections precede weight observation;
     /// self-loop and parallel-edge policies are the ordinary Prism laws.
+    /// An explicit relation also prunes authenticated block metadata before
+    /// edge payload faults and head allocation. Initial admission still checks
+    /// the complete root; all histories of the selected relation remain visible
+    /// to the same-cut merge, including later retirement restatements.
     ///
     /// Every buffered Work event and selection visit charges source work. Each
     /// merged VId/EId candidate charges one source scratch entry, including
@@ -159,7 +163,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             }
             let mut edges = Vec::new();
             {
-                let mut scan = self.partition.edge_scan(cx, as_of).map_err(read_failure)?;
+                let mut scan = match selection.relation {
+                    Some(relation) => self.partition.edge_scan_relation(cx, as_of, relation),
+                    None => self.partition.edge_scan(cx, as_of),
+                }
+                .map_err(read_failure)?;
                 while let Some(candidate) = scan
                     .next_candidate_with(cx, &mut |event| {
                         control(match event {
