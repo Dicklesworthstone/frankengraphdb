@@ -450,9 +450,7 @@ fn unsupported_component_contracts_and_unbounded_pages_refuse_before_publication
             // literal projection profile admitted by this derivative.
             "CALL fnx.connected_components(relation => 'R',parallel => 'collapse',self_loops => 'drop')".into(),
         ];
-        for name in ["pagerank"] {
-            bodies.push(format!("CALL fnx.{name}({INPUT})"));
-        }
+        bodies.push(format!("CALL fnx.pagerank({INPUT})"));
         for body in bodies {
             // Neither explicit nor canonical empty windows may hide an
             // unsupported descendant or erase projection/argument admission.

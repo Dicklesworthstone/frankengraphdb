@@ -521,15 +521,11 @@ impl ResidentIndex {
         // A graph-enabled index must advance topology even for edge-only
         // commits. Pin the successor off-side, before the SAME final acceptance
         // as both search lanes. Failure/unwind leaves the old coherent triple.
-        let graph_source = if self.graph_source.is_some() {
+        let graph_source = if let Some(current) = &self.graph_source {
             work.borrow_mut().charge(1)?;
             Some(EmbeddedReadView {
                 snapshot: Arc::clone(snapshot),
-                namespace: self
-                    .graph_source
-                    .as_ref()
-                    .expect("graph source is present")
-                    .namespace,
+                namespace: current.namespace,
                 beacon_indexes: QueryIndexes::default(),
             })
         } else {
