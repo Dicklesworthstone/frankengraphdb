@@ -34,7 +34,7 @@ fn all_composed_refusals_and_exact_quota_boundaries_leave_accepted_state_intact(
 }
 
 fn composed_refusals(native_rows: bool) {
-    let ((), report) = run_async_under_lab(0x6b63_0110, |root| async move {
+    let ((), report) = run_async_under_lab(0x6b63_0110, move |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let keys = DatabaseKeys::new(
