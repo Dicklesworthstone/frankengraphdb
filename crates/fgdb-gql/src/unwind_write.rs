@@ -15,6 +15,12 @@
 //! The root may select a list from a parameter document using the same static
 //! map keys and signed indexes as later sources, without copying that document.
 //! Alias rebinding, dynamic indexes, multiple statements and empty batches refuse.
+//!
+//! Vertex SET/REMOVE batches that write their MATCH's selection fields freeze
+//! all selections and assignment inputs against the entry transaction overlay,
+//! then apply their field updates in input order. MERGE and already-admitted
+//! disjoint row updates retain sequential visibility. Feedback involving
+//! relationship updates or multi-element deletion still refuses typed.
 
 mod controlled;
 mod expansion;
@@ -68,8 +74,8 @@ pub enum GraphUnwindWriteError {
         observed: usize,
     },
     /// A multirow MATCH mutation could change a later input row's selection.
-    /// Until a shared clause-at-a-time owner exists, sequential execution
-    /// would be a different query. The complete batch refuses before binding.
+    /// Its shape is outside the closed frozen vertex-update profile, so
+    /// sequential execution would be a different query. It refuses before binding.
     RowFeedsLaterMatch {
         statement: usize,
     },
@@ -277,10 +283,12 @@ impl GraphUnwindWriteText {
     /// definition size limits still apply to the lowered statement. Execution
     /// uses the ordinary program executor and its existing
     /// rollback, authorization, cancellation, allocation and commit semantics.
-    /// A multirow MATCH mutation that writes its own selection's property or
-    /// label domain refuses before execution, as does deletion whose MATCH
-    /// depends on edges or another vertex binding. Disjoint updates, simple
-    /// single-vertex deletion and MERGE retain sequential program semantics.
+    /// Vertex updates that write their own MATCH's property or label domain
+    /// freeze all row selections and RHS values against the entry overlay,
+    /// then stage fields in input order. Relationship feedback and deletion
+    /// whose MATCH depends on edges or another vertex binding still refuse.
+    /// Disjoint updates, simple single-vertex deletion and MERGE retain
+    /// sequential program semantics.
     pub fn bind_with_limit(
         &self,
         arguments: &GqlParameters,

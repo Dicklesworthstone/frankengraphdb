@@ -4,6 +4,8 @@
 
 #[path = "query_prism_direction_tests.rs"]
 mod direction;
+#[path = "query_prism_relation_tests.rs"]
+mod relation;
 #[path = "query_prism_source_tests.rs"]
 mod source_admission;
 

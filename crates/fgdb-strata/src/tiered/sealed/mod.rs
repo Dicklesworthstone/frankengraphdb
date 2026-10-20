@@ -4,6 +4,9 @@
 //! compaction paths. Small descriptors use Tier I; larger descriptors use EF
 //! neighbors, EF CSR offsets, identity-coded EIDs, visibility spans and aligned
 //! property sidecars. Parallel edges and retained versions remain incidences.
+//! `BlockStore::seal_relation` proves that same complete root while retaining
+//! only one relation for compaction and encoding. Its opaque anchor keeps that
+//! scope even when the selected relation has no retained incidences.
 //!
 //! The source-root receipt is separate from the resident image: an anchor does
 //! not pin its adjacency bytes. Reload authenticates the complete image against
@@ -24,6 +27,8 @@ mod incoming;
 pub use incoming::{
     IncomingIndexLimits, IncomingIndexStats, SealedIncomingCursor, SealedIncomingIndex,
 };
+#[cfg(test)]
+mod relation_tests;
 #[cfg(test)]
 mod tests;
 mod wire;
@@ -91,6 +96,10 @@ pub enum SealedError {
         floor: CommitSeq,
         publication: CommitSeq,
     },
+    RelationOutsideAnchor {
+        requested: RelationId,
+        retained: RelationId,
+    },
     ImageMismatch,
 }
 
@@ -131,6 +140,7 @@ pub struct SealedScope {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SealedAnchor {
     scope: SealedScope,
+    relation: Option<RelationId>,
     fingerprint: [u8; 32],
     encoded_bytes: usize,
 }
@@ -138,6 +148,25 @@ pub struct SealedAnchor {
 impl SealedAnchor {
     pub const fn scope(self) -> SealedScope {
         self.scope
+    }
+
+    /// The retained relation, or `None` for a complete partition image. An
+    /// empty scoped image proves absence only within its retained relation.
+    pub const fn relation(self) -> Option<RelationId> {
+        self.relation
+    }
+
+    /// Check coverage before treating a missing descriptor as an empty row.
+    pub fn check_relation(self, requested: RelationId) -> Result<(), SealedError> {
+        if let Some(retained) = self.relation
+            && requested != retained
+        {
+            return Err(SealedError::RelationOutsideAnchor {
+                requested,
+                retained,
+            });
+        }
+        Ok(())
     }
 
     pub const fn encoded_bytes(self) -> usize {
@@ -253,10 +282,72 @@ impl<V: Vfs> BlockStore<V> {
         // Preserve the existing source-incidence contract even when a caller
         // offers a looser explicit source profile than the image allowance.
         source.max_incidences = source.max_incidences.min(limits.max_incidences);
-        let (root, blocks, properties) = self
-            .reopen_adjacency_bounded(cx, root_id, floor, source)
+        self.seal_selected_adjacency(cx, root_id, floor, None, limits, source)
             .await
-            .map_err(sealed_source_error)?;
+    }
+
+    /// Authenticate a complete partition and retain only `relation` for the
+    /// image. Unrelated adjacency/property payloads are released after their
+    /// admission, before compaction and encoding. Whole-root I/O and history
+    /// validation remain necessary; this is not descriptor-only source access.
+    ///
+    /// Source limits use their defaults, with raw incidences admitting at least
+    /// the requested image capacity. A small selected image therefore does not
+    /// cap unrelated source history. Use `seal_relation_with_source_limits` to
+    /// bound that raw population independently.
+    pub async fn seal_relation(
+        &self,
+        cx: &QueryCx,
+        root_id: PartitionRootVersion,
+        floor: CommitSeq,
+        relation: RelationId,
+        limits: SealedLimits,
+    ) -> Result<SealedPartition, SealedError> {
+        let mut source = crate::store::RootReadLimits::default();
+        source.max_incidences = source.max_incidences.max(limits.max_incidences);
+        self.seal_relation_with_source_limits(cx, root_id, floor, relation, limits, source)
+            .await
+    }
+
+    /// Select one relation only AFTER every source object's integrity,
+    /// properties, chain and history checks. Raw source limits apply to all
+    /// referenced data; image limits apply solely to the retained relation.
+    /// Neither limit can authorize a partial result or a partial root proof.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn seal_relation_with_source_limits(
+        &self,
+        cx: &QueryCx,
+        root_id: PartitionRootVersion,
+        floor: CommitSeq,
+        relation: RelationId,
+        limits: SealedLimits,
+        source: crate::store::RootReadLimits,
+    ) -> Result<SealedPartition, SealedError> {
+        self.seal_selected_adjacency(cx, root_id, floor, Some(relation), limits, source)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seal_selected_adjacency(
+        &self,
+        cx: &QueryCx,
+        root_id: PartitionRootVersion,
+        floor: CommitSeq,
+        relation: Option<RelationId>,
+        limits: SealedLimits,
+        source: crate::store::RootReadLimits,
+    ) -> Result<SealedPartition, SealedError> {
+        let (root, blocks, properties) = match relation {
+            Some(relation) => {
+                self.reopen_relation_adjacency_bounded(cx, root_id, floor, source, relation)
+                    .await
+            }
+            None => {
+                self.reopen_adjacency_bounded(cx, root_id, floor, source)
+                    .await
+            }
+        }
+        .map_err(sealed_source_error)?;
         cx.checkpoint().map_err(SealedError::Interrupted)?;
         let compacted = crate::compact::compact_with_props(&blocks, &properties, floor)
             .map_err(SealedError::History)?;
@@ -272,7 +363,7 @@ impl<V: Vfs> BlockStore<V> {
         };
         let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
         let image = image::build(compacted, limits, &mut checkpoint)?;
-        SealedPartition::finish(scope, image, limits, &mut checkpoint)
+        SealedPartition::finish_scoped(scope, relation, image, limits, &mut checkpoint)
     }
 }
 
@@ -297,8 +388,19 @@ fn sealed_source_error(error: crate::store::RootReadError) -> SealedError {
 }
 
 impl SealedPartition {
+    #[cfg(test)]
     fn finish(
         scope: SealedScope,
+        image: Image,
+        limits: SealedLimits,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<Self, SealedError> {
+        Self::finish_scoped(scope, None, image, limits, checkpoint)
+    }
+
+    fn finish_scoped(
+        scope: SealedScope,
+        relation: Option<RelationId>,
         image: Image,
         limits: SealedLimits,
         checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
@@ -307,14 +409,30 @@ impl SealedPartition {
         let bytes = wire::encode(&image, limits, checkpoint)?;
         let anchor = SealedAnchor {
             scope,
+            relation,
             fingerprint: fingerprint(&bytes),
             encoded_bytes: bytes.len(),
         };
+        Self::check_image_scope(anchor, &image, checkpoint)?;
         checkpoint()?;
         Ok(Self {
             anchor,
             image: Arc::new(image),
         })
+    }
+
+    fn check_image_scope(
+        anchor: SealedAnchor,
+        image: &Image,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        if anchor.relation.is_some() {
+            for row in &image.rows {
+                checkpoint()?;
+                anchor.check_relation(row.key.relation)?;
+            }
+        }
+        Ok(())
     }
 
     pub const fn anchor(&self) -> SealedAnchor {
@@ -342,6 +460,8 @@ impl SealedPartition {
         }
     }
 
+    /// Physical image metadata. `None` outside a scoped anchor's relation does
+    /// not prove graph absence; use `anchor().check_relation` before a read.
     pub fn storage_kind(&self, src: VId, relation: RelationId) -> Option<RowStorageKind> {
         self.image.find_row(src, relation).map(Row::kind)
     }
@@ -382,6 +502,7 @@ impl SealedPartition {
         }
         let image = wire::decode(bytes, limits, resolver, checkpoint)?;
         image.validate(anchor.scope, limits, checkpoint)?;
+        Self::check_image_scope(anchor, &image, checkpoint)?;
         checkpoint()?;
         Ok(Self {
             anchor,
@@ -401,6 +522,7 @@ impl SealedPartition {
     ) -> Result<SealedCursor<'a>, SealedError> {
         cx.checkpoint().map_err(SealedError::Interrupted)?;
         self.anchor.authorize(as_of)?;
+        self.anchor.check_relation(relation)?;
         let row = self.image.find_row(src, relation);
         let position = match (row, lower_bound) {
             (Some(row), Some(destination)) => row.lower_bound(&self.image, destination),

@@ -241,8 +241,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// the controlled binder's row/field, metadata, payload and repeated-global
     /// work, lowered-text compilation and expanded native binding to the SAME
     /// permit. Every row binds before graph observation or identity allocation.
-    /// Later rows see earlier checked effects; any precommit failure discards
-    /// the entire batch. Repeated identity receipts consume repeated signed rows.
+    /// MERGE and disjoint mutations see earlier checked effects. Vertex updates
+    /// that can change their own MATCH first freeze every row's selection and
+    /// expressions against the entry overlay, then authorize and apply each
+    /// original field in input order. Any precommit failure discards the entire
+    /// batch. Repeated identity receipts consume repeated signed rows.
     /// CREATE/INSERT forms keep their existing compiler. Explicit larger bound
     /// batches and the prepared-session API retain their existing contracts.
     ///

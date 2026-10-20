@@ -41,6 +41,8 @@
 //! is outside its kernel timer, and no loading time is hidden in a kernel
 //! comparison. Subsequent database samples may use the ordinary projection
 //! cache; `projection_reused` observes that fact rather than assuming it.
+//! BFS samples retain the certificate's per-level pull decisions and actual
+//! vertex/arc visits; their benefit bounds describe visits, not elapsed time.
 //! Both engines run in every paired trial, with alternating order. Raw samples
 //! and empirical quantiles describe this machine, not an activated §17 gate,
 //! a fitted tail, a server/authorization benchmark, or external-memory parity.
@@ -524,9 +526,51 @@ fn database_sample(
                 "edges_scanned",
                 certificate.witness.edges_scanned.to_string(),
             ),
+            (
+                "nodes_touched",
+                certificate.witness.nodes_touched.to_string(),
+            ),
+            (
+                "bfs_pull_levels",
+                certificate
+                    .bfs_decision_card
+                    .as_ref()
+                    .map_or(0, |card| card.pulls.len())
+                    .to_string(),
+            ),
             ("correctness", "pending-live-GAPBS-comparison".to_owned()),
         ],
     )?;
+    if let Some(card) = &certificate.bfs_decision_card {
+        for pull in &card.pulls {
+            emit(
+                log,
+                "bfs_pull_decision",
+                &[
+                    ("sample", prefix.to_owned()),
+                    ("policy_version", card.policy_version.to_string()),
+                    ("fallback", card.fallback.to_owned()),
+                    ("dwell_levels", card.dwell_levels.to_string()),
+                    (
+                        "pull_cost_multiplier",
+                        card.pull_cost_multiplier.to_string(),
+                    ),
+                    ("depth", pull.depth.to_string()),
+                    ("frontier_vertices", pull.frontier_vertices.to_string()),
+                    ("frontier_arcs", pull.frontier_arcs.to_string()),
+                    (
+                        "unseen_incoming_arcs",
+                        pull.unseen_incoming_arcs.to_string(),
+                    ),
+                    ("vertices", pull.vertices.to_string()),
+                    ("benefit_lower", pull.benefit_lower.to_string()),
+                    ("benefit_upper", pull.benefit_upper.to_string()),
+                    ("candidate_visits", pull.candidate_visits.to_string()),
+                    ("incoming_visits", pull.incoming_visits.to_string()),
+                ],
+            )?;
+        }
+    }
     *previous = Some(projection);
     Ok((values, query_ns, certificate.edges))
 }

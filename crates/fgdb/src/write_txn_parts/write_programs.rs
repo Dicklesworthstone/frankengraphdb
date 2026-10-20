@@ -1,6 +1,8 @@
 // Mixed write programs reuse the existing private program guard and ordinary
 // staging paths. This file owns orchestration, not another writer or matcher.
 
+include!("frozen_update_program.rs");
+
 /// Admitted edge chunks remain private until the program's last stage. Every
 /// selection in this profile reads only the unchanged vertex domain, so it
 /// sees exactly the same values as the ordinary canonical prefix overlay.
@@ -170,7 +172,9 @@ impl WriteTxn {
     /// relationship MERGE, including ON MATCH/ON CREATE actions on either
     /// element kind, as one atomic operation inside this transaction. Each step
     /// sees its predecessor's canonical overlay; assignments within a step
-    /// remain frozen and simultaneous. No intermediate step commits.
+    /// remain frozen and simultaneous. A native UNWIND vertex-update program
+    /// with frozen input provenance evaluates every step against its entry
+    /// overlay, then stages the updates in input order. No step commits.
     /// Plain DELETE refuses incident relationships; it never becomes a cascade.
     /// Statements may name different relations; their effects must satisfy
     /// `write_atomic` composition, including the shared-initializer prefix rules.
@@ -226,6 +230,11 @@ impl WriteTxn {
                 pinned: self.basis,
                 live,
             }));
+        }
+        if program.freezes_vertex_update_input() {
+            return self
+                .execute_frozen_vertex_updates_governed(database, cx, program, policy, false)
+                .map(|(stats, _)| stats);
         }
         cx.with_restriction(|| {
             let mut workspace = MutationProgramWorkspace::for_write_program(self, program);
@@ -388,6 +397,11 @@ impl WriteTxn {
                 pinned: self.basis,
                 live,
             }));
+        }
+        if program.freezes_vertex_update_input() {
+            return self
+                .execute_frozen_vertex_updates_governed(database, cx, program, policy, true)
+                .map(|(stats, receipts)| fgdb_gql::GraphWriteProgramReceipt::new(stats, receipts));
         }
         cx.with_restriction(|| {
             let mut workspace = MutationProgramWorkspace::for_write_program(self, program);

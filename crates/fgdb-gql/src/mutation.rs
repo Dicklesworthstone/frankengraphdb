@@ -400,6 +400,46 @@ impl core::fmt::Debug for PreparedGraphMutation {
     }
 }
 impl PreparedGraphMutation {
+    /// Closed profile used by the UNWIND clause-at-a-time adapter. Every
+    /// target must be a resolved vertex column and every action a field update;
+    /// deletions and relationship updates need different staging contracts.
+    pub(crate) fn is_vertex_update_only(&self) -> bool {
+        self.actions.iter().all(|action| {
+            !action.deletes()
+                && self.columns.get(action.target()) == Some(&GraphSetColumnType::Vertex)
+        })
+    }
+
+    /// Bound the program's field-intent statistics from the resolved definition.
+    /// A complete-map replacement expands its clear action to at most every
+    /// unkept catalog key: the collector refuses a property name absent from
+    /// this same injective catalog. Ordinary actions keep their one-intent bound.
+    pub(crate) fn maximum_effects_per_binding(&self) -> usize {
+        let maximum: u128 = self
+            .actions
+            .iter()
+            .map(|action| match action {
+                GraphMutationAction::ClearProperties { keep, .. } => self
+                    .selection
+                    .plan()
+                    .reverse_catalog
+                    .as_ref()
+                    .map_or(0, |catalog| {
+                        catalog
+                            .properties
+                            .keys()
+                            .filter(|key| !keep.contains(key))
+                            .count() as u128
+                    }),
+                _ => 1,
+            })
+            .sum();
+        // At most MAX_GRAPH_MUTATION_ACTIONS usize-sized catalogs fit this
+        // u128 sum. A materialized proposal has at most usize::MAX intents,
+        // so capping to that length cannot admit an impossible larger count.
+        maximum.min(usize::MAX as u128) as usize
+    }
+
     /// The caller supplies the existing WriteBatch relation coordinate. It is
     /// never guessed from a MATCH relation, a result value, or an ambient catalog.
     /// Property targets are vertex or edge columns; assignment inputs are scalar.

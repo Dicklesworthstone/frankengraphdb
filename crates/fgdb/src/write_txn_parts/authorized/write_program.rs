@@ -41,10 +41,12 @@ impl<V: Vfs + Clone> Database<V> {
     /// Execute an atomic authorized CRUD program over the canonical native
     /// transaction overlay. Supports INSERT/CREATE, SET/REMOVE/DETACH DELETE
     /// plain DELETE, vertex/relationship MERGE and ON MATCH/ON CREATE actions.
-    /// A later statement observes preceding checked effects;
-    /// each individual statement still freezes its MATCH and expressions before
-    /// staging. Every field/image and every plain-DELETE incidence proof uses
-    /// the same rules as the corresponding authorized single-statement method.
+    /// A later statement observes preceding checked effects. A compiler-marked
+    /// UNWIND vertex-update program freezes every row's MATCH and expressions
+    /// against the entry overlay before applying its fields in input order.
+    /// Each ordinary statement also freezes its own MATCH and expressions.
+    /// Every field/image and every plain-DELETE incidence proof uses the same
+    /// rules as the corresponding authorized single-statement method.
     ///
     /// All statements share one live permit and the existing cumulative native
     /// program meter. Creations later deleted still consume creation allowance;
@@ -299,6 +301,20 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut receipts = Vec::new();
                 let stats = query_cx
                     .with_restriction(|| {
+                        if program.freezes_vertex_update_input() {
+                            let (stats, frozen_receipts) = mutation::apply_frozen_program(
+                                workspace.transaction(),
+                                self,
+                                query_cx,
+                                program,
+                                policy,
+                                scope,
+                                execution,
+                                returning,
+                            )?;
+                            receipts = frozen_receipts;
+                            return Ok(stats);
+                        }
                         let execution = RefCell::new(&mut *execution);
                         program.execute_governed(
                             policy,

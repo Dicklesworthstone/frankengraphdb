@@ -198,7 +198,7 @@ const SIGNATURES: &[FnxSignature] = &[
         rng_policy: "none",
         graph_laws: "explicit projection; unweighted outgoing reachability; inclusive hop cutoff; reachable rows only in VId order",
         complexity: "O(|V| + |E|)",
-        execution_kernel: "fgdb-prism/bfs-row-cursor-v1",
+        execution_kernel: "fgdb-prism/bfs-bounded-pull-v1",
     },
     FnxSignature {
         name: "fnx.connected_components",

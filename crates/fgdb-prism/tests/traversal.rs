@@ -167,10 +167,33 @@ fn bfs_runs_preserve_distances_witnesses_and_every_work_refusal() {
             assert_eq!(meter.largest_run, FNX_METER_RUN);
             let reached = batched.rows.len();
             let witness = &batched.certificate.witness;
-            assert_eq!(witness.nodes_touched, reached);
+            // This graph selects pull only at the undirected wide frontier,
+            // when the cutoff allows its successor. Pull truthfully includes
+            // every candidate vertex visit and one certificate-hash unit per
+            // recorded decision; scalar and batched meters observe the same
+            // physical traversal and exact cancellation ordinal.
+            let pulls = batched
+                .certificate
+                .bfs_decision_card
+                .as_ref()
+                .map(|card| card.pulls.as_slice())
+                .unwrap_or(&[]);
+            assert_eq!(
+                !pulls.is_empty(),
+                direction == Directedness::Undirected && (cutoff.is_none() || cutoff == Some(2))
+            );
+            let candidate_visits: usize = pulls.iter().map(|pull| pull.candidate_visits).sum();
+            assert_eq!(witness.nodes_touched, reached + candidate_visits);
+            assert!(
+                witness.nodes_touched + witness.edges_scanned <= batched.certificate.estimated_work
+            );
             assert_eq!(
                 scalar_units,
-                3 * vertices.len() + reached + witness.edges_scanned + 3
+                3 * vertices.len()
+                    + witness.nodes_touched
+                    + witness.edges_scanned
+                    + 3
+                    + pulls.len()
             );
             for stop in 1..=scalar_units {
                 let mut meter = ComponentMeter {

@@ -50,12 +50,91 @@ impl SpillSetJoinPlan {
         ) && !self.keys().is_empty()
             && self.spec.predicate().is_none()
     }
-    /// Keyed residual joins replay only equal-key candidates through the native
-    /// ON kernel. Every left/right occurrence owns its own witness; outer and
-    /// presence decisions never reuse another occurrence's predicate result.
-    /// This is a fixed choice before execution, never a retry after refusal.
+    /// Residual joins replay only equal-key candidates through the native ON
+    /// kernel. An unkeyed definition may use necessary ON equalities, proved
+    /// by the SAME Boolean analysis as resident and maintained selections.
+    /// This bounded metadata inspection owns no input rows. The host repeats
+    /// it under its execution control before retaining the actual probe keys.
+    /// Every occurrence owns its own witness; this is never a retry strategy.
     pub fn supports_merge_filtered(&self) -> bool {
-        !self.keys().is_empty() && self.spec.predicate().is_some()
+        if self.spec.predicate().is_none() {
+            return false;
+        }
+        if !self.keys().is_empty() {
+            return true;
+        }
+        match self.spec.predicate_probe_keys_with_control(&mut |_| {
+            Ok::<_, core::convert::Infallible>(())
+        }) {
+            Ok(keys) => !keys.is_empty(),
+            Err(never) => match never {},
+        }
+    }
+
+    /// Physical candidate tuple in original left/right column positions.
+    /// Explicit keys keep typed identity. Otherwise these are necessary ON
+    /// equalities, NOT additional typed join conditions. Empty means no merge
+    /// specialization; NOT and unsafe OR arms never manufacture a key.
+    /// Reserve metadata on ScratchEntry before returning success and retain
+    /// it through sorting and both witness sweeps. Refusal is terminal.
+    pub fn probe_keys_with_control<E>(
+        &self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<(usize, usize)>, SpillSetRowError<E>> {
+        if self.keys().is_empty() {
+            return self
+                .spec
+                .predicate_probe_keys_with_control(control)
+                .map_err(SpillSetRowError::Control);
+        }
+        let mut keys = Vec::new();
+        for &key in self.keys() {
+            control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+            control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
+            keys.push(key);
+        }
+        Ok(keys)
+    }
+
+    /// Compare tuples obtained from THIS plan's probe_keys_with_control.
+    /// Inferred tuples use native language orderability (ascending, NULL last)
+    /// on both sides. This is a candidate SUPERSET, not predicate equivalence:
+    /// e.g. Decimal(7), Int(7), Float(7) can share a group without all matching
+    /// ON. Every candidate must still pass the complete native matcher. This
+    /// permits reuse of the ordinary query-order sorter without rewriting
+    /// payloads, defining another numeric law or promoting inferred keys into
+    /// explicit typed conditions. Payload columns do not break tuple ties.
+    /// Complete input schemas and key bounds are checked before comparison.
+    pub fn compare_probe_keys_with_control<E>(
+        &self,
+        left: &GraphValueRow,
+        right: &GraphValueRow,
+        keys: &[(usize, usize)],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<core::cmp::Ordering, SpillSetRowError<E>> {
+        if !self.keys().is_empty() {
+            return self.compare_keys_with_control(left, right, control);
+        }
+        self.validate_row_with_control(left, 0, control)?;
+        self.validate_row_with_control(right, 1, control)?;
+        for &(a, b) in keys {
+            control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+            let left = left
+                .values()
+                .get(a)
+                .ok_or_else(|| failure(RowJoinError::InputSchema { side: 0 }))?;
+            let right = right
+                .values()
+                .get(b)
+                .ok_or_else(|| failure(RowJoinError::InputSchema { side: 1 }))?;
+            let order = left
+                .compare_orderability_with_control(right, control)
+                .map_err(SpillSetRowError::Control)?;
+            if order != core::cmp::Ordering::Equal {
+                return Ok(order);
+            }
+        }
+        Ok(core::cmp::Ordering::Equal)
     }
     pub fn compare_keys_with_control<E>(
         &self,

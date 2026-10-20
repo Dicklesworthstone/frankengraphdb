@@ -40,7 +40,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 
 #[test]
-fn multirow_mutations_refuse_selection_feedback_across_fields_aliases_and_scopes() {
+fn multirow_vertex_updates_freeze_selection_feedback_across_fields_aliases_and_scopes() {
     let input = rows(vec![
         object(vec![("id", int(1)), ("p", int(2))]),
         object(vec![("id", int(2)), ("p", int(3))]),
@@ -62,14 +62,27 @@ fn multirow_mutations_refuse_selection_feedback_across_fields_aliases_and_scopes
         "MATCH (n:Entity) WHERE coalesce(0,n.id)=row.id SET n.id=row.p",
         "MATCH (n:Entity) WHERE upper(n.name)='X' SET n.name='changed'",
         "MATCH (n:Entity) WHERE n.id IN [row.id,NULL] SET n += {id:row.p}",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=a.p SET a.p=row.p",
+        "MATCH (a:Entity) OPTIONAL MATCH (a)-[:R]->(b) WHERE coalesce(b.id,0)=row.id SET a.id=row.p",
+        "MATCH (a:Entity) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE b.id=row.id OR b.p=0 } SET a.id=row.p",
+    ] {
+        let definition =
+            GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}")).unwrap();
+        let bound = definition
+            .bind(&input, RelationId(1), symbols)
+            .unwrap_or_else(|error| panic!("{tail}: {error:?}"));
+        assert!(bound.program().freezes_vertex_update_input(), "{tail}");
+        assert_eq!(bound.argument_sets(), 2);
+        let singleton = definition.bind(&single, RelationId(1), symbols).unwrap();
+        assert_eq!(singleton.argument_sets(), 1);
+        assert!(!singleton.program().freezes_vertex_update_input());
+    }
+    for tail in [
         "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p",
         "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e += {id:row.p}",
         "MATCH (a:Entity)-[e:R]->(b) WHERE e.id IS NULL SET e.id=row.p",
         "MATCH (a:Entity)-[e:R]->(b) WHERE abs(e.id)=row.id SET e.id=row.p",
-        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=a.p SET a.p=row.p",
         "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=a.p REMOVE e.id",
-        "MATCH (a:Entity) OPTIONAL MATCH (a)-[:R]->(b) WHERE coalesce(b.id,0)=row.id SET a.id=row.p",
-        "MATCH (a:Entity) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE b.id=row.id OR b.p=0 } SET a.id=row.p",
         "MATCH (n:Entity {id:row.id})-[:R]->(m) DETACH DELETE n",
         "MATCH (n:Entity {id:row.id}), (anchor:Entity {id:1}) DETACH DELETE n",
         "MATCH (n:Entity {id:row.id}), (anchor:Entity {id:1}) DELETE n",
@@ -111,6 +124,7 @@ fn disjoint_updates_single_vertex_deletion_and_merges_keep_their_native_programs
         let actual = definition.bind(&input, RelationId(1), symbols).unwrap();
         assert_eq!(actual.argument_sets(), 3, "{tail}");
         assert_eq!(actual.program().statements().len(), 3, "{tail}");
+        assert!(!actual.program().freezes_vertex_update_input(), "{tail}");
     }
 }
 
@@ -191,16 +205,26 @@ fn nullable_first_rows_never_hide_later_boolean_property_dependencies() {
     let frozen = input.canonical_bytes();
     for tail in [
         "MATCH (n:Entity) WHERE n.id=row.id OR n.p=0 SET n.id=row.p",
-        "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e.id=row.p",
         "MATCH (a:Entity) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE coalesce(b.id,0)=row.id } SET a.id=row.p",
     ] {
         let definition =
             GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}")).unwrap();
-        assert!(matches!(
-            definition.bind(&input, RelationId(1), symbols),
-            Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
-        ));
+        assert!(
+            definition
+                .bind(&input, RelationId(1), symbols)
+                .unwrap()
+                .program()
+                .freezes_vertex_update_input()
+        );
     }
+    let edge = GraphUnwindWriteText::parse(
+        "UNWIND $rows AS row MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e.id=row.p",
+    )
+    .unwrap();
+    assert!(matches!(
+        edge.bind(&input, RelationId(1), symbols),
+        Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+    ));
     let disjoint = GraphUnwindWriteText::parse(
         "UNWIND $rows AS row MATCH (n:Entity) WHERE n.id=row.id OR n.id IS NULL SET n.p=row.p",
     )
@@ -234,10 +258,9 @@ fn selection_feedback_uses_final_expansion_count_and_preserves_definition_contro
         ("ids", list(vec![int(1), int(2)])),
         ("p", int(3)),
     ])]);
-    assert!(matches!(
-        definition.bind(&input, RelationId(1), symbols),
-        Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
-    ));
+    let expanded = definition.bind(&input, RelationId(1), symbols).unwrap();
+    assert_eq!(expanded.argument_sets(), 2);
+    assert!(expanded.program().freezes_vertex_update_input());
     let refused = definition.bind_with_limit_controlled(
         &input,
         RelationId(1),
@@ -256,13 +279,11 @@ fn selection_feedback_uses_final_expansion_count_and_preserves_definition_contro
         object(vec![("ids", list(vec![int(1)])), ("p", int(3))]),
         object(vec![("ids", list(vec![])), ("p", int(4))]),
     ]);
-    assert_eq!(
-        definition
-            .bind(&contracted, RelationId(1), symbols)
-            .unwrap()
-            .argument_sets(),
-        1
-    );
+    let contracted = definition
+        .bind(&contracted, RelationId(1), symbols)
+        .unwrap();
+    assert_eq!(contracted.argument_sets(), 1);
+    assert!(!contracted.program().freezes_vertex_update_input());
 }
 
 #[test]
@@ -580,6 +601,8 @@ fn scalar_aliases_cannot_capture_graph_bindings_or_intercept_native_create_pipel
         "UNWIND $rows AS x CREATE (n {id:x})",
         "UNWIND $rows AS x UNWIND x AS y CREATE (n {id:y}) RETURN n",
         "UNWIND $rows AS SET MATCH (n) WHERE n.p=SET CREATE (m {id:SET})",
+        "UNWIND $rows AS row MATCH (SET) WHERE SET.id=row.id CREATE (m {id:row.id})",
+        "UNWIND $rows AS row MATCH (n) WHERE n.SET={id:row.id} CREATE (m {id:row.id})",
         "UNWIND $rows AS MERGE MATCH (n) WHERE n.p=MERGE INSERT (m {id:MERGE})",
     ] {
         assert!(

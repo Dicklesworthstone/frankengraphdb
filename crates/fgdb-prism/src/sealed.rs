@@ -231,9 +231,11 @@ impl SealedGraphView {
         limits: ProjectionLimits,
     ) -> Result<Self, SealedProjectionError> {
         checkpoint(cx)?;
-        if config.selection.relation.is_none() {
-            return Err(SealedProjectionError::RelationRequired);
-        }
+        let relation = config
+            .selection
+            .relation
+            .ok_or(SealedProjectionError::RelationRequired)?;
+        partition.anchor().check_relation(relation)?;
         let scope = partition.anchor().scope();
         if config.as_of < scope.floor || config.as_of > scope.publication {
             return Err(SealedProjectionError::Read(
@@ -274,8 +276,9 @@ impl SealedGraphView {
                     cx.query,
                     IncomingIndexLimits {
                         max_incidences: limits.max_input_edges,
-                        // This indexes the whole admitted image, including other
-                        // relations and unselected endpoints, not merely n vertices.
+                        // This indexes the whole retained image, including
+                        // unselected endpoints. A relation-scoped source has
+                        // already excluded unrelated families before sealing.
                         max_rows: limits.max_input_edges,
                         max_workspace_bytes: limits.max_workspace_bytes - workspace_bytes,
                     },

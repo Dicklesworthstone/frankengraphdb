@@ -4,8 +4,9 @@
 //! executed the computation.
 
 use crate::{
-    AdapterPath, FNX_IMPLEMENTATION_REVISION, FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm,
-    FnxCallSpec, FnxGraphKind, FnxOutput, GraphView, SnapshotBinding, SnapshotGraphView,
+    AdapterPath, BfsDecisionCard, FNX_IMPLEMENTATION_REVISION, FNX_SIGNATURE_REGISTRY_VERSION,
+    FnxAlgorithm, FnxCallSpec, FnxGraphKind, FnxOutput, GraphView, SnapshotBinding,
+    SnapshotGraphView,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
@@ -150,6 +151,37 @@ pub enum FnxValue {
     /// A finite weighted distance, distinct from a centrality score.
     Float(f64),
 }
+
+/// One canonical result cell, including its type tag. Feeding the complete
+/// fixed-width record at once preserves the v3 transcript while avoiding two
+/// tiny hasher updates per cell. No row buffer or new checkpoint is needed.
+#[inline]
+pub(crate) fn hash_result_value(hash: &mut Hasher, value: FnxValue) {
+    let mut bytes = [0_u8; 17];
+    let len = match value {
+        FnxValue::Vertex(vertex) => {
+            bytes[1..].copy_from_slice(&vertex.0.to_le_bytes());
+            17
+        }
+        FnxValue::Score(score) => {
+            bytes[0] = 1;
+            bytes[1..9].copy_from_slice(&score.to_bits().to_le_bytes());
+            9
+        }
+        FnxValue::Integer(value) => {
+            bytes[0] = 2;
+            bytes[1..9].copy_from_slice(&value.to_le_bytes());
+            9
+        }
+        FnxValue::Float(value) => {
+            bytes[0] = 3;
+            bytes[1..9].copy_from_slice(&value.to_bits().to_le_bytes());
+            9
+        }
+    };
+    hash.update(&bytes[..len]);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnxCertificate {
     pub registry_version: u16,
@@ -175,9 +207,13 @@ pub struct FnxCertificate {
     pub estimated_work: usize,
     /// Peak vector backing bytes for the kernel, excluding the existing
     /// projection, output rows and allocator overhead. Includes temporary
-    /// kernel indexes and normalized weights; PageRank records its reserved
-    /// capacities at the allocation peak.
+    /// kernel indexes, normalized weights and BFS decision evidence; PageRank
+    /// and adaptive BFS record their reserved capacities at the allocation peak.
     pub kernel_workspace_bytes: usize,
+    /// Replayable physical direction choices when decoded BFS completes a
+    /// pull level. Absent when no pull was executed, including other kernels
+    /// and compressed-row execution.
+    pub bfs_decision_card: Option<BfsDecisionCard>,
     /// The foundation schema, populated from actual completed kernel passes.
     /// Admission, projection and result-conversion work are not loop counters.
     pub witness: ComplexityWitness,
@@ -952,16 +988,16 @@ impl FnxCallSpec {
         ) {
             admit("result rows", n, limits.max_result_rows)?;
         }
-        let mut arcs = 0usize;
-        for source in 0..n {
-            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-            let neighbors = graph
-                .neighbors_indices(source)
-                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-            arcs = arcs
-                .checked_add(neighbors.len())
-                .ok_or(FnxExecutionError::SizeOverflow)?;
-        }
+        // The builder already checked every row boundary, and its final
+        // immutable offset is the exact arc count (including both directions of
+        // undirected edges, but only one incidence per self-loop). Retain the
+        // scan's logical admission units and refusal order without reopening
+        // every row on every CALL. A scalar meter still sees every unit.
+        charge_runs(n, &mut checkpoint)?;
+        let arcs = *graph
+            .outgoing_offsets()
+            .last()
+            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
         let estimated_work = match algorithm {
             FnxAlgorithm::PageRank(options) => n.checked_add(arcs).and_then(|step| {
                 options
@@ -1020,6 +1056,7 @@ impl FnxCallSpec {
                     .ok_or(FnxExecutionError::SizeOverflow)?
             }
         };
+        let mut bfs_decision_card = None;
         let output = match algorithm {
             FnxAlgorithm::PageRank(options) => {
                 let (scores, witness, workspace_bytes) =
@@ -1075,7 +1112,19 @@ impl FnxCallSpec {
                 kernel_workspace_bytes = workspace_bytes;
                 output
             }
-            _ => crate::traversal::run(graph, algorithm, limits.max_result_rows, &mut checkpoint)?,
+            _ => {
+                let traversal = crate::traversal::run(
+                    graph,
+                    algorithm,
+                    limits.max_result_rows,
+                    &mut checkpoint,
+                )?;
+                if let Some(bytes) = traversal.workspace_bytes {
+                    kernel_workspace_bytes = bytes;
+                }
+                bfs_decision_card = traversal.bfs_decision_card;
+                traversal.output
+            }
         };
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let mut rows = reserve(output.row_count)?;
@@ -1091,24 +1140,7 @@ impl FnxCallSpec {
             let mut row = reserve(self.outputs().len())?;
             for column in self.outputs() {
                 let value = output.values.value(index, column.field, graph)?;
-                match value {
-                    FnxValue::Vertex(vertex) => {
-                        result_hash.update(&[0]);
-                        result_hash.update(&vertex.0.to_le_bytes());
-                    }
-                    FnxValue::Score(score) => {
-                        result_hash.update(&[1]);
-                        result_hash.update(&score.to_bits().to_le_bytes());
-                    }
-                    FnxValue::Integer(value) => {
-                        result_hash.update(&[2]);
-                        result_hash.update(&value.to_le_bytes());
-                    }
-                    FnxValue::Float(value) => {
-                        result_hash.update(&[3]);
-                        result_hash.update(&value.to_bits().to_le_bytes());
-                    }
-                }
+                hash_result_value(&mut result_hash, value);
                 row.push(value);
             }
             rows.push(row);
@@ -1119,7 +1151,7 @@ impl FnxCallSpec {
         let witness = output.witness;
         let kernel_source_digest = kernel_source_digest();
         let mut hash = Hasher::new();
-        hash.update(b"fgdb:prism:call-certificate:v3");
+        hash.update(b"fgdb:prism:call-certificate:v4");
         hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
         hash.update(FNX_IMPLEMENTATION_REVISION.as_bytes());
         hash_text(&mut hash, signature.execution_kernel);
@@ -1144,6 +1176,10 @@ impl FnxCallSpec {
         }
         hash_text(&mut hash, &witness.algorithm);
         hash_text(&mut hash, &witness.complexity_claim);
+        hash_bfs_decision_card(&mut hash, bfs_decision_card.as_ref(), &mut || {
+            checkpoint.unit()
+        })
+        .map_err(FnxExecutionError::Cancelled)?;
         let certificate = FnxCertificate {
             registry_version: FNX_SIGNATURE_REGISTRY_VERSION,
             implementation_revision: FNX_IMPLEMENTATION_REVISION,
@@ -1160,6 +1196,7 @@ impl FnxCallSpec {
             input_edges: graph.input_edge_count(),
             estimated_work,
             kernel_workspace_bytes,
+            bfs_decision_card,
             witness,
             digest: hash.finalize(),
         };
@@ -1178,6 +1215,47 @@ impl FnxCallSpec {
 fn hash_text(hash: &mut Hasher, text: &str) {
     hash.update(&(text.len() as u128).to_le_bytes());
     hash.update(text.as_bytes());
+}
+
+/// The v4 certificate binds the optional policy and every ordered, completed
+/// pull decision. Like row conversion, evidence encoding has a checkpoint for
+/// each bounded record; absent evidence adds no work units.
+pub(crate) fn hash_bfs_decision_card<C>(
+    hash: &mut Hasher,
+    card: Option<&BfsDecisionCard>,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<(), C> {
+    let Some(card) = card else {
+        hash.update(&[0]);
+        return Ok(());
+    };
+    hash.update(&[1]);
+    hash.update(&card.policy_version.to_le_bytes());
+    hash_text(hash, card.fallback);
+    for number in [
+        card.dwell_levels,
+        card.pull_cost_multiplier,
+        card.pulls.len(),
+    ] {
+        hash.update(&(number as u128).to_le_bytes());
+    }
+    for decision in &card.pulls {
+        checkpoint()?;
+        for number in [
+            decision.depth,
+            decision.frontier_vertices,
+            decision.frontier_arcs,
+            decision.unseen_incoming_arcs,
+            decision.vertices,
+            decision.benefit_lower,
+            decision.benefit_upper,
+            decision.candidate_visits,
+            decision.incoming_visits,
+        ] {
+            hash.update(&(number as u128).to_le_bytes());
+        }
+    }
+    Ok(())
 }
 
 fn kernel_source_digest() -> Digest {
@@ -1212,6 +1290,7 @@ mod tests {
     };
     use fgdb_types::{CommitSeq, EId, ids::ObjectId};
     use std::convert::Infallible;
+    use std::mem::size_of;
 
     fn projection(mask: u16, direction: Directedness) -> SnapshotGraphView {
         let vertices = [VId(0), VId(17), VId(u128::MAX)];
@@ -1273,6 +1352,469 @@ mod tests {
             }
             self.seen += n;
             Ok(())
+        }
+    }
+
+    struct RecordingMeter<'a, const RUNS: bool>(&'a mut Recording);
+
+    impl<const RUNS: bool> FnxMeter<&'static str> for RecordingMeter<'_, RUNS> {
+        fn poll(&mut self) -> Result<(), &'static str> {
+            self.0.poll()
+        }
+        fn unit(&mut self) -> Result<(), &'static str> {
+            self.0.unit()
+        }
+        fn units(&mut self, n: usize) -> Result<(), &'static str> {
+            if RUNS {
+                self.0.units(n)
+            } else {
+                for _ in 0..n {
+                    self.unit()?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn bfs_decision_cards_bind_ordered_records_and_checkpoint_before_each_record() {
+        let card = BfsDecisionCard {
+            policy_version: 0x0102,
+            fallback: "top_down",
+            dwell_levels: 3,
+            pull_cost_multiplier: 4,
+            pulls: vec![
+                crate::BfsPullDecision {
+                    depth: 5,
+                    frontier_vertices: 6,
+                    frontier_arcs: 7,
+                    unseen_incoming_arcs: 8,
+                    vertices: 9,
+                    benefit_lower: 10,
+                    benefit_upper: 11,
+                    candidate_visits: 12,
+                    incoming_visits: 13,
+                },
+                crate::BfsPullDecision {
+                    depth: 14,
+                    frontier_vertices: 15,
+                    frontier_arcs: 16,
+                    unseen_incoming_arcs: 17,
+                    vertices: 18,
+                    benefit_lower: 19,
+                    benefit_upper: 20,
+                    candidate_visits: 21,
+                    incoming_visits: usize::MAX,
+                },
+            ],
+        };
+        // Explicit protocol bytes, independently of the streaming helper:
+        // presence, u16 policy, text length/text, three u128 header integers,
+        // then nine u128 fields per ordered pull. Distinct values expose an
+        // omitted, reordered or narrowed field; the last exercises a full word.
+        let mut transcript = vec![1, 2, 1];
+        transcript.extend_from_slice(&8_u128.to_le_bytes());
+        transcript.extend_from_slice(b"top_down");
+        for number in [3_u128, 4, 2].into_iter().chain(5..=21) {
+            transcript.extend_from_slice(&number.to_le_bytes());
+        }
+        transcript.extend_from_slice(&(usize::MAX as u128).to_le_bytes());
+        for stop in [None, Some(1), Some(2)] {
+            let mut observed = 0;
+            let mut actual = Hasher::new();
+            let result = hash_bfs_decision_card(&mut actual, Some(&card), &mut || {
+                observed += 1;
+                if stop == Some(observed) {
+                    Err("stop")
+                } else {
+                    Ok(())
+                }
+            });
+            let prefix = stop.map_or(transcript.len(), |stop| 75 + (stop - 1) * 144);
+            let mut expected = Hasher::new();
+            expected.update(&transcript[..prefix]);
+            assert_eq!(actual.finalize(), expected.finalize(), "stop={stop:?}");
+            assert_eq!(observed, stop.unwrap_or(2));
+            assert_eq!(result, stop.map_or(Ok(()), |_| Err("stop")));
+        }
+        let mut absent = Hasher::new();
+        hash_bfs_decision_card(&mut absent, None, &mut || -> Result<(), Infallible> {
+            panic!("absent evidence must not add a checkpoint")
+        })
+        .unwrap();
+        let mut expected = Hasher::new();
+        expected.update(&[0]);
+        assert_eq!(absent.finalize(), expected.finalize());
+    }
+
+    #[test]
+    fn public_bfs_certificates_bind_decisions_and_measured_evidence_workspace() {
+        let n = 16;
+        let vertices: Vec<_> = (0..n).map(|i| VId((1 << 113) + i as u128)).collect();
+        let mut edges = Vec::new();
+        for &source in &vertices {
+            for &target in &vertices {
+                if source != target {
+                    edges.push(ProjectionEdge {
+                        eid: EId(edges.len() as u128),
+                        source,
+                        target,
+                        weight: 1.0,
+                    });
+                }
+            }
+        }
+        let graph = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([0x31; 32]),
+                as_of: CommitSeq(17),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: Directedness::Directed,
+                parallel_edges: ParallelEdgePolicy::CollapseUnit,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: n,
+                max_input_edges: edges.len(),
+                max_adjacency_entries: edges.len(),
+                max_workspace_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let limits = FnxExecutionLimits {
+            max_iterations: 1,
+            max_result_rows: n,
+            max_estimated_work: n + edges.len(),
+        };
+        let text = |bytes: &mut Vec<u8>, value: &str| {
+            bytes.extend_from_slice(&(value.len() as u128).to_le_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        };
+        for cutoff in [None, Some(0)] {
+            let call = FnxCallSpec::single_source_shortest_path_length(vertices[0], cutoff);
+            let result = call
+                .execute(&graph, limits, || Ok::<(), Infallible>(()))
+                .unwrap();
+            let certificate = &result.certificate;
+            let reached = if cutoff.is_none() { n } else { 1 };
+            let expected_rows: Vec<_> = vertices[..reached]
+                .iter()
+                .enumerate()
+                .map(|(at, &vertex)| {
+                    vec![
+                        FnxValue::Vertex(vertex),
+                        FnxValue::Integer(u64::from(at != 0)),
+                    ]
+                })
+                .collect();
+            assert_eq!(result.rows, expected_rows);
+            let mut evidence = Vec::new();
+            if cutoff.is_none() {
+                let card = certificate.bfs_decision_card.as_ref().expect("dense pull");
+                assert_eq!(card.policy_version, 1);
+                assert_eq!(card.fallback, "top_down");
+                assert_eq!(card.dwell_levels, 1);
+                assert_eq!(card.pull_cost_multiplier, 2);
+                assert_eq!(
+                    card.pulls,
+                    [crate::BfsPullDecision {
+                        depth: 1,
+                        frontier_vertices: 15,
+                        frontier_arcs: 225,
+                        unseen_incoming_arcs: 0,
+                        vertices: 16,
+                        benefit_lower: 209,
+                        benefit_upper: 209,
+                        candidate_visits: 16,
+                        incoming_visits: 0,
+                    }]
+                );
+                let vectors = n * (size_of::<usize>() + size_of::<Option<usize>>());
+                let decision_bytes = card.pulls.capacity() * size_of::<crate::BfsPullDecision>();
+                assert!(certificate.kernel_workspace_bytes >= vectors + decision_bytes);
+                // Known dense-graph decision bytes, independent of the
+                // certificate helper and the returned evidence's field values.
+                evidence.extend_from_slice(&[1, 1, 0]);
+                text(&mut evidence, "top_down");
+                for number in [1_u128, 2, 1, 1, 15, 225, 0, 16, 209, 209, 16, 0] {
+                    evidence.extend_from_slice(&number.to_le_bytes());
+                }
+            } else {
+                assert!(certificate.bfs_decision_card.is_none());
+                evidence.push(0);
+            }
+            // Reconstruct the entire v4 envelope independently; this detects
+            // dropped propagation or a card omitted from the public digest.
+            let mut transcript = b"fgdb:prism:call-certificate:v4".to_vec();
+            transcript.extend_from_slice(&certificate.registry_version.to_le_bytes());
+            transcript.extend_from_slice(certificate.implementation_revision.as_bytes());
+            text(&mut transcript, certificate.execution_kernel);
+            transcript.extend_from_slice(&certificate.kernel_source_digest.0);
+            text(&mut transcript, certificate.numeric_profile);
+            transcript.extend_from_slice(&certificate.projection_digest.0);
+            transcript.extend_from_slice(&certificate.call_digest.0);
+            transcript.extend_from_slice(&certificate.result_digest.0);
+            text(&mut transcript, certificate.adapter.as_str());
+            for number in [
+                certificate.vertices,
+                certificate.edges,
+                certificate.input_edges,
+                certificate.estimated_work,
+                certificate.kernel_workspace_bytes,
+                certificate.witness.nodes_touched,
+                certificate.witness.edges_scanned,
+                certificate.witness.queue_peak,
+            ] {
+                transcript.extend_from_slice(&(number as u128).to_le_bytes());
+            }
+            text(&mut transcript, &certificate.witness.algorithm);
+            text(&mut transcript, &certificate.witness.complexity_claim);
+            transcript.extend_from_slice(&evidence);
+            let mut expected = Hasher::new();
+            expected.update(&transcript);
+            assert_eq!(certificate.digest, expected.finalize(), "cutoff={cutoff:?}");
+        }
+    }
+
+    #[test]
+    fn result_cell_records_preserve_type_tags_float_bits_and_chunk_boundaries() {
+        // The transcript oracle supplies explicit tags and bit patterns,
+        // independently of the production encoder's enum match and buffer.
+        let cases = [
+            (FnxValue::Vertex(VId(0)), 0, 0_u128, 16),
+            (FnxValue::Vertex(VId(u128::MAX)), 0, u128::MAX, 16),
+            (FnxValue::Vertex(VId(1 << 97)), 0, 1 << 97, 16),
+            (FnxValue::Score(0.0), 1, 0, 8),
+            (FnxValue::Score(-0.0), 1, 1 << 63, 8),
+            (
+                FnxValue::Score(f64::from_bits(0x3fef_ffff_ffff_ffff)),
+                1,
+                0x3fef_ffff_ffff_ffff,
+                8,
+            ),
+            (FnxValue::Integer(0), 2, 0, 8),
+            (FnxValue::Integer(u64::MAX), 2, u64::MAX as u128, 8),
+            (FnxValue::Float(-0.0), 3, 1 << 63, 8),
+            (
+                FnxValue::Float(f64::from_bits(0x7ff8_0000_0000_0042)),
+                3,
+                0x7ff8_0000_0000_0042,
+                8,
+            ),
+        ];
+        for prefix in [0, 1, 7, 16, 17, 63, 64, 65, 1023, 1024, 1025] {
+            let mut transcript = vec![0xa5; prefix];
+            let mut actual = Hasher::new();
+            actual.update(&transcript);
+            for _ in 0..33 {
+                for &(value, tag, bits, width) in &cases {
+                    transcript.push(tag);
+                    transcript.extend_from_slice(&bits.to_le_bytes()[..width]);
+                    hash_result_value(&mut actual, value);
+                }
+            }
+            let mut expected = Hasher::new();
+            expected.update(&transcript);
+            assert_eq!(actual.finalize(), expected.finalize(), "prefix={prefix}");
+        }
+    }
+
+    #[test]
+    fn public_call_result_digests_match_the_independent_canonical_transcript() {
+        let graph = projection(511, Directedness::Directed);
+        let limits = FnxExecutionLimits {
+            max_iterations: 1000,
+            max_result_rows: 3,
+            max_estimated_work: 1 << 20,
+        };
+        let calls = [
+            FnxCallSpec::pagerank(PageRankOptions::default()),
+            FnxCallSpec::weakly_connected_components(),
+            FnxCallSpec::single_source_shortest_path_length(VId(0), None),
+            FnxCallSpec::single_source_dijkstra_path_length(
+                crate::DijkstraOptions::new(VId(0), None).unwrap(),
+            ),
+            FnxCallSpec::from_arguments(
+                "fnx",
+                "pagerank",
+                &[],
+                &[("score", "rank"), ("vertex", "node")],
+            )
+            .unwrap(),
+        ];
+        for call in calls {
+            let result = call
+                .execute(&graph, limits, || Ok::<(), Infallible>(()))
+                .unwrap();
+            let mut transcript = b"fgdb:prism:result-rows:v3".to_vec();
+            transcript.extend_from_slice(&(result.rows.len() as u128).to_le_bytes());
+            transcript.extend_from_slice(&call.digest().0);
+            for row in &result.rows {
+                for &value in row {
+                    // Decode the returned typed cells into the specified
+                    // transcript without calling the production hash helper.
+                    match value {
+                        FnxValue::Vertex(vertex) => {
+                            transcript.push(0);
+                            transcript.extend_from_slice(&vertex.0.to_le_bytes());
+                        }
+                        FnxValue::Score(score) => {
+                            transcript.push(1);
+                            transcript.extend_from_slice(&score.to_bits().to_le_bytes());
+                        }
+                        FnxValue::Integer(value) => {
+                            transcript.push(2);
+                            transcript.extend_from_slice(&value.to_le_bytes());
+                        }
+                        FnxValue::Float(value) => {
+                            transcript.push(3);
+                            transcript.extend_from_slice(&value.to_bits().to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let mut expected = Hasher::new();
+            expected.update(&transcript);
+            assert_eq!(result.certificate.result_digest, expected.finalize());
+        }
+    }
+
+    #[test]
+    fn call_arc_admission_uses_exact_incidence_counts_in_every_projection_direction() {
+        let call = FnxCallSpec::single_source_shortest_path_length(VId(0), None);
+        let limits = FnxExecutionLimits {
+            max_iterations: 1000,
+            max_result_rows: 3,
+            max_estimated_work: 0,
+        };
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            for mask in 0..512 {
+                let graph = projection(mask, direction);
+                let arcs: usize = (0..graph.node_count())
+                    .map(|vertex| graph.neighbors_indices(vertex).unwrap().len())
+                    .sum();
+                let mut meter = Recording {
+                    calls: Vec::new(),
+                    stop: None,
+                    seen: 0,
+                    polls: 0,
+                };
+                let result = call.execute(&graph, limits, RecordingMeter::<true>(&mut meter));
+                assert!(matches!(
+                    result,
+                    Err(FnxExecutionError::LimitExceeded {
+                        resource: "estimated work",
+                        limit: 0,
+                        requested,
+                    }) if requested == graph.node_count() + arcs
+                ));
+                assert_eq!(meter.seen, 1 + graph.node_count());
+                assert_eq!(meter.calls, [1, 3]);
+            }
+        }
+    }
+
+    #[test]
+    fn complete_call_runs_preserve_scalar_results_and_every_work_refusal() {
+        // Two complete runs plus a tail, isolates, a self-loop, and wide IDs.
+        let n = 2 * FNX_METER_RUN + 3;
+        let vertices: Vec<_> = (0..n)
+            .map(|index| VId(((index as u128) << 64) | (n - index) as u128))
+            .collect();
+        let edges: Vec<_> = [(0, 0), (0, 1), (1, 2), (n - 1, n - 1)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (source, target))| ProjectionEdge {
+                eid: EId(u128::MAX - index as u128),
+                source: vertices[source],
+                target: vertices[target],
+                weight: 1.0,
+            })
+            .collect();
+        let graph = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([0x4a; 32]),
+                as_of: CommitSeq(7),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: Directedness::Directed,
+                parallel_edges: ParallelEdgePolicy::CollapseUnit,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: n,
+                max_input_edges: edges.len(),
+                max_adjacency_entries: edges.len(),
+                max_workspace_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let limits = FnxExecutionLimits {
+            max_iterations: 100,
+            max_result_rows: n,
+            max_estimated_work: 1 << 20,
+        };
+        let fresh = |stop| Recording {
+            calls: Vec::new(),
+            stop,
+            seen: 0,
+            polls: 0,
+        };
+        for call in [
+            FnxCallSpec::single_source_shortest_path_length(vertices[0], None),
+            FnxCallSpec::weakly_connected_components(),
+        ] {
+            let (mut scalar, mut runs) = (fresh(None), fresh(None));
+            let expected = call
+                .execute(&graph, limits, RecordingMeter::<false>(&mut scalar))
+                .unwrap();
+            let actual = call
+                .execute(&graph, limits, RecordingMeter::<true>(&mut runs))
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!((runs.seen, runs.polls), (scalar.seen, scalar.polls));
+            assert_eq!(&runs.calls[..4], &[1, FNX_METER_RUN, FNX_METER_RUN, 3]);
+            assert!(runs.calls.iter().all(|&run| run <= FNX_METER_RUN));
+            for stop in 1..=scalar.seen {
+                let (mut scalar, mut runs) = (fresh(Some(stop)), fresh(Some(stop)));
+                let expected = call.execute(&graph, limits, RecordingMeter::<false>(&mut scalar));
+                let actual = call.execute(&graph, limits, RecordingMeter::<true>(&mut runs));
+                assert!(matches!(
+                    expected,
+                    Err(FnxExecutionError::Cancelled("stop"))
+                ));
+                assert!(matches!(actual, Err(FnxExecutionError::Cancelled("stop"))));
+                assert_eq!(runs.seen, stop);
+                assert_eq!((runs.seen, runs.polls), (scalar.seen, scalar.polls));
+            }
+            // An estimate refusal still occurs only after every admission
+            // unit, and the last unit's cancellation wins over that refusal.
+            let refused = FnxExecutionLimits {
+                max_estimated_work: 0,
+                ..limits
+            };
+            for stop in [n + 1, n + 2] {
+                let mut meter = fresh(Some(stop));
+                let result = call.execute(&graph, refused, RecordingMeter::<true>(&mut meter));
+                if stop == n + 1 {
+                    assert!(matches!(result, Err(FnxExecutionError::Cancelled("stop"))));
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(FnxExecutionError::LimitExceeded { .. })
+                    ));
+                }
+                assert_eq!(meter.seen, n + 1);
+            }
         }
     }
 

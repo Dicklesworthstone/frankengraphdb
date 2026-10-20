@@ -6,7 +6,7 @@
 //! A cursor dereferences the same immutable source image on both faces. No
 //! caller-supplied permutation or serialized index can acquire source authority.
 
-use super::image::{RowScan, reserved};
+use super::image::{RowScan, RowScanStep, reserved};
 use super::{
     Image, SealedAnchor, SealedEdge, SealedError, SealedPartition, SealedScanBudget,
     SealedScanStep, check_limit,
@@ -127,7 +127,8 @@ fn ef_bytes(count: usize, maximum: u64) -> Result<usize, SealedError> {
 impl SealedPartition {
     /// Count retained versions in one outgoing descriptor, INCLUDING invisible
     /// history. This is a low-level source-cost bound, not a visible degree or
-    /// security-filtered graph statistic.
+    /// security-filtered graph statistic. Zero outside a scoped anchor's
+    /// relation describes this image only; it does not prove graph absence.
     pub fn retained_row_len(&self, source: VId, relation: RelationId) -> usize {
         self.image
             .find_row(source, relation)
@@ -258,6 +259,8 @@ impl SealedIncomingIndex {
     }
 
     /// Retained incidence count, not a visible or authorized graph degree.
+    /// Zero outside the source anchor's relation is physical image metadata,
+    /// not proof of an empty graph row.
     pub fn retained_row_len(&self, destination: VId, relation: RelationId) -> usize {
         self.find(destination, relation)
             .map_or(0, |row| row.incidences)
@@ -298,6 +301,7 @@ impl SealedIncomingIndex {
     ) -> Result<SealedIncomingCursor<'_>, SealedError> {
         checkpoint()?;
         self.source.anchor.authorize(as_of)?;
+        self.source.anchor.check_relation(relation)?;
         let chunks = self.find(destination, relation).map_or(&[][..], |row| {
             &self.index.chunks[row.first_chunk..row.end_chunk]
         });
@@ -438,14 +442,14 @@ impl<'a> SealedIncomingCursor<'a> {
         if self.finished {
             return Ok(SealedScanStep::End);
         }
-        let result = self.pull(budget, checkpoint);
+        let result = self.pull::<true, E>(budget, checkpoint);
         if result.is_err() || matches!(&result, Ok(SealedScanStep::End)) {
             self.finished = true;
         }
         result
     }
 
-    fn pull<E: From<SealedError>>(
+    fn pull<const FILTER: bool, E: From<SealedError>>(
         &mut self,
         budget: &mut SealedScanBudget,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
@@ -464,7 +468,9 @@ impl<'a> SealedIncomingCursor<'a> {
                     .map(EliasFano::sequential_cursor);
                 continue;
             };
-            let (entry, locator) = self.incidence(position)?;
+            let Some((entry, locator)) = self.incidence::<FILTER>(position)? else {
+                continue;
+            };
             if entry.visible_at(self.as_of) {
                 let properties = if locator == 0 {
                     &[][..]
@@ -481,7 +487,10 @@ impl<'a> SealedIncomingCursor<'a> {
         Ok(SealedScanStep::End)
     }
 
-    fn incidence(&mut self, position: u64) -> Result<(crate::AdjacencyEntry, u32), SealedError> {
+    fn incidence<const FILTER: bool>(
+        &mut self,
+        position: u64,
+    ) -> Result<Option<(crate::AdjacencyEntry, u32)>, SealedError> {
         if !self
             .source_row
             .as_ref()
@@ -547,7 +556,48 @@ impl<'a> SealedIncomingCursor<'a> {
                 .ok_or(SealedError::NonCanonical)?;
             current.scan = RowScan::new(self.image, row, offset);
         }
-        current.scan.next().ok_or(SealedError::NonCanonical)
+        if !FILTER {
+            return current
+                .scan
+                .next()
+                .map(Some)
+                .ok_or(SealedError::NonCanonical);
+        }
+        match current
+            .scan
+            .next_or_hidden_span(self.as_of)
+            .ok_or(SealedError::NonCanonical)?
+        {
+            RowScanStep::Incidence(entry, locator) => Ok(Some((entry, locator))),
+            RowScanStep::Hidden(_) => {
+                // Only this locator has spent fuel and passed its live guard.
+                // Advance one raw incidence, never the whole source span: a
+                // yield or refusal must keep its original incoming position.
+                // Long hidden spans invalidate the neighbor decoder; short
+                // gaps advance only that decoder. Invisible CSR versions never
+                // decode edge identities or read property locators.
+                current.scan.skip_hidden(1);
+                Ok(None)
+            }
+        }
+    }
+
+    // The pre-filter streaming reader remains a same-process physical control.
+    // The positional reader in incoming_tests is the independent result oracle.
+    #[cfg(test)]
+    fn next_decoding_history<E: From<SealedError>>(
+        &mut self,
+        budget: &mut SealedScanBudget,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
+        if self.finished {
+            return Ok(SealedScanStep::End);
+        }
+        let result = self.pull::<false, E>(budget, checkpoint);
+        if result.is_err() || matches!(&result, Ok(SealedScanStep::End)) {
+            self.finished = true;
+        }
+        result
     }
 }
 

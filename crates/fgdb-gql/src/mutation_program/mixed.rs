@@ -350,10 +350,13 @@ impl GraphWriteProgramStats {
 
 /// Source-ordered mixed graph writes across relation coordinates. Later MATCH
 /// and MERGE steps observe successful earlier creations, updates and deletes in
-/// the canonical transaction overlay.
+/// the canonical transaction overlay. The native UNWIND compiler can instead
+/// mark a closed vertex-update program whose inputs must all be evaluated
+/// against its entry overlay before any of its updates are staged.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphWriteProgram {
     statements: Box<[GraphWriteStatement]>,
+    frozen_vertex_update_input: bool,
 }
 impl core::fmt::Debug for PreparedGraphWriteProgram {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -389,6 +392,7 @@ impl PreparedGraphWriteProgram {
         }
         Ok(Self {
             statements: statements.into_boxed_slice(),
+            frozen_vertex_update_input: false,
         })
     }
     #[must_use]
@@ -396,9 +400,32 @@ impl PreparedGraphWriteProgram {
         &self.statements
     }
 
+    /// All selections and assignment values in this program use the entry
+    /// transaction overlay. Its vertex field updates then apply in input order.
+    /// This provenance is only issued by the native UNWIND compiler; ordinary
+    /// mixed programs, including MERGE and disjoint row updates, stay sequential.
+    #[must_use]
+    pub const fn freezes_vertex_update_input(&self) -> bool {
+        self.frozen_vertex_update_input
+    }
+
+    pub(crate) fn freeze_vertex_update_input(&mut self) -> bool {
+        if self.statements.len() <= 1
+            || !self.statements.iter().all(|statement| {
+                matches!(statement, GraphWriteStatement::Mutation(input)
+                    if input.is_vertex_update_only())
+            })
+        {
+            return false;
+        }
+        self.frozen_vertex_update_input = true;
+        true
+    }
+
     // Transfer bound definitions into an admitted batch without deep-cloning
     // each record's program a second time.
     pub(crate) fn into_statements(self) -> Box<[GraphWriteStatement]> {
+        debug_assert!(!self.frozen_vertex_update_input);
         self.statements
     }
 
@@ -406,7 +433,11 @@ impl PreparedGraphWriteProgram {
     /// a durable operation ID, identity-allocation log or commit acknowledgment.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"fgdb:mixed-write-program:v1\0".to_vec();
+        let mut bytes = if self.frozen_vertex_update_input {
+            b"fgdb:mixed-write-program:frozen-unwind-vertex-updates:v1\0".to_vec()
+        } else {
+            b"fgdb:mixed-write-program:v1\0".to_vec()
+        };
         bytes.extend_from_slice(&(self.statements.len() as u64).to_be_bytes());
         for statement in &self.statements {
             let (kind, value) = match statement {
@@ -426,7 +457,8 @@ impl PreparedGraphWriteProgram {
     }
 
     /// TRUSTED workspace seam: stage must retain read observations, use the
-    /// existing kernels, expose each successful prefix to the next step and
+    /// existing kernels, expose each successful prefix to the next step (or
+    /// freeze all inputs when freezes_vertex_update_input() is set) and
     /// restore the starting workspace on any error or unwind. This callback
     /// cannot make an arbitrary external writer atomic. WriteTxn implements
     /// these obligations using the existing private MutationProgramWorkspace.
@@ -481,7 +513,7 @@ impl PreparedGraphWriteProgram {
                 (GraphWriteStatement::Mutation(input), GraphWriteStepStats::Mutation(stats)) => {
                     meter
                         .common
-                        .absorb(statement, input.actions().len(), stats)?;
+                        .absorb(statement, input.maximum_effects_per_binding(), stats)?;
                 }
                 (GraphWriteStatement::Insert(input), GraphWriteStepStats::Insert(stats)) => {
                     meter.absorb_insert(statement, input, stats)?;
