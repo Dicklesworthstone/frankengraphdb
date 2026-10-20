@@ -2,6 +2,9 @@
 // selection and RHS uses the real transaction overlay at entry; one ordered
 // preparation then stages all proposals, without rewalking a growing prefix.
 
+type FrozenUpdateFault<A> =
+    fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>;
+
 impl WriteTxn {
     fn execute_frozen_vertex_updates_governed<V: Vfs + Clone, A>(
         &mut self,
@@ -15,7 +18,7 @@ impl WriteTxn {
             fgdb_gql::GraphWriteProgramStats,
             Vec<fgdb_gql::GraphWriteStepReceipt>,
         ),
-        fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>,
+        FrozenUpdateFault<A>,
     > {
         use fgdb_gql::{
             GqlQueryError, GraphMutationError, GraphMutationIntent, GraphMutationProgramError,
