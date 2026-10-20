@@ -1516,12 +1516,18 @@ impl<'a> Parser<'a> {
 
     /// Resolve grouped keys and aggregate calls as column leaves while using
     /// the same scalar precedence, parameters and list grammar as ordinary rows.
+    /// A read scope sees committed values, so `.key` after a resolved leaf
+    /// reads that element's or map's entry (`WITH n WITH n WHERE n.p = 2`).
     pub(in crate::graph_text) fn read_resolved_value(
         &mut self,
         resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
         depth: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
-        self.read_recursive_value(None, &[], &mut Some(ValueResolver::Columns(resolve)), depth)
+        let entries = core::mem::replace(&mut self.resolved_entries, true);
+        let value =
+            self.read_recursive_value(None, &[], &mut Some(ValueResolver::Columns(resolve)), depth);
+        self.resolved_entries = entries;
+        value
     }
 
     /// As [`Self::read_resolved_value`] for a whole RETURN or WITH item:
@@ -1531,7 +1537,11 @@ impl<'a> Parser<'a> {
         resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
         depth: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
-        self.read_recursive_value(None, &[], &mut Some(ValueResolver::Items(resolve)), depth)
+        let entries = core::mem::replace(&mut self.resolved_entries, true);
+        let value =
+            self.read_recursive_value(None, &[], &mut Some(ValueResolver::Items(resolve)), depth);
+        self.resolved_entries = entries;
+        value
     }
 
     pub(super) fn read_write_value(

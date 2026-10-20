@@ -695,8 +695,10 @@ struct Parser<'a> {
     read_comparisons: Option<Vec<boolean::RowComparison<'a>>>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// A resolved leaf followed by `.key` reads that entry (an imported
-    /// map's `row.key` beside MATCH reads, fgdb-0s2pq). Only the insertion
-    /// value compiler enables it.
+    /// map's `row.key` beside MATCH reads, fgdb-0s2pq). Read scopes enable it
+    /// (read_resolved_value/item), as does the insertion value compiler. A
+    /// write RETURN never does, except for an imported map's own leaf: its
+    /// other leaves are post-write values that an element read would miss.
     resolved_entries: bool,
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.

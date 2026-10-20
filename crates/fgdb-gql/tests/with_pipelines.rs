@@ -1,8 +1,9 @@
 //! Native WITH stages use one GLA source and the existing relational executor.
 
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
     GraphColumn, GraphPatternBuilder, GraphValueOrder, GraphValueRow, IntegerComparison,
+    PreparedGraphPattern,
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GqlScalarParameter,
@@ -42,29 +43,54 @@ fn run(
     GqlQueryExecution<GraphValueRow>,
     GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
 > {
+    run_reading(query, values, policy, checkpoint, false)
+}
+/// As `run`, plus the host's element reader when `elements` (fgdb-xnd7x):
+/// `x.p` of a vertex a stage produced reads the value the scan sees.
+fn run_reading(
+    query: &PreparedGraphSet,
+    values: &[CanonicalScalar],
+    policy: GqlQueryPolicy,
+    checkpoint: &mut impl FnMut() -> Result<(), usize>,
+    elements: bool,
+) -> Result<
+    GqlQueryExecution<GraphValueRow>,
+    GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
+> {
     let checkpoint = RefCell::new(checkpoint);
     let stored: Vec<CanonicalPropertyValue> = values
         .iter()
         .map(|value| CanonicalPropertyValue::from(value.clone()))
         .collect();
-    query.execute_governed(
+    let patterns = |pattern: &PreparedGraphPattern<GraphValueRow>, remaining| {
+        pattern.plan().execute_governed_with_properties(
+            values.len() as u64,
+            (0..values.len()).map(|at| VId(at as u128)),
+            [],
+            |vid, predicates| {
+                Ok::<_, &'static str>(
+                    predicates
+                        .iter()
+                        .all(|test| test.matches(&[], &[(P, stored[vid.0 as usize].clone())])),
+                )
+            },
+            |vid, _| Ok(Some(&stored[vid.0 as usize])),
+            remaining,
+            || (checkpoint.borrow_mut())(),
+        )
+    };
+    if !elements {
+        return query.execute_governed(policy, patterns, || (checkpoint.borrow_mut())());
+    }
+    query.execute_governed_with_elements(
         policy,
-        |pattern, remaining| {
-            pattern.plan().execute_governed_with_properties(
-                values.len() as u64,
-                (0..values.len()).map(|at| VId(at as u128)),
-                [],
-                |vid, predicates| {
-                    Ok::<_, &'static str>(
-                        predicates
-                            .iter()
-                            .all(|test| test.matches(&[], &[(P, stored[vid.0 as usize].clone())])),
-                    )
-                },
-                |vid, _| Ok(Some(&stored[vid.0 as usize])),
-                remaining,
-                || (checkpoint.borrow_mut())(),
-            )
+        patterns,
+        |_, _, _| panic!("these laws run no CALL source"),
+        |element, key| {
+            Ok(match element {
+                ElementId::Vertex(vid) if key == P => Some(stored[vid.0 as usize].clone()),
+                _ => None,
+            })
         },
         || (checkpoint.borrow_mut())(),
     )
@@ -899,7 +925,7 @@ fn computed_with_predicates_filter_the_projected_rows() {
 /// graph-to-row boundary. Its rows equal the MATCH-level WHERE under the
 /// binding's own name, an alias, DISTINCT and a page after the WHERE, and the
 /// hidden column never reaches RETURN *, a later WITH *, or a lookup by its
-/// private name. Reads in a later stage stay refused.
+/// private name. A later stage reads through the host's element reader.
 #[test]
 fn a_with_where_reads_properties_of_projected_vertices_through_hidden_boundary_columns() {
     let values = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
@@ -948,13 +974,24 @@ fn a_with_where_reads_properties_of_projected_vertices_through_hidden_boundary_c
     for text in [
         "MATCH (n) WITH n WHERE n.p = 2 AND __fg_boundary_0 = 2 RETURN n",
         "MATCH (n) WITH n WHERE n.p = 2 RETURN __fg_boundary_0",
-        "MATCH (n) WITH n WITH n WHERE n.p = 2 RETURN n",
     ] {
         assert!(
             PreparedGraphSetText::prepare(text, symbols).is_err(),
             "{text}"
         );
     }
+    // A later stage has no hidden column for `n.p`: it reads the property
+    // through the host's element reader (fgdb-xnd7x). Without that reader the
+    // read is a typed error, never a guess; with it, the rows equal the
+    // MATCH-level WHERE (openCypher With7 [2] reads this way).
+    let later = prepare("MATCH (n) WITH n WITH n WHERE n.p = 2 RETURN n ORDER BY n");
+    assert!(run(&later, &values, wide(), &mut || Ok(())).is_err());
+    assert_eq!(
+        run_reading(&later, &values, wide(), &mut || Ok(()), true)
+            .unwrap()
+            .value,
+        rows("MATCH (n) WHERE n.p = 2 RETURN n ORDER BY n")
+    );
 }
 
 /// fgdb-1tgko: the boundary's scope also covers the WITH's pages, a WHERE
