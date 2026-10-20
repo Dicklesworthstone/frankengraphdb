@@ -255,3 +255,46 @@ fn every_delta_preparation_refusal_and_final_cap_preserves_both_arrangements() {
         assert_eq!(join.rows(), &after);
     }
 }
+
+#[test]
+fn predicated_presence_bulk_intake_does_not_enumerate_rejected_pair_derivatives() {
+    for kind in [RowJoinKind::Semi, RowJoinKind::Anti] {
+        let mut measurements = Vec::new();
+        for n in [32_i64, 128] {
+            let rows = input(&(0..n).map(|value| (value, 1)).collect::<Vec<_>>());
+            let spec = definition(kind, true)
+                .with_predicate(&[GraphSetPredicateOp::Truth(Some(true))]).unwrap();
+            let mut join = IncrementalRowJoin::new(spec);
+            let mut calls = 0_u64;
+            join.prepare(&rows, &rows, LIMBS, Some(n as u64), &mut |_| {
+                calls += 1;
+                Ok::<_, usize>(())
+            }).unwrap().commit();
+            if kind == RowJoinKind::Semi { assert_eq!(join.rows(), &rows); }
+            else { assert!(join.rows().is_empty()); }
+            measurements.push(calls);
+        }
+        assert!(measurements[1] <= 6 * measurements[0], "{kind:?}: {measurements:?}");
+    }
+}
+
+#[test]
+fn right_count_only_updates_do_not_visit_unchanged_presence_rows() {
+    for kind in [RowJoinKind::Semi, RowJoinKind::Anti] {
+        let mut traces = Vec::new();
+        for n in [32_i64, 128] {
+            let left: Vec<_> = (n..2*n).map(|v| (v, 2)).collect();
+            let right: Vec<_> = (0..n).map(|v| (v, 2)).collect();
+            let mut join = seeded(kind, true, &left, &right);
+            let mut events = Vec::new();
+            let delta = join.prepare(&ZSet::new(), &input(&[(0, 1)]), LIMBS, None, &mut |event| {
+                events.push(event);
+                Ok::<_, usize>(())
+            }).unwrap().commit();
+            assert!(delta.is_empty());
+            assert_eq!(join.rows(), &oracle(kind, &left, &right));
+            traces.push(events);
+        }
+        assert_eq!(traces[0], traces[1], "{kind:?}: one count update must not scan the left bag");
+    }
+}

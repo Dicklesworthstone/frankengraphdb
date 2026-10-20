@@ -112,21 +112,16 @@ impl Input {
         match self {
             Self::Predicated(input) => {
                 let presence = predicate::presence_delta(input, spec, left, right, limbs, control)?;
-                let pairs = spec.kind.includes_right();
-                let matched = input.prepare_filtered(
-                    left,
-                    right,
-                    limbs,
-                    control,
-                    |_, left, right, control| {
-                        // Existence never needs a product of occurrence counts.
-                        if pairs {
-                            spec.matches(left, right, control)
-                        } else {
-                            Ok(false)
-                        }
-                    },
-                )?;
+                let matched = if spec.kind.includes_right() {
+                    input.prepare_filtered(left, right, limbs, control, |_, left, right, control| {
+                        spec.matches(left, right, control)
+                    })?
+                } else {
+                    // Presence already derived the complete result. Integrate
+                    // both inputs without visiting a Cartesian derivative whose
+                    // predicate would unconditionally reject every candidate.
+                    input.prepare_inputs(left, right, limbs, control)?
+                };
                 Ok(InputUpdate::Predicated { matched, presence })
             }
             Self::Inner(input) => Ok(InputUpdate::Inner(
