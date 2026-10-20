@@ -339,6 +339,82 @@ impl<'a> Parser<'a> {
         Ok((result, incoming))
     }
 
+    /// Carried vertices whose properties the part starting at this MATCH
+    /// reads (`a.p`) although its own pattern does not bind them, in
+    /// first-read order. The part ends at the next top-level WITH or set
+    /// operation. A part that names a path, a node binding of the same name
+    /// and a comprehension or quantifier local are left to the ordinary
+    /// compiler. Nothing is consumed.
+    fn carried_property_reads(
+        &self,
+        incoming: &RowSchema<'a>,
+    ) -> Result<Vec<Name<'a>>, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut previous = self.current.kind;
+        let mut depth = 0_usize;
+        let mut reads: Vec<Name<'a>> = Vec::new();
+        let mut excluded: Vec<&'a str> = Vec::new();
+        loop {
+            let token = lexer.next()?;
+            let after_dot = matches!(previous, TokenKind::Punct(b'.'));
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    let Some(outer) = depth.checked_sub(1) else {
+                        break;
+                    };
+                    depth = outer;
+                }
+                TokenKind::Word(word)
+                    if depth == 0
+                        && !after_dot
+                        && (["UNION", "EXCEPT", "INTERSECT"]
+                            .iter()
+                            .any(|clause| word.eq_ignore_ascii_case(clause))
+                            || (word.eq_ignore_ascii_case("WITH")
+                                && !matches!(previous, TokenKind::Word(previous)
+                                    if previous.eq_ignore_ascii_case("STARTS")
+                                        || previous.eq_ignore_ascii_case("ENDS")))) =>
+                {
+                    break;
+                }
+                TokenKind::Word(word) if !after_dot => {
+                    let next = lexer.clone().next()?.kind;
+                    if depth == 0 && matches!(next, TokenKind::Punct(b'=')) {
+                        if matches!(previous, TokenKind::Word(clause)
+                            if clause.eq_ignore_ascii_case("MATCH"))
+                        {
+                            return Ok(Vec::new());
+                        }
+                    } else if matches!(previous, TokenKind::Punct(b'('))
+                        && matches!(next, TokenKind::Punct(b')' | b':' | b'{'))
+                    {
+                        excluded.push(word);
+                    } else if matches!(previous, TokenKind::Punct(b'[' | b'('))
+                        && matches!(next, TokenKind::Word(next) if next.eq_ignore_ascii_case("IN"))
+                    {
+                        excluded.push(word);
+                    } else if matches!(next, TokenKind::Punct(b'.'))
+                        && incoming.iter().any(|(name, kind)| {
+                            name.text == word && *kind == GraphSetColumnType::Vertex
+                        })
+                        && reads.iter().all(|read| read.text != word)
+                    {
+                        reads.push(Name {
+                            text: word,
+                            at: token.at,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            previous = token.kind;
+        }
+        reads.retain(|read| !excluded.contains(&read.text));
+        Ok(reads)
+    }
+
     pub(in crate::graph_text) fn take_part_syntax(
         &mut self,
     ) -> Result<Syntax<'a>, GraphPatternTextError> {
@@ -371,6 +447,20 @@ impl<'a> Parser<'a> {
         let optional = kind == Some(RowJoinKind::Left);
         self.read_row_bindings = incoming.iter().map(|(name, _)| *name).collect();
         self.read_comparisons = Some(Vec::new());
+        // A carried vertex whose property this part reads (`WITH a MATCH (b)
+        // WHERE a.p < b.p`) re-matches by identity, exactly as the name-reuse
+        // form `MATCH (a), (b)` does: the key loop below correlates it with
+        // the carried column (fgdb-dhcfo).
+        if kind.is_some() {
+            for name in self.carried_property_reads(incoming)? {
+                self.capacity(
+                    self.syntax.variables.len(),
+                    crate::algebra::MAX_PATTERN_VERTICES,
+                    crate::algebra::PatternLimitDimension::Vertices,
+                )?;
+                self.syntax.variables.push(name);
+            }
+        }
         self.parse_match_prefix()?;
         // A continuation owns a separate ON join, not the leading-row
         // product. Until that owner projects computed keys, require callers

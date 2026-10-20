@@ -498,3 +498,60 @@ fn a_top_level_where_identity_with_an_imported_element_is_the_reused_name_join()
         assert_eq!(calls, 0, "{text}");
     }
 }
+
+/// fgdb-dhcfo: a carried vertex's property read after a later MATCH is that
+/// vertex's own. The part re-matches it by identity, as the name-reuse
+/// spelling `WITH a MATCH (a), (b)` does, so both spellings answer alike.
+#[test]
+fn a_carried_vertex_property_read_after_a_later_match_re_matches_it_by_identity() {
+    let ints = |x: i64, y: i64| {
+        GraphValueRow::from_owned_values(vec![
+            GraphValue::Scalar(CanonicalScalar::Int(x)),
+            GraphValue::Scalar(CanonicalScalar::Int(y)),
+        ])
+    };
+    // p = [1, 2, 2, 3] on vertices 1..4: every pair with a.p < b.p.
+    let theta = execute(
+        "MATCH (a) WITH a MATCH (b) WHERE a.p < b.p RETURN a.p AS x, b.p AS y ORDER BY x, y",
+    );
+    assert_eq!(
+        theta,
+        [(1, 2), (1, 2), (1, 3), (2, 3), (2, 3)]
+            .map(|(x, y)| ints(x, y))
+            .to_vec()
+    );
+    assert_eq!(
+        theta,
+        execute(
+            "MATCH (a) WITH a MATCH (a), (b) WHERE a.p < b.p RETURN a.p AS x, b.p AS y ORDER BY x, y"
+        )
+    );
+    // A RETURN-only read keeps the carried product: 4 x 4 rows.
+    assert_eq!(
+        execute("MATCH (a) WITH a MATCH (b) RETURN a.p AS x, b.p AS y ORDER BY x, y").len(),
+        16
+    );
+    // OPTIONAL: only the new binding null-extends; the carried value stays.
+    let optional = execute(
+        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.p > a.p + 1 RETURN a.p AS x, b.p AS y ORDER BY x, y",
+    );
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let int = |value: i64| GraphValue::Scalar(CanonicalScalar::Int(value));
+    assert_eq!(
+        optional,
+        vec![
+            GraphValueRow::from_owned_values(vec![int(1), int(3)]),
+            GraphValueRow::from_owned_values(vec![int(2), null.clone()]),
+            GraphValueRow::from_owned_values(vec![int(2), null.clone()]),
+            GraphValueRow::from_owned_values(vec![int(3), null]),
+        ]
+    );
+    // A binding the WITH dropped is still unknown after the next MATCH.
+    assert!(
+        PreparedGraphSetText::prepare(
+            "MATCH (a), (c) WITH a MATCH (b) WHERE c.p < b.p RETURN b",
+            symbols
+        )
+        .is_err()
+    );
+}
