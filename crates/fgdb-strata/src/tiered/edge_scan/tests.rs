@@ -1113,7 +1113,10 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
         while below + 1 < cost {
             let mid = (below + cost) / 2;
             bounds.max_work = mid;
-            match store.open_buffered_root(&cx, id, pool.clone(), bounds).await {
+            match store
+                .open_buffered_root(&cx, id, pool.clone(), bounds)
+                .await
+            {
                 Ok(_) => cost = mid,
                 Err(_) => below = mid,
             }

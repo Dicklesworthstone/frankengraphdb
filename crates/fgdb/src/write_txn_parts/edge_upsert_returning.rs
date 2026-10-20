@@ -54,11 +54,23 @@ fn edge_upsert_returning<E, A, C>(
             let scratch = u128::from(evaluator.scratch_entries)
                 + u128::from(event == GlaExecutionEvent::ScratchEntry);
             for (observed, limit, dimension) in [
-                (work, policy.merge.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-                (scratch, policy.merge.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+                (
+                    work,
+                    policy.merge.query.evaluator.max_work_units,
+                    GlaLimitDimension::WorkUnits,
+                ),
+                (
+                    scratch,
+                    policy.merge.query.evaluator.max_scratch_entries,
+                    GlaLimitDimension::ScratchEntries,
+                ),
             ] {
                 if observed > u128::from(limit) {
-                    return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+                    return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                        dimension,
+                        limit,
+                        observed,
+                    }));
                 }
             }
             evaluator.work_units = work as u64;
@@ -66,10 +78,14 @@ fn edge_upsert_returning<E, A, C>(
             Ok(())
         };
         control(GlaExecutionEvent::Work)?;
-        let Some(edge) = outcome.edge() else { return Ok(None) };
+        let Some(edge) = outcome.edge() else {
+            return Ok(None);
+        };
         // Admit the complete private input before its allocation, even when
         // LIMIT 0 will discard every output row.
-        for _ in query.bindings() { control(GlaExecutionEvent::ScratchEntry)?; }
+        for _ in query.bindings() {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
         let mut row = Vec::with_capacity(query.bindings().len());
         for binding in query.bindings() {
             control(GlaExecutionEvent::Work)?;
@@ -81,14 +97,17 @@ fn edge_upsert_returning<E, A, C>(
             });
         }
         Ok(Some(row))
-    })().map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
-    query.project_governed(
-        row,
-        stats.merge.match_selection,
-        evaluator,
-        policy.merge.query,
-        checkpoint,
-    ).map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Returning))
+    })()
+    .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
+    query
+        .project_governed(
+            row,
+            stats.merge.match_selection,
+            evaluator,
+            policy.merge.query,
+            checkpoint,
+        )
+        .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Returning))
 }
 
 impl WriteTxn {
@@ -111,13 +130,28 @@ impl WriteTxn {
     ) -> EdgeUpsertQueryResult<A> {
         use fgdb_gql::GraphEdgeUpsertQueryError;
         let workspace = MutationProgramWorkspace::new(self);
-        let (stats, outcome) = workspace.txn.execute_graph_edge_upsert_governed(
-            database, cx, query.upsert(), edge_upsert_query_selection_policy(policy), allocate,
-        ).map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
-        let rows = cx.with_restriction(|| edge_upsert_returning(
-            query, stats, outcome, policy, || cx.checkpoint(),
-            |edge, key, control| edge_upsert_property(&*workspace.txn, &*database, edge, key, control),
-        ))?;
+        let (stats, outcome) = workspace
+            .txn
+            .execute_graph_edge_upsert_governed(
+                database,
+                cx,
+                query.upsert(),
+                edge_upsert_query_selection_policy(policy),
+                allocate,
+            )
+            .map_err(|error| error.map_source(GraphEdgeUpsertQueryError::Upsert))?;
+        let rows = cx.with_restriction(|| {
+            edge_upsert_returning(
+                query,
+                stats,
+                outcome,
+                policy,
+                || cx.checkpoint(),
+                |edge, key, control| {
+                    edge_upsert_property(&*workspace.txn, &*database, edge, key, control)
+                },
+            )
+        })?;
         workspace.accept();
         Ok((stats, outcome, rows))
     }
@@ -131,9 +165,11 @@ impl WriteTxn {
         policy: fgdb_gql::GraphEdgeUpsertPolicy,
     ) -> EdgeUpsertQueryResult<WriteTxnError> {
         use fgdb_gql::{GqlQueryError, GraphEdgeUpsertError, GraphEdgeUpsertQueryError};
-        let source = |error| GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
-            GraphEdgeUpsertError::Staging(error),
-        ));
+        let source = |error| {
+            GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
+                GraphEdgeUpsertError::Staging(error),
+            ))
+        };
         self.ensure_database(database).map_err(source)?;
         let mut allocate = database.engine_allocator(cx).map_err(source)?;
         self.execute_graph_edge_upsert_query_governed(database, cx, query, policy, move |_| {
@@ -163,16 +199,22 @@ impl<V: Vfs + Clone> Database<V> {
         TxnGqlError<fgdb_gql::GraphEdgeUpsertQueryError<WriteTxnError, A>>,
     > {
         use fgdb_gql::{GqlQueryError, GraphEdgeUpsertError, GraphEdgeUpsertQueryError};
-        let source = |error| GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
-            GraphEdgeUpsertError::Staging(error),
-        ));
-        let mut transaction = self.begin(txn_cx)
+        let source = |error| {
+            GqlQueryError::Source(GraphEdgeUpsertQueryError::Upsert(
+                GraphEdgeUpsertError::Staging(error),
+            ))
+        };
+        let mut transaction = self
+            .begin(txn_cx)
             .map_err(|error| source(WriteTxnError::Write(error)))?;
-        let (stats, outcome, rows) = match transaction.execute_graph_edge_upsert_query_governed(
-            self, query_cx, query, policy, allocate,
-        ) {
+        let (stats, outcome, rows) = match transaction
+            .execute_graph_edge_upsert_query_governed(self, query_cx, query, policy, allocate)
+        {
             Ok(result) => result,
-            Err(error) => { transaction.abort(); return Err(error); }
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
         };
         let completion = transaction.finish(self, commit_cx).await.map_err(source)?;
         Ok((stats, outcome, rows, completion))

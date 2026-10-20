@@ -323,10 +323,12 @@ fn staged_plan(
             let mut rows = Vec::new();
             for left in &left {
                 for right in &right {
-                    if let Some(row) = cross.select_pair_with_control(left, right, &mut |event| {
-                        assert_ne!(event, GlaExecutionEvent::ResultRow);
-                        Ok(())
-                    })? {
+                    if let Some(row) =
+                        cross.select_pair_with_control(left, right, &mut |event| {
+                            assert_ne!(event, GlaExecutionEvent::ResultRow);
+                            Ok(())
+                        })?
+                    {
                         rows.push(row);
                     }
                 }
@@ -1033,7 +1035,10 @@ fn unsupported_sources_and_relational_descendants_refuse_before_limit_zero() {
     let probed = prepare(
         "MATCH (a)-[:R]->(b)-[:R]->(c) WHERE EXISTS { MATCH (c)-[:R]->(d) } RETURN a.p+c.p AS value",
     );
-    assert_eq!(staged(&graph, &probed).unwrap(), graph.native(&probed).unwrap());
+    assert_eq!(
+        staged(&graph, &probed).unwrap(),
+        graph.native(&probed).unwrap()
+    );
     let pattern = PreparedGraphSet::from(leaf("MATCH (n) RETURN n.p AS value"));
     let spec = RowJoinSpec::cross(pattern.column_types(), pattern.column_types()).unwrap();
     let joined = pattern.clone().join(pattern.clone(), spec).unwrap();

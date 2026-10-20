@@ -572,7 +572,10 @@ fn a_label_test_value_is_label_membership_or_type_equality() {
     );
     // A written label test is the same Boolean value a RETURN reads: SET
     // stores true or false (both the CLI and the TCK runner read it back).
-    for text in ["MATCH (a) SET a.n = a:L", "MATCH (a) SET a.n = 'L' IN labels(a)"] {
+    for text in [
+        "MATCH (a) SET a.n = a:L",
+        "MATCH (a) SET a.n = 'L' IN labels(a)",
+    ] {
         assert!(
             fgdb_gql::PreparedGraphMutationText::prepare(text, RelationId(1), symbols).is_ok(),
             "{text}"

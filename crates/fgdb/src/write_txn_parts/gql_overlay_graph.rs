@@ -124,8 +124,13 @@ mod query_source {
     }
 
     type OverlayEdges<'a> = BTreeMap<EId, (VId, RelationId, VId, EdgeView<'a>)>;
-    type StagedAdjacency<'a> =
-        BTreeMap<(VId, bool, EId), (IdentifiedEdge, &'a [(PropertyKeyId, fgdb_types::CanonicalPropertyValue)])>;
+    type StagedAdjacency<'a> = BTreeMap<
+        (VId, bool, EId),
+        (
+            IdentifiedEdge,
+            &'a [(PropertyKeyId, fgdb_types::CanonicalPropertyValue)],
+        ),
+    >;
 
     /// A conservative input closure, before applying the canonical effects.
     /// Retired edges may still be in this set; the ordinary overlay removes

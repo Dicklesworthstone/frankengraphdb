@@ -424,7 +424,11 @@ fn text_keeps_concrete_domain_refusals_before_catalog_access() {
                 let text = format!("{left} {operation} {quantifier} RETURN NULL AS value LIMIT 0");
                 let template = PreparedGraphSetText::prepare(&text, symbols)
                     .unwrap_or_else(|error| panic!("{text}: {error:?}"));
-                assert_eq!(template.column_types(), &[GraphSetColumnType::Any], "{text}");
+                assert_eq!(
+                    template.column_types(),
+                    &[GraphSetColumnType::Any],
+                    "{text}"
+                );
             }
         }
     }

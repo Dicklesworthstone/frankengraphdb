@@ -134,10 +134,8 @@ impl WriteTxn {
         // Repeated savepoints of the same prefix must continue sharing one value.
         // All copies and allocations precede the final cancellation boundary.
         let (prepared, saved_prepared) = {
-            let mut refreshed: Vec<(
-                std::sync::Arc<PreparedWrite>,
-                std::sync::Arc<PreparedWrite>,
-            )> = Vec::with_capacity(self.savepoints.len() + 1);
+            let mut refreshed: Vec<(std::sync::Arc<PreparedWrite>, std::sync::Arc<PreparedWrite>)> =
+                Vec::with_capacity(self.savepoints.len() + 1);
             let mut at_frontier = |original: &std::sync::Arc<PreparedWrite>| {
                 if let Some((_, next)) = refreshed
                     .iter()
@@ -148,7 +146,10 @@ impl WriteTxn {
                 let mut next = original.as_ref().clone();
                 next.basis = frontier;
                 let next = std::sync::Arc::new(next);
-                refreshed.push((std::sync::Arc::clone(original), std::sync::Arc::clone(&next)));
+                refreshed.push((
+                    std::sync::Arc::clone(original),
+                    std::sync::Arc::clone(&next),
+                ));
                 next
             };
             checkpoint()?;

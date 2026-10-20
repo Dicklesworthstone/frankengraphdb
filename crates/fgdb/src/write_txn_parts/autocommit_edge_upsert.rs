@@ -49,9 +49,8 @@ mod native_edge_upsert_autocommit_return_tests {
     use asupersync::lab::run_async_under_lab;
     use fgdb_delta_types::{PropertyKeyId, RelationId};
     use fgdb_gql::{
-        GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeMergePolicy,
-        GraphEdgeUpsertPolicy, GraphEdgeUpsertQueryError, GraphSymbol, GraphSymbolKind,
-        PreparedGraphEdgeUpsertQueryText,
+        GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeMergePolicy, GraphEdgeUpsertPolicy,
+        GraphEdgeUpsertQueryError, GraphSymbol, GraphSymbolKind, PreparedGraphEdgeUpsertQueryText,
     };
     use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -89,9 +88,7 @@ mod native_edge_upsert_autocommit_return_tests {
             db.write(&commit, seed).await.unwrap();
             let before = db.frontier().unwrap();
             let policy = GraphEdgeUpsertPolicy::new(
-                GraphEdgeMergePolicy::new(GqlQueryPolicy::new(
-                    1_000, 100, 5_000_000, 2_000_000,
-                )),
+                GraphEdgeMergePolicy::new(GqlQueryPolicy::new(1_000, 100, 5_000_000, 2_000_000)),
                 100,
             );
             let next = AtomicU64::new(100);
@@ -111,12 +108,19 @@ mod native_edge_upsert_autocommit_return_tests {
             .unwrap();
             let result = db
                 .execute_graph_edge_upsert_query_autocommit_governed(
-                    &txcx, &cx, &commit, &failing, policy, &mut allocate,
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &failing,
+                    policy,
+                    &mut allocate,
                 )
                 .await;
             assert!(matches!(
                 result,
-                Err(GqlQueryError::Source(GraphEdgeUpsertQueryError::Returning(_)))
+                Err(GqlQueryError::Source(GraphEdgeUpsertQueryError::Returning(
+                    _
+                )))
             ));
             assert!(db.edges().unwrap().is_empty());
             assert_eq!(db.frontier().unwrap(), before);
@@ -132,7 +136,12 @@ mod native_edge_upsert_autocommit_return_tests {
             .unwrap();
             let (_, outcome, rows, _) = db
                 .execute_graph_edge_upsert_query_autocommit_governed(
-                    &txcx, &cx, &commit, &successful, policy, &mut allocate,
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &successful,
+                    policy,
+                    &mut allocate,
                 )
                 .await
                 .unwrap();
