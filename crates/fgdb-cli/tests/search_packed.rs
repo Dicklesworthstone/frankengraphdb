@@ -278,11 +278,13 @@ fn packed_cli_searches_high_dimensional_parameter_bytes_and_matches_native_gql()
     );
     assert_eq!(rows(&packed).len(), 1);
     assert!(rows(&packed)[0].ends_with("{\"type\":\"float\",\"value\":\"0\"}]}"));
-    // Without ORDER BY, CALL hybrid.search preserves its rank order, including
-    // across implied vertex property reads (fgdb-euy8y).
+    // A composed GQL read uses its explicit ORDER BY, not an assumption that
+    // procedure-local ranking survives every later relational operator: a
+    // RETURN without one is in canonical row order (fgdb-euy8y part 2 waits
+    // on the canonical-order ruling, fgdb-9bu1s).
     let query = format!(
         "CALL hybrid.search(vector => [{vector}], vector_property => 'embedding', k => 1) \
-        YIELD node, vector_distance RETURN node AS vertex, vector_distance AS distance"
+        YIELD node, vector_distance RETURN node AS vertex, vector_distance AS distance ORDER BY distance"
     );
     let gql = db.okay("query", &[&query]);
     assert_eq!(rows(&packed), rows(&gql));
@@ -297,7 +299,8 @@ fn packed_cli_searches_high_dimensional_parameter_bytes_and_matches_native_gql()
         "query",
         &[
             "CALL hybrid.search(vector => [1, 0], vector_property => 'embedding', k => 3) \
-             YIELD node, vector_distance RETURN node AS vertex, vector_distance AS distance",
+             YIELD node, vector_distance RETURN node AS vertex, vector_distance AS distance \
+             ORDER BY distance",
         ],
     );
     assert_eq!(rows(&multi_packed), rows(&multi_gql));
@@ -305,7 +308,8 @@ fn packed_cli_searches_high_dimensional_parameter_bytes_and_matches_native_gql()
         "query",
         &[
             "CALL hybrid.search(vector => [1, 0], vector_property => 'embedding', k => 3) \
-             YIELD node, vector_distance RETURN node.name AS title, vector_distance AS distance",
+             YIELD node, vector_distance RETURN node.name AS title, vector_distance AS distance \
+             ORDER BY distance",
         ],
     );
     let titles: Vec<&str> = rows(&multi_props)
