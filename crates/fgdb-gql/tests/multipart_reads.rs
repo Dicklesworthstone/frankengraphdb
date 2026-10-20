@@ -324,10 +324,18 @@ fn cumulative_budgets_and_every_cancellation_checkpoint_cover_the_whole_join() {
 
 #[test]
 fn illegal_imports_scopes_and_statement_wide_depth_refuse_before_catalog() {
+    // A carried vertex's property after a later MATCH re-matches it by
+    // identity (fgdb-dhcfo; the rows are pinned below).
+    assert!(
+        PreparedGraphSetText::prepare(
+            "MATCH (n) WITH n AS kept MATCH (m) RETURN kept.p AS value",
+            symbols
+        )
+        .is_ok()
+    );
     for text in [
         "MATCH (n) WITH n.p AS n MATCH (n)-[:R]->(m) RETURN m",
         "MATCH (n) WITH n AS kept MATCH (m) RETURN n",
-        "MATCH (n) WITH n AS kept MATCH (m) RETURN kept.p AS value",
         "MATCH (n) WITH n AS kept MATCH (m) OPTIONAL MATCH (kept)-[:R]->(x) RETURN x",
         "MATCH (n) WITH n AS kept MATCH (m) WHERE EXISTS { MATCH (kept)-[:R]->(x) } RETURN m",
         "MATCH (n) WITH n MATCH (n) RETURN n+1 AS bad",
