@@ -444,6 +444,238 @@ fn history_relations_parallel_edges_and_self_loops_keep_source_properties() {
     assert!(collect(&incoming, VId(9), RelationId(99), CommitSeq(5), None).is_empty());
 }
 
+#[derive(Clone, Copy, Debug)]
+enum HistoryShape {
+    AllVisible,
+    AllHidden,
+    Alternating,
+    LongGaps,
+}
+
+fn history_fixture(count: usize, shape: HistoryShape) -> (SealedPartition, Vec<AdjacencyEntry>) {
+    let entries: Vec<_> = (0..count)
+        .map(|at| {
+            let visible = match shape {
+                HistoryShape::AllVisible => true,
+                HistoryShape::AllHidden => false,
+                HistoryShape::Alternating => !at.is_multiple_of(2),
+                HistoryShape::LongGaps => {
+                    at + 1 == count || [63, 64, 65, 255, 256, 257, 4095].contains(&at)
+                }
+            };
+            let mut edge = entry(
+                (1_u128 << 80) + 17,
+                u128::MAX,
+                (1_u128 << 112) + at as u128,
+                1,
+            );
+            edge.created_at = CommitSeq(if visible { 3 } else { 1 });
+            edge.retired_at = (!visible).then_some(CommitSeq(3));
+            edge
+        })
+        .collect();
+    (seal(&entries), entries)
+}
+
+/// Compare each pull against the pre-filter sequential reader and check its
+/// answer against independent logical records. Exact guard/fuel/error order
+/// matters even for a call that returns no visible incidence.
+fn compare_history_pulls(
+    incoming: &SealedIncomingIndex,
+    entries: &[AdjacencyEntry],
+    cut: CommitSeq,
+    allowances: &[usize],
+    stop: Option<usize>,
+) -> usize {
+    let mut old = incoming
+        .open(entries[0].dst, entries[0].relation, cut, None, &mut || {
+            Ok(())
+        })
+        .unwrap();
+    let mut new = incoming
+        .open(entries[0].dst, entries[0].relation, cut, None, &mut || {
+            Ok(())
+        })
+        .unwrap();
+    let expected: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.visible_at(cut))
+        .collect();
+    let (mut old_calls, mut new_calls, mut seen, mut pulls) = (0, 0, 0, 0);
+    let (mut position, mut visible_prefix) = (0, 0);
+    loop {
+        let allowance = allowances[pulls % allowances.len()];
+        pulls += 1;
+        assert!(pulls <= 3 * entries.len() + 64, "scan must make progress");
+        let mut old_fuel = SealedScanBudget::new(allowance);
+        let mut new_fuel = SealedScanBudget::new(allowance);
+        let old_step = old.next_decoding_history(&mut old_fuel, &mut || {
+            old_calls += 1;
+            if stop == Some(old_calls) {
+                Err(SealedError::InvalidFloor)
+            } else {
+                Ok(())
+            }
+        });
+        let new_step = new.next_budgeted_inner(&mut new_fuel, &mut || {
+            new_calls += 1;
+            if stop == Some(new_calls) {
+                Err(SealedError::InvalidFloor)
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(new_calls, old_calls);
+        assert_eq!(new_fuel.remaining(), old_fuel.remaining());
+        assert_eq!(new.finished, old.finished);
+        assert_eq!(new.chunk, old.chunk);
+        assert_eq!(new.source_row.is_some(), old.source_row.is_some());
+        if let (Some(old_row), Some(new_row)) = (&old.source_row, &new.source_row) {
+            assert_eq!(new_row.index, old_row.index);
+            assert_eq!(new_row.scan.position, old_row.scan.position);
+            assert_eq!(old_row.scan.decoded_incidences(), old_row.scan.position);
+            visible_prefix += entries[position..new_row.scan.position]
+                .iter()
+                .filter(|entry| entry.visible_at(cut))
+                .count();
+            position = new_row.scan.position;
+            assert_eq!(
+                new_row.scan.decoded_incidences(),
+                if incoming.source.image.rows[new_row.index].kind()
+                    == super::super::RowStorageKind::Inline
+                {
+                    new_row.scan.position
+                } else {
+                    visible_prefix
+                },
+            );
+        }
+        match (old_step, new_step) {
+            (Ok(SealedScanStep::Item(old_edge)), Ok(SealedScanStep::Item(new_edge))) => {
+                assert_eq!(new_edge.entry, old_edge.entry);
+                assert_eq!(new_edge.entry, *expected[seen]);
+                assert!(std::ptr::eq(new_edge.properties, old_edge.properties));
+                assert_eq!(
+                    new_edge.properties,
+                    &[(
+                        PropertyKeyId(1),
+                        CanonicalScalar::Int(new_edge.entry.created_at.0 as i64).into(),
+                    )],
+                );
+                seen += 1;
+            }
+            (Ok(SealedScanStep::Yield), Ok(SealedScanStep::Yield)) => {}
+            (Ok(SealedScanStep::End), Ok(SealedScanStep::End)) => {
+                assert!(stop.is_none());
+                assert_eq!(seen, expected.len());
+                break;
+            }
+            (Err(SealedError::InvalidFloor), Err(SealedError::InvalidFloor)) => {
+                assert_eq!(Some(new_calls), stop);
+                break;
+            }
+            (old, new) => panic!("incoming history steps differ: {old:?} vs {new:?}"),
+        }
+    }
+    let mut zero = SealedScanBudget::new(0);
+    assert!(matches!(
+        new.next_budgeted_inner(&mut zero, &mut || -> Result<(), SealedError> {
+            panic!("terminal cursor resumed")
+        }),
+        Ok(SealedScanStep::End)
+    ));
+    assert!(matches!(
+        old.next_decoding_history(&mut zero, &mut || -> Result<(), SealedError> {
+            panic!("terminal incumbent resumed")
+        }),
+        Ok(SealedScanStep::End)
+    ));
+    new_calls
+}
+
+#[test]
+fn incoming_hidden_history_preserves_every_fuel_boundary_and_refusal() {
+    for count in [1, 8, 9, 65, 257] {
+        for shape in [
+            HistoryShape::AllVisible,
+            HistoryShape::AllHidden,
+            HistoryShape::Alternating,
+            HistoryShape::LongGaps,
+        ] {
+            let (source, entries) = history_fixture(count, shape);
+            let incoming = index(&source);
+            for cut in [CommitSeq(1), CommitSeq(2), CommitSeq(3), CommitSeq(10)] {
+                let allowances = [0, 1, 0, 7, 63, 64, 65, 256, 257];
+                let total = compare_history_pulls(&incoming, &entries, cut, &allowances, None);
+                for stop in 1..=total {
+                    compare_history_pulls(&incoming, &entries, cut, &allowances, Some(stop));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn incoming_large_hidden_history_elides_decodes_after_authenticated_reload() {
+    for shape in [
+        HistoryShape::AllVisible,
+        HistoryShape::AllHidden,
+        HistoryShape::Alternating,
+        HistoryShape::LongGaps,
+    ] {
+        let (source, entries) = history_fixture(8193, shape);
+        let bytes = wire::encode(&source.image, SealedLimits::default(), &mut || Ok(())).unwrap();
+        let reloaded = SealedPartition::reload_inner(
+            source.anchor(),
+            &bytes,
+            SealedLimits::default(),
+            None,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        for partition in [&source, &reloaded] {
+            let incoming = index(partition);
+            assert!(incoming.stats().chunks > 1);
+            compare_history_pulls(
+                &incoming,
+                &entries,
+                CommitSeq(3),
+                &[0, 1, 63, 64, 65, 255, 256, 257, 4096],
+                None,
+            );
+            let mut cursor = incoming
+                .open(
+                    entries[0].dst,
+                    entries[0].relation,
+                    CommitSeq(3),
+                    None,
+                    &mut || Ok(()),
+                )
+                .unwrap();
+            while cursor.next_inner(&mut || Ok(())).unwrap().is_some() {}
+            let scan = &cursor.source_row.as_ref().unwrap().scan;
+            let visible = entries
+                .iter()
+                .filter(|edge| edge.visible_at(CommitSeq(3)))
+                .count();
+            assert_eq!(scan.decoded_incidences(), visible);
+            match shape {
+                HistoryShape::AllHidden => {
+                    assert_eq!(scan.decoded_incidences(), 0);
+                    assert_eq!(scan.resumed_seeks(), 0);
+                }
+                HistoryShape::AllVisible | HistoryShape::Alternating => {
+                    assert_eq!(scan.resumed_seeks(), 0);
+                }
+                HistoryShape::LongGaps => {
+                    assert_eq!(visible, 8);
+                    assert!(scan.resumed_seeks() <= visible);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn full_width_lower_bounds_seek_across_ef_chunk_boundaries() {
     let mut entries: Vec<_> = (0..600u128)
@@ -675,6 +907,110 @@ fn cooperative_sort_matches_std_on_duplicate_and_adversarial_keys() {
             expected.sort_unstable();
             sort(&mut values, &mut || Ok(())).unwrap();
             assert_eq!(values, expected);
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual release-mode incoming hidden-history decode-elision benchmark"]
+fn benchmark_sealed_incoming_history_decode_elision_against_unfiltered() {
+    use std::hint::black_box;
+    use std::time::{Duration, Instant};
+
+    const ROUNDS: usize = 9;
+    eprintln!(
+        "incoming_history_scan: same-process pre-filter sequential reader; sealing, \
+         index construction, wire admission, QueryCx and durable I/O excluded; \
+         empirical_gate_activated=false"
+    );
+    for count in [4096, 65536] {
+        for shape in [
+            HistoryShape::AllVisible,
+            HistoryShape::AllHidden,
+            HistoryShape::Alternating,
+            HistoryShape::LongGaps,
+        ] {
+            let (source, entries) = history_fixture(count, shape);
+            let incoming = index(&source);
+            compare_history_pulls(&incoming, &entries, CommitSeq(3), &[usize::MAX], None);
+            let scan = |filtered| {
+                let mut cursor = incoming
+                    .open(
+                        entries[0].dst,
+                        entries[0].relation,
+                        CommitSeq(3),
+                        None,
+                        &mut || Ok(()),
+                    )
+                    .unwrap();
+                let mut fuel = SealedScanBudget::new(usize::MAX);
+                let (mut sum, mut visible, mut polls) = (0_u128, 0_usize, 0_usize);
+                loop {
+                    let mut guard = || {
+                        polls += 1;
+                        Ok::<_, SealedError>(())
+                    };
+                    let step = if filtered {
+                        cursor.next_budgeted_inner(&mut fuel, &mut guard)
+                    } else {
+                        cursor.next_decoding_history(&mut fuel, &mut guard)
+                    }
+                    .unwrap();
+                    match step {
+                        SealedScanStep::Item(edge) => {
+                            let edge = black_box(edge);
+                            sum = sum
+                                .wrapping_mul(31)
+                                .wrapping_add(edge.entry.eid.0)
+                                .wrapping_add(edge.entry.dst.0);
+                            black_box(edge.properties);
+                            visible += 1;
+                        }
+                        SealedScanStep::End => break,
+                        SealedScanStep::Yield => panic!("unbounded scan exhausted its fuel"),
+                    }
+                }
+                (sum, visible, polls, usize::MAX - fuel.remaining())
+            };
+            let expected = scan(false);
+            assert_eq!(scan(true), expected);
+            let repetitions = 262_144_usize.div_ceil(count);
+            let measure = |filtered| {
+                let start = Instant::now();
+                for _ in 0..repetitions {
+                    assert_eq!(black_box(scan(filtered)), expected);
+                }
+                start.elapsed()
+            };
+            let mut old = [Duration::ZERO; ROUNDS];
+            let mut new = [Duration::ZERO; ROUNDS];
+            for round in 0..ROUNDS {
+                if round.is_multiple_of(2) {
+                    old[round] = measure(false);
+                    new[round] = measure(true);
+                } else {
+                    new[round] = measure(true);
+                    old[round] = measure(false);
+                }
+            }
+            old.sort_unstable();
+            new.sort_unstable();
+            let ns = |elapsed: Duration| elapsed.as_secs_f64() * 1e9 / (count * repetitions) as f64;
+            eprintln!(
+                "count={count} shape={shape:?} visible={} polls={} fuel={} rounds={ROUNDS} \
+                 old_ns={:.3} old_min={:.3} old_max={:.3} new_ns={:.3} new_min={:.3} \
+                 new_max={:.3} self_speedup={:.3}",
+                expected.1,
+                expected.2,
+                expected.3,
+                ns(old[ROUNDS / 2]),
+                ns(old[0]),
+                ns(old[ROUNDS - 1]),
+                ns(new[ROUNDS / 2]),
+                ns(new[0]),
+                ns(new[ROUNDS - 1]),
+                old[ROUNDS / 2].as_secs_f64() / new[ROUNDS / 2].as_secs_f64(),
+            );
         }
     }
 }
