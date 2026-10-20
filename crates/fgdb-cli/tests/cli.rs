@@ -483,9 +483,14 @@ fn a_list_argument_selects_in_a_pattern_where_for_reads_and_writes() {
         ),
         "written",
     );
-    let hit = run(
+    // No `$ids` here: a declared parameter the text never reads is refused.
+    let hit = fixture.robot(
         "query",
-        "MATCH (n:Person) WHERE n.hit = true RETURN n.id AS id ORDER BY id",
+        &[
+            "--property",
+            "hit=2",
+            "MATCH (n:Person) WHERE n.hit = true RETURN n.id AS id ORDER BY id",
+        ],
     );
     succeeded(&hit, "rows");
     assert_eq!(rows(&hit), [id(1), id(3)]);
