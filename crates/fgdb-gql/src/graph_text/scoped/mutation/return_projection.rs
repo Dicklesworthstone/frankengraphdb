@@ -243,7 +243,9 @@ fn case_has_list(
             {
                 let mut ahead = lexer.clone();
                 let result = ahead.next()?;
-                if list_operand_at(result, &ahead, row)? || dynamic_column_at(result, &ahead, row)?
+                if list_operand_at(result, &ahead, row)?
+                    || dynamic_column_at(result, &ahead, row)?
+                    || composite_result_at(result, &ahead)?
                 {
                     return Ok(true);
                 }
@@ -251,6 +253,18 @@ fn case_has_list(
             _ => {}
         }
     }
+}
+
+/// Whether a CASE result starting at `token` (with `lexer` just past it) needs
+/// the value language: a map literal (`THEN {a: 1}`), or a subscript or slice
+/// of a name (`THEN items[1]`, `THEN items[1..]`), which the scalar program
+/// cannot read. The value-language Case returns scalars too.
+fn composite_result_at(token: Token<'_>, lexer: &Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+    Ok(match token.kind {
+        TokenKind::Punct(b'{') => true,
+        TokenKind::Word(_) => matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'[')),
+        _ => false,
+    })
 }
 
 /// Whether `token` (with `lexer` just past it) starts a read of a dynamically

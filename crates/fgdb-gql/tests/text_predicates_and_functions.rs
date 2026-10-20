@@ -2375,8 +2375,50 @@ fn plus_concatenates_lists_and_appends_or_prepends_values() {
             ints(&[2, 3]),
         ),
         ("CASE null WHEN null THEN [1] ELSE [2] END", ints(&[2])),
+        // A map literal result is a composite too, in either arm.
+        (
+            "CASE WHEN true THEN {a: 1} ELSE null END",
+            GraphValue::Map {
+                keys: vec![Box::<str>::from("a")].into_boxed_slice(),
+                values: vec![int(1)].into_boxed_slice(),
+            },
+        ),
+        (
+            "CASE WHEN n.text = 'x' THEN {a: 1} ELSE {b: n.text, c: [2]} END",
+            GraphValue::Map {
+                keys: vec![Box::<str>::from("b"), Box::from("c")].into_boxed_slice(),
+                values: vec![word("ab"), ints(&[2])].into_boxed_slice(),
+            },
+        ),
+        ("CASE n.text WHEN 'x' THEN {a: 1} END", null.clone()),
     ] {
         assert_eq!(value(expression), expected, "{expression}");
+    }
+    // A subscript or slice of a name is read in the value language too
+    // (spill_set's `CASE WHEN true THEN {values: items, tail: items[1..]}
+    // ELSE null END`); the scalar program refused both at prepare.
+    for (expression, expected) in [
+        (
+            "CASE WHEN true THEN items[1..] ELSE null END",
+            ints(&[2, 3]),
+        ),
+        ("CASE WHEN false THEN null ELSE items[..1] END", ints(&[1])),
+        (
+            "CASE WHEN true THEN {values: items, tail: items[1..]} ELSE null END",
+            GraphValue::Map {
+                keys: vec![Box::<str>::from("tail"), Box::from("values")].into_boxed_slice(),
+                values: vec![ints(&[2, 3]), ints(&[1, 2, 3])].into_boxed_slice(),
+            },
+        ),
+        ("CASE WHEN true THEN items[1] ELSE 0 END", int(2)),
+        ("CASE WHEN false THEN items[1] ELSE 0 END", int(0)),
+    ] {
+        let query = prepare(&format!(
+            "MATCH (n) WITH [1, 2, 3] AS items RETURN {expression} AS value"
+        ));
+        let result = execute(&query, &text("ab"), policy())
+            .unwrap_or_else(|error| panic!("{expression}: {error:?}"));
+        assert_eq!(result.value[0].values()[0], expected, "{expression}");
     }
     let unselected_fails = prepare(
         "MATCH (n) RETURN CASE WHEN false THEN [1] ELSE [1 / (size(n.text) - 2)] END AS value",
