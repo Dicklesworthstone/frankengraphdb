@@ -1,6 +1,6 @@
 //! Governed composition, not a second graph interpreter or transaction manager.
 
-use super::{GraphQueryWriteBindError, PreparedGraphQueryWrite};
+use super::{GraphQueryWriteBindError, GraphQueryWriteBindEvent, PreparedGraphQueryWrite};
 use crate::algebra::GraphValueRow;
 use crate::{
     BoundGraphWriteScriptBatch, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
@@ -119,6 +119,48 @@ impl PreparedGraphQueryWrite {
         &self,
         policy: GraphWriteProgramPolicy,
         max_statements: usize,
+        read: impl FnMut(
+            &PreparedGraphSet,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>>,
+        stage: impl FnMut(
+            &BoundGraphWriteScriptBatch,
+            GraphWriteProgramPolicy,
+        ) -> Result<GraphWriteProgramReceipt, GraphWriteScriptExecutionError<E, A, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphQueryWriteExecution, GraphQueryWriteExecutionError<E, A, C>> {
+        self.execute_governed_with_binding_control(
+            policy,
+            max_statements,
+            read,
+            stage,
+            checkpoint,
+            |_| Ok(()),
+        )
+    }
+
+    /// As [`Self::execute_governed`], with a host admission for each binding
+    /// reservation. This lets a capability-scoped adapter charge the SAME live
+    /// permit for expanded argument metadata and recursive collection copies,
+    /// not merely one checkpoint for an arbitrarily large reservation.
+    ///
+    /// `binding_control` runs after the ordinary checkpoint and before native
+    /// accounting or allocation. It receives the original row coordinates and
+    /// logical entry count, including zero-entry acceptance boundaries. A
+    /// refusal is a binding interruption with its original cause; no stage
+    /// callback or later binding admission runs. Native policy limits still
+    /// apply independently and cannot be widened by a successful host callback.
+    ///
+    /// All callbacks must share one trusted transaction and authority. The
+    /// ENTIRE execution, including final acceptance after successful staging,
+    /// still belongs inside the host's ordinary rollback guard. No callback
+    /// may publish tentative values or commit an intermediate result.
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::result_large_err)]
+    pub fn execute_governed_with_binding_control<E, A, C>(
+        &self,
+        policy: GraphWriteProgramPolicy,
+        max_statements: usize,
         mut read: impl FnMut(
             &PreparedGraphSet,
             GqlQueryPolicy,
@@ -128,6 +170,7 @@ impl PreparedGraphQueryWrite {
             GraphWriteProgramPolicy,
         ) -> Result<GraphWriteProgramReceipt, GraphWriteScriptExecutionError<E, A, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
+        mut binding_control: impl FnMut(GraphQueryWriteBindEvent) -> Result<(), C>,
     ) -> Result<GraphQueryWriteExecution, GraphQueryWriteExecutionError<E, A, C>> {
         use GraphQueryWriteExecutionError as Error;
         checkpoint().map_err(|error| Error::Control(GqlQueryError::Interrupted(error)))?;
@@ -149,6 +192,7 @@ impl PreparedGraphQueryWrite {
         let mut evaluator = source.evaluator;
         let batch = self.bind_rows_controlled(&source.value, max_statements, |event| {
             checkpoint().map_err(GqlQueryError::Interrupted)?;
+            binding_control(event).map_err(GqlQueryError::Interrupted)?;
             charge(query, &mut evaluator, event.entries)
         }).map_err(Error::Binding)?;
         // Frozen operands now belong to the admitted batch. Drop read results
@@ -204,3 +248,6 @@ impl PreparedGraphQueryWrite {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod binding_tests;
