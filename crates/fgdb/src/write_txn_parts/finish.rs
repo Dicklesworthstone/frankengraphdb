@@ -296,11 +296,7 @@ impl WriteTxn {
         // The final validation checkpoint precedes BOTH kinds of acceptance.
         // Never return Interrupted after a marker or a successful read close.
         checkpoint()?;
-        let completion = if let Some(mut prepared) = attempt.transaction.prepared.take() {
-            if prepared.authorization_decision_digest.is_none() {
-                prepared.authorization_decision_digest =
-                    attempt.transaction.authorization_decision_digest;
-            }
+        let completion = if let Some(prepared) = attempt.transaction.prepared.take() {
             attempt.transaction.staged.clear();
             // Completion consumes every rollback point. Release their shared
             // prefixes before taking ownership for the ordinary commit path.
