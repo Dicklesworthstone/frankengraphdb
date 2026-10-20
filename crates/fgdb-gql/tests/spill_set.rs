@@ -318,13 +318,17 @@ fn staged_plan(
             assert_eq!(plan.source().kind(), fgdb_gql::scan_stream::ScanKind::Set);
             let left = staged_plan(graph, cross.left())?;
             let right = staged_plan(graph, cross.right())?;
+            // A selected product (7d0bb0bb) keeps only its accepted pairs, as
+            // the production host does; an unselected one copies every pair.
             let mut rows = Vec::new();
             for left in &left {
                 for right in &right {
-                    rows.push(cross.copy_pair_with_control(left, right, &mut |event| {
+                    if let Some(row) = cross.select_pair_with_control(left, right, &mut |event| {
                         assert_ne!(event, GlaExecutionEvent::ResultRow);
                         Ok(())
-                    })?);
+                    })? {
+                        rows.push(row);
+                    }
                 }
             }
             rows
@@ -1014,45 +1018,39 @@ fn projected_allocations_and_refusals_use_the_host_control_without_final_row_cha
 
 #[test]
 fn unsupported_sources_and_relational_descendants_refuse_before_limit_zero() {
-    for text in [
-        "MATCH (a)-[:R]->(b)-[:R]->(c) WHERE EXISTS { MATCH (c)-[:R]->(d) } RETURN a.p+c.p AS value LIMIT 0",
-        "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(x) } RETURN a.p+1 AS value LIMIT 0",
-    ] {
-        let error = AsyncSpillSetPlan::compile(&prepare(text)).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                SpillSetBuildError::Vertex(_) | SpillSetBuildError::Edge(_)
-            ),
-            "{text}: {error:?}"
-        );
-    }
+    // A vertex source with an existence probe is still outside the profile.
+    let text = "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(x) } RETURN a.p+1 AS value LIMIT 0";
+    let error = AsyncSpillSetPlan::compile(&prepare(text)).unwrap_err();
+    assert!(
+        matches!(error, SpillSetBuildError::Vertex(_)),
+        "{text}: {error:?}"
+    );
+    // A fixed-hop edge source carries its probe and spills with the native
+    // answer. Relational joins execute over completed child runs (d3574354;
+    // their rows are relational_join's laws), so a nested join and a union
+    // over one now compile, LIMIT 0 included.
+    let graph = Graph::sample();
+    let probed = prepare(
+        "MATCH (a)-[:R]->(b)-[:R]->(c) WHERE EXISTS { MATCH (c)-[:R]->(d) } RETURN a.p+c.p AS value",
+    );
+    assert_eq!(staged(&graph, &probed).unwrap(), graph.native(&probed).unwrap());
     let pattern = PreparedGraphSet::from(leaf("MATCH (n) RETURN n.p AS value"));
     let spec = RowJoinSpec::cross(pattern.column_types(), pattern.column_types()).unwrap();
-    let unsupported = pattern.clone().join(pattern.clone(), spec).unwrap();
-    let query = unsupported.clone().nested().unwrap().with_page(0, Some(0));
-    assert!(matches!(
-        AsyncSpillSetPlan::compile(&query),
-        Err(SpillSetBuildError::Unsupported { depth: 1 })
-    ));
-    let unsupported = unsupported
+    let joined = pattern.clone().join(pattern.clone(), spec).unwrap();
+    let nested = joined.clone().nested().unwrap();
+    let joined = joined
         .project(
             vec![GraphSetProjection::new("value", GraphSetValue::Column(0))],
             GraphSetQuantifier::All,
         )
         .unwrap();
-    let query = pattern
-        .combine(
-            GraphSetOperation::Union,
-            GraphSetQuantifier::All,
-            unsupported,
-        )
-        .unwrap()
-        .with_page(0, Some(0));
-    assert!(matches!(
-        AsyncSpillSetPlan::compile(&query),
-        Err(SpillSetBuildError::Unsupported { depth: 2 })
-    ));
+    let union = pattern
+        .combine(GraphSetOperation::Union, GraphSetQuantifier::All, joined)
+        .unwrap();
+    for query in [nested, union] {
+        assert!(AsyncSpillSetPlan::compile(&query).is_ok());
+        assert!(AsyncSpillSetPlan::compile(&query.with_page(0, Some(0))).is_ok());
+    }
 }
 
 #[test]
@@ -1475,15 +1473,11 @@ fn collection_and_unsupported_group_descendants_still_refuse_before_zero_limit()
         .clone()
         .group_by(&[], &[GraphAggregate::collect("items", 0)])
         .unwrap();
-    assert!(matches!(
-        AsyncSpillSetPlan::compile(&collection.clone().with_page(0, Some(0))),
-        Err(SpillSetBuildError::Unsupported { depth: 0 })
-    ));
+    // COLLECT groups spill under the byte-bounded collector (b9ddb0b0), as a
+    // source and below a nested boundary, LIMIT 0 included.
+    assert!(AsyncSpillSetPlan::compile(&collection.clone().with_page(0, Some(0))).is_ok());
     let nested = collection.nested().unwrap().with_page(0, Some(0));
-    assert!(matches!(
-        AsyncSpillSetPlan::compile(&nested),
-        Err(SpillSetBuildError::Unsupported { depth: 1 })
-    ));
+    assert!(AsyncSpillSetPlan::compile(&nested).is_ok());
     // A relational join below a group was the unsupported descendant until
     // d3574354 executed joins over completed child runs; it now compiles.
     let spec = RowJoinSpec::cross(input.column_types(), input.column_types()).unwrap();
@@ -2089,8 +2083,9 @@ fn cartesian_oversized_rows_and_unsupported_children_refuse_before_empty_pages()
         .unwrap();
     let spec = RowJoinSpec::cross(input.column_types(), input.column_types()).unwrap();
     let relational_join = input.clone().join(input.clone(), spec).unwrap();
-    // Relational joins execute over completed child runs since d3574354, so
-    // a product over one compiles; a collection child still refuses.
+    // Relational joins execute over completed child runs since d3574354 and
+    // COLLECT groups spill since b9ddb0b0, so a product over either compiles,
+    // directly and below a nested boundary.
     for product in [
         input
             .clone()
@@ -2103,24 +2098,19 @@ fn cartesian_oversized_rows_and_unsupported_children_refuse_before_empty_pages()
     ] {
         assert!(AsyncSpillSetPlan::compile(&product.clone().with_page(0, Some(0))).is_ok());
     }
-    let unsupported = collection;
     for product in [
         input
             .clone()
             .with_page(0, Some(0))
-            .cross_join(unsupported.clone())
+            .cross_join(collection.clone())
             .unwrap(),
-        unsupported
+        collection
             .cross_join(input.clone().with_page(0, Some(0)))
             .unwrap(),
     ] {
-        assert!(matches!(
-            AsyncSpillSetPlan::compile(&product.clone().with_page(0, Some(0))),
-            Err(SpillSetBuildError::Unsupported { depth: 1 })
-        ));
-        assert!(matches!(
-            AsyncSpillSetPlan::compile(&product.nested().unwrap().with_page(0, Some(0))),
-            Err(SpillSetBuildError::Unsupported { depth: 2 })
-        ));
+        assert!(AsyncSpillSetPlan::compile(&product.clone().with_page(0, Some(0))).is_ok());
+        assert!(
+            AsyncSpillSetPlan::compile(&product.nested().unwrap().with_page(0, Some(0))).is_ok()
+        );
     }
 }
