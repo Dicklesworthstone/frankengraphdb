@@ -1,4 +1,7 @@
 //! Public creation entry points with real tokens, collector, storage and reopen.
+// Loaded through #[path], so a child resolves beside this file, as from a
+// mod.rs: name its directory explicitly.
+#[path = "insert_tests/factors.rs"]
 mod factors;
 
 use super::*;
