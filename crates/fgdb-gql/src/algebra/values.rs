@@ -279,7 +279,11 @@ pub struct GraphPath {
 }
 
 impl GraphPath {
-    pub(crate) fn new(start: VId, steps: Box<[(EId, VId)]>) -> Self {
+    /// A path value from its start vertex and (edge, vertex) steps, as a
+    /// pattern binding carries it. Like a Vertex or Edge value, it is not
+    /// checked against any graph.
+    #[must_use]
+    pub fn new(start: VId, steps: Box<[(EId, VId)]>) -> Self {
         Self { start, steps }
     }
     #[must_use]

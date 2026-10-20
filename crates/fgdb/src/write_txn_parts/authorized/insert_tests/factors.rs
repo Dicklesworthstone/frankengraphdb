@@ -286,7 +286,13 @@ fn authorized_factor_creation_preserves_occurrences_masked_return_values_and_row
                     (edge.entry.src, edge.entry.relation, edge.entry.dst),
                     (VId(source), R, VId(destination))
                 );
-                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(weight))]);
+                assert_eq!(
+                    edge.props,
+                    vec![(
+                        P,
+                        fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(weight))
+                    )]
+                );
             }
             let after = db.frontier().unwrap();
             assert_eq!(after.0, before.0 + 1);
@@ -387,13 +393,22 @@ fn authorized_factor_program_reads_rekeyed_and_created_overlay_rows_and_rolls_ba
                 assert_eq!(
                     db.vertex(VId(3)).unwrap().unwrap().props,
                     vec![
-                        (P, CanonicalScalar::Int(20)),
-                        (SECRET, CanonicalScalar::Int(777))
+                        (
+                            P,
+                            fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(20))
+                        ),
+                        (
+                            SECRET,
+                            fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(777))
+                        )
                     ]
                 );
                 assert_eq!(
                     db.vertex(created).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(9))]
+                    vec![(
+                        P,
+                        fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(9))
+                    )]
                 );
                 let expected = [
                     (VId(1), VId(3), 7),
@@ -408,7 +423,13 @@ fn authorized_factor_program_reads_rekeyed_and_created_overlay_rows_and_rolls_ba
                         (edge.entry.src, edge.entry.relation, edge.entry.dst),
                         (source, R, destination)
                     );
-                    assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(weight))]);
+                    assert_eq!(
+                        edge.props,
+                        vec![(
+                            P,
+                            fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(weight))
+                        )]
+                    );
                 }
                 let after = db.frontier().unwrap();
                 assert_eq!(after.0, before.0.0 + 1);

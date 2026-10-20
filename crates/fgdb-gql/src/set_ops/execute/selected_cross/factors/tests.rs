@@ -180,9 +180,8 @@ fn execute(
 ) -> SetResult<GqlQueryExecution<GraphValueRow>, &'static str, usize> {
     query
         .execute_with_source(policy, source, || Ok(()))
-        .map(|execution| {
+        .inspect(|execution| {
             assert_eq!(execution.rows.result_rows, execution.value.len() as u64);
-            execution
         })
 }
 

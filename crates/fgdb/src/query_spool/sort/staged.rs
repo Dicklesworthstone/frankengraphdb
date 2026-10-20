@@ -10,7 +10,7 @@ use fgdb_gql::spill_set::{
     AsyncSpillElementSource, AsyncSpillSetPlan, SpillSetRowError, SpillSetStage, SpillSetValuesPlan,
 };
 use fgdb_gql::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded};
-use fgdb_types::{CanonicalScalar, CanonicalScalarResolver};
+use fgdb_types::CanonicalScalarResolver;
 
 // A property lends its scalar while owning the authenticated cold record and
 // that record's byte grant. The evaluator reserves its destination copy before
