@@ -12,6 +12,7 @@ pub mod committed;
 pub mod components;
 pub mod incremental;
 pub mod reachability;
+mod seek;
 pub mod set;
 pub mod triangles;
 
