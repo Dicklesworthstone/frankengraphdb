@@ -184,11 +184,17 @@ fn repeated_vertex_keys_share_one_authorized_commit_and_survive_reopen() {
         assert_eq!(db.vertices().unwrap().len(), 2);
         assert_eq!(
             db.vertex(first).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(5))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(5).into())
+            ]
         );
         assert_eq!(
             db.vertex(second).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(4))]
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(4).into())
+            ]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -262,7 +268,7 @@ fn relationship_batches_reuse_masked_native_merge_and_admit_relation_scope() {
         assert_eq!(result.steps()[1].merged_edge().unwrap().edge(), Some(edge));
         assert_eq!(
             db.edge(edge).unwrap().unwrap().props,
-            vec![(Q, CanonicalScalar::Int(5))]
+            vec![(Q, CanonicalScalar::Int(5).into())]
         );
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -591,9 +597,9 @@ fn hidden_fields_stay_masked_and_original_forbidden_writes_cannot_escape() {
             assert_eq!(
                 stored.props,
                 vec![
-                    (P, CanonicalScalar::Int(1)),
-                    (Q, CanonicalScalar::Int(15)),
-                    (SECRET, secret),
+                    (P, CanonicalScalar::Int(1).into()),
+                    (Q, CanonicalScalar::Int(15).into()),
+                    (SECRET, secret.into()),
                 ]
             );
             assert_eq!(db.vertex(VId(99)).unwrap(), hidden);

@@ -126,6 +126,7 @@ fn prepare_root(
             | Op::Xor
             | Op::Concat
             | Op::Power
+            | Op::Atan2
             | Op::StartsWith
             | Op::EndsWith
             | Op::Contains => 2,
@@ -306,7 +307,8 @@ fn prepare_root(
             Op::Upper | Op::Lower | Op::Trim | Op::Substring | Op::Concat | Op::ToText => {
                 Kind::Text
             }
-            Op::Numeric(_) | Op::Power => Kind::Float,
+            Op::Numeric(GraphNumericFunction::Sign) => Kind::Integer,
+            Op::Numeric(_) | Op::Power | Op::Atan2 => Kind::Float,
             _ => Kind::Integer,
         };
         let numeric_arithmetic = !integer_root
@@ -331,7 +333,8 @@ fn prepare_root(
                     | CanonicalScalar::Timestamp(_)
                     | CanonicalScalar::Duration(_)
             ),
-            Op::Numeric(_) | Op::Power => true,
+            Op::Numeric(GraphNumericFunction::Sign) => false,
+            Op::Numeric(_) | Op::Power | Op::Atan2 => true,
             Op::Binary(GraphIntegerBinary::NullIf) => nodes[children[0]].may_float,
             Op::Unary(_) | Op::Binary(_) => numeric_arithmetic,
             Op::Coalesce => children.iter().any(|&child| nodes[child].may_float),
@@ -481,6 +484,7 @@ fn prepare_root(
                     Op::Xor => Some(Instruction::Xor),
                     Op::Concat => Some(Instruction::Concat),
                     Op::Power => Some(Instruction::Power),
+                    Op::Atan2 => Some(Instruction::Atan2),
                     Op::StartsWith => Some(Instruction::StartsWith),
                     Op::EndsWith => Some(Instruction::EndsWith),
                     Op::Contains => Some(Instruction::Contains),
@@ -548,6 +552,7 @@ fn prepare_root(
                     | Op::Matches(_)
                     | Op::Concat
                     | Op::Power
+                    | Op::Atan2
                     | Op::StartsWith
                     | Op::EndsWith
                     | Op::Contains => unreachable!("operator emitted above"),

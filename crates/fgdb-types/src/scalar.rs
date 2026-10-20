@@ -543,7 +543,15 @@ impl CanonicalScalar {
     /// is a typed rejection; declared lengths are validated against both the
     /// profile bound and the actually-present input before any allocation.
     pub fn decode(bytes: &[u8]) -> Result<Self, ScalarDecodeError> {
-        Self::decode_inner(bytes, None)
+        Self::decode_inner_mode(bytes, None, false)
+    }
+
+    /// Decodes one stored scalar from authenticated durable storage without a
+    /// live [`CanonicalScalarResolver`], preserving committed zoned timestamp
+    /// metadata `(instant, offset, zone_identifier, tzdb_oid)` after validating
+    /// range and syntax invariants.
+    pub fn decode_stored(bytes: &[u8]) -> Result<Self, ScalarDecodeError> {
+        Self::decode_inner_mode(bytes, None, true)
     }
 
     /// Decodes one scalar against an explicit content-addressed artifact
@@ -553,12 +561,20 @@ impl CanonicalScalar {
         bytes: &[u8],
         resolver: &dyn CanonicalScalarResolver,
     ) -> Result<Self, ScalarDecodeError> {
-        Self::decode_inner(bytes, Some(resolver))
+        Self::decode_inner_mode(bytes, Some(resolver), false)
     }
 
     pub(crate) fn decode_inner(
         bytes: &[u8],
         resolver: Option<&dyn CanonicalScalarResolver>,
+    ) -> Result<Self, ScalarDecodeError> {
+        Self::decode_inner_mode(bytes, resolver, false)
+    }
+
+    pub(crate) fn decode_inner_mode(
+        bytes: &[u8],
+        resolver: Option<&dyn CanonicalScalarResolver>,
+        allow_stored_zoned: bool,
     ) -> Result<Self, ScalarDecodeError> {
         let (&tag, rest) = bytes.split_first().ok_or(ScalarDecodeError::Empty)?;
         let exact = |want: usize| -> Result<&[u8], ScalarDecodeError> {
@@ -602,7 +618,7 @@ impl CanonicalScalar {
                     .ok_or(ScalarDecodeError::NonCanonicalFloat { bits })
             }
             TAG_TEXT => decode_text_scalar(rest, resolver),
-            TAG_TIMESTAMP => decode_timestamp_scalar(rest, resolver),
+            TAG_TIMESTAMP => decode_timestamp_scalar(rest, resolver, allow_stored_zoned),
             TAG_BYTES => decode_bytes_scalar(rest),
             TAG_DATE => {
                 let raw = array_from_exact::<8>(exact(8)?, tag)?;
@@ -916,6 +932,7 @@ fn decode_text_scalar(
 fn decode_timestamp_scalar(
     payload: &[u8],
     resolver: Option<&dyn CanonicalScalarResolver>,
+    allow_stored_zoned: bool,
 ) -> Result<CanonicalScalar, ScalarDecodeError> {
     let mut cursor = ScalarCursor::new(TAG_TIMESTAMP, payload)?;
     let instant = decode_ordered_i128(u128::from_be_bytes(
@@ -944,12 +961,25 @@ fn decode_timestamp_scalar(
             validate_zone_identifier(&zone).map_err(|error| {
                 ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
             })?;
-            let resolver = resolver.ok_or(ScalarDecodeError::Timestamp(
-                TimestampDecodeError::TzdbResolverRequired,
-            ))?;
-            CanonicalTimestamp::zoned(instant, offset, &zone, tzdb_oid, resolver).map_err(
-                |error| ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error)),
-            )?
+            match resolver {
+                Some(resolver) => CanonicalTimestamp::zoned(
+                    instant, offset, &zone, tzdb_oid, resolver,
+                )
+                .map_err(|error| {
+                    ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
+                })?,
+                None if allow_stored_zoned => {
+                    CanonicalTimestamp::from_stored_zoned(instant, offset, &zone, tzdb_oid)
+                        .map_err(|error| {
+                            ScalarDecodeError::Timestamp(TimestampDecodeError::InvalidValue(error))
+                        })?
+                }
+                None => {
+                    return Err(ScalarDecodeError::Timestamp(
+                        TimestampDecodeError::TzdbResolverRequired,
+                    ));
+                }
+            }
         }
         other => {
             return Err(ScalarDecodeError::Timestamp(

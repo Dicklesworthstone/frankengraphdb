@@ -131,14 +131,20 @@ fn rowless_actions_freeze_targets_and_admit_the_whole_action_count() {
         for (vertex, p) in IDS.into_iter().zip([22, 24, 26]) {
             assert_eq!(
                 txn.vertex(&db, vertex).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(8))]
+                vec![
+                    (P, CanonicalScalar::Int(p).into()),
+                    (Q, CanonicalScalar::Int(8).into())
+                ]
             );
         }
         txn.finish(&mut db, &commit).await.unwrap();
         for (vertex, p) in IDS.into_iter().zip([22, 24, 26]) {
             assert_eq!(
                 db.vertex(vertex).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(8))]
+                vec![
+                    (P, CanonicalScalar::Int(p).into()),
+                    (Q, CanonicalScalar::Int(8).into())
+                ]
             );
         }
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -173,7 +179,10 @@ fn a_late_target_failure_restores_all_targets_and_keeps_the_prior_prefix() {
         for (vertex, p) in IDS.into_iter().zip([1, 2, 3]) {
             assert_eq!(
                 txn.vertex(&db, vertex).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(7))]
+                vec![
+                    (P, CanonicalScalar::Int(p).into()),
+                    (Q, CanonicalScalar::Int(7).into())
+                ]
             );
         }
         assert!(txn.vertex(&db, VId(99)).unwrap().is_some());
@@ -225,7 +234,10 @@ fn empty_matches_create_once_and_a_later_match_never_allocates_again() {
         assert_eq!(second.merge.match_selection.result_rows, 1);
         assert_eq!(
             txn.vertex(&db, created).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(18)), (Q, CanonicalScalar::Int(7))]
+            vec![
+                (P, CanonicalScalar::Int(18).into()),
+                (Q, CanonicalScalar::Int(7).into())
+            ]
         );
         txn.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.vertices().unwrap().len(), 1);

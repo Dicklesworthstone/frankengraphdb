@@ -253,9 +253,9 @@ fn raw_guards_cancelled_edits_and_absent_removals_remain_dependencies() {
                     let vertex = database.vertex(VId(1)).unwrap().unwrap();
                     assert_eq!(
                         vertex.props[0].1,
-                        CanonicalScalar::Int(if case == 0 { 7 } else { 0 })
+                        CanonicalScalar::Int(if case == 0 { 7 } else { 0 }).into()
                     );
-                    assert_eq!(vertex.props[1].1, CanonicalScalar::Int(8));
+                    assert_eq!(vertex.props[1].1, CanonicalScalar::Int(8).into());
                 }
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }
@@ -375,7 +375,7 @@ fn unchanged_reads_pass_and_changed_reads_or_ineligible_work_refuse() {
             }
             assert_eq!(
                 database.vertex(VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(if case == 1 { 7 } else { 0 })
+                CanonicalScalar::Int(if case == 1 { 7 } else { 0 }).into()
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
@@ -425,11 +425,11 @@ fn multi_relation_rebase_admits_the_whole_expanded_input() {
                 assert_eq!(result.unwrap(), CommitSeq(frontier.0 + 1));
                 assert_eq!(
                     database.edge(EId(10)).unwrap().unwrap().props[0].1,
-                    CanonicalScalar::Int(7)
+                    CanonicalScalar::Int(7).into()
                 );
                 assert_eq!(
                     database.edge(EId(20)).unwrap().unwrap().props[0].1,
-                    CanonicalScalar::Int(7)
+                    CanonicalScalar::Int(7).into()
                 );
             }
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -492,7 +492,7 @@ fn every_checkpoint_and_unwind_before_publication_release_the_workspace() {
             assert_eq!(database.frontier().unwrap(), frontier);
             assert_eq!(
                 database.vertex(VId(1)).unwrap().unwrap().props[0].1,
-                CanonicalScalar::Int(0)
+                CanonicalScalar::Int(0).into()
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
@@ -609,7 +609,7 @@ fn field_domains_keep_kinds_and_keys_distinct_and_refuse_unknown_history() {
             elem,
             property: key,
             before: None,
-            after: Some(CanonicalScalar::Int(1)),
+            after: Some(CanonicalScalar::Int(1).into()),
         };
         assert_eq!(footprint.conflicts(&row, &mut || Ok(())).unwrap(), expected);
     }
@@ -688,7 +688,7 @@ fn read_derived_writes_rebase_without_repeating_reads_and_match_serial_reopen() 
             let mut transaction = database.begin(&txcx).unwrap();
             let basis = transaction.basis();
             let read = transaction.vertex(&database, VId(3)).unwrap().unwrap();
-            let CanonicalScalar::Int(value) = &read.props[0].1 else {
+            let Some(CanonicalScalar::Int(value)) = read.props[0].1.as_scalar() else {
                 panic!("integer fixture");
             };
             assert!(transaction.vertex(&database, VId(99)).unwrap().is_none());
@@ -715,7 +715,7 @@ fn read_derived_writes_rebase_without_repeating_reads_and_match_serial_reopen() 
             }
             assert_eq!(
                 pinned.vertex(VId(1)).unwrap().unwrap().props[1].1,
-                CanonicalScalar::Int(0)
+                CanonicalScalar::Int(0).into()
             );
             let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
             seed(&mut serial, &cx).await;
@@ -868,11 +868,11 @@ fn read_write_skew_cannot_hide_behind_independent_rebase_domains() {
                 } else {
                     assert_eq!(
                         left.vertex(&database, VId(2)).unwrap().unwrap().props[0].1,
-                        CanonicalScalar::Int(0)
+                        CanonicalScalar::Int(0).into()
                     );
                     assert_eq!(
                         right.vertex(&database, VId(1)).unwrap().unwrap().props[0].1,
-                        CanonicalScalar::Int(0)
+                        CanonicalScalar::Int(0).into()
                     );
                     right_write.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(1)));
                 }
@@ -902,11 +902,11 @@ fn read_write_skew_cannot_hide_behind_independent_rebase_domains() {
                     let right_row = database.vertex(VId(2)).unwrap().unwrap();
                     assert_eq!(
                         left_row.props[0].1,
-                        CanonicalScalar::Int(if reverse { 0 } else { 1 })
+                        CanonicalScalar::Int(if reverse { 0 } else { 1 }).into()
                     );
                     assert_eq!(
                         right_row.props[0].1,
-                        CanonicalScalar::Int(if reverse { 1 } else { 0 })
+                        CanonicalScalar::Int(if reverse { 1 } else { 0 }).into()
                     );
                 }
                 assert_eq!(txcx.outstanding_obligations(), 0);

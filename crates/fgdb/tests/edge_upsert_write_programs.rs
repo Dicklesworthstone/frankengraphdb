@@ -119,7 +119,7 @@ fn one_atomic_ingestion_creates_vertices_decorates_edge_and_reads_its_own_action
         );
         assert_eq!(
             txn.edge(&db, EId(10)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(100))]
+            vec![(W, CanonicalScalar::Int(100).into())]
         );
         assert!(db.vertex(VId(1)).unwrap().is_none());
         assert!(db.edge(EId(10)).unwrap().is_none());
@@ -150,7 +150,7 @@ fn one_atomic_ingestion_creates_vertices_decorates_edge_and_reads_its_own_action
         assert_eq!(db.edges().unwrap().len(), 1);
         assert_eq!(
             db.edge(EId(10)).unwrap().unwrap().props,
-            vec![(W, CanonicalScalar::Int(100))]
+            vec![(W, CanonicalScalar::Int(100).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

@@ -142,6 +142,9 @@ fn value(db: &Database<MemVfs>, edge: EId) -> CanonicalScalar {
         .find(|(key, _)| *key == P)
         .unwrap()
         .1
+        .as_scalar()
+        .expect("scalar property")
+        .clone()
 }
 
 #[test]
@@ -432,7 +435,7 @@ fn hidden_fields_and_endpoints_stay_private_and_committed_results_survive_reopen
                     .unwrap()
                     .unwrap()
                     .props
-                    .contains(&(SECRET, CanonicalScalar::Int(99)))
+                    .contains(&(SECRET, CanonicalScalar::Int(99).into()))
             );
         }
         let after = state!(db);

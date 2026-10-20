@@ -26,7 +26,8 @@ fn all_join_kinds_have_a_sealed_external_source_and_canonical_finish() {
         RowJoinKind::Anti,
     ] {
         for keyed in [false, true] {
-            let types = [GraphSetColumnType::Scalar];
+            // `n.p` is a property column, which is Stored (fgdb-kr8j1).
+            let types = [GraphSetColumnType::Stored];
             let spec = if keyed {
                 RowJoinSpec::new(&types, &types, &[(0, 0)])
             } else {

@@ -12,7 +12,8 @@ use fgdb_gql::{
     PreparedGraphSet, PreparedGraphSetText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -72,7 +73,7 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) -> CommitSeq {
 }
 fn scalar(row: &VertexRow) -> Option<i64> {
     row.props.iter().find_map(|(key, value)| match value {
-        CanonicalScalar::Int(n) if *key == P => Some(*n),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)) if *key == P => Some(*n),
         _ => None,
     })
 }

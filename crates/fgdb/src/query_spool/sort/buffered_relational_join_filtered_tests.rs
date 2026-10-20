@@ -4,9 +4,16 @@ use super::*;
 #[path = "buffered_selected_cross_tests.rs"]
 mod selected_cross_tests;
 
-fn filtered_spec(kind: RowJoinKind, keys: &[(usize, usize)], rhs: usize) -> RowJoinSpec {
-    let types = [GraphSetColumnType::Scalar; 2];
-    RowJoinSpec::new(&types, &types, keys)
+/// `left` and `right` are the joined relations' declared column domains: a
+/// property column is Stored (fgdb-kr8j1), a literal or arithmetic one Scalar.
+fn filtered_spec(
+    kind: RowJoinKind,
+    keys: &[(usize, usize)],
+    rhs: usize,
+    left: &[GraphSetColumnType],
+    right: &[GraphSetColumnType],
+) -> RowJoinSpec {
+    RowJoinSpec::new(left, right, keys)
         .unwrap()
         .with_kind(kind)
         .with_predicate(&[GraphSetPredicateOp::Compare {
@@ -166,7 +173,16 @@ fn filtered_merge_preserves_mapped_repeated_keys_and_original_predicate_operands
         for keys in definitions {
             for kind in KINDS {
                 let query = leaf(0, false)
-                    .join(right.clone(), filtered_spec(kind, keys, 2))
+                    .join(
+                        right.clone(),
+                        filtered_spec(
+                            kind,
+                            keys,
+                            2,
+                            &[GraphSetColumnType::Stored; 2],
+                            &[GraphSetColumnType::Stored; 2],
+                        ),
+                    )
                     .unwrap();
                 assert_eq!(
                     execute(&query, 2, &mut view, &cx, policy(100), 100, WORK)
@@ -219,7 +235,16 @@ fn filtered_merge_distinguishes_duplicate_products_null_keys_and_unknown_on() {
                 for kind in KINDS {
                     let query = left
                         .clone()
-                        .join(right.clone(), filtered_spec(kind, &[(0, 0)], 3))
+                        .join(
+                            right.clone(),
+                            filtered_spec(
+                                kind,
+                                &[(0, 0)],
+                                3,
+                                left.column_types(),
+                                right.column_types(),
+                            ),
+                        )
                         .unwrap();
                     assert_eq!(
                         execute(&query, 2, &mut view, &cx, policy(100), 100, WORK)
@@ -393,7 +418,13 @@ fn filtered_merge_empty_children_keep_outer_and_presence_semantics() {
                     .with_page(0, empty_left.then_some(0))
                     .join(
                         leaf(1, false).with_page(0, empty_right.then_some(0)),
-                        filtered_spec(kind, &[(0, 0)], 3),
+                        filtered_spec(
+                            kind,
+                            &[(0, 0)],
+                            3,
+                            &[GraphSetColumnType::Stored; 2],
+                            &[GraphSetColumnType::Stored; 2],
+                        ),
                     )
                     .unwrap();
                 assert_eq!(
@@ -433,7 +464,16 @@ fn filtered_merge_does_not_hide_failed_children_behind_empty_outer_or_zero_page(
         for kind in KINDS {
             let query = leaf(0, false)
                 .with_page(0, Some(0))
-                .join(right.clone(), filtered_spec(kind, &[(0, 0)], 3))
+                .join(
+                    right.clone(),
+                    filtered_spec(
+                        kind,
+                        &[(0, 0)],
+                        3,
+                        &[GraphSetColumnType::Stored; 2],
+                        &[GraphSetColumnType::Stored, GraphSetColumnType::Scalar],
+                    ),
+                )
                 .unwrap()
                 .with_page(0, Some(0));
             assert!(matches!(
@@ -463,7 +503,7 @@ fn filtered_merge_selective_keys_avoid_all_pairs_when_on_rejects_every_candidate
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap();
-        let types = [GraphSetColumnType::Scalar; 2];
+        let types = input.column_types().to_vec();
         let query = |keyed| {
             let spec = if keyed {
                 RowJoinSpec::new(&types, &types, &[(0, 0)])

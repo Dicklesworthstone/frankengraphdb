@@ -8,7 +8,7 @@ use fgdb_gql::{
     GraphAggregateRow, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
     PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Edge = (VId, RelationId, VId);
@@ -397,7 +397,7 @@ fn observed_branches_keep_per_occurrence_property_errors_even_with_limit_zero() 
         (VId(1), RelationId(2), VId(2)),
         (VId(1), RelationId(3), VId(3)),
     ];
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     for tail in [
         " RETURN c,COUNT(h.n) AS n GROUP BY c LIMIT 0",
         " WHERE h.n=c.n RETURN c,COUNT(*) AS n GROUP BY c LIMIT 0",

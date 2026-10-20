@@ -301,7 +301,7 @@ impl WriteTxn {
                     if let Some(vertices) = &mut vertices {
                         vertices.push(vertex);
                     }
-                    batch.create_vertex(vertex, labels, properties);
+                    batch.create_vertex_values(vertex, labels, properties);
                 }
                 GraphInsertIntent::Edge {
                     edge,
@@ -316,7 +316,7 @@ impl WriteTxn {
                     groups
                         .entry(relation)
                         .or_insert_with(|| WriteBatch::new(relation))
-                        .add_edge(edge, source, destination, properties);
+                        .add_edge_values(edge, source, destination, properties);
                 }
             }
         }

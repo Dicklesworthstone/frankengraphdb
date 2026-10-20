@@ -180,7 +180,10 @@ fn staged_and_committed_targets_share_results_budgets_and_statement_rollback() {
         assert_eq!(db.vertices().unwrap().len(), 1);
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(4))],
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(4).into())
+            ],
         );
         transaction.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
@@ -189,8 +192,8 @@ fn staged_and_committed_targets_share_results_budgets_and_statement_rollback() {
             assert_eq!(
                 db.vertex(id).unwrap().unwrap().props,
                 vec![
-                    (P, CanonicalScalar::Int(key)),
-                    (Q, CanonicalScalar::Int(value))
+                    (P, CanonicalScalar::Int(key).into()),
+                    (Q, CanonicalScalar::Int(value).into())
                 ],
             );
         }

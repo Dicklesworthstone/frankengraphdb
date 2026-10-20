@@ -9,7 +9,7 @@ use fgdb_gql::{
     PreparedGraphAggregateText, PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate,
     PreparedProcedureCall,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::Cell;
 
 const VALUE: PropertyKeyId = PropertyKeyId(1);
@@ -91,11 +91,11 @@ fn procedure(
 fn property(
     element: ElementId,
     key: PropertyKeyId,
-) -> Result<Option<CanonicalScalar>, &'static str> {
+) -> Result<Option<CanonicalPropertyValue>, &'static str> {
     assert_eq!(key, VALUE);
     match element {
-        ElementId::Vertex(VId(1)) => Ok(Some(CanonicalScalar::Int(2))),
-        ElementId::Vertex(HIGH) => Ok(Some(CanonicalScalar::Int(7))),
+        ElementId::Vertex(VId(1)) => Ok(Some(CanonicalScalar::Int(2).into())),
+        ElementId::Vertex(HIGH) => Ok(Some(CanonicalScalar::Int(7).into())),
         _ => Err("outside source"),
     }
 }
@@ -292,7 +292,8 @@ fn post_group_missing_properties_are_null_and_unavailable_readers_keep_the_typed
                     reads += 1;
                     // Both stored scalar null and an absent property produce
                     // null, retaining every collected element's occurrence.
-                    Ok((element == ElementId::Vertex(HIGH)).then_some(CanonicalScalar::Null))
+                    Ok((element == ElementId::Vertex(HIGH))
+                        .then_some(CanonicalPropertyValue::from(CanonicalScalar::Null)))
                 },
                 || Ok(()),
             )
@@ -448,7 +449,7 @@ fn post_group_binary_payloads_reserve_each_occurrence_even_outside_the_output_pa
                 procedure,
                 |_, key| {
                     assert_eq!(key, VALUE);
-                    Ok(Some(value.clone()))
+                    Ok(Some(value.clone().into()))
                 },
                 || Ok(()),
             )

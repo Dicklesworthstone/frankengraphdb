@@ -9,7 +9,8 @@ use crate::{DeltaBlockVersion, PartitionRootVersion, encode_block, encode_block_
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::{
-    BranchId, CanonicalScalar, DatabaseSecurityNamespaceId, GraphId, PurposeContexts, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, GraphId,
+    PurposeContexts, VId,
 };
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -72,7 +73,10 @@ fn vertex(id: u128, created: u64, retired: Option<u64>, value: i64) -> VertexRow
         created_at: CommitSeq(created),
         retired_at: retired.map(CommitSeq),
         labels: vec![LabelId(9)],
-        props: vec![(P, CanonicalScalar::Int(value))],
+        props: vec![(
+            P,
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)),
+        )],
     }
 }
 
@@ -134,7 +138,7 @@ async fn fixture(
     for (entries, values, predecessor) in definitions {
         let props: Vec<_> = values
             .into_iter()
-            .map(|v| vec![(P, CanonicalScalar::Int(v))])
+            .map(|v| vec![(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v)))])
             .collect();
         let patch = store
             .put_edge_property_patch(&cx, &encode_property_patch(&props).unwrap())
@@ -227,7 +231,10 @@ fn expected(cut: u64) -> Vec<BufferedEdge> {
     rows.into_iter()
         .map(|(entry, value)| BufferedEdge {
             entry,
-            props: vec![(P, CanonicalScalar::Int(value))],
+            props: vec![(
+                P,
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)),
+            )],
         })
         .collect()
 }
@@ -715,7 +722,13 @@ fn endpoint_images_share_the_cut_and_self_loops_share_one_allocation() {
                     } else {
                         row.vid.0 as i64 * 10
                     };
-                    assert_eq!(row.props, vec![(P, CanonicalScalar::Int(value))]);
+                    assert_eq!(
+                        row.props,
+                        vec![(
+                            P,
+                            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))
+                        )]
+                    );
                     assert!(row.visible_at(CommitSeq(cut)));
                 }
                 assert_eq!(record.source_vertex().vid, record.edge().entry.src);

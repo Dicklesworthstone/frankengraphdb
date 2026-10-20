@@ -249,7 +249,7 @@ fn decode_row(
 ) -> Result<GraphValueRow> {
     Ok(match resolver {
         Some(resolver) => GraphValueRow::decode_canonical_with_resolver(bytes, resolver),
-        None => GraphValueRow::decode_canonical(bytes),
+        None => GraphValueRow::decode_stored(bytes),
     }?)
 }
 fn invalid<T>() -> Result<T> {

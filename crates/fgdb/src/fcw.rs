@@ -412,8 +412,8 @@ mod tests {
         DeltaRow::Property {
             elem,
             property: PropertyKeyId(3),
-            before: Some(CanonicalScalar::Int(10)),
-            after: Some(CanonicalScalar::Int(15)),
+            before: Some(CanonicalScalar::Int(10).into()),
+            after: Some(CanonicalScalar::Int(15).into()),
         }
     }
 

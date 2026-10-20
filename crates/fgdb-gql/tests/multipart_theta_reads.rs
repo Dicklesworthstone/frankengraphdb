@@ -44,7 +44,8 @@ fn run(
     GqlQueryExecution<GraphValueRow>,
     GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
 > {
-    let values = [1, 2, 2, 3].map(CanonicalScalar::Int);
+    let values = [1, 2, 2, 3]
+        .map(|value| fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(value)));
     let checkpoint = RefCell::new(checkpoint);
     query.execute_governed(
         policy,

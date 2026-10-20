@@ -8,14 +8,14 @@ use fgdb_gql::{
     GraphSetTextErrorKind, GraphSymbol, GraphSymbolKind, MAX_GRAPH_SET_DEPTH, PreparedGraphSet,
     PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(1);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 type QueryResult =
     Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<()>, ()>>;
@@ -80,12 +80,12 @@ fn ints(rows: &[GraphValueRow]) -> Vec<Vec<Option<i64>>> {
 #[test]
 fn computed_order_keys_rank_before_paging_and_do_not_escape_the_return_schema() {
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(2)),
-        ((VId(1), Q), CanonicalScalar::Int(0)),
-        ((VId(2), P), CanonicalScalar::Int(1)),
-        ((VId(2), Q), CanonicalScalar::Int(2)),
-        ((VId(3), P), CanonicalScalar::Int(3)),
-        ((VId(3), Q), CanonicalScalar::Int(1)),
+        ((VId(1), P), CanonicalScalar::Int(2).into()),
+        ((VId(1), Q), CanonicalScalar::Int(0).into()),
+        ((VId(2), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), Q), CanonicalScalar::Int(2).into()),
+        ((VId(3), P), CanonicalScalar::Int(3).into()),
+        ((VId(3), Q), CanonicalScalar::Int(1).into()),
     ]);
     let text = "MATCH (n) RETURN n.p AS p \
                 ORDER BY n.p + n.q * $weight DESC, p ASC SKIP $skip LIMIT $count";
@@ -122,9 +122,9 @@ fn computed_order_keys_rank_before_paging_and_do_not_escape_the_return_schema() 
 #[test]
 fn computed_order_uses_return_aliases_and_preserves_all_rows_under_distinct() {
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(1)),
-        ((VId(2), P), CanonicalScalar::Int(1)),
-        ((VId(3), P), CanonicalScalar::Int(3)),
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), P), CanonicalScalar::Int(1).into()),
+        ((VId(3), P), CanonicalScalar::Int(3).into()),
     ]);
     let query = prepare("MATCH (n) RETURN DISTINCT n.p + 10 AS score ORDER BY -score");
     assert_eq!(
@@ -174,9 +174,9 @@ fn computed_order_uses_return_aliases_and_preserves_all_rows_under_distinct() {
 #[test]
 fn computed_with_and_multipart_return_keep_their_scope_and_selected_occurrences() {
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(1)),
-        ((VId(2), P), CanonicalScalar::Int(3)),
-        ((VId(3), P), CanonicalScalar::Int(2)),
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), P), CanonicalScalar::Int(3).into()),
+        ((VId(3), P), CanonicalScalar::Int(2).into()),
     ]);
     let vertices = [VId(3), VId(2), VId(1)];
     let query = prepare(
@@ -216,8 +216,8 @@ fn computed_with_and_multipart_return_keep_their_scope_and_selected_occurrences(
 #[test]
 fn computed_sort_errors_and_work_limits_cannot_hide_behind_a_page() {
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(1)),
-        ((VId(2), P), CanonicalScalar::Int(2)),
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
     ]);
     for limit in [0, 1] {
         let query = prepare(&format!(
@@ -356,8 +356,8 @@ fn computed_order_cancellation_never_returns_a_selected_prefix() {
 #[test]
 fn precedence_nullable_functions_and_public_column_order_match_scalar_semantics() {
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(-7)),
-        ((VId(1), Q), CanonicalScalar::Int(2)),
+        ((VId(1), P), CanonicalScalar::Int(-7).into()),
+        ((VId(1), Q), CanonicalScalar::Int(2).into()),
     ]);
     let query =
         prepare("MATCH (n) RETURN n.p/n.q AS quotient,n.p%n.q AS remainder,-n.p+n.q*3 AS total");
@@ -410,10 +410,10 @@ fn constants_and_computed_distinct_preserve_walk_and_optional_bags() {
     .value;
     assert_eq!(ints(&rows), vec![vec![Some(1)]; 3]);
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(-2)),
-        ((VId(2), P), CanonicalScalar::Int(2)),
-        ((VId(3), P), CanonicalScalar::Int(-3)),
-        ((VId(4), P), CanonicalScalar::Int(3)),
+        ((VId(1), P), CanonicalScalar::Int(-2).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
+        ((VId(3), P), CanonicalScalar::Int(-3).into()),
+        ((VId(4), P), CanonicalScalar::Int(3).into()),
     ]);
     let query =
         prepare("MATCH (n) RETURN DISTINCT n.p*n.p AS square ORDER BY square DESC SKIP 1 LIMIT 1");
@@ -430,8 +430,8 @@ fn constants_and_computed_distinct_preserve_walk_and_optional_bags() {
 #[test]
 fn computed_arms_obey_set_precedence_and_parenthesized_local_selection() {
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(1)),
-        ((VId(2), P), CanonicalScalar::Int(2)),
+        ((VId(1), P), CanonicalScalar::Int(1).into()),
+        ((VId(2), P), CanonicalScalar::Int(2).into()),
     ]);
     let query = prepare(
         "MATCH (n) RETURN n.p*2 AS value UNION ALL MATCH (m) RETURN m.p+1 AS value \
@@ -583,7 +583,7 @@ fn malformed_types_aliases_and_projection_depth_refuse_before_catalog_access() {
 #[test]
 fn lazy_arithmetic_cannot_hide_property_source_failure_or_late_overflow() {
     let query = prepare("MATCH (n) RETURN COALESCE(n.p,n.q) AS value LIMIT 0");
-    let scalar = CanonicalScalar::Int(1);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
     let result = query.execute_governed(
         policy(),
         |pattern, budget| {
@@ -613,8 +613,8 @@ fn lazy_arithmetic_cannot_hide_property_source_failure_or_late_overflow() {
     ));
     let query = prepare("MATCH (n) RETURN n.p+1 AS value LIMIT 0");
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(0)),
-        ((VId(2), P), CanonicalScalar::Int(i64::MAX)),
+        ((VId(1), P), CanonicalScalar::Int(0).into()),
+        ((VId(2), P), CanonicalScalar::Int(i64::MAX).into()),
     ]);
     assert!(matches!(run(&query,&[VId(1),VId(2)],&[],&props),
         Err(GqlQueryError::Source(GraphSetExecutionError::Projection { row:1,error,.. })) if error.kind == GraphIntegerErrorKind::Overflow));

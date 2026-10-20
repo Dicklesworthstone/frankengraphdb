@@ -412,6 +412,7 @@ impl<V: Vfs + Clone> Database<V> {
             basis: self.snapshot.frontier,
             handle_owner: Arc::clone(&self.handle_owner),
             dependencies,
+            authorization_decision_digest: None,
         })
     }
 

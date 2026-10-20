@@ -17,7 +17,7 @@ use fgdb_gql::{
     GlaExecutionEvent, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError,
     GraphAggregateValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -74,7 +74,7 @@ struct Image {
     from: VId,
     to: VId,
     relation: RelationId,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 struct Record {
     image: Arc<Image>,
@@ -156,7 +156,7 @@ impl Source {
                     from,
                     to,
                     relation,
-                    props: vec![(P, CanonicalScalar::Int(p))],
+                    props: vec![(P, CanonicalScalar::Int(p).into())],
                 }),
             );
         }
@@ -339,8 +339,10 @@ fn joined_aggregate_occurrences_match_108_independent_relation_summaries() {
                                 if r_id == s_id {
                                     continue;
                                 }
-                                let (CanonicalScalar::Int(rp), CanonicalScalar::Int(sp)) =
-                                    (&r.props[0].1, &s.props[0].1)
+                                let (
+                                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(rp)),
+                                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(sp)),
+                                ) = (&r.props[0].1, &s.props[0].1)
                                 else {
                                     unreachable!()
                                 };
@@ -477,7 +479,9 @@ fn final_zero_row_budget_does_not_mask_bad_domains_or_missing_indexes() {
         Arc::get_mut(source.edges.get_mut(&EId(2)).unwrap())
             .unwrap()
             .props[0]
-            .1 = CanonicalScalar::ucs_basic_text("not numeric").unwrap();
+            .1 = CanonicalScalar::ucs_basic_text("not numeric")
+            .unwrap()
+            .into();
         let counts = source.counts.clone();
         let text = "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN SUM(s.p) AS total LIMIT 0";
         let mut cursor = AsyncEdgeJoinSpillAggregateCursor::new(source, plan(text), policy(0), ok);

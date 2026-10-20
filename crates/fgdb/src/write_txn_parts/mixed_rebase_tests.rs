@@ -115,15 +115,15 @@ fn mixed_creation_updates_and_cas_publish_once_and_match_serial_reopen() {
         );
         assert_eq!(
             db.vertex(VId(1)).unwrap().unwrap().props[0].1,
-            CanonicalScalar::Int(8)
+            CanonicalScalar::Int(8).into()
         );
         assert_eq!(
             db.vertex(VId(50)).unwrap().unwrap().props[0].1,
-            CanonicalScalar::Int(7)
+            CanonicalScalar::Int(7).into()
         );
         assert_eq!(
             db.edge(EId(60)).unwrap().unwrap().props[0].1,
-            CanonicalScalar::Int(9)
+            CanonicalScalar::Int(9).into()
         );
         let mut serial = Database::open_memory(&cx, keys()).await.unwrap();
         seed(&mut serial, &cx).await;
@@ -423,7 +423,7 @@ fn combined_footprint_is_domain_separated_and_refuses_unknown_history() {
             elem,
             property,
             before: None,
-            after: Some(CanonicalScalar::Int(1)),
+            after: Some(CanonicalScalar::Int(1).into()),
         };
         assert_eq!(footprint.conflicts(&row, &mut || Ok(())).unwrap(), wanted);
     }

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const R: RelationId = RelationId(7);
 const P: PropertyKeyId = PropertyKeyId(9);
-type EdgeFixtures = BTreeMap<EId, (VId, VId, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type EdgeFixtures = BTreeMap<EId, (VId, VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 struct Fixture {
     edges: EdgeFixtures,
     vertices: BTreeSet<VId>,

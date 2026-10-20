@@ -32,7 +32,7 @@ mod tests {
     use super::*;
     use crate::read::{Projection, VectorEncoding};
     use crate::{DistanceMetric, HnswConfig, IndexConfig, IndexDocument, WorkBudget};
-    use fgdb_types::{CanonicalDecimal, CanonicalF64, VId};
+    use fgdb_types::{CanonicalDecimal, CanonicalF64, CanonicalPropertyValue, VId};
 
     fn float(value: f64) -> CanonicalScalar {
         CanonicalScalar::Float(CanonicalF64::new(value))
@@ -47,6 +47,11 @@ mod tests {
         encoding: VectorEncoding,
         work: &mut dyn WorkControl,
     ) -> Result<IndexDocument, BeaconError> {
+        let values: Vec<Option<CanonicalPropertyValue>> = values
+            .iter()
+            .cloned()
+            .map(|value| value.map(CanonicalPropertyValue::from))
+            .collect();
         Projection {
             text: None,
             vector: (0..values.len()).collect(),

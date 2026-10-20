@@ -81,7 +81,9 @@ fn reference(
                 .props
                 .iter()
                 .find(|(key, _)| *key == P)
-                .map_or(CanonicalScalar::Null, |(_, value)| value.clone());
+                .map_or(CanonicalScalar::Null, |(_, value)| {
+                    value.as_scalar().expect("scalar fixture").clone()
+                });
             vec![GraphValue::Scalar(value)]
         })
         .collect();

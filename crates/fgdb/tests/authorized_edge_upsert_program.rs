@@ -152,6 +152,9 @@ fn value(db: &Database<MemVfs>, edge: EId) -> CanonicalScalar {
         .find(|(key, _)| *key == VALUE)
         .unwrap()
         .1
+        .as_scalar()
+        .expect("scalar property")
+        .clone()
 }
 fn authorization(error: &(dyn std::error::Error + 'static)) -> Option<Error> {
     let mut current = Some(error);
@@ -212,7 +215,7 @@ fn repeated_pairs_keep_every_parallel_match_and_reopen_the_one_commit() {
                     .unwrap()
                     .unwrap()
                     .props
-                    .contains(&(SECRET, CanonicalScalar::Int(7)))
+                    .contains(&(SECRET, CanonicalScalar::Int(7).into()))
             );
         }
         let seq = db.frontier().unwrap();

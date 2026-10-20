@@ -115,7 +115,10 @@ impl<S: VertexScanSource> EdgeScanSource for Lookup<'_, S> {
         eid: EId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+    ) -> Result<
+        Option<Option<&'a fgdb_types::CanonicalPropertyValue>>,
+        EdgeScanSourceError<Self::Error, C>,
+    > {
         // A topology record need not contain payloads. Preserve the source's
         // separately admitted scalar route, just as vertex_property does.
         self.0
@@ -141,7 +144,10 @@ impl<S: VertexScanSource> EdgeScanSource for Lookup<'_, S> {
         vid: VId,
         key: PropertyKeyId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+    ) -> Result<
+        Option<Option<&'a fgdb_types::CanonicalPropertyValue>>,
+        EdgeScanSourceError<Self::Error, C>,
+    > {
         self.0
             .vertex_property(vid, key, &mut |event| control(edge_event(event)))
             .map_err(source_error)

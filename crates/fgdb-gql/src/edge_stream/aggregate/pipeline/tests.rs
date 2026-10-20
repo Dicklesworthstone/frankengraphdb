@@ -14,7 +14,7 @@ use crate::{
     GraphSymbolKind, PreparedGraphAggregate, PreparedGraphPipelineAggregateText,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use std::collections::BTreeMap;
 use std::sync::{
     Arc,
@@ -28,7 +28,7 @@ const TEXT: &str = "MATCH (a)-[r:R]->(b) WITH b AS owner,r.p AS p WHERE p>=0 \
     COUNT(DISTINCT value) AS support GROUP BY owner";
 
 struct Source {
-    props: Vec<Vec<(PropertyKeyId, CanonicalScalar)>>,
+    props: Vec<Vec<(PropertyKeyId, CanonicalPropertyValue)>>,
     next: usize,
     fault: Option<EId>,
     drops: Arc<AtomicUsize>,
@@ -39,7 +39,7 @@ impl Source {
             props: values
                 .iter()
                 .map(|v| {
-                    v.map(|v| vec![(P, CanonicalScalar::Int(v))])
+                    v.map(|v| vec![(P, CanonicalScalar::Int(v).into())])
                         .unwrap_or_default()
                 })
                 .collect(),
@@ -531,7 +531,7 @@ fn vertex_with_masked_records_match_batch_and_independent_grouped_occurrences() 
         });
         let mut source = Source::new(&values);
         for properties in &mut source.props {
-            properties.push((PropertyKeyId(2), CanonicalScalar::Bool(true)));
+            properties.push((PropertyKeyId(2), CanonicalScalar::Bool(true).into()));
         }
         let expected = eager_vertex(&query, &source);
         let drops = source.drops.clone();

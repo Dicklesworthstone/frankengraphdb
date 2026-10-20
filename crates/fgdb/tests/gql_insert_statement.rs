@@ -316,6 +316,163 @@ fn insert_scripts_preserve_dependent_overlay_reads_and_one_completion() {
     }
 }
 
+/// fgdb-sl4ym (TCK Create3 [5], [6]): `MATCH ... WITH ... CREATE` creates
+/// once per WITH row. A vertex the row carries is a bound endpoint, an
+/// aggregate or filtered row feeds properties, RETURN reads the row, and a
+/// name the WITH dropped declares a new vertex, as openCypher scopes it.
+#[test]
+fn create_after_with_reads_the_with_row() {
+    let ((), report) = run_async_under_lab(0x1a5e_a17b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, true).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let returned = write(
+            &mut db,
+            "MATCH (n:Source) WITH n AS a CREATE (a)-[:R]->(:Copy {p: 1}) RETURN a",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { columns, rows } = returned else {
+            unreachable!("CREATE ... RETURN answers rows")
+        };
+        assert_eq!(columns, ["a"]);
+        assert_eq!(rows.len(), 2);
+        let copies = |db: &Database<MemVfs>| {
+            db.vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == vec![COPY])
+                .count()
+        };
+        assert_eq!(copies(&db), 2);
+        let from_sources = |db: &Database<MemVfs>| {
+            db.edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| [VId(10), VId(20)].contains(&edge.entry.src))
+                .count()
+        };
+        // The seeded 10 -> 20 edge, plus one from each source.
+        assert_eq!(from_sources(&db), 3);
+        write(
+            &mut db,
+            "MATCH (n:Source) WITH count(n) AS c CREATE (:Copy {p: c})",
+        )
+        .await
+        .unwrap();
+        let counted = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| {
+                vertex.labels == vec![COPY]
+                    && vertex.props == vec![(P, CanonicalScalar::Int(2).into())]
+            })
+            .count();
+        assert_eq!(counted, 1);
+        write(
+            &mut db,
+            "MATCH (n:Source) WITH n, n.p AS p WHERE p > 15 \
+             CREATE (n)-[:R {since: p}]->(:Person)",
+        )
+        .await
+        .unwrap();
+        let since = db
+            .edges()
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.props == vec![(SINCE, CanonicalScalar::Int(20).into())])
+            .map(|edge| edge.entry.src)
+            .collect::<Vec<_>>();
+        assert_eq!(since, [VId(20)]);
+        // A carried vertex's property feeds a created one and RETURN reads it.
+        let carried = write(
+            &mut db,
+            "MATCH (n:Source) WITH n AS a CREATE (:Person {p: a.p + 1}) RETURN a.p AS p",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = carried else {
+            unreachable!("CREATE ... RETURN answers rows")
+        };
+        assert_eq!(rows.len(), 2);
+        let written = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| vertex.labels == vec![PERSON])
+            .flat_map(|vertex| vertex.props)
+            .filter(|(key, _)| *key == P)
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        assert_eq!(written.len(), 2);
+        for value in [11, 21] {
+            assert!(
+                written.contains(&CanonicalScalar::Int(value).into()),
+                "{written:?}"
+            );
+        }
+        // RETURN * is the WITH row and the named creations, never a dropped
+        // MATCH binding.
+        let starred = write(
+            &mut db,
+            "MATCH (n:Source) WITH n AS a LIMIT 1 CREATE (b:Copy) RETURN *",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { columns, rows } = starred else {
+            unreachable!("CREATE ... RETURN * answers rows")
+        };
+        assert_eq!(columns, ["a", "b"]);
+        assert_eq!(rows.len(), 1);
+        // `m` left scope at the WITH: CREATE declares a new vertex m.
+        let vertices = db.vertices().unwrap().len();
+        write(
+            &mut db,
+            "MATCH (n:Source), (m:Source) WITH n AS a LIMIT 1 CREATE (m)-[:R]->(a)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.vertices().unwrap().len(), vertices + 1);
+        let frontier = db.frontier().unwrap();
+        for refused in [
+            "MATCH (n:Source) WITH n.p AS p CREATE (p)-[:R]->(:Copy)",
+            "MATCH (n:Source) WITH n AS a CREATE (a:Person)",
+            "MATCH (n:Source) WITH n AS a CREATE (:Copy {p: n.p})",
+            "MATCH (n:Source) WITH n AS a CREATE (:Copy) RETURN n",
+        ] {
+            assert!(write(&mut db, refused).await.is_err(), "{refused}");
+        }
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn readme_insert_example_runs_through_database_query_write() {
     let ((), report) = run_async_under_lab(0x1a5e_adaa, |root| async move {
@@ -360,8 +517,8 @@ fn readme_insert_example_runs_through_database_query_write() {
             assert_eq!(
                 vertex.props,
                 vec![
-                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap()),
-                    (BORN, CanonicalScalar::Int(born)),
+                    (NAME, CanonicalScalar::ucs_basic_text(name).unwrap().into()),
+                    (BORN, CanonicalScalar::Int(born).into()),
                 ]
             );
         }
@@ -372,7 +529,7 @@ fn readme_insert_example_runs_through_database_query_write() {
             (edge.entry.src, edge.entry.dst, edge.entry.relation),
             (vertices[0], vertices[1], R)
         );
-        assert_eq!(edge.props, vec![(SINCE, CanonicalScalar::Int(1833))]);
+        assert_eq!(edge.props, vec![(SINCE, CanonicalScalar::Int(1833).into())]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

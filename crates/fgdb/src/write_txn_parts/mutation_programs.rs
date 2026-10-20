@@ -221,7 +221,7 @@ mod mutation_program_workspace_tests {
                     assert!(db.vertex(VId(777)).unwrap().is_some());
                     assert_eq!(
                         db.vertex(VId(1)).unwrap().unwrap().props[0].1,
-                        CanonicalScalar::Int(10)
+                        CanonicalScalar::Int(10).into()
                     );
                 }
             }

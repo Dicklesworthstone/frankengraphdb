@@ -1187,7 +1187,7 @@ fn a_prefetching_reopen_proves_hosted_patches_as_the_serial_walk_does() {
                 relation: REL,
                 dst: VId(1),
                 canonical_key: None,
-                props: vec![(PropertyKeyId(7), CanonicalScalar::Int(i as i64))],
+                props: vec![(PropertyKeyId(7), CanonicalScalar::Int(i as i64).into())],
                 valid_time: None,
             };
             writer
@@ -1439,7 +1439,7 @@ fn batch_publication_matches_standalone_and_defers_receipts() {
                     canonical_key: None,
                     props: vec![(
                         fgdb_delta_types::PropertyKeyId(7),
-                        fgdb_types::CanonicalScalar::Int(42),
+                        fgdb_types::CanonicalScalar::Int(42).into(),
                     )],
                     valid_time: None,
                 },
@@ -1759,7 +1759,7 @@ fn a_receipted_property_patch_is_not_reread_by_a_later_block() {
                         canonical_key: None,
                         props: vec![(
                             fgdb_delta_types::PropertyKeyId(7),
-                            fgdb_types::CanonicalScalar::Int(42),
+                            fgdb_types::CanonicalScalar::Int(42).into(),
                         )],
                         valid_time: None,
                     },
@@ -2095,8 +2095,8 @@ fn a_propertied_block_admits_only_with_its_patch_reachable() {
     under_lab(0x9a_01, move |cx| async move {
         use fgdb_delta_types::{DeltaRow, PropertyKeyId};
         use fgdb_strata::writer::BlockWriter;
-        use fgdb_types::CanonicalScalar;
         use fgdb_types::ids::{BranchId, GraphId};
+        use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
 
         let keys = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
@@ -2126,7 +2126,7 @@ fn a_propertied_block_admits_only_with_its_patch_reachable() {
                     relation: REL,
                     dst: VId(2),
                     canonical_key: None,
-                    props: vec![(PropertyKeyId(7), CanonicalScalar::Int(1815))],
+                    props: vec![(PropertyKeyId(7), CanonicalScalar::Int(1815).into())],
                     valid_time: None,
                 },
             )
@@ -2158,7 +2158,10 @@ fn a_propertied_block_admits_only_with_its_patch_reachable() {
             .expect("the sealed patch decodes");
         assert_eq!(
             rows,
-            vec![vec![(PropertyKeyId(7), CanonicalScalar::Int(1815))]],
+            vec![vec![(
+                PropertyKeyId(7),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1815))
+            )]],
             "the patch carries exactly the propertied entry's list"
         );
 
@@ -2209,8 +2212,8 @@ fn a_tombstone_restates_the_properties_in_its_own_patch() {
     under_lab(0x9a_02, move |cx| async move {
         use fgdb_delta_types::{DeltaRow, PropertyKeyId};
         use fgdb_strata::writer::BlockWriter;
-        use fgdb_types::CanonicalScalar;
         use fgdb_types::ids::{BranchId, GraphId};
+        use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
 
         let keys = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
@@ -2240,7 +2243,7 @@ fn a_tombstone_restates_the_properties_in_its_own_patch() {
                     relation: REL,
                     dst: VId(2),
                     canonical_key: None,
-                    props: vec![(PropertyKeyId(7), CanonicalScalar::Int(1))],
+                    props: vec![(PropertyKeyId(7), CanonicalScalar::Int(1).into())],
                     valid_time: None,
                 },
             )
@@ -2273,7 +2276,10 @@ fn a_tombstone_restates_the_properties_in_its_own_patch() {
             .expect("the tombstone RESTATES the properties");
         assert_eq!(
             fgdb_strata::edge_props::decode_property_patch(&hosted.bytes).expect("decodes"),
-            vec![vec![(PropertyKeyId(7), CanonicalScalar::Int(1))]],
+            vec![vec![(
+                PropertyKeyId(7),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1))
+            )]],
         );
 
         // Full round trip: store everything, admit, reopen.
@@ -2367,14 +2373,17 @@ fn a_root_refuses_a_block_transplanted_from_another_partition() {
 fn admission_refuses_a_propertied_block_with_a_forged_digest() {
     use fgdb_delta_types::PropertyKeyId;
     use fgdb_strata::edge_props::{encode_property_patch, property_patch_id};
-    use fgdb_types::CanonicalScalar;
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
 
     let dir = scratch_dir("forged-joint-digest");
     under_lab(53, move |cx| async move {
         let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
             .await
             .expect("opens");
-        let rows = vec![vec![(PropertyKeyId(7), CanonicalScalar::Int(1815))]];
+        let rows = vec![vec![(
+            PropertyKeyId(7),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1815)),
+        )]];
         let patch_bytes = encode_property_patch(&rows).expect("encodes");
         let patch_id = property_patch_id(&K_OID, NAMESPACE, &patch_bytes);
         let entries = vec![entry(1, 2, 1), entry(1, 3, 2)];

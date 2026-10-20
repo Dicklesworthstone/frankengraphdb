@@ -8,7 +8,10 @@ use fgdb_gql::GraphSymbolKind;
 use fgdb_protocol::body::{ErrorCode, ExecuteMode, Outcome, WireValue};
 use fgdb_protocol::client::{Answer, Client, ClientError};
 use fgdb_server::{DatabaseConfig, Server, ServerLimits, Symbols, issue_token, issuer};
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId,
+    PurposeContexts,
+};
 use fgdb_warden::{Grant, QueryLimits, Rights, Scope};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -129,9 +132,12 @@ impl Fixture {
         let edges = db.edges().unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].entry.relation, RelationId(1));
-        let mut props = vec![(PropertyKeyId(2), CanonicalScalar::Int(value))];
+        let mut props = vec![(
+            PropertyKeyId(2),
+            CanonicalPropertyValue::from(CanonicalScalar::Int(value)),
+        )];
         if secret {
-            props.push((PropertyKeyId(3), CanonicalScalar::Int(99)));
+            props.push((PropertyKeyId(3), CanonicalScalar::Int(99).into()));
         }
         assert_eq!(edges[0].props, props);
         for (id, key) in [(edges[0].entry.src, 1), (edges[0].entry.dst, 2)] {
@@ -139,7 +145,7 @@ impl Fixture {
             assert_eq!(vertex.labels, vec![LabelId(1)]);
             assert_eq!(
                 vertex.props,
-                vec![(PropertyKeyId(1), CanonicalScalar::Int(key))]
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(key).into())]
             );
         }
     }

@@ -28,7 +28,8 @@ use fgdb_reference::ssi::{DangerousStructure, TxnTrace, dangerous_structures};
 use fgdb_reference::txn::{Transaction, TxnOutcome};
 use fgdb_reference::{ConflictKey, ReferenceDatabase, ssi};
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq, ObjectId, VId,
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, LogicalCommandSeq,
+    ObjectId, VId,
 };
 use std::collections::BTreeSet;
 
@@ -40,8 +41,8 @@ const LABEL: LabelId = LabelId(10);
 const PROP: PropertyKeyId = PropertyKeyId(100);
 const SEMANTICS: ObjectId = ObjectId([0x11; 32]);
 
-fn int(value: i64) -> CanonicalScalar {
-    CanonicalScalar::Int(value)
+fn int(value: i64) -> CanonicalPropertyValue {
+    CanonicalScalar::Int(value).into()
 }
 
 fn create(vid: u128, value: i64) -> Statement {

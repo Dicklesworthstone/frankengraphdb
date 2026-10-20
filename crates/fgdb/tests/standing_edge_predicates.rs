@@ -114,12 +114,12 @@ fn storage_count(db: &Database<MemVfs>, edge: bool, operator: usize) -> u64 {
                 .props
                 .iter()
                 .find(|(key, _)| *key == L)
-                .map(|(_, value)| value);
+                .map(|(_, value)| value.as_scalar().expect("scalar fixture"));
             let right = rows[b]
                 .props
                 .iter()
                 .find(|(key, _)| *key == R)
-                .map(|(_, value)| value);
+                .map(|(_, value)| value.as_scalar().expect("scalar fixture"));
             let (Some(a), Some(b)) = (left, right) else {
                 return false;
             };

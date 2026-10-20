@@ -1106,7 +1106,8 @@ mod tests {
     use asupersync::lab::run_async_under_lab;
     use fgdb_delta_types::PropertyKeyId;
     use fgdb_types::{
-        BranchId, CanonicalScalar, DatabaseSecurityNamespaceId, GraphId, PurposeContexts,
+        BranchId, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, GraphId,
+        PurposeContexts,
     };
 
     #[test]
@@ -1125,7 +1126,10 @@ mod tests {
             )
             .await
             .unwrap();
-            let rows = vec![vec![(PropertyKeyId(1), CanonicalScalar::Int(7))]];
+            let rows = vec![vec![(
+                PropertyKeyId(1),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7)),
+            )]];
             let patch = store
                 .put_edge_property_patch(
                     &commit,

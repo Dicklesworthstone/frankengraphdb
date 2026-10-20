@@ -9,7 +9,8 @@ use fgdb_gql::{
     PreparedGraphAggregate, PreparedGraphAggregateText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -110,7 +111,9 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord], minimum: i64) -> Vec<Exp
             .props
             .iter()
             .find_map(|(key, value)| match value {
-                CanonicalScalar::Int(value) if *key == P => Some(*value),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) if *key == P => {
+                    Some(*value)
+                }
                 _ => None,
             });
         groups.entry(source.vid).or_default().push(value);

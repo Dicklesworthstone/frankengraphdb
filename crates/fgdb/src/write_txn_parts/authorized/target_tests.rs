@@ -341,7 +341,7 @@ fn hidden_vertices_and_endpoints_share_absent_target_refusal_thresholds() {
         }
         assert_eq!(
             hidden.vertex(VId(9)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(9))]
+            vec![(P, CanonicalScalar::Int(9).into())]
         );
     });
 }
@@ -382,7 +382,7 @@ fn hidden_edge_relations_and_endpoints_share_absent_target_refusal_thresholds() 
                     .unwrap()
                     .unwrap()
                     .props,
-                vec![(P, CanonicalScalar::Int(9))]
+                vec![(P, CanonicalScalar::Int(9).into())]
             );
         }
     });
@@ -422,8 +422,8 @@ fn admitted_updates_keep_original_hidden_fields_and_refuse_after_image_scope_esc
         assert_eq!(
             before.props,
             vec![
-                (P, CanonicalScalar::Int(7)),
-                (SECRET, CanonicalScalar::Int(99))
+                (P, CanonicalScalar::Int(7).into()),
+                (SECRET, CanonicalScalar::Int(99).into())
             ]
         );
         let mut escape = WriteBatch::new(R);

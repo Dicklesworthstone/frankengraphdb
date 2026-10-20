@@ -131,7 +131,8 @@ mod tests {
     use asupersync::lab::run_async_under_lab;
     use fgdb_delta_types::{LabelId, PropertyKeyId};
     use fgdb_types::{
-        BranchId, CanonicalScalar, DatabaseSecurityNamespaceId, GraphId, PurposeContexts,
+        BranchId, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, GraphId,
+        PurposeContexts,
     };
 
     #[test]
@@ -158,7 +159,9 @@ mod tests {
                 labels: vec![LabelId(9)],
                 props: vec![(
                     PropertyKeyId(11),
-                    CanonicalScalar::bytes(vec![0x45; 14_000]).unwrap(),
+                    CanonicalPropertyValue::Scalar(
+                        CanonicalScalar::bytes(vec![0x45; 14_000]).unwrap(),
+                    ),
                 )],
             };
             let first_bytes = crate::vertex::encode_patch(core::slice::from_ref(&first)).unwrap();

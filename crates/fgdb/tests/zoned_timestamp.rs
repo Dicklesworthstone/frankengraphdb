@@ -148,7 +148,7 @@ fn inspect(
                 (Some(row), Some(value)) => {
                     row.vid == target
                         && row.labels == [TIMESTAMP]
-                        && row.props == [(P, value.clone())]
+                        && row.props == [(P, value.clone().into())]
                 }
                 _ => false,
             },
@@ -163,7 +163,7 @@ fn inspect(
             &baseline,
             |row| {
                 row.as_ref().is_some_and(|row| {
-                    row.labels == [BASELINE] && row.props == [(P, CanonicalScalar::Int(99))]
+                    row.labels == [BASELINE] && row.props == [(P, CanonicalScalar::Int(99).into())]
                 })
             },
             failures,
@@ -465,11 +465,11 @@ fn native_preparation_refuses_every_zoned_scalar_before_noops_and_netfold() {
             let original_edges = db.edges().unwrap();
             assert_eq!(
                 db.vertex(TARGET_ID).unwrap().unwrap().props,
-                [(P, offset.clone())]
+                [(P, offset.clone().into())]
             );
             assert_eq!(
                 db.edge(EId(1)).unwrap().unwrap().props,
-                [(P, offset.clone())]
+                [(P, offset.clone().into())]
             );
             for &(name, build) in cases {
                 let phase = format!("prepare/{mode}/{name}");
@@ -701,7 +701,7 @@ fn check_version_2(
     let values = version_2_values();
     assert_eq!(db.frontier().unwrap(), frontier, "{phase}");
     for (at, value) in (0u128..).zip(&values) {
-        let expected = Some(vec![(P, value.clone())]);
+        let expected = Some(vec![(P, value.clone().into())]);
         let vertex = db.vertex(VId(10 + at)).unwrap();
         assert_eq!(vertex.map(|row| row.props), expected, "{phase}");
         let edge = db.edge(EId(20 + at)).unwrap();
@@ -721,13 +721,13 @@ fn check_version_2(
     let current = db.vertex(BASELINE_ID).unwrap();
     assert_eq!(
         current.map(|row| row.props),
-        Some(vec![(P, local_date_time)]),
+        Some(vec![(P, local_date_time.into())]),
         "{phase}"
     );
     let historical = db.vertex_at(BASELINE_ID, updated).unwrap();
     assert_eq!(
         historical.map(|row| row.props),
-        Some(vec![(P, duration)]),
+        Some(vec![(P, duration.into())]),
         "{phase}"
     );
     // A parameter operand compiles to a scalar predicate, not the expression
@@ -833,7 +833,7 @@ fn version_2_temporal_properties_persist_through_recovery_and_compaction() {
                 .unwrap();
             assert_eq!(view.frontier(), frontier, "{phase}/view");
             for (at, value) in (0u128..).zip(version_2_values()) {
-                let expected = Some(vec![(P, value)]);
+                let expected = Some(vec![(P, value.into())]);
                 let vertex = view.vertex(VId(10 + at)).unwrap();
                 assert_eq!(vertex.map(|row| row.props), expected, "{phase}/view");
                 let edge = view.edge(EId(20 + at)).unwrap();

@@ -406,7 +406,10 @@ fn retained_answers(case: Case, db: &Database<FaultVfs>, query: &QueryCx, outcom
         assert_eq!(db.in_neighbours_at(VId(3), R, at).unwrap(), incoming);
         case.record("native-expansion-at", outcome, (at, &neighbours, incoming));
         let edge = db.edge_at(EId(10), at).unwrap().unwrap();
-        assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(edge_value))]);
+        assert_eq!(
+            edge.props,
+            vec![(P, CanonicalScalar::Int(edge_value).into())]
+        );
         case.record("native-edge-property-at", outcome, (at, edge.props));
     }
     assert_eq!(db.neighbours(VId(1), R).unwrap(), vec![VId(2), VId(3)]);
@@ -417,7 +420,7 @@ fn retained_answers(case: Case, db: &Database<FaultVfs>, query: &QueryCx, outcom
         (vec![VId(2), VId(3)], vec![VId(1)]),
     );
     let edge = db.edge(EId(10)).unwrap().unwrap();
-    assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(6))]);
+    assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(6).into())]);
     case.record("native-edge-property-live", outcome, edge.props);
     assert!(db.verify_snapshot_indexes().unwrap());
     // Equality selects a maintained property posting; its bound expansion uses
@@ -682,26 +685,26 @@ fn bulk_rows() -> Vec<BulkRow> {
         BulkRow::Vertex(BulkVertex {
             key: "a".into(),
             labels: vec![],
-            props: vec![(P, CanonicalScalar::Int(10))],
+            props: vec![(P, CanonicalScalar::Int(10).into())],
         }),
         BulkRow::Vertex(BulkVertex {
             key: "b".into(),
             labels: vec![],
-            props: vec![(P, CanonicalScalar::Int(20))],
+            props: vec![(P, CanonicalScalar::Int(20).into())],
         }),
         BulkRow::Edge(BulkEdge {
             key: "ab".into(),
             source: "a".into(),
             destination: "b".into(),
             relation: R,
-            props: vec![(P, CanonicalScalar::Int(5))],
+            props: vec![(P, CanonicalScalar::Int(5).into())],
         }),
         BulkRow::Edge(BulkEdge {
             key: "ba".into(),
             source: "b".into(),
             destination: "a".into(),
             relation: R,
-            props: vec![(P, CanonicalScalar::Int(7))],
+            props: vec![(P, CanonicalScalar::Int(7).into())],
         }),
         // A distinct property row avoids incidental FGSP deduplication against
         // the damaged prefix; this measures resume, not immutable-put reuse.
@@ -710,7 +713,7 @@ fn bulk_rows() -> Vec<BulkRow> {
             source: "a".into(),
             destination: "a".into(),
             relation: R,
-            props: vec![(P, CanonicalScalar::Int(99))],
+            props: vec![(P, CanonicalScalar::Int(99).into())],
         }),
     ]
 }
@@ -767,7 +770,7 @@ fn bulk_answers(db: &Database<FaultVfs>, checkpoint: &BulkLoadCheckpoint, finish
     for (key, value) in [("a", 10), ("b", 20)] {
         let vertex = db.vertex(checkpoint.vertices[key]).unwrap().unwrap();
         assert!(vertex.labels.is_empty());
-        assert_eq!(vertex.props, vec![(P, CanonicalScalar::Int(value))]);
+        assert_eq!(vertex.props, vec![(P, CanonicalScalar::Int(value).into())]);
     }
     for (key, source, destination, value) in [
         ("ab", "a", "b", 5),
@@ -781,7 +784,7 @@ fn bulk_answers(db: &Database<FaultVfs>, checkpoint: &BulkLoadCheckpoint, finish
         assert_eq!(edge.entry.src, checkpoint.vertices[source]);
         assert_eq!(edge.entry.dst, checkpoint.vertices[destination]);
         assert_eq!(edge.entry.relation, R);
-        assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(value))]);
+        assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(value).into())]);
     }
 }
 

@@ -99,7 +99,7 @@ fn bulk_vertices_preserve_staged_labels_properties_and_historical_birth_rows() {
         let before = transaction.vertices(&database).expect("bulk overlay reads");
         assert_eq!(vertex_ids(&before), vec![VId(1), VId(3)]);
         assert_eq!(before[0].labels, vec![LabelId(8)]);
-        assert_eq!(before[0].props, vec![(key, CanonicalScalar::Int(5))]);
+        assert_eq!(before[0].props, vec![(key, CanonicalScalar::Int(5).into())]);
         assert_eq!(before[1].labels, vec![LabelId(4), LabelId(9)]);
         assert_eq!(before[1].birth_ordinal, 9);
         assert_eq!(before[1].created_at, basis);

@@ -301,7 +301,11 @@ impl WriteTxn {
             // Completion consumes every rollback point. Release their shared
             // prefixes before taking ownership for the ordinary commit path.
             attempt.transaction.savepoints.clear();
-            let prepared = std::sync::Arc::unwrap_or_clone(prepared);
+            let mut prepared = std::sync::Arc::unwrap_or_clone(prepared);
+            if prepared.authorization_decision_digest.is_none() {
+                prepared.authorization_decision_digest =
+                    attempt.transaction.authorization_decision_digest;
+            }
             // Set before polling the cancellable publication future. Drop
             // consults its retained database fence, never guesses rollback.
             attempt.entered_commit = true;
@@ -332,6 +336,7 @@ impl WriteTxn {
     fn discard_terminal_workspace(&mut self) {
         self.staged.clear();
         self.prepared = None;
+        self.authorization_decision_digest = None;
         self.savepoints.clear();
         self.read_set.get_mut().clear();
         self.point_reads.get_mut().clear();
@@ -354,9 +359,9 @@ impl WriteTxn {
     }
 
     fn overlay_property(
-        props: &mut Vec<(fgdb_delta_types::PropertyKeyId, CanonicalScalar)>,
+        props: &mut Vec<(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)>,
         key: fgdb_delta_types::PropertyKeyId,
-        value: Option<&CanonicalScalar>,
+        value: Option<&CanonicalPropertyValue>,
     ) {
         match props.binary_search_by_key(&key, |(property, _)| *property) {
             Ok(at) => match value {

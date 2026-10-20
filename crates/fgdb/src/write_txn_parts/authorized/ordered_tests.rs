@@ -5,7 +5,7 @@ use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{RelationId, SchemaEpoch};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts};
-use fgdb_warden::{Grant, LimitDimension, QueryLimits, Rights, Scope};
+use fgdb_warden::{Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
 
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0xb3; 32]);
 const L: LabelId = LabelId(1);
@@ -102,14 +102,14 @@ fn assert_graph<V: Vfs + Clone>(db: &Database<V>, seq: CommitSeq, vertex_p: i64,
     assert_eq!(db.frontier().unwrap(), seq);
     assert_eq!(
         db.vertex(VId(1)).unwrap().unwrap().props,
-        vec![(P, CanonicalScalar::Int(vertex_p))]
+        vec![(P, CanonicalScalar::Int(vertex_p).into())]
     );
     for vid in [VId(1), VId(2), VId(3)] {
         assert_eq!(db.vertex(vid).unwrap().unwrap().labels, vec![L]);
     }
     assert_eq!(
         db.edge_at(EId(10), seq).unwrap().unwrap().props,
-        vec![(P, CanonicalScalar::Int(edge_p))]
+        vec![(P, CanonicalScalar::Int(edge_p).into())]
     );
     assert_eq!(db.neighbours(VId(1), R).unwrap(), vec![VId(2)]);
     assert_eq!(db.neighbours(VId(2), S).unwrap(), vec![VId(3)]);
@@ -181,7 +181,7 @@ fn forbidden_noop_in_another_relation_discards_all_prefix_effects() {
         assert_graph(&db, initial, 1, 10);
         assert_eq!(
             db.vertex(VId(9)).unwrap().unwrap().props,
-            vec![(SECRET, CanonicalScalar::Int(99))]
+            vec![(SECRET, CanonicalScalar::Int(99).into())]
         );
         // The failed workspace must not fence the handle.
         let seq = db
@@ -241,7 +241,7 @@ fn batch_coordinate_cannot_authorize_a_hidden_edge_relation() {
         assert!(db.vertex(VId(1)).unwrap().unwrap().props.is_empty());
         assert_eq!(
             db.edge_at(EId(10), initial).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1))]
+            vec![(P, CanonicalScalar::Int(1).into())]
         );
         assert_eq!(txn.outstanding_obligations(), baseline);
     });
@@ -434,5 +434,68 @@ fn empty_groups_and_read_only_tokens_never_create_a_workspace_or_publish() {
         ));
         assert_eq!(db.frontier().unwrap(), initial);
         assert_eq!(txn.outstanding_obligations(), baseline);
+    });
+}
+
+#[test]
+fn authorized_commits_persist_deterministic_authorization_decision_digest_and_owner_writes_remain_zero()
+ {
+    under_lab(0xb307, |contexts| async move {
+        let cx = contexts.commit();
+        let txn = contexts.txn();
+        let mut db = Database::<MemVfs>::open_memory(&cx, keys()).await.unwrap();
+        seed_graph(&mut db, &cx).await;
+        let owner_seq = db.frontier().unwrap();
+        assert_eq!(
+            db.commit_authorization_decision_digest(owner_seq).unwrap(),
+            Some(fgdb_crypto::Digest([0u8; 32])),
+        );
+
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let verified = authority.verify_at(&token, "main", NOW).unwrap();
+        let permit = verified.begin_write_at("main", NOW).unwrap();
+        let expected_digest = fgdb_crypto::hash(&permit.canonical_decision_bytes());
+        assert_ne!(expected_digest, fgdb_crypto::Digest([0u8; 32]));
+
+        let mut first = WriteBatch::new(R);
+        first.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(42)));
+        let seq1 = db
+            .write_authorized(&txn, &cx, &authority, &token, "main", first, || NOW)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.commit_authorization_decision_digest(seq1).unwrap(),
+            Some(expected_digest),
+        );
+
+        // Same capability + policy epoch produces the exact same digest (FG-INV-19).
+        let mut second = WriteBatch::new(R);
+        second.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(43)));
+        let seq2 = db
+            .write_authorized(&txn, &cx, &authority, &token, "main", second, || NOW + 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.commit_authorization_decision_digest(seq2).unwrap(),
+            Some(expected_digest),
+        );
+
+        // Attenuating the token with a tighter node limit changes the digest.
+        let attenuated = token.attenuate(Restriction::MaxNodes(50)).unwrap();
+        let mut third = WriteBatch::new(R);
+        third.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(44)));
+        let seq3 = db
+            .write_authorized(&txn, &cx, &authority, &attenuated, "main", third, || {
+                NOW + 20
+            })
+            .await
+            .unwrap();
+        let attenuated_digest = db
+            .commit_authorization_decision_digest(seq3)
+            .unwrap()
+            .unwrap();
+        assert_ne!(attenuated_digest, fgdb_crypto::Digest([0u8; 32]));
+        assert_ne!(attenuated_digest, expected_digest);
     });
 }

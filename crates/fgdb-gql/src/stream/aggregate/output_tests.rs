@@ -12,7 +12,7 @@ use std::rc::Rc;
 const K: PropertyKeyId = PropertyKeyId(1);
 const V: PropertyKeyId = PropertyKeyId(2);
 const L: LabelId = LabelId(1);
-type Record = (VId, Vec<(PropertyKeyId, CanonicalScalar)>);
+type Record = (VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>);
 struct Source {
     rows: Vec<Record>,
     at: usize,
@@ -71,10 +71,10 @@ fn source(rows: Vec<Record>) -> Source {
 fn record(vid: u128, k: Option<i64>, v: Option<i64>) -> Record {
     let mut props = Vec::new();
     if let Some(k) = k {
-        props.push((K, CanonicalScalar::Int(k)));
+        props.push((K, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(k))));
     }
     if let Some(v) = v {
-        props.push((V, CanonicalScalar::Int(v)));
+        props.push((V, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v))));
     }
     (VId(vid), props)
 }
@@ -142,12 +142,12 @@ fn eager(q: &PreparedGraphAggregate, rows: &[Record]) -> Vec<GraphAggregateRow> 
     .unwrap()
     .value
 }
-fn scalar(props: &[(PropertyKeyId, CanonicalScalar)], key: PropertyKeyId) -> Option<i128> {
+fn scalar(props: &[(PropertyKeyId, CanonicalPropertyValue)], key: PropertyKeyId) -> Option<i128> {
     props
         .iter()
         .find(|(k, _)| *k == key)
         .and_then(|(_, v)| match v {
-            CanonicalScalar::Int(v) => Some(i128::from(*v)),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(v)) => Some(i128::from(*v)),
             _ => None,
         })
 }
@@ -353,10 +353,10 @@ fn zero_full_and_impossible_pages_do_not_hide_source_having_or_expression_errors
             "MATCH (n:L) RETURN MIN(n.v) AS m GROUP BY n.k HAVING m>0 OR TRUE ORDER BY m{window}"
         ));
         let mut rows = fixture(63);
-        rows.last_mut()
-            .unwrap()
-            .1
-            .push((V, CanonicalScalar::ucs_basic_text("private").unwrap()));
+        rows.last_mut().unwrap().1.push((
+            V,
+            CanonicalScalar::ucs_basic_text("private").unwrap().into(),
+        ));
         let mut cursor = run(&q, rows, wide());
         assert!(matches!(
             cursor.next(),

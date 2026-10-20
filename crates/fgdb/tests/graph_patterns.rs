@@ -13,7 +13,8 @@ use fgdb_gql::algebra::{
 };
 use fgdb_gql::{GlaLimitDimension, GqlBudgetDimension, GqlQueryError, GqlQueryPolicy};
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::BTreeSet;
 
@@ -125,7 +126,11 @@ impl Case {
                         if self.filtered
                             && (!a.labels.contains(&L) || !c.props.iter().any(|(key, scalar)| {
                                 *key == N
-                                    && matches!(scalar, CanonicalScalar::Int(value) if *value >= 3)
+                                    && matches!(
+                                        scalar,
+                                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))
+                                            if *value >= 3
+                                    )
                             }))
                         {
                             continue;
@@ -176,7 +181,11 @@ impl Case {
                         if self.filtered
                             && (!a.labels.contains(&L) || !c.props.iter().any(|(key, scalar)| {
                                 *key == N
-                                    && matches!(scalar, CanonicalScalar::Int(value) if *value >= 3)
+                                    && matches!(
+                                        scalar,
+                                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))
+                                            if *value >= 3
+                                    )
                             }))
                         {
                             continue;
@@ -1226,11 +1235,11 @@ fn indexed_overlay_native_match_write_commits_only_the_bounded_target() {
             let old = i64::try_from(target.0).unwrap();
             assert_eq!(
                 txn.vertex(&db, target).unwrap().unwrap().props,
-                vec![(N, CanonicalScalar::Int(old + 1))],
+                vec![(N, CanonicalScalar::Int(old + 1).into())],
             );
             assert_eq!(
                 db.vertex(target).unwrap().unwrap().props,
-                vec![(N, CanonicalScalar::Int(old))],
+                vec![(N, CanonicalScalar::Int(old).into())],
             );
             assert_eq!(db.frontier().unwrap(), basis);
             assert!(matches!(
@@ -1246,7 +1255,7 @@ fn indexed_overlay_native_match_write_commits_only_the_bounded_target() {
                 } else {
                     i64::try_from(row.vid.0).unwrap()
                 };
-                assert_eq!(row.props, vec![(N, CanonicalScalar::Int(expected))]);
+                assert_eq!(row.props, vec![(N, CanonicalScalar::Int(expected).into())]);
             }
             assert_eq!(txcx.outstanding_obligations(), 0);
         }

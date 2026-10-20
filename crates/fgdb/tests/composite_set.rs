@@ -374,7 +374,7 @@ fn every_version_two_temporal_kind_is_stored_without_text_coercion() {
                 let stored = vertex.props.iter().find(|(key, _)| *key == D);
                 assert_eq!(
                     stored.map(|(_, value)| value),
-                    Some(&expected),
+                    Some(&expected.clone().into()),
                     "{expression}"
                 );
             }

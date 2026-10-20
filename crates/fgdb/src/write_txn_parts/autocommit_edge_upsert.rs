@@ -150,7 +150,7 @@ mod native_edge_upsert_autocommit_return_tests {
             assert!(reopened.edge(EId(100)).unwrap().is_none());
             assert_eq!(
                 reopened.edge(EId(101)).unwrap().unwrap().props,
-                vec![(property, CanonicalScalar::Int(8))]
+                vec![(property, CanonicalScalar::Int(8).into())]
             );
         });
         assert!(report.lab_test_passed(), "{report:?}");

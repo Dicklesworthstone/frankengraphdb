@@ -34,8 +34,8 @@ use crate::{
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
 use fgdb_types::{
-    BranchId, CanonicalScalar, CanonicalScalarResolver, EId, GraphId, ObjectId,
-    ScalarProfileVersion, VId,
+    BranchId, CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar,
+    CanonicalScalarResolver, EId, GraphId, ObjectId, ScalarProfileVersion, VId,
 };
 
 /// Format version of the canonical delta encoding.
@@ -55,12 +55,25 @@ pub const DELTA_FORMAT_V1: u16 = 1;
 /// `UnsupportedFormat` instead of misreading a value it has no tag for.
 pub const DELTA_FORMAT_V2: u16 = 2;
 
+/// Version 2 plus List and Map property values (fgdb-k3nub): the leading tags
+/// 0x08 and 0x09 of [`CanonicalPropertyValue`]'s encoding, whose scalars keep
+/// exactly their scalar bytes.
+///
+/// Additive and exact, as V2 is: a template is written in V3 if and only if
+/// one of its property values is a collection. Every scalar-only template
+/// keeps its V1 or V2 bytes and digest, and a reader that predates V3 refuses
+/// a V3 template as `UnsupportedFormat`.
+pub const DELTA_FORMAT_V3: u16 = 3;
+
 /// The one format `entries` may be written in. One encoding per value: a V2
-/// header over profile-1 content would give the same rows a second digest.
+/// header over profile-1 content, or a V3 header over scalar-only content,
+/// would give the same rows a second digest.
 pub fn delta_format_for(entries: &[CoordinateEntry]) -> u16 {
-    let profile = entries
-        .iter()
-        .flat_map(|entry| &entry.rows)
+    let rows = || entries.iter().flat_map(|entry| &entry.rows);
+    if rows().any(DeltaRow::holds_collection) {
+        return DELTA_FORMAT_V3;
+    }
+    let profile = rows()
         .map(DeltaRow::scalar_profile)
         .max()
         .unwrap_or(ScalarProfileVersion::V1);
@@ -73,7 +86,7 @@ pub fn delta_format_for(entries: &[CoordinateEntry]) -> u16 {
 
 /// Whether this build reads delta `format` at all.
 pub fn is_supported_delta_format(format: u16) -> bool {
-    matches!(format, DELTA_FORMAT_V1 | DELTA_FORMAT_V2)
+    matches!(format, DELTA_FORMAT_V1 | DELTA_FORMAT_V2 | DELTA_FORMAT_V3)
 }
 
 /// Arm tags. Stable across versions — a tag is a durable value, so these are
@@ -108,6 +121,11 @@ mod tag {
 pub enum CanonicalError {
     /// A scalar value could not be encoded (it exceeded a profile bound).
     Scalar,
+    /// A List or Map property value could not be encoded or decoded: a bound
+    /// on its entries, nesting or size, or a noncanonical collection encoding.
+    /// Boxed: the value error is 64 bytes and this enum sits inline in every
+    /// read and write error (ReadError::VersionHead, WriteError::Canonical).
+    PropertyValue(Box<CanonicalPropertyValueError>),
     /// The input ended inside a value.
     Truncated,
     /// A tag this reader does not define. Never skipped: a reader that does
@@ -117,8 +135,9 @@ pub enum CanonicalError {
     /// A format version this reader does not implement.
     UnsupportedFormat { format: u16 },
     /// A supported format that is not the one the content requires
-    /// ([`delta_format_for`]): a V1 header over a profile-2 value, or a V2
-    /// header over content that V1 encodes.
+    /// ([`delta_format_for`]): a V1 header over a profile-2 value, a V2 header
+    /// over content that V1 encodes, a V1 or V2 header over a collection, or a
+    /// V3 header over scalar-only content.
     FormatMismatch { format: u16, required: u16 },
     /// Bytes remained after a complete value was decoded.
     TrailingBytes { remaining: usize },
@@ -148,6 +167,7 @@ impl core::fmt::Display for CanonicalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Scalar => write!(f, "a scalar value exceeded its profile bound"),
+            Self::PropertyValue(error) => write!(f, "a collection property value: {error}"),
             Self::CollectionTooLarge { len } => {
                 write!(f, "a collection of {len} elements exceeds the 32-bit count")
             }
@@ -327,11 +347,45 @@ impl Writer {
         }
     }
 
-    fn props(&mut self, props: &[(PropertyKeyId, CanonicalScalar)]) -> Result<(), CanonicalError> {
+    /// A property value, length prefixed like a scalar. A scalar value is
+    /// written by `scalar` itself, so scalar-only rows keep their bytes and
+    /// errors; a collection is its canonical [`CanonicalPropertyValue`] bytes.
+    fn value(&mut self, value: &CanonicalPropertyValue) -> Result<(), CanonicalError> {
+        if let Some(scalar) = value.as_scalar() {
+            return self.scalar(scalar);
+        }
+        let encoded = value
+            .encode()
+            .map_err(|error| CanonicalError::PropertyValue(Box::new(error)))?;
+        self.count(encoded.len())?;
+        self.out.extend_from_slice(&encoded);
+        Ok(())
+    }
+
+    fn optional_value(
+        &mut self,
+        value: Option<&CanonicalPropertyValue>,
+    ) -> Result<(), CanonicalError> {
+        match value {
+            None => {
+                self.u8(tag::ABSENT);
+                Ok(())
+            }
+            Some(inner) => {
+                self.u8(tag::PRESENT);
+                self.value(inner)
+            }
+        }
+    }
+
+    fn props(
+        &mut self,
+        props: &[(PropertyKeyId, CanonicalPropertyValue)],
+    ) -> Result<(), CanonicalError> {
         self.count(props.len())?;
         for (key, value) in props {
             self.u64(key.0);
-            self.scalar(value)?;
+            self.value(value)?;
         }
         Ok(())
     }
@@ -347,6 +401,7 @@ struct Reader<'a> {
     bytes: &'a [u8],
     position: usize,
     resolver: Option<&'a dyn CanonicalScalarResolver>,
+    allow_stored_zoned: bool,
 }
 
 impl core::fmt::Debug for Reader<'_> {
@@ -364,6 +419,16 @@ impl<'a> Reader<'a> {
             bytes,
             position: 0,
             resolver,
+            allow_stored_zoned: false,
+        }
+    }
+
+    fn new_stored(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            position: 0,
+            resolver: None,
+            allow_stored_zoned: true,
         }
     }
 
@@ -500,6 +565,7 @@ impl<'a> Reader<'a> {
 
     fn scalar(&mut self) -> Result<CanonicalScalar, CanonicalError> {
         let resolver = self.resolver;
+        let allow_stored_zoned = self.allow_stored_zoned;
         let len = self.count(1)?;
         let encoded = self.take(len)?;
         // This is the closed graph-value decoder; no JWT or signature state exists here.
@@ -509,6 +575,9 @@ impl<'a> Reader<'a> {
         match resolver {
             Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver)
                 .map_err(|_| CanonicalError::Scalar),
+            None if allow_stored_zoned => {
+                CanonicalScalar::decode_stored(encoded).map_err(|_| CanonicalError::Scalar)
+            }
             None => CanonicalScalar::decode(encoded).map_err(|_| CanonicalError::Scalar),
         }
     }
@@ -521,13 +590,41 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn props(&mut self) -> Result<Vec<(PropertyKeyId, CanonicalScalar)>, CanonicalError> {
+    /// A property value. The decoder admits a collection in every format;
+    /// `validate` refuses one under a V1 or V2 header (`FormatMismatch`), as
+    /// it refuses a profile-2 scalar under V1. Any other value is decoded by
+    /// `scalar` itself, so scalar bytes keep their decoding and errors.
+    fn value(&mut self) -> Result<CanonicalPropertyValue, CanonicalError> {
+        let start = self.position;
+        let len = self.count(1)?;
+        let encoded = self.take(len)?;
+        if !CanonicalPropertyValue::is_collection_encoding(encoded) {
+            self.position = start;
+            return self.scalar().map(CanonicalPropertyValue::Scalar);
+        }
+        match self.resolver {
+            Some(resolver) => CanonicalPropertyValue::decode_with_resolver(encoded, resolver),
+            None if self.allow_stored_zoned => CanonicalPropertyValue::decode_stored(encoded),
+            None => CanonicalPropertyValue::decode(encoded),
+        }
+        .map_err(|error| CanonicalError::PropertyValue(Box::new(error)))
+    }
+
+    fn optional_value(&mut self) -> Result<Option<CanonicalPropertyValue>, CanonicalError> {
+        if self.presence()? {
+            Ok(Some(self.value()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn props(&mut self) -> Result<Vec<(PropertyKeyId, CanonicalPropertyValue)>, CanonicalError> {
         // 8 bytes of key + 4 of length is the floor for one property.
         let count = self.count(12)?;
         let mut props = Vec::with_capacity(count);
         for _ in 0..count {
             let key = PropertyKeyId(self.u64()?);
-            props.push((key, self.scalar()?));
+            props.push((key, self.value()?));
         }
         Ok(props)
     }
@@ -607,21 +704,24 @@ impl DeltaRow {
     /// carries. Listed per arm, so a new arm that carries a value cannot be
     /// left out silently.
     pub fn scalar_profile(&self) -> ScalarProfileVersion {
+        let values = |values: &mut dyn Iterator<Item = &CanonicalPropertyValue>| {
+            values
+                .map(CanonicalPropertyValue::required_scalar_profile)
+                .max()
+                .unwrap_or(ScalarProfileVersion::V1)
+        };
         match self {
             DeltaRow::CreateVertex { props, .. } => {
-                ScalarProfileVersion::required_for_all(props.iter().map(|(_, value)| value))
+                values(&mut props.iter().map(|(_, value)| value))
             }
             DeltaRow::CreateEdge {
                 canonical_key,
                 props,
                 ..
-            } => ScalarProfileVersion::required_for_all(
-                canonical_key
-                    .iter()
-                    .chain(props.iter().map(|(_, value)| value)),
-            ),
+            } => ScalarProfileVersion::required_for_all(canonical_key.iter())
+                .max(values(&mut props.iter().map(|(_, value)| value))),
             DeltaRow::Property { before, after, .. } => {
-                ScalarProfileVersion::required_for_all(before.iter().chain(after))
+                values(&mut before.iter().chain(after.iter()))
             }
             DeltaRow::DeleteVertex { .. }
             | DeltaRow::DeleteEdge { .. }
@@ -632,6 +732,29 @@ impl DeltaRow {
             | DeltaRow::Sketch { .. }
             | DeltaRow::Schema { .. }
             | DeltaRow::Constraint { .. } => ScalarProfileVersion::V1,
+        }
+    }
+
+    /// Whether this row carries a List or Map property value, which only
+    /// [`DELTA_FORMAT_V3`] holds. Listed per arm, as `scalar_profile` is.
+    pub fn holds_collection(&self) -> bool {
+        match self {
+            DeltaRow::CreateVertex { props, .. } | DeltaRow::CreateEdge { props, .. } => {
+                props.iter().any(|(_, value)| value.is_collection())
+            }
+            DeltaRow::Property { before, after, .. } => before
+                .iter()
+                .chain(after.iter())
+                .any(CanonicalPropertyValue::is_collection),
+            DeltaRow::DeleteVertex { .. }
+            | DeltaRow::DeleteEdge { .. }
+            | DeltaRow::LabelMembership { .. }
+            | DeltaRow::ValidTime { .. }
+            | DeltaRow::Counter { .. }
+            | DeltaRow::Escrow { .. }
+            | DeltaRow::Sketch { .. }
+            | DeltaRow::Schema { .. }
+            | DeltaRow::Constraint { .. } => false,
         }
     }
 
@@ -722,8 +845,8 @@ impl DeltaRow {
                 w.u8(tag::PROPERTY);
                 w.element(*elem);
                 w.u64(property.0);
-                w.optional_scalar(before.as_ref())?;
-                w.optional_scalar(after.as_ref())?;
+                w.optional_value(before.as_ref())?;
+                w.optional_value(after.as_ref())?;
             }
             DeltaRow::ValidTime {
                 elem,
@@ -821,7 +944,13 @@ impl DeltaRow {
 
     /// Decode one row, requiring the input to be exactly one row.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CanonicalError> {
-        Self::read_with_dyn_resolver(bytes, None)
+        Self::read_with_dyn_resolver(bytes, None, false)
+    }
+
+    /// Decode one committed row from authenticated durable storage without a
+    /// live [`CanonicalScalarResolver`], preserving stored zoned timestamps.
+    pub fn decode_stored(bytes: &[u8]) -> Result<Self, CanonicalError> {
+        Self::read_with_dyn_resolver(bytes, None, true)
     }
 
     /// Decode one row under an explicit pinned-artifact resolver. Zoned
@@ -831,15 +960,20 @@ impl DeltaRow {
         bytes: &[u8],
         resolver: &dyn CanonicalScalarResolver,
     ) -> Result<Self, CanonicalError> {
-        Self::read_with_dyn_resolver(bytes, Some(resolver))
+        Self::read_with_dyn_resolver(bytes, Some(resolver), false)
     }
 
     /// Decode one already-length-bounded row from `bytes` under `resolver`.
     fn read_with_dyn_resolver(
         bytes: &[u8],
         resolver: Option<&dyn CanonicalScalarResolver>,
+        allow_stored_zoned: bool,
     ) -> Result<Self, CanonicalError> {
-        let mut r = Reader::new(bytes, resolver);
+        let mut r = if allow_stored_zoned && resolver.is_none() {
+            Reader::new_stored(bytes)
+        } else {
+            Reader::new(bytes, resolver)
+        };
         let row = Self::read(&mut r)?;
         if !r.is_exhausted() {
             return Err(CanonicalError::TrailingBytes {
@@ -905,8 +1039,8 @@ impl DeltaRow {
             tag::PROPERTY => DeltaRow::Property {
                 elem: r.element()?,
                 property: PropertyKeyId(r.u64()?),
-                before: r.optional_scalar()?,
-                after: r.optional_scalar()?,
+                before: r.optional_value()?,
+                after: r.optional_value()?,
             },
             tag::VALID_TIME => DeltaRow::ValidTime {
                 elem: r.element()?,
@@ -1008,7 +1142,11 @@ impl CoordinateEntry {
         for _ in 0..row_count {
             let len = r.count(1)?;
             let encoded = r.take(len)?;
-            rows.push(DeltaRow::read_with_dyn_resolver(encoded, r.resolver)?);
+            rows.push(DeltaRow::read_with_dyn_resolver(
+                encoded,
+                r.resolver,
+                r.allow_stored_zoned,
+            )?);
         }
         Ok(CoordinateEntry {
             graph,
@@ -1041,7 +1179,13 @@ impl LogicalDeltaTemplate {
     /// stable digest, so admitting one would let the same logical change
     /// present two identities.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CanonicalError> {
-        Self::decode_inner(bytes, None)
+        Self::decode_from_reader(Reader::new(bytes, None))
+    }
+
+    /// Decode a committed template from authenticated durable storage without a
+    /// live [`CanonicalScalarResolver`], preserving stored zoned timestamps.
+    pub fn decode_stored(bytes: &[u8]) -> Result<Self, CanonicalError> {
+        Self::decode_from_reader(Reader::new_stored(bytes))
     }
 
     /// Decode a template under an explicit pinned-artifact resolver. Zoned
@@ -1051,14 +1195,10 @@ impl LogicalDeltaTemplate {
         bytes: &[u8],
         resolver: &dyn CanonicalScalarResolver,
     ) -> Result<Self, CanonicalError> {
-        Self::decode_inner(bytes, Some(resolver))
+        Self::decode_from_reader(Reader::new(bytes, Some(resolver)))
     }
 
-    fn decode_inner(
-        bytes: &[u8],
-        resolver: Option<&dyn CanonicalScalarResolver>,
-    ) -> Result<Self, CanonicalError> {
-        let mut r = Reader::new(bytes, resolver);
+    fn decode_from_reader(mut r: Reader<'_>) -> Result<Self, CanonicalError> {
         let format = r.u16()?;
         if !is_supported_delta_format(format) {
             return Err(CanonicalError::UnsupportedFormat { format });

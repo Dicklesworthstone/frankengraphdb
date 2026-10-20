@@ -46,7 +46,7 @@ fn vertex(vid: u128, value: i64) -> DeltaRow {
         vid: VId(vid),
         birth_ordinal: vid as u64,
         labels: vec![LABEL],
-        props: vec![(PROP, CanonicalScalar::Int(value))],
+        props: vec![(PROP, CanonicalScalar::Int(value).into())],
         valid_time: None,
     }
 }
@@ -55,8 +55,8 @@ fn set(vid: u128, before: i64, after: i64) -> DeltaRow {
     DeltaRow::Property {
         elem: ElementId::Vertex(VId(vid)),
         property: PROP,
-        before: Some(CanonicalScalar::Int(before)),
-        after: Some(CanonicalScalar::Int(after)),
+        before: Some(CanonicalScalar::Int(before).into()),
+        after: Some(CanonicalScalar::Int(after).into()),
     }
 }
 

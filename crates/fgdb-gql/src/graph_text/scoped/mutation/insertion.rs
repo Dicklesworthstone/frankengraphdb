@@ -91,7 +91,10 @@ impl<'a> Parser<'a> {
     /// The MATCH scope is shared by CREATE endpoints and RETURN. New names
     /// must not shadow a matched edge or path by silently declaring a vertex.
     pub(super) fn insertion_match_kind(&self, name: &str) -> Option<GraphSetColumnType> {
-        if self.syntax.names_path(name) {
+        // After WITH only the row is in scope (fgdb-sl4ym).
+        if self.write_row_scope {
+            None
+        } else if self.syntax.names_path(name) {
             Some(GraphSetColumnType::Path)
         } else if self.syntax.visible_edge(name).is_some() {
             Some(GraphSetColumnType::Edge)
@@ -146,7 +149,8 @@ impl<'a> Parser<'a> {
         Ok(true)
     }
 
-    /// A MATCH-first WITH/UNWIND selects the native graph-to-row compiler.
+    /// A MATCH-first UNWIND selects the native graph-to-row compiler (a
+    /// MATCH-first WITH takes the write-row pipeline, `prepare_after_with`).
     /// The MATCH parser has identified the boundary; restart that same bounded
     /// statement with its row-source owner, not a rewritten RETURN or a
     /// fallback after a refused parse. Its parameter table remains live through
@@ -165,13 +169,18 @@ impl<'a> Parser<'a> {
     /// Resolve the combined row (imports, then projected MATCH fields) while
     /// using the ordinary scalar compiler. The graph child is evaluated once;
     /// these are projection slots, not deferred reads of the created graph.
-    fn insertion_source_value(
+    pub(super) fn insertion_source_value(
         &mut self,
         inputs: &mut Vec<Projection<'a>>,
         imports: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ReadValueTemplate, crate::GraphSetTextError> {
         self.read_resolved_value(
             &mut |parser| {
+                // After WITH, `a.key` of an element the row carries is that
+                // row's hidden read (fgdb-sl4ym).
+                if let Some(column) = parser.boundary_read(imports.len())? {
+                    return Ok(Some(column));
+                }
                 let TokenKind::Word(word) = parser.current.kind else {
                     return Ok(None);
                 };
@@ -205,7 +214,7 @@ impl<'a> Parser<'a> {
             .map(|(_, kind)| *kind)
             .chain(inputs.iter().map(|input| {
                 if input.property.is_some() {
-                    GraphSetColumnType::Scalar
+                    GraphSetColumnType::Stored
                 } else {
                     match input.path {
                         Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
@@ -251,7 +260,8 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Hold a value-language CREATE property to the scalar property law.
+    /// Hold a value-language CREATE property to the written property law:
+    /// a scalar or a stored List (fgdb-k3nub).
     fn scalar_property_value(
         &self,
         value: ReadValueTemplate,
@@ -260,27 +270,33 @@ impl<'a> Parser<'a> {
         inputs: &[Projection<'a>],
     ) -> Result<ReadValueTemplate, GraphInsertTextError> {
         let types = self.insertion_input_types(imports, inputs);
-        if !matches!(
-            value.column_type(&types, &self.syntax.parameters),
-            GraphSetColumnType::Scalar | GraphSetColumnType::Any
-        ) {
-            return Err(expected(at, "scalar CREATE property expression"));
+        let kind = value.column_type(&types, &self.syntax.parameters);
+        let admitted = match value {
+            // A parameter binds a scalar argument only; a list parameter is
+            // not yet a written List.
+            ReadValueTemplate::Parameter { .. } => {
+                matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any)
+            }
+            _ => matches!(
+                kind,
+                GraphSetColumnType::Scalar
+                    | GraphSetColumnType::Stored
+                    | GraphSetColumnType::List
+                    | GraphSetColumnType::Any
+            ),
+        };
+        if !admitted {
+            return Err(expected(at, "scalar or list CREATE property expression"));
         }
-        // A list or map is never a stored property. A list index, a map
-        // entry (`row.name`), size(), IN, a quantifier or reduce() may be
-        // scalar and is checked per row at execution.
+        // A map construction is never a written property (openCypher
+        // InvalidPropertyType) until the owner rules on stored maps. A list
+        // that holds a map or a graph element, a map entry (`row.name`) and
+        // every other composite are checked per row at execution.
         if matches!(
             value,
-            ReadValueTemplate::List(_)
-                | ReadValueTemplate::Local(_)
-                | ReadValueTemplate::Comprehension { .. }
-                | ReadValueTemplate::Slice { .. }
-                | ReadValueTemplate::Range { .. }
-                | ReadValueTemplate::MapLiteral { .. }
-                | ReadValueTemplate::MapOverlay { .. }
-                | ReadValueTemplate::Keys(_)
+            ReadValueTemplate::MapLiteral { .. } | ReadValueTemplate::MapOverlay { .. }
         ) {
-            return Err(expected(at, "scalar CREATE property expression"));
+            return Err(expected(at, "scalar or list CREATE property expression"));
         }
         Ok(value)
     }
@@ -318,13 +334,14 @@ impl<'a> Parser<'a> {
                     self.insertion_source_value(inputs, schema)?
                 };
                 self.scalar_property_value(value, at, schema, inputs)?
-            } else if self.starts_let_operand()? {
+            } else if self.starts_let_operand()? || self.is_punct(b'[') {
                 // A temporal constructor, a quantifier, a list function,
                 // keys() or size() is a value-language operand that the
                 // scalar compiler reads only through a let slot, which a
                 // CREATE property has none of: read the whole property in
                 // the value language, as a row-fed CREATE does
-                // (fgdb-txbg9, fgdb-o5o9t).
+                // (fgdb-txbg9, fgdb-o5o9t). So is a list literal, which a
+                // stored List property may now be (fgdb-k3nub).
                 let value = self.insertion_source_value(inputs, &[])?;
                 self.scalar_property_value(value, at, &[], inputs)?
             } else if matches!(self.current.kind, TokenKind::Parameter(name)
@@ -398,15 +415,26 @@ impl<'a> Parser<'a> {
                     .enumerate()
                     .find(|(_, (alias, _))| alias.text == name.text)
             }) {
+                // A vertex an imported row carries is that row's endpoint: the
+                // WITH row of a write after WITH (fgdb-sl4ym), or a MATCH-first
+                // UNWIND row that projected the matched vertex.
                 if *kind != GraphSetColumnType::Vertex {
-                    return Err(expected(name.at, "vertex-typed imported CREATE endpoint"));
+                    return Err(expected(
+                        name.at,
+                        if self.write_row_scope {
+                            "a vertex-valued WITH binding"
+                        } else {
+                            "vertex-typed imported CREATE endpoint"
+                        },
+                    ));
                 }
                 Some(GraphInsertEndpoint::Column(column))
-            } else if self
-                .syntax
-                .variables
-                .iter()
-                .any(|variable| variable.text == name.text)
+            } else if !self.write_row_scope
+                && self
+                    .syntax
+                    .variables
+                    .iter()
+                    .any(|variable| variable.text == name.text)
             {
                 let column = self.mutation_projection(&mut parsed.projections, name, None)?;
                 Some(GraphInsertEndpoint::Column(
@@ -549,7 +577,9 @@ impl<'a> Parser<'a> {
         if parsed.vertices.is_empty() && parsed.edges.is_empty() {
             return Err(insertion_build(create_at, GraphInsertBuildError::Empty));
         }
+        // After WITH the row carries the bag, and no MATCH field is read.
         if parsed.projections.is_empty()
+            && !self.write_row_scope
             && let Some(&root) = self.syntax.variables.first()
         {
             // A MATCH still carries its occurrence bag even for constants.
@@ -631,19 +661,20 @@ fn bind_fields(
             | ReadValueTemplate::Quantifier { .. }
             | ReadValueTemplate::Reduce { .. }
             | ReadValueTemplate::MapGet { .. }
-            | ReadValueTemplate::Let { .. } => GraphMutationValue::Composite(
-                return_projection::bind_read_value(value, values.unwrap_or(shape))?,
-            ),
-            ReadValueTemplate::List(_)
+            | ReadValueTemplate::Let { .. }
+            // A list-valued field is a stored List (fgdb-k3nub). Execution
+            // refuses a list that holds a map or a graph element.
+            | ReadValueTemplate::List(_)
             | ReadValueTemplate::Local(_)
             | ReadValueTemplate::Comprehension { .. }
             | ReadValueTemplate::Slice { .. }
             | ReadValueTemplate::Range { .. }
-            | ReadValueTemplate::MapLiteral { .. }
-            | ReadValueTemplate::MapOverlay { .. }
-            | ReadValueTemplate::Keys(_) => {
-                // Scalar properties only: list construction is a read-surface
-                // capability, not a stored property encoding.
+            | ReadValueTemplate::Keys(_) => GraphMutationValue::Composite(
+                return_projection::bind_read_value(value, values.unwrap_or(shape))?,
+            ),
+            ReadValueTemplate::MapLiteral { .. } | ReadValueTemplate::MapOverlay { .. } => {
+                // A map is not a written property value (openCypher
+                // InvalidPropertyType) until the owner rules on stored maps.
                 return Err(GraphInsertTextError {
                     offset: 0,
                     kind: GraphInsertTextErrorKind::Expression(
@@ -730,10 +761,12 @@ impl PreparedGraphInsertText {
             .with_zones(resolve.time_zones());
         let (leading, mut row_schema) = parser.insertion_unwind_prefix()?;
         let mut matched = parser.insertion_match_prefix(&row_schema)?;
-        let read_source = if leading.is_empty()
-            && matched
-            && (parser.is_word("WITH") || parser.is_word("UNWIND"))
-        {
+        // MATCH ... WITH ... CREATE reads the WITH row through the write-row
+        // pipeline that SET, REMOVE and DELETE after WITH share (fgdb-sl4ym).
+        if matched && leading.is_empty() && parser.is_word("WITH") {
+            return Self::prepare_after_with(parser, statement, relation, resolve, returning);
+        }
+        let read_source = if leading.is_empty() && matched && parser.is_word("UNWIND") {
             let (source, schema) =
                 parser.insertion_graph_row_prefix(statement, declarations, resolve.time_zones())?;
             row_schema = schema;
@@ -1097,6 +1130,148 @@ impl PreparedGraphInsertText {
         if let Some(returning) = &returning {
             // Validate RETURN against the real source shape. Treating a MATCH
             // as a singleton here would lose its columns and occurrence bag.
+            returning.bind(prepared, &shape_arguments(template.parameter_schema()))?;
+        }
+        Ok((template, returning))
+    }
+
+    /// `MATCH ... WITH ... CREATE ... [RETURN ...]` (fgdb-sl4ym): CREATE
+    /// runs once per row of the read pipeline through its last WITH stage.
+    /// That row is the whole scope: a vertex it carries is a bound endpoint,
+    /// its values feed properties and RETURN, and a MATCH binding the WITH
+    /// dropped is unknown. The row pipeline is the ordinary read relation.
+    fn prepare_after_with<'a>(
+        mut parser: Parser<'a>,
+        statement: &'a str,
+        relation: RelationId,
+        mut resolve: impl GraphSymbolResolver,
+        returning: bool,
+    ) -> Result<
+        (
+            Self,
+            Option<crate::insertion_query_text::InsertReturnTemplate>,
+        ),
+        GraphInsertTextError,
+    > {
+        let (head, stages, schema) = parser.write_row_prefix()?;
+        let at = parser.current.at;
+        parser.write_row_scope = true;
+        let mut parsed = parser.insertion_clauses(Some(&schema))?;
+        let returning = if returning {
+            Some(parser.insertion_return(&mut parsed, &schema)?)
+        } else {
+            None
+        };
+        parser.end()?;
+        parser.write_row_scope = false;
+        if !parsed.projections.is_empty() {
+            return Err(expected(at, "a CREATE that reads only the WITH row"));
+        }
+        if let Some(returning) = &returning {
+            returning.admit(&parser.syntax.parameters)?;
+        }
+        let read = parser.finish_write_row_prefix(statement, head, stages)?;
+        let mut input = read.resolve(crate::graph_text::LentResolver(&mut resolve))?;
+        let mut cache = BTreeMap::new();
+        let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
+            let key = (kind, name.text.to_owned());
+            if let Some(value) = cache.get(&key) {
+                return Ok(*value);
+            }
+            let value = resolve
+                .resolve_symbol(kind, name.text)
+                .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
+            if value.kind() != kind {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::WrongSymbolKind {
+                        expected: kind,
+                        found: value.kind(),
+                    },
+                ));
+            }
+            cache.insert(key, value);
+            Ok(value)
+        };
+        let mut vertices = Vec::new();
+        for vertex in parsed.vertices {
+            let mut labels = Vec::new();
+            for label in vertex.labels {
+                let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)? else {
+                    unreachable!("shared catalog resolver checked the domain")
+                };
+                labels.push(label);
+            }
+            vertices.push(InsertVertexTemplate {
+                labels,
+                properties: resolve_properties(vertex.properties, &mut symbol)?,
+            });
+        }
+        let mut edges = Vec::new();
+        for edge in parsed.edges {
+            let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, edge.relation)?
+            else {
+                unreachable!("shared catalog resolver checked the domain")
+            };
+            edges.push(InsertEdgeTemplate {
+                source: edge.source,
+                destination: edge.destination,
+                relation,
+                properties: resolve_properties(edge.properties, &mut symbol)?,
+            });
+        }
+        let mut returning = returning
+            .map(|returning| returning.resolve(&mut symbol))
+            .transpose()?;
+        let created_maps = returning.as_ref().is_some_and(|returning| {
+            returning.bindings.iter().any(|binding| {
+                matches!(
+                    binding,
+                    crate::GraphInsertBinding::VertexProperties(_)
+                        | crate::GraphInsertBinding::EdgeProperties(_)
+                        | crate::GraphInsertBinding::VertexLabels(_)
+                )
+            })
+        });
+        let source_metadata = input.selection.as_ref().is_some_and(|selection| {
+            selection.columns.iter().any(|column| {
+                matches!(
+                    column.path,
+                    Some(
+                        GraphPathFunction::Labels
+                            | GraphPathFunction::Type
+                            | GraphPathFunction::Properties
+                    )
+                )
+            })
+        });
+        if created_maps || source_metadata {
+            let catalog =
+                std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(&mut resolve, statement));
+            if let Some(selection) = input.selection.as_mut() {
+                selection.reverse_catalog = Some(std::sync::Arc::clone(&catalog));
+            }
+            if created_maps {
+                returning
+                    .as_mut()
+                    .expect("created maps belong to RETURN")
+                    .property_catalog = Some(catalog);
+            }
+        }
+        let template = Self {
+            input: InsertTextInput::Relation {
+                statement: statement.to_owned(),
+                input,
+            },
+            relation,
+            vertices,
+            edges,
+            create_at: at,
+        };
+        // Endpoint domains, written keys and value columns check here, over
+        // the bound shape of the read relation.
+        let prepared = template.instantiate(None, None)?;
+        if let Some(returning) = &returning {
             returning.bind(prepared, &shape_arguments(template.parameter_schema()))?;
         }
         Ok((template, returning))

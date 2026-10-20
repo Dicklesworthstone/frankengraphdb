@@ -261,7 +261,7 @@ impl PreparedGraphSetAggregate {
         elements: impl FnMut(
             fgdb_delta_types::ElementId,
             fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalScalar>, E>,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {

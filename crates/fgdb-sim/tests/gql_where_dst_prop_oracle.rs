@@ -20,7 +20,7 @@ fn reference_sources(graph: &ReferenceGraph) -> Vec<VId> {
         .filter(|(_, edge)| {
             graph
                 .vertex(edge.dst)
-                .is_some_and(|vertex| vertex.props.get(&K) == Some(&CanonicalScalar::Int(1)))
+                .is_some_and(|vertex| vertex.props.get(&K) == Some(&CanonicalScalar::Int(1).into()))
         })
         .map(|(_, edge)| edge.src)
         .collect();

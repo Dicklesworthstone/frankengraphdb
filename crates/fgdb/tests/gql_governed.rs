@@ -12,7 +12,8 @@ use fgdb_gql::{
     PreparedGqlTemplate,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -537,7 +538,11 @@ fn source_oracle(db: &Database<MemVfs>, at: CommitSeq) -> Vec<(Vec<VId>, u64)> {
     let qualifying = |vid: VId| {
         vertices.get(&vid).is_some_and(|row| {
             row.props.iter().any(|(key, value)| {
-                *key == N && matches!(value, CanonicalScalar::Int(n) if *n >= 3)
+                *key == N
+                    && matches!(
+                        value,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)) if *n >= 3
+                    )
             })
         })
     };

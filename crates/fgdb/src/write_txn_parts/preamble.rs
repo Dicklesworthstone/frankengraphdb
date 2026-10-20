@@ -6,8 +6,9 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::{ElementId, LabelId, RelationId};
 use fgdb_strata::AdjacencyEntry;
 use fgdb_types::{
-    Acquired, CanonicalScalar, CommitCx, CommitSeq, EId, EmbeddedTxnCompletion, EmbeddedTxnState,
-    ObligationAcquireError, ObligationId, PurposeObligation, TxnCx, VId,
+    Acquired, CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, EId,
+    EmbeddedTxnCompletion, EmbeddedTxnState, ObligationAcquireError, ObligationId,
+    PurposeObligation, TxnCx, VId,
 };
 
 /// The keyed permutation that turns an engine allocation counter into an
@@ -616,6 +617,7 @@ pub struct WriteTxn {
     /// creation in one of these relations could add a row. The plan reads no
     /// other relation's edges, so it is not the whole-table `scanned_edges`.
     scanned_edge_relations: std::cell::RefCell<std::collections::BTreeSet<RelationId>>,
+    pub(crate) authorization_decision_digest: Option<fgdb_crypto::Digest>,
     state: EmbeddedTxnState,
     pin: Option<PurposeObligation<Acquired>>,
 }

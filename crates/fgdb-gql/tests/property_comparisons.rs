@@ -6,7 +6,7 @@ use fgdb_gql::algebra::{
     IntegerComparison, MAX_PATTERN_PREDICATES, PatternBuildError, VertexPredicate,
 };
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy, GraphAggregate, PreparedGraphAggregate};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
@@ -75,12 +75,14 @@ fn all_comparisons_match_independent_multigraph_path_enumeration() {
         Some(CanonicalScalar::Int(i64::MIN)),
         Some(CanonicalScalar::Int(7)),
         None,
-    ];
+    ]
+    .map(|value| value.map(CanonicalPropertyValue::from));
     let right = [
         Some(CanonicalScalar::Int(7)),
         Some(CanonicalScalar::Int(i64::MAX)),
         Some(CanonicalScalar::Null),
-    ];
+    ]
+    .map(|value| value.map(CanonicalPropertyValue::from));
     let universe = [
         (IDS[0], R, IDS[1]),
         (IDS[0], R, IDS[1]),
@@ -130,8 +132,12 @@ fn all_comparisons_match_independent_multigraph_path_enumeration() {
                             for (b, c) in oriented(s2, d2, direction) {
                                 if via == b
                                     && expected(
-                                        left[position(a)].as_ref(),
-                                        right[position(c)].as_ref(),
+                                        left[position(a)]
+                                            .as_ref()
+                                            .and_then(CanonicalPropertyValue::as_scalar),
+                                        right[position(c)]
+                                            .as_ref()
+                                            .and_then(CanonicalPropertyValue::as_scalar),
                                         comparison,
                                     )
                                 {
@@ -188,12 +194,14 @@ fn optional_and_existence_apply_pair_filters_before_scope_success() {
         CanonicalScalar::Int(1),
         CanonicalScalar::Int(8),
         CanonicalScalar::Int(10),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let right = [
         CanonicalScalar::Int(0),
         CanonicalScalar::Int(5),
         CanonicalScalar::Null,
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let edges = [
         (IDS[0], R, IDS[1]),
         (IDS[0], R, IDS[1]),
@@ -316,7 +324,8 @@ fn comparisons_are_not_cached_by_only_the_left_vertex_and_can_use_one_vertex_twi
         CanonicalScalar::Int(5),
         CanonicalScalar::Int(2),
         CanonicalScalar::Int(9),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let mut b = builder(&["a", "b"]);
     b.edge("a", R, GlaDirection::Forward, "b").unwrap();
     b.compare_properties("a", P, IntegerComparison::Less, "b", P)
@@ -377,7 +386,8 @@ fn pair_selection_preserves_exact_limits_and_every_interruption_checkpoint() {
     let values = [
         CanonicalScalar::ucs_basic_text(&"a".repeat(2048)).unwrap(),
         CanonicalScalar::ucs_basic_text(&"b".repeat(4096)).unwrap(),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let run = |policy| {
         query.plan().execute_governed_with_properties(
             2,

@@ -468,7 +468,9 @@ fn run_transcript(root: &asupersync::Cx) {
             labels: vec![LabelId(7)],
             props: vec![(
                 PropertyKeyId(1),
-                CanonicalScalar::ucs_basic_text("Ada").expect("bounded UCS_BASIC text"),
+                CanonicalScalar::ucs_basic_text("Ada")
+                    .expect("bounded UCS_BASIC text")
+                    .into(),
             )],
             valid_time: None,
         },
@@ -504,7 +506,7 @@ fn run_transcript(root: &asupersync::Cx) {
             elem: ElementId::Vertex(VId(1)),
             property: PropertyKeyId(2),
             before: None,
-            after: Some(CanonicalScalar::Int(1815)),
+            after: Some(CanonicalScalar::Int(1815).into()),
         },
         DeltaRow::ValidTime {
             elem: ElementId::Edge(EId(1)),

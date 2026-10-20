@@ -10,7 +10,8 @@ use fgdb_gql::{
     PreparedGraphMutation, PreparedGraphMutationText, PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 
 const OWNER: LabelId = LabelId(1);
@@ -22,7 +23,11 @@ const MAP_HEAD: &str = "MATCH (a:Owner {flag:TRUE,n:10}) \
 const CAPTURE_HEAD: &str = "MATCH (a:Owner {flag:TRUE}) \
     OPTIONAL MATCH (b) WHERE b.n = a.n + $delta";
 type Pair = (VId, Option<VId>);
-type Records = Vec<(VId, Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type Records = Vec<(
+    VId,
+    Vec<LabelId>,
+    Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+)>;
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -303,7 +308,7 @@ fn map_selected_correlated_writes_refuse_atomically_and_can_retry() {
         assert!(db.vertex(VId(777)).unwrap().is_some());
         for id in [2, 3] {
             let row = db.vertex(VId(id)).unwrap().unwrap();
-            assert_eq!(row.props, vec![(N, CanonicalScalar::Int(16))]);
+            assert_eq!(row.props, vec![(N, CanonicalScalar::Int(16).into())]);
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

@@ -9,7 +9,7 @@ use asupersync::fs::Vfs;
 use fgdb_beacon::read::{ReadError, ReadOptions, Rows, Search};
 use fgdb_beacon::{BeaconError, BeaconIndex, IndexConfig, IndexSnapshot, WorkBudget, WorkControl};
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId};
-use fgdb_types::{CanonicalScalar, QueryCx, VId};
+use fgdb_types::{CanonicalPropertyValue, QueryCx, VId};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, btree_map::Entry};
 
@@ -19,7 +19,7 @@ mod graph;
 type Options = ReadOptions<PropertyKeyId, LabelId>;
 type Cancel = Box<asupersync::error::Error>;
 /// A vertex created in this transaction, borrowed: its labels and properties.
-type CreatedContents<'a> = (&'a [LabelId], &'a [(PropertyKeyId, CanonicalScalar)]);
+type CreatedContents<'a> = (&'a [LabelId], &'a [(PropertyKeyId, CanonicalPropertyValue)]);
 
 /// The native query host observes the existing engine's actual admissions.
 /// Work and source events share one allowance; a record is a surviving
@@ -112,7 +112,7 @@ struct Overlay<'a> {
     created: Option<CreatedContents<'a>>,
     deleted: bool,
     labels: BTreeMap<LabelId, bool>,
-    properties: BTreeMap<PropertyKeyId, Option<&'a CanonicalScalar>>,
+    properties: BTreeMap<PropertyKeyId, Option<&'a CanonicalPropertyValue>>,
 }
 
 impl<'a> Overlay<'a> {
@@ -682,6 +682,7 @@ mod tests {
         DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch,
     };
     use fgdb_delta_types::RelationId;
+    use fgdb_types::CanonicalScalar;
     use fgdb_types::{CanonicalText, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts};
 
     const LABEL: LabelId = LabelId(1);

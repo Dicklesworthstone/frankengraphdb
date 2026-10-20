@@ -200,13 +200,13 @@ fn zero_relationship_creates_one_edge_with_frozen_properties_and_survives_reopen
         assert_eq!(outcome, GraphEdgeMergeOutcome::Created(EId(20)));
         let staged = txn.edge(&db, EId(20)).unwrap().unwrap();
         assert_eq!((staged.entry.src, staged.entry.dst), (VId(2), VId(3)));
-        assert_eq!(staged.props, vec![(WEIGHT, CanonicalScalar::Int(7))]);
+        assert_eq!(staged.props, vec![(WEIGHT, CanonicalScalar::Int(7).into())]);
         assert!(db.edge(EId(20)).unwrap().is_none());
         txn.commit(&mut db, &commit).await.unwrap();
         assert!(db.frontier().unwrap().0 > before.0);
         assert_eq!(
             db.edge(EId(20)).unwrap().unwrap().props,
-            vec![(WEIGHT, CanonicalScalar::Int(7))]
+            vec![(WEIGHT, CanonicalScalar::Int(7).into())]
         );
         db.compact(&commit).await.unwrap();
         drop(db);
@@ -215,7 +215,7 @@ fn zero_relationship_creates_one_edge_with_frozen_properties_and_survives_reopen
             .unwrap();
         assert_eq!(
             db.edge(EId(20)).unwrap().unwrap().props,
-            vec![(WEIGHT, CanonicalScalar::Int(7))]
+            vec![(WEIGHT, CanonicalScalar::Int(7).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

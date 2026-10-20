@@ -338,7 +338,7 @@ fn sealed_compaction_snapshot_preserves_history_pins_and_subsequent_writes() {
         let fourth_seq = db.write(&cx, fourth).await.unwrap();
         assert_eq!(
             db.edge_at(forward, fourth_seq).unwrap().unwrap().props,
-            vec![(property, CanonicalScalar::Int(12))]
+            vec![(property, CanonicalScalar::Int(12).into())]
         );
         let after_write = history(&db);
         assert_eq!(&after_write[..before.len()], before.as_slice());

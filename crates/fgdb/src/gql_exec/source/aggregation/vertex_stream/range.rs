@@ -233,7 +233,11 @@ fn history_matches<C>(
             core::cmp::Ordering::Greater => high = mid,
             core::cmp::Ordering::Equal => {
                 control(VertexScanEvent::Work)?;
-                if bounds.accepts(&properties[mid].1) {
+                if properties[mid]
+                    .1
+                    .as_scalar()
+                    .is_some_and(|value| bounds.accepts(value))
+                {
                     return Ok(true);
                 }
                 break;

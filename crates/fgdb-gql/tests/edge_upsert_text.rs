@@ -190,6 +190,78 @@ fn trailing_set_retains_its_own_clause_and_overwritten_on_actions() {
     assert_ne!(plain.canonical_bytes(), flattened.canonical_bytes());
 }
 
+/// openCypher Merge6 [7], Merge7 [5]: `e += {k: v, ...}` is the branch's
+/// simultaneous `e.k = v, ...` assignments, in every SET position, under the
+/// same action count and duplicate-field law.
+#[test]
+fn a_literal_map_assignment_is_the_same_branch_assignments() {
+    // Each statement gets exactly the arguments it names: an unused argument
+    // refuses UnexpectedArguments.
+    let bind = |text: &str| {
+        let mut args = GqlParameters::new();
+        for (name, value) in [("left", 1), ("right", 2), ("fresh", 200), ("seen", 100)] {
+            if text.contains(&format!("${name}")) {
+                args = args.with_int64(name, value).unwrap();
+            }
+        }
+        PreparedGraphEdgeUpsertText::prepare(text, R, symbols)
+            .and_then(|template| template.bind_parameters(&args))
+            .map(|bound| bound.canonical_bytes())
+            .map_err(|error| format!("{text}: {error:?}"))
+    };
+    let head = "MATCH (a),(b) WHERE a.p=$left AND b.p=$right MERGE (a)-[e:R]->(b)";
+    for (map, spelled) in [
+        (
+            "ON CREATE SET e += {w: $fresh, p: e.w + 1}",
+            "ON CREATE SET e.w = $fresh, e.p = e.w + 1",
+        ),
+        (
+            "ON MATCH SET e.p = 1, e += {w: $seen}",
+            "ON MATCH SET e.p = 1, e.w = $seen",
+        ),
+        (
+            "ON CREATE SET e += {w: 1} ON MATCH SET e += {w: 2} SET e += {p: 3}",
+            "ON CREATE SET e.w = 1 ON MATCH SET e.w = 2 SET e.p = 3",
+        ),
+    ] {
+        assert_eq!(
+            bind(&format!("{head} {map}")).unwrap(),
+            bind(&format!("{head} {spelled}")).unwrap(),
+            "{map}"
+        );
+    }
+    for refused in [
+        "ON CREATE SET e += {}",
+        "ON CREATE SET e += {w: 1, w: 2}",
+        "ON CREATE SET a += {w: 1}",
+        "ON CREATE SET e += {w: a.p}",
+        "ON CREATE SET e += w",
+    ] {
+        assert!(bind(&format!("{head} {refused}")).is_err(), "{refused}");
+    }
+    // A map entry and a spelled assignment of one field still collide.
+    let duplicate = PreparedGraphEdgeUpsertText::prepare(
+        &format!("{head} ON CREATE SET e += {{w: 1}}, e.w = 2"),
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(
+        &GqlParameters::new()
+            .with_int64("left", 1)
+            .unwrap()
+            .with_int64("right", 2)
+            .unwrap(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        duplicate.kind,
+        GraphEdgeUpsertTextErrorKind::UpsertBuild(GraphEdgeUpsertBuildError::DuplicateProperty {
+            branch: GraphEdgeUpsertBranch::Create,
+        })
+    ));
+}
+
 // Evaluate the actual checked bytecode, not an imitation of expression syntax.
 fn evaluate(
     value: &fgdb_gql::GraphEdgeUpsertValue,

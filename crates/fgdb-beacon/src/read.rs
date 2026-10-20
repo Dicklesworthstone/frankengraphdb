@@ -5,7 +5,17 @@
 //! storage dependency. The embedded adapter instantiates them with the native
 //! PropertyKeyId/LabelId types. Coordinate ORDER is semantic and never sorted.
 
-use fgdb_types::{CanonicalScalar, CommitSeq, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, VId};
+
+/// A stored property value that is scalar NULL or absent. A List or Map
+/// (fgdb-k3nub) is present, and an indexed lane refuses it as it refuses any
+/// other value of the wrong kind.
+fn is_null(value: Option<&CanonicalPropertyValue>) -> bool {
+    matches!(
+        value,
+        None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null))
+    )
+}
 
 use crate::{
     BeaconError, ExactHybridHit, ExactHybridQuery, IndexConfig, IndexDocument, IndexSnapshot,
@@ -322,14 +332,14 @@ impl<K: Copy> Projection<K> {
         &self,
         id: VId,
         config: &IndexConfig,
-        mut property: impl FnMut(K) -> Option<&'a CanonicalScalar>,
+        mut property: impl FnMut(K) -> Option<&'a CanonicalPropertyValue>,
         work: &mut dyn WorkControl,
     ) -> Result<IndexDocument, BeaconError> {
         work.charge(1)?;
         let text = if config.text.is_some() {
             match self.text.and_then(&mut property) {
-                None | Some(CanonicalScalar::Null) => None,
-                Some(CanonicalScalar::Text(text)) => {
+                None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
+                Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Text(text))) => {
                     let text = text.as_str();
                     if text.len() > config.max_text_bytes {
                         return Err(BeaconError::ResourceLimit {
@@ -377,7 +387,7 @@ impl<K: Copy> Projection<K> {
             let mut complete = true;
             for &key in &self.vector {
                 work.charge(1)?;
-                if matches!(property(key), None | Some(CanonicalScalar::Null)) {
+                if is_null(property(key)) {
                     complete = false;
                 }
             }
@@ -392,10 +402,12 @@ impl<K: Copy> Projection<K> {
                 for &key in &self.vector {
                     work.charge(1)?;
                     let value = match property(key) {
-                        Some(value) if self.encoding == VectorEncoding::CoordinatesRoundedF32 => {
+                        Some(CanonicalPropertyValue::Scalar(value))
+                            if self.encoding == VectorEncoding::CoordinatesRoundedF32 =>
+                        {
                             numeric::rounded(value, work)?
                         }
-                        Some(CanonicalScalar::Int(value)) => {
+                        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => {
                             let narrowed = *value as f32;
                             if narrowed as i128 != i128::from(*value) {
                                 return Err(BeaconError::InvalidQuery(
@@ -404,7 +416,7 @@ impl<K: Copy> Projection<K> {
                             }
                             narrowed
                         }
-                        Some(CanonicalScalar::Float(value)) => {
+                        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Float(value))) => {
                             let value = value.get();
                             let narrowed = value as f32;
                             if !narrowed.is_finite() || f64::from(narrowed) != value {
@@ -441,14 +453,14 @@ fn packed<'a, K>(
     text: Option<String>,
     key: K,
     dimensions: usize,
-    mut property: impl FnMut(K) -> Option<&'a CanonicalScalar>,
+    mut property: impl FnMut(K) -> Option<&'a CanonicalPropertyValue>,
     work: &mut dyn WorkControl,
 ) -> Result<IndexDocument, BeaconError> {
     work.charge(1)?;
     let vector = match property(key) {
         // An absent (including capability-masked) vector omits the lane.
-        None | Some(CanonicalScalar::Null) => None,
-        Some(CanonicalScalar::Bytes(bytes)) => {
+        None | Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) => None,
+        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Bytes(bytes))) => {
             let bytes = bytes.as_slice();
             if dimensions.checked_mul(4) != Some(bytes.len()) {
                 return Err(BeaconError::InvalidQuery(

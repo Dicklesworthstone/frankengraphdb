@@ -8,7 +8,10 @@ use fgdb_gql::{
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
     PreparedGraphMutationText,
 };
-use fgdb_types::{CanonicalDate, CanonicalScalar, CanonicalScalarKind, EId, VId};
+use fgdb_types::{
+    CanonicalDate, CanonicalList, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind,
+    EId, VId,
+};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -16,7 +19,7 @@ const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const COPY: LabelId = LabelId(9);
-type Props = BTreeMap<(VId, PropertyKeyId), CanonicalScalar>;
+type Props = BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>;
 type Triple = (VId, RelationId, VId);
 type ResultOf = Result<GraphInsertBatch, GqlQueryError<GraphInsertError<(), ()>, ()>>;
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -115,8 +118,8 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
         (VId(2), R, VId(3)),
     ];
     let props = Props::from([
-        ((VId(1), P), CanonicalScalar::Int(10)),
-        ((VId(2), P), CanonicalScalar::Int(20)),
+        ((VId(1), P), CanonicalScalar::Int(10).into()),
+        ((VId(2), P), CanonicalScalar::Int(20).into()),
     ]);
     let result = run(&query, &[VId(1), VId(2), VId(3)], &edges, &props).unwrap();
     assert_eq!(
@@ -134,8 +137,8 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
             vertex,
             labels: vec![COPY],
             properties: vec![
-                (P, CanonicalScalar::Int(value)),
-                (Q, CanonicalScalar::Int(value + 1)),
+                (P, CanonicalScalar::Int(value).into()),
+                (Q, CanonicalScalar::Int(value + 1).into()),
             ],
         });
         expected.push(GraphInsertIntent::Edge {
@@ -143,7 +146,7 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
             relation: R,
             source,
             destination: vertex,
-            properties: vec![(Q, CanonicalScalar::Int(1))],
+            properties: vec![(Q, CanonicalScalar::Int(1).into())],
         });
         expected.push(GraphInsertIntent::Edge {
             edge: EId(1_001 + row as u128 * 16),
@@ -193,7 +196,7 @@ fn constants_preserve_walk_optional_and_edge_only_occurrences() {
         let y = VId(x.0 + 1);
         assert!(
             matches!(&intents[1], GraphInsertIntent::Vertex { properties, .. }
-            if properties == &[(P, CanonicalScalar::Null)])
+            if properties == &[(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))])
         );
         for (edge, source, destination) in [(2, x, y), (3, y, x), (4, x, x)] {
             assert!(
@@ -367,7 +370,10 @@ fn scalar_payloads_and_original_utf8_offsets_survive_binding_without_interpolati
     let batch = run(&plan, &[VId(1)], &[], &Props::new()).unwrap();
     assert!(
         matches!(&batch.intents()[0], GraphInsertIntent::Vertex { properties, .. }
-        if properties == &[(P, CanonicalScalar::ucs_basic_text(payload).unwrap()), (Q, CanonicalScalar::Int(-7))])
+        if properties == &[
+            (P, CanonicalPropertyValue::Scalar(CanonicalScalar::ucs_basic_text(payload).unwrap())),
+            (Q, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(-7))),
+        ])
     );
     assert!(!format!("{template:?} {plan:?} {batch:?}").contains(payload));
     assert!(matches!(
@@ -400,7 +406,7 @@ fn missing_optional_endpoints_are_not_silently_turned_into_partial_creations() {
         &query,
         &[VId(1)],
         &[],
-        &Props::from([((VId(1), P), CanonicalScalar::Int(2))]),
+        &Props::from([((VId(1), P), CanonicalScalar::Int(2).into())]),
     )
     .unwrap();
     assert!(
@@ -475,9 +481,21 @@ fn inline_chains_incoming_arrows_cycles_and_anonymous_nodes_bind_exact_endpoints
     let result = result.unwrap();
     let mut expected = Vec::new();
     for (index, labels, properties) in [
-        (0, vec![COPY], vec![(P, CanonicalScalar::Int(1))]),
-        (1, vec![], vec![(P, CanonicalScalar::Int(2))]),
-        (2, vec![], vec![(P, CanonicalScalar::Int(3))]),
+        (
+            0,
+            vec![COPY],
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(1)))],
+        ),
+        (
+            1,
+            vec![],
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(2)))],
+        ),
+        (
+            2,
+            vec![],
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(3)))],
+        ),
         (3, vec![], vec![]),
         (4, vec![COPY], vec![]),
     ] {
@@ -488,7 +506,12 @@ fn inline_chains_incoming_arrows_cycles_and_anonymous_nodes_bind_exact_endpoints
         });
     }
     for (index, source, destination, properties) in [
-        (0, 100, 101, vec![(P, CanonicalScalar::Int(10))]),
+        (
+            0,
+            100,
+            101,
+            vec![(P, CanonicalPropertyValue::from(CanonicalScalar::Int(10)))],
+        ),
         (1, 102, 101, vec![]),
         (2, 101, 100, vec![]),
         (3, 100, 103, vec![]),
@@ -553,12 +576,12 @@ fn consecutive_create_clauses_are_one_creation_over_shared_bindings() {
         GraphInsertIntent::Vertex {
             vertex: VId(100),
             labels: vec![COPY],
-            properties: vec![(P, CanonicalScalar::Int(1))],
+            properties: vec![(P, CanonicalScalar::Int(1).into())],
         },
         GraphInsertIntent::Vertex {
             vertex: VId(101),
             labels: vec![],
-            properties: vec![(P, CanonicalScalar::Int(2))],
+            properties: vec![(P, CanonicalScalar::Int(2).into())],
         },
     ];
     for (index, source, destination) in [(0, 100, 101), (1, 101, 100)] {
@@ -626,7 +649,10 @@ fn standalone_parameters_keep_exact_kinds_offsets_occurrences_and_lazy_case() {
     let batch = result.unwrap();
     assert!(
         matches!(&batch.intents()[0], GraphInsertIntent::Vertex { properties, .. }
-        if properties == &[(P, CanonicalScalar::ucs_basic_text(payload).unwrap()), (Q, CanonicalScalar::Int(0))])
+        if properties == &[
+            (P, CanonicalPropertyValue::Scalar(CanonicalScalar::ucs_basic_text(payload).unwrap())),
+            (Q, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0))),
+        ])
     );
     assert_eq!(calls.get(), 4);
     assert_eq!(
@@ -784,7 +810,7 @@ fn unwind_creation_is_the_native_relation_with_ordered_duplicate_occurrences() {
                 GraphInsertIntent::Vertex {
                     vertex: VId(100 + row as u128 * 16),
                     labels: vec![COPY],
-                    properties: vec![(P, CanonicalScalar::Int(value))],
+                    properties: vec![(P, CanonicalScalar::Int(value).into())],
                 }
             })
             .collect::<Vec<_>>()
@@ -822,24 +848,24 @@ fn multiple_unwinds_feed_computed_fields_and_row_local_creation_chains() {
                 vertex: a,
                 labels: vec![COPY],
                 properties: vec![
-                    (P, CanonicalScalar::Int(value)),
+                    (P, CanonicalScalar::Int(value).into()),
                     (
                         Q,
-                        CanonicalScalar::Int(if value == 1 { 9 } else { value * 2 }),
+                        CanonicalScalar::Int(if value == 1 { 9 } else { value * 2 }).into(),
                     ),
                 ],
             },
             GraphInsertIntent::Vertex {
                 vertex: b,
                 labels: vec![],
-                properties: vec![(P, CanonicalScalar::Int(value - 1))],
+                properties: vec![(P, CanonicalScalar::Int(value - 1).into())],
             },
             GraphInsertIntent::Edge {
                 edge: EId(1_000 + row as u128 * 16),
                 relation: R,
                 source: a,
                 destination: b,
-                properties: vec![(P, CanonicalScalar::Int(value + 10))],
+                properties: vec![(P, CanonicalScalar::Int(value + 10).into())],
             },
             GraphInsertIntent::Edge {
                 edge: EId(1_001 + row as u128 * 16),
@@ -893,12 +919,18 @@ fn unwind_parameters_bind_once_and_empty_sources_never_create_a_unit() {
             GraphInsertIntent::Vertex {
                 vertex: VId(100),
                 labels: vec![COPY],
-                properties: vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(9))]
+                properties: vec![
+                    (P, CanonicalScalar::Int(7).into()),
+                    (Q, CanonicalScalar::Int(9).into())
+                ]
             },
             GraphInsertIntent::Vertex {
                 vertex: VId(116),
                 labels: vec![COPY],
-                properties: vec![(P, CanonicalScalar::Null), (Q, CanonicalScalar::Null)]
+                properties: vec![
+                    (P, CanonicalScalar::Null.into()),
+                    (Q, CanonicalScalar::Null.into())
+                ]
             },
         ]
     );
@@ -947,10 +979,11 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
         "UNWIND [1] AS x CREATE (x:Copy)",
         "UNWIND [1] AS x CREATE (:Copy {p:y})",
         // `x.name` is a map entry since fgdb-2jw3z slice 3, checked per row
-        // at execution (crates/fgdb/tests/map_values.rs); a map or list
-        // literal is never a property value.
+        // at execution (crates/fgdb/tests/map_values.rs); a map literal is
+        // never a property value. A list literal is a stored List since
+        // fgdb-k3nub (a_create_property_may_be_a_temporal_or_composite_value);
+        // a list PARAMETER still binds no stored List.
         "UNWIND [1] AS x CREATE (:Copy {p:{name: x}})",
-        "UNWIND [1] AS x CREATE (:Copy {p:[x]})",
         "UNWIND $items AS x CREATE (:Copy {p:$items})",
         // `UNWIND ... MATCH ... CREATE` is supported since 70ebdf31; its
         // positive laws are in graph_insert_query_text.rs.
@@ -986,9 +1019,11 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
 
 #[test]
 fn every_unwind_property_is_validated_before_the_first_identity() {
+    // A list row is a stored List since fgdb-k3nub; a map row never is.
     for text in [
         "UNWIND [2,0] AS x CREATE (:Copy {p:10/x})",
-        "UNWIND [1,[2]] AS x CREATE (:Copy {p:x})",
+        "UNWIND [1,{a: 2}] AS x CREATE (:Copy {p:x})",
+        "UNWIND [1,[{a: 2}]] AS x CREATE (:Copy {p:x})",
     ] {
         let query = prepare(text);
         let result: ResultOf = query.execute_governed(
@@ -1004,7 +1039,9 @@ fn every_unwind_property_is_validated_before_the_first_identity() {
 /// A CREATE property may be any scalar the value language computes: a
 /// temporal constructor (fgdb-txbg9), or a composite operand such as size()
 /// of a list (fgdb-o5o9t), which the scalar compiler reads only through a
-/// let slot. A list-valued property still refuses where it starts.
+/// let slot. Since fgdb-k3nub a list-valued property (a literal, a
+/// comprehension, keys()) is a stored List; a map literal still refuses
+/// where it starts.
 #[test]
 fn a_create_property_may_be_a_temporal_or_composite_value() {
     let query =
@@ -1022,12 +1059,44 @@ fn a_create_property_may_be_a_temporal_or_composite_value() {
             vertex: VId(100),
             labels: vec![COPY],
             properties: vec![
-                (P, CanonicalScalar::Date(date)),
-                (Q, CanonicalScalar::Int(3)),
+                (P, CanonicalScalar::Date(date).into()),
+                (Q, CanonicalScalar::Int(3).into()),
             ],
         }]
     );
-    let text = "CREATE (:Copy {p: [x IN [1, 2] | x]})";
+    let int = |value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value));
+    let list = |values| CanonicalPropertyValue::List(CanonicalList::try_new(values).unwrap());
+    for (text, expected) in [
+        (
+            "CREATE (:Copy {p: [x IN [1, 2] | x]})",
+            list(vec![int(1), int(2)]),
+        ),
+        (
+            "CREATE (:Copy {p: [[1], []]})",
+            list(vec![list(vec![int(1)]), list(vec![])]),
+        ),
+        (
+            "CREATE (:Copy {p: range(1, 3)})",
+            list(vec![int(1), int(2), int(3)]),
+        ),
+    ] {
+        let result: ResultOf = prepare(text).execute_governed(
+            policy(),
+            |_, _| Err(GqlQueryError::Source(())),
+            identity,
+            || Ok(()),
+        );
+        assert_eq!(
+            result.unwrap().intents(),
+            vec![GraphInsertIntent::Vertex {
+                vertex: VId(100),
+                labels: vec![COPY],
+                properties: vec![(P, expected)],
+            }],
+            "{text}"
+        );
+    }
+    let text = "CREATE (:Copy {p: {a: 1}})";
     let error = PreparedGraphInsertText::prepare(text, R, symbols).unwrap_err();
     assert_eq!(error.offset, 18, "{text}: {error:?}");
 }

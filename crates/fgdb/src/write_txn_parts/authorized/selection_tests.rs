@@ -85,7 +85,10 @@ fn vertex_and_edge_field_charges_ignore_hidden_keys_but_physical_lookups_do_not(
                         &|_| "source",
                     )
                     .unwrap();
-                assert_eq!(raw_value.property, Some(&CanonicalScalar::Int(7)));
+                assert_eq!(
+                    raw_value.property.and_then(|value| value.as_scalar()),
+                    Some(&CanonicalScalar::Int(7))
+                );
                 physical.push(raw);
                 let mut trace = Vec::new();
                 let polls = Cell::new(0);
@@ -106,7 +109,10 @@ fn vertex_and_edge_field_charges_ignore_hidden_keys_but_physical_lookups_do_not(
                     |_| "source",
                 )
                 .unwrap();
-                assert_eq!(value, CanonicalScalar::Int(7));
+                assert_eq!(
+                    value,
+                    fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(7))
+                );
                 assert_eq!(polls.get(), raw, "every native traversal event still polls");
                 assert!(
                     txn.point_reads
@@ -164,7 +170,10 @@ fn masked_fields_never_lookup_or_witness_and_visible_payload_reserves_before_cop
                 |_| "source",
             )
             .unwrap();
-            assert_eq!(value, CanonicalScalar::Null);
+            assert_eq!(
+                value,
+                fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Null)
+            );
             assert_eq!(trace, [GlaExecutionEvent::ScratchEntry]);
             assert!(txn.point_reads.borrow().is_empty());
             txn.abort();
@@ -195,7 +204,7 @@ fn masked_fields_never_lookup_or_witness_and_visible_payload_reserves_before_cop
                     assert_eq!(txn.point_reads.borrow().1, Some(element));
                 }
             } else {
-                assert_eq!(result.unwrap(), payload);
+                assert_eq!(result.unwrap(), payload.clone().into());
                 assert!(
                     txn.point_reads
                         .borrow()
@@ -244,7 +253,10 @@ fn physical_interruption_retains_refusal_witness_and_native_overlay_still_wins()
             |_| "source",
         )
         .unwrap();
-        assert_eq!(value, CanonicalScalar::Int(19));
+        assert_eq!(
+            value,
+            fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(19))
+        );
         assert_eq!(
             txn.point_reads.borrow().1,
             Some(element),
@@ -263,7 +275,10 @@ fn physical_interruption_retains_refusal_witness_and_native_overlay_still_wins()
             |_| "source",
         )
         .unwrap();
-        assert_eq!(value, CanonicalScalar::Null);
+        assert_eq!(
+            value,
+            fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Null)
+        );
         assert!(
             txn.point_reads
                 .borrow()

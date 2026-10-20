@@ -29,7 +29,14 @@ fn orient(row: &Row, direction: usize) -> Vec<(VId, VId)> {
     }
 }
 fn payload(row: &Row) -> CanonicalScalar {
-    row.4.iter().find(|(key, _)| *key == P).unwrap().1.clone()
+    row.4
+        .iter()
+        .find(|(key, _)| *key == P)
+        .unwrap()
+        .1
+        .as_scalar()
+        .expect("scalar property")
+        .clone()
 }
 fn atom(edge: &str, end: &str, direction: usize, any: bool) -> String {
     let relation = if any { "" } else { ":R" };

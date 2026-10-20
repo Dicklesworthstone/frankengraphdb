@@ -1,6 +1,6 @@
 use super::*;
 use crate::{GraphCheapestPathError, GraphCostPath, GraphPathCostError};
-use fgdb_types::{CanonicalScalar, EId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const R: RelationId = RelationId(7);
@@ -45,6 +45,10 @@ fn run(
     edges: &[Edge],
     weights: &BTreeMap<EId, CanonicalScalar>,
 ) -> Result<Vec<GraphCostPath>, GraphCheapestPathError<()>> {
+    let weights: BTreeMap<EId, CanonicalPropertyValue> = weights
+        .iter()
+        .map(|(eid, weight)| (*eid, weight.clone().into()))
+        .collect();
     match q.ranked_count() {
         Some(count) => q.query().execute_k_with_control(
             count,

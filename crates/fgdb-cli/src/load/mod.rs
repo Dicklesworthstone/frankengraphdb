@@ -961,14 +961,17 @@ fn parse_row(
     if key.is_empty() {
         return Err("caller key must not be empty".into());
     }
-    let mut props = Vec::new();
+    let mut props: Vec<(PropertyKeyId, fgdb_types::CanonicalPropertyValue)> = Vec::new();
     if let Some(values) = fields.get("props") {
         for (name, value) in object(values)? {
             let id = options
                 .properties
                 .get(name)
                 .ok_or_else(|| format!("UnknownBinding: property {name}"))?;
-            props.push((PropertyKeyId(u64::from(*id)), storable(value, resolver)?));
+            props.push((
+                PropertyKeyId(u64::from(*id)),
+                storable(value, resolver)?.into(),
+            ));
         }
     }
     props.sort_by_key(|(id, _)| *id);

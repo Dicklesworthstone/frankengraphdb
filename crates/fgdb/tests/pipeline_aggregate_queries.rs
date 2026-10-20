@@ -11,8 +11,8 @@ use fgdb_gql::{
     PreparedGraphAggregate, PreparedGraphPipelineAggregateText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
-    PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 use std::collections::BTreeMap;
 
@@ -78,7 +78,9 @@ fn oracle(vertices: &[VertexRow], take: usize) -> Vec<Summary> {
         .iter()
         .map(|row| {
             let value = row.props.iter().find_map(|(key, value)| match value {
-                CanonicalScalar::Int(value) if *key == P => Some(*value),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) if *key == P => {
+                    Some(*value)
+                }
                 _ => None,
             });
             (row.vid, value)
@@ -504,7 +506,7 @@ fn late_pipeline_failure_preserves_an_outer_write_that_can_still_commit() {
         assert!(db.vertex(VId(99)).unwrap().is_some());
         assert_eq!(
             db.vertex(VId(2)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(5))]
+            vec![(P, CanonicalScalar::Int(5).into())]
         );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

@@ -628,7 +628,7 @@ fn expression<'g, E, C>(
                     .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
                     control(GlaExecutionEvent::ScratchEntry)?;
                     match value {
-                        Some(value) => {
+                        Some(fgdb_types::CanonicalPropertyValue::Scalar(value)) => {
                             for _ in 0..ValueRef::Scalar(&value).payload_units() {
                                 control(GlaExecutionEvent::ScratchEntry)?;
                             }
@@ -638,6 +638,11 @@ fn expression<'g, E, C>(
                                 value,
                             )))
                         }
+                        // A stored List or Map (fgdb-k3nub) is admitted node by
+                        // node and returned as itself, never as NULL.
+                        Some(stored) => OutputValue::Owned(GraphAggregateValue::Value(
+                            GraphValue::admit_property_value(&stored, control)?,
+                        )),
                         None => OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(
                             CanonicalScalar::Null,
                         ))),
@@ -1039,6 +1044,9 @@ impl PreparedGraphAggregate {
         read: &mut crate::set_ops::ElementRead<'_, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<Vec<GraphAggregateRow>, QueryError<E, C>> {
+        let mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>> =
+            control;
+        let control = &mut control;
         let mut rows = Vec::new();
         // Complete every surviving group's expressions before selection, even
         // for an impossible page. No result-row charge or hidden payload copy.

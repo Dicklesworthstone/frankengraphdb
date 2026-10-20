@@ -17,7 +17,10 @@ use fgdb_gql::{
 };
 use fgdb_types::CanonicalScalarKind;
 use fgdb_types::CanonicalText;
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId,
+    PurposeContexts, VId,
+};
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -127,21 +130,39 @@ fn oracle(db: &Database<MemVfs>, at: CommitSeq, kind: Kind) -> Vec<VId> {
         .into_iter()
         .filter(|row| match kind {
             Kind::Int => row.props.iter().any(|(key, value)| {
-                *key == P && matches!(value, CanonicalScalar::Int(actual) if *actual == BOUND)
+                *key == P
+                    && matches!(
+                        value,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(actual))
+                            if *actual == BOUND
+                    )
             }),
             Kind::Labeled => {
                 row.labels.contains(&L)
                     && row.props.iter().any(|(key, value)| {
                         *key == P
-                            && matches!(value, CanonicalScalar::Int(actual) if *actual == BOUND)
+                            && matches!(
+                                value,
+                                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(actual))
+                                    if *actual == BOUND
+                            )
                     })
             }
             Kind::Text => row.props.iter().any(|(key, value)| {
                 *key == Q
-                    && matches!(value, CanonicalScalar::Text(actual) if actual.as_str() == "hit")
+                    && matches!(
+                        value,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Text(actual))
+                            if actual.as_str() == "hit"
+                    )
             }),
             Kind::Range => row.props.iter().any(|(key, value)| {
-                *key == P && matches!(value, CanonicalScalar::Int(actual) if *actual > BOUND)
+                *key == P
+                    && matches!(
+                        value,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(actual))
+                            if *actual > BOUND
+                    )
             }),
             Kind::Unbound => true,
         })

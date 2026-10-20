@@ -95,7 +95,7 @@ async fn assert_values(cx: &Cx, db: &Served, first: i64, second: i64) {
                 .unwrap()
                 .unwrap()
                 .props
-                .contains(&(P, CanonicalScalar::Int(expected)))
+                .contains(&(P, CanonicalScalar::Int(expected).into()))
         );
     }
 }

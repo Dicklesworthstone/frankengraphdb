@@ -4,7 +4,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, GraphAggregateRow,
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregate, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 type Edge = (VId, RelationId, VId);
@@ -245,7 +245,7 @@ fn a_billion_paths_keep_their_returned_endpoint_without_visiting_a_billion_bindi
             [],
             edges.iter().copied(),
             |_, _| Err::<bool, _>("topology-only path read a vertex"),
-            |_, _| Err::<Option<&CanonicalScalar>, _>("topology-only path read a property"),
+            |_, _| Err::<Option<&CanonicalPropertyValue>, _>("topology-only path read a property"),
             GqlQueryPolicy::new(65, 8, 65_536, 16_384),
             || Ok::<_, ()>(()),
         )
@@ -429,7 +429,7 @@ fn property_bearing_connectors_keep_the_uncompressed_fallible_read_contract() {
         (VId(1), S, VId(2)),
         (VId(2), S, VId(3)),
     ];
-    let scalar = CanonicalScalar::Int(7);
+    let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let mut reads = 0;
     let result = query.execute_governed(
         4,
@@ -542,7 +542,7 @@ fn unread_relationship_names_leave_the_unnamed_definition() {
             [VId(1), VId(2), VId(3)],
             edges.iter().copied(),
             |_, _| Ok::<bool, &str>(true),
-            |_, _| Ok::<Option<&CanonicalScalar>, &str>(None),
+            |_, _| Ok::<Option<&CanonicalPropertyValue>, &str>(None),
             wide(),
             || Ok::<_, ()>(()),
         )

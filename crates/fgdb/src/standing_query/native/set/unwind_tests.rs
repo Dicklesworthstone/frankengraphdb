@@ -7,7 +7,9 @@ use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
     GraphSetProjection, GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 
 const P: PropertyKeyId = PropertyKeyId(1);
 fn policy() -> GqlQueryPolicy {
@@ -58,13 +60,13 @@ fn expected<V: Vfs + Clone>(db: &Database<V>, distinct: bool) -> (CommitSeq, Que
             .iter()
             .find(|(k, _)| *k == P)
             .map(|(_, v)| v.clone())
-            .unwrap_or(CanonicalScalar::Null);
+            .unwrap_or(CanonicalPropertyValue::Scalar(CanonicalScalar::Null));
         match value {
-            CanonicalScalar::Int(n) => {
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)) => {
                 values.push(GraphValue::Scalar(CanonicalScalar::Int(n)));
                 values.push(GraphValue::Scalar(CanonicalScalar::Int(n + 1)));
             }
-            CanonicalScalar::Null => {
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Null) => {
                 values.push(GraphValue::Scalar(CanonicalScalar::Null));
                 values.push(GraphValue::Scalar(CanonicalScalar::Null));
             }

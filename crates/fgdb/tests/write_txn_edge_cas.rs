@@ -87,7 +87,7 @@ fn staged_matching_edge_cas_is_private_and_abort_preserves_old_value() {
                     .expect("overlay edge")
                     .expect("edge remains live")
                     .props,
-                vec![(PROPERTY, CanonicalScalar::Int(11))]
+                vec![(PROPERTY, CanonicalScalar::Int(11).into())]
             );
             assert_eq!(
                 database
@@ -95,7 +95,7 @@ fn staged_matching_edge_cas_is_private_and_abort_preserves_old_value() {
                     .expect("base edge")
                     .expect("edge remains live")
                     .props,
-                vec![(PROPERTY, CanonicalScalar::Int(OLD))],
+                vec![(PROPERTY, CanonicalScalar::Int(OLD).into())],
                 "base view retains the old value"
             );
 
@@ -116,7 +116,7 @@ fn staged_matching_edge_cas_is_private_and_abort_preserves_old_value() {
                 .expect("reopen edge")
                 .expect("edge remains live")
                 .props,
-            vec![(PROPERTY, CanonicalScalar::Int(OLD))]
+            vec![(PROPERTY, CanonicalScalar::Int(OLD).into())]
         );
     });
 }
@@ -164,7 +164,7 @@ fn matching_edge_cas_commits_once_and_mismatch_changes_no_edge_value() {
                     .expect("mismatch overlay edge")
                     .expect("edge remains live")
                     .props,
-                vec![(PROPERTY, CanonicalScalar::Int(22))],
+                vec![(PROPERTY, CanonicalScalar::Int(22).into())],
                 "mismatching CAS leaves the overlay value unchanged"
             );
             assert_eq!(
@@ -173,7 +173,7 @@ fn matching_edge_cas_commits_once_and_mismatch_changes_no_edge_value() {
                     .expect("base edge")
                     .expect("edge remains live")
                     .props,
-                vec![(PROPERTY, CanonicalScalar::Int(22))],
+                vec![(PROPERTY, CanonicalScalar::Int(22).into())],
                 "mismatching CAS leaves durable value unchanged"
             );
             mismatch.abort();
@@ -193,7 +193,7 @@ fn matching_edge_cas_commits_once_and_mismatch_changes_no_edge_value() {
                 .expect("reopen edge")
                 .expect("edge remains live")
                 .props,
-            vec![(PROPERTY, CanonicalScalar::Int(22))]
+            vec![(PROPERTY, CanonicalScalar::Int(22).into())]
         );
         assert!(
             reopened
@@ -220,7 +220,7 @@ fn concurrent_matching_cas_of_observed_edge_aborts_reader_with_read_01() {
                     .expect("transactional edge read succeeds")
                     .expect("observed edge exists")
                     .props,
-                vec![(PROPERTY, CanonicalScalar::Int(OLD))]
+                vec![(PROPERTY, CanonicalScalar::Int(OLD).into())]
             );
             let mut disjoint = WriteBatch::new(R);
             disjoint.create_vertex(VId(3), vec![], vec![]);
@@ -257,7 +257,7 @@ fn concurrent_matching_cas_of_observed_edge_aborts_reader_with_read_01() {
                 .expect("reopen edge")
                 .expect("edge remains live")
                 .props,
-            vec![(PROPERTY, CanonicalScalar::Int(33))]
+            vec![(PROPERTY, CanonicalScalar::Int(33).into())]
         );
         assert!(
             reopened.vertex(VId(3)).expect("reopen vertex").is_none(),

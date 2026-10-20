@@ -3,7 +3,7 @@ use crate::algebra::{GlaPlan, GraphValue, GraphValueRow, VertexPredicate};
 use crate::stream::VertexScanPlan;
 use crate::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitSeq};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ops::Bound::{Excluded, Unbounded};
@@ -22,7 +22,7 @@ const MODES: [GraphWalkSearch; 6] = [
 struct Source {
     edges: BTreeMap<EId, (VId, VId)>,
     ids: BTreeSet<VId>,
-    properties: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalScalar)>>,
+    properties: BTreeMap<VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>>,
     outgoing: BTreeMap<VId, BTreeSet<EId>>,
     incoming: BTreeMap<VId, BTreeSet<EId>>,
     after: Option<EId>,
@@ -53,11 +53,11 @@ impl Source {
             s.incoming.entry(b).or_default().insert(eid);
         }
         s.properties
-            .insert(VId(0), vec![(P, CanonicalScalar::Int(1))]);
+            .insert(VId(0), vec![(P, CanonicalScalar::Int(1).into())]);
         s.properties
-            .insert(VId(1), vec![(P, CanonicalScalar::Null)]);
+            .insert(VId(1), vec![(P, CanonicalScalar::Null.into())]);
         s.properties
-            .insert(VId(2), vec![(P, CanonicalScalar::Int(7))]);
+            .insert(VId(2), vec![(P, CanonicalScalar::Int(7).into())]);
         s
     }
     fn small(mask: usize) -> Self {

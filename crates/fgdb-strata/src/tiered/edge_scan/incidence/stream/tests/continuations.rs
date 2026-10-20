@@ -64,7 +64,7 @@ fn retained_join_requests_preserve_restarts_seeks_and_literal_history() {
                                 assert_eq!(
                                     candidate.row.as_ref().map(|row| row.edge().props.clone()),
                                     visible(candidate.eid, cut)
-                                        .map(|value| vec![(P, CanonicalScalar::Int(value))])
+                                        .map(|value| vec![(P, CanonicalScalar::Int(value).into())])
                                 );
                                 if let Some(row) = candidate.row {
                                     assert_eq!(row.source_vertex().vid, row.edge().entry.src);

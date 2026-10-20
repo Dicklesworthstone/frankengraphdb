@@ -570,7 +570,7 @@ fn property<'a, S: EdgeScanSource, C>(
     vid: VId,
     key: PropertyKeyId,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
-) -> ScanResult<Option<&'a CanonicalScalar>, S::Error, C> {
+) -> ScanResult<Option<&'a fgdb_types::CanonicalPropertyValue>, S::Error, C> {
     flatten(source.vertex_property(vid, key, control))?
         .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))
 }
@@ -579,7 +579,7 @@ fn edge_property<'a, S: EdgeScanSource, C>(
     eid: EId,
     key: PropertyKeyId,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
-) -> ScanResult<Option<&'a CanonicalScalar>, S::Error, C> {
+) -> ScanResult<Option<&'a fgdb_types::CanonicalPropertyValue>, S::Error, C> {
     flatten(source.edge_property(eid, key, control))?
         .ok_or(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable))
 }
@@ -738,13 +738,19 @@ fn accepts<S: EdgeScanSource, C>(
     }
 }
 #[allow(clippy::too_many_arguments)]
-fn collect_element_properties<'a, Row: GlaOutput, E>(
+fn collect_element_properties<'a, Row: GlaOutput, E: From<crate::GraphIntegerError>>(
     operator: &GlaOperator,
     bindings: &[Option<VId>],
     paths: &[Option<GraphPath>],
     projected: &mut ProjectedRows<Row>,
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(
+        VId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
+    edge_property: &mut impl FnMut(
+        EId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a fgdb_types::CanonicalPropertyValue>, E>,
     vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
     edge_type: &mut impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,

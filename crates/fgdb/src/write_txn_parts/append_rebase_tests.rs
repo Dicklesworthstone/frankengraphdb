@@ -164,7 +164,7 @@ fn dependent_multi_relation_creations_preserve_births_and_exact_row_admission() 
             }
             assert_eq!(
                 database.vertex(VId(1)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(100))]
+                vec![(P, CanonicalScalar::Int(100).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         }

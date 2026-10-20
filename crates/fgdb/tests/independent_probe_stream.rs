@@ -102,7 +102,7 @@ fn property(db: &Database<MemVfs>, cut: CommitSeq, id: VId) -> CanonicalScalar {
         .props
         .iter()
         .find(|(k, _)| *k == P)
-        .map(|(_, v)| v.clone())
+        .map(|(_, v)| v.as_scalar().expect("scalar fixture").clone())
         .unwrap_or(CanonicalScalar::Null)
 }
 // Enumerate complete inner relations before reducing to existence. Local

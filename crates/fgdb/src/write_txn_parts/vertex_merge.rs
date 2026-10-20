@@ -361,7 +361,7 @@ fn stage_vertex_merge_creation<V: Vfs + Clone, A>(
         else {
             unreachable!("validated vertex MERGE contains no edge creation")
         };
-        batch.create_vertex(vertex, labels, properties);
+        batch.create_vertex_values(vertex, labels, properties);
     }
     cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
     let staged = if transaction.staged.iter().all(|batch| batch.relation == relation) {

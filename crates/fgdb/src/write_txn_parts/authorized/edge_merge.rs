@@ -8,14 +8,14 @@ use super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxn,
     WriteTxnError, redacted, selection, stage,
 };
-use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{
     GqlQueryError, GqlQueryExecution, GraphEdgeMergeError, GraphEdgeMergeOutcome,
     GraphEdgeMergePolicy, GraphEdgeMergeQueryError, GraphEdgeMergeStats, PreparedGraphEdgeMerge,
     PreparedGraphEdgeMergeQuery,
 };
-use fgdb_types::{CanonicalScalar, CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
+use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
@@ -251,7 +251,7 @@ impl<V: Vfs + Clone> Database<V> {
                             // Mask BEFORE lookup: a hidden field is NULL with
                             // no source read, admission or witness.
                             if !verified.predicates().allows_property(key) {
-                                return Ok(GraphValue::Scalar(CanonicalScalar::Null));
+                                return Ok(None);
                             }
                             transaction.merge_return_property(self, element, key)
                         },

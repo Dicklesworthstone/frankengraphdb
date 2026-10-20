@@ -112,6 +112,8 @@ impl PreparedGraphAggregate {
         read: &mut crate::set_ops::ElementRead<'_, E>,
         govern: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<GraphAggregateRow, QueryError<E, C>> {
+        let mut govern: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>> = govern;
+        let govern = &mut govern;
         let columns = |column: usize| {
             if column < row.keys.len() {
                 Ok(Cell::Value(value_ref(&row.keys[column])))

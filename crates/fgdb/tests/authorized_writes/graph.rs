@@ -49,7 +49,7 @@ fn mixed_graph_batch_updates_and_deletes_edges_then_reopens() {
         assert_eq!(txn.outstanding_obligations(), baseline);
         assert_eq!(
             db.edge_at(EId(10), seq).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7))]
+            vec![(P, CanonicalScalar::Int(7).into())]
         );
         assert!(db.edge_at(EId(12), seq).unwrap().is_none());
         assert_eq!(db.neighbours(VId(1), R).unwrap(), vec![VId(1), VId(2)]);
@@ -58,7 +58,7 @@ fn mixed_graph_batch_updates_and_deletes_edges_then_reopens() {
         assert_eq!(reopened.frontier().unwrap(), seq);
         assert_eq!(
             reopened.edge_at(EId(10), seq).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7))]
+            vec![(P, CanonicalScalar::Int(7).into())]
         );
         assert!(reopened.edge_at(EId(12), seq).unwrap().is_none());
         assert_eq!(
@@ -232,7 +232,7 @@ fn hidden_endpoint_blocks_edge_update_and_cascade_and_create_cannot_probe_it() {
             assert!(db.edge_at(EId(20), frontier).unwrap().is_none());
             assert_eq!(
                 db.edge_at(EId(10), frontier).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(1))]
+                vec![(P, CanonicalScalar::Int(1).into())]
             );
         }
     });
@@ -282,7 +282,10 @@ fn an_ensure_refuses_before_it_could_capture_an_unrelated_hidden_edge() {
         assert_eq!(untouched.entry.src, VId(3));
         assert_eq!(untouched.entry.dst, VId(4));
         assert_eq!(untouched.entry.relation, RelationId(2));
-        assert_eq!(untouched.props, vec![(SECRET, CanonicalScalar::Int(99))]);
+        assert_eq!(
+            untouched.props,
+            vec![(SECRET, CanonicalScalar::Int(99).into())]
+        );
     });
 }
 
@@ -315,8 +318,8 @@ fn whole_object_deletion_cannot_erase_untouched_hidden_properties() {
         assert_eq!(
             db.edge_at(EId(10), frontier).unwrap().unwrap().props,
             vec![
-                (P, CanonicalScalar::Int(7)),
-                (SECRET, CanonicalScalar::Int(88))
+                (P, CanonicalScalar::Int(7).into()),
+                (SECRET, CanonicalScalar::Int(88).into())
             ]
         );
         let baseline = txn.outstanding_obligations();
@@ -806,7 +809,10 @@ fn full_property_authority_still_deletes_scoped_edges_and_reopens() {
         }
         let endpoint = reopened.vertex(VId(1)).unwrap().unwrap();
         assert_eq!(endpoint.labels, vec![L, HIDDEN]);
-        assert_eq!(endpoint.props, vec![(SECRET, CanonicalScalar::Int(99))]);
+        assert_eq!(
+            endpoint.props,
+            vec![(SECRET, CanonicalScalar::Int(99).into())]
+        );
         assert!(reopened.vertex(VId(2)).unwrap().is_some());
         assert!(reopened.vertex(VId(3)).unwrap().is_some());
     });

@@ -99,7 +99,10 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) -> CommitSeq {
     db.write(cx, batch).await.unwrap()
 }
 fn property(row: &VertexRow, key: PropertyKeyId) -> Option<&CanonicalScalar> {
-    row.props.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+    row.props
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| v.as_scalar().expect("scalar fixture"))
 }
 fn and(left: Option<bool>, right: Option<bool>) -> Option<bool> {
     match (left, right) {

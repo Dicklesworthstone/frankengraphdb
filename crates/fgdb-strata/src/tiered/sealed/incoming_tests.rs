@@ -4,7 +4,7 @@ use crate::compact::Compaction;
 use crate::edge_props::{BlockProps, EdgePropertyRow};
 use crate::{AdjacencyEntry, PartitionRootVersion};
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId};
+use fgdb_types::{BranchId, CanonicalPropertyValue, CanonicalScalar, EId, GraphId, ObjectId};
 
 fn entry(source: u128, target: u128, id: u128, relation: u64) -> AdjacencyEntry {
     AdjacencyEntry {
@@ -29,7 +29,9 @@ fn seal(entries: &[AdjacencyEntry]) -> SealedPartition {
                 .map(|entry| {
                     vec![(
                         PropertyKeyId(1),
-                        CanonicalScalar::Int(entry.created_at.0 as i64),
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                            entry.created_at.0 as i64,
+                        )),
                     )]
                 })
                 .collect(),
@@ -308,6 +310,7 @@ fn incoming_streaming_matches_positional_work_and_logical_oracle_on_hubs_and_spa
                                         &[(
                                             PropertyKeyId(1),
                                             CanonicalScalar::Int(a.entry.created_at.0 as i64)
+                                                .into()
                                         )]
                                     );
                                     emitted.push(a.entry);
@@ -366,7 +369,10 @@ fn every_small_topology_transposes_exactly_and_preserves_original_edge_orientati
                 assert_eq!(entry.dst, VId(target));
                 assert_eq!(
                     properties,
-                    vec![(PropertyKeyId(1), CanonicalScalar::Int(1))]
+                    vec![(
+                        PropertyKeyId(1),
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1))
+                    )]
                 );
             }
         }
@@ -407,7 +413,7 @@ fn history_relations_parallel_edges_and_self_loops_keep_source_properties() {
             actual[0].1,
             vec![(
                 PropertyKeyId(1),
-                CanonicalScalar::Int(if cut < 5 { 1 } else { 5 })
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(if cut < 5 { 1 } else { 5 }))
             )]
         );
         let mut cursor = incoming

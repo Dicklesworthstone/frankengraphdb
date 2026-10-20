@@ -9,7 +9,7 @@ mod query_source {
         EdgeRelation, GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan,
         PreparedGraphPattern, VertexPredicate,
     };
-    use fgdb_types::{CanonicalScalar, EId, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
     use std::collections::{BTreeMap, BTreeSet};
 
     include!("aggregate_queries.rs");
@@ -19,12 +19,15 @@ mod query_source {
     type IdentifiedEdge = (EId, VId, RelationId, VId);
     struct VertexView<'a> {
         labels: &'a [LabelId],
-        props: &'a [(PropertyKeyId, CanonicalScalar)],
+        props: &'a [(PropertyKeyId, CanonicalPropertyValue)],
         label_edits: BTreeMap<LabelId, bool>,
-        property_edits: BTreeMap<PropertyKeyId, Option<&'a CanonicalScalar>>,
+        property_edits: BTreeMap<PropertyKeyId, Option<&'a CanonicalPropertyValue>>,
     }
     impl<'a> VertexView<'a> {
-        fn new(labels: &'a [LabelId], props: &'a [(PropertyKeyId, CanonicalScalar)]) -> Self {
+        fn new(
+            labels: &'a [LabelId],
+            props: &'a [(PropertyKeyId, CanonicalPropertyValue)],
+        ) -> Self {
             Self {
                 labels,
                 props,
@@ -32,7 +35,7 @@ mod query_source {
                 property_edits: BTreeMap::new(),
             }
         }
-        fn property(&self, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+        fn property(&self, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
             if let Some(value) = self.property_edits.get(&key) {
                 *value
             } else {
@@ -42,7 +45,9 @@ mod query_source {
                     .map(|at| &self.props[at].1)
             }
         }
-        fn effective_properties(&self) -> impl Iterator<Item = (PropertyKeyId, &CanonicalScalar)> {
+        fn effective_properties(
+            &self,
+        ) -> impl Iterator<Item = (PropertyKeyId, &CanonicalPropertyValue)> {
             self.props
                 .iter()
                 .filter(move |(key, _)| !self.property_edits.contains_key(key))
@@ -83,17 +88,17 @@ mod query_source {
     }
 
     struct EdgeView<'a> {
-        props: &'a [(PropertyKeyId, CanonicalScalar)],
-        edits: BTreeMap<PropertyKeyId, Option<&'a CanonicalScalar>>,
+        props: &'a [(PropertyKeyId, CanonicalPropertyValue)],
+        edits: BTreeMap<PropertyKeyId, Option<&'a CanonicalPropertyValue>>,
     }
     impl<'a> EdgeView<'a> {
-        fn new(props: &'a [(PropertyKeyId, CanonicalScalar)]) -> Self {
+        fn new(props: &'a [(PropertyKeyId, CanonicalPropertyValue)]) -> Self {
             Self {
                 props,
                 edits: BTreeMap::new(),
             }
         }
-        fn property(&self, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+        fn property(&self, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
             if let Some(value) = self.edits.get(&key) {
                 *value
             } else {
@@ -103,7 +108,9 @@ mod query_source {
                     .map(|at| &self.props[at].1)
             }
         }
-        fn effective_properties(&self) -> impl Iterator<Item = (PropertyKeyId, &CanonicalScalar)> {
+        fn effective_properties(
+            &self,
+        ) -> impl Iterator<Item = (PropertyKeyId, &CanonicalPropertyValue)> {
             self.props
                 .iter()
                 .filter(move |(key, _)| !self.edits.contains_key(key))
@@ -118,7 +125,7 @@ mod query_source {
 
     type OverlayEdges<'a> = BTreeMap<EId, (VId, RelationId, VId, EdgeView<'a>)>;
     type StagedAdjacency<'a> =
-        BTreeMap<(VId, bool, EId), (IdentifiedEdge, &'a [(PropertyKeyId, CanonicalScalar)])>;
+        BTreeMap<(VId, bool, EId), (IdentifiedEdge, &'a [(PropertyKeyId, fgdb_types::CanonicalPropertyValue)])>;
 
     /// A conservative input closure, before applying the canonical effects.
     /// Retired edges may still be in this set; the ordinary overlay removes
@@ -132,7 +139,7 @@ mod query_source {
     #[allow(clippy::too_many_arguments)]
     fn select_bound_edge<'a, E>(
         edge: IdentifiedEdge,
-        props: &'a [(PropertyKeyId, CanonicalScalar)],
+        props: &'a [(PropertyKeyId, fgdb_types::CanonicalPropertyValue)],
         near: VId,
         direction: GlaDirection,
         target: &mut BTreeSet<VId>,
@@ -408,7 +415,11 @@ mod query_source {
                         .all(|predicate| self.vertices[at].1.matches(predicate))
                 })
         }
-        pub(super) fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+        pub(super) fn property(
+            &self,
+            vid: VId,
+            key: PropertyKeyId,
+        ) -> Option<&CanonicalPropertyValue> {
             let at = self
                 .vertices
                 .binary_search_by_key(&vid, |(vid, _)| *vid)
@@ -419,7 +430,7 @@ mod query_source {
             &self,
             eid: EId,
             key: PropertyKeyId,
-        ) -> Option<&CanonicalScalar> {
+        ) -> Option<&CanonicalPropertyValue> {
             let at = self
                 .edges
                 .binary_search_by_key(&eid, |(edge, _)| edge.0)
@@ -1339,8 +1350,8 @@ mod query_source {
         #[test]
         fn borrowed_property_overrides_shadow_without_cloning_or_coercion() {
             let key = PropertyKeyId(1);
-            let properties = [(key, CanonicalScalar::Int(7))];
-            let changed = CanonicalScalar::Int(9);
+            let properties = [(key, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7)))];
+            let changed = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(9));
             let mut row = VertexView::new(&[LabelId(2)], &properties);
             assert!(std::ptr::eq(row.property(key).unwrap(), &properties[0].1));
             row.property_edits.insert(key, Some(&changed));
@@ -1371,13 +1382,22 @@ mod query_source {
         fn complete_property_maps_use_staged_add_update_and_removal_for_both_element_kinds() {
             use fgdb_gql::algebra::GraphValue;
             let properties = [
-                (PropertyKeyId(1), CanonicalScalar::Int(7)),
+                (
+                    PropertyKeyId(1),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(7)),
+                ),
                 // An effective removal must not consult this unmapped key.
-                (PropertyKeyId(2), CanonicalScalar::Int(8)),
-                (PropertyKeyId(4), CanonicalScalar::Int(9)),
+                (
+                    PropertyKeyId(2),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(8)),
+                ),
+                (
+                    PropertyKeyId(4),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(9)),
+                ),
             ];
-            let updated = CanonicalScalar::Bool(false);
-            let added = CanonicalScalar::Null;
+            let updated = CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(false));
+            let added = CanonicalPropertyValue::Scalar(CanonicalScalar::Null);
             let mut vertex = VertexView::new(&[], &properties);
             vertex
                 .property_edits
@@ -1419,8 +1439,8 @@ mod query_source {
             .unwrap();
             assert_eq!(vertex_map, expected);
             assert_eq!(edge_map, expected);
-            assert_eq!(properties[0].1, CanonicalScalar::Int(7));
-            assert_eq!(properties[1].1, CanonicalScalar::Int(8));
+            assert_eq!(properties[0].1, CanonicalScalar::Int(7).into());
+            assert_eq!(properties[1].1, CanonicalScalar::Int(8).into());
             assert!(std::ptr::eq(
                 vertex.property(PropertyKeyId(1)).unwrap(),
                 &updated
@@ -1445,13 +1465,22 @@ mod query_source {
         fn scalar_and_null_predicates_read_the_canonical_override_not_the_old_type() {
             use fgdb_gql::algebra::ScalarPredicate;
             let key = PropertyKeyId(1);
-            let properties = [(key, CanonicalScalar::ucs_basic_text("old value").unwrap())];
-            let changed = CanonicalScalar::Bool(false);
-            let null = CanonicalScalar::Null;
+            let properties = [(
+                key,
+                CanonicalPropertyValue::Scalar(
+                    CanonicalScalar::ucs_basic_text("old value").unwrap(),
+                ),
+            )];
+            let changed = CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(false));
+            let null = CanonicalPropertyValue::Scalar(CanonicalScalar::Null);
             let mut row = VertexView::new(&[], &properties);
             let scalar = VertexPredicate::ScalarProperty {
                 key,
-                predicate: ScalarPredicate::new(changed.clone(), IntegerComparison::Equal).unwrap(),
+                predicate: ScalarPredicate::new(
+                    changed.as_scalar().unwrap().clone(),
+                    IntegerComparison::Equal,
+                )
+                .unwrap(),
             };
             let absent = VertexPredicate::PropertyNull { key, is_null: true };
             assert!(!row.matches(&scalar));

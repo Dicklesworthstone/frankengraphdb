@@ -123,7 +123,9 @@ fn merge_pairs_replay_duplicate_groups_and_use_mapped_repeated_keys() {
         let pool = MemoryPool::new(32_000_000, 0).unwrap();
         let mut view = view(&contexts.commit(), &vfs, &pool).await;
         let baseline = pool.used();
-        let types = [GraphSetColumnType::Scalar; 2];
+        // Each side declares its relation's own column domains (a property is
+        // Stored, fgdb-kr8j1; a computed value Scalar).
+        let types = leaf(0, false).column_types().to_vec();
         let definitions: &[&[(usize, usize)]] = &[
             &[(0, 0)],
             &[(1, 0), (0, 1)],
@@ -167,7 +169,7 @@ fn merge_pairs_empty_inputs_keep_exact_outer_null_extensions() {
         let vfs = fixture(&contexts.commit()).await;
         let pool = MemoryPool::new(32_000_000, 0).unwrap();
         let mut view = view(&contexts.commit(), &vfs, &pool).await;
-        let types = [GraphSetColumnType::Scalar; 2];
+        let types = leaf(0, false).column_types().to_vec();
         let (left_rows, right_rows) = pair_inputs(2, false);
         for (empty_left, empty_right) in [(true, false), (false, true), (true, true)] {
             for kind in KINDS.into_iter().take(4) {
@@ -279,13 +281,14 @@ fn merge_pairs_zero_page_and_empty_left_do_not_skip_failed_right_expressions() {
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap();
-        let types = [GraphSetColumnType::Scalar; 2];
+        let left_types = leaf(0, false).column_types().to_vec();
+        let right_types = right.column_types().to_vec();
         for kind in KINDS.into_iter().take(4) {
             let query = leaf(0, false)
                 .with_page(0, Some(0))
                 .join(
                     right.clone(),
-                    RowJoinSpec::new(&types, &types, &[(0, 0)])
+                    RowJoinSpec::new(&left_types, &right_types, &[(0, 0)])
                         .unwrap()
                         .with_kind(kind),
                 )
@@ -322,7 +325,7 @@ fn merge_pairs_exact_duplicate_occurrences_multiply_without_duplicate_outer_padd
             .with_duplicates()
             .into()
         };
-        let types = [GraphSetColumnType::Scalar];
+        let types = keys_only(0).column_types().to_vec();
         for kind in KINDS.into_iter().take(4) {
             let query = keys_only(0)
                 .join(

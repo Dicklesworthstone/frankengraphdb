@@ -137,7 +137,7 @@ fn commits_at_or_before_the_basis_are_not_conflicts() {
                 .expect("vertex read")
                 .expect("vertex")
                 .props,
-            vec![(P, CanonicalScalar::Int(5))]
+            vec![(P, CanonicalScalar::Int(5).into())]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

@@ -86,7 +86,7 @@ fn spill_edge_input_error_is_checked_before_zero_result_budget_and_drops_source(
         panic!("edge input");
     };
     let mut input = source(63);
-    input.edges.get_mut(&EId(2)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true))];
+    input.edges.get_mut(&EId(2)).unwrap().3 = vec![(P, CanonicalScalar::Bool(true).into())];
     let drops = input.drops.clone();
     let mut cursor = EdgeSpillAggregateCursor::new(
         input,

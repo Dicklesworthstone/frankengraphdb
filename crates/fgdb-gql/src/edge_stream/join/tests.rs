@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const R: RelationId = RelationId(7);
 const P: PropertyKeyId = PropertyKeyId(9);
-type EdgeFixtures = BTreeMap<EId, (VId, VId, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type EdgeFixtures = BTreeMap<EId, (VId, VId, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 #[derive(Clone)]
 struct Fixture {
     edges: EdgeFixtures,
@@ -49,7 +49,7 @@ impl Fixture {
                 (
                     VId(from),
                     VId(to),
-                    vec![(P, CanonicalScalar::Int((id % 5) as i64 - 2))],
+                    vec![(P, CanonicalScalar::Int((id % 5) as i64 - 2).into())],
                 ),
             );
         }
@@ -227,7 +227,7 @@ fn oracle(
                         continue;
                     }
                     if filter
-                        && !matches!((&rp[0].1, &sp[0].1), (CanonicalScalar::Int(x), CanonicalScalar::Int(y)) if *x >= 0 && *y < 2)
+                        && !matches!((rp[0].1.as_scalar().unwrap(), sp[0].1.as_scalar().unwrap()), (CanonicalScalar::Int(x), CanonicalScalar::Int(y)) if *x >= 0 && *y < 2)
                     {
                         continue;
                     }
@@ -237,8 +237,8 @@ fn oracle(
                         GraphValue::Edge(s),
                         GraphValue::Vertex(b),
                         GraphValue::Vertex(c),
-                        GraphValue::Scalar(rp[0].1.clone()),
-                        GraphValue::Scalar(sp[0].1.clone()),
+                        GraphValue::Scalar(rp[0].1.as_scalar().unwrap().clone()),
+                        GraphValue::Scalar(sp[0].1.as_scalar().unwrap().clone()),
                     ]);
                 }
             }

@@ -96,7 +96,7 @@ pub fn try_build(
                 vid: VId(vid),
                 birth_ordinal: vid as u64,
                 labels: vec![LABEL],
-                props: vec![(PROP, fgdb_types::CanonicalScalar::Int(vid as i64))],
+                props: vec![(PROP, fgdb_types::CanonicalScalar::Int(vid as i64).into())],
                 valid_time: None,
             },
             Step::AddEdge { eid, src, dst } => DeltaRow::CreateEdge {

@@ -8,7 +8,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, GraphAggregateRow,
     GraphSymbolResolver, PreparedGraphAggregate, PreparedGraphAggregateText, RelationBind,
 };
-use fgdb_types::{CanonicalScalar, CommitSeq, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, VId};
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,7 +20,7 @@ const LABELS: [LabelId; 1] = [LabelId(1)];
 #[derive(Clone)]
 struct Row {
     id: VId,
-    props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 }
 struct Source {
     rows: Vec<Row>,
@@ -80,10 +80,10 @@ fn source(rows: Vec<Row>) -> Source {
 fn row(id: u128, group: Option<i64>, value: Option<i64>) -> Row {
     let mut props = Vec::new();
     if let Some(value) = group {
-        props.push((G, CanonicalScalar::Int(value)));
+        props.push((G, CanonicalScalar::Int(value).into()));
     }
     if let Some(value) = value {
-        props.push((P, CanonicalScalar::Int(value)));
+        props.push((P, CanonicalScalar::Int(value).into()));
     }
     Row { id: VId(id), props }
 }
@@ -126,7 +126,7 @@ fn run(
 }
 fn integer(row: &Row, key: PropertyKeyId) -> Option<i64> {
     row.props.iter().find_map(|(k, v)| match v {
-        CanonicalScalar::Int(n) if *k == key => Some(*n),
+        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)) if *k == key => Some(*n),
         _ => None,
     })
 }
@@ -296,7 +296,7 @@ fn qualified_off_page_errors_and_late_source_errors_precede_all_output() {
     }
     let q = query("MATCH (v:L) RETURN MIN(v.p) AS m GROUP BY v.g HAVING m>0 OR TRUE LIMIT 0");
     let mut bad = rows;
-    bad[2].props[1].1 = CanonicalScalar::Bool(true);
+    bad[2].props[1].1 = CanonicalScalar::Bool(true).into();
     assert!(matches!(
         run(&q, source(bad), wide()).next(),
         Some(Err(GqlQueryError::Source(
@@ -368,7 +368,7 @@ fn transformed_output_keeps_exact_domains_repeated_keys_and_all_input_columns() 
     // Result processing may not conceal a bad aggregate input at LIMIT 0.
     let q = query("MATCH (v:L) RETURN SUM(v.p) AS total GROUP BY v.g ORDER BY total LIMIT 0");
     let mut bad = fixture(63);
-    bad.last_mut().unwrap().props[1].1 = CanonicalScalar::Bool(true);
+    bad.last_mut().unwrap().props[1].1 = CanonicalScalar::Bool(true).into();
     assert!(matches!(
         run(&q, source(bad), wide()).next(),
         Some(Err(GqlQueryError::Source(

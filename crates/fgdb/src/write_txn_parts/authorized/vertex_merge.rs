@@ -191,6 +191,7 @@ impl<V: Vfs + Clone> Database<V> {
                                 control,
                                 source,
                             )
+                            .and_then(selection::scalar)
                         },
                         |control| {
                             vertex_upsert_properties(
@@ -319,7 +320,7 @@ pub(super) fn merge<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 unreachable!("validated vertex MERGE contains no edge creation")
             };
             let mut batch = WriteBatch::new(merge.relation());
-            batch.create_vertex(vertex, labels, properties);
+            batch.create_vertex_values(vertex, labels, properties);
             for row in batch.rows {
                 stage(transaction, database, batch.relation, row, execution)
                     .map_err(|error| GqlQueryError::Source(GraphVertexMergeError::Source(error)))?;
@@ -396,6 +397,7 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     control,
                     |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)),
                 )
+                .and_then(selection::scalar)
             },
             |batch| {
                 let mut state = state.borrow_mut();
@@ -697,7 +699,7 @@ mod all_targets {
                     unreachable!("validated vertex MERGE contains no edge creation")
                 };
                 let mut batch = WriteBatch::new(upsert.merge().relation());
-                batch.create_vertex(vertex, labels, properties);
+                batch.create_vertex_values(vertex, labels, properties);
                 for row in batch.rows {
                     stage(transaction, database, batch.relation, row, execution)
                         .map_err(staging)?;
@@ -752,6 +754,7 @@ mod all_targets {
                         control,
                         staging,
                     )
+                    .and_then(selection::scalar)
                 },
                 |batch| {
                     let mut state = state.borrow_mut();
@@ -802,8 +805,8 @@ mod all_targets {
                     row.push(match *binding {
                         GraphVertexReturnBinding::Vertex => GraphValue::Vertex(outcome.vertex()),
                         GraphVertexReturnBinding::Property(key) => {
-                            let value = if scope.allows_property(key) {
-                                selection::property(
+                            if scope.allows_property(key) {
+                                let value = selection::property(
                                     transaction,
                                     database,
                                     ElementId::Vertex(outcome.vertex()),
@@ -812,13 +815,19 @@ mod all_targets {
                                     &mut poll,
                                     &mut control,
                                     staging,
+                                )?;
+                                // A stored List or Map returns as itself (fgdb-k3nub).
+                                GraphValue::from_property_value(&value).ok_or(
+                                    GqlQueryError::Data(fgdb_gql::GraphIntegerError {
+                                        instruction: 0,
+                                        kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+                                    }),
                                 )?
                             } else {
                                 // Match the singular masked reader's logical charge.
                                 control(GlaExecutionEvent::ScratchEntry)?;
-                                fgdb_types::CanonicalScalar::Null
-                            };
-                            GraphValue::Scalar(value)
+                                GraphValue::Scalar(fgdb_types::CanonicalScalar::Null)
+                            }
                         }
                         GraphVertexReturnBinding::Properties => vertex_upsert_properties(
                             transaction,

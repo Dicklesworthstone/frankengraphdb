@@ -16,7 +16,7 @@ fn large_source() -> Source {
                 from,
                 relation,
                 to,
-                vec![(P, CanonicalScalar::Int((at % 7) as i64))],
+                vec![(P, CanonicalScalar::Int((at % 7) as i64).into())],
             ),
         );
         for key in [(from, 0), (to, 1), (from, 2), (to, 2)] {

@@ -5,7 +5,7 @@ use super::*;
 use asupersync::lab::run_async_under_lab;
 use fgdb::DatabaseKeys;
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId};
 
 fn okay<T>(result: Result<T, Failure>) -> T {
     result.unwrap_or_else(|error| panic!("{}: {}", error.class, error.message))
@@ -223,8 +223,8 @@ fn merge_and_mutation_returning_freeze_post_statement_values_in_clause_order() {
         assert_eq!(
             vertices[0].props,
             [
-                (PropertyKeyId(1), CanonicalScalar::Int(8)),
-                (PropertyKeyId(2), CanonicalScalar::Int(8)),
+                (PropertyKeyId(1), CanonicalScalar::Int(8).into()),
+                (PropertyKeyId(2), CanonicalScalar::Int(8).into()),
             ],
         );
         assert_eq!(db.delta_since(CommitSeq(0)).unwrap().count(), 1);
@@ -350,7 +350,7 @@ fn returning_arguments_remain_local_and_earlier_rows_are_frozen() {
             assert!(
                 vertices
                     .iter()
-                    .all(|v| v.props == vec![(PropertyKeyId(1), CanonicalScalar::Int(99))])
+                    .all(|v| v.props == vec![(PropertyKeyId(1), CanonicalScalar::Int(99).into())])
             );
             assert_eq!(contexts.txn().outstanding_obligations(), 0);
         }
@@ -451,7 +451,7 @@ fn returning_and_read_rows_consume_one_transaction_wide_allowance() {
         let merged = fgdb_types::VId(u128::from(vertex(6)));
         assert!(vertices.iter().all(|row| row.props.contains(&(
             PropertyKeyId(2),
-            CanonicalScalar::Int(if row.vid == merged { 8 } else { 7 }),
+            CanonicalScalar::Int(if row.vid == merged { 8 } else { 7 }).into(),
         ))));
         assert!(text.contains(r#""count":1,"statements":5"#));
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
@@ -800,7 +800,10 @@ fn aggregate_returning_counts_occurrences_and_keeps_one_transaction_row_allowanc
                         .iter()
                         .filter_map(|row| row.props.iter().find_map(|(key, value)| {
                             match (key, value) {
-                                (PropertyKeyId(2), CanonicalScalar::Int(value)) => Some(*value),
+                                (
+                                    PropertyKeyId(2),
+                                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)),
+                                ) => Some(*value),
                                 _ => None,
                             }
                         }))

@@ -78,7 +78,7 @@ fn edge_upsert_actions<E, A, C>(
                 control(GlaExecutionEvent::ScratchEntry)?;
                 let value = match &definition.value {
                     GraphEdgeUpsertValue::Literal(value) => {
-                        point_payload_admission(value.value(), &mut |event| {
+                        point_scalar_payload_admission(value.value(), &mut |event| {
                             control(match event {
                                 SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
                                 _ => GlaExecutionEvent::Work,
@@ -179,7 +179,17 @@ fn edge_upsert_property<V: Vfs + Clone, A, C>(
     source_control(SourceEvent::ScratchEntry)?;
     transaction.point_reads.borrow_mut().record(element, field);
     source_control(SourceEvent::ScratchEntry)?;
-    let value = projected.property.cloned().unwrap_or(CanonicalScalar::Null);
+    // A MERGE action reads its operands as scalars; a stored List or Map
+    // refuses rather than read as NULL (fgdb-k3nub).
+    let value = match projected.property {
+        None => CanonicalScalar::Null,
+        Some(value) => value.as_scalar().cloned().ok_or_else(|| {
+            GqlQueryError::from(fgdb_gql::GraphIntegerError {
+                instruction: 0,
+                kind: fgdb_gql::GraphIntegerErrorKind::StoredCollection,
+            })
+        })?,
+    };
     attempt.accepted = true;
     Ok(value)
 }
@@ -380,7 +390,7 @@ mod native_edge_upsert_return_tests {
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             let first = db.edge(EId(100)).unwrap().unwrap();
             assert_eq!((first.entry.src, first.entry.dst), (VId(1), VId(2)));
-            assert_eq!(first.props, vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(31))]);
+            assert_eq!(first.props, vec![(P, CanonicalScalar::Int(7).into()), (Q, CanonicalScalar::Int(31).into())]);
             assert!(db.edge(EId(102)).unwrap().is_none());
             assert_eq!(txcx.outstanding_obligations(), 0);
             // A missing MATCH input does not allocate an edge or evaluate the
@@ -512,8 +522,8 @@ mod native_edge_upsert_composite_tests {
             tx.finish(&mut db, &commit).await.unwrap();
             for (edge, p, q) in [(10, 4, 7), (11, 6, 9)] {
                 assert_eq!(db.edge(EId(edge)).unwrap().unwrap().props, vec![
-                    (P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(q)),
-                    (AFTER, CanonicalScalar::Int(p)),
+                    (P, CanonicalScalar::Int(p).into()), (Q, CanonicalScalar::Int(q).into()),
+                    (AFTER, CanonicalScalar::Int(p).into()),
                 ]);
             }
             assert_eq!(txcx.outstanding_obligations(), 0);

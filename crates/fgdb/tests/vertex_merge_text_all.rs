@@ -105,14 +105,17 @@ fn assert_targets(db: &Database<MemVfs>, ps: [i64; 3], q: i64) {
     for (vertex, p) in TARGETS.into_iter().zip(ps) {
         assert_eq!(
             db.vertex(vertex).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(q))]
+            vec![
+                (P, CanonicalScalar::Int(p).into()),
+                (Q, CanonicalScalar::Int(q).into())
+            ]
         );
     }
     assert_eq!(
         db.vertex(OUTSIDE).unwrap().unwrap().props,
         vec![
-            (P, CanonicalScalar::Int(100)),
-            (Q, CanonicalScalar::Int(99))
+            (P, CanonicalScalar::Int(100).into()),
+            (Q, CanonicalScalar::Int(99).into())
         ]
     );
 }
@@ -181,7 +184,10 @@ fn transaction_text_updates_all_targets_while_explicit_unique_api_stays_unique()
         for (vertex, p) in TARGETS.into_iter().zip([22, 24, 26]) {
             assert_eq!(
                 transaction.vertex(&db, vertex).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(8))]
+                vec![
+                    (P, CanonicalScalar::Int(p).into()),
+                    (Q, CanonicalScalar::Int(8).into())
+                ]
             );
         }
         transaction.finish(&mut db, &commit).await.unwrap();
@@ -278,7 +284,10 @@ fn filtered_creation_commits_once_and_later_match_preserves_allocator_coordinate
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
         assert_eq!(
             db.vertex(created).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(8)), (Q, CanonicalScalar::Int(7))]
+            vec![
+                (P, CanonicalScalar::Int(8).into()),
+                (Q, CanonicalScalar::Int(7).into())
+            ]
         );
         let result = db
             .query_write(

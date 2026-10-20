@@ -36,7 +36,8 @@ fn leaf(side: usize, null_key: bool) -> PreparedGraphSet {
     .into()
 }
 fn joined(kind: RowJoinKind, keyed: bool, residual: bool, null_key: bool) -> PreparedGraphSet {
-    let types = [GraphSetColumnType::Scalar; 2];
+    // Both leaves project property columns, which are Stored (fgdb-kr8j1).
+    let types = [GraphSetColumnType::Stored; 2];
     let spec = if keyed {
         RowJoinSpec::new(&types, &types, &[(0, 0)])
     } else {
@@ -294,12 +295,14 @@ fn empty_left_and_zero_parent_page_still_execute_the_failing_right_child() {
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap();
-        let types = [GraphSetColumnType::Scalar; 2];
+        // A property column is Stored (fgdb-kr8j1); the quotient is a Scalar.
+        let left_types = [GraphSetColumnType::Stored; 2];
+        let right_types = [GraphSetColumnType::Stored, GraphSetColumnType::Scalar];
         let query = leaf(0, false)
             .with_page(0, Some(0))
             .join(
                 right,
-                RowJoinSpec::new(&types, &types, &[(0, 0)])
+                RowJoinSpec::new(&left_types, &right_types, &[(0, 0)])
                     .unwrap()
                     .with_kind(RowJoinKind::Anti),
             )
@@ -378,7 +381,7 @@ fn merge_presence_preserves_duplicate_left_occurrences_and_parent_pagination() {
             .with_duplicates()
             .into()
         };
-        let types = [GraphSetColumnType::Scalar];
+        let types = [GraphSetColumnType::Stored];
         for cut in [1, 2] {
             for kind in [RowJoinKind::Semi, RowJoinKind::Anti] {
                 let query = key_only(0)
@@ -444,7 +447,7 @@ fn merge_presence_handles_mapped_composite_and_repeated_key_positions() {
         .unwrap()
         .with_duplicates()
         .into();
-        let types = [GraphSetColumnType::Scalar; 2];
+        let types = [GraphSetColumnType::Stored; 2];
         for cut in [1, 2] {
             for kind in [RowJoinKind::Semi, RowJoinKind::Anti] {
                 let query = leaf(0, false)
@@ -557,7 +560,7 @@ fn merge_presence_empty_children_keep_absence_semantics_and_release_memory() {
         let vfs = fixture(&contexts.commit()).await;
         let pool = MemoryPool::new(32_000_000, 0).unwrap();
         let mut view = view(&contexts.commit(), &vfs, &pool).await;
-        let types = [GraphSetColumnType::Scalar; 2];
+        let types = [GraphSetColumnType::Stored; 2];
         let baseline = pool.used();
         for empty_side in [0, 1] {
             for kind in [RowJoinKind::Semi, RowJoinKind::Anti] {

@@ -33,6 +33,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(PERSON)),
         (GraphSymbolKind::Label, "Tag") => Some(GraphSymbol::Label(LabelId(2))),
+        (GraphSymbolKind::Label, "Listed") => Some(GraphSymbol::Label(LabelId(3))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(NAME)),
         (GraphSymbolKind::Property, "first") => Some(GraphSymbol::Property(FIRST)),
@@ -622,17 +623,18 @@ fn map_rows_drive_create_properties() {
             ),
             vec![vec![text("u"), int(42)], vec![text("w"), text("a")]]
         );
-        // A list or map entry is not a property value, and a non-map row has
-        // no entries: each refuses typed, and the whole program commits
-        // nothing, including its earlier rows.
+        // A map entry is not a property value, and a non-map row has no
+        // entries: each refuses typed, and the whole program commits nothing,
+        // including its earlier rows. (A list entry and keys() are stored
+        // Lists since fgdb-k3nub, below.)
         for (statement, phase) in [
             // Per row, at execution: the value is known only then.
             (
-                "UNWIND [{name: 'ok'}, {name: ['a']}] AS row CREATE (:Person {name: row.name})",
+                "UNWIND [{name: 'ok'}, {name: {a: 1}}] AS row CREATE (:Person {name: row.name})",
                 "execute:",
             ),
             (
-                "UNWIND [{name: 'ok'}, {name: {a: 1}}] AS row CREATE (:Person {name: row.name})",
+                "UNWIND [{name: 'ok'}, {name: [{a: 1}]}] AS row CREATE (:Person {name: row.name})",
                 "execute:",
             ),
             (
@@ -643,12 +645,8 @@ fn map_rows_drive_create_properties() {
                 "UNWIND [{name: 'ok'}] AS row CREATE (:Person {name: row})",
                 "execute:",
             ),
-            // At preparation: a map or a key list is never scalar.
+            // At preparation: a map literal is never a written value.
             ("CREATE (:Person {name: {a: 1}})", "prepare:"),
-            (
-                "UNWIND [{name: 'ok'}] AS row CREATE (:Person {name: keys(row)})",
-                "prepare:",
-            ),
         ] {
             let result = write(&mut db, cxs, statement, &empty).await;
             assert!(
@@ -657,6 +655,76 @@ fn map_rows_drive_create_properties() {
             );
         }
         assert_eq!(query(&db, people), expected);
+        // fgdb-k3nub: a list-valued entry and keys() of a map row are written
+        // as stored Lists and read back as the same lists.
+        for statement in [
+            "UNWIND [{name: ['a', 'b']}] AS row CREATE (:Listed {name: row.name})",
+            "UNWIND [{name: 'ok'}] AS row CREATE (:Listed {name: keys(row)})",
+        ] {
+            write(&mut db, cxs, statement, &empty).await.unwrap();
+        }
+        let mut listed = query(&db, "MATCH (n:Listed) RETURN n.name AS name");
+        listed.sort();
+        let mut wanted = vec![
+            vec![list([text("a"), text("b")])],
+            vec![list([text("name")])],
+        ];
+        wanted.sort();
+        assert_eq!(listed, wanted);
+        // fgdb-kr8j1: a set operand's property column carries the stored
+        // Lists, and UNION deduplicates them by canonical value. Paired with
+        // a list literal column it widens, and keeps every stored List.
+        let mut union = query(
+            &db,
+            "MATCH (n:Listed) RETURN n.name AS name UNION MATCH (m:Listed) RETURN m.name AS name",
+        );
+        union.sort();
+        assert_eq!(union, wanted);
+        let mut widened = query(
+            &db,
+            "MATCH (n:Listed) RETURN n.name AS name UNION MATCH (m:Listed) RETURN ['z'] AS name",
+        );
+        widened.sort();
+        let mut wanted_widened = wanted.clone();
+        wanted_widened.push(vec![list([text("z")])]);
+        wanted_widened.sort();
+        assert_eq!(widened, wanted_widened);
+        // fgdb-bqri3: a pattern WHERE whose scalar program meets a stored List
+        // raises, as the same expression in RETURN does. It never reads the
+        // row as UNKNOWN, which silently dropped every listed vertex (count 0
+        // for size(n.name) > 1). After WITH the value language reads the list.
+        for statement in [
+            "MATCH (n:Listed) WHERE size(n.name) > 1 RETURN count(*) AS c",
+            "MATCH (n:Listed) WHERE size(n.name) > 1 RETURN n.name AS name",
+            "MATCH (n:Listed) RETURN size(n.name) > 1 AS longer",
+        ] {
+            assert!(
+                db.query(&cx, statement, &empty, symbols, policy()).is_err(),
+                "{statement}"
+            );
+        }
+        assert_eq!(
+            query(
+                &db,
+                "MATCH (n:Listed) WITH n WHERE size(n.name) > 1 RETURN n.name AS name"
+            ),
+            vec![vec![list([text("a"), text("b")])]]
+        );
+        // SET from a property column that holds a stored List refuses typed
+        // at execution and commits nothing; it panicked the process
+        // ("complete input schema checked"). Writing it is fgdb-k3nub's.
+        let copied = "MATCH (n:Listed), (m:Tag) SET m.first = n.name";
+        let result = write(&mut db, cxs, copied, &empty).await;
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.starts_with("execute:")),
+            "{copied}: {result:?}"
+        );
+        assert_eq!(
+            query(&db, "MATCH (m:Tag) RETURN m.first AS first"),
+            vec![vec![int(42)]]
+        );
     });
 }
 

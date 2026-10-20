@@ -7,7 +7,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
     PreparedGraphAggregateText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 const P: PropertyKeyId = PropertyKeyId(1);
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -143,6 +143,7 @@ fn scalar_tuple_and_value_pages_match_independent_sorted_multigraph_projections(
 fn small_bag_page_avoids_thousands_of_payload_copies_but_reads_every_candidate() {
     let pattern = query("MATCH (n) RETURN n.p AS payload SKIP 2 LIMIT 3");
     let payload = CanonicalScalar::bytes(vec![7; 4096]).unwrap();
+    let stored = CanonicalPropertyValue::from(payload.clone());
     let mut reads = 0;
     let frozen = pattern.canonical_bytes();
     let result = pattern
@@ -154,7 +155,7 @@ fn small_bag_page_avoids_thousands_of_payload_copies_but_reads_every_candidate()
             |_, _| Ok::<_, ()>(true),
             |_, _| {
                 reads += 1;
-                Ok(Some(&payload))
+                Ok(Some(&stored))
             },
             GqlQueryPolicy::new(4096, 3, 1_000_000, 5 * (1 + 1 + 64)),
             || Ok::<_, ()>(()),
@@ -177,7 +178,7 @@ fn small_bag_page_avoids_thousands_of_payload_copies_but_reads_every_candidate()
             (0..4096).map(VId),
             [],
             |_, _| Ok::<_, ()>(true),
-            |_, _| Ok(Some(&payload)),
+            |_, _| Ok(Some(&stored)),
             GqlQueryPolicy::new(4096, 4096, 1_000_000, 330),
             || Ok::<_, ()>(())
         ),
@@ -189,7 +190,7 @@ fn small_bag_page_avoids_thousands_of_payload_copies_but_reads_every_candidate()
 fn zero_and_full_pages_never_hide_late_predicate_or_projected_property_failures() {
     for count in [0, 1] {
         let pattern = query(&format!("MATCH (n) RETURN n,n.p LIMIT {count}"));
-        let scalar = CanonicalScalar::Int(1);
+        let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
         let mut reads = 0;
         let result = pattern.plan().execute_governed_with_properties(
             2,
@@ -288,7 +289,8 @@ fn exact_page_limits_and_every_interruption_return_no_partial_success() {
         CanonicalScalar::Int(5),
         CanonicalScalar::Int(1),
         CanonicalScalar::Null,
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let vertices = [VId(0), VId(1), VId(2), VId(3)];
     let run = |policy| {
         pattern.plan().execute_governed_with_properties(

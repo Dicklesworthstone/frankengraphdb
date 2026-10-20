@@ -145,13 +145,21 @@ fn at_instant(
 }
 
 /// The zone a timestamp is in: its named zone when the statement carries a
-/// tzdb, else its offset.
-fn timestamp_zone<'v>(value: &'v CanonicalTimestamp, zones: Option<&GqlTimeZones>) -> Zone<'v> {
+/// matching tzdb, else its offset for offset-only timestamps. A zoned timestamp
+/// whose named zone is required by a temporal rule refuses without its tzdb.
+fn timestamp_zone<'v>(
+    value: &'v CanonicalTimestamp,
+    zones: Option<&GqlTimeZones>,
+) -> Result<Zone<'v>, GraphIntegerErrorKind> {
     match value.zone() {
-        Some(zone) if zones.is_some_and(|zones| zones.tzdb == zone.tzdb_oid()) => {
-            Zone::Named(zone.identifier())
+        Some(zone) => {
+            if zones.is_some_and(|zones| zones.tzdb == zone.tzdb_oid()) {
+                Ok(Zone::Named(zone.identifier()))
+            } else {
+                Err(Invalid)
+            }
         }
-        _ => Zone::Offset(value.utc_offset_seconds()),
+        None => Ok(Zone::Offset(value.utc_offset_seconds())),
     }
 }
 
@@ -372,13 +380,13 @@ fn between(
     }
     let (mut from, mut to) = (moment(left)?, moment(right)?);
     if to.offset.is_none()
-        && let Some(zone) = named_zone(left, zones)
+        && let Some(zone) = named_zone(left, zones)?
     {
         let date = to.date.or(from.date).ok_or(Invalid)?;
         to.offset = Some(offset_in_zone(zone, date, to.time, zones)?);
     }
     if from.offset.is_none()
-        && let Some(zone) = named_zone(right, zones)
+        && let Some(zone) = named_zone(right, zones)?
     {
         let date = from.date.or(to.date).ok_or(Invalid)?;
         from.offset = Some(offset_in_zone(zone, date, from.time, zones)?);
@@ -439,15 +447,18 @@ fn between(
 }
 
 /// The named zone a timestamp carries, when the statement's tzdb has it.
-fn named_zone<'v>(value: &'v GraphValue, zones: Option<&GqlTimeZones>) -> Option<&'v str> {
+fn named_zone<'v>(
+    value: &'v GraphValue,
+    zones: Option<&GqlTimeZones>,
+) -> Result<Option<&'v str>, GraphIntegerErrorKind> {
     match value {
         GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => {
-            match timestamp_zone(value, zones) {
-                Zone::Named(name) => Some(name),
-                Zone::Offset(_) => None,
+            match timestamp_zone(value, zones)? {
+                Zone::Named(name) => Ok(Some(name)),
+                Zone::Offset(_) => Ok(None),
             }
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -1179,7 +1190,7 @@ fn datetime(
                     // time base keeps the offset it was written with.
                     let zone = match base {
                         GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => {
-                            Some(timestamp_zone(value, zones))
+                            Some(timestamp_zone(value, zones)?)
                         }
                         _ => offset.map(Zone::Offset),
                     };
@@ -1287,7 +1298,7 @@ fn zoned_part<'v>(
     match value {
         GraphValue::Scalar(CanonicalScalar::LocalDateTime(value)) => Ok((*value, None)),
         GraphValue::Scalar(CanonicalScalar::Timestamp(value)) => {
-            Ok((wall_clock(value)?, Some(timestamp_zone(value, zones))))
+            Ok((wall_clock(value)?, Some(timestamp_zone(value, zones)?)))
         }
         _ => Err(Invalid),
     }

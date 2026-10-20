@@ -8,7 +8,7 @@ use fgdb_gql::{
     GqlQueryPolicy, GraphAggregate, GraphAggregateValue as Value, GraphExactAverage,
     GraphSetColumnType, PreparedGraphSetAggregate,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
 const LIMBS: LimbLimit = LimbLimit::new(16);
@@ -68,7 +68,7 @@ fn z(values: impl IntoIterator<Item = (CanonicalScalar, i128)>) -> ZSet<GraphVal
     .unwrap()
 }
 fn seed(input: &ZSet<GraphValueRow>) -> Operator {
-    let mut state = Operator::new(definition(), &[GraphSetColumnType::Scalar]).unwrap();
+    let mut state = Operator::new(definition(), &[GraphSetColumnType::Stored]).unwrap();
     state
         .prepare(input, LIMBS, None, &mut allow)
         .unwrap()
@@ -229,7 +229,7 @@ fn multiplicities_are_weighted_and_ceiling_replacements_remove_before_adding() {
         None,
     )
     .unwrap();
-    let mut distinct = Operator::new(definition, &[GraphSetColumnType::Scalar]).unwrap();
+    let mut distinct = Operator::new(definition, &[GraphSetColumnType::Stored]).unwrap();
     apply(&mut distinct, [(float(0.5), i128::MAX)]);
     assert_eq!(values(&distinct), vec![f(0.5); 2]);
 }
@@ -284,7 +284,7 @@ fn snapshot(input: &ZSet<GraphValueRow>) -> Vec<Value> {
             panic!("test scalar")
         };
         for _ in 0..weight.to_i128().unwrap() {
-            properties.insert(VId(id), value.clone());
+            properties.insert(VId(id), CanonicalPropertyValue::from(value.clone()));
             id += 1;
         }
     }

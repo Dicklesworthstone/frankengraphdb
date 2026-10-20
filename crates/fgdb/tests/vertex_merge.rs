@@ -176,7 +176,7 @@ fn zero_match_creates_exactly_one_vertex_and_survives_reopen() {
         assert_eq!(outcome, GraphVertexMergeOutcome::Created(VId(100)));
         let staged = txn.vertex(&db, VId(100)).unwrap().unwrap();
         assert_eq!(staged.labels, vec![MERGED]);
-        assert_eq!(staged.props, vec![(P, CanonicalScalar::Int(42))]);
+        assert_eq!(staged.props, vec![(P, CanonicalScalar::Int(42).into())]);
         assert!(db.vertex(VId(100)).unwrap().is_none());
         txn.commit(&mut db, &commit).await.unwrap();
         assert!(db.frontier().unwrap().0 > before.0);
@@ -187,7 +187,7 @@ fn zero_match_creates_exactly_one_vertex_and_survives_reopen() {
             .await
             .unwrap();
         let row = db.vertex(VId(100)).unwrap().unwrap();
-        assert_eq!(row.props, vec![(P, CanonicalScalar::Int(42))]);
+        assert_eq!(row.props, vec![(P, CanonicalScalar::Int(42).into())]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

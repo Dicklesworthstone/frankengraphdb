@@ -105,6 +105,8 @@ impl GraphSetPredicateOp {
         columns: Option<&[usize]>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
+        let mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E> = control;
+        let control = &mut control;
         let mut stack: [Option<bool>; MAX_PATTERN_PREDICATES] = [None; MAX_PATTERN_PREDICATES];
         let mut depth = 0;
         for op in code {

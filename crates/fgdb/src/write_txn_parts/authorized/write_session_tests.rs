@@ -191,7 +191,10 @@ fn native_and_session_prepared_writes_use_one_commit_and_a_frozen_resolver() {
         drop(session);
         assert_eq!(
             db.vertex(a).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(20))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(20).into())
+            ]
         );
         assert_eq!(db.edges().unwrap().len(), 1);
         let expected = (
@@ -327,7 +330,7 @@ fn write_only_session_cannot_prepare_selected_writes_or_fall_back_to_raw_reads()
                     .unwrap()
                     .unwrap()
                     .props,
-                vec![(P, CanonicalScalar::Int(1))]
+                vec![(P, CanonicalScalar::Int(1).into())]
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -1070,12 +1073,12 @@ fn text_batches_merge_record_major_with_zero_output_rows_and_reopen_exactly() {
             .collect();
         assert_eq!(visible.len(), 2);
         assert!(visible.contains(&vec![
-            (P, CanonicalScalar::Int(1)),
-            (Q, CanonicalScalar::Int(30))
+            (P, CanonicalScalar::Int(1).into()),
+            (Q, CanonicalScalar::Int(30).into())
         ]));
         assert!(visible.contains(&vec![
-            (P, CanonicalScalar::Int(2)),
-            (Q, CanonicalScalar::Int(7))
+            (P, CanonicalScalar::Int(2).into()),
+            (Q, CanonicalScalar::Int(7).into())
         ]));
         let expected = (
             db.frontier().unwrap(),

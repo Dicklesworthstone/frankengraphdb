@@ -175,8 +175,8 @@ impl<V: Vfs + Clone> Database<V> {
                                 cells.push(match *binding {
                                     GraphEdgeReturnBinding::Edge => GraphValue::Edge(edge),
                                     GraphEdgeReturnBinding::Property(key) => {
-                                        let value = if verified.predicates().allows_property(key) {
-                                            selection::property(
+                                        if verified.predicates().allows_property(key) {
+                                            let value = selection::property(
                                                 workspace.transaction(),
                                                 self,
                                                 ElementId::Edge(edge),
@@ -194,13 +194,18 @@ impl<V: Vfs + Clone> Database<V> {
                                                 },
                                                 &mut control,
                                                 staging,
+                                            )?;
+                                            GraphValue::from_property_value(&value).ok_or(
+                                                GqlQueryError::Data(fgdb_gql::GraphIntegerError {
+                                                    instruction: 0,
+                                                    kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+                                                }),
                                             )?
                                         } else {
                                             control(GlaExecutionEvent::Work)?;
                                             control(GlaExecutionEvent::ScratchEntry)?;
-                                            CanonicalScalar::Null
-                                        };
-                                        GraphValue::Scalar(value)
+                                            GraphValue::Scalar(CanonicalScalar::Null)
+                                        }
                                     }
                                 });
                             }

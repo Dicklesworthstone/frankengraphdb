@@ -72,7 +72,9 @@ fn expected(db: &Database<MemVfs>, mode: usize) -> Bag {
             .props
             .iter()
             .find(|(p, _)| *p == P)
-            .map_or(CanonicalScalar::Null, |(_, v)| v.clone());
+            .map_or(CanonicalScalar::Null, |(_, v)| {
+                v.as_scalar().expect("scalar fixture").clone()
+            });
         let keep = match mode {
             0 => matches!(&value,CanonicalScalar::Int(n) if *n>0),
             1 => matches!(&value,CanonicalScalar::Int(n) if *n<=0),

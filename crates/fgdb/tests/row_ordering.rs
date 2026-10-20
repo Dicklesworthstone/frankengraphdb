@@ -9,7 +9,8 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::cmp::Ordering;
 
@@ -108,7 +109,9 @@ fn oracle(
                 .props
                 .iter()
                 .find_map(|(key, value)| match value {
-                    CanonicalScalar::Int(value) if *key == RANK => Some(*value),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) if *key == RANK => {
+                        Some(*value)
+                    }
                     _ => None,
                 });
             rows.push((owner.vid, rank, Some(destination.vid)));

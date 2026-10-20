@@ -3,7 +3,7 @@ use crate::{DatabaseKeys, MemVfs};
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::{GlaLimitDimension, GqlBudgetDimension, GqlQueryError, GqlQueryPolicy};
-use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{CanonicalPropertyValue, DatabaseSecurityNamespaceId, PurposeContexts};
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -213,7 +213,10 @@ fn absence_null_labels_and_staged_only_targets_keep_the_one_row_contract() {
                     GqlQueryPolicy::new(records, 1, 100_000, 100_000),
                 )
                 .unwrap();
-            assert_eq!(result.value, vec![expected]);
+            assert_eq!(
+                result.value,
+                vec![expected.map(CanonicalPropertyValue::from)]
+            );
             assert_eq!(result.rows.snapshot_records, records);
             assert_eq!(result.rows.result_rows, 1);
         }
@@ -239,7 +242,7 @@ fn absence_null_labels_and_staged_only_targets_keep_the_one_row_contract() {
             )
             .unwrap()
             .value,
-            vec![Some(CanonicalScalar::Null)]
+            vec![Some(CanonicalScalar::Null.into())]
         );
         assert!(
             matches!(txn.vertex_property_governed(&db, &query, VId(999), P,
@@ -307,7 +310,7 @@ fn quota_refusal_retry_and_savepoint_rollback_retain_observations_without_losing
                 .find(|(k, _)| *k == Q)
                 .unwrap()
                 .1,
-            CanonicalScalar::Int(42)
+            CanonicalScalar::Int(42).into()
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -485,7 +488,10 @@ fn successful_governed_reads_keep_precise_rebase_and_stale_read_rejection() {
                 let fields = db.vertex(VId(1)).unwrap().unwrap().props;
                 assert_eq!(
                     fields,
-                    vec![(P, CanonicalScalar::Int(99)), (Q, CanonicalScalar::Int(88))]
+                    vec![
+                        (P, CanonicalScalar::Int(99).into()),
+                        (Q, CanonicalScalar::Int(88).into())
+                    ]
                 );
             }
         }

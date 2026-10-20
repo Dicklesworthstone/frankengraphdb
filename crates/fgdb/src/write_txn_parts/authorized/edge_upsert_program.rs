@@ -256,6 +256,7 @@ fn apply_all<V: Vfs + Clone, Clock: FnMut() -> u64>(
                             control,
                             staging,
                         )
+                        .and_then(selection::scalar)
                     },
                     |batch| {
                         let mut state = state.borrow_mut();

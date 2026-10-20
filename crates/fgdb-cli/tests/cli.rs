@@ -765,3 +765,82 @@ fn a_bindings_file_adds_to_the_flag_bindings() {
         refused(&child.wait_with_output().unwrap(), 2, "usage");
     }
 }
+
+#[test]
+fn as_of_reads_report_selected_seq_and_certify_to_refuses_overwrite() {
+    let fixture = Fixture::new("as-of-seq-and-certify-overwrite");
+    succeeded(&fixture.robot("create", &[]), "created");
+    succeeded(
+        &fixture.robot("write", &["INSERT (:Person {id: 1})"]),
+        "written",
+    );
+    succeeded(
+        &fixture.robot("write", &["INSERT (:Person {id: 2})"]),
+        "written",
+    );
+
+    let historical = "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ $at RETURN n, n.id";
+    let eager = fixture.robot("query", &["--param", "at=uint:1", historical]);
+    succeeded(&eager, "rows");
+    assert!(
+        String::from_utf8_lossy(&eager.stdout)
+            .contains(r#"{"v":1,"event":"result","kind":"rows","seq":1,"count":1}"#),
+        "{}",
+        String::from_utf8_lossy(&eager.stdout)
+    );
+
+    let streamed = fixture.robot("query", &["--stream", "--param", "at=uint:1", historical]);
+    succeeded(&streamed, "rows");
+    assert!(
+        String::from_utf8_lossy(&streamed.stdout)
+            .contains(r#"{"v":1,"event":"result","kind":"rows","stream":true,"seq":1,"count":1}"#),
+        "{}",
+        String::from_utf8_lossy(&streamed.stdout)
+    );
+
+    let spill_dir = fixture.dir.join("spill");
+    std::fs::create_dir(&spill_dir).unwrap();
+    let spilled = fixture.robot(
+        "query",
+        &[
+            "--spill-dir",
+            spill_dir.to_str().unwrap(),
+            "--param",
+            "at=uint:1",
+            historical,
+        ],
+    );
+    succeeded(&spilled, "rows");
+    assert!(
+        String::from_utf8_lossy(&spilled.stdout)
+            .contains(r#"{"v":1,"event":"result","kind":"rows","stream":true,"seq":1,"count":1}"#),
+        "{}",
+        String::from_utf8_lossy(&spilled.stdout)
+    );
+
+    let certificate = fixture.dir.join("c1.cert");
+    let certificate_str = certificate.to_str().unwrap();
+    let certified = fixture.robot(
+        "query",
+        &[
+            "--certify-to",
+            certificate_str,
+            "--param",
+            "at=uint:1",
+            historical,
+        ],
+    );
+    succeeded(&certified, "rows");
+    let original_bytes = std::fs::read(&certificate).unwrap();
+
+    let overwrite = fixture.robot(
+        "query",
+        &[
+            "--certify-to",
+            certificate_str,
+            "MATCH (n:Person) RETURN n.id",
+        ],
+    );
+    refused(&overwrite, 2, "usage");
+    assert_eq!(std::fs::read(&certificate).unwrap(), original_bytes);
+}

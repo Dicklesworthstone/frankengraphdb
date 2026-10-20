@@ -902,11 +902,14 @@ mod write_return_tests {
             for (vertex, edge, value) in [(100, 1_000, 10), (110, 1_010, 12)] {
                 assert_eq!(
                     db.vertex(VId(vertex)).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(value))]
+                    vec![(P, CanonicalScalar::Int(value).into())]
                 );
                 let edge = db.edge(EId(edge)).unwrap().unwrap();
                 assert_eq!((edge.entry.src, edge.entry.dst), (VId(1), VId(vertex)));
-                assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(value - 3))]);
+                assert_eq!(
+                    edge.props,
+                    vec![(P, CanonicalScalar::Int(value - 3).into())]
+                );
             }
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -997,7 +1000,7 @@ mod write_return_tests {
             assert!(db.vertex(VId(101)).unwrap().is_none());
             assert_eq!(
                 db.vertex(VId(102)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(5))]
+                vec![(P, CanonicalScalar::Int(5).into())]
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         });
@@ -1193,7 +1196,10 @@ mod write_return_tests {
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             assert_eq!(
                 db.edge(EId(100)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(7)), (q, CanonicalScalar::Int(42))]
+                vec![
+                    (P, CanonicalScalar::Int(7).into()),
+                    (q, CanonicalScalar::Int(42).into())
+                ]
             );
             assert!(db.edge(EId(101)).unwrap().is_none());
             assert_eq!(txcx.outstanding_obligations(), 0);
@@ -1287,7 +1293,7 @@ mod write_return_tests {
             assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
             assert_eq!(
                 db.edge(EId(500)).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(7))]
+                vec![(P, CanonicalScalar::Int(7).into())]
             );
             assert_eq!(db.frontier().unwrap(), before);
             transaction.finish(&mut db, &commit).await.unwrap();
@@ -1295,7 +1301,7 @@ mod write_return_tests {
             for edge in [EId(500), EId(501)] {
                 assert_eq!(
                     db.edge(edge).unwrap().unwrap().props,
-                    vec![(P, CanonicalScalar::Int(8))]
+                    vec![(P, CanonicalScalar::Int(8).into())]
                 );
             }
             assert_eq!(txcx.outstanding_obligations(), 0);

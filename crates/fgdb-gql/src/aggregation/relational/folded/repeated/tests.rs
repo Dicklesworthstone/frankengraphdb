@@ -409,7 +409,7 @@ fn graph_sources_execute_once_and_share_snapshot_admission() {
     .unwrap();
     for max_snapshot in [3, 4] {
         let mut calls = 0;
-        let scalar = CanonicalScalar::Int(3);
+        let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(3));
         let result = q.execute_relational_with_source(
             GqlQueryPolicy::new(max_snapshot, 1, 100_000, 10_000),
             |pattern: &crate::algebra::PreparedGraphPattern<crate::algebra::GraphValueRow>,

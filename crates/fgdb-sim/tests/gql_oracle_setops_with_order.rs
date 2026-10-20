@@ -31,7 +31,12 @@ fn project(graph: &ReferenceGraph) -> Vec<Row> {
         .map(|(_, v)| {
             [K, T]
                 .into_iter()
-                .map(|key| v.props.get(&key).cloned().unwrap_or(CanonicalScalar::Null))
+                .map(|key| {
+                    v.props
+                        .get(&key)
+                        .map(|value| value.as_scalar().expect("scalar").clone())
+                        .unwrap_or(CanonicalScalar::Null)
+                })
                 .collect()
         })
         .collect()

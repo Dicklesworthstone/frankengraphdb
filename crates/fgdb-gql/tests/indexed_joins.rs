@@ -212,7 +212,7 @@ fn intersection_never_skips_an_intervening_fallible_property_selection() {
 fn property_pair_selection_is_fallible_before_a_following_existence_clause() {
     use fgdb_delta_types::PropertyKeyId;
     use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphText};
-    use fgdb_types::CanonicalScalar;
+    use fgdb_types::CanonicalPropertyValue;
 
     let query = PreparedGraphText::prepare(
         "MATCH (a)-[:R]->(b)-[:S]->(c) \
@@ -252,7 +252,7 @@ fn property_pair_selection_is_fallible_before_a_following_existence_clause() {
         |_, _| Ok(true),
         |_, _| {
             reads += 1;
-            Err::<Option<&CanonicalScalar>, _>("property-pair source failed")
+            Err::<Option<&CanonicalPropertyValue>, _>("property-pair source failed")
         },
         wide(),
         || Ok::<_, ()>(()),

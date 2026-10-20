@@ -40,7 +40,9 @@ use fgdb_reference::ReferenceGraph;
 use fgdb_sim::{replay, replay_through};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, CommitCx, CommitSeq, GraphId, QueryCx, VId};
+use fgdb_types::{
+    BranchId, CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, GraphId, QueryCx, VId,
+};
 
 const GRAPH: GraphId = GraphId(1);
 const BRANCH: BranchId = BranchId(1);
@@ -187,7 +189,7 @@ fn reference_collect(graph: &ReferenceGraph, distinct: bool, keep_nulls: bool) -
         let value = vertex
             .props
             .get(&P)
-            .cloned()
+            .map(|value| value.as_scalar().expect("scalar fixture").clone())
             .unwrap_or(CanonicalScalar::Null);
         if value == CanonicalScalar::Null && !keep_nulls {
             continue;
@@ -212,7 +214,7 @@ fn reference_unwind_match(graph: &ReferenceGraph, elements: &[i64]) -> Vec<VId> 
     for element in elements {
         for vid in reference_vertices(graph) {
             let vertex = graph.vertex(vid).expect("iterated vertex");
-            if matches!(vertex.props.get(&P), Some(CanonicalScalar::Int(value)) if value == element)
+            if matches!(vertex.props.get(&P), Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) if value == element)
             {
                 out.push(vid);
             }
@@ -379,7 +381,7 @@ fn list_value_families_match_independent_reference_across_seeds() {
                         .expect("live vertex")
                         .props
                         .get(&P)
-                        .cloned()
+                        .map(|value| value.as_scalar().expect("scalar fixture").clone())
                         .unwrap_or(CanonicalScalar::Null)
                 })
                 .collect();
@@ -399,13 +401,15 @@ fn list_value_families_match_independent_reference_across_seeds() {
                             .expect("vertex")
                             .props
                             .get(&P)
-                            .cloned()
+                            .map(|value| value.as_scalar().expect("scalar fixture").clone())
                             .unwrap_or(CanonicalScalar::Null)
                             == *key
                     })
                     .filter_map(|vid| {
                         match graph.vertex(*vid).expect("vertex").props.get(&P) {
-                            Some(CanonicalScalar::Int(value)) => Some(int(*value)),
+                            Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))) => {
+                                Some(int(*value))
+                            }
                             _ => None, // collect skips NULL/missing members
                         }
                     })
@@ -590,7 +594,7 @@ fn expected_group_families(graph: &ReferenceGraph) -> Vec<Vec<GraphValue>> {
         let key = vertex
             .props
             .get(&P)
-            .cloned()
+            .map(|value| value.as_scalar().expect("scalar fixture").clone())
             .unwrap_or(CanonicalScalar::Null);
         let value = match &key {
             CanonicalScalar::Int(value) => Some(*value),

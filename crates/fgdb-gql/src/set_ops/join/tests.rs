@@ -34,7 +34,7 @@ fn leaf() -> PreparedGraphSet {
     .into()
 }
 fn spec(keyed: bool, kind: RowJoinKind) -> RowJoinSpec {
-    let types = [GraphSetColumnType::Scalar; 2];
+    let types = [GraphSetColumnType::Stored; 2];
     let spec = if keyed {
         RowJoinSpec::new(&types, &types, &[(0, 0)])
     } else {
@@ -246,7 +246,7 @@ fn full_join_finishes_child_pages_before_on_and_supports_further_relational_stag
 
 #[test]
 fn nulls_and_incompatible_values_remain_unknown_under_not_and_zero_width_full_keeps_both_sides() {
-    let types = [GraphSetColumnType::Scalar; 2];
+    let types = [GraphSetColumnType::Stored; 2];
     let negative = RowJoinSpec::cross(&types, &types)
         .unwrap()
         .with_kind(RowJoinKind::Full)
@@ -434,7 +434,7 @@ fn bound_join_identity_schema_and_window_accessors_cover_complete_semantics() {
             }
         }
     }
-    let types = [GraphSetColumnType::Scalar; 2];
+    let types = [GraphSetColumnType::Stored; 2];
     let mut changed = types;
     changed[1] = GraphSetColumnType::Any;
     for side in 0..2 {

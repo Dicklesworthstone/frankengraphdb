@@ -1,6 +1,9 @@
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{FnxSelection, FnxWeightError, FnxWeightSpec, MissingWeightPolicy};
-use fgdb_types::{CanonicalF64, CanonicalScalar};
+use fgdb_types::{
+    CanonicalF64, CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue,
+    CanonicalScalar, CanonicalText,
+};
 
 fn property(missing: MissingWeightPolicy) -> FnxWeightSpec {
     FnxWeightSpec::Property {
@@ -9,9 +12,14 @@ fn property(missing: MissingWeightPolicy) -> FnxWeightSpec {
     }
 }
 
+fn stored(value: CanonicalScalar) -> CanonicalPropertyValue {
+    CanonicalPropertyValue::Scalar(value)
+}
+
 #[test]
 fn missing_and_null_weights_follow_only_the_explicit_policy() {
-    for missing in [None, Some(&CanonicalScalar::Null)] {
+    let null = stored(CanonicalScalar::Null);
+    for missing in [None, Some(&null)] {
         assert_eq!(
             property(MissingWeightPolicy::Reject).resolve(missing),
             Err(FnxWeightError::Missing)
@@ -26,7 +34,7 @@ fn missing_and_null_weights_follow_only_the_explicit_policy() {
         );
     }
     assert_eq!(
-        FnxWeightSpec::Unit.resolve(Some(&CanonicalScalar::Bool(true))),
+        FnxWeightSpec::Unit.resolve(Some(&stored(CanonicalScalar::Bool(true)))),
         Ok(1.0)
     );
     assert_eq!(FnxWeightSpec::Unit.property_key(), None);
@@ -47,13 +55,15 @@ fn integer_weights_are_exact_including_the_i64_boundary() {
         9_007_199_254_740_994,
         i64::MIN,
     ] {
-        let weight = spec.resolve(Some(&CanonicalScalar::Int(value))).unwrap();
+        let weight = spec
+            .resolve(Some(&stored(CanonicalScalar::Int(value))))
+            .unwrap();
         assert_eq!(weight as i128, i128::from(value));
     }
     // An i64 round trip saturates at MAX and would incorrectly accept this.
     for value in [i64::MAX, 9_007_199_254_740_993, -9_007_199_254_740_993] {
         assert_eq!(
-            spec.resolve(Some(&CanonicalScalar::Int(value))),
+            spec.resolve(Some(&stored(CanonicalScalar::Int(value)))),
             Err(FnxWeightError::InexactInteger)
         );
     }
@@ -64,22 +74,44 @@ fn numeric_values_do_not_coerce_booleans_or_accept_nonfinite_floats() {
     let spec = property(MissingWeightPolicy::Zero);
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert_eq!(
-            spec.resolve(Some(&CanonicalScalar::Float(CanonicalF64::new(value)))),
+            spec.resolve(Some(&stored(CanonicalScalar::Float(CanonicalF64::new(
+                value
+            ))))),
             Err(FnxWeightError::NonFinite)
         );
     }
+    // A stored List or Map is a present value of the wrong kind (fgdb-k3nub):
+    // it is NotNumeric under every missing policy, never absent, and a
+    // one-element numeric List is not unwrapped.
+    let one = CanonicalList::try_new(vec![stored(CanonicalScalar::Int(4))]).unwrap();
+    let map = CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+        CanonicalText::new_ucs_basic("w").unwrap(),
+        stored(CanonicalScalar::Int(4)),
+    )])
+    .unwrap();
     for value in [
-        CanonicalScalar::Bool(false),
-        CanonicalScalar::ucs_basic_text("4").unwrap(),
+        stored(CanonicalScalar::Bool(false)),
+        stored(CanonicalScalar::ucs_basic_text("4").unwrap()),
+        CanonicalPropertyValue::List(one),
+        CanonicalPropertyValue::List(CanonicalList::try_new(vec![]).unwrap()),
+        CanonicalPropertyValue::Map(map),
     ] {
         assert_eq!(spec.resolve(Some(&value)), Err(FnxWeightError::NotNumeric));
+        assert_eq!(
+            property(MissingWeightPolicy::Unit).resolve(Some(&value)),
+            Err(FnxWeightError::NotNumeric)
+        );
     }
     let zero = spec
-        .resolve(Some(&CanonicalScalar::Float(CanonicalF64::new(-0.0))))
+        .resolve(Some(&stored(CanonicalScalar::Float(CanonicalF64::new(
+            -0.0,
+        )))))
         .unwrap();
     assert_eq!(zero.to_bits(), 0.0_f64.to_bits());
     assert_eq!(
-        spec.resolve(Some(&CanonicalScalar::Float(CanonicalF64::new(-2.25)))),
+        spec.resolve(Some(&stored(CanonicalScalar::Float(CanonicalF64::new(
+            -2.25
+        ))))),
         Ok(-2.25)
     );
     // A finite negative weight is legal projection data; PageRank itself refuses it.

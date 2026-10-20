@@ -10,7 +10,8 @@ use fgdb_gql::{
     GraphWriteScriptExecutionError,
 };
 use fgdb_types::{
-    CanonicalScalar, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion,
+    PurposeContexts, VId,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -116,11 +117,17 @@ fn native_engine_upserts_repeated_keys_once_and_reopens() {
         assert_eq!(db.vertices().unwrap().len(), 2);
         assert_eq!(
             db.vertex(first).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(5))]
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(5).into())
+            ]
         );
         assert_eq!(
             db.vertex(second).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(4))]
+            vec![
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(4).into())
+            ]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -166,7 +173,10 @@ fn transaction_native_updates_see_staged_rows_and_do_not_publish() {
         assert!(db.vertex(VId(90)).unwrap().is_none());
         assert_eq!(
             txn.vertex(&db, VId(90)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(90)), (Q, CanonicalScalar::Int(12))]
+            vec![
+                (P, CanonicalScalar::Int(90).into()),
+                (Q, CanonicalScalar::Int(12).into())
+            ]
         );
         txn.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.frontier().unwrap().0, before.0 + 1);
@@ -280,8 +290,8 @@ fn native_late_overflow_retains_row_location_and_outer_prefix() {
         assert_eq!(
             txn.vertex(&db, VId(90)).unwrap().unwrap().props,
             vec![
-                (P, CanonicalScalar::Int(90)),
-                (Q, CanonicalScalar::Int(i64::MAX))
+                (P, CanonicalScalar::Int(90).into()),
+                (Q, CanonicalScalar::Int(i64::MAX).into())
             ]
         );
         txn.finish(&mut db, &commit).await.unwrap();
@@ -431,8 +441,10 @@ fn five_thousand_native_unwind_rows_commit_once_and_reopen_without_chunking() {
             .iter()
             .map(|vertex| {
                 assert_eq!(vertex.labels, vec![L]);
-                let [(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(q))] =
-                    vertex.props.as_slice()
+                let [
+                    (P, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(p))),
+                    (Q, CanonicalPropertyValue::Scalar(CanonicalScalar::Int(q))),
+                ] = vertex.props.as_slice()
                 else {
                     panic!("both row fields must survive native storage preparation")
                 };

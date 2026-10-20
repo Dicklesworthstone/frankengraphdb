@@ -167,7 +167,10 @@ fn single_script_executes_dependent_statements_with_and_without_identity_receipt
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             assert_eq!(
                 db.vertex(created).unwrap().unwrap().props,
-                vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(70))]
+                vec![
+                    (P, CanonicalScalar::Int(7).into()),
+                    (Q, CanonicalScalar::Int(70).into())
+                ]
             );
             assert_eq!(txn.outstanding_obligations(), 0);
         }
@@ -267,10 +270,10 @@ fn relationship_ingestion_reuses_shared_vertices_and_edges_and_reopens_one_commi
         assert_eq!(db.vertices().unwrap().len(), 3);
         let one = db.edge(first).unwrap().unwrap();
         assert_eq!((one.entry.src, one.entry.dst), (a, b));
-        assert_eq!(one.props, vec![(Q, CanonicalScalar::Int(33))]);
+        assert_eq!(one.props, vec![(Q, CanonicalScalar::Int(33).into())]);
         assert_eq!(
             db.edge(second).unwrap().unwrap().props,
-            vec![(Q, CanonicalScalar::Int(22))]
+            vec![(Q, CanonicalScalar::Int(22).into())]
         );
         let state = (
             db.frontier().unwrap(),

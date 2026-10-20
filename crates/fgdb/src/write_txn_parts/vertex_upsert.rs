@@ -337,7 +337,7 @@ fn vertex_upsert_actions<E, A, C>(
             control(GlaExecutionEvent::ScratchEntry)?; // proposal before allocation
             match definition {
                 GraphVertexUpsertAction::SetProperty { key, value } => {
-                    point_payload_admission(value.value(), &mut |event| {
+                    point_scalar_payload_admission(value.value(), &mut |event| {
                         control(match event {
                             SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
                             _ => GlaExecutionEvent::Work,
@@ -433,7 +433,17 @@ fn vertex_upsert_property<V: Vfs + Clone, A, C>(
     source_control(SourceEvent::ScratchEntry)?;
     transaction.point_reads.borrow_mut().record(element, field);
     source_control(SourceEvent::ScratchEntry)?;
-    let value = projected.property.cloned().unwrap_or(CanonicalScalar::Null);
+    // A MERGE action reads its operands as scalars; a stored List or Map
+    // refuses rather than read as NULL (fgdb-k3nub).
+    let value = match projected.property {
+        None => CanonicalScalar::Null,
+        Some(value) => value.as_scalar().cloned().ok_or_else(|| {
+            GqlQueryError::from(fgdb_gql::GraphIntegerError {
+                instruction: 0,
+                kind: fgdb_gql::GraphIntegerErrorKind::StoredCollection,
+            })
+        })?,
+    };
     attempt.accepted = true;
     Ok(value)
 }

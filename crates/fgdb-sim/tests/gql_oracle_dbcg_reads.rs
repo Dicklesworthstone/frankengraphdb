@@ -8,7 +8,7 @@ use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphSymbol, GraphSymbolKind};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cmp::Ordering;
 
 const R: RelationId = RelationId(1);
@@ -453,11 +453,11 @@ fn hidden_order_properties_match_storage_scan_oracle() {
                     .map(|vertex| {
                         let cells = [NAME, AGE, CITY].map(|key| {
                             HiddenOrderCell::from_scalar(
-                                vertex
-                                    .props
-                                    .iter()
-                                    .find(|(found, _)| *found == key)
-                                    .map(|(_, value)| value),
+                                vertex.props.iter().find(|(found, _)| *found == key).map(
+                                    |(_, value)| {
+                                        value.as_scalar().expect("unexpected fixture value")
+                                    },
+                                ),
                             )
                         });
                         (vertex.vid, cells)
@@ -473,9 +473,8 @@ fn hidden_order_properties_match_storage_scan_oracle() {
                     let null = vertices.iter().find(|v| v.vid == explicit).unwrap();
                     assert!(!absent.props.iter().any(|(found, _)| *found == key));
                     assert!(
-                        null.props
-                            .iter()
-                            .any(|(found, value)| *found == key && *value == CanonicalScalar::Null)
+                        null.props.iter().any(|(found, value)| *found == key
+                            && *value == CanonicalScalar::Null.into())
                     );
                 }
                 for edge_pattern in [false, true] {
@@ -696,7 +695,9 @@ fn existential_subqueries_match_storage_scan_oracle() {
                                                         *key == AGE
                                                             && matches!(
                                                                 value,
-                                                                CanonicalScalar::Int(n) if *n > 0
+                                                                CanonicalPropertyValue::Scalar(
+                                                                    CanonicalScalar::Int(n)
+                                                                ) if *n > 0
                                                             )
                                                     }))
                                         })

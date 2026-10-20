@@ -101,7 +101,7 @@ fn folded_outputs_retain_the_source_reader_through_ranking_and_limit_zero() {
                         if fail && reads.get() == 3 {
                             Err("last group property refused")
                         } else {
-                            Ok(Some(CanonicalScalar::Int(17)))
+                            Ok(Some(CanonicalScalar::Int(17).into()))
                         }
                     },
                 };

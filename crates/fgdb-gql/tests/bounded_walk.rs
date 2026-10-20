@@ -10,7 +10,7 @@ use fgdb_gql::{
     GqlQueryError, GqlQueryPolicy, GraphAggregate, GraphWalkBounds, MAX_GRAPH_WALK_HOPS,
     PreparedGraphAggregate,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const R: RelationId = RelationId(1);
@@ -366,11 +366,15 @@ fn endpoint_filters_do_not_remove_transit_vertices_and_late_errors_are_not_hidde
             } else {
                 vec![]
             };
-            Ok::<_, ()>(
-                predicates
-                    .iter()
-                    .all(|p| p.matches(&labels, &[(key, CanonicalScalar::Int(vid.0 as i64))])),
-            )
+            Ok::<_, ()>(predicates.iter().all(|p| {
+                p.matches(
+                    &labels,
+                    &[(
+                        key,
+                        CanonicalPropertyValue::from(CanonicalScalar::Int(vid.0 as i64)),
+                    )],
+                )
+            }))
         })
         .unwrap();
     assert_eq!(
@@ -380,7 +384,7 @@ fn endpoint_filters_do_not_remove_transit_vertices_and_late_errors_are_not_hidde
     let mut b = builder(&["a", "b"]);
     b.walk("a", R, GlaDirection::Forward, "b", bounds(1, 2))
         .unwrap();
-    let value = CanonicalScalar::Int(1);
+    let value = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
     for count in [Some(0), Some(1), None] {
         let query = b
             .prepare_values(&[GraphColumn::property("value", "b", key)], 0, count)

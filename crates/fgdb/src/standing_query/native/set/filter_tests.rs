@@ -10,7 +10,9 @@ use fgdb_gql::{
     GraphSetColumnType, GraphSetOperand, GraphSetPredicateOp as Predicate, GraphSetProjection,
     GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const LIMBS: LimbLimit = LimbLimit::new(4);
@@ -81,7 +83,7 @@ fn expected<V: Vfs + Clone>(
     let mut count = 0;
     for row in db.vertices_at(at).unwrap() {
         if matches!(row.props.iter().find(|(key, _)| *key == P).map(|(_, v)| v),
-            Some(CanonicalScalar::Int(n)) if *n > 0 && n % 2 == 1)
+            Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n))) if *n > 0 && n % 2 == 1)
         {
             count += 2;
         }
@@ -422,7 +424,7 @@ fn public_filtered_specs_compose_fence_dependents_and_rebuild_without_rebinding(
         );
         assert_eq!(saved(&db.standing_queries), before);
         let spec = RowProjectionSpec::new(
-            vec![GraphSetColumnType::Scalar],
+            vec![GraphSetColumnType::Stored],
             expression(Binary::Divide),
             GraphSetQuantifier::All,
         )
@@ -518,7 +520,7 @@ fn rejected_tuple_updates_advance_zero_quota_views_with_changed_key_work_only() 
             db.write(&commit, seed).await.unwrap();
             let parent = register(&mut db, &cx, &leaf(), policy()).unwrap();
             let spec = RowProjectionSpec::selection(
-                vec![GraphSetColumnType::Scalar],
+                vec![GraphSetColumnType::Stored],
                 vec!["p".into()],
                 &[Predicate::Truth(None)],
             )

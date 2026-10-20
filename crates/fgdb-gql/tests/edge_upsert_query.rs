@@ -45,7 +45,7 @@ fn return_schema_preserves_edge_identity_and_final_property_slots() {
     assert_eq!(query.columns(), &["edge", "value"]);
     assert_eq!(
         query.column_types(),
-        &[GraphSetColumnType::Edge, GraphSetColumnType::Scalar]
+        &[GraphSetColumnType::Edge, GraphSetColumnType::Stored]
     );
     assert_eq!(query.upsert(), &upsert());
     assert_eq!(query.bindings().len(), 2);

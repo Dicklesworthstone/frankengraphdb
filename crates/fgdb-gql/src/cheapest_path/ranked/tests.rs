@@ -1,4 +1,5 @@
 use super::*;
+use fgdb_types::CanonicalPropertyValue;
 
 const RELATION: RelationId = RelationId(7);
 const WEIGHT: PropertyKeyId = PropertyKeyId(9);
@@ -31,7 +32,7 @@ fn plain(row: &GraphCostPath) -> Answer {
 fn oracle(
     query: &PreparedGraphCheapestPath,
     edges: &[Edge],
-    weights: &BTreeMap<EId, CanonicalScalar>,
+    weights: &BTreeMap<EId, CanonicalPropertyValue>,
 ) -> Vec<Answer> {
     let mut layer = vec![(query.source(), 0_i128, Vec::<Step>::new())];
     let mut answers = Vec::new();
@@ -53,7 +54,8 @@ fn oracle(
                 if relation != RELATION {
                     continue;
                 }
-                let CanonicalScalar::Int(weight) = &weights[&edge] else {
+                let CanonicalPropertyValue::Scalar(CanonicalScalar::Int(weight)) = &weights[&edge]
+                else {
                     panic!("integer fixture");
                 };
                 let mut destinations = Vec::new();
@@ -91,7 +93,10 @@ fn exhaustive_ranked_signed_walk_bags_equal_independent_enumeration() {
             if choice != 0 {
                 let edge = EId(at as u128 + 1);
                 edges.push((edge, VId(left), RELATION, VId(right)));
-                weights.insert(edge, CanonicalScalar::Int(choice as i64 - 2));
+                weights.insert(
+                    edge,
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(choice as i64 - 2)),
+                );
             }
         }
         for direction in [
@@ -146,7 +151,12 @@ fn stopping_and_continuing_at_a_target_are_distinct_partitions() {
     for weight in [-1, 0, 1, i64::MIN, i64::MAX] {
         let weights: BTreeMap<_, _> = edges
             .iter()
-            .map(|(id, ..)| (*id, CanonicalScalar::Int(weight)))
+            .map(|(id, ..)| {
+                (
+                    *id,
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(weight)),
+                )
+            })
             .collect();
         for (start, end) in [(0, 0), (0, 1)] {
             let query = query(start, end, GlaDirection::Forward, 0, 4);
@@ -179,9 +189,9 @@ fn cursor_owns_admitted_costs_preserves_wide_id_ties_and_redacts_state() {
         (EId(u128::MAX), VId(0), RELATION, VId(u128::MAX)),
         (EId(1_u128 << 100), VId(0), RELATION, VId(u128::MAX)),
     ];
-    let mut weights = BTreeMap::from([
-        (edges[0].0, CanonicalScalar::Int(5)),
-        (edges[1].0, CanonicalScalar::Int(5)),
+    let mut weights: BTreeMap<EId, CanonicalPropertyValue> = BTreeMap::from([
+        (edges[0].0, CanonicalScalar::Int(5).into()),
+        (edges[1].0, CanonicalScalar::Int(5).into()),
     ]);
     let query = query(0, u128::MAX, GlaDirection::Forward, 1, 1);
     let mut cursor = query
@@ -192,7 +202,7 @@ fn cursor_owns_admitted_costs_preserves_wide_id_ties_and_redacts_state() {
             |_| Ok(()),
         )
         .unwrap();
-    weights.insert(edges[0].0, CanonicalScalar::Int(-20));
+    weights.insert(edges[0].0, CanonicalScalar::Int(-20).into());
     assert!(format!("{cursor:?}").contains("[REDACTED]"));
     assert_eq!(
         plain(
@@ -254,7 +264,7 @@ fn first_four_of_two_to_the_fortieth_walks_do_not_enumerate_the_result_bag() {
             ));
         }
     }
-    let weight = CanonicalScalar::Int(1);
+    let weight = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1));
     let query = query(0, 40, GlaDirection::Forward, 40, 40);
     let mut work = 0;
     let mut control = |_| {
@@ -314,10 +324,10 @@ fn every_refusal_closes_all_state_and_a_fresh_cursor_retries_exactly() {
         (EId(2), VId(0), RELATION, VId(0)),
         (EId(8), VId(1), RELATION, VId(0)),
     ];
-    let weights = BTreeMap::from([
-        (EId(7), CanonicalScalar::Int(4)),
-        (EId(2), CanonicalScalar::Int(-1)),
-        (EId(8), CanonicalScalar::Int(2)),
+    let weights: BTreeMap<EId, CanonicalPropertyValue> = BTreeMap::from([
+        (EId(7), CanonicalScalar::Int(4).into()),
+        (EId(2), CanonicalScalar::Int(-1).into()),
+        (EId(8), CanonicalScalar::Int(2).into()),
     ]);
     let query = query(0, 1, GlaDirection::Undirected, 0, 3);
     let mut total = 0;
@@ -390,7 +400,7 @@ fn exact_combined_limits_count_only_the_requested_prefix_and_refuse_atomically()
         (EId(1), VId(0), RELATION, VId(0)),
         (EId(2), VId(0), RELATION, VId(0)),
     ];
-    let weight = CanonicalScalar::Int(0);
+    let weight = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0));
     let run = |count, policy| {
         query.execute_k_governed_with_edge_properties(
             count,
@@ -476,6 +486,7 @@ fn exact_combined_limits_count_only_the_requested_prefix_and_refuse_atomically()
 fn source_admission_is_not_bypassed_by_zero_count_or_missing_anchors() {
     let missing = query(99, 100, GlaDirection::Forward, 0, 0);
     let edge = (EId(1), VId(0), RELATION, VId(1));
+    let null = CanonicalPropertyValue::Scalar(CanonicalScalar::Null);
     for count in [0, 1] {
         assert_eq!(
             missing.execute_k_with_control(
@@ -494,7 +505,7 @@ fn source_admission_is_not_bypassed_by_zero_count_or_missing_anchors() {
                 count,
                 [VId(0), VId(1)],
                 [edge],
-                |_, _| Ok::<_, ()>(Some(&CanonicalScalar::Null)),
+                |_, _| Ok::<_, ()>(Some(&null)),
                 |_| Ok(())
             ),
             Err(GraphCheapestPathError::Cost(
@@ -518,7 +529,7 @@ fn maximum_depth_is_iterative_and_keeps_exact_signed_costs() {
         crate::MAX_GRAPH_WALK_HOPS,
         crate::MAX_GRAPH_WALK_HOPS,
     );
-    let weight = CanonicalScalar::Int(i64::MIN);
+    let weight = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(i64::MIN));
     let mut cursor = query
         .cursor_with_control(
             [VId(0)],

@@ -8,7 +8,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
     GraphSymbol, GraphSymbolKind, PreparedGraphSet, PreparedGraphSetText,
 };
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::{Cell, RefCell};
 
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -43,7 +43,12 @@ fn run(
 ) -> ResultRows {
     let checkpoint = RefCell::new(checkpoint);
     let props: Vec<_> = (1..=4)
-        .map(|id| vec![(P, CanonicalScalar::Int(id * 10))])
+        .map(|id| {
+            vec![(
+                P,
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(id * 10)),
+            )]
+        })
         .collect();
     query.execute_governed(
         policy,
@@ -89,7 +94,12 @@ fn rows(text: &str) -> Vec<GraphValueRow> {
 /// plan that captures a relationship.
 fn identified_rows(text: &str) -> Vec<GraphValueRow> {
     let props: Vec<_> = (1..=4)
-        .map(|id| vec![(P, CanonicalScalar::Int(id * 10))])
+        .map(|id| {
+            vec![(
+                P,
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(id * 10)),
+            )]
+        })
         .collect();
     bind(text)
         .execute_governed(

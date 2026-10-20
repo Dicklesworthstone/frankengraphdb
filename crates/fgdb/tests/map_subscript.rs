@@ -24,6 +24,8 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "Item") => Some(GraphSymbol::Label(LabelId(1))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         _ => None,
     }
 }
@@ -139,6 +141,180 @@ fn parameter_documents_select_native_identities_lists_and_maps_without_coercion(
             .unwrap(),
             expected(&["a", "b"], vec![vec![null(), null()]])
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A parenthesized value that a map read or subscript follows is read whole
+/// (TCK Graph6 [4], [8], Map1 [3]), and a function argument is a whole
+/// expression, comparisons and Boolean operators included (TypeConversion4
+/// [3]). Grouping parentheses before an operator keep their meaning.
+#[test]
+fn parenthesized_values_take_postfix_reads_and_arguments_take_predicates() {
+    let ((), report) = run_async_under_lab(0x6d61_7005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let text =
+            |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+        let boolean = |value| GraphValue::Scalar(CanonicalScalar::Bool(value));
+        for (statement, columns, row) in [
+            (
+                "WITH [123, {existing: 42, notMissing: null}] AS list \
+                 RETURN (list[1]).missing AS a, (list[1]).notMissing AS b, \
+                 (list[1]).existing AS c",
+                vec!["a", "b", "c"],
+                vec![null(), null(), int(42)],
+            ),
+            ("RETURN ([1, 2])[0] AS x", vec!["x"], vec![int(1)]),
+            // NULL is dynamically typed: its map read is NULL (Map1 [2],
+            // Null1 [5], Null2 [5]).
+            (
+                "WITH null AS m RETURN m.missing AS a, m.name IS NULL AS b, \
+                 m.name IS NOT NULL AS c",
+                vec!["a", "b", "c"],
+                vec![null(), boolean(true), boolean(false)],
+            ),
+            // A graph function of NULL is NULL (TCK Graph4 [3]).
+            (
+                "RETURN type(null) AS a, nodes(null) AS b",
+                vec!["a", "b"],
+                vec![null(), null()],
+            ),
+            ("RETURN (1 + 2) * 3 AS x", vec!["x"], vec![int(9)]),
+            (
+                "RETURN toString(1 < 0) AS a, coalesce(1 = 2, true) AS b, \
+                 toString(true AND false) AS c",
+                vec!["a", "b", "c"],
+                vec![text("false"), boolean(false), text("false")],
+            ),
+        ] {
+            assert_eq!(
+                db.query(&cx, statement, &GqlParameters::new(), symbols, policy())
+                    .map_err(|error| format!("{statement}: {error}"))
+                    .unwrap(),
+                expected(&columns, vec![row]),
+                "{statement}"
+            );
+        }
+        // `$from..$to` are slice bounds, not field reads (TCK List2 [10]).
+        let bounds = GqlParameters::new()
+            .with_int64("from", 1)
+            .unwrap()
+            .with_int64("to", 3)
+            .unwrap();
+        assert_eq!(
+            db.query(
+                &cx,
+                "WITH [1, 2, 3] AS list RETURN list[$from..$to] AS r",
+                &bounds,
+                symbols,
+                policy()
+            )
+            .unwrap(),
+            expected(
+                &["r"],
+                vec![vec![GraphValue::List(
+                    vec![int(2), int(3)].into_boxed_slice()
+                )]]
+            )
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// openCypher dynamic property access (Graph7; the Merge6/Merge7 control
+/// queries): `n[key]` of a MATCH vertex or relationship reads the property
+/// named by `key`, NULL when absent, alone, in arithmetic and in a
+/// comprehension. A path is not subscripted, and a non-text key fails.
+#[test]
+fn element_subscripts_read_the_property_named_by_a_dynamic_key() {
+    let ((), report) = run_async_under_lab(0x6d61_7004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut next = 200u128;
+        let write_policy = GraphWriteProgramPolicy::new(policy(), 10_000, 10_000, 10_000);
+        db.query_write(
+            &contexts.txn(),
+            &cx,
+            &commit,
+            "CREATE (:Item {p: 1, q: 'x'})-[:R {q: 'y'}]->(:Item {p: 3})",
+            &GqlParameters::new(),
+            symbols,
+            RelationId(1),
+            write_policy,
+            |request| {
+                next += 1;
+                Ok::<_, Infallible>(match request.request {
+                    fgdb_gql::insertion::GraphInsertRequest::Vertex { .. } => {
+                        ElementId::Vertex(VId(next))
+                    }
+                    fgdb_gql::insertion::GraphInsertRequest::Edge { .. } => {
+                        ElementId::Edge(fgdb_types::EId(next))
+                    }
+                })
+            },
+        )
+        .await
+        .unwrap();
+        let text =
+            |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+        let read = |statement: &str, params: &GqlParameters| {
+            db.query(&cx, statement, params, symbols, policy())
+        };
+        let key = GqlParameters::new().with_text("key", "q").unwrap();
+        assert_eq!(
+            read(
+                "MATCH (n:Item) RETURN n['p'] AS a, n[$key] AS b, n['absent'] AS c ORDER BY a",
+                &key
+            )
+            .unwrap(),
+            expected(
+                &["a", "b", "c"],
+                vec![
+                    vec![int(1), text("x"), null()],
+                    vec![int(3), null(), null()]
+                ]
+            )
+        );
+        assert_eq!(
+            read(
+                "MATCH ()-[r:R]->() RETURN r['q'] AS a, \
+                 [key IN keys(r) | key + '->' + r[key]] AS kv",
+                &GqlParameters::new()
+            )
+            .unwrap(),
+            expected(
+                &["a", "kv"],
+                vec![vec![
+                    text("y"),
+                    GraphValue::List(vec![text("q->y")].into_boxed_slice())
+                ]]
+            )
+        );
+        assert_eq!(
+            read(
+                "MATCH (n:Item) RETURN n['p'] + 10 AS a, n[null] AS b ORDER BY a",
+                &GqlParameters::new()
+            )
+            .unwrap(),
+            expected(
+                &["a", "b"],
+                vec![vec![int(11), null()], vec![int(13), null()]]
+            )
+        );
+        for refused in [
+            "MATCH p = (a:Item)-[:R]->(b) RETURN p['q'] AS a",
+            "MATCH (n:Item) RETURN n[1] AS a",
+            "MATCH (n:Item) RETURN m['p'] AS a",
+        ] {
+            assert!(read(refused, &GqlParameters::new()).is_err(), "{refused}");
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

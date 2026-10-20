@@ -8,7 +8,7 @@ use crate::write_txn::{PointReadField, ProjectionReadAttempt, point_payload_admi
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_gql::algebra::{GlaOutput, PreparedGraphPattern};
 use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
-use fgdb_types::{CanonicalScalar, QueryCx};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, QueryCx};
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 
@@ -40,12 +40,12 @@ pub(super) fn property<V: Vfs + Clone, E>(
     mut poll: impl FnMut() -> Result<(), E>,
     control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E>,
     source_error: impl Fn(WriteTxnError) -> E,
-) -> Result<CanonicalScalar, E> {
+) -> Result<CanonicalPropertyValue, E> {
     use crate::gql_exec::source::SourceEvent;
 
     if !scope.allows_property(key) {
         control(GlaExecutionEvent::ScratchEntry)?;
-        return Ok(CanonicalScalar::Null);
+        return Ok(CanonicalScalar::Null.into());
     }
     control(GlaExecutionEvent::Work)?;
     let field = PointReadField::Property(key);
@@ -75,9 +75,29 @@ pub(super) fn property<V: Vfs + Clone, E>(
     control(GlaExecutionEvent::ScratchEntry)?;
     transaction.point_reads.borrow_mut().record(element, field);
     control(GlaExecutionEvent::ScratchEntry)?;
-    let value = projected.property.cloned().unwrap_or(CanonicalScalar::Null);
+    let value = projected
+        .property
+        .cloned()
+        .unwrap_or_else(|| CanonicalScalar::Null.into());
     attempt.accepted = true;
     Ok(value)
+}
+
+/// A [`property`] value for a consumer that holds only a scalar: a stored
+/// List or Map (fgdb-k3nub) refuses as a non-scalar operand rather than
+/// reading as NULL.
+pub(super) fn scalar<S, C>(
+    value: CanonicalPropertyValue,
+) -> Result<CanonicalScalar, GqlQueryError<S, C>> {
+    match value {
+        CanonicalPropertyValue::Scalar(value) => Ok(value),
+        CanonicalPropertyValue::List(_) | CanonicalPropertyValue::Map(_) => {
+            Err(GqlQueryError::Data(fgdb_gql::GraphIntegerError {
+                instruction: 0,
+                kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
+            }))
+        }
+    }
 }
 
 fn query_control(error: WriteTxnError) -> QueryError {

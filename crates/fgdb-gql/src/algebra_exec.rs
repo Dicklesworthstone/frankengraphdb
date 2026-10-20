@@ -8,7 +8,10 @@ mod join;
 mod policy;
 mod projection;
 mod trail;
-pub(crate) use comparison::{charge_payload, compare_element_properties, compare_properties};
+pub(crate) use comparison::{
+    charge_payload, charge_stored_payload, compare_element_properties, compare_properties,
+    compare_stored,
+};
 pub(crate) use policy::Charges;
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::{GovernedCheckpoint, ProjectedRows};
@@ -18,7 +21,7 @@ use crate::algebra::{
     GraphWalkSearch, VertexPredicate,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1197,7 +1200,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Row>, E> {
         if self.projects_property_maps() {
@@ -1257,8 +1260,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
         edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
         control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -1293,8 +1296,11 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        mut edge_property: impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         mut vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
         mut edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut vertex_properties: impl FnMut(VId) -> Result<Option<&'a crate::algebra::GraphValue>, E>,
@@ -1367,7 +1373,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
-        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Row>, E> {
         if self.projects_property_maps() {
@@ -1725,7 +1731,7 @@ mod tests {
                 reads.set(reads.get() + 1);
                 assert_eq!(vid, VId(2));
                 Ok::<_, ()>(predicates.iter().all(|predicate| {
-                    predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(7))])
+                    predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(7).into())])
                 }))
             })
             .unwrap();

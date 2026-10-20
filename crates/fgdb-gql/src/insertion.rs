@@ -17,7 +17,7 @@ use crate::{
     GraphSetProjection, GraphSetValue, PreparedGraphSet,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 
 pub const MAX_GRAPH_INSERT_DECLARATIONS: usize = 256;
 pub const MAX_GRAPH_INSERT_FIELDS: usize = 256;
@@ -235,14 +235,16 @@ pub enum GraphInsertIntent {
     Vertex {
         vertex: VId,
         labels: Vec<LabelId>,
-        properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+        /// Sorted by key. A value is a scalar or a stored List (fgdb-k3nub).
+        properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
     Edge {
         edge: EId,
         relation: RelationId,
         source: VId,
         destination: VId,
-        properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+        /// Sorted by key. A value is a scalar or a stored List (fgdb-k3nub).
+        properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
 }
 impl core::fmt::Debug for GraphInsertIntent {
@@ -689,11 +691,13 @@ impl Properties {
         let mut keys = Vec::new();
         let mut projection = Vec::new();
         for (at, (key, value)) in fields.into_iter().enumerate() {
-            let check = |column| {
-                if matches!(
-                    columns.get(column),
-                    Some(GraphSetColumnType::Scalar | GraphSetColumnType::Any)
-                ) {
+            // A list column is a stored list field (fgdb-k3nub); execution
+            // still refuses a list holding a map or a graph element.
+            let check = |column: usize| {
+                if columns.get(column).is_some_and(|kind| {
+                    kind.is_scalar_like()
+                        || matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any)
+                }) {
                     Ok(())
                 } else {
                     Err(GraphInsertBuildError::ValueColumn {
@@ -722,7 +726,9 @@ impl Properties {
                     };
                     let kind = crate::GraphSetProjection::admit_output(&value, columns, at)
                         .map_err(|kind| refused(Some(kind)))?;
-                    if !matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any) {
+                    if !kind.is_scalar_like()
+                        && !matches!(kind, GraphSetColumnType::List | GraphSetColumnType::Any)
+                    {
                         return Err(refused(None));
                     }
                     value

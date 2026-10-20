@@ -96,7 +96,7 @@ fn numeric_range_streams_match_storage_and_eager_oracles_at_exact_boundaries() {
                         .props
                         .iter()
                         .find(|(key, _)| *key == KEY)
-                        .map(|(_, value)| value);
+                        .map(|(_, value)| value.as_scalar().expect("scalar property"));
                     constraints.iter().all(|(literal, comparison)| {
                         comparison.accepts_scalar_pair(actual, Some(literal))
                     })

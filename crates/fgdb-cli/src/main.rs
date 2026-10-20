@@ -1358,7 +1358,32 @@ fn open_failure(error: fgdb::OpenError) -> Failure {
         | E::UnsupportedManifestFormat { .. }
         | E::SlotUnrecoverable { .. }
         | E::NotEmpty { .. } => Failure::open(error),
-        _ => Failure::io(error),
+        other => {
+            let mut source = std::error::Error::source(&other);
+            while let Some(current) = source {
+                if current
+                    .downcast_ref::<fgdb_types::ScalarDecodeError>()
+                    .is_some_and(|decode| {
+                        matches!(
+                            decode,
+                            fgdb_types::ScalarDecodeError::Timestamp(
+                                fgdb_types::TimestampDecodeError::TzdbResolverRequired
+                                    | fgdb_types::TimestampDecodeError::InvalidValue(
+                                        fgdb_types::TimestampConstructionError::Tzdb(_),
+                                    ),
+                            ) | fgdb_types::ScalarDecodeError::Text(
+                                fgdb_types::CanonicalTextError::ResolverRequired
+                                    | fgdb_types::CanonicalTextError::MissingArtifact { .. }
+                            )
+                        )
+                    })
+                {
+                    return Failure::open(other);
+                }
+                source = current.source();
+            }
+            Failure::io(other)
+        }
     }
 }
 fn execution_failure(error: impl std::error::Error + 'static) -> Failure {

@@ -566,7 +566,7 @@ pub(super) fn admit_snapshot(
             meter.charge(ZSetEvent::ScratchEntry)?;
             for (_, value) in row {
                 meter.charge(ZSetEvent::Work)?;
-                meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+                meter.units(ZSetEvent::ScratchEntry, stored_units(value))?;
             }
         }
     }

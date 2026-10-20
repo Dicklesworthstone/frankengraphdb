@@ -672,11 +672,11 @@ fn merge_return_row_allowance_applies_after_projection_on_both_branches() {
         assert!(rows.value.is_empty());
         assert_eq!(
             txn.vertex_property(&db, VId(4), Q).unwrap(),
-            Some(CanonicalScalar::Int(11)),
+            Some(CanonicalScalar::Int(11).into()),
         );
         assert_eq!(
             txn.vertex_property(&db, created.vertex(), Q).unwrap(),
-            Some(CanonicalScalar::Int(3)),
+            Some(CanonicalScalar::Int(3).into()),
         );
         let digest = txn.staged_effect_digest().unwrap();
         for statement in [
@@ -757,11 +757,11 @@ fn aggregate_return_uses_post_statement_values_and_refusals_restore_the_overlay(
             assert_eq!(db.frontier().unwrap(), basis);
             assert_eq!(
                 txn.vertex_property(&db, VId(1), P).unwrap(),
-                Some(CanonicalScalar::Int(11))
+                Some(CanonicalScalar::Int(11).into())
             );
             assert_eq!(
                 txn.vertex_property(&db, VId(4), Q).unwrap(),
-                Some(CanonicalScalar::Int(10))
+                Some(CanonicalScalar::Int(10).into())
             );
         }
 
@@ -777,7 +777,7 @@ fn aggregate_return_uses_post_statement_values_and_refusals_restore_the_overlay(
         for id in 1..=4 {
             assert_eq!(
                 txn.vertex_property(&db, VId(id), Q).unwrap(),
-                Some(CanonicalScalar::Int(0))
+                Some(CanonicalScalar::Int(0).into())
             );
         }
         txn.finish(&mut db, commit).await.unwrap();

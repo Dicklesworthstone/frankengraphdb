@@ -91,7 +91,7 @@ fn repeated_delete_create_records_replace_in_one_commit_and_survive_reopen() {
         assert_eq!(db.vertices().unwrap().len(), 1);
         assert_eq!(
             db.vertex(VId(12)).unwrap().unwrap().props,
-            vec![(P, CanonicalScalar::Int(7))]
+            vec![(P, CanonicalScalar::Int(7).into())]
         );
         assert!(db.vertex_at(VId(1), before).unwrap().is_some());
         assert_eq!(txcx.outstanding_obligations(), 0);

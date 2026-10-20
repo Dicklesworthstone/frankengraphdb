@@ -1326,7 +1326,7 @@ mod template_tests {
 mod compound_tests {
     use super::*;
     use crate::GqlQueryPolicy;
-    use fgdb_types::VId;
+    use fgdb_types::{CanonicalPropertyValue, VId};
     use std::cell::Cell;
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -1346,6 +1346,10 @@ mod compound_tests {
     }
 
     fn rows(predicate: &str, values: &[Option<CanonicalScalar>]) -> Vec<VId> {
+        let values: Vec<Option<CanonicalPropertyValue>> = values
+            .iter()
+            .map(|value| value.clone().map(CanonicalPropertyValue::from))
+            .collect();
         let plan = prepare(predicate);
         let result = plan
             .plan()
@@ -1525,7 +1529,7 @@ mod compound_tests {
     fn empty_membership_still_propagates_property_source_failure() {
         for predicate in ["n.p IN []", "n.p NOT IN []", "n.p IN [1, n.q]"] {
             let plan = prepare(predicate);
-            let value = CanonicalScalar::Int(1);
+            let value = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
             let result = plan.plan().execute_governed_with_properties(
                 1,
                 [VId(1)],

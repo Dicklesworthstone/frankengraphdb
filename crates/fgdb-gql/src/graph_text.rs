@@ -34,14 +34,32 @@ pub const MAX_GRAPH_TEXT_TOKENS: usize = 8_192;
 /// CHAR_LENGTH (fgdb-xakp1): a scalar is never a list, so SIZE of one is its
 /// character count. A leading SIZE(...) row value keeps the list-or-text
 /// Size node instead. The Boolean lowering lookahead and the compiler read
-/// this one table, so a name cannot be known to one and not the other.
-const SCALAR_FUNCTIONS: [&str; 19] = [
+/// this one table, so a name cannot be known to one and not the other. PI()
+/// and E() take no argument; ATAN2 takes two.
+const SCALAR_FUNCTIONS: [&str; 36] = [
     "ABS",
     "TOFLOAT",
     "FLOOR",
     "CEIL",
     "ROUND",
     "SQRT",
+    "EXP",
+    "LOG",
+    "LOG10",
+    "SIN",
+    "COS",
+    "TAN",
+    "COT",
+    "ASIN",
+    "ACOS",
+    "ATAN",
+    "ATAN2",
+    "DEGREES",
+    "RADIANS",
+    "HAVERSIN",
+    "SIGN",
+    "PI",
+    "E",
     "COALESCE",
     "NULLIF",
     "UPPER",
@@ -711,6 +729,12 @@ struct Parser<'a> {
     defer_where: bool,
     /// The lexer and token at that WHERE keyword, once it was deferred.
     deferred_where: Option<(Lexer<'a>, Token<'a>)>,
+    /// A write clause after WITH is being read (fgdb-sl4ym): its scope is
+    /// the WITH row alone, so the MATCH bindings WITH dropped stay hidden.
+    write_row_scope: bool,
+    /// The WITH stages before a write are being read: the hidden reads of
+    /// the elements the row carries stay in it, for the write and RETURN.
+    write_prefix: bool,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -792,6 +816,8 @@ impl<'a> Parser<'a> {
             zones: None,
             defer_where: false,
             deferred_where: None,
+            write_row_scope: false,
+            write_prefix: false,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),
@@ -2147,7 +2173,7 @@ impl PreparedGraphText {
 mod tests {
     use super::*;
     use crate::{GqlQueryError, GqlQueryPolicy};
-    use fgdb_types::{CanonicalScalar, EId, VId};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
     use std::cell::Cell;
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -2752,7 +2778,10 @@ mod tests {
     #[test]
     fn inline_property_map_selects_only_equal_values() {
         let pattern = query("MATCH (a {n:1}) RETURN a");
-        let values = [CanonicalScalar::Int(1), CanonicalScalar::Int(2)];
+        let values: [CanonicalPropertyValue; 2] = [
+            CanonicalScalar::Int(1).into(),
+            CanonicalScalar::Int(2).into(),
+        ];
         let actual = pattern
             .plan()
             .execute_governed_with_properties(
@@ -2766,7 +2795,8 @@ mod tests {
                             comparison,
                             value,
                         } => {
-                            values.get(vid.0 as usize - 1) == Some(&CanonicalScalar::Int(*value))
+                            values.get(vid.0 as usize - 1)
+                                == Some(&CanonicalPropertyValue::from(CanonicalScalar::Int(*value)))
                                 && *comparison == IntegerComparison::Equal
                         }
                         _ => true,
@@ -2831,8 +2861,8 @@ mod tests {
 
     #[test]
     fn property_nulls_and_duplicate_pagination_use_existing_value_semantics() {
-        let null = CanonicalScalar::Null;
-        let value = CanonicalScalar::Int(7);
+        let null = CanonicalPropertyValue::from(CanonicalScalar::Null);
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
         let edges = [
             (VId(1), RelationId(1), VId(2)),
             (VId(1), RelationId(1), VId(3)),
@@ -2865,7 +2895,7 @@ mod tests {
         assert!(run("b.n SKIP 1 LIMIT 1")[0].get(0).unwrap().is_null());
         assert_eq!(
             run("b.n SKIP 2 LIMIT 1")[0].get(0).unwrap().as_scalar(),
-            Some(&value)
+            Some(&CanonicalScalar::Int(7))
         );
         assert!(run("b.n LIMIT 0").is_empty());
         assert_eq!(
@@ -2930,7 +2960,7 @@ mod tests {
             (EId(3), VId(2), RelationId(2), VId(3)),
             (EId(4), VId(2), RelationId(2), VId(4)),
         ];
-        let scalar = CanonicalScalar::Int(7);
+        let scalar = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
         let run = |cap| {
             pattern.plan().execute_governed_with_identified_properties(
                 4,
@@ -3108,9 +3138,15 @@ mod tests {
     #[test]
     fn inline_node_maps_keep_optional_rows_parallel_edges_and_null_semantics() {
         let values = BTreeMap::from([
-            (VId(1), CanonicalScalar::Int(1)),
-            (VId(2), CanonicalScalar::Int(7)),
-            (VId(3), CanonicalScalar::Null),
+            (
+                VId(1),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(1)),
+            ),
+            (
+                VId(2),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(7)),
+            ),
+            (VId(3), CanonicalPropertyValue::from(CanonicalScalar::Null)),
         ]);
         let edges = [
             (VId(1), RelationId(1), VId(2)),

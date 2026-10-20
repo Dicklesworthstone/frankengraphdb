@@ -20,7 +20,7 @@ mod incremental;
 mod join;
 mod merge;
 mod procedure;
-mod projection;
+pub(crate) mod projection;
 pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
@@ -75,15 +75,20 @@ pub enum GraphSetColumnType {
     /// Every canonical native value, including maps, lists and graph elements.
     /// Combining this open domain with a concrete one never narrows it.
     Any,
+    /// A stored property value (fgdb-k3nub, fgdb-kr8j1): a scalar, or a
+    /// stored List or Map, never a graph element at any depth. A property
+    /// column has this domain; every consumer that admits a Scalar column
+    /// admits it too, and a scalar-only operator still refuses a collection
+    /// at run time with its own typed error. Scalar keeps its strict domain.
+    Stored,
 }
 impl From<&ValueProjection> for GraphSetColumnType {
     fn from(column: &ValueProjection) -> Self {
         use crate::algebra::GraphPathFunction;
         match column {
             ValueProjection::Vertex { .. } => Self::Vertex,
-            ValueProjection::Property { .. }
-            | ValueProjection::EdgeProperty { .. }
-            | ValueProjection::Type { .. } => Self::Scalar,
+            ValueProjection::Property { .. } | ValueProjection::EdgeProperty { .. } => Self::Stored,
+            ValueProjection::Type { .. } => Self::Scalar,
             ValueProjection::Labels { .. } => Self::List,
             ValueProjection::Properties { .. } | ValueProjection::EdgeProperties { .. } => {
                 Self::Any
@@ -120,13 +125,24 @@ impl GraphSetColumnType {
             Self::Edge => 5,
             Self::List => 6,
             Self::Any => 7,
+            Self::Stored => 8,
         }
+    }
+
+    /// Whether this column may be read as a scalar operand: a Scalar column,
+    /// or a stored property value, whose collections refuse at run time.
+    #[must_use]
+    pub(crate) const fn is_scalar_like(self) -> bool {
+        matches!(self, Self::Scalar | Self::Stored)
     }
 
     /// The common checked domain of two set-operand columns. Any already
     /// admits every native value, so it remains open when paired with a known
-    /// domain. Different concrete domains still refuse; this changes schema
-    /// admission only, never canonical equality, values or numeric coercion.
+    /// domain. A stored property value widens a Scalar column it is paired
+    /// with, and is itself widened to Any by a List column, whose lists may
+    /// hold graph elements. Other different concrete domains still refuse;
+    /// this changes schema admission only, never canonical equality, values or
+    /// numeric coercion.
     ///
     /// Native and maintained set compilers share this rule. Apply it to the
     /// complete declared schemas before inspecting any rows, including empty
@@ -140,6 +156,13 @@ impl GraphSetColumnType {
             Some(Self::Any)
         } else if self == other {
             Some(self)
+        } else if self.is_scalar_like() && other.is_scalar_like() {
+            Some(Self::Stored)
+        } else if matches!(
+            (self, other),
+            (Self::Stored, Self::List) | (Self::List, Self::Stored)
+        ) {
+            Some(Self::Any)
         } else {
             None
         }
@@ -149,16 +172,22 @@ impl GraphSetColumnType {
         use crate::algebra::GraphValue;
         self == Self::Any
             || value.is_null()
-            || matches!(
-                (self, value),
-                (Self::Vertex, GraphValue::Vertex(_))
-                    | (Self::Scalar, GraphValue::Scalar(_))
-                    | (Self::Path, GraphValue::Path(_))
-                    | (Self::Vertices, GraphValue::Vertices(_))
-                    | (Self::Edges, GraphValue::Edges(_))
-                    | (Self::Edge, GraphValue::Edge(_))
-                    | (Self::List, GraphValue::List(_))
-            )
+            || match (self, value) {
+                (Self::Stored, GraphValue::Scalar(_)) => true,
+                (Self::Stored, GraphValue::List(_) | GraphValue::Map { .. }) => {
+                    value.is_stored_value()
+                }
+                _ => matches!(
+                    (self, value),
+                    (Self::Vertex, GraphValue::Vertex(_))
+                        | (Self::Scalar, GraphValue::Scalar(_))
+                        | (Self::Path, GraphValue::Path(_))
+                        | (Self::Vertices, GraphValue::Vertices(_))
+                        | (Self::Edges, GraphValue::Edges(_))
+                        | (Self::Edge, GraphValue::Edge(_))
+                        | (Self::List, GraphValue::List(_))
+                ),
+            }
     }
 }
 
@@ -950,7 +979,7 @@ impl PreparedGraphSet {
         mut elements: impl FnMut(
             fgdb_delta_types::ElementId,
             fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalScalar>, E>,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
         let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
@@ -958,7 +987,8 @@ impl PreparedGraphSet {
         let elements: &mut dyn FnMut(
             fgdb_delta_types::ElementId,
             fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalScalar>, E> = &mut elements;
+        )
+            -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> = &mut elements;
         let mut source = WithElementReads {
             source: WithProcedures {
                 patterns,
@@ -1348,5 +1378,82 @@ mod pulled_projection_tests {
                 assert!(query.ordered_row_pull().is_none());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod column_domain_tests {
+    use super::GraphSetColumnType;
+    use crate::algebra::GraphValue;
+    use fgdb_types::{CanonicalScalar, EId, VId};
+
+    /// fgdb-kr8j1: a property column is Stored. It admits a scalar or a stored
+    /// List or Map, nested ones included, and refuses a graph element at any
+    /// depth. Scalar keeps its exact shape, so a spilled or copied Scalar
+    /// column still refuses a collection.
+    #[test]
+    fn a_stored_column_admits_stored_collections_and_never_an_element() {
+        let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let list = |values: Vec<GraphValue>| GraphValue::List(values.into_boxed_slice());
+        let map = |entries: Vec<(&str, GraphValue)>| {
+            GraphValue::map(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.into(), value))
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let stored = [
+            int(1),
+            list(vec![]),
+            list(vec![int(1), list(vec![int(2)])]),
+            map(vec![("a", int(1)), ("b", list(vec![int(2)]))]),
+        ];
+        for value in &stored {
+            assert!(GraphSetColumnType::Stored.accepts(value), "{value:?}");
+        }
+        for element in [
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Edge(EId(1)),
+            list(vec![GraphValue::Vertex(VId(1))]),
+            list(vec![list(vec![GraphValue::Edge(EId(1))])]),
+            map(vec![("a", GraphValue::Vertex(VId(1)))]),
+        ] {
+            assert!(!GraphSetColumnType::Stored.accepts(&element), "{element:?}");
+        }
+        assert!(GraphSetColumnType::Scalar.accepts(&stored[0]));
+        for collection in &stored[1..] {
+            assert!(
+                !GraphSetColumnType::Scalar.accepts(collection),
+                "{collection:?}"
+            );
+        }
+        assert!(!GraphSetColumnType::Vertex.accepts(&list(vec![])));
+        assert!(!GraphSetColumnType::List.accepts(&int(1)));
+    }
+
+    /// A set operand pairing keeps Scalar strict, widens Scalar with Stored
+    /// to Stored, and Stored with List to Any. Elements never pair with it.
+    #[test]
+    fn set_operands_widen_a_stored_column_only_to_a_domain_holding_both() {
+        use GraphSetColumnType as T;
+        for (left, right, common) in [
+            (T::Scalar, T::Scalar, Some(T::Scalar)),
+            (T::Scalar, T::Stored, Some(T::Stored)),
+            (T::Stored, T::Scalar, Some(T::Stored)),
+            (T::Stored, T::Stored, Some(T::Stored)),
+            (T::Stored, T::List, Some(T::Any)),
+            (T::List, T::Stored, Some(T::Any)),
+            (T::Stored, T::Any, Some(T::Any)),
+            (T::Scalar, T::List, None),
+            (T::Stored, T::Vertex, None),
+            (T::Edge, T::Stored, None),
+        ] {
+            assert_eq!(left.common_set_domain(right), common, "{left:?} {right:?}");
+        }
+        assert!(T::Stored.is_scalar_like() && T::Scalar.is_scalar_like());
+        assert!(!T::Any.is_scalar_like() && !T::List.is_scalar_like());
+        assert_ne!(T::Stored.tag(), T::Scalar.tag());
     }
 }

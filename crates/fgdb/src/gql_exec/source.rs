@@ -9,7 +9,7 @@ use crate::Snapshot;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_strata::AdjacencyEntry;
 use fgdb_strata::vertex::{VertexPatchRows, VertexRow};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
@@ -1495,7 +1495,10 @@ impl PropertyEqualityIndex {
                 statements.push((row.vid, row.created_at, patch, row_at));
                 for (key, value) in &row.props {
                     work += 1;
-                    if matches!(value, CanonicalScalar::Null) {
+                    // A List or Map is indexed under its own canonical bytes
+                    // (fgdb-k3nub): never skipped, and never equal to the
+                    // scalar a lookup encodes.
+                    if matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) {
                         continue;
                     }
                     let Ok(encoded) = value.encode() else {
@@ -1578,7 +1581,7 @@ impl PropertyEqualityIndex {
                 self.histories = self.histories.insert(row.vid, history, &mut self.work);
                 for (key, value) in &row.props {
                     self.work += 1;
-                    if matches!(value, CanonicalScalar::Null) {
+                    if matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Null)) {
                         continue;
                     }
                     let Ok(encoded) = value.encode() else {
@@ -1942,7 +1945,12 @@ pub(crate) fn bound_vertices<'a, E, Row>(
                 // Historical membership is only a candidate superset. Recheck
                 // spelling on the visible row; retain all original GLA filters.
                 if row.props.iter().any(|(property, value)| {
-                    *property == key && matches!(value, CanonicalScalar::Text(value) if value.as_str().starts_with(text))
+                    *property == key
+                        && matches!(
+                            value,
+                            CanonicalPropertyValue::Scalar(CanonicalScalar::Text(value))
+                                if value.as_str().starts_with(text)
+                        )
                 }) {
                     control(SourceEvent::ScratchEntry)?;
                     rows.push(row);
@@ -2339,7 +2347,7 @@ mod indexed_tests {
                         created_at: CommitSeq(seq),
                         retired_at: None,
                         labels: vec![],
-                        props: vec![(PropertyKeyId(1 + next(2)), value)],
+                        props: vec![(PropertyKeyId(1 + next(2)), value.into())],
                     });
                 }
                 let bytes = fgdb_strata::vertex::encode_patch(&rows).unwrap();
@@ -2602,7 +2610,7 @@ mod indexed_tests {
             created_at: CommitSeq(created),
             retired_at: retired.map(CommitSeq),
             labels: vec![fgdb_delta_types::LabelId(1)],
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(value).into())],
         };
         let patch = |rows: &[VertexRow]| {
             let bytes = fgdb_strata::vertex::encode_patch(rows).unwrap();
@@ -2641,7 +2649,7 @@ mod indexed_tests {
                 .into_iter()
                 .filter(|row| {
                     row.props.iter().any(|(key, value)| {
-                        *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7)
+                        *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7).into()
                     })
                 })
                 .map(|row| row.vid)
@@ -2653,7 +2661,7 @@ mod indexed_tests {
                     .visible_row(&patches, *vid, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
                     .unwrap()
                     && row.props.iter().any(|(key, value)| {
-                        *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7)
+                        *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7).into()
                     })
                 {
                     winners.push(row.vid);
@@ -2831,13 +2839,16 @@ mod indexed_tests {
     }
 }
 
-type BorrowedEdge<'a> = (IdentifiedEdge, &'a [(PropertyKeyId, CanonicalScalar)]);
+type BorrowedEdge<'a> = (
+    IdentifiedEdge,
+    &'a [(PropertyKeyId, CanonicalPropertyValue)],
+);
 
 pub(crate) fn edge_properties_at(
     props: &[Option<Arc<fgdb_strata::edge_props::BlockProps>>],
     block: usize,
     row: usize,
-) -> &[(PropertyKeyId, CanonicalScalar)] {
+) -> &[(PropertyKeyId, CanonicalPropertyValue)] {
     let Some(Some(props)) = props.get(block) else {
         return &[];
     };
@@ -2856,7 +2867,7 @@ pub(crate) fn visit_edges_with_properties<'a, E, C>(
     control: &mut C,
     mut visit: impl FnMut(
         &'a AdjacencyEntry,
-        &'a [(PropertyKeyId, CanonicalScalar)],
+        &'a [(PropertyKeyId, CanonicalPropertyValue)],
         &mut C,
     ) -> Result<(), E>,
 ) -> Result<(), E>
@@ -2877,7 +2888,7 @@ pub(crate) fn visit_edges_with_coordinates<'a, E, C>(
     control: &mut C,
     mut visit: impl FnMut(
         &'a AdjacencyEntry,
-        &'a [(PropertyKeyId, CanonicalScalar)],
+        &'a [(PropertyKeyId, CanonicalPropertyValue)],
         usize,
         usize,
         &mut C,
@@ -4310,7 +4321,11 @@ pub(super) fn admit<'a, E, Row>(
     })
 }
 impl BorrowedTables<'_> {
-    pub(super) fn edge_property(&self, eid: EId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+    pub(super) fn edge_property(
+        &self,
+        eid: EId,
+        key: PropertyKeyId,
+    ) -> Option<&CanonicalPropertyValue> {
         let at = self
             .edges
             .binary_search_by_key(&eid, |(edge, _)| edge.0)
@@ -4321,7 +4336,7 @@ impl BorrowedTables<'_> {
             .ok()
             .map(|at| &props[at].1)
     }
-    pub(super) fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+    pub(super) fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
         let row = self.vertices[self
             .vertices
             .binary_search_by_key(&vid, |row| row.vid)
@@ -4454,7 +4469,7 @@ mod tests {
             created_at: CommitSeq(created),
             retired_at: retired.map(CommitSeq),
             labels: vec![LabelId(1)],
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(value).into())],
         }
     }
     fn patch(rows: &[VertexRow]) -> VertexPatchRows {
@@ -4612,14 +4627,16 @@ mod tests {
     fn shared_edge_generations_keep_exact_historical_coordinates_and_property_borrows() {
         use fgdb_strata::edge_props::BlockProps;
 
-        let old_value = CanonicalScalar::ucs_basic_text(&"carried".repeat(1024)).unwrap();
+        let old_value = CanonicalPropertyValue::from(
+            CanonicalScalar::ucs_basic_text(&"carried".repeat(1024)).unwrap(),
+        );
         let block: Arc<[AdjacencyEntry]> =
             vec![edge(1, 1, None), edge(2, 1, None), edge(3, 1, None)].into();
         let sidecar = Arc::new(BlockProps {
             locators: vec![1, 0, 2],
             rows: vec![
                 vec![(PropertyKeyId(1), old_value.clone())],
-                vec![(PropertyKeyId(1), CanonicalScalar::Int(30))],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(30).into())],
             ],
         });
         let pinned_blocks = vec![Arc::clone(&block)];
@@ -4632,7 +4649,7 @@ mod tests {
             locators: vec![1, 2],
             rows: vec![
                 vec![(PropertyKeyId(1), old_value.clone())],
-                vec![(PropertyKeyId(1), CanonicalScalar::Int(13))],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(13).into())],
             ],
         })));
         blocks.push(vec![edge(2, 1, Some(4))].into());
@@ -4640,7 +4657,7 @@ mod tests {
         blocks.push(vec![edge(4, 5, None)].into());
         props.push(Some(Arc::new(BlockProps {
             locators: vec![1],
-            rows: vec![vec![(PropertyKeyId(1), CanonicalScalar::Int(40))]],
+            rows: vec![vec![(PropertyKeyId(1), CanonicalScalar::Int(40).into())]],
         })));
         let index = pinned_index.extend(&blocks, pinned_blocks.len());
         assert!(index.equivalent(&AdjacencyIndex::build(&blocks)));
@@ -4664,17 +4681,23 @@ mod tests {
                         if at < 3 {
                             old_value.clone()
                         } else {
-                            CanonicalScalar::Int(13)
+                            CanonicalScalar::Int(13).into()
                         },
                     )],
                 ));
                 if at < 4 {
                     expected.push((EId(2), Vec::new()));
                 }
-                expected.push((EId(3), vec![(PropertyKeyId(1), CanonicalScalar::Int(30))]));
+                expected.push((
+                    EId(3),
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(30).into())],
+                ));
             }
             if at >= 5 {
-                expected.push((EId(4), vec![(PropertyKeyId(1), CanonicalScalar::Int(40))]));
+                expected.push((
+                    EId(4),
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(40).into())],
+                ));
             }
             assert_eq!(
                 actual

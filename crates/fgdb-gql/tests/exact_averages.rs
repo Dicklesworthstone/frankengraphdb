@@ -9,7 +9,7 @@ use fgdb_gql::{
     GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphSymbol, GraphSymbolKind,
     PreparedGraphAggregate, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -88,7 +88,9 @@ fn all_and_distinct_averages_match_owned_occurrence_oracles_and_rank_exactly() {
                 .collect();
             let scalars: Vec<_> = values
                 .iter()
-                .map(|value| value.map(CanonicalScalar::Int))
+                .map(|value| {
+                    value.map(|value| CanonicalPropertyValue::from(CanonicalScalar::Int(value)))
+                })
                 .collect();
             let mut groups: BTreeMap<VId, Vec<i64>> = BTreeMap::new();
             for (owner, _, destination) in &edges {
@@ -221,7 +223,8 @@ fn sub_float_differences_survive_ordering_flat_and_compound_having() {
         CanonicalScalar::Int(n - 1),
         CanonicalScalar::Int(n),
         CanonicalScalar::Int(i64::MIN),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let edges = [
         (VId(1), R, VId(10)),
         (VId(1), R, VId(11)),
@@ -299,7 +302,7 @@ fn empty_null_and_noninteger_domains_are_explicit_even_with_zero_output() {
         .unwrap();
     assert_eq!(empty.value.len(), 1);
     assert!(empty.value[0].values().iter().all(|value| value.is_null()));
-    let null = CanonicalScalar::Null;
+    let null = CanonicalPropertyValue::from(CanonicalScalar::Null);
     let missing = query
         .execute_governed(
             2,
@@ -316,7 +319,9 @@ fn empty_null_and_noninteger_domains_are_explicit_even_with_zero_output() {
     for scalar in [
         CanonicalScalar::Bool(true),
         CanonicalScalar::ucs_basic_text("7").unwrap(),
-    ] {
+    ]
+    .map(CanonicalPropertyValue::from)
+    {
         let query = prepare("MATCH (n) RETURN AVG(n.p) AS a HAVING TRUE OR a IS NULL LIMIT 0");
         assert!(matches!(
             query.execute_governed(
@@ -391,7 +396,8 @@ fn exact_numeric_updates_share_all_limits_and_every_interruption_checkpoint() {
         CanonicalScalar::Int(1),
         CanonicalScalar::Int(5),
         CanonicalScalar::Int(9),
-    ];
+    ]
+    .map(CanonicalPropertyValue::from);
     let edges = [
         (VId(1), R, VId(10)),
         (VId(1), R, VId(10)),
@@ -508,7 +514,11 @@ fn binary64_sum_and_average_round_the_exact_result_once_in_any_order() {
     let query = prepare("MATCH (n) RETURN SUM(n.p) AS s, AVG(n.p) AS a, SUM(DISTINCT n.p) AS d");
     let expected = [float(3.6), float(0.6), float(3.6)]
         .map(|value| GraphAggregateValue::Value(GraphValue::Scalar(value)));
-    let mut order = values.to_vec();
+    let mut order: Vec<_> = values
+        .iter()
+        .cloned()
+        .map(CanonicalPropertyValue::from)
+        .collect();
     for rotation in 0..values.len() * 2 {
         order.rotate_left(1);
         if rotation == values.len() {
@@ -530,7 +540,8 @@ fn binary64_sum_and_average_round_the_exact_result_once_in_any_order() {
     }
     // Repeated binary64 values count once under DISTINCT, and stay distinct
     // from an equal integer, as COUNT(DISTINCT) keeps them.
-    let repeated = [float(1.5), float(1.5), CanonicalScalar::Int(1), float(1.0)];
+    let repeated = [float(1.5), float(1.5), CanonicalScalar::Int(1), float(1.0)]
+        .map(CanonicalPropertyValue::from);
     let rows = query
         .execute_governed(
             4,

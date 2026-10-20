@@ -12,7 +12,7 @@ fn row(vid: VId, at: u64, value: CanonicalScalar) -> VertexRow {
         created_at: CommitSeq(at),
         retired_at: None,
         labels: vec![],
-        props: vec![(KEY, value)],
+        props: vec![(KEY, value.into())],
     }
 }
 
@@ -68,7 +68,7 @@ fn every_prefix_refusal_preserves_the_full_ordered_retry_at_the_capacity_boundar
             .flat_map(|patch| patch.iter())
             .filter(|row| {
                 !indexed
-                    || matches!(&row.props[0].1, CanonicalScalar::Text(value)
+                    || matches!(row.props[0].1.as_scalar(), Some(CanonicalScalar::Text(value))
                 if value.as_str().starts_with("Ad"))
             })
             .map(|row| row.vid)

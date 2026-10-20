@@ -10,7 +10,8 @@ use fgdb_gql::{
     PreparedGraphAggregate, PreparedGraphAggregateText, PreparedGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
 };
 use std::collections::BTreeMap;
 
@@ -111,7 +112,11 @@ fn oracle(vertices: &[VertexRow], edges: &[EdgeRecord]) -> Vec<Plain> {
                     .find(|row| row.vid == second.entry.dst)
                     .unwrap();
                 let score = vertex.props.iter().find_map(|(key, value)| match value {
-                    CanonicalScalar::Int(value) if *key == SCORE => Some(*value),
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))
+                        if *key == SCORE =>
+                    {
+                        Some(*value)
+                    }
                     _ => None,
                 });
                 result.push((first.entry.src, second.entry.dst, score));

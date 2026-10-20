@@ -8,7 +8,7 @@ use fgdb_gql::{
     MAX_GRAPH_SET_OPERANDS, MAX_GRAPH_TEXT_BYTES, PreparedGraphAggregateText, PreparedGraphSet,
     PreparedGraphSetText, PreparedGraphText,
 };
-use fgdb_types::{CanonicalF64, CanonicalScalar, CanonicalScalarKind, VId};
+use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, CanonicalScalarKind, VId};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -51,7 +51,7 @@ fn values() -> [Option<CanonicalScalar>; 6] {
     ]
 }
 fn run(query: &PreparedGraphSet) -> Vec<GraphValueRow> {
-    let values = values();
+    let values = values().map(|value| value.map(CanonicalPropertyValue::from));
     query
         .execute_governed(
             policy(),
@@ -395,18 +395,6 @@ fn text_keeps_concrete_domain_refusals_before_catalog_access() {
             GraphSetColumnType::List,
             GraphSetColumnType::Scalar,
         ),
-        (
-            "MATCH (n:PrivateLabel) RETURN n AS value",
-            "RETURN NULL AS value",
-            GraphSetColumnType::Vertex,
-            GraphSetColumnType::Scalar,
-        ),
-        (
-            "RETURN [1] AS value",
-            "RETURN NULL AS value",
-            GraphSetColumnType::List,
-            GraphSetColumnType::Scalar,
-        ),
     ] {
         for operation in ["UNION", "INTERSECT", "EXCEPT"] {
             for quantifier in ["ALL", "DISTINCT"] {
@@ -425,6 +413,18 @@ fn text_keeps_concrete_domain_refusals_before_catalog_access() {
                     "{text}"
                 );
                 assert_eq!(error.offset, text.find(operation).unwrap());
+            }
+        }
+    }
+    // A NULL literal is dynamically typed (0372f28d; TCK Null1 [5]): paired
+    // with a vertex or a list it widens the column to Any, never refuses.
+    for left in ["MATCH (n:A) RETURN n AS value", "RETURN [1] AS value"] {
+        for operation in ["UNION", "INTERSECT", "EXCEPT"] {
+            for quantifier in ["ALL", "DISTINCT"] {
+                let text = format!("{left} {operation} {quantifier} RETURN NULL AS value LIMIT 0");
+                let template = PreparedGraphSetText::prepare(&text, symbols)
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                assert_eq!(template.column_types(), &[GraphSetColumnType::Any], "{text}");
             }
         }
     }
@@ -608,20 +608,29 @@ fn nullable_collection_parameters_preserve_declared_domains_and_frozen_bindings(
             .collect::<Vec<_>>(),
         vec![null, list(vec![int(3)])]
     );
-    let error = PreparedGraphSetText::prepare_with_parameter_types(
+    // A NULL literal is dynamically typed (0372f28d): beside a list
+    // parameter it widens the column to Any, and both rows survive.
+    let widened = PreparedGraphSetText::prepare_with_parameter_types(
         "RETURN $items AS value UNION ALL RETURN NULL AS value",
         &[("items", GqlParameterType::List)],
-        |_, _| panic!("concrete schema refusal precedes catalog access"),
+        symbols,
     )
-    .unwrap_err();
-    assert_eq!(
-        error.kind,
-        GraphSetTextErrorKind::SetBuild(GraphSetBuildError::ColumnType {
-            column: 0,
-            left: GraphSetColumnType::List,
-            right: GraphSetColumnType::Scalar,
-        })
-    );
+    .unwrap();
+    assert_eq!(widened.column_types(), &[GraphSetColumnType::Any]);
+    let bound = widened
+        .bind_parameters(
+            &GqlParameters::new()
+                .with_list("items", vec![int(3)])
+                .unwrap(),
+        )
+        .unwrap();
+    let values = run(&bound)
+        .iter()
+        .map(|row| row.get(0).unwrap().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    assert!(values.contains(&GraphValue::Scalar(CanonicalScalar::Null)));
+    assert!(values.contains(&list(vec![int(3)])));
 }
 
 #[test]

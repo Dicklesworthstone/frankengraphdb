@@ -17,7 +17,7 @@ type Cells = Vec<Vec<GraphValue>>;
 fn execute(
     q: &GlaPlan<GraphValueRow>,
     topology: &Topology,
-    values: &BTreeMap<VId, CanonicalScalar>,
+    values: &BTreeMap<VId, CanonicalPropertyValue>,
     optimized: bool,
     stop: usize,
 ) -> (Result<Cells, VisitError<usize, ()>>, Trace) {
@@ -73,7 +73,7 @@ fn execute(
 fn read_cells<'a, E>(
     columns: &[ValueProjection],
     ids: &[Option<VId>],
-    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
 ) -> Result<Vec<GraphValue>, E> {
     let mut cells = Vec::new();
     for column in columns {
@@ -88,7 +88,10 @@ fn read_cells<'a, E>(
                     None => None,
                 };
                 cells.push(GraphValue::Scalar(
-                    value.cloned().unwrap_or(CanonicalScalar::Null),
+                    value
+                        .map(|value| value.as_scalar().expect("scalar property fixture"))
+                        .cloned()
+                        .unwrap_or(CanonicalScalar::Null),
                 ));
             }
             _ => panic!("property fixture"),
@@ -119,9 +122,9 @@ fn topology(mask: usize, direction: GlaDirection) -> Topology {
 
 #[test]
 fn late_properties_and_boolean_reads_have_native_order_on_every_complete_binding() {
-    let values = BTreeMap::from([
-        (VId(0), CanonicalScalar::Int(-1)),
-        (VId(1), CanonicalScalar::Null),
+    let values: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::from([
+        (VId(0), CanonicalScalar::Int(-1).into()),
+        (VId(1), CanonicalScalar::Null.into()),
     ]);
     for direction in [
         GlaDirection::Forward,
@@ -161,9 +164,9 @@ fn late_properties_and_boolean_reads_have_native_order_on_every_complete_binding
 #[test]
 fn every_property_source_failure_is_the_same_failure_after_the_same_reads() {
     let graph = topology(511, GlaDirection::Forward);
-    let values = BTreeMap::from([
-        (VId(0), CanonicalScalar::Int(1)),
-        (VId(1), CanonicalScalar::Int(1)),
+    let values: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::from([
+        (VId(0), CanonicalScalar::Int(1).into()),
+        (VId(1), CanonicalScalar::Int(1).into()),
     ]);
     let q = pattern(
         "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) WHERE a.p=b.p OR c.p IS NULL RETURN a.p AS ap, c.p AS cp",
@@ -213,7 +216,8 @@ fn changing_property_callbacks_are_not_cached_or_reordered_by_the_kernel() {
         CanonicalScalar::Int(1),
         CanonicalScalar::Int(2),
         CanonicalScalar::Null,
-    ];
+    ]
+    .map(CanonicalPropertyValue::Scalar);
     let run = |optimized| {
         let mut calls = 0;
         let mut answer = Vec::new();
@@ -259,13 +263,13 @@ fn changing_property_callbacks_are_not_cached_or_reordered_by_the_kernel() {
 fn late_property_intersection_keeps_root_contiguity_and_prunes_sparse_wedges() {
     let n = 1024_u128;
     let mut graph = BTreeMap::new();
-    let mut values = BTreeMap::new();
+    let mut values: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::new();
     for i in 0..n {
         for (a, r, b) in [(i, 1, n), (n, 2, n + i + 1), (n + i + 1, 3, i)] {
             graph.insert((VId(a), RelationId(r), VId(b)), Multiplicity::ONE);
         }
-        values.insert(VId(i), CanonicalScalar::Int(i as i64));
-        values.insert(VId(n + i + 1), CanonicalScalar::Int(i as i64));
+        values.insert(VId(i), CanonicalScalar::Int(i as i64).into());
+        values.insert(VId(n + i + 1), CanonicalScalar::Int(i as i64).into());
     }
     let graph = Topology::from(graph);
     let q = pattern("MATCH (a)-[:R]->(b)-[:S]->(c)-[:T]->(a) WHERE a.p=c.p RETURN a,c.p");
@@ -301,7 +305,7 @@ fn late_property_intersection_keeps_root_contiguity_and_prunes_sparse_wedges() {
 fn every_late_read_and_projection_checkpoint_propagates_and_exact_work_limits_replay() {
     let q = pattern("MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) WHERE a.p=b.p RETURN c.p");
     let graph = topology(17 | 256, GlaDirection::Forward);
-    let value = CanonicalScalar::Int(1);
+    let value = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
     let mut baseline = Vec::new();
     let mut total = 0;
     let mut stats = crate::GlaExecutionStats::default();
@@ -384,10 +388,10 @@ fn every_late_read_and_projection_checkpoint_propagates_and_exact_work_limits_re
 #[test]
 fn property_aggregates_preserve_parallel_bags_nulls_groups_and_finite_root_pages() {
     use super::tests::{aggregate, wide};
-    let values = BTreeMap::from([
-        (VId(0), CanonicalScalar::Int(-1)),
-        (VId(1), CanonicalScalar::Null),
-        (VId(2), CanonicalScalar::Int(-1)),
+    let values: BTreeMap<VId, CanonicalPropertyValue> = BTreeMap::from([
+        (VId(0), CanonicalScalar::Int(-1).into()),
+        (VId(1), CanonicalScalar::Null.into()),
+        (VId(2), CanonicalScalar::Int(-1).into()),
     ]);
     let mut edges = Vec::new();
     for a in 0..4 {
@@ -469,7 +473,7 @@ fn late_null_rejection_and_property_support_precede_an_above_count_weight() {
     .into_iter()
     .flat_map(|edge| std::iter::repeat_n(edge, 256))
     .collect();
-    let run = |q: &PreparedGraphAggregate, value: &CanonicalScalar| {
+    let run = |q: &PreparedGraphAggregate, value: &CanonicalPropertyValue| {
         q.execute_governed(
             768,
             [VId(0), VId(1), VId(2)],
@@ -486,7 +490,7 @@ fn late_null_rejection_and_property_support_precede_an_above_count_weight() {
     let counted = aggregate(&format!("MATCH {body} RETURN COUNT(c.p) AS n"));
     let selected = aggregate(&format!("MATCH {body} WHERE a.p=c.p RETURN COUNT(*) AS n"));
     assert_eq!(
-        run(&support, &CanonicalScalar::Int(i64::MIN))
+        run(&support, &CanonicalScalar::Int(i64::MIN).into())
             .unwrap()
             .value[0]
             .get(0)
@@ -495,21 +499,21 @@ fn late_null_rejection_and_property_support_precede_an_above_count_weight() {
         Some(1)
     );
     assert_eq!(
-        run(&counted, &CanonicalScalar::Null).unwrap().value[0]
+        run(&counted, &CanonicalScalar::Null.into()).unwrap().value[0]
             .get(0)
             .unwrap()
             .as_count(),
         Some(0)
     );
     assert_eq!(
-        run(&selected, &CanonicalScalar::Null).unwrap().value[0]
+        run(&selected, &CanonicalScalar::Null.into()).unwrap().value[0]
             .get(0)
             .unwrap()
             .as_count(),
         Some(0)
     );
     assert!(matches!(
-        run(&counted, &CanonicalScalar::Int(1)),
+        run(&counted, &CanonicalScalar::Int(1).into()),
         Err(GqlQueryError::Source(
             GraphAggregateError::ArithmeticOverflow { aggregate: 0 }
         ))

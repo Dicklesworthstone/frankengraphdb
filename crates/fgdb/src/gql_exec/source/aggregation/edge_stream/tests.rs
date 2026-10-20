@@ -1,14 +1,16 @@
 use super::*;
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts,
+};
 
 type EdgeImage = (
     EId,
     VId,
     RelationId,
     VId,
-    Vec<(PropertyKeyId, CanonicalScalar)>,
+    Vec<(PropertyKeyId, CanonicalPropertyValue)>,
 );
 fn read_source(
     view: EmbeddedReadView,
@@ -130,7 +132,7 @@ fn history_predecessors_equal_authoritative_rows_and_every_source_boundary_propa
         assert!(
             old_rows
                 .iter()
-                .all(|row| row.4 == vec![(key, CanonicalScalar::Int(3))])
+                .all(|row| row.4 == vec![(key, CanonicalScalar::Int(3).into())])
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -312,7 +314,7 @@ fn current_history_hint_preserves_arbitrary_reads_and_pinned_generations() {
         for (source, value) in [(&old, 1), (&new, 2)] {
             assert_eq!(
                 source.edge(EId(0), control).unwrap().unwrap().properties,
-                &[(property, CanonicalScalar::Int(value))]
+                &[(property, CanonicalScalar::Int(value).into())]
             );
             // Both an arbitrary future candidate and an absent identity take
             // the existing point lookup, without overwriting the root hint.
@@ -320,7 +322,7 @@ fn current_history_hint_preserves_arbitrary_reads_and_pinned_generations() {
             assert!(source.edge(EId(5), control).unwrap().is_none());
             assert_eq!(
                 source.edge(EId(0), control).unwrap().unwrap().properties,
-                &[(property, CanonicalScalar::Int(value))]
+                &[(property, CanonicalScalar::Int(value).into())]
             );
         }
         db.compact(&commit).await.unwrap();

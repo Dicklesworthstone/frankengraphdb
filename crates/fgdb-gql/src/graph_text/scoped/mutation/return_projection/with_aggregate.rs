@@ -514,10 +514,8 @@ impl<'a> Parser<'a> {
         };
         self.punct(b')', "one expression as the aggregate argument")?;
         if matches!(function, Function::SumInt | Function::AverageInt)
-            && !matches!(
-                input_kind,
-                GraphSetColumnType::Scalar | GraphSetColumnType::Any
-            )
+            && !input_kind.is_scalar_like()
+            && input_kind != GraphSetColumnType::Any
         {
             return Err(expected(item_at, "scalar input for a numeric aggregate"));
         }

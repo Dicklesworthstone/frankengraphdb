@@ -11,10 +11,10 @@ use fgdb_gql::{
     GlaExecutionEvent, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
     PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeMap;
 
-type Vertices = BTreeMap<VId, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalScalar)>)>;
+type Vertices = BTreeMap<VId, (Vec<LabelId>, Vec<(PropertyKeyId, CanonicalPropertyValue)>)>;
 type Edge = (VId, RelationId, VId);
 const CIK: PropertyKeyId = PropertyKeyId(1);
 
@@ -57,7 +57,7 @@ fn fixture() -> Vertices {
             VId(id),
             (
                 vec![LabelId(label)],
-                cik.map(|value| vec![(CIK, CanonicalScalar::Int(value))])
+                cik.map(|value| vec![(CIK, CanonicalScalar::Int(value).into())])
                     .unwrap_or_default(),
             ),
         );
@@ -66,7 +66,7 @@ fn fixture() -> Vertices {
         .get_mut(&VId(13))
         .unwrap()
         .1
-        .push((CIK, CanonicalScalar::Null));
+        .push((CIK, CanonicalScalar::Null.into()));
     vertices
 }
 fn matches(vertices: &Vertices, vid: VId, predicates: &[VertexPredicate]) -> bool {
@@ -76,7 +76,7 @@ fn matches(vertices: &Vertices, vid: VId, predicates: &[VertexPredicate]) -> boo
             .all(|predicate| predicate.matches(labels, props))
     })
 }
-fn property(vertices: &Vertices, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+fn property(vertices: &Vertices, vid: VId, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
     vertices
         .get(&vid)?
         .1

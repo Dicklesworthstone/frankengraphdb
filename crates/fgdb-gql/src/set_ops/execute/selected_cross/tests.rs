@@ -1,7 +1,7 @@
 use super::*;
 use crate::algebra::IntegerComparison;
 use crate::{GqlParameters, PreparedGraphSetText};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
 fn allow(_: GlaExecutionEvent) -> Result<(), usize> {
     Ok(())
@@ -430,8 +430,8 @@ fn native_unwind_match_selection_reaches_the_physical_path_without_new_syntax() 
         fused(&prepared),
         "native binding must reach the selected-product path"
     );
-    let s1 = CanonicalScalar::Int(1);
-    let s2 = CanonicalScalar::Int(2);
+    let s1 = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
+    let s2 = CanonicalPropertyValue::from(CanonicalScalar::Int(2));
     let result = prepared
         .execute_governed(
             policy(),
@@ -617,7 +617,10 @@ fn prepare_p(text: &str) -> Result<PreparedGraphSet, crate::GraphSetTextError> {
 
 /// Execute over two vertices with p(1) = 1 and p(2) = 2; the rows as a bag.
 fn over_two_vertices(prepared: &PreparedGraphSet) -> Vec<GraphValueRow> {
-    let (s1, s2) = (CanonicalScalar::Int(1), CanonicalScalar::Int(2));
+    let (s1, s2) = (
+        CanonicalPropertyValue::from(CanonicalScalar::Int(1)),
+        CanonicalPropertyValue::from(CanonicalScalar::Int(2)),
+    );
     let mut rows = prepared
         .execute_governed(
             policy(),

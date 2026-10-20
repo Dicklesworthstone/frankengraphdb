@@ -10,7 +10,9 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphAggregate, GraphAggregateRow, GraphSymbol, GraphSymbolKind,
     PreparedGraphAggregate, PreparedGraphAggregateText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use std::collections::BTreeMap;
 
 const R: RelationId = RelationId(1);
@@ -134,12 +136,14 @@ fn oracle(
             if !child
                 .props
                 .iter()
-                .any(|(key, value)| *key == FLAG && *value == CanonicalScalar::Int(1))
+                .any(|(key, value)| *key == FLAG && *value == CanonicalScalar::Int(1).into())
             {
                 continue;
             }
             let amount = child.props.iter().find_map(|(key, value)| match value {
-                CanonicalScalar::Int(n) if *key == AMOUNT => Some(i128::from(*n)),
+                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)) if *key == AMOUNT => {
+                    Some(i128::from(*n))
+                }
                 _ => None,
             });
             matches.push((Some(child.vid), amount));

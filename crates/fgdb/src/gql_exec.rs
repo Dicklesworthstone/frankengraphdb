@@ -15,7 +15,7 @@ use fgdb_gql::algebra::{
     GlaIdentityOutput, GlaOutput, GlaPlan, GraphValue, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{BoundPlan, GlaExecution, GlaExecutionError, GlaExecutionLimits, RelationBind};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
 use source::SourceEvent;
 use std::collections::BTreeMap;
 
@@ -73,7 +73,7 @@ pub(crate) fn element_property_at(
     element: fgdb_delta_types::ElementId,
     key: PropertyKeyId,
     as_of: CommitSeq,
-) -> Result<Option<CanonicalScalar>, GqlError> {
+) -> Result<Option<CanonicalPropertyValue>, GqlError> {
     read_element_property(
         element,
         key,
@@ -89,8 +89,8 @@ pub(crate) fn read_element_property(
     key: PropertyKeyId,
     vertex: impl FnOnce(VId) -> Result<Option<VertexRow>, ReadError>,
     edge: impl FnOnce(EId) -> Result<Option<EdgeRecord>, ReadError>,
-) -> Result<Option<CanonicalScalar>, GqlError> {
-    let lookup = |props: &[(PropertyKeyId, CanonicalScalar)]| {
+) -> Result<Option<CanonicalPropertyValue>, GqlError> {
+    let lookup = |props: &[(PropertyKeyId, CanonicalPropertyValue)]| {
         props
             .binary_search_by_key(&key, |(key, _)| *key)
             .ok()
@@ -432,7 +432,7 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             }))
         }
     }
-    fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+    fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
         if let Some(tables) = &self.borrowed {
             return tables.property(vid, key);
         }
@@ -442,7 +442,7 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             .ok()
             .map(|at| &row.props[at].1)
     }
-    fn edge_property(&self, eid: EId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+    fn edge_property(&self, eid: EId, key: PropertyKeyId) -> Option<&CanonicalPropertyValue> {
         if let Some(tables) = &self.borrowed {
             return tables.edge_property(eid, key);
         }
