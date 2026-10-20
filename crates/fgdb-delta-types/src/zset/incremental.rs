@@ -201,7 +201,12 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalJoin<K, L, R> {
         let left = prepare_changes(&self.left, &left, limbs, control)?;
         let right = prepare_changes(&self.right, &right, limbs, control)?;
         event(control, ZSetEvent::Work)?;
-        Ok(JoinUpdate { owner: self, left, right, delta: ZSet::new() })
+        Ok(JoinUpdate {
+            owner: self,
+            left,
+            right,
+            delta: ZSet::new(),
+        })
     }
 
     /// One complete algebra tick. For multi-operator atomic publication use
@@ -753,17 +758,27 @@ mod input_only_tests {
     const LIMBS: LimbLimit = LimbLimit::new(16);
     type Join = IncrementalJoin<i32, i32, i32>;
 
-    fn allow(_: ZSetEvent) -> Result<(), usize> { Ok(()) }
+    fn allow(_: ZSetEvent) -> Result<(), usize> {
+        Ok(())
+    }
     fn bag(rows: &[((i32, i32), i128)]) -> ZSet<(i32, i32)> {
         ZSet::from_updates(
             rows.iter().map(|&(row, n)| (row, ZWeight::from_i128(n))),
-            LIMBS, &mut allow,
-        ).unwrap()
+            LIMBS,
+            &mut allow,
+        )
+        .unwrap()
     }
     fn seed() -> Join {
         let mut join = Join::new();
-        join.prepare_inputs(&bag(&[((0, 1), 2)]), &bag(&[((0, 2), 3)]), LIMBS, &mut allow)
-            .unwrap().commit();
+        join.prepare_inputs(
+            &bag(&[((0, 1), 2)]),
+            &bag(&[((0, 2), 3)]),
+            LIMBS,
+            &mut allow,
+        )
+        .unwrap()
+        .commit();
         join
     }
 
@@ -779,19 +794,44 @@ mod input_only_tests {
                             (bag(&[((0, 1), a)]), bag(&[((0, 2), b)])),
                             (bag(&[((0, 1), da)]), bag(&[((0, 2), db)])),
                         ] {
-                            assert!(inputs.prepare_inputs(&left, &right, LIMBS, &mut allow)
-                                .unwrap().commit().is_empty());
-                            assert!(filtered.prepare_filtered(&left, &right, LIMBS, &mut allow,
-                                |_, _, _, _| Ok(false)).unwrap().commit().is_empty());
+                            assert!(
+                                inputs
+                                    .prepare_inputs(&left, &right, LIMBS, &mut allow)
+                                    .unwrap()
+                                    .commit()
+                                    .is_empty()
+                            );
+                            assert!(
+                                filtered
+                                    .prepare_filtered(
+                                        &left,
+                                        &right,
+                                        LIMBS,
+                                        &mut allow,
+                                        |_, _, _, _| Ok(false)
+                                    )
+                                    .unwrap()
+                                    .commit()
+                                    .is_empty()
+                            );
                             assert_eq!(inputs, filtered);
                         }
                         let left = ZWeight::from_i128(a + da);
                         let right = ZWeight::from_i128(b + db);
-                        assert_eq!(inputs.left_weight(&0, &1), (!left.is_zero()).then_some(&left));
-                        assert_eq!(inputs.right_weight(&0, &2), (!right.is_zero()).then_some(&right));
+                        assert_eq!(
+                            inputs.left_weight(&0, &1),
+                            (!left.is_zero()).then_some(&left)
+                        );
+                        assert_eq!(
+                            inputs.right_weight(&0, &2),
+                            (!right.is_zero()).then_some(&right)
+                        );
                         let snapshot = inputs.snapshot(LIMBS, &mut allow).unwrap();
                         let product = ZWeight::from_i128((a + da) * (b + db));
-                        assert_eq!(snapshot.weight(&(0, 1, 2)), (!product.is_zero()).then_some(&product));
+                        assert_eq!(
+                            snapshot.weight(&(0, 1, 2)),
+                            (!product.is_zero()).then_some(&product)
+                        );
                     }
                 }
             }
@@ -805,24 +845,31 @@ mod input_only_tests {
         let mut state = seed();
         let mut calls = 0;
         {
-            let pending = state.prepare_inputs(&left, &right, LIMBS, &mut |_| {
-                calls += 1;
-                Ok::<_, usize>(())
-            }).unwrap();
+            let pending = state
+                .prepare_inputs(&left, &right, LIMBS, &mut |_| {
+                    calls += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
             assert!(pending.delta().is_empty());
         }
         assert_eq!(state, seed());
         for stop in 1..=calls {
             let mut seen = 0;
-            let error = state.prepare_inputs(&left, &right, LIMBS, &mut |_| {
-                seen += 1;
-                if seen == stop { Err(stop) } else { Ok(()) }
-            }).unwrap_err();
+            let error = state
+                .prepare_inputs(&left, &right, LIMBS, &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                })
+                .unwrap_err();
             assert_eq!(error, ZSetError::Control(stop));
             assert_eq!(seen, stop);
             assert_eq!(state, seed());
         }
-        state.prepare_inputs(&left, &right, LIMBS, &mut allow).unwrap().commit();
+        state
+            .prepare_inputs(&left, &right, LIMBS, &mut allow)
+            .unwrap()
+            .commit();
         assert!(state.left_group(&0).is_none());
         assert!(state.right_group(&0).is_none());
         assert_eq!(state.left_weight(&1, &5), Some(&ZWeight::from_i128(4)));
@@ -835,22 +882,43 @@ mod input_only_tests {
         let right = bag(&[((0, 2), 2)]);
         let mut state = Join::new();
         // Both input counts fit the inline domain; their product does not.
-        state.prepare_inputs(&left, &right, LimbLimit::new(0), &mut allow).unwrap().commit();
-        assert!(matches!(state.snapshot(LimbLimit::new(0), &mut allow), Err(ZSetError::Arithmetic(_))));
+        state
+            .prepare_inputs(&left, &right, LimbLimit::new(0), &mut allow)
+            .unwrap()
+            .commit();
+        assert!(matches!(
+            state.snapshot(LimbLimit::new(0), &mut allow),
+            Err(ZSetError::Arithmetic(_))
+        ));
         let mut unchanged = Join::new();
-        unchanged.prepare_inputs(&left, &right, LIMBS, &mut allow).unwrap().commit();
+        unchanged
+            .prepare_inputs(&left, &right, LIMBS, &mut allow)
+            .unwrap()
+            .commit();
         let increment = bag(&[((0, 1), 1)]);
-        assert!(matches!(state.prepare_inputs(&increment, &bag(&[((0, 2), 1)]),
-            LimbLimit::new(0), &mut allow), Err(ZSetError::Arithmetic(_))));
+        assert!(matches!(
+            state.prepare_inputs(
+                &increment,
+                &bag(&[((0, 2), 1)]),
+                LimbLimit::new(0),
+                &mut allow
+            ),
+            Err(ZSetError::Arithmetic(_))
+        ));
         assert_eq!(state, unchanged);
-        state.prepare_inputs(&increment, &ZSet::new(), LIMBS, &mut allow).unwrap().commit();
+        state
+            .prepare_inputs(&increment, &ZSet::new(), LIMBS, &mut allow)
+            .unwrap()
+            .commit();
         assert!(state.left_weight(&0, &1).unwrap().is_promoted());
         // Transfer admission still rejects promoted input under an insufficient
         // allowance, before any counterpart or result could mask it.
         let promoted = left.plus(&increment, LIMBS, &mut allow).unwrap();
         let mut empty = Join::new();
-        assert!(matches!(empty.prepare_inputs(&promoted, &ZSet::new(),
-            LimbLimit::new(0), &mut allow), Err(ZSetError::WeightAdmission { .. })));
+        assert!(matches!(
+            empty.prepare_inputs(&promoted, &ZSet::new(), LimbLimit::new(0), &mut allow),
+            Err(ZSetError::WeightAdmission { .. })
+        ));
         assert_eq!(empty, Join::new());
     }
 
@@ -860,19 +928,35 @@ mod input_only_tests {
         for n in [1, 512] {
             let rows = bag(&(0..n).map(|v| ((0, v), 1)).collect::<Vec<_>>());
             let mut actual = Join::new();
-            actual.prepare_inputs(&rows, &rows, LIMBS, &mut allow).unwrap().commit();
+            actual
+                .prepare_inputs(&rows, &rows, LIMBS, &mut allow)
+                .unwrap()
+                .commit();
             let mut incumbent = Join::new();
-            incumbent.prepare_filtered(&rows, &rows, LIMBS, &mut allow,
-                |_, _, _, _| Ok(false)).unwrap().commit();
+            incumbent
+                .prepare_filtered(&rows, &rows, LIMBS, &mut allow, |_, _, _, _| Ok(false))
+                .unwrap()
+                .commit();
             let delta = bag(&[((0, 0), 1)]);
             let mut events = Vec::new();
-            assert!(actual.prepare_inputs(&delta, &ZSet::new(), LIMBS, &mut |event| {
-                events.push(event);
-                Ok::<_, usize>(())
-            }).unwrap().commit().is_empty());
+            assert!(
+                actual
+                    .prepare_inputs(&delta, &ZSet::new(), LIMBS, &mut |event| {
+                        events.push(event);
+                        Ok::<_, usize>(())
+                    })
+                    .unwrap()
+                    .commit()
+                    .is_empty()
+            );
             let mut rejected = 0;
-            incumbent.prepare_filtered(&delta, &ZSet::new(), LIMBS, &mut allow,
-                |_, _, _, _| { rejected += 1; Ok(false) }).unwrap().commit();
+            incumbent
+                .prepare_filtered(&delta, &ZSet::new(), LIMBS, &mut allow, |_, _, _, _| {
+                    rejected += 1;
+                    Ok(false)
+                })
+                .unwrap()
+                .commit();
             assert_eq!(rejected, n);
             assert_eq!(actual, incumbent);
             traces.push(events);

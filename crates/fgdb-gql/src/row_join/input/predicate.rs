@@ -56,11 +56,29 @@ pub(super) fn presence_delta<E>(
             RowJoinKind::Left | RowJoinKind::Full | RowJoinKind::Semi | RowJoinKind::Anti
         ) {
             let other = Witnesses::new(old_right, &right, limbs, control)?;
-            append_changes(spec, old_left, &left, &other, false, &mut output, limbs, control)?;
+            append_changes(
+                spec,
+                old_left,
+                &left,
+                &other,
+                false,
+                &mut output,
+                limbs,
+                control,
+            )?;
         }
         if matches!(spec.kind, RowJoinKind::Right | RowJoinKind::Full) {
             let other = Witnesses::new(old_left, &left, limbs, control)?;
-            append_changes(spec, old_right, &right, &other, true, &mut output, limbs, control)?;
+            append_changes(
+                spec,
+                old_right,
+                &right,
+                &other,
+                true,
+                &mut output,
+                limbs,
+                control,
+            )?;
         }
     }
     // Null extensions from distinct arms can coincide. Consolidate exact signed
@@ -90,7 +108,9 @@ impl<'a> Witnesses<'a> {
             charge(control, ZSetEvent::Work)?;
             if let Some(before) = old.weight(row) {
                 charge(control, ZSetEvent::Work)?;
-                let after = before.checked_add(change, limbs).map_err(ZSetError::Arithmetic)?;
+                let after = before
+                    .checked_add(change, limbs)
+                    .map_err(ZSetError::Arithmetic)?;
                 if after.is_zero() {
                     charge(control, ZSetEvent::ScratchEntry)?;
                     removed.insert(row);
@@ -101,7 +121,11 @@ impl<'a> Witnesses<'a> {
                 added.push(row);
             }
         }
-        Ok(Self { old, added, removed })
+        Ok(Self {
+            old,
+            added,
+            removed,
+        })
     }
 
     fn changed(&self) -> bool {
@@ -141,7 +165,11 @@ fn matches<E>(
     reversed: bool,
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<bool, ZSetError<E>> {
-    let (left, right) = if reversed { (candidate, row) } else { (row, candidate) };
+    let (left, right) = if reversed {
+        (candidate, row)
+    } else {
+        (row, candidate)
+    };
     spec.matches(left, right, control)
 }
 
@@ -180,9 +208,11 @@ fn append_changes<E>(
         charge(control, ZSetEvent::Work)?;
         let before = old.weight(row).unwrap_or(&zero);
         charge(control, ZSetEvent::Work)?;
-        let after = before.checked_add(change, limbs).map_err(ZSetError::Arithmetic)?;
-        let matched_before = !before.is_zero()
-            && other.has_match(spec, row, reversed, false, control)?;
+        let after = before
+            .checked_add(change, limbs)
+            .map_err(ZSetError::Arithmetic)?;
+        let matched_before =
+            !before.is_zero() && other.has_match(spec, row, reversed, false, control)?;
         let matched_after = if after.is_zero() {
             false
         } else if !before.is_zero() && !other.changed() {
@@ -197,7 +227,8 @@ fn append_changes<E>(
             (false, true) => append_side(output, spec, row, reversed, &after, limbs, control)?,
             (true, false) => {
                 charge(control, ZSetEvent::Work)?;
-                let removed = before.checked_mul(&ZWeight::from_i128(-1), limbs)
+                let removed = before
+                    .checked_mul(&ZWeight::from_i128(-1), limbs)
                     .map_err(ZSetError::Arithmetic)?;
                 append_side(output, spec, row, reversed, &removed, limbs, control)?;
             }
@@ -228,7 +259,8 @@ fn append_changes<E>(
         if before != after {
             charge(control, ZSetEvent::Work)?;
             let sign = if after == keep_matched { 1 } else { -1 };
-            let change = count.checked_mul(&ZWeight::from_i128(sign), limbs)
+            let change = count
+                .checked_mul(&ZWeight::from_i128(sign), limbs)
                 .map_err(ZSetError::Arithmetic)?;
             append_side(output, spec, row, reversed, &change, limbs, control)?;
         }
@@ -245,7 +277,11 @@ fn append_side<E>(
     limbs: LimbLimit,
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<(), ZSetError<E>> {
-    let (left, right) = if reversed { (None, Some(row)) } else { (Some(row), None) };
+    let (left, right) = if reversed {
+        (None, Some(row))
+    } else {
+        (Some(row), None)
+    };
     append(output, spec, left, right, weight, limbs, control)
 }
 

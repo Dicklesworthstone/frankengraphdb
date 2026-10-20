@@ -113,9 +113,13 @@ impl Input {
             Self::Predicated(input) => {
                 let presence = predicate::presence_delta(input, spec, left, right, limbs, control)?;
                 let matched = if spec.kind.includes_right() {
-                    input.prepare_filtered(left, right, limbs, control, |_, left, right, control| {
-                        spec.matches(left, right, control)
-                    })?
+                    input.prepare_filtered(
+                        left,
+                        right,
+                        limbs,
+                        control,
+                        |_, left, right, control| spec.matches(left, right, control),
+                    )?
                 } else {
                     // Presence already derived the complete result. Integrate
                     // both inputs without visiting a Cartesian derivative whose

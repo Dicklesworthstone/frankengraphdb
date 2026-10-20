@@ -63,9 +63,10 @@ impl SpillSetJoinPlan {
         if !self.keys().is_empty() {
             return true;
         }
-        match self.spec.predicate_probe_keys_with_control(&mut |_| {
-            Ok::<_, core::convert::Infallible>(())
-        }) {
+        match self
+            .spec
+            .predicate_probe_keys_with_control(&mut |_| Ok::<_, core::convert::Infallible>(()))
+        {
             Ok(keys) => !keys.is_empty(),
             Err(never) => match never {},
         }

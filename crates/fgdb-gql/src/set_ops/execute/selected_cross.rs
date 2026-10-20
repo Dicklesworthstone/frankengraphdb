@@ -110,7 +110,11 @@ fn required_keys<E>(
         if duplicate {
             continue;
         }
-        if requires_atom(code, |op| equality(op, width, columns) == Some(key), control)? {
+        if requires_atom(
+            code,
+            |op| equality(op, width, columns) == Some(key),
+            control,
+        )? {
             control(GlaExecutionEvent::ScratchEntry)?;
             keys.push(key);
         }
@@ -376,7 +380,9 @@ pub(super) fn visit_with_context<E, Context>(
     for row in left {
         event(context, GlaExecutionEvent::Work)?;
         let range = if let Some(probe) = &range_index {
-            probe.select(row, right, &mut candidates, &mut |value| event(context, value))?;
+            probe.select(row, right, &mut candidates, &mut |value| {
+                event(context, value)
+            })?;
             0..candidates.len()
         } else {
             index.range(row, right, &mut hint, &mut |value| event(context, value))?

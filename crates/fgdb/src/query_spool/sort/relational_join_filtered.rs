@@ -91,7 +91,15 @@ where
 {
     if !plan.keys().is_empty() {
         return order_keys(
-            plan, side, input, source, destination, run_rows, max_runs, page_bytes, work,
+            plan,
+            side,
+            input,
+            source,
+            destination,
+            run_rows,
+            max_runs,
+            page_bytes,
+            work,
         )
         .await;
     }
@@ -255,7 +263,16 @@ where
         let mut found = false;
         if nonnull {
             while let Some(peer_row) = head.as_ref() {
-                match compare(plan, keys, pass, &row.row, &peer_row.row, cx, policy, evaluator)? {
+                match compare(
+                    plan,
+                    keys,
+                    pass,
+                    &row.row,
+                    &peer_row.row,
+                    cx,
+                    policy,
+                    evaluator,
+                )? {
                     Ordering::Less => break,
                     Ordering::Greater => {
                         drop(head.take());
