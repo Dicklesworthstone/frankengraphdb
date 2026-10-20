@@ -411,6 +411,19 @@ impl<'a> Parser<'a> {
         if self.list_case_follows(row)? {
             return self.list_case_value(columns, nesting, at);
         }
+        // A list- or map-typed parameter is that argument's value. Read it
+        // here: the composite reader would hand a bare parameter back to the
+        // scalar compiler, which sees the same comparison again.
+        if let TokenKind::Parameter(name) = self.current.kind
+            && let Some(kind @ (GqlParameterType::List | GqlParameterType::Map)) =
+                self.parameter_types.get(name).copied()
+        {
+            let at = self.current.at;
+            let Number::Parameter(index) = self.number(kind)? else {
+                unreachable!("the current native token is a parameter");
+            };
+            return Ok(ReadValueTemplate::parameter(index, at, kind));
+        }
         self.composite_value(columns, nesting, at)
     }
 
