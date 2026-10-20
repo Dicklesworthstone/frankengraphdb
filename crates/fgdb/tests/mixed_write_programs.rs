@@ -1222,6 +1222,265 @@ mod independent_edges {
         assert!(report.lab_test_passed(), "{report:?}");
     }
 
+    /// Paired complete bound-program preparation and normal MemVfs commit.
+    /// Binding, fixture creation, cache warmup and oracle inspection are outside
+    /// both timers. Every trial starts at the same seeded basis, uses the same
+    /// caller allocator/policy and publishes through the ordinary commit path.
+    /// This reports observations; wall-clock ratios are never correctness gates.
+    #[test]
+    #[ignore = "paired 250/1000/4000-record preparation and commit measurement"]
+    fn independent_edge_program_paired_measurement() {
+        use fgdb::EdgeRecord;
+        use fgdb_gql::PreparedGraphWriteScript;
+        use std::time::{Duration, Instant};
+
+        struct Measurement {
+            preparation: Duration,
+            commit: Duration,
+            receipt: GraphWriteProgramReceipt,
+            digest: fgdb_crypto::Digest,
+            edges: Vec<EdgeRecord>,
+        }
+
+        async fn measure(
+            c: &PurposeContexts,
+            query: &PreparedGraphWriteProgram,
+            allowance: GraphWriteProgramPolicy,
+            independent: bool,
+        ) -> Measurement {
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed(&mut db, &c.commit()).await;
+            let basis = db.frontier().unwrap();
+            let mut warm = db.begin(&c.txn()).unwrap();
+            incumbent(
+                &mut warm,
+                &mut db,
+                &c.query(),
+                &loops(2),
+                policy(),
+                edge_identity,
+            )
+            .unwrap();
+            warm.abort();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let started = Instant::now();
+            let receipt = if independent {
+                txn.execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    query,
+                    allowance,
+                    edge_identity,
+                )
+            } else {
+                incumbent(
+                    &mut txn,
+                    &mut db,
+                    &c.query(),
+                    query,
+                    allowance,
+                    edge_identity,
+                )
+            }
+            .unwrap();
+            let preparation = started.elapsed();
+            // Inspect the exact prepared authority without charging this
+            // benchmark-only encoding to either implementation's elapsed time.
+            let digest = txn.staged_effect_digest().unwrap();
+            let started = Instant::now();
+            txn.commit(&mut db, &c.commit()).await.unwrap();
+            let commit = started.elapsed();
+            assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+            let edges = db.edges().unwrap();
+            assert_eq!(edges.len(), query.statements().len() + 2);
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+            Measurement {
+                preparation,
+                commit,
+                receipt,
+                digest,
+                edges,
+            }
+        }
+
+        fn equivalent(old: &Measurement, new: &Measurement) {
+            compare_receipts(&new.receipt, &old.receipt);
+            assert_eq!(new.digest, old.digest);
+            assert_eq!(new.edges, old.edges);
+            assert!(
+                new.receipt.stats().evaluator.work_units < old.receipt.stats().evaluator.work_units,
+                "the actual ordinary overlay must still walk the staged edge prefix"
+            );
+        }
+
+        fn summary(mut samples: Vec<Duration>) -> [f64; 3] {
+            samples.sort_unstable();
+            [
+                samples[0],
+                samples[samples.len() / 2],
+                samples[samples.len() - 1],
+            ]
+            .map(|time| time.as_secs_f64() * 1000.0)
+        }
+
+        let ((), report) = run_async_under_lab(0x6d17_01ff, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let script = PreparedGraphWriteScript::prepare(
+                "MATCH (a:Base),(b:Base) WHERE a.p=$source AND b.p=$target CREATE (a)-[:R {p:$value}]->(b)",
+                R,
+                symbols,
+            )
+            .unwrap();
+            eprintln!(
+                "edge_program_measurement storage=MemVfs allocator=deterministic_caller scope=bound_program_preparation_and_commit debug_assertions={} warmup_pairs=1 measured_pairs=5",
+                cfg!(debug_assertions)
+            );
+            for records in [250, 1000, 4000] {
+                let args: Vec<_> = (0..records)
+                    .map(|record| {
+                        let (source, target) = if record % 2 == 0 { (10, 20) } else { (20, 10) };
+                        GqlParameters::new()
+                            .with_int64("source", source)
+                            .unwrap()
+                            .with_int64("target", target)
+                            .unwrap()
+                            .with_int64("value", record as i64)
+                            .unwrap()
+                    })
+                    .collect();
+                let batch = script
+                    .bind_parameter_sets_with_limit(&args, records)
+                    .unwrap();
+                let query = batch.program();
+                assert_eq!(query.statements().len(), records);
+                assert!(query.statements().iter().all(|step| matches!(step,
+                    GraphWriteStatement::Insert(input)
+                        if input.independent_edge_append_relation() == Some(R)
+                )));
+                let allowance = GraphWriteProgramPolicy::new(
+                    GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+                    0,
+                    0,
+                    records as u64,
+                );
+                // The expected graph is enumerated independently of either
+                // execution: one directed edge per input, plus the seed pair.
+                let mut expected = BTreeMap::from([
+                    (EId(11), (VId(1), R, VId(2), Vec::new())),
+                    (EId(12), (VId(1), R, VId(2), Vec::new())),
+                ]);
+                for record in 0..records {
+                    let eid = if record == 0 {
+                        EId(u128::MAX)
+                    } else {
+                        EId(100_000 + record as u128 * 10_000)
+                    };
+                    let (source, target) = if record % 2 == 0 {
+                        (VId(1), VId(2))
+                    } else {
+                        (VId(2), VId(1))
+                    };
+                    expected.insert(
+                        eid,
+                        (
+                            source,
+                            R,
+                            target,
+                            vec![(P, CanonicalScalar::Int(record as i64))],
+                        ),
+                    );
+                }
+                let verify_graph = |measured: &Measurement| {
+                    let actual: BTreeMap<_, _> = measured
+                        .edges
+                        .iter()
+                        .map(|edge| {
+                            (
+                                edge.entry.eid,
+                                (
+                                    edge.entry.src,
+                                    edge.entry.relation,
+                                    edge.entry.dst,
+                                    edge.props.clone(),
+                                ),
+                            )
+                        })
+                        .collect();
+                    assert_eq!(actual, expected);
+                    assert_eq!(measured.receipt.stats().created_edges, records as u64);
+                    assert_eq!(measured.receipt.stats().created_vertices, 0);
+                };
+                let old = measure(&c, query, allowance, false).await;
+                let new = measure(&c, query, allowance, true).await;
+                equivalent(&old, &new);
+                verify_graph(&new);
+                let mut old_samples = Vec::new();
+                let mut new_samples = Vec::new();
+                for pair in 0..5 {
+                    let (old, new) = if pair % 2 == 0 {
+                        (
+                            measure(&c, query, allowance, false).await,
+                            measure(&c, query, allowance, true).await,
+                        )
+                    } else {
+                        let new = measure(&c, query, allowance, true).await;
+                        let old = measure(&c, query, allowance, false).await;
+                        (old, new)
+                    };
+                    equivalent(&old, &new);
+                    verify_graph(&new);
+                    eprintln!(
+                        "edge_program_pair records={records} pair={} first={} ordinary_prepare_ms={:.3} independent_prepare_ms={:.3} ordinary_commit_ms={:.3} independent_commit_ms={:.3} ordinary_work={} independent_work={}",
+                        pair + 1,
+                        if pair % 2 == 0 {
+                            "ordinary"
+                        } else {
+                            "independent"
+                        },
+                        old.preparation.as_secs_f64() * 1000.0,
+                        new.preparation.as_secs_f64() * 1000.0,
+                        old.commit.as_secs_f64() * 1000.0,
+                        new.commit.as_secs_f64() * 1000.0,
+                        old.receipt.stats().evaluator.work_units,
+                        new.receipt.stats().evaluator.work_units,
+                    );
+                    old_samples.push(old);
+                    new_samples.push(new);
+                }
+                eprintln!(
+                    "edge_program_summary records={records} order=min_median_max_ms ordinary_prepare={:?} independent_prepare={:?} ordinary_commit={:?} independent_commit={:?} ordinary_prepare_plus_commit={:?} independent_prepare_plus_commit={:?}",
+                    summary(
+                        old_samples
+                            .iter()
+                            .map(|sample| sample.preparation)
+                            .collect()
+                    ),
+                    summary(
+                        new_samples
+                            .iter()
+                            .map(|sample| sample.preparation)
+                            .collect()
+                    ),
+                    summary(old_samples.iter().map(|sample| sample.commit).collect()),
+                    summary(new_samples.iter().map(|sample| sample.commit).collect()),
+                    summary(
+                        old_samples
+                            .iter()
+                            .map(|sample| sample.preparation + sample.commit)
+                            .collect()
+                    ),
+                    summary(
+                        new_samples
+                            .iter()
+                            .map(|sample| sample.preparation + sample.commit)
+                            .collect()
+                    ),
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
     #[test]
     fn failed_private_chunks_keep_unobserved_edge_identity_dependencies() {
         let ((), report) = run_async_under_lab(0x6d17_0105, |root| async move {

@@ -656,3 +656,372 @@ fn external_with_groups_and_argument_support_do_not_spend_the_single_output_gran
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+mod buffered_elements {
+    use super::*;
+    use fgdb::{
+        BufferLimits, BufferedReadLimits, BufferedReadView, NativeResultSpool, NativeSpoolError,
+        PreparedBufferedOrder,
+    };
+    use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValueRow};
+    use fgdb_gql::{GlaLimitDimension, GraphIntegerErrorKind, GraphSetExecutionError};
+    use fgdb_types::{CommitCx, CommitSeq};
+
+    const PAYLOAD: usize = 513;
+
+    fn scalar(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+    fn null() -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Null)
+    }
+    fn payload() -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::bytes(vec![0xa5; PAYLOAD]).unwrap())
+    }
+
+    async fn fixture(cx: &CommitCx) -> (Database<MemVfs>, MemVfs) {
+        let vfs = MemVfs::new().unwrap();
+        let mut db = Database::create_with_vfs(cx, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (vid, p) in [(VId(1), Some(2)), (VId(2), None), (VId(u128::MAX), Some(7))] {
+            let mut props = properties(p, None);
+            props.push((Q, CanonicalScalar::bytes(vec![0xa5; PAYLOAD]).unwrap()));
+            batch.create_vertex(vid, vec![L], props);
+        }
+        for (eid, from, to, value) in [
+            (EId(11), VId(1), VId(u128::MAX), 11),
+            (EId(12), VId(1), VId(u128::MAX), 17),
+            (EId(u128::MAX), VId(u128::MAX), VId(2), 19),
+        ] {
+            batch.add_edge(eid, from, to, properties(Some(value), None));
+        }
+        assert_eq!(db.write(cx, batch).await.unwrap(), CommitSeq(1));
+        (db, vfs)
+    }
+
+    async fn cold(cx: &CommitCx, vfs: &MemVfs, pool: &MemoryPool) -> BufferedReadView<MemVfs> {
+        Database::open_buffered_read_view_with_vfs(
+            cx,
+            vfs.clone(),
+            vfs.database_dir(),
+            keys(),
+            pool.clone(),
+            BufferedReadLimits {
+                max_root_bytes: 64 * 1024,
+                max_source_bytes: 16_000_000,
+                max_blocks: 512,
+                max_vertex_patches: 512,
+                max_work: 100_000_000,
+                buffer: BufferLimits {
+                    max_frames: 1,
+                    max_ghost_entries: 2,
+                    max_extent_bytes: 16 * 1024,
+                },
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn execute(
+        prepared: &PreparedBufferedOrder,
+        view: &mut BufferedReadView<MemVfs>,
+        cx: &QueryCx,
+        limits: GqlQueryPolicy,
+        io: &mut Files,
+    ) -> Result<(NativeResultSpool, u64), NativeSpoolError> {
+        prepared
+            .spool_in_view(
+                view,
+                cx,
+                limits,
+                &mut io.a,
+                &mut io.b,
+                &mut io.c,
+                1,
+                512,
+                1,
+                512,
+                257,
+                16 * 1024,
+                100,
+                100_000_000,
+            )
+            .await
+    }
+
+    async fn contents(
+        spool: &NativeResultSpool,
+        file: &mut SpillFile<File>,
+        cx: &QueryCx,
+    ) -> Vec<Vec<GraphValue>> {
+        let mut reader = spool.reader(file);
+        let mut rows = Vec::new();
+        while let Some(bytes) = reader.next_row(cx).await.unwrap() {
+            rows.push(
+                GraphValueRow::decode_canonical(bytes.as_ref())
+                    .unwrap()
+                    .values()
+                    .to_vec(),
+            );
+        }
+        assert!(reader.next_row(cx).await.unwrap().is_none());
+        rows
+    }
+
+    #[test]
+    fn cold_carried_elements_use_the_opened_cut_after_edits_and_compaction() {
+        let ((), report) = run_async_under_lab(0x5749_5360, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let (mut db, vfs) = fixture(&commit).await;
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(2 * 1024 * 1024, 0).unwrap();
+            let mut view = cold(&commit, &vfs, &source_pool).await;
+            let args = GqlParameters::new();
+            let cases = [
+                (
+                    "MATCH (n:L) WITH {owner:n,items:[n,n]} AS state RETURN state.owner AS owner,[x IN state.items | x.p] AS values ORDER BY owner",
+                    vec![
+                        vec![
+                            GraphValue::Vertex(VId(1)),
+                            GraphValue::List(vec![scalar(2), scalar(2)].into_boxed_slice()),
+                        ],
+                        vec![
+                            GraphValue::Vertex(VId(2)),
+                            GraphValue::List(vec![null(), null()].into_boxed_slice()),
+                        ],
+                        vec![
+                            GraphValue::Vertex(VId(u128::MAX)),
+                            GraphValue::List(vec![scalar(7), scalar(7)].into_boxed_slice()),
+                        ],
+                    ],
+                ),
+                (
+                    "MATCH (a)-[r:R]->(b) WITH {owner:r,items:[a,b,a]} AS state RETURN state.owner AS owner,state.owner.p AS weight,[x IN state.items | x.p] AS values ORDER BY owner",
+                    vec![
+                        vec![
+                            GraphValue::Edge(EId(11)),
+                            scalar(11),
+                            GraphValue::List(
+                                vec![scalar(2), scalar(7), scalar(2)].into_boxed_slice(),
+                            ),
+                        ],
+                        vec![
+                            GraphValue::Edge(EId(12)),
+                            scalar(17),
+                            GraphValue::List(
+                                vec![scalar(2), scalar(7), scalar(2)].into_boxed_slice(),
+                            ),
+                        ],
+                        vec![
+                            GraphValue::Edge(EId(u128::MAX)),
+                            scalar(19),
+                            GraphValue::List(vec![scalar(7), null(), scalar(7)].into_boxed_slice()),
+                        ],
+                    ],
+                ),
+                (
+                    "MATCH (n:L) WITH [n,n] AS items UNWIND [x IN items | x.p] AS value RETURN value ORDER BY value NULLS LAST",
+                    vec![
+                        vec![scalar(2)],
+                        vec![scalar(2)],
+                        vec![scalar(7)],
+                        vec![scalar(7)],
+                        vec![null()],
+                        vec![null()],
+                    ],
+                ),
+            ];
+            let mut prepared = Vec::new();
+            for (text, expected) in cases {
+                let ordinary = prepare(text, &args);
+                let QueryResult::Rows { rows, .. } =
+                    ordinary.execute(&db, &cx, &args, policy(100)).unwrap()
+                else {
+                    panic!("expected native rows");
+                };
+                let rows: Vec<Vec<_>> = rows
+                    .into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|value| match value {
+                                GraphAggregateValue::Value(value) => value,
+                                other => panic!("unexpected aggregate value: {other:?}"),
+                            })
+                            .collect()
+                    })
+                    .collect();
+                assert_eq!(rows, expected, "ordinary pre-edit: {text}");
+                prepared.push((
+                    text,
+                    ordinary.prepare_buffered_order(&args).unwrap(),
+                    expected,
+                ));
+            }
+            let mut edit = WriteBatch::new(R);
+            edit.set_vertex_property(VId(u128::MAX), P, Some(CanonicalScalar::Int(70)));
+            edit.set_edge_property(EId(u128::MAX), P, Some(CanonicalScalar::Int(190)));
+            assert_eq!(db.write(&commit, edit).await.unwrap(), CommitSeq(2));
+            db.compact(&commit).await.unwrap();
+            for (text, prepared, expected) in prepared {
+                // Ordinary buffered point reads may retain one authenticated
+                // frame. Compare identical completed access states, not the
+                // deliberately empty cache immediately after opening.
+                let mut quiescent = None;
+                for _ in 0..2 {
+                    let mut io = files(&cx, &spill_pool).await;
+                    let (spool, _) = execute(&prepared, &mut view, &cx, policy(100), &mut io)
+                        .await
+                        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                    assert_eq!(spool.snapshot_seq(), CommitSeq(1));
+                    let actual = contents(&spool, &mut io.b, &cx).await;
+                    assert_eq!(actual, expected, "buffered frozen cut: {text}");
+                    assert_eq!(spool.row_count(), expected.len() as u64);
+                    assert_eq!(spill_pool.used(), 0, "{text}");
+                    if let Some(prior) = quiescent {
+                        assert_eq!(source_pool.used(), prior, "{text}");
+                    }
+                    quiescent = Some(source_pool.used());
+                }
+            }
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn buffered_property_payloads_share_exact_allowances_and_preserve_late_errors() {
+        let ((), report) = run_async_under_lab(0x5749_5361, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let (_db, vfs) = fixture(&commit).await;
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(2 * 1024 * 1024, 0).unwrap();
+            let mut view = cold(&commit, &vfs, &source_pool).await;
+            let args = GqlParameters::new();
+            for (tail, count) in [
+                ("RETURN payload", 3),
+                ("RETURN payload LIMIT 0", 0),
+                ("RETURN payload LIMIT 1", 1),
+                ("WHERE FALSE RETURN payload", 0),
+            ] {
+                let text = format!(
+                    "MATCH (n:L) WITH [n,n] AS identities WITH [x IN identities | x.q] AS payload {tail}"
+                );
+                let prepared = prepare(&text, &args).prepare_buffered_order(&args).unwrap();
+                let small_text = text.replace("x.q", "x.p");
+                let small = prepare(&small_text, &args)
+                    .prepare_buffered_order(&args)
+                    .unwrap();
+                let mut io = files(&cx, &spill_pool).await;
+                let (small, _) = execute(&small, &mut view, &cx, policy(100), &mut io)
+                    .await
+                    .unwrap();
+                let small_scratch = small.evaluator_stats().scratch_entries;
+                assert_eq!(spill_pool.used(), 0);
+                let mut io = files(&cx, &spill_pool).await;
+                let (full, _) = execute(&prepared, &mut view, &cx, policy(100), &mut io)
+                    .await
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                let rows = full.row_stats();
+                let stats = full.evaluator_stats();
+                // There are three vertices and two reached q reads per vertex.
+                // Each independent 513-byte destination scalar needs at least
+                // ceil(513/64) payload entries, even behind a zero-result page.
+                let payload_entries = 6 * PAYLOAD.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) as u64;
+                assert!(
+                    stats.scratch_entries >= small_scratch + payload_entries,
+                    "{text}"
+                );
+                let expected = vec![
+                    vec![GraphValue::List(
+                        vec![payload(), payload()].into_boxed_slice()
+                    )];
+                    count
+                ];
+                assert_eq!(contents(&full, &mut io.b, &cx).await, expected, "{text}");
+                assert_eq!(rows.result_rows, count as u64);
+                assert_eq!(spill_pool.used(), 0);
+                let exact = GqlQueryPolicy::new(
+                    rows.snapshot_records,
+                    rows.result_rows,
+                    stats.work_units,
+                    stats.scratch_entries,
+                );
+                for dimension in [
+                    None,
+                    Some(GlaLimitDimension::WorkUnits),
+                    Some(GlaLimitDimension::ScratchEntries),
+                ] {
+                    let mut limits = exact;
+                    match dimension {
+                        Some(GlaLimitDimension::WorkUnits) => limits.evaluator.max_work_units -= 1,
+                        Some(GlaLimitDimension::ScratchEntries) => {
+                            limits.evaluator.max_scratch_entries -= 1
+                        }
+                        _ => {}
+                    }
+                    let mut quiescent = None;
+                    for _ in 0..2 {
+                        let mut io = files(&cx, &spill_pool).await;
+                        let result = execute(&prepared, &mut view, &cx, limits, &mut io).await;
+                        if let Some(dimension) = dimension {
+                            let error = result.unwrap_err();
+                            assert!(
+                                matches!(error, NativeSpoolError::BufferedExecute(ref inner)
+                                if matches!(**inner, GqlQueryError::Evaluator(ref limit)
+                                    if limit.dimension == dimension)),
+                                "{text}: {error:?}"
+                            );
+                        } else {
+                            let (spool, _) =
+                                result.unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                            assert_eq!(spool.snapshot_seq(), CommitSeq(1));
+                            assert_eq!(spool.row_stats(), rows);
+                            assert_eq!(spool.evaluator_stats(), stats);
+                            assert_eq!(contents(&spool, &mut io.b, &cx).await, expected);
+                        }
+                        assert_eq!(spill_pool.used(), 0, "{text}");
+                        if let Some(prior) = quiescent {
+                            assert_eq!(source_pool.used(), prior, "{text}");
+                        }
+                        quiescent = Some(source_pool.used());
+                    }
+                }
+            }
+            for limit in [0, 1] {
+                let text = format!(
+                    "MATCH (n:L) WITH n AS x RETURN 1/(coalesce(x.p,0)-7) AS value LIMIT {limit}"
+                );
+                let prepared = prepare(&text, &args).prepare_buffered_order(&args).unwrap();
+                let mut quiescent = None;
+                for _ in 0..2 {
+                    let mut io = files(&cx, &spill_pool).await;
+                    let error = execute(&prepared, &mut view, &cx, policy(1), &mut io)
+                        .await
+                        .unwrap_err();
+                    assert!(
+                        matches!(error, NativeSpoolError::SetExecution(
+                        GraphSetExecutionError::Projection { error, .. }
+                    ) if error.kind == GraphIntegerErrorKind::DivisionByZero),
+                        "{text}: {error:?}"
+                    );
+                    assert_eq!(spill_pool.used(), 0);
+                    if let Some(prior) = quiescent {
+                        assert_eq!(source_pool.used(), prior, "{text}");
+                    }
+                    quiescent = Some(source_pool.used());
+                }
+            }
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

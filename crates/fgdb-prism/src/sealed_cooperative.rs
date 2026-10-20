@@ -1,4 +1,4 @@
-//! Cooperative ranks, degree/core, distances, connectivity and local clustering.
+//! Cooperative ranks, eigenvectors, degree/core, distances and connectivity.
 //!
 //! One fuel counter covers raw incidence decoding (including invisible history,
 //! excluded endpoints and parallel reductions), scalar passes and result rows.
@@ -110,7 +110,9 @@ impl FnxCallSpec {
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
                 | FnxAlgorithm::Foundation(
-                    FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::CoreNumber
+                    FoundationAlgorithm::DegreeCentrality
+                        | FoundationAlgorithm::CoreNumber
+                        | FoundationAlgorithm::EigenvectorCentrality
                 )
         )
     }
@@ -217,6 +219,25 @@ impl FnxCallSpec {
                     yield_now,
                 };
                 return super::core_number::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    &mut control,
+                )
+                .await;
+            }
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
+            ) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::eigenvector::execute_cooperative(
                     self,
                     graph,
                     limits,

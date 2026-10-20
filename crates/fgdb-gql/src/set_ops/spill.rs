@@ -20,10 +20,32 @@ use crate::spill_aggregate::SpillAggregateDefinition;
 use crate::stream::{AsyncVertexScanPlan, VertexScanBuildError};
 use crate::{GlaExecutionEvent, GraphAggregateError, GraphAggregateRow};
 use core::convert::Infallible;
+use fgdb_delta_types::{ElementId, PropertyKeyId};
+use fgdb_types::CanonicalScalar;
 
 mod relational_join;
 mod selected_cross;
 pub use relational_join::SpillSetJoinPlan;
+
+/// The executing host's pinned, awaitable element-property reader.
+///
+/// The returned property retains its source reservation until the evaluator
+/// has admitted and copied its scalar. Reads must use the same snapshot and
+/// authority as the input rows. Only reached operands call this reader, so
+/// CASE/coalesce, comprehensions and reduce preserve their original effects.
+/// `Some(Ok(None))` is an absent property; outer `None` means this host cannot
+/// read element properties and preserves the typed expression refusal.
+/// Original source errors pass through without conversion to NULL.
+pub trait AsyncSpillElementSource: Send {
+    type Error: Send;
+    type Property: std::borrow::Borrow<fgdb_types::CanonicalPropertyValue> + Send;
+
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> impl Future<Output = Option<Result<Option<Self::Property>, Self::Error>>> + Send;
+}
 
 /// A refusal found before any graph source or scratch writer is opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -566,9 +588,15 @@ impl core::fmt::Debug for AsyncSpillSetPlan {
 #[derive(Clone)]
 enum Operation {
     Identity,
-    Project(Vec<GraphSetProjection>),
+    Project {
+        projection: Vec<GraphSetProjection>,
+        reads_elements: bool,
+    },
     Filter(RowPredicate),
-    Unwind(GraphSetValue),
+    Unwind {
+        value: GraphSetValue,
+        reads_elements: bool,
+    },
 }
 
 /// A checked per-input operation and its complete finish contract.
@@ -636,27 +664,14 @@ impl SpillSetStage {
         row_index: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<SpillSetRows, SpillSetRowError<E>> {
+        self.admit_input(&row, control)?;
         let mut event = |event| control(event).map_err(SpillSetRowError::Control);
-        event(GlaExecutionEvent::Work)?;
-        if row.len() != self.input.len() {
-            return Err(SpillSetRowError::Native(
-                GraphSetExecutionError::InputSchema { operand: 0 },
-            ));
-        }
-        for (kind, value) in self.input.iter().zip(row.values()) {
-            event(GlaExecutionEvent::Work)?;
-            if !kind.accepts(value) {
-                return Err(SpillSetRowError::Native(
-                    GraphSetExecutionError::InputSchema { operand: 0 },
-                ));
-            }
-        }
         let state = match &self.operation {
             Operation::Identity => StageRows::One(Some(row)),
             Operation::Filter(predicate) => {
                 StageRows::One(predicate.evaluate(&row, &mut event)?.then_some(row))
             }
-            Operation::Project(projection) => StageRows::One(Some(
+            Operation::Project { projection, .. } => StageRows::One(Some(
                 GraphSetProjection::evaluate_numbered_row_with_control(
                     &row,
                     row_index as u64,
@@ -672,7 +687,7 @@ impl SpillSetStage {
                     },
                 )?,
             )),
-            Operation::Unwind(value) => {
+            Operation::Unwind { value, .. } => {
                 StageRows::Unwind(projection::UnwindRows::new(row, value, &mut event).map_err(
                     |error| match error {
                         projection::ProjectionFailure::Control(error) => error,
@@ -688,6 +703,118 @@ impl SpillSetStage {
             }
         };
         Ok(SpillSetRows { state })
+    }
+
+    /// Evaluate one input with the same schema, native events and error order
+    /// as start(), awaiting only reached element-property operands. No source
+    /// is prefetched or replayed. Dropping the future releases its private
+    /// evaluation state; it never publishes a prefix.
+    ///
+    /// Preparation caches whether an expression can read an element. Stages
+    /// without that effect retain the synchronous evaluator without recursive
+    /// frame allocations or a per-row expression-tree scan.
+    ///
+    /// reserve_frame must grant the requested exact future byte size BEFORE
+    /// its Box allocation and retain that grant through the future's last use
+    /// or cancellation. These physical reservations are separate from native
+    /// logical work. As with start(), ScratchEntry reservations must retain
+    /// all evaluated values through the returned rows' awaited uses.
+    pub async fn start_with_async_elements<E, S, M, G>(
+        &self,
+        row: GraphValueRow,
+        row_index: usize,
+        control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), E> + Send),
+        source: &mut S,
+        reserve_frame: &M,
+    ) -> Result<SpillSetRows, SpillSetRowError<E>>
+    where
+        E: Send,
+        S: AsyncSpillElementSource<Error = E>,
+        M: Fn(usize) -> Result<G, E> + Sync,
+        G: Send,
+    {
+        let reads_elements = match &self.operation {
+            Operation::Identity | Operation::Filter(_) => false,
+            Operation::Project { reads_elements, .. }
+            | Operation::Unwind { reads_elements, .. } => *reads_elements,
+        };
+        if !reads_elements {
+            return self.start(row, row_index, control);
+        }
+        self.admit_input(&row, control)?;
+        let expression_error = |error| match error {
+            projection::ProjectionFailure::Control(error) => SpillSetRowError::Control(error),
+            projection::ProjectionFailure::Arithmetic { column, error } => {
+                SpillSetRowError::Native(GraphSetExecutionError::Projection {
+                    row: row_index,
+                    column,
+                    error,
+                })
+            }
+        };
+        let state = match &self.operation {
+            Operation::Identity => StageRows::One(Some(row)),
+            Operation::Filter(predicate) => StageRows::One(
+                predicate
+                    .evaluate(&row, &mut |event| {
+                        control(event).map_err(SpillSetRowError::Control)
+                    })?
+                    .then_some(row),
+            ),
+            Operation::Project { projection, .. } => StageRows::One(Some(
+                projection::evaluate_async(
+                    &row,
+                    projection,
+                    Some(row_index as u64),
+                    control,
+                    source,
+                    reserve_frame,
+                )
+                .await
+                .map_err(expression_error)?,
+            )),
+            Operation::Unwind { value, .. } => {
+                control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+                let list = projection::evaluate_value_async(
+                    value,
+                    &row,
+                    row.len(),
+                    None,
+                    control,
+                    source,
+                    reserve_frame,
+                )
+                .await
+                .map_err(expression_error)?;
+                StageRows::Unwind(
+                    projection::UnwindRows::from_evaluated(row, list, control)
+                        .map_err(expression_error)?,
+                )
+            }
+        };
+        Ok(SpillSetRows { state })
+    }
+
+    fn admit_input<E>(
+        &self,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), SpillSetRowError<E>> {
+        control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+        if row.len() != self.input.len() {
+            return Err(SpillSetRowError::Native(
+                GraphSetExecutionError::InputSchema { operand: 0 },
+            ));
+        }
+        for (kind, value) in self.input.iter().zip(row.values()) {
+            control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+            if !kind.accepts(value) {
+                return Err(SpillSetRowError::Native(
+                    GraphSetExecutionError::InputSchema { operand: 0 },
+                ));
+            }
+        }
+        Ok(())
     }
 }
 impl core::fmt::Debug for SpillSetStage {
@@ -846,7 +973,12 @@ fn compile_stages<'a>(
         } => (
             compile_stages(input, depth + 1, stages)?,
             input.types.clone(),
-            Operation::Project(projection.clone()),
+            Operation::Project {
+                projection: projection.clone(),
+                reads_elements: projection
+                    .iter()
+                    .any(|output| output.value().may_read_element_properties()),
+            },
             (!*preserve_order && !input.preserves_row_order())
                 || *quantifier == GraphSetQuantifier::Distinct,
             *quantifier == GraphSetQuantifier::Distinct,
@@ -854,7 +986,10 @@ fn compile_stages<'a>(
         SetNode::Unwind { input, value } => (
             compile_stages(input, depth + 1, stages)?,
             input.types.clone(),
-            Operation::Unwind(value.clone()),
+            Operation::Unwind {
+                value: value.clone(),
+                reads_elements: value.may_read_element_properties(),
+            },
             false,
             false,
         ),
@@ -1017,9 +1152,12 @@ mod tests {
             input: vec![GraphSetColumnType::Vertex],
             columns: vec!["owner".into(), "item".into()],
             types: vec![GraphSetColumnType::Vertex; 2],
-            operation: Operation::Unwind(GraphSetValue::Value(GraphValue::Vertices(
-                vec![VId(1), VId(2), VId(3)].into_boxed_slice(),
-            ))),
+            operation: Operation::Unwind {
+                value: GraphSetValue::Value(GraphValue::Vertices(
+                    vec![VId(1), VId(2), VId(3)].into_boxed_slice(),
+                )),
+                reads_elements: false,
+            },
             order: None,
             distinct: false,
             offset: 0,

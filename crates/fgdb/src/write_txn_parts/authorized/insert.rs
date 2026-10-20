@@ -4,12 +4,16 @@
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
 use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, selection, stage};
-use fgdb_gql::algebra::GraphValueRow;
+use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::insertion::{
     GraphInsertBatch, GraphInsertError, GraphInsertIntent, GraphInsertPolicy, GraphInsertStats,
     PreparedGraphInsert,
 };
-use fgdb_gql::{GqlQueryError, GqlQueryExecution, GraphInsertQueryError, PreparedGraphInsertQuery};
+use fgdb_gql::{
+    GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphInsertQueryError,
+    GraphPatternFactorExecution, GraphSetSource, PreparedGraphInsertQuery,
+    PreparedGraphPatternFactors,
+};
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
 use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
@@ -31,6 +35,58 @@ fn source(error: WriteTxnError) -> Fault {
 
 fn query_source(error: WriteTxnError) -> QueryFault {
     source(error).map_source(GraphInsertQueryError::Insertion)
+}
+
+// A statement-scoped source borrows the existing control/database cells, never
+// a Ref or RefMut. Each graph call releases its database borrow before the
+// collector starts allocating identities through that same cell.
+struct InsertGraphSource<'s, 'db, 'run, 'cx, 'permit, V: Vfs, Clock> {
+    transaction: &'s WriteTxn,
+    database: &'s RefCell<&'db mut Database<V>>,
+    cx: &'s QueryCx,
+    scope: &'s PlannerPredicates,
+    execution: &'s RefCell<&'run mut Execution<'cx, 'permit, Clock>>,
+}
+
+impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteTxnError>
+    for InsertGraphSource<'_, '_, '_, '_, '_, V, Clock>
+{
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<WriteTxnError, WriteTxnError>> {
+        selection::select_overlay(
+            self.transaction,
+            &self.database.borrow(),
+            self.cx,
+            pattern,
+            self.scope,
+            policy,
+            self.execution,
+        )
+    }
+
+    fn supports_pattern_factors(&self) -> bool {
+        true
+    }
+
+    fn pattern_factors(
+        &mut self,
+        request: &PreparedGraphPatternFactors<'_>,
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphPatternFactorExecution, GqlQueryError<WriteTxnError, WriteTxnError>>>
+    {
+        Some(selection::select_overlay_factors(
+            self.transaction,
+            &self.database.borrow(),
+            self.cx,
+            request,
+            self.scope,
+            policy,
+            self.execution,
+        ))
+    }
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -234,18 +290,14 @@ impl<V: Vfs + Clone> Database<V> {
                     // borrows end before intent staging or awaiting completion.
                     let controls = RefCell::new(&mut execution);
                     let database = RefCell::new(&mut *self);
-                    query.execute_governed(
+                    query.execute_governed_with_source(
                         policy,
-                        |pattern, allowance| {
-                            selection::select_overlay(
-                                workspace.transaction(),
-                                &database.borrow(),
-                                query_cx,
-                                pattern,
-                                verified.predicates(),
-                                allowance,
-                                &controls,
-                            )
+                        InsertGraphSource {
+                            transaction: workspace.transaction(),
+                            database: &database,
+                            cx: query_cx,
+                            scope: verified.predicates(),
+                            execution: &controls,
                         },
                         |request| database.borrow_mut().allocate_identity(query_cx, request),
                         || {
@@ -380,18 +432,14 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
         // masked selection and all computed values are validated.
         let execution = RefCell::new(&mut *execution);
         let database = RefCell::new(&mut *database);
-        insertion.execute_governed(
+        insertion.execute_governed_with_source(
             policy,
-            |pattern, allowance| {
-                selection::select_overlay(
-                    transaction,
-                    &database.borrow(),
-                    query_cx,
-                    pattern,
-                    scope,
-                    allowance,
-                    &execution,
-                )
+            InsertGraphSource {
+                transaction,
+                database: &database,
+                cx: query_cx,
+                scope,
+                execution: &execution,
             },
             |request| database.borrow_mut().allocate_identity(query_cx, request),
             || {

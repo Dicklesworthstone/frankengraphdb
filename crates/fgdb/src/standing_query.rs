@@ -648,7 +648,7 @@ impl<V: Vfs + Clone> Database<V> {
                 self.prepare_standing_triangles(cx, query.relation(), query.quantifier(), policy)?,
             )),
             StandingQuery::TriangleCounts(query) => StandingQuery::TriangleCounts(Box::new(
-                self.prepare_standing_triangle_counts(cx, query.relation, policy)?,
+                self.prepare_standing_triangle_counts(cx, query.relation, query.output(), policy)?,
             )),
             StandingQuery::Components(query) => StandingQuery::Components(Box::new(
                 self.prepare_standing_components(cx, query.relation, policy)?,

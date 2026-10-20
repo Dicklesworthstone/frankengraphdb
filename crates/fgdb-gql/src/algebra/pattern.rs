@@ -2,8 +2,11 @@
 //! Projection may return vertex IDs, correlated bindings or canonical values.
 //! Captured chains preserve ordered routes; uncaptured WALKs retain endpoints.
 
+mod factors;
 mod property_comparison;
 mod value_projection;
+
+pub use factors::PreparedGraphPatternFactors;
 
 use super::{
     BindingSlot, EdgeRelation, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphMatchMode,

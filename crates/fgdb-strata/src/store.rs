@@ -74,7 +74,7 @@ use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use fgdb_crypto::zeroize::SharedSecret;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{CanonicalScalarResolver, CommitSeq, StorageReadCx};
+use fgdb_types::{BranchId, CanonicalScalarResolver, CommitSeq, GraphId, StorageReadCx};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::future::Future;
@@ -2733,26 +2733,126 @@ impl<V: Vfs> BlockStore<V> {
     ) -> Result<VerifiedRoot, StoreError> {
         // Resume after the prefix this handle already verified, if this root
         // extends it exactly; otherwise verify from the first reference.
+        let identity = self.root_identity_domain();
         let memo = receipts.root_memo.take().filter(|memo| {
             memo.partition == root.partition
+                && memo
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.identity == identity)
                 && root.blocks.starts_with(&memo.blocks)
                 && root.vertex_patches.starts_with(&memo.patches)
         });
-        let RootMemo {
-            blocks: mut verified_blocks,
-            mut chain_heads,
-            patches: mut verified_patches,
-            mut segments,
-            ..
-        } = memo.unwrap_or_default();
+        let mut memo = memo.unwrap_or_default();
+        memo.partition = root.partition;
         // The memo's segments and index segments chunk the prefix it just
         // proved this root extends, so only those this root newly fills are
         // sealed and hashed (fgdb-d5vo4, fgdb-5gzaa).
-        let encoded =
-            crate::root::encode_root_v5(root, self.k_oid.expose(), self.namespace, &mut segments)
-                .map_err(StoreError::MalformedRoot)?;
-        let (block_start, patch_start) = (verified_blocks.len(), verified_patches.len());
-        for (at, reference) in root.blocks.iter().enumerate().skip(block_start) {
+        let encoded = crate::root::encode_root_v5(
+            root,
+            self.k_oid.expose(),
+            self.namespace,
+            &mut memo.segments,
+        )
+        .map_err(StoreError::MalformedRoot)?;
+        let carried = (memo.blocks.len(), memo.patches.len());
+        memo.blocks.extend_from_slice(&root.blocks[carried.0..]);
+        memo.patches
+            .extend_from_slice(&root.vertex_patches[carried.1..]);
+        self.verify_root_suffix(cx, &mut memo, carried, receipts)
+            .await?;
+        Ok(self.finish_verified_root(root.graph, root.branch, root.published_at, encoded, memo))
+    }
+
+    /// Verify an append to the exact root these receipts last published or
+    /// admitted from a published slot. The memo owns the unchanged reference
+    /// vectors; only the supplied suffix is copied and checked, including its
+    /// boundary with each carried list. Encoding uses the same canonical V5
+    /// encoder as [`Self::verify_root`].
+    ///
+    /// `Ok(None)` leaves the receipts unchanged: the basis, coordinate, counts
+    /// or publication did not match a current memo, and the caller must supply
+    /// a complete root to [`Self::verify_root`]. An eligible append takes the
+    /// memo, which is restored only after durable publication. Dropping the
+    /// result or refusing any check cannot make an unpublished suffix eligible.
+    pub async fn verify_root_append(
+        &self,
+        cx: &CommitCx,
+        append: RootAppend<'_>,
+        receipts: &mut PublishReceipts,
+    ) -> Result<Option<VerifiedRoot>, StoreError> {
+        let identity = self.root_identity_domain();
+        let eligible = receipts.root_memo.as_ref().is_some_and(|memo| {
+            memo.partition == append.partition
+                && memo.blocks.len() == append.carried_blocks
+                && memo.patches.len() == append.carried_patches
+                && memo.binding.as_ref().is_some_and(|binding| {
+                    binding.identity == identity
+                        && binding.root == append.basis
+                        && binding.graph == append.graph
+                        && binding.branch == append.branch
+                        && binding.published_at <= append.published_at
+                })
+        });
+        if !eligible {
+            return Ok(None);
+        }
+        let mut memo = receipts.root_memo.take().expect("eligible memo");
+        let carried = (memo.blocks.len(), memo.patches.len());
+        // Refuse an excessive append before copying it into the memo. Counts
+        // are checked again by the shared encoder with the structural laws.
+        let declared =
+            u32::try_from(carried.0.saturating_add(append.blocks.len())).unwrap_or(u32::MAX);
+        if declared > crate::root::MAX_ROOT_BLOCKS {
+            return Err(StoreError::MalformedRoot(
+                crate::root::RootError::ImplausibleBlockCount { declared },
+            ));
+        }
+        let declared = u32::try_from(carried.1.saturating_add(append.vertex_patches.len()))
+            .unwrap_or(u32::MAX);
+        if declared > crate::root::MAX_ROOT_PATCHES {
+            return Err(StoreError::MalformedRoot(
+                crate::root::RootError::ImplausiblePatchCount { declared },
+            ));
+        }
+        memo.blocks.extend_from_slice(append.blocks);
+        memo.patches.extend_from_slice(append.vertex_patches);
+        let encoded = crate::root::encode_root_v5_append(
+            crate::root::PartitionRootRef {
+                graph: append.graph,
+                branch: append.branch,
+                partition: append.partition,
+                published_at: append.published_at,
+                blocks: &memo.blocks,
+                vertex_patches: &memo.patches,
+            },
+            carried,
+            self.k_oid.expose(),
+            self.namespace,
+            &mut memo.segments,
+        )
+        .map_err(StoreError::MalformedRoot)?;
+        self.verify_root_suffix(cx, &mut memo, carried, receipts)
+            .await?;
+        Ok(Some(self.finish_verified_root(
+            append.graph,
+            append.branch,
+            append.published_at,
+            encoded,
+            memo,
+        )))
+    }
+
+    /// Both entry points use identical span, history and chain admission. A
+    /// durable object receipt can skip a read, never its root-order chain law.
+    async fn verify_root_suffix(
+        &self,
+        cx: &CommitCx,
+        memo: &mut RootMemo,
+        carried: (usize, usize),
+        receipts: &mut PublishReceipts,
+    ) -> Result<(), StoreError> {
+        for (at, reference) in memo.blocks.iter().enumerate().skip(carried.0) {
             let receipted = receipts.spans.get(&reference.block_id)
                 == Some(&(reference.first_seq, reference.last_seq));
             let (family, predecessor) = if receipted {
@@ -2762,7 +2862,7 @@ impl<V: Vfs> BlockStore<V> {
                     .expect("every span receipt records its chain fields in the same insertion")
             } else {
                 let (entries, _props, predecessor) = self
-                    .resolve_root_block(cx, at, root.partition, reference)
+                    .resolve_root_block(cx, at, memo.partition, reference)
                     .await?;
                 receipts
                     .validator
@@ -2782,7 +2882,7 @@ impl<V: Vfs> BlockStore<V> {
             // THE CHAIN LAW (V6) holds on the memoised path too: receipts
             // prove a block admissible, never that a root ORDERS it lawfully.
             if let Some(family) = family {
-                let expected = chain_heads.get(&family).copied();
+                let expected = memo.chain_heads.get(&family).copied();
                 if predecessor.map(|link| link.0) != expected {
                     return Err(StoreError::MalformedRoot(
                         crate::root::RootError::BlockChainMismatch {
@@ -2792,11 +2892,10 @@ impl<V: Vfs> BlockStore<V> {
                         },
                     ));
                 }
-                chain_heads.insert(family, reference.block_id);
+                memo.chain_heads.insert(family, reference.block_id);
             }
-            verified_blocks.push(*reference);
         }
-        for (at, reference) in root.vertex_patches.iter().enumerate().skip(patch_start) {
+        for (at, reference) in memo.patches.iter().enumerate().skip(carried.1) {
             if receipts.patch_spans.get(&reference.patch_id)
                 != Some(&(reference.first_seq, reference.last_seq))
             {
@@ -2811,23 +2910,51 @@ impl<V: Vfs> BlockStore<V> {
                     (reference.first_seq, reference.last_seq),
                 );
             }
-            verified_patches.push(*reference);
         }
+        Ok(())
+    }
+
+    fn finish_verified_root(
+        &self,
+        graph: GraphId,
+        branch: BranchId,
+        published_at: CommitSeq,
+        encoded: crate::root::EncodedRoot,
+        mut memo: RootMemo,
+    ) -> VerifiedRoot {
         let id =
             StoredObjectKind::Root.identity(self.k_oid.expose(), self.namespace, &encoded.bytes);
-        Ok(VerifiedRoot {
-            id: PartitionRootVersion(id),
+        let id = PartitionRootVersion(id);
+        memo.binding = Some(self.root_binding(id, graph, branch, published_at));
+        VerifiedRoot {
+            id,
             bytes: encoded.bytes,
             segments: encoded.new_segments,
             index_segments: encoded.new_index_segments,
-            memo: RootMemo {
-                partition: root.partition,
-                blocks: verified_blocks,
-                chain_heads,
-                patches: verified_patches,
-                segments,
-            },
-        })
+            memo,
+        }
+    }
+
+    fn root_identity_domain(&self) -> ObjectId {
+        // An opaque tag for this key and security namespace, not another
+        // copy of key material and not a claim that a root exists on disk.
+        StoredObjectKind::Root.identity(self.k_oid.expose(), self.namespace, &[])
+    }
+
+    fn root_binding(
+        &self,
+        root: PartitionRootVersion,
+        graph: GraphId,
+        branch: BranchId,
+        published_at: CommitSeq,
+    ) -> RootBinding {
+        RootBinding {
+            identity: self.root_identity_domain(),
+            root,
+            graph,
+            branch,
+            published_at,
+        }
     }
 
     /// Publish a verified root together with the manifest that names it: both
@@ -3016,6 +3143,7 @@ impl<V: Vfs> BlockStore<V> {
         }
         let admission = RootAdmission {
             partition: root.partition,
+            binding: self.root_binding(id, root.graph, root.branch, root.published_at),
             blocks: root.blocks.clone(),
             chains,
             patches: root.vertex_patches.clone(),
@@ -3180,6 +3308,9 @@ struct RootWalk {
 #[derive(Debug)]
 pub struct RootAdmission {
     partition: u64,
+    /// The stored identity is retained verbatim: a reopened V3 or V4 root
+    /// must not be silently rebound to its re-encoding as V5.
+    binding: RootBinding,
     blocks: Vec<crate::root::BlockRef>,
     /// Parallel to `blocks`: each block's descriptor family and declared
     /// predecessor.
@@ -3276,6 +3407,22 @@ pub struct VerifiedRoot {
     memo: RootMemo,
 }
 
+/// A proposed extension of one exact, already admitted partition root.
+/// Membership slices contain only new references; the previous publication
+/// supplies the prefix. A stale or mismatched basis takes the full-root path.
+#[derive(Clone, Copy, Debug)]
+pub struct RootAppend<'a> {
+    pub basis: PartitionRootVersion,
+    pub graph: GraphId,
+    pub branch: BranchId,
+    pub partition: u64,
+    pub published_at: CommitSeq,
+    pub carried_blocks: usize,
+    pub carried_patches: usize,
+    pub blocks: &'a [crate::root::BlockRef],
+    pub vertex_patches: &'a [crate::root::PatchRef],
+}
+
 impl VerifiedRoot {
     /// The identity the root will be stored under.
     pub fn id(&self) -> PartitionRootVersion {
@@ -3287,6 +3434,7 @@ impl VerifiedRoot {
 #[derive(Debug, Default)]
 struct RootMemo {
     partition: u64,
+    binding: Option<RootBinding>,
     blocks: Vec<crate::root::BlockRef>,
     chain_heads: BTreeMap<(fgdb_types::VId, fgdb_delta_types::RelationId), ObjectId>,
     patches: Vec<crate::root::PatchRef>,
@@ -3294,6 +3442,18 @@ struct RootMemo {
     /// Valid exactly as long as the memo is: a root that does not extend the
     /// prefix drops both.
     segments: crate::root::SegmentCache,
+}
+
+/// Exact publication provenance for the append fast path. The identity tag
+/// binds both the key and security namespace; block/patch counts and partition
+/// are carried by the enclosing memo.
+#[derive(Debug)]
+struct RootBinding {
+    identity: ObjectId,
+    root: PartitionRootVersion,
+    graph: GraphId,
+    branch: BranchId,
+    published_at: CommitSeq,
 }
 
 impl PublishReceipts {
@@ -3342,6 +3502,7 @@ impl PublishReceipts {
     pub fn for_published_root(admission: RootAdmission) -> Self {
         let RootAdmission {
             partition,
+            binding,
             blocks,
             chains,
             patches,
@@ -3381,6 +3542,7 @@ impl PublishReceipts {
             property_patches,
             root_memo: Some(RootMemo {
                 partition,
+                binding: Some(binding),
                 blocks,
                 chain_heads,
                 patches,

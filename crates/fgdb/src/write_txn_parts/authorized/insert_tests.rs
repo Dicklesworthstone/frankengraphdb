@@ -1,4 +1,6 @@
 //! Public creation entry points with real tokens, collector, storage and reopen.
+mod factors;
+
 use super::*;
 use crate::{DatabaseKeys, MemVfs};
 use asupersync::lab::run_async_under_lab;

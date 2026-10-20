@@ -39,6 +39,8 @@ mod connectivity;
 mod core_numbers;
 #[path = "prism_cooperative/dijkstra.rs"]
 mod dijkstra;
+#[path = "prism_cooperative/eigenvector.rs"]
+mod eigenvector;
 
 fn options(direction: Directedness) -> FnxReadOptions {
     FnxReadOptions {
@@ -1336,6 +1338,7 @@ fn every_cooperative_checkpoint_cancels_and_every_suspension_can_be_dropped_with
             FnxCallSpec::clustering_coefficient(),
             degree_call(),
             core_call(),
+            eigenvector_call(),
         ] {
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
@@ -1509,6 +1512,7 @@ fn cooperative_live_guards_span_every_checkpoint_without_changing_successful_res
                 FnxCallSpec::clustering_coefficient(),
                 degree_call(),
                 core_call(),
+                eigenvector_call(),
             ];
             if n != 0 {
                 calls.push(FnxCallSpec::single_source_shortest_path_length(
@@ -1620,6 +1624,7 @@ fn revocation_during_each_suspension_precedes_any_resumed_source_or_result_work(
             // Keep at least four revocation opportunities for this fixture.
             (degree_call(), 2),
             (core_call(), 3),
+            (eigenvector_call(), 3),
         ] {
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let measured = cx.with_checkpoint_probe(Arc::clone(&probe));
@@ -1708,6 +1713,14 @@ fn degree_call() -> FnxCallSpec {
 fn core_call() -> FnxCallSpec {
     FnxCallSpec::bind(
         "CALL fnx.core_number() YIELD core AS level,vertex AS id",
+        &FnxParameters::new(),
+    )
+    .unwrap()
+}
+
+fn eigenvector_call() -> FnxCallSpec {
+    FnxCallSpec::bind(
+        "CALL fnx.eigenvector_centrality() YIELD score AS rank,vertex AS id",
         &FnxParameters::new(),
     )
     .unwrap()

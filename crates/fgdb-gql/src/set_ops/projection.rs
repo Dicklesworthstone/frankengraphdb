@@ -17,6 +17,7 @@ pub(crate) use temporal::{
     timestamp_text,
 };
 
+use super::spill::AsyncSpillElementSource;
 use super::{
     GraphSetBuildError, GraphSetColumnType, GraphSetQuantifier, PreparedGraphSet, SetNode,
     check_depth,
@@ -30,6 +31,7 @@ use crate::{
 };
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_types::CanonicalScalar;
+use std::borrow::Borrow;
 use std::collections::BTreeSet;
 
 /// Checked output expression. Column positions refer to the input relation,
@@ -457,6 +459,95 @@ impl GraphListQuantifier {
     }
 }
 impl GraphSetValue {
+    // A conservative preparation-time effect check. All children, including
+    // lazy branches, participate; no value is evaluated and no source is read.
+    // Typed admission already bounds this tree. The exhaustive match keeps new
+    // expression variants from silently selecting a reader-free executor.
+    pub(super) fn may_read_element_properties(&self) -> bool {
+        match self {
+            Self::Column(_)
+            | Self::Literal(_)
+            | Self::TypedNull(_)
+            | Self::Integer(_)
+            | Self::Value(_)
+            | Self::Local(_)
+            | Self::Random { .. } => false,
+            Self::MapGet { map, property, .. } => {
+                matches!(property, GraphElementKey::Property(_))
+                    || map.may_read_element_properties()
+            }
+            Self::List(values) => values.iter().any(Self::may_read_element_properties),
+            Self::Size(value)
+            | Self::Keys(value)
+            | Self::Temporal {
+                argument: value, ..
+            }
+            | Self::Function {
+                argument: value, ..
+            } => value.may_read_element_properties(),
+            Self::Index {
+                list: left,
+                index: right,
+            }
+            | Self::In {
+                value: left,
+                list: right,
+            }
+            | Self::Equal { left, right }
+            | Self::Ordered { left, right, .. }
+            | Self::Quantifier {
+                list: left,
+                predicate: right,
+                ..
+            } => left.may_read_element_properties() || right.may_read_element_properties(),
+            Self::Comprehension { list, filter, map } => {
+                list.may_read_element_properties()
+                    || filter
+                        .as_deref()
+                        .is_some_and(Self::may_read_element_properties)
+                    || map
+                        .as_deref()
+                        .is_some_and(Self::may_read_element_properties)
+            }
+            Self::Slice { list, from, to } => {
+                list.may_read_element_properties()
+                    || from
+                        .as_deref()
+                        .is_some_and(Self::may_read_element_properties)
+                    || to.as_deref().is_some_and(Self::may_read_element_properties)
+            }
+            Self::Range { start, end, step } => {
+                start.may_read_element_properties()
+                    || end.may_read_element_properties()
+                    || step
+                        .as_deref()
+                        .is_some_and(Self::may_read_element_properties)
+            }
+            Self::Reduce { init, list, expr } => {
+                init.may_read_element_properties()
+                    || list.may_read_element_properties()
+                    || expr.may_read_element_properties()
+            }
+            Self::MapLiteral { values, guard, .. } => {
+                guard
+                    .as_deref()
+                    .is_some_and(Self::may_read_element_properties)
+                    || values.iter().any(Self::may_read_element_properties)
+            }
+            Self::MapOverlay { base, values, .. } | Self::Let { body: base, values } => {
+                base.may_read_element_properties()
+                    || values.iter().any(Self::may_read_element_properties)
+            }
+            Self::Case { arms, otherwise } => {
+                arms.iter().any(|(condition, value)| {
+                    condition.may_read_element_properties() || value.may_read_element_properties()
+                }) || otherwise
+                    .as_deref()
+                    .is_some_and(Self::may_read_element_properties)
+            }
+        }
+    }
+
     pub(crate) fn append_canonical_bytes(&self, bytes: &mut Vec<u8>) {
         append_value_transcript(self, bytes);
     }
@@ -1287,6 +1378,95 @@ pub(super) fn copy_value<E>(
     value.copy_with_control(control)
 }
 
+// The scalar leaf of GraphValue::copy_with_control, with the identical event
+// sequence. Borrowing the scalar lets a cold host retain its record guard
+// through admission instead of cloning an uncharged temporary GraphValue.
+fn copy_property<E>(
+    value: &CanonicalScalar,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValue, E> {
+    control(GlaExecutionEvent::ScratchEntry)?;
+    control(GlaExecutionEvent::Work)?;
+    control(GlaExecutionEvent::ScratchEntry)?;
+    let sizes = match value {
+        CanonicalScalar::Text(text) => {
+            [text.len(), text.canonical_sort_key().map_or(0, <[u8]>::len)]
+        }
+        CanonicalScalar::Bytes(bytes) => [bytes.as_slice().len(), 0],
+        CanonicalScalar::Timestamp(timestamp) => [
+            timestamp.zone().map_or(0, |zone| zone.identifier().len()),
+            0,
+        ],
+        _ => [0, 0],
+    };
+    for bytes in sizes {
+        for _ in 0..bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+    }
+    Ok(GraphValue::Scalar(value.clone()))
+}
+
+#[cfg(test)]
+mod property_copy_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_property_copies_preserve_scalar_events_and_every_refusal() {
+        let mut values = vec![
+            CanonicalScalar::Null,
+            CanonicalScalar::Bool(true),
+            CanonicalScalar::Int(i64::MIN),
+        ];
+        for size in [0, 1, 64, 65, 129, 513] {
+            values.push(CanonicalScalar::bytes(vec![0xa5; size]).unwrap());
+            values.push(CanonicalScalar::ucs_basic_text(&"x".repeat(size)).unwrap());
+        }
+        for value in values {
+            let scalar = GraphValue::Scalar(value.clone());
+            let mut original_events = Vec::new();
+            let original = scalar
+                .copy_with_control(&mut |event| {
+                    original_events.push(event);
+                    Ok::<_, &'static str>(())
+                })
+                .unwrap();
+            let mut borrowed_events = Vec::new();
+            let borrowed = copy_property(&value, &mut |event| {
+                borrowed_events.push(event);
+                Ok::<_, &'static str>(())
+            })
+            .unwrap();
+            assert_eq!(borrowed, original);
+            assert_eq!(borrowed_events, original_events);
+            for stop in 1..=original_events.len() {
+                let mut original_prefix = Vec::new();
+                let original = scalar.copy_with_control(&mut |event| {
+                    original_prefix.push(event);
+                    if original_prefix.len() == stop {
+                        Err("copy refused")
+                    } else {
+                        Ok(())
+                    }
+                });
+                let mut borrowed_prefix = Vec::new();
+                let borrowed = copy_property(&value, &mut |event| {
+                    borrowed_prefix.push(event);
+                    if borrowed_prefix.len() == stop {
+                        Err("copy refused")
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert_eq!(original, Err("copy refused"));
+                assert_eq!(borrowed, original);
+                assert_eq!(original_prefix, original_events[..stop]);
+                assert_eq!(borrowed_prefix, original_prefix);
+            }
+        }
+    }
+}
+
 /// One evaluated UNWIND input, shared by resident, folded and external rows.
 /// Evaluation owns the list once; each step moves one element and copies only
 /// its original prefix. Consuming a step makes a control refusal terminal.
@@ -1305,6 +1485,15 @@ impl UnwindRows {
         control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
         let column = row.len();
         let list = evaluate_value(value, &row, column, control)?;
+        Self::from_evaluated(row, list, control)
+    }
+
+    pub(super) fn from_evaluated<E>(
+        row: GraphValueRow,
+        list: GraphValue,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, ProjectionFailure<E>> {
+        let column = row.len();
         let values = match list {
             GraphValue::List(values) => values.into_vec(),
             value if value.is_null() => Vec::new(),
@@ -1433,14 +1622,16 @@ pub(crate) fn no_element_reads<E>(
 /// row's ordinal when its caller numbers the rows it projects, which keys
 /// rand() (fgdb-13l85; without an ordinal, rand() is a typed error), and the
 /// host's element property reader (fgdb-xnd7x).
-struct Evaluation<'a, 'r, E> {
+struct EvaluationState<'a, R: ?Sized> {
     nodes: usize,
     ordinal: Option<u64>,
-    read: &'a mut ElementRead<'r, E>,
+    read: &'a mut R,
 }
 
-impl<'a, 'r, E> Evaluation<'a, 'r, E> {
-    fn new(ordinal: Option<u64>, read: &'a mut ElementRead<'r, E>) -> Self {
+type Evaluation<'a, 'r, E> = EvaluationState<'a, ElementRead<'r, E>>;
+
+impl<'a, R: ?Sized> EvaluationState<'a, R> {
+    fn new(ordinal: Option<u64>, read: &'a mut R) -> Self {
         Self {
             nodes: 0,
             ordinal,
@@ -1450,29 +1641,8 @@ impl<'a, 'r, E> Evaluation<'a, 'r, E> {
 
     /// A fresh node bound for one element's own evaluation, on the same row
     /// and with the same reader.
-    fn element(&mut self) -> Evaluation<'_, 'r, E> {
-        Evaluation::new(self.ordinal, &mut *self.read)
-    }
-}
-
-fn operand<'a, E>(
-    value: &'a GraphSetValue,
-    row: &'a GraphValueRow,
-    column: usize,
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    depth: usize,
-    nodes: &mut Evaluation<'_, '_, E>,
-) -> Result<std::borrow::Cow<'a, GraphValue>, ProjectionFailure<E>> {
-    let borrowed = match value {
-        GraphSetValue::Column(input) => row.values().get(*input),
-        GraphSetValue::Value(value) => Some(value),
-        _ => None,
-    };
-    if let Some(value) = borrowed {
-        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
-        Ok(std::borrow::Cow::Borrowed(value))
-    } else {
-        evaluate_value_at(value, row, column, control, depth, nodes).map(std::borrow::Cow::Owned)
+    fn element(&mut self) -> EvaluationState<'_, R> {
+        EvaluationState::new(self.ordinal, &mut *self.read)
     }
 }
 
@@ -1504,14 +1674,127 @@ fn list_members<'a, E>(
     Ok(Some(std::borrow::Cow::Owned(members)))
 }
 
-fn evaluate_value_at<E>(
+trait SynchronousElementSource {
+    type Error;
+    type Property: Borrow<fgdb_types::CanonicalPropertyValue>;
+
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<Self::Property>, Self::Error>>;
+}
+
+impl<E, F: ?Sized> SynchronousElementSource for F
+where
+    F: FnMut(
+        ElementId,
+        PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>>,
+{
+    type Error = E;
+    type Property = fgdb_types::CanonicalPropertyValue;
+
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+        self(element, key)
+    }
+}
+
+// One evaluator body owns bounds, operand order, short-circuiting, native
+// events, canonical copies and errors. Only its effect calls differ. Ordinary
+// execution keeps plain recursion; async helpers live in the active frame.
+macro_rules! projection_await {
+    (synchronous, $call:expr) => {
+        $call
+    };
+    (asynchronous, $call:expr) => {
+        $call.await
+    };
+}
+
+macro_rules! projection_recurse {
+    (synchronous, $reserve:expr, $call:expr) => {
+        $call
+    };
+    (asynchronous, $reserve:expr, $call:expr) => {{
+        let mut frame = reserve_future($call, $reserve)?;
+        let result = frame.0.as_mut().await;
+        drop(frame);
+        result
+    }};
+}
+
+// Keep allocation outside the recursive async function's concrete type. The
+// exact grant precedes Box::pin, and tuple order drops the future before the
+// grant both on normal return and when a suspended evaluation is cancelled.
+fn reserve_future<F, M, G, E>(
+    future: F,
+    reserve: &M,
+) -> Result<(std::pin::Pin<Box<F>>, G), ProjectionFailure<E>>
+where
+    M: Fn(usize) -> Result<G, E>,
+{
+    let grant = reserve(core::mem::size_of::<F>()).map_err(ProjectionFailure::Control)?;
+    Ok((Box::pin(future), grant))
+}
+
+macro_rules! projection_evaluator {
+    ($mode:ident, [$($asyncness:tt)*], $reader:ident, [$($send:tt)*], [$($sync:tt)*]) => {
+mod $mode {
+use super::*;
+
+$($asyncness)* fn operand<'a, R, C, M, G>(
+    value: &'a GraphSetValue,
+    row: &'a GraphValueRow,
+    column: usize,
+    control: &mut C,
+    depth: usize,
+    nodes: &mut EvaluationState<'_, R>,
+    reserve: &M,
+) -> Result<std::borrow::Cow<'a, GraphValue>, ProjectionFailure<R::Error>>
+where
+    R: $reader + ?Sized,
+    C: FnMut(GlaExecutionEvent) -> Result<(), R::Error> $($send)*,
+    M: Fn(usize) -> Result<G, R::Error> $($sync)*,
+    G: Sized $($send)*,
+{
+    let borrowed = match value {
+        GraphSetValue::Column(input) => row.values().get(*input),
+        GraphSetValue::Value(value) => Some(value),
+        _ => None,
+    };
+    if let Some(value) = borrowed {
+        control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+        Ok(std::borrow::Cow::Borrowed(value))
+    } else {
+        projection_recurse!(
+            $mode,
+            reserve,
+            evaluate_value_at(value, row, column, control, depth, nodes, reserve)
+        )
+        .map(std::borrow::Cow::Owned)
+    }
+}
+
+pub(super) $($asyncness)* fn evaluate_value_at<R, C, M, G>(
     value: &GraphSetValue,
     row: &GraphValueRow,
     column: usize,
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    control: &mut C,
     depth: usize,
-    nodes: &mut Evaluation<'_, '_, E>,
-) -> Result<GraphValue, ProjectionFailure<E>> {
+    nodes: &mut EvaluationState<'_, R>,
+    reserve: &M,
+) -> Result<GraphValue, ProjectionFailure<R::Error>>
+where
+    R: $reader + ?Sized,
+    C: FnMut(GlaExecutionEvent) -> Result<(), R::Error> $($send)*,
+    M: Fn(usize) -> Result<G, R::Error> $($sync)*,
+    G: Sized $($send)*,
+{
     use crate::GraphIntegerErrorKind;
     let failure = |kind| ProjectionFailure::Arithmetic {
         column,
@@ -1583,20 +1866,24 @@ fn evaluate_value_at<E>(
             let mut values = Vec::new();
             for expression in expressions {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-                values.push(evaluate_value_at(
-                    expression,
-                    row,
-                    column,
-                    control,
-                    depth + 1,
-                    nodes,
+                values.push(projection_recurse!(
+                    $mode,
+                    reserve,
+                    evaluate_value_at(expression, row, column, control, depth + 1, nodes, reserve)
                 )?);
             }
             GraphValue::List(values.into_boxed_slice())
         }
         GraphSetValue::Index { list, index } => {
-            let list = operand(list, row, column, control, depth + 1, nodes)?;
-            let index = evaluate_value_at(index, row, column, control, depth + 1, nodes)?;
+            let list = projection_await!(
+                $mode,
+                operand(list, row, column, control, depth + 1, nodes, reserve)
+            )?;
+            let index = projection_recurse!(
+                $mode,
+                reserve,
+                evaluate_value_at(index, row, column, control, depth + 1, nodes, reserve)
+            )?;
             if list.is_null() || index.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
@@ -1650,8 +1937,14 @@ fn evaluate_value_at<E>(
             }
         }
         GraphSetValue::In { value, list } => {
-            let value = operand(value, row, column, control, depth + 1, nodes)?;
-            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            let value = projection_await!(
+                $mode,
+                operand(value, row, column, control, depth + 1, nodes, reserve)
+            )?;
+            let list = projection_await!(
+                $mode,
+                operand(list, row, column, control, depth + 1, nodes, reserve)
+            )?;
             let truth = if list.is_null() {
                 None
             } else {
@@ -1665,8 +1958,14 @@ fn evaluate_value_at<E>(
             GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
         }
         GraphSetValue::Equal { left, right } => {
-            let left = operand(left, row, column, control, depth + 1, nodes)?;
-            let right = operand(right, row, column, control, depth + 1, nodes)?;
+            let left = projection_await!(
+                $mode,
+                operand(left, row, column, control, depth + 1, nodes, reserve)
+            )?;
+            let right = projection_await!(
+                $mode,
+                operand(right, row, column, control, depth + 1, nodes, reserve)
+            )?;
             let truth = membership::equal(left.as_ref(), right.as_ref(), control)
                 .map_err(ProjectionFailure::Control)?;
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
@@ -1677,8 +1976,14 @@ fn evaluate_value_at<E>(
             left,
             right,
         } => {
-            let left = operand(left, row, column, control, depth + 1, nodes)?;
-            let right = operand(right, row, column, control, depth + 1, nodes)?;
+            let left = projection_await!(
+                $mode,
+                operand(left, row, column, control, depth + 1, nodes, reserve)
+            )?;
+            let right = projection_await!(
+                $mode,
+                operand(right, row, column, control, depth + 1, nodes, reserve)
+            )?;
             let truth = membership::order(*comparison, left.as_ref(), right.as_ref(), control)
                 .map_err(ProjectionFailure::Control)?;
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
@@ -1689,7 +1994,10 @@ fn evaluate_value_at<E>(
             argument,
             zones,
         } => {
-            let argument = operand(argument, row, column, control, depth + 1, nodes)?;
+            let argument = projection_await!(
+                $mode,
+                operand(argument, row, column, control, depth + 1, nodes, reserve)
+            )?;
             let value = temporal::construct(*function, argument.as_ref(), zones.as_ref())
                 .map_err(failure)?;
             control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
@@ -1698,13 +2006,22 @@ fn evaluate_value_at<E>(
         GraphSetValue::Function {
             function: GraphValueFunction::Coalesce,
             argument,
-        } => coalesce_value(argument, row, column, control, depth, nodes)?,
+        } => projection_await!(
+            $mode,
+            coalesce_value(argument, row, column, control, depth, nodes, reserve)
+        )?,
         GraphSetValue::Function { function, argument } => {
-            let argument = operand(argument, row, column, control, depth + 1, nodes)?;
+            let argument = projection_await!(
+                $mode,
+                operand(argument, row, column, control, depth + 1, nodes, reserve)
+            )?;
             value_function(*function, argument.as_ref(), column, control)?
         }
         GraphSetValue::Size(list) => {
-            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            let list = projection_await!(
+                $mode,
+                operand(list, row, column, control, depth + 1, nodes, reserve)
+            )?;
             let size = if list.is_null() {
                 None
             } else if let Some(values) = list.as_list() {
@@ -1741,7 +2058,10 @@ fn evaluate_value_at<E>(
             copy_value(value, control).map_err(ProjectionFailure::Control)?
         }
         GraphSetValue::Comprehension { list, filter, map } => {
-            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            let list = projection_await!(
+                $mode,
+                operand(list, row, column, control, depth + 1, nodes, reserve)
+            )?;
             if list.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
@@ -1757,7 +2077,10 @@ fn evaluate_value_at<E>(
                         copy_value(member, control).map_err(ProjectionFailure::Control)?,
                     );
                     if let Some(filter) = filter
-                        && !element_truth(filter, &scope, column, control, depth, nodes)?
+                        && !projection_await!(
+                            $mode,
+                            element_truth(filter, &scope, column, control, depth, nodes, reserve)
+                        )?
                             .unwrap_or(false)
                     {
                         continue;
@@ -1766,14 +2089,16 @@ fn evaluate_value_at<E>(
                     kept.push(match map {
                         // Each element evaluation is bounded like a whole
                         // expression; total work is charged through control.
-                        Some(map) => evaluate_value_at(
-                            map,
-                            &scope,
-                            column,
-                            control,
-                            depth + 1,
-                            &mut nodes.element(),
-                        )?,
+                        Some(map) => {
+                            let mut element = nodes.element();
+                            projection_recurse!(
+                                $mode,
+                                reserve,
+                                evaluate_value_at(
+                                    map, &scope, column, control, depth + 1, &mut element, reserve
+                                )
+                            )?
+                        }
                         None => copy_value(member, control).map_err(ProjectionFailure::Control)?,
                     });
                 }
@@ -1789,7 +2114,10 @@ fn evaluate_value_at<E>(
             list,
             predicate,
         } => {
-            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            let list = projection_await!(
+                $mode,
+                operand(list, row, column, control, depth + 1, nodes, reserve)
+            )?;
             let truth = if list.is_null() {
                 None
             } else {
@@ -1804,8 +2132,9 @@ fn evaluate_value_at<E>(
                         copy_value(member, control).map_err(ProjectionFailure::Control)?,
                     );
                     control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-                    results.push(element_truth(
-                        predicate, &scope, column, control, depth, nodes,
+                    results.push(projection_await!(
+                        $mode,
+                        element_truth(predicate, &scope, column, control, depth, nodes, reserve)
                     )?);
                 }
                 kind.combine(results)
@@ -1814,12 +2143,18 @@ fn evaluate_value_at<E>(
             GraphValue::Scalar(truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
         }
         GraphSetValue::Slice { list, from, to } => {
-            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            let list = projection_await!(
+                $mode,
+                operand(list, row, column, control, depth + 1, nodes, reserve)
+            )?;
             let mut bounds = [None, None];
             let mut null = list.is_null();
             for (slot, bound) in bounds.iter_mut().zip([from, to]) {
                 if let Some(bound) = bound {
-                    match integer_part(bound, row, column, control, depth, nodes)? {
+                    match projection_await!(
+                        $mode,
+                        integer_part(bound, row, column, control, depth, nodes, reserve)
+                    )? {
                         Some(value) => *slot = Some(i128::from(value)),
                         None => null = true,
                     }
@@ -1841,10 +2176,19 @@ fn evaluate_value_at<E>(
             }
         }
         GraphSetValue::Range { start, end, step } => {
-            let start = integer_part(start, row, column, control, depth, nodes)?;
-            let end = integer_part(end, row, column, control, depth, nodes)?;
+            let start = projection_await!(
+                $mode,
+                integer_part(start, row, column, control, depth, nodes, reserve)
+            )?;
+            let end = projection_await!(
+                $mode,
+                integer_part(end, row, column, control, depth, nodes, reserve)
+            )?;
             let step = match step {
-                Some(step) => integer_part(step, row, column, control, depth, nodes)?,
+                Some(step) => projection_await!(
+                    $mode,
+                    integer_part(step, row, column, control, depth, nodes, reserve)
+                )?,
                 None => Some(1),
             };
             match (start, end, step) {
@@ -1865,8 +2209,15 @@ fn evaluate_value_at<E>(
             }
         }
         GraphSetValue::Reduce { init, list, expr } => {
-            let mut accumulator = evaluate_value_at(init, row, column, control, depth + 1, nodes)?;
-            let list = operand(list, row, column, control, depth + 1, nodes)?;
+            let mut accumulator = projection_recurse!(
+                $mode,
+                reserve,
+                evaluate_value_at(init, row, column, control, depth + 1, nodes, reserve)
+            )?;
+            let list = projection_await!(
+                $mode,
+                operand(list, row, column, control, depth + 1, nodes, reserve)
+            )?;
             if list.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
@@ -1881,13 +2232,13 @@ fn evaluate_value_at<E>(
                         0,
                         copy_value(member, control).map_err(ProjectionFailure::Control)?,
                     );
-                    accumulator = evaluate_value_at(
-                        expr,
-                        &scope,
-                        column,
-                        control,
-                        depth + 1,
-                        &mut nodes.element(),
+                    let mut element = nodes.element();
+                    accumulator = projection_recurse!(
+                        $mode,
+                        reserve,
+                        evaluate_value_at(
+                            expr, &scope, column, control, depth + 1, &mut element, reserve
+                        )
                     )?;
                 }
                 accumulator
@@ -1899,7 +2250,10 @@ fn evaluate_value_at<E>(
             guard,
         } => {
             if let Some(guard) = guard
-                && operand(guard, row, column, control, depth + 1, nodes)?.is_null()
+                && projection_await!(
+                    $mode,
+                    operand(guard, row, column, control, depth + 1, nodes, reserve)
+                )?.is_null()
             {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 return Ok(GraphValue::Scalar(CanonicalScalar::Null));
@@ -1908,13 +2262,10 @@ fn evaluate_value_at<E>(
             let mut entries = Vec::new();
             for value in values {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-                entries.push(evaluate_value_at(
-                    value,
-                    row,
-                    column,
-                    control,
-                    depth + 1,
-                    nodes,
+                entries.push(projection_recurse!(
+                    $mode,
+                    reserve,
+                    evaluate_value_at(value, row, column, control, depth + 1, nodes, reserve)
                 )?);
             }
             for key in keys.iter() {
@@ -1933,7 +2284,10 @@ fn evaluate_value_at<E>(
             value
         }
         GraphSetValue::MapGet { map, key, property } => {
-            let map = operand(map, row, column, control, depth + 1, nodes)?;
+            let map = projection_await!(
+                $mode,
+                operand(map, row, column, control, depth + 1, nodes, reserve)
+            )?;
             let element = match map.as_ref() {
                 GraphValue::Vertex(vid) => Some(ElementId::Vertex(*vid)),
                 GraphValue::Edge(eid) => Some(ElementId::Edge(*eid)),
@@ -1951,21 +2305,28 @@ fn evaluate_value_at<E>(
                     GraphElementKey::Missing => Some(Ok(None)),
                     GraphElementKey::Property(key) => {
                         control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
-                        (nodes.read)(element, *key)
+                        projection_await!($mode, nodes.read.element_property(element, *key))
                     }
                 };
                 match value
                     .ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?
                     .map_err(ProjectionFailure::Control)?
                 {
-                    // A stored List or Map reads as the value it is
-                    // (fgdb-k3nub); copy_value charges every node.
-                    Some(value) => copy_value(
-                        &GraphValue::from_property_value(&value)
-                            .ok_or_else(|| failure(GraphIntegerErrorKind::StoredValueBounds))?,
-                        control,
-                    )
-                    .map_err(ProjectionFailure::Control)?,
+                    Some(value) => match value.borrow() {
+                        // A stored scalar keeps the borrowed copy's charges.
+                        fgdb_types::CanonicalPropertyValue::Scalar(scalar) => {
+                            copy_property(scalar, control).map_err(ProjectionFailure::Control)?
+                        }
+                        // A stored List or Map reads as the value it is
+                        // (fgdb-k3nub); copy_value charges every node.
+                        stored => copy_value(
+                            &GraphValue::from_property_value(stored).ok_or_else(|| {
+                                failure(GraphIntegerErrorKind::StoredValueBounds)
+                            })?,
+                            control,
+                        )
+                        .map_err(ProjectionFailure::Control)?,
+                    },
                     None => {
                         control(GlaExecutionEvent::ScratchEntry)
                             .map_err(ProjectionFailure::Control)?;
@@ -1999,7 +2360,10 @@ fn evaluate_value_at<E>(
             }
         }
         GraphSetValue::Keys(map) => {
-            let map = operand(map, row, column, control, depth + 1, nodes)?;
+            let map = projection_await!(
+                $mode,
+                operand(map, row, column, control, depth + 1, nodes, reserve)
+            )?;
             if map.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
@@ -2014,7 +2378,10 @@ fn evaluate_value_at<E>(
             }
         }
         GraphSetValue::MapOverlay { base, keys, values } => {
-            let base = operand(base, row, column, control, depth + 1, nodes)?;
+            let base = projection_await!(
+                $mode,
+                operand(base, row, column, control, depth + 1, nodes, reserve)
+            )?;
             if base.is_null() {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                 return Ok(GraphValue::Scalar(CanonicalScalar::Null));
@@ -2025,13 +2392,10 @@ fn evaluate_value_at<E>(
             let mut entries = Vec::new();
             for value in values {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-                entries.push(evaluate_value_at(
-                    value,
-                    row,
-                    column,
-                    control,
-                    depth + 1,
-                    nodes,
+                entries.push(projection_recurse!(
+                    $mode,
+                    reserve,
+                    evaluate_value_at(value, row, column, control, depth + 1, nodes, reserve)
                 )?);
             }
             overlay_map(&base, keys, entries, column, control)?
@@ -2040,26 +2404,31 @@ fn evaluate_value_at<E>(
             // Every value reads the enclosing row, never another slot.
             let mut computed = Vec::with_capacity(values.len());
             for value in values {
-                computed.push(evaluate_value_at(
-                    value,
-                    row,
-                    column,
-                    control,
-                    depth + 1,
-                    nodes,
+                computed.push(projection_recurse!(
+                    $mode,
+                    reserve,
+                    evaluate_value_at(value, row, column, control, depth + 1, nodes, reserve)
                 )?);
             }
             let mut scope = element_scope(row, computed.len(), control)?;
             for (slot, value) in computed.into_iter().rev().enumerate() {
                 scope.set_from_end(slot, value);
             }
-            evaluate_value_at(body, &scope, column, control, depth + 1, nodes)?
+            projection_recurse!(
+                $mode,
+                reserve,
+                evaluate_value_at(body, &scope, column, control, depth + 1, nodes, reserve)
+            )?
         }
         GraphSetValue::Case { arms, otherwise } => {
             let mut selected = otherwise.as_deref();
             for (condition, value) in arms {
                 let truth =
-                    match evaluate_value_at(condition, row, column, control, depth + 1, nodes)? {
+                    match projection_recurse!(
+                        $mode,
+                        reserve,
+                        evaluate_value_at(condition, row, column, control, depth + 1, nodes, reserve)
+                    )? {
                         GraphValue::Scalar(CanonicalScalar::Bool(truth)) => truth,
                         GraphValue::Scalar(CanonicalScalar::Null) => false,
                         _ => return Err(failure(GraphIntegerErrorKind::NonBoolean)),
@@ -2070,7 +2439,11 @@ fn evaluate_value_at<E>(
                 }
             }
             match selected {
-                Some(value) => evaluate_value_at(value, row, column, control, depth + 1, nodes)?,
+                Some(value) => projection_recurse!(
+                    $mode,
+                    reserve,
+                    evaluate_value_at(value, row, column, control, depth + 1, nodes, reserve)
+                )?,
                 None => {
                     control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                     GraphValue::Scalar(CanonicalScalar::Null)
@@ -2093,6 +2466,181 @@ fn evaluate_value_at<E>(
         }
     };
     Ok(result)
+}
+
+/// openCypher coalesce over a composite argument: each argument in order
+/// until one is not NULL, which is the answer; no later argument runs. A call
+/// with one argument holds it directly, more hold the list of them.
+$($asyncness)* fn coalesce_value<R, C, M, G>(
+    arguments: &GraphSetValue,
+    row: &GraphValueRow,
+    column: usize,
+    control: &mut C,
+    depth: usize,
+    nodes: &mut EvaluationState<'_, R>,
+    reserve: &M,
+) -> Result<GraphValue, ProjectionFailure<R::Error>>
+where
+    R: $reader + ?Sized,
+    C: FnMut(GlaExecutionEvent) -> Result<(), R::Error> $($send)*,
+    M: Fn(usize) -> Result<G, R::Error> $($sync)*,
+    G: Sized $($send)*,
+{
+    let arguments = match arguments {
+        GraphSetValue::List(arguments) => arguments.as_slice(),
+        single => core::slice::from_ref(single),
+    };
+    for argument in arguments {
+        let value = projection_await!(
+            $mode,
+            operand(argument, row, column, control, depth + 1, nodes, reserve)
+        )?;
+        if !value.is_null() {
+            return match value {
+                std::borrow::Cow::Owned(value) => Ok(value),
+                std::borrow::Cow::Borrowed(value) => {
+                    copy_value(value, control).map_err(ProjectionFailure::Control)
+                }
+            };
+        }
+    }
+    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+    Ok(GraphValue::Scalar(CanonicalScalar::Null))
+}
+
+/// An integer bound, step or range endpoint: Some(value), None for NULL, and
+/// any other value a typed NonInteger error.
+$($asyncness)* fn integer_part<R, C, M, G>(
+    value: &GraphSetValue,
+    row: &GraphValueRow,
+    column: usize,
+    control: &mut C,
+    depth: usize,
+    nodes: &mut EvaluationState<'_, R>,
+    reserve: &M,
+) -> Result<Option<i64>, ProjectionFailure<R::Error>>
+where
+    R: $reader + ?Sized,
+    C: FnMut(GlaExecutionEvent) -> Result<(), R::Error> $($send)*,
+    M: Fn(usize) -> Result<G, R::Error> $($sync)*,
+    G: Sized $($send)*,
+{
+    match projection_recurse!(
+        $mode,
+        reserve,
+        evaluate_value_at(value, row, column, control, depth + 1, nodes, reserve)
+    )? {
+        GraphValue::Scalar(CanonicalScalar::Int(value)) => Ok(Some(value)),
+        GraphValue::Scalar(CanonicalScalar::Null) => Ok(None),
+        _ => Err(ProjectionFailure::Arithmetic {
+            column,
+            error: GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::NonInteger,
+            },
+        }),
+    }
+}
+
+/// A per-element predicate's three-valued result: TRUE, FALSE or UNKNOWN
+/// (NULL). Any other value is a typed expression error, never a filter.
+$($asyncness)* fn element_truth<R, C, M, G>(
+    predicate: &GraphSetValue,
+    scope: &GraphValueRow,
+    column: usize,
+    control: &mut C,
+    depth: usize,
+    outer: &mut EvaluationState<'_, R>,
+    reserve: &M,
+) -> Result<Option<bool>, ProjectionFailure<R::Error>>
+where
+    R: $reader + ?Sized,
+    C: FnMut(GlaExecutionEvent) -> Result<(), R::Error> $($send)*,
+    M: Fn(usize) -> Result<G, R::Error> $($sync)*,
+    G: Sized $($send)*,
+{
+    let mut element = outer.element();
+    match projection_recurse!(
+        $mode,
+        reserve,
+        evaluate_value_at(predicate, scope, column, control, depth + 1, &mut element, reserve)
+    )? {
+        GraphValue::Scalar(CanonicalScalar::Bool(truth)) => Ok(Some(truth)),
+        GraphValue::Scalar(CanonicalScalar::Null) => Ok(None),
+        _ => Err(ProjectionFailure::Arithmetic {
+            column,
+            error: GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::NonBoolean,
+            },
+        }),
+    }
+}
+}
+    };
+}
+
+projection_evaluator!(synchronous, [], SynchronousElementSource, [], []);
+projection_evaluator!(asynchronous, [async], AsyncSpillElementSource, [+ Send], [+ Sync]);
+
+fn evaluate_value_at<E>(
+    value: &GraphSetValue,
+    row: &GraphValueRow,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    depth: usize,
+    nodes: &mut Evaluation<'_, '_, E>,
+) -> Result<GraphValue, ProjectionFailure<E>> {
+    synchronous::evaluate_value_at(value, row, column, control, depth, nodes, &|_| {
+        Ok::<(), E>(())
+    })
+}
+
+pub(super) async fn evaluate_async<E, S, M, G>(
+    row: &GraphValueRow,
+    projection: &[GraphSetProjection],
+    ordinal: Option<u64>,
+    control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), E> + Send),
+    read: &mut S,
+    reserve: &M,
+) -> Result<GraphValueRow, ProjectionFailure<E>>
+where
+    E: Send,
+    S: AsyncSpillElementSource<Error = E>,
+    M: Fn(usize) -> Result<G, E> + Sync,
+    G: Send,
+{
+    let mut values = Vec::new();
+    for (column, output) in projection.iter().enumerate() {
+        values.push(
+            evaluate_value_async(&output.value, row, column, ordinal, control, read, reserve)
+                .await?,
+        );
+    }
+    Ok(GraphValueRow::from_owned_values(values))
+}
+
+pub(super) async fn evaluate_value_async<E, S, M, G>(
+    value: &GraphSetValue,
+    row: &GraphValueRow,
+    column: usize,
+    ordinal: Option<u64>,
+    control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), E> + Send),
+    read: &mut S,
+    reserve: &M,
+) -> Result<GraphValue, ProjectionFailure<E>>
+where
+    E: Send,
+    S: AsyncSpillElementSource<Error = E>,
+    M: Fn(usize) -> Result<G, E> + Sync,
+    G: Send,
+{
+    let mut nodes = EvaluationState::new(ordinal, read);
+    projection_recurse!(
+        asynchronous,
+        reserve,
+        asynchronous::evaluate_value_at(value, row, column, control, 0, &mut nodes, reserve)
+    )
 }
 
 /// An openCypher value function (fgdb-13l85) over its evaluated argument:
@@ -2208,36 +2756,6 @@ pub(crate) fn value_function<E>(
             )
         }
     }
-}
-
-/// openCypher coalesce over a composite argument: each argument in order
-/// until one is not NULL, which is the answer; no later argument runs. A call
-/// with one argument holds it directly, more hold the list of them.
-fn coalesce_value<E>(
-    arguments: &GraphSetValue,
-    row: &GraphValueRow,
-    column: usize,
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    depth: usize,
-    nodes: &mut Evaluation<'_, '_, E>,
-) -> Result<GraphValue, ProjectionFailure<E>> {
-    let arguments = match arguments {
-        GraphSetValue::List(arguments) => arguments.as_slice(),
-        single => core::slice::from_ref(single),
-    };
-    for argument in arguments {
-        let value = operand(argument, row, column, control, depth + 1, nodes)?;
-        if !value.is_null() {
-            return match value {
-                std::borrow::Cow::Owned(value) => Ok(value),
-                std::borrow::Cow::Borrowed(value) => {
-                    copy_value(value, control).map_err(ProjectionFailure::Control)
-                }
-            };
-        }
-    }
-    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-    Ok(GraphValue::Scalar(CanonicalScalar::Null))
 }
 
 /// rand()'s draw (fgdb-13l85): FNV-1a over a domain tag, the call site, the
@@ -2450,29 +2968,6 @@ pub(crate) fn map_keys<E>(
     Ok(texts.into_boxed_slice())
 }
 
-/// An integer bound, step or range endpoint: Some(value), None for NULL, and
-/// any other value a typed NonInteger error.
-fn integer_part<E>(
-    value: &GraphSetValue,
-    row: &GraphValueRow,
-    column: usize,
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    depth: usize,
-    nodes: &mut Evaluation<'_, '_, E>,
-) -> Result<Option<i64>, ProjectionFailure<E>> {
-    match evaluate_value_at(value, row, column, control, depth + 1, nodes)? {
-        GraphValue::Scalar(CanonicalScalar::Int(value)) => Ok(Some(value)),
-        GraphValue::Scalar(CanonicalScalar::Null) => Ok(None),
-        _ => Err(ProjectionFailure::Arithmetic {
-            column,
-            error: GraphIntegerError {
-                instruction: 0,
-                kind: crate::GraphIntegerErrorKind::NonInteger,
-            },
-        }),
-    }
-}
-
 /// Copy `row` into a list-comprehension element scope, under the same
 /// per-value reservations as any other row copy.
 fn element_scope<E>(
@@ -2545,34 +3040,4 @@ pub(crate) fn range_values<E>(
         members.push(GraphValue::Scalar(CanonicalScalar::Int(value)));
     }
     Ok(members)
-}
-
-/// A per-element predicate's three-valued result: TRUE, FALSE or UNKNOWN
-/// (NULL). Any other value is a typed expression error, never a filter.
-fn element_truth<E>(
-    predicate: &GraphSetValue,
-    scope: &GraphValueRow,
-    column: usize,
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    depth: usize,
-    outer: &mut Evaluation<'_, '_, E>,
-) -> Result<Option<bool>, ProjectionFailure<E>> {
-    match evaluate_value_at(
-        predicate,
-        scope,
-        column,
-        control,
-        depth + 1,
-        &mut outer.element(),
-    )? {
-        GraphValue::Scalar(CanonicalScalar::Bool(truth)) => Ok(Some(truth)),
-        GraphValue::Scalar(CanonicalScalar::Null) => Ok(None),
-        _ => Err(ProjectionFailure::Arithmetic {
-            column,
-            error: GraphIntegerError {
-                instruction: 0,
-                kind: crate::GraphIntegerErrorKind::NonBoolean,
-            },
-        }),
-    }
 }

@@ -27,9 +27,9 @@ pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub(crate) use procedure::{BorrowedSource, DynPatterns, DynProcedures, PatternSource};
 pub use procedure::{
-    GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection,
-    ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
-    WithElementReads, WithProcedures,
+    GraphPatternFactorExecution, GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops, WithElementReads, WithProcedures,
 };
 pub(crate) use projection::{
     ElementRead, ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership,
@@ -249,6 +249,10 @@ pub enum GraphSetExecutionError<E> {
     ProcedureUnavailable {
         operand: usize,
     },
+    /// A host advertised factors but supplied no source for a checked request.
+    PatternFactorsUnavailable {
+        operand: usize,
+    },
     /// An owned-row leaf reached a host that supplies no owned rows.
     OwnedRowsUnavailable,
 }
@@ -273,6 +277,9 @@ impl<E> GraphSetExecutionError<E> {
             }
             Self::ProcedureUnavailable { operand } => {
                 GraphSetExecutionError::ProcedureUnavailable { operand }
+            }
+            Self::PatternFactorsUnavailable { operand } => {
+                GraphSetExecutionError::PatternFactorsUnavailable { operand }
             }
             Self::OwnedRowsUnavailable => GraphSetExecutionError::OwnedRowsUnavailable,
         }
@@ -305,6 +312,12 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphSetExecutionError<E> {
             }
             Self::OwnedRowsUnavailable => {
                 f.write_str("a write tail reached a host without its head rows")
+            }
+            Self::PatternFactorsUnavailable { operand } => {
+                write!(
+                    f,
+                    "set operand {operand} promised graph factors but supplied none"
+                )
             }
         }
     }
@@ -1030,10 +1043,9 @@ impl PreparedGraphSet {
     pub(crate) fn execute_with_source<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        source: &mut impl GraphSetSource<E, C>,
+        source: &mut dyn GraphSetSource<E, C>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
-        let source: &mut dyn GraphSetSource<E, C> = source;
         let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, source, checkpoint)
     }

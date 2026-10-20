@@ -26,6 +26,8 @@ mod components;
 mod cooperative;
 #[path = "sealed_core.rs"]
 mod core_number;
+#[path = "sealed_eigenvector.rs"]
+mod eigenvector;
 #[path = "sealed_shortest_path.rs"]
 mod shortest_path;
 
@@ -533,7 +535,9 @@ impl FnxCallSpec {
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
                 | FnxAlgorithm::Foundation(
-                    FoundationAlgorithm::DegreeCentrality | FoundationAlgorithm::CoreNumber
+                    FoundationAlgorithm::DegreeCentrality
+                        | FoundationAlgorithm::CoreNumber
+                        | FoundationAlgorithm::EigenvectorCentrality
                 )
         )
     }
@@ -558,9 +562,10 @@ impl FnxCallSpec {
     }
 
     /// Execute registered ranks, distances, components and local triangles or
-    /// clustering or core numbers directly from authenticated compressed rows.
+    /// clustering, core numbers and eigenvectors from authenticated compressed rows.
     /// Degree centrality uses the admitted degree directory without opening
     /// rows; core peeling opens each row once with O(|V|) integer workspace.
+    /// Eigenvector iteration keeps two score vectors and canonical reductions.
     /// Every graph pass and row pull is fallible; identities remain stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
     /// This synchronous API does not claim async scheduling or disk spill.
@@ -615,6 +620,12 @@ impl FnxCallSpec {
             FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber)
         ) {
             return core_number::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
+        ) {
+            return eigenvector::execute(self, cx, graph, limits, memory, &admission);
         }
         let pass = execution_pass_work(self, graph)?;
         let (kernel, estimated_work, workspace, source) = match self.algorithm() {
@@ -996,6 +1007,8 @@ fn source_digest() -> Digest {
             include_str!("sealed_execute.rs"),
             include_str!("sealed_cooperative.rs"),
             include_str!("sealed_core.rs"),
+            include_str!("sealed_eigenvector.rs"),
+            include_str!("foundation.rs"),
             include_str!("sealed_clustering.rs"),
             include_str!("sealed_components.rs"),
             include_str!("sealed_shortest_path.rs"),
@@ -1579,6 +1592,11 @@ mod tests {
                 .unwrap(),
                 FnxCallSpec::bind(
                     "CALL fnx.core_number() YIELD vertex,core",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
+                FnxCallSpec::bind(
+                    "CALL fnx.eigenvector_centrality() YIELD vertex,score",
                     &FnxParameters::new(),
                 )
                 .unwrap(),

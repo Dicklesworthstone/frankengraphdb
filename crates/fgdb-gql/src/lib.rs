@@ -105,7 +105,7 @@ pub use aggregation::{
     GraphNullPlacement, MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PositionedEdge,
     PositionedGraph, PreparedGraphAggregate, PreparedGraphCount,
 };
-pub use algebra::GraphMatchMode;
+pub use algebra::{GraphMatchMode, PreparedGraphPatternFactors};
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
     GlaLimitDimension, GlaLimitExceeded, GovernedCheckpoint, GqlQueryError, GqlQueryExecution,
@@ -214,14 +214,14 @@ pub use prepared::{
 };
 pub use set_ops::row_filter;
 pub use set_ops::{
-    GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetBuildError, GraphSetColumnType,
-    GraphSetExecutionError, GraphSetFilterError, GraphSetOperand, GraphSetOperation,
-    GraphSetPredicateOp, GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier,
-    GraphSetRowPull, GraphSetSource, GraphSetValue, GraphTemporalFunction, GraphValueFunction,
-    MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
-    PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
-    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementReads,
-    WithProcedures,
+    GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphPatternFactorExecution,
+    GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetFilterError,
+    GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
+    GraphSetProjectionError, GraphSetQuantifier, GraphSetRowPull, GraphSetSource, GraphSetValue,
+    GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS,
+    PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops, WithElementReads, WithProcedures,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;

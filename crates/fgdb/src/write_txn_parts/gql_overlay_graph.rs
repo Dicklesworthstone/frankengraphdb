@@ -926,6 +926,76 @@ mod query_source {
             })
         }
 
+        /// Execute independent endpoints against one original overlay admission.
+        /// In particular neither factor can narrow the source's read witnesses,
+        /// and an empty factor cannot suppress the other factor's evaluation.
+        pub(super) fn execute_graph_pattern_factors_governed<V: Vfs + Clone>(
+            &self,
+            database: &Database<V>,
+            cx: &fgdb_types::QueryCx,
+            request: &fgdb_gql::PreparedGraphPatternFactors<'_>,
+            policy: fgdb_gql::GqlQueryPolicy,
+        ) -> Result<
+            fgdb_gql::GraphPatternFactorExecution,
+            fgdb_gql::GqlQueryError<WriteTxnError, Box<asupersync::error::Error>>,
+        > {
+            cx.with_restriction(|| {
+                let snapshot = self
+                    .query_snapshot(database)
+                    .map_err(fgdb_gql::GqlQueryError::Source)?;
+                cx.checkpoint()
+                    .map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                let original = request.original();
+                let mut usage = crate::gql_exec::AdmissionUsage::default();
+                let source = self.query_source_with_witnesses(
+                    snapshot,
+                    original.plan().clone(),
+                    original.required_vertex_label(),
+                    true,
+                    &mut |event| {
+                        cx.checkpoint()
+                            .map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                        usage.observe(policy, event)
+                    },
+                )?;
+                let names = source.catalog_names();
+                let maps = source.property_maps(
+                    &mut |event| {
+                        cx.checkpoint()
+                            .map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                        usage.observe(policy, event)
+                    },
+                    |error| fgdb_gql::GqlQueryError::Source(WriteTxnError::Read(error)),
+                )?;
+                let result = crate::gql_exec::execute_pattern_factors(
+                    request,
+                    source.snapshot_records as u64,
+                    policy,
+                    usage,
+                    |factor, allowance| {
+                        factor.plan().execute_governed_with_element_maps(
+                            source.snapshot_records as u64,
+                            source.vertex_ids(),
+                            source.identified_edges(),
+                            |vid, predicates| {
+                                Ok::<_, WriteTxnError>(source.matches(vid, predicates))
+                            },
+                            |vid, key| Ok(source.property(vid, key)),
+                            |eid, key| Ok(source.edge_property(eid, key)),
+                            |vid| names.labels(vid),
+                            |eid| names.edge_type(eid),
+                            |vid| Ok(maps.vertices.get(&vid)),
+                            |eid| Ok(maps.edges.get(&eid)),
+                            allowance,
+                            || cx.checkpoint(),
+                        )
+                    },
+                )?;
+                source.accept_observations();
+                Ok(result)
+            })
+        }
+
         fn note_query_read<E>(
             &self,
             observed: &mut BTreeSet<ElementId>,

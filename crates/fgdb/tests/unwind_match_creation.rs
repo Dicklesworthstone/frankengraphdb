@@ -67,6 +67,153 @@ fn int(value: i64) -> GraphValue {
 }
 
 #[test]
+fn bulk_endpoint_factors_share_one_admission_below_the_cartesian_work_bound() {
+    let ((), report) = run_async_under_lab(0xb01c_0010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        const RECORDS: u64 = 512;
+        let vertex = |key: u64| VId((1_u128 << 100) + u128::from(key) + 1);
+        let mut seed = WriteBatch::new(R);
+        for key in 0..RECORDS {
+            seed.create_vertex(
+                vertex(key),
+                vec![SOURCE],
+                vec![(P, CanonicalScalar::Int(key as i64))],
+            );
+        }
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let parameters = GqlParameters::new()
+            .with_list(
+                "rows",
+                [(400, 7, 11), (3, 400, 12), (400, 7, 13), (511, 700, 14)]
+                    .into_iter()
+                    .map(|(source, destination, weight)| {
+                        GraphValue::map(vec![
+                            ("src".into(), int(source)),
+                            ("dst".into(), int(destination)),
+                            ("weight".into(), int(weight)),
+                        ])
+                        .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let insertion = PreparedGraphInsertText::prepare(
+            "UNWIND $rows AS row MATCH (a:Source {p:row.src}), (b:Source {p:row.dst})
+             CREATE (a)-[:R {q:row.weight}]->(b)",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&parameters)
+        .unwrap();
+        // The old 512*512 graph product exceeds even this work allowance,
+        // before any imported key can eliminate its nonmatching pairs.
+        let bounded = GqlQueryPolicy::new(RECORDS, 4, 200_000, 100_000);
+        assert!(bounded.evaluator.max_work_units < RECORDS * RECORDS);
+        let mut transaction = db.begin(&contexts.txn()).unwrap();
+        let before = transaction.staged_effect_digest().unwrap();
+        let allocations = AtomicUsize::new(0);
+        let refusal = transaction
+            .execute_graph_insert_governed(
+                &mut db,
+                &contexts.query(),
+                &insertion,
+                GraphInsertPolicy::new(GqlQueryPolicy::new(RECORDS - 1, 4, 200_000, 100_000), 0, 3),
+                |_| {
+                    allocations.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>(ElementId::Edge(EId(9_999)))
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            refusal,
+            fgdb_gql::GqlQueryError::Rows(error)
+                if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                    && error.limit == RECORDS - 1 && error.observed == RECORDS
+        ));
+        assert_eq!(allocations.load(Ordering::SeqCst), 0);
+        assert_eq!(transaction.staged_effect_digest().unwrap(), before);
+        let stats = transaction
+            .execute_graph_insert_engine_governed(
+                &mut db,
+                &contexts.query(),
+                &insertion,
+                GraphInsertPolicy::new(bounded, 0, 3),
+            )
+            .unwrap();
+        assert_eq!(stats.selection.snapshot_records, RECORDS);
+        assert_eq!(stats.selection.result_rows, 3);
+        assert_eq!((stats.created_vertices, stats.created_edges), (0, 3));
+        for (counter, source, destination, weight) in
+            [(1, 400, 7, 11), (2, 3, 400, 12), (3, 400, 7, 13)]
+        {
+            let edge = transaction
+                .edge(&db, engine_edge(counter))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (edge.entry.src, edge.entry.dst),
+                (vertex(source), vertex(destination)),
+            );
+            assert_eq!(edge.props, vec![(Q, CanonicalScalar::Int(weight))]);
+        }
+        assert!(db.edges().unwrap().is_empty());
+        transaction
+            .finish(&mut db, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(db.edges().unwrap().len(), 3);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn two_private_endpoint_rows_do_not_consume_two_public_result_rows() {
+    let ((), report) = run_async_under_lab(0xb01c_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let vertex = VId(u128::MAX);
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(vertex, vec![SOURCE], vec![(P, CanonicalScalar::Int(7))]);
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let insertion = PreparedGraphInsertText::prepare(
+            "UNWIND [{src:7,dst:7}] AS row
+             MATCH (a:Source {p:row.src}), (b:Source {p:row.dst}) CREATE (a)-[:R]->(b)",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let mut transaction = db.begin(&contexts.txn()).unwrap();
+        let stats = transaction
+            .execute_graph_insert_engine_governed(
+                &mut db,
+                &contexts.query(),
+                &insertion,
+                GraphInsertPolicy::new(GqlQueryPolicy::new(1, 1, 100_000, 100_000), 0, 1),
+            )
+            .unwrap();
+        assert_eq!(stats.selection.snapshot_records, 1);
+        assert_eq!(stats.selection.result_rows, 1);
+        assert_eq!(stats.created_edges, 1);
+        let edge = transaction.edge(&db, engine_edge(1)).unwrap().unwrap();
+        assert_eq!((edge.entry.src, edge.entry.dst), (vertex, vertex));
+        transaction
+            .finish(&mut db, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(db.edges().unwrap().len(), 1);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn map_parameter_edge_import_is_one_atomic_statement_over_staged_wide_endpoints() {
     let ((), report) = run_async_under_lab(0xb01c_0005, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

@@ -1,6 +1,45 @@
 // Query-selected graph creation stages one ordinary WriteBatch. Selection and
 // computed payloads are frozen before allocation; commit remains explicit.
 
+struct InsertGraphSource<'a, V: Vfs> {
+    transaction: &'a WriteTxn,
+    database: &'a Database<V>,
+    cx: &'a fgdb_types::QueryCx,
+}
+
+impl<V: Vfs + Clone> fgdb_gql::GraphSetSource<WriteTxnError, Box<asupersync::error::Error>>
+    for InsertGraphSource<'_, V>
+{
+    fn supports_pattern_factors(&self) -> bool {
+        true
+    }
+
+    fn pattern(
+        &mut self,
+        pattern: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        TxnGqlError<WriteTxnError>,
+    > {
+        self.transaction
+            .execute_graph_pattern_governed(self.database, self.cx, pattern, policy)
+    }
+
+    fn pattern_factors(
+        &mut self,
+        request: &fgdb_gql::PreparedGraphPatternFactors<'_>,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Option<Result<fgdb_gql::GraphPatternFactorExecution, TxnGqlError<WriteTxnError>>> {
+        Some(self.transaction.execute_graph_pattern_factors_governed(
+            self.database,
+            self.cx,
+            request,
+            policy,
+        ))
+    }
+}
+
 impl WriteTxn {
     /// Stage CREATE/INSERT and its native RETURN rows as one atomic operation.
     /// The prepared query evaluates its complete selection, creation payloads,
@@ -44,12 +83,12 @@ impl WriteTxn {
         }
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
-            let proposal = query.execute_governed(
+            let proposal = query.execute_governed_with_source(
                 policy,
-                |pattern, allowance| {
-                    workspace
-                        .txn
-                        .execute_graph_pattern_governed(database, cx, pattern, allowance)
+                InsertGraphSource {
+                    transaction: workspace.txn,
+                    database,
+                    cx,
                 },
                 allocate,
                 || cx.checkpoint(),
@@ -222,10 +261,12 @@ impl WriteTxn {
             }));
         }
         cx.with_restriction(|| {
-            let proposal = insertion.execute_governed(
+            let proposal = insertion.execute_governed_with_source(
                 policy,
-                |pattern, allowance| {
-                    self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                InsertGraphSource {
+                    transaction: self,
+                    database,
+                    cx,
                 },
                 allocate,
                 || cx.checkpoint(),

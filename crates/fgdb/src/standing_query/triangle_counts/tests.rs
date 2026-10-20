@@ -9,13 +9,17 @@ fn policy() -> GqlQueryPolicy {
 }
 
 fn build(snapshot: &crate::Snapshot) -> State {
+    build_as(snapshot, Output::Triangles)
+}
+
+fn build_as(snapshot: &crate::Snapshot, output: Output) -> State {
     let mut checkpoint = || Ok(());
     let mut meter = Meter {
         policy: policy(),
         stats: StandingQueryStats::default(),
         checkpoint: &mut checkpoint,
     };
-    State::from_snapshot(snapshot, RelationId(1), &mut meter).unwrap()
+    State::from_snapshot(snapshot, RelationId(1), output, &mut meter).unwrap()
 }
 
 fn unchanged(actual: &State, before: &State) {
@@ -48,8 +52,6 @@ fn every_input_kernel_counter_sink_and_final_refusal_preserves_the_accepted_gene
         }
         db.write(&commit, seed).await.unwrap();
         let baseline = Arc::clone(&db.snapshot);
-        let before = build(&baseline);
-        assert!(before.delta().is_none());
         let mut change = WriteBatch::new(RelationId(1));
         change.delete_edge(EId(10));
         change.delete_vertex(VId(1));
@@ -57,89 +59,94 @@ fn every_input_kernel_counter_sink_and_final_refusal_preserves_the_accepted_gene
         change.add_edge(EId(16), VId(3), VId(2), vec![]);
         db.write(&commit, change).await.unwrap();
         let batch = db.delta_since(baseline.frontier).unwrap().next().unwrap();
-        let expected = build(&db.snapshot);
-        assert_eq!(expected.rows().len(), 3);
-        assert_ne!(expected.rows(), before.rows());
-        let mut accepted = build(&baseline);
-        let mut calls = 0;
-        let stats = {
-            let mut checkpoint = || {
-                calls += 1;
-                Ok(())
-            };
-            let mut meter = Meter {
-                policy: policy(),
-                stats: StandingQueryStats::default(),
-                checkpoint: &mut checkpoint,
-            };
-            accepted.maintain(&commit, batch, &mut meter).unwrap();
-            meter.stats
-        };
-        assert!(calls > 0 && stats.work_units > 0 && stats.scratch_entries > 0);
-        assert_eq!(accepted.rows(), expected.rows());
-        assert_eq!(accepted.counts.vertices, expected.counts.vertices);
-        assert_eq!(accepted.triangles, expected.triangles);
-        assert_eq!(accepted.input, expected.input);
-        assert!(accepted.delta().is_some());
-        for stop in 1..=calls {
-            let mut state = build(&baseline);
-            let mut seen = 0;
-            let mut checkpoint = || {
-                seen += 1;
-                if seen == stop {
-                    Err(StandingQueryFailure::Interrupted)
-                } else {
+        for output in [Output::Triangles, Output::Clustering] {
+            let build = |snapshot: &crate::Snapshot| build_as(snapshot, output);
+            let before = build(&baseline);
+            assert!(before.delta().is_none());
+            let expected = build(&db.snapshot);
+            assert_eq!(expected.rows().len(), 3);
+            assert_ne!(expected.rows(), before.rows());
+            let mut accepted = build(&baseline);
+            let mut calls = 0;
+            let stats = {
+                let mut checkpoint = || {
+                    calls += 1;
                     Ok(())
-                }
+                };
+                let mut meter = Meter {
+                    policy: policy(),
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
+                accepted.maintain(&commit, batch, &mut meter).unwrap();
+                meter.stats
             };
-            let mut meter = Meter {
-                policy: policy(),
-                stats: StandingQueryStats::default(),
-                checkpoint: &mut checkpoint,
-            };
-            assert_eq!(
-                state.maintain(&commit, batch, &mut meter),
-                Err(StandingQueryFailure::Interrupted)
-            );
-            assert_eq!(seen, stop);
-            unchanged(&state, &before);
-        }
-        for (rows, work, scratch, error) in [
-            (3, stats.work_units, stats.scratch_entries, None),
-            (
-                2,
-                stats.work_units,
-                stats.scratch_entries,
-                Some(StandingQueryFailure::ResultBudget),
-            ),
-            (
-                3,
-                stats.work_units - 1,
-                stats.scratch_entries,
-                Some(StandingQueryFailure::WorkBudget),
-            ),
-            (
-                3,
-                stats.work_units,
-                stats.scratch_entries - 1,
-                Some(StandingQueryFailure::ScratchBudget),
-            ),
-        ] {
-            let mut state = build(&baseline);
-            let mut checkpoint = || Ok(());
-            let mut meter = Meter {
-                policy: GqlQueryPolicy::new(100_000, rows, work, scratch),
-                stats: StandingQueryStats::default(),
-                checkpoint: &mut checkpoint,
-            };
-            let result = state.maintain(&commit, batch, &mut meter);
-            if let Some(error) = error {
-                assert_eq!(result, Err(error));
+            assert!(calls > 0 && stats.work_units > 0 && stats.scratch_entries > 0);
+            assert_eq!(accepted.rows(), expected.rows());
+            assert_eq!(accepted.counts.vertices, expected.counts.vertices);
+            assert_eq!(accepted.triangles, expected.triangles);
+            assert_eq!(accepted.input, expected.input);
+            assert!(accepted.delta().is_some());
+            for stop in 1..=calls {
+                let mut state = build(&baseline);
+                let mut seen = 0;
+                let mut checkpoint = || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(StandingQueryFailure::Interrupted)
+                    } else {
+                        Ok(())
+                    }
+                };
+                let mut meter = Meter {
+                    policy: policy(),
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
+                assert_eq!(
+                    state.maintain(&commit, batch, &mut meter),
+                    Err(StandingQueryFailure::Interrupted)
+                );
+                assert_eq!(seen, stop);
                 unchanged(&state, &before);
-            } else {
-                result.unwrap();
-                assert_eq!(state.rows(), expected.rows());
-                assert_eq!(state.counts.vertices, expected.counts.vertices);
+            }
+            for (rows, work, scratch, error) in [
+                (3, stats.work_units, stats.scratch_entries, None),
+                (
+                    2,
+                    stats.work_units,
+                    stats.scratch_entries,
+                    Some(StandingQueryFailure::ResultBudget),
+                ),
+                (
+                    3,
+                    stats.work_units - 1,
+                    stats.scratch_entries,
+                    Some(StandingQueryFailure::WorkBudget),
+                ),
+                (
+                    3,
+                    stats.work_units,
+                    stats.scratch_entries - 1,
+                    Some(StandingQueryFailure::ScratchBudget),
+                ),
+            ] {
+                let mut state = build(&baseline);
+                let mut checkpoint = || Ok(());
+                let mut meter = Meter {
+                    policy: GqlQueryPolicy::new(100_000, rows, work, scratch),
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
+                let result = state.maintain(&commit, batch, &mut meter);
+                if let Some(error) = error {
+                    assert_eq!(result, Err(error));
+                    unchanged(&state, &before);
+                } else {
+                    result.unwrap();
+                    assert_eq!(state.rows(), expected.rows());
+                    assert_eq!(state.counts.vertices, expected.counts.vertices);
+                }
             }
         }
     });
@@ -163,19 +170,20 @@ fn synthetic(triangles: i64, incidences: i128) -> Counts {
         stats: StandingQueryStats::default(),
         checkpoint: &mut checkpoint,
     };
-    let mut state = Counts::new(&mut meter).unwrap();
+    let mut state = Counts::new(Output::Triangles, &mut meter).unwrap();
     for vertex in [VId(0), VId(1), VId(u128::MAX)] {
         state.vertices.insert(
             vertex,
             Counters {
-                triangles,
+                triangles: u64::try_from(triangles).unwrap(),
+                degree: 0,
                 incidences,
             },
         );
         state
             .rows
             .accumulate(
-                row(vertex, triangles, &mut meter).unwrap(),
+                row(vertex, CanonicalScalar::Int(triangles), &mut meter).unwrap(),
                 ZWeight::ONE,
                 LIMBS,
                 &mut |_| Ok::<_, StandingQueryFailure>(()),
@@ -270,7 +278,13 @@ fn numeric_liveness_and_incidence_refusals_are_atomic_and_empty_ticks_are_distin
         };
         assert_eq!(
             state
-                .prepare(&vertices, &edges, &triangles, &mut meter)
+                .prepare(
+                    &vertices,
+                    &edges,
+                    std::iter::empty(),
+                    &triangles,
+                    &mut meter
+                )
                 .map(CountsUpdate::commit),
             Err(error)
         );
@@ -285,7 +299,7 @@ fn numeric_liveness_and_incidence_refusals_are_atomic_and_empty_ticks_are_distin
         checkpoint: &mut checkpoint,
     };
     state
-        .prepare(&empty_v, &empty_e, &empty_t, &mut meter)
+        .prepare(&empty_v, &empty_e, std::iter::empty(), &empty_t, &mut meter)
         .unwrap()
         .commit();
     assert!(state.last_delta.as_ref().unwrap().is_empty());
@@ -294,6 +308,7 @@ fn numeric_liveness_and_incidence_refusals_are_atomic_and_empty_ticks_are_distin
         .prepare(
             &zset([(a, -1), (b, -1), (c, -1)]),
             &empty_e,
+            std::iter::empty(),
             &empty_t,
             &mut meter,
         )
@@ -301,6 +316,159 @@ fn numeric_liveness_and_incidence_refusals_are_atomic_and_empty_ticks_are_distin
         .commit();
     assert!(state.vertices.is_empty() && state.rows.is_empty());
     assert_eq!(state.last_delta.as_ref().unwrap().len(), 3);
+}
+
+#[test]
+fn clustering_keeps_exact_count_rounding_and_commits_counters_when_score_bits_stay_equal() {
+    let sample = Counters {
+        triangles: u64::MAX,
+        degree: (1_u64 << 53) + 1,
+        incidences: i128::from((1_u64 << 53) + 1),
+    };
+    let CanonicalScalar::Float(score) = Output::Clustering.value(sample).unwrap() else {
+        panic!("clustering float");
+    };
+    // Widening the exact d*(d-1) before conversion gives precisely 2^-41.
+    // Multiplying rounded f64 degrees instead gives the next larger float.
+    assert_eq!(score.to_bits(), 0x3d60_0000_0000_0000);
+    assert_ne!(
+        score.to_bits(),
+        (2.0 * sample.triangles as f64 / (sample.degree as f64 * (sample.degree as f64 - 1.0)))
+            .to_bits(),
+    );
+    assert_eq!(
+        Output::Triangles.value(sample),
+        Err(StandingQueryFailure::Arithmetic)
+    );
+    for degree in [0, 1, 2, u64::MAX] {
+        assert_eq!(
+            Output::Clustering
+                .value(Counters {
+                    triangles: 0,
+                    degree,
+                    incidences: i128::from(degree)
+                })
+                .unwrap(),
+            CanonicalScalar::Float(CanonicalF64::new(0.0)),
+        );
+    }
+    assert_eq!(
+        Output::Clustering.value(Counters {
+            triangles: 2,
+            degree: 2,
+            incidences: 2
+        }),
+        Err(StandingQueryFailure::InvalidDelta),
+    );
+
+    // Numeric-state fixture, not a graph-source oracle: the first exact count
+    // increment rounds to the same coefficient. The following increment must
+    // use that accepted integer state and then emit its changed score bits.
+    let counters = Counters {
+        triangles: 1_u64 << 53,
+        degree: 1_u64 << 32,
+        incidences: 1_i128 << 32,
+    };
+    let mut checkpoint = || Ok(());
+    let mut meter = Meter {
+        policy: policy(),
+        stats: StandingQueryStats::default(),
+        checkpoint: &mut checkpoint,
+    };
+    let mut state = Counts::new(Output::Clustering, &mut meter).unwrap();
+    for vertex in [VId(0), VId(1), VId(2)] {
+        state.vertices.insert(vertex, counters);
+        state
+            .rows
+            .accumulate(
+                row(
+                    vertex,
+                    Output::Clustering.value(counters).unwrap(),
+                    &mut meter,
+                )
+                .unwrap(),
+                ZWeight::ONE,
+                LIMBS,
+                &mut |_| Ok::<_, StandingQueryFailure>(()),
+            )
+            .unwrap();
+    }
+    let triangle = zset([((VId(0), VId(1), VId(2)), 1)]);
+    for increment in 1..=2 {
+        state
+            .prepare(
+                &ZSet::new(),
+                &ZSet::new(),
+                std::iter::empty(),
+                &triangle,
+                &mut meter,
+            )
+            .unwrap()
+            .commit();
+        assert!(
+            state
+                .vertices
+                .values()
+                .all(|value| value.triangles == counters.triangles + increment)
+        );
+        assert_eq!(
+            state.last_delta.as_ref().unwrap().len(),
+            if increment == 1 { 0 } else { 6 }
+        );
+    }
+}
+
+#[test]
+fn clustering_degree_only_tick_work_is_independent_of_unrelated_isolates() {
+    let ((), report) = run_async_under_lab(0x7472_6304, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let keys = || {
+            DatabaseKeys::new(
+                [0x97; 32],
+                DatabaseSecurityNamespaceId([0x98; 32]),
+                [0x99; 32],
+            )
+        };
+        let mut previous = None;
+        for isolates in [0, 1000] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for id in 0..4 + isolates {
+                seed.create_vertex(VId(id), vec![], vec![]);
+            }
+            for (id, a, b) in [(1, 0, 1), (2, 1, 2), (3, 2, 0)] {
+                seed.add_edge(EId(id), VId(a), VId(b), vec![]);
+            }
+            let start = db.write(&commit, seed).await.unwrap();
+            let mut state = build_as(&db.snapshot, Output::Clustering);
+            let mut change = WriteBatch::new(RelationId(1));
+            change.add_edge(EId(4), VId(0), VId(3), vec![]);
+            db.write(&commit, change).await.unwrap();
+            let batch = db.delta_since(start).unwrap().next().unwrap();
+            let mut checkpoint = || Ok(());
+            let mut meter = Meter {
+                policy: policy(),
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            state.maintain(&commit, batch, &mut meter).unwrap();
+            assert_eq!(state.delta().unwrap().len(), 2);
+            assert_eq!(state.triangles.total(), &ZWeight::ONE);
+            assert_eq!(
+                state.rows(),
+                build_as(&db.snapshot, Output::Clustering).rows()
+            );
+            if let Some(before) = previous {
+                assert_eq!(
+                    meter.stats, before,
+                    "an ordinary tick must not rebuild rows or scan unrelated retained vertices"
+                );
+            }
+            previous = Some(meter.stats);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

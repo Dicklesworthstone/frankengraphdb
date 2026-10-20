@@ -2119,3 +2119,526 @@ fn cartesian_oversized_rows_and_unsupported_children_refuse_before_empty_pages()
         );
     }
 }
+
+mod async_elements {
+    use super::*;
+    use fgdb_delta_types::ElementId;
+    use fgdb_gql::GraphElementKey;
+    use fgdb_gql::spill_set::AsyncSpillElementSource;
+    use std::borrow::Borrow;
+    use std::future::{Future, poll_fn};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Waker};
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Effect {
+        Event(GlaExecutionEvent),
+        Read(ElementId, PropertyKeyId),
+    }
+    type Trace = Arc<Mutex<Vec<Effect>>>;
+
+    struct Property {
+        value: CanonicalPropertyValue,
+        live: Arc<AtomicUsize>,
+    }
+    impl Borrow<CanonicalPropertyValue> for Property {
+        fn borrow(&self) -> &CanonicalPropertyValue {
+            &self.value
+        }
+    }
+    impl Drop for Property {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    #[derive(Default)]
+    struct Reader {
+        trace: Trace,
+        live: Arc<AtomicUsize>,
+        refuse: Option<ElementId>,
+        unavailable: bool,
+    }
+    impl AsyncSpillElementSource for Reader {
+        type Error = &'static str;
+        type Property = Property;
+
+        async fn element_property(
+            &mut self,
+            element: ElementId,
+            key: PropertyKeyId,
+        ) -> Option<Result<Option<Property>, &'static str>> {
+            self.trace.lock().unwrap().push(Effect::Read(element, key));
+            if self.unavailable {
+                return None;
+            }
+            if key != P {
+                return Some(Err("unselected property was read"));
+            }
+            // Independent fixture lookup, with no dependence on the evaluator
+            // or a narrowing conversion of the full-width graph identity.
+            let value = match element {
+                ElementId::Vertex(VId(1)) => Some(2),
+                ElementId::Vertex(VId(u128::MAX)) => Some(7),
+                ElementId::Edge(EId(u128::MAX)) => Some(11),
+                _ => None,
+            };
+            let property = value.map(|value| {
+                self.live.fetch_add(1, AtomicOrdering::SeqCst);
+                Property {
+                    value: CanonicalScalar::Int(value).into(),
+                    live: Arc::clone(&self.live),
+                }
+            });
+            // Hold an actual source guard across one suspension. Cancellation
+            // must drop it even before the reader returns its scalar.
+            let mut suspended = false;
+            poll_fn(|cx| {
+                if suspended {
+                    Poll::Ready(())
+                } else {
+                    suspended = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            Some(if self.refuse == Some(element) {
+                Err("original source failure")
+            } else {
+                Ok(property)
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FrameState {
+        current: AtomicUsize,
+        peak: AtomicUsize,
+        attempts: AtomicUsize,
+    }
+    struct Frames {
+        state: Arc<FrameState>,
+        limit: usize,
+        refuse: Option<usize>,
+    }
+    struct Grant {
+        state: Arc<FrameState>,
+        bytes: usize,
+    }
+    impl Drop for Grant {
+        fn drop(&mut self) {
+            self.state
+                .current
+                .fetch_sub(self.bytes, AtomicOrdering::SeqCst);
+        }
+    }
+    impl Frames {
+        fn new(limit: usize, refuse: Option<usize>) -> Self {
+            Self {
+                state: Arc::default(),
+                limit,
+                refuse,
+            }
+        }
+        fn reserve(&self, bytes: usize) -> Result<Grant, &'static str> {
+            let attempt = self.state.attempts.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            let next = self
+                .state
+                .current
+                .load(AtomicOrdering::SeqCst)
+                .checked_add(bytes)
+                .ok_or("frame refused")?;
+            if self.refuse == Some(attempt) || next > self.limit {
+                return Err("frame refused");
+            }
+            self.state.current.store(next, AtomicOrdering::SeqCst);
+            self.state.peak.fetch_max(next, AtomicOrdering::SeqCst);
+            Ok(Grant {
+                state: Arc::clone(&self.state),
+                bytes,
+            })
+        }
+        fn assert_released(&self, reader: &Reader) {
+            assert_eq!(self.state.current.load(AtomicOrdering::SeqCst), 0);
+            assert_eq!(reader.live.load(AtomicOrdering::SeqCst), 0);
+        }
+    }
+
+    fn control(
+        trace: Trace,
+        stop: Option<usize>,
+    ) -> impl FnMut(GlaExecutionEvent) -> Result<(), &'static str> + Send {
+        let mut events = 0;
+        move |event| {
+            trace.lock().unwrap().push(Effect::Event(event));
+            events += 1;
+            if stop == Some(events) {
+                Err("native event refused")
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn finish<F: Future>(future: F) -> F::Output {
+        let mut future = Box::pin(future);
+        let mut cx = Context::from_waker(Waker::noop());
+        for _ in 0..32 {
+            if let Poll::Ready(result) = future.as_mut().poll(&mut cx) {
+                return result;
+            }
+        }
+        panic!("finite fixture failed to make progress");
+    }
+
+    fn run(
+        stage: &SpillSetStage,
+        input: GraphValueRow,
+        reader: &mut Reader,
+        frames: &Frames,
+        stop: Option<usize>,
+    ) -> Result<Vec<GraphValueRow>, SpillSetRowError<&'static str>> {
+        let mut control = control(Arc::clone(&reader.trace), stop);
+        let reserve = |bytes| frames.reserve(bytes);
+        finish(async {
+            let mut cursor = stage
+                .start_with_async_elements(input, 17, &mut control, reader, &reserve)
+                .await?;
+            let mut rows = Vec::new();
+            while let Some((row, next)) = cursor.next_with_control(&mut control)? {
+                rows.push(row);
+                cursor = next;
+            }
+            Ok(rows)
+        })
+    }
+
+    fn stage(expression: &str) -> SpillSetStage {
+        let query = prepare(&format!(
+            "MATCH (n) WITH [n] AS items RETURN {expression} AS result"
+        ));
+        AsyncSpillSetPlan::compile(&query)
+            .unwrap()
+            .stages()
+            .last()
+            .unwrap()
+            .clone()
+    }
+    fn identities() -> [ElementId; 5] {
+        [
+            ElementId::Vertex(VId(1)),
+            ElementId::Vertex(VId(u128::MAX)),
+            ElementId::Vertex(VId(1)),
+            ElementId::Edge(EId(u128::MAX)),
+            ElementId::Vertex(VId(2)),
+        ]
+    }
+    fn input() -> GraphValueRow {
+        row(vec![GraphValue::List(
+            identities()
+                .map(|element| match element {
+                    ElementId::Vertex(vid) => GraphValue::Vertex(vid),
+                    ElementId::Edge(eid) => GraphValue::Edge(eid),
+                })
+                .into(),
+        )])
+    }
+    fn values() -> GraphValue {
+        GraphValue::List(
+            vec![
+                scalar(2),
+                scalar(7),
+                scalar(2),
+                scalar(11),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ]
+            .into_boxed_slice(),
+        )
+    }
+    fn reads(trace: &[Effect]) -> Vec<(ElementId, PropertyKeyId)> {
+        trace
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Read(element, key) => Some((*element, *key)),
+                Effect::Event(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reached_reads_keep_bags_nulls_edges_and_full_width_ids_across_suspension() {
+        for (expression, expected) in [
+            ("[x IN items | x.p]", values()),
+            (
+                "reduce(total=0,x IN items | total+coalesce(x.p,0))",
+                scalar(22),
+            ),
+            (
+                "CASE WHEN true THEN [x IN items | x.p] ELSE [x IN items | x.q] END",
+                values(),
+            ),
+            ("coalesce([x IN items | x.p],[x IN items | x.q])", values()),
+        ] {
+            let mut reader = Reader::default();
+            let frames = Frames::new(usize::MAX, None);
+            let output = run(&stage(expression), input(), &mut reader, &frames, None).unwrap();
+            assert_eq!(output, vec![row(vec![expected])], "{expression}");
+            assert_eq!(
+                reads(&reader.trace.lock().unwrap()),
+                identities().map(|element| (element, P)),
+                "{expression}"
+            );
+            frames.assert_released(&reader);
+        }
+
+        let mut reader = Reader::default();
+        let frames = Frames::new(usize::MAX, None);
+        let output = run(
+            &stage("[x IN items WHERE x.p IS NOT NULL | x.p]"),
+            input(),
+            &mut reader,
+            &frames,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            vec![row(vec![GraphValue::List(
+                vec![scalar(2), scalar(7), scalar(2), scalar(11)].into_boxed_slice()
+            )])]
+        );
+        let mut expected = Vec::new();
+        for (at, element) in identities().into_iter().enumerate() {
+            expected.push((element, P));
+            if at < 4 {
+                expected.push((element, P));
+            }
+        }
+        assert_eq!(reads(&reader.trace.lock().unwrap()), expected);
+        frames.assert_released(&reader);
+    }
+
+    #[test]
+    fn native_refusal_at_every_event_keeps_the_exact_effect_prefix() {
+        let stage = stage("[x IN items | x.p]");
+        let mut reader = Reader::default();
+        let frames = Frames::new(usize::MAX, None);
+        run(&stage, input(), &mut reader, &frames, None).unwrap();
+        let expected = reader.trace.lock().unwrap().clone();
+        frames.assert_released(&reader);
+        let mut ordinal = 0;
+        for (at, effect) in expected.iter().enumerate() {
+            if !matches!(effect, Effect::Event(_)) {
+                continue;
+            }
+            ordinal += 1;
+            let mut reader = Reader::default();
+            let frames = Frames::new(usize::MAX, None);
+            assert_eq!(
+                run(&stage, input(), &mut reader, &frames, Some(ordinal)),
+                Err(SpillSetRowError::Control("native event refused"))
+            );
+            assert_eq!(*reader.trace.lock().unwrap(), expected[..=at]);
+            frames.assert_released(&reader);
+        }
+
+        let refused = ElementId::Edge(EId(u128::MAX));
+        let mut reader = Reader {
+            refuse: Some(refused),
+            ..Reader::default()
+        };
+        let frames = Frames::new(usize::MAX, None);
+        assert_eq!(
+            run(&stage, input(), &mut reader, &frames, None),
+            Err(SpillSetRowError::Control("original source failure"))
+        );
+        let at = expected
+            .iter()
+            .position(|effect| *effect == Effect::Read(refused, P))
+            .unwrap();
+        assert_eq!(*reader.trace.lock().unwrap(), expected[..=at]);
+        frames.assert_released(&reader);
+    }
+
+    #[test]
+    fn every_recursive_allocation_is_admitted_and_released_even_when_dropped() {
+        let stage = stage("[x IN items | x.p]");
+        let mut reader = Reader::default();
+        let frames = Frames::new(usize::MAX, None);
+        let expected_rows = run(&stage, input(), &mut reader, &frames, None).unwrap();
+        let expected_trace = reader.trace.lock().unwrap().clone();
+        let peak = frames.state.peak.load(AtomicOrdering::SeqCst);
+        let attempts = frames.state.attempts.load(AtomicOrdering::SeqCst);
+        assert!(peak > 0);
+        assert!(attempts > identities().len());
+        frames.assert_released(&reader);
+
+        let mut reader = Reader::default();
+        let frames = Frames::new(peak, None);
+        assert_eq!(
+            run(&stage, input(), &mut reader, &frames, None).unwrap(),
+            expected_rows
+        );
+        assert_eq!(*reader.trace.lock().unwrap(), expected_trace);
+        frames.assert_released(&reader);
+        let mut reader = Reader::default();
+        let frames = Frames::new(peak - 1, None);
+        assert_eq!(
+            run(&stage, input(), &mut reader, &frames, None),
+            Err(SpillSetRowError::Control("frame refused"))
+        );
+        frames.assert_released(&reader);
+
+        for stop in 1..=attempts {
+            let mut reader = Reader::default();
+            let frames = Frames::new(usize::MAX, Some(stop));
+            assert_eq!(
+                run(&stage, input(), &mut reader, &frames, None),
+                Err(SpillSetRowError::Control("frame refused"))
+            );
+            let trace = reader.trace.lock().unwrap();
+            assert_eq!(*trace, expected_trace[..trace.len()]);
+            frames.assert_released(&reader);
+        }
+
+        let mut reader = Reader::default();
+        let trace = Arc::clone(&reader.trace);
+        let live = Arc::clone(&reader.live);
+        let frames = Frames::new(usize::MAX, None);
+        let reserve = |bytes| frames.reserve(bytes);
+        let mut control = control(Arc::clone(&trace), None);
+        let mut future = Box::pin(stage.start_with_async_elements(
+            input(),
+            17,
+            &mut control,
+            &mut reader,
+            &reserve,
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(future.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(live.load(AtomicOrdering::SeqCst), 1);
+        assert!(frames.state.current.load(AtomicOrdering::SeqCst) > 0);
+        assert_eq!(reads(&trace.lock().unwrap()), vec![(identities()[0], P)]);
+        drop(future);
+        frames.assert_released(&reader);
+        assert_eq!(reads(&trace.lock().unwrap()), vec![(identities()[0], P)]);
+    }
+
+    #[test]
+    fn missing_properties_and_unavailable_readers_remain_distinct() {
+        for property in [
+            GraphElementKey::Missing,
+            GraphElementKey::Unbound,
+            GraphElementKey::Property(P),
+        ] {
+            let query = PreparedGraphSet::from(leaf("MATCH (n) RETURN n AS item"))
+                .project(
+                    vec![GraphSetProjection::new(
+                        "value",
+                        GraphSetValue::MapGet {
+                            map: Box::new(GraphSetValue::Column(0)),
+                            key: "p".into(),
+                            property,
+                        },
+                    )],
+                    GraphSetQuantifier::All,
+                )
+                .unwrap();
+            let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+            let stage = plan.stages().last().unwrap();
+            let mut reader = Reader {
+                unavailable: true,
+                ..Reader::default()
+            };
+            let frames = Frames::new(usize::MAX, None);
+            let result = run(
+                stage,
+                row(vec![GraphValue::Vertex(VId(1))]),
+                &mut reader,
+                &frames,
+                None,
+            );
+            if property == GraphElementKey::Missing {
+                assert_eq!(
+                    result.unwrap(),
+                    vec![row(vec![GraphValue::Scalar(CanonicalScalar::Null)])]
+                );
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(SpillSetRowError::Native(
+                        GraphSetExecutionError::Projection {
+                            error: fgdb_gql::GraphIntegerError {
+                                kind: GraphIntegerErrorKind::IncompatibleOperands,
+                                ..
+                            },
+                            ..
+                        }
+                    ))
+                ));
+            }
+            let expected = if property == GraphElementKey::Property(P) {
+                vec![(ElementId::Vertex(VId(1)), P)]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(reads(&reader.trace.lock().unwrap()), expected);
+            frames.assert_released(&reader);
+        }
+    }
+
+    #[test]
+    fn synchronous_and_async_stages_preserve_no_read_values_and_native_events() {
+        let mut stages = [
+            "[x IN items WHERE x > 1 | x * 2]",
+            "reduce(total=0,x IN items | total+x)",
+            "CASE WHEN true THEN {values:items,tail:items[1..]} ELSE null END",
+            "coalesce(null,items)",
+            "[x IN items | rand()]",
+        ]
+        .map(|expression| (expression, stage(expression)))
+        .to_vec();
+        let query = prepare("MATCH (n) WITH [n] AS items UNWIND items AS value RETURN value");
+        let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+        let unwind = plan
+            .stages()
+            .iter()
+            .find(|stage| {
+                stage
+                    .columns()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(["items", "value"])
+            })
+            .unwrap()
+            .clone();
+        stages.push(("UNWIND items", unwind));
+        for (expression, stage) in stages {
+            let input = row(vec![GraphValue::List(
+                vec![scalar(1), scalar(2), scalar(3)].into_boxed_slice(),
+            )]);
+            let mut expected_events = Vec::new();
+            let expected = stage_rows(&stage, input.clone(), 17, &mut |event| {
+                expected_events.push(Effect::Event(event));
+                Ok::<_, &'static str>(())
+            });
+            let mut reader = Reader::default();
+            let frames = Frames::new(0, None);
+            let actual = run(&stage, input, &mut reader, &frames, None);
+            assert_eq!(actual, expected, "{expression}");
+            assert_eq!(
+                *reader.trace.lock().unwrap(),
+                expected_events,
+                "{expression}"
+            );
+            assert_eq!(
+                frames.state.attempts.load(AtomicOrdering::SeqCst),
+                0,
+                "{expression}"
+            );
+            frames.assert_released(&reader);
+        }
+    }
+}

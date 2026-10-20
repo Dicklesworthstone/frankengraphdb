@@ -442,3 +442,6 @@ fn selected_product_spills_only_matches_when_candidate_count_exceeds_private_row
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[path = "buffered_language_order_tests.rs"]
+mod language_order_tests;

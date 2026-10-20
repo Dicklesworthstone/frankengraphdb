@@ -28,8 +28,8 @@ use fnx_algorithms::GraphView;
 #[cfg(test)]
 use fnx_classes::Graph;
 
-const EIGENVECTOR_MAX_ITERATIONS: usize = 100;
-const EIGENVECTOR_TOLERANCE: f64 = 1.0e-6;
+pub(crate) const EIGENVECTOR_MAX_ITERATIONS: usize = 100;
+pub(crate) const EIGENVECTOR_TOLERANCE: f64 = 1.0e-6;
 
 /// Admission-time work bound over `n` vertices and `arcs` adjacency entries
 /// (an undirected edge counts in both rows).

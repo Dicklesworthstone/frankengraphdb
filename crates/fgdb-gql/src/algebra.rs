@@ -24,7 +24,7 @@ pub(crate) use pattern::valid_column_name;
 pub use pattern::{
     GraphPatternBuilder, MAX_PATTERN_BINDINGS, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES,
     MAX_PATTERN_NAME_BYTES, MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError,
-    PatternLimitDimension, PreparedGraphPattern,
+    PatternLimitDimension, PreparedGraphPattern, PreparedGraphPatternFactors,
 };
 pub use predicate::{MAX_SCALAR_PREDICATE_BYTES, ScalarPredicate, ScalarPredicateError};
 pub use values::{
