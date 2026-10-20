@@ -1761,16 +1761,38 @@ mod graph_function_tests {
                 ))
             ));
         }
-        assert!(matches!(
-            bind("[1, 2]"),
-            Err(GraphMutationTextError {
-                kind: GraphMutationTextErrorKind::Build(
-                    GraphMutationBuildError::ValueExpression { .. }
-                ),
-                ..
-            })
-        ));
-        let bound = bind("[[1]][0]").unwrap();
+        // A list value is a stored List (fgdb-k3nub), a list selected out of
+        // a list included; a map is still no property value.
+        let stored = |values: Vec<i64>| {
+            fgdb_types::CanonicalPropertyValue::List(
+                fgdb_types::CanonicalList::try_new(
+                    values
+                        .into_iter()
+                        .map(|value| CanonicalScalar::Int(value).into())
+                        .collect(),
+                )
+                .unwrap(),
+            )
+        };
+        for (expression, expected) in [("[1, 2]", vec![1, 2]), ("[[1]][0]", vec![1])] {
+            let batch = execute_assignment(
+                &bind(expression).unwrap(),
+                &[CanonicalScalar::Int(7)],
+                assignment_policy(),
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(
+                batch.intents(),
+                &[crate::GraphMutationIntent::Property {
+                    vertex: fgdb_types::VId(1),
+                    key: PropertyKeyId(1),
+                    value: Some(stored(expected)),
+                }],
+                "{expression}"
+            );
+        }
+        let bound = bind("[{k: 1}][0]").unwrap();
         assert!(matches!(
             execute_assignment(
                 &bound,

@@ -413,8 +413,6 @@ fn unsupported_optional_scopes_and_carried_dereferences_refuse_before_catalog() 
         "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN labels(a) AS labels",
         "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN SIZE(labels(a)) AS size",
         "MATCH (a) WITH a.score AS a OPTIONAL MATCH (a) RETURN a",
-        "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) MATCH (b)-[:R]->(c) RETURN c",
-        "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN c",
         "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN b",
         "MATCH (a) WITH a OPTIONAL RETURN a",
     ] {
@@ -445,6 +443,24 @@ fn unsupported_optional_scopes_and_carried_dereferences_refuse_before_catalog() 
         ),
         vec![vertices(&[None])],
     );
+    // A clause after the OPTIONAL one is its own clause (fgdb-iznzx). The
+    // optional step yields b = 2 twice (the doubled 1->2), 3 for a = 2 and
+    // a = 3, and NULL for a = 4; 2->3 and 3->3 then reach c = 3 from each
+    // bound b. A required MATCH drops the NULL row, an OPTIONAL one keeps it.
+    assert_eq!(
+        rows("MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) MATCH (b)-[:R]->(c) RETURN c"),
+        vec![vertices(&[Some(3)]); 4],
+    );
+    let kept =
+        rows("MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN c");
+    assert_eq!(kept.len(), 5);
+    assert_eq!(
+        kept.iter()
+            .filter(|row| **row == vertices(&[Some(3)]))
+            .count(),
+        4
+    );
+    assert!(kept.contains(&vertices(&[None])));
 }
 
 #[test]

@@ -1087,7 +1087,6 @@ fn generic_map_outputs_remain_values_and_metadata_scope_does_not_escape() {
     }
     for statement in [
         "CALL t.scores() YIELD vertex AS n WITH n WITH n RETURN labels(n)",
-        "MATCH (n) WITH n WITH n RETURN labels(n)",
         "MATCH (n) WITH n.p AS n RETURN labels(n)",
         "CALL t.scores() YIELD vertex AS n UNWIND [1] AS x RETURN labels(x)",
     ] {
@@ -1110,6 +1109,12 @@ fn carried_vertex_edge_and_path_metadata_matches_direct_native_projection() {
         (
             "MATCH (n) RETURN labels(n) AS tags",
             "MATCH (n) WITH n AS owner RETURN labels(owner) AS tags",
+        ),
+        // A matched vertex keeps its metadata through a later plain WITH
+        // (fgdb-iznzx); a procedure's YIELD vertex still refuses above.
+        (
+            "MATCH (n) RETURN labels(n) AS tags",
+            "MATCH (n) WITH n WITH n RETURN labels(n) AS tags",
         ),
         (
             "MATCH (a)-[r:R]->(b) RETURN type(r) AS kind",

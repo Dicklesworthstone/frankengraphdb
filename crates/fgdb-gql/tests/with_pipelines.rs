@@ -980,17 +980,21 @@ fn a_with_where_reads_properties_of_projected_vertices_through_hidden_boundary_c
             "{text}"
         );
     }
-    // A later stage has no hidden column for `n.p`: it reads the property
-    // through the host's element reader (fgdb-xnd7x). Without that reader the
-    // read is a typed error, never a guess; with it, the rows equal the
-    // MATCH-level WHERE (openCypher With7 [2] reads this way).
+    // A later stage reads `n.p` from the hidden column the plain WITH carries
+    // through (fgdb-iznzx), so it needs no host element reader (fgdb-xnd7x);
+    // with or without one, the rows equal the MATCH-level WHERE (openCypher
+    // With7 [2] reads this way).
     let later = prepare("MATCH (n) WITH n WITH n WHERE n.p = 2 RETURN n ORDER BY n");
-    assert!(run(&later, &values, wide(), &mut || Ok(())).is_err());
+    let expected = rows("MATCH (n) WHERE n.p = 2 RETURN n ORDER BY n");
+    assert_eq!(
+        run(&later, &values, wide(), &mut || Ok(())).unwrap().value,
+        expected
+    );
     assert_eq!(
         run_reading(&later, &values, wide(), &mut || Ok(()), true)
             .unwrap()
             .value,
-        rows("MATCH (n) WHERE n.p = 2 RETURN n ORDER BY n")
+        expected
     );
 }
 

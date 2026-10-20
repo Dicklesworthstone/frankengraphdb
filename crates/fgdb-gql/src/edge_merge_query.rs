@@ -456,13 +456,14 @@ mod with_tests {
             "MATCH (a),(b) MERGE (a)-[r:R]->(b) WITH r RETURN r",
             "MATCH (a),(b) MERGE (a)<-[r:R]-(b) WITH r AS edge RETURN edge",
             "MATCH (a),(b) MERGE (a)-[:R]-(b) WITH a RETURN a;",
+            // A WITH row may head the MERGE (fgdb-cpny9).
+            "MATCH (a),(b) WITH a,b MERGE (a)-[:R]->(b) RETURN a",
         ] {
             assert!(PreparedGraphEdgeMergeQueryText::has_return_clause(text).unwrap());
             prepare(text);
         }
         for text in [
             "MATCH (a),(b) MERGE (a)-[:R {p: 'WITH'}]->(b)",
-            "MATCH (a),(b) WITH a,b MERGE (a)-[:R]->(b) RETURN a",
             "MATCH (a),(b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p=1 WITH r RETURN r",
             "MATCH (a),(b) MERGE (a)-[:R]->(b) MERGE (b)-[:R]->(a) RETURN a",
             "MERGE (n) WITH n RETURN n",
