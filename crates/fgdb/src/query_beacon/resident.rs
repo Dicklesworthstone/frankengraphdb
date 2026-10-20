@@ -206,19 +206,6 @@ fn definition(options: &Options, work: &mut impl WorkControl) -> Result<Options,
     })
 }
 
-pub(crate) fn resident_to_read_error(
-    error: Error,
-) -> fgdb_beacon::read::ReadError<ReadError, Cancel> {
-    match error {
-        Error::Source(error) => fgdb_beacon::read::ReadError::Read(error),
-        Error::Interrupted(error) => fgdb_beacon::read::ReadError::Interrupted(error),
-        Error::Index(error) => fgdb_beacon::read::ReadError::Index(error),
-        _ => fgdb_beacon::read::ReadError::Index(BeaconError::Invariant(
-            "unexpected resident search error",
-        )),
-    }
-}
-
 fn search(
     index: &IndexSnapshot,
     definition: &Options,

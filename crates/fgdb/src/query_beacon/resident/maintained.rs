@@ -11,9 +11,7 @@ use super::{
 use asupersync::fs::Vfs;
 use fgdb_beacon::expansion::ExpansionSpec;
 use fgdb_beacon::read::{ReadPolicy, Rows, Search};
-use fgdb_beacon::{
-    BeaconError, GraphHybridHit, GraphHybridQuery, IndexSnapshot, VectorSearch, WorkControl,
-};
+use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, IndexSnapshot, WorkControl};
 use fgdb_delta_types::{LogicalDeltaBatch, RelationId};
 use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::cell::RefCell;
@@ -274,103 +272,6 @@ impl Registry {
             }
         }
         self.refresh_query_indexes();
-    }
-
-    pub(crate) fn find_for_search(
-        &self,
-        at: CommitSeq,
-        options: &Options,
-        query: Search<'_>,
-    ) -> Option<PinnedIndex> {
-        if self.is_empty() || options.config_for(query).is_err() {
-            return None;
-        }
-        let (vector_mode, text_needed) = match query {
-            Search::Vector { mode, .. } => (Some(mode), false),
-            Search::Text { .. } => (None, true),
-            Search::Hybrid(hybrid) => (
-                (hybrid.profile.vector_weight() != 0 && hybrid.vector_candidates > 0)
-                    .then_some(hybrid.vector_mode),
-                hybrid.profile.text_weight() != 0 && hybrid.text_candidates > 0,
-            ),
-        };
-        self.find_matching(at, options, vector_mode, text_needed, false)
-    }
-
-    pub(crate) fn find_for_graph_search(
-        &self,
-        at: CommitSeq,
-        options: &Options,
-        query: GraphHybridQuery<'_>,
-    ) -> Option<PinnedIndex> {
-        if self.is_empty() || query.is_graph_only() || options.config_for_graph(query).is_err() {
-            return None;
-        }
-        let vector_mode = (query.retrieval.profile.vector_weight() != 0
-            && query.retrieval.vector_candidates > 0)
-            .then_some(query.retrieval.vector_mode);
-        let text_needed =
-            query.retrieval.profile.text_weight() != 0 && query.retrieval.text_candidates > 0;
-        self.find_matching(at, options, vector_mode, text_needed, query.graph_enabled())
-    }
-
-    fn find_matching(
-        &self,
-        at: CommitSeq,
-        options: &Options,
-        vector_mode: Option<VectorSearch>,
-        text_needed: bool,
-        graph_needed: bool,
-    ) -> Option<PinnedIndex> {
-        if !text_needed && vector_mode.is_none() {
-            return None;
-        }
-        for entry in self.entries.iter().flatten() {
-            if entry.failure.is_some() || entry.resident.source_sequence != at {
-                continue;
-            }
-            if graph_needed && !entry.resident.has_graph_source() {
-                continue;
-            }
-            let def = &entry.resident.definition;
-            if def.vertex_label != options.vertex_label {
-                continue;
-            }
-            if text_needed
-                && (def.projection.text != options.projection.text
-                    || def.index.text.is_none()
-                    || def.index.text != options.index.text)
-            {
-                continue;
-            }
-            if let Some(mode) = vector_mode {
-                if def.projection.vector != options.projection.vector
-                    || def.projection.encoding != options.projection.encoding
-                {
-                    continue;
-                }
-                let (Some(def_vec), Some(req_vec)) = (&def.index.vector, &options.index.vector)
-                else {
-                    continue;
-                };
-                if def_vec.dimensions != req_vec.dimensions
-                    || def_vec.metric != req_vec.metric
-                    || def_vec.max_vectors < req_vec.max_vectors
-                {
-                    continue;
-                }
-                if matches!(mode, VectorSearch::Approximate { .. })
-                    && (!def_vec.links
-                        || def_vec.m != req_vec.m
-                        || def_vec.ef_construction != req_vec.ef_construction
-                        || def_vec.seed != req_vec.seed)
-                {
-                    continue;
-                }
-            }
-            return Some(entry.resident.snapshot());
-        }
-        None
     }
 }
 
