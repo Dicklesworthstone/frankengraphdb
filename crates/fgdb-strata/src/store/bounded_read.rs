@@ -433,6 +433,34 @@ impl<V: Vfs> BlockStore<V> {
         requested_cut: CommitSeq,
         limits: RootReadLimits,
     ) -> Result<ReopenedAdjacency, RootReadError> {
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, None)
+            .await
+    }
+
+    /// Prove the SAME complete source as `reopen_adjacency_bounded`, but retain
+    /// only one relation for the sealer. Selection happens after each block's
+    /// properties, family, predecessor and cross-object history are admitted.
+    /// Unselected source objects still consume the raw input budget.
+    pub(crate) async fn reopen_relation_adjacency_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+        relation: fgdb_delta_types::RelationId,
+    ) -> Result<ReopenedAdjacency, RootReadError> {
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, Some(relation))
+            .await
+    }
+
+    async fn reopen_selected_adjacency_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+        relation: Option<fgdb_delta_types::RelationId>,
+    ) -> Result<ReopenedAdjacency, RootReadError> {
         cx.checkpoint().map_err(RootReadError::Interrupted)?;
         let root = self
             .get_root_with_byte_limit(cx, id, limits.max_root_bytes)
@@ -455,7 +483,19 @@ impl<V: Vfs> BlockStore<V> {
             .inspect_root_blocks_observed(
                 cx,
                 &root,
-                |_, _, read| Some(super::decoded_block(read)),
+                |_, _, read| {
+                    // Admission has proved that every entry in the block is
+                    // in this first entry's family. It also validated hosted
+                    // properties and the whole-root EId/chain history before
+                    // invoking this retention callback.
+                    let keep = relation.is_none_or(|relation| {
+                        read.resolved
+                            .0
+                            .first()
+                            .is_some_and(|entry| entry.relation == relation)
+                    });
+                    keep.then(|| super::decoded_block(read))
+                },
                 &mut observe,
                 1,
                 &mut super::RootWalk::default(),

@@ -127,7 +127,8 @@ fn ef_bytes(count: usize, maximum: u64) -> Result<usize, SealedError> {
 impl SealedPartition {
     /// Count retained versions in one outgoing descriptor, INCLUDING invisible
     /// history. This is a low-level source-cost bound, not a visible degree or
-    /// security-filtered graph statistic.
+    /// security-filtered graph statistic. Zero outside a scoped anchor's
+    /// relation describes this image only; it does not prove graph absence.
     pub fn retained_row_len(&self, source: VId, relation: RelationId) -> usize {
         self.image
             .find_row(source, relation)
@@ -258,6 +259,8 @@ impl SealedIncomingIndex {
     }
 
     /// Retained incidence count, not a visible or authorized graph degree.
+    /// Zero outside the source anchor's relation is physical image metadata,
+    /// not proof of an empty graph row.
     pub fn retained_row_len(&self, destination: VId, relation: RelationId) -> usize {
         self.find(destination, relation)
             .map_or(0, |row| row.incidences)
@@ -298,6 +301,7 @@ impl SealedIncomingIndex {
     ) -> Result<SealedIncomingCursor<'_>, SealedError> {
         checkpoint()?;
         self.source.anchor.authorize(as_of)?;
+        self.source.anchor.check_relation(relation)?;
         let chunks = self.find(destination, relation).map_or(&[][..], |row| {
             &self.index.chunks[row.first_chunk..row.end_chunk]
         });

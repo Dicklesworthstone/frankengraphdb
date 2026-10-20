@@ -19,6 +19,7 @@ use fgdb_prism::{
     SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
     SnapshotGraphView,
 };
+use fgdb_strata::store::RootReadLimits;
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
 use fgdb_types::{CanonicalF64, CanonicalScalar, CommitSeq, QueryCx, VId};
 use std::mem::size_of;
@@ -414,6 +415,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// does not borrow the writer, so later writes and writer drop cannot
     /// change its vertices, edge weights or source identity. Preparing itself
     /// does not grant a durable lease or make the source larger-than-memory.
+    /// Only the selected relation enters compaction, the sealed image and its
+    /// incoming index; every source object is still read and authenticated.
     #[allow(clippy::too_many_arguments)]
     pub async fn prism_sealed_projection_at(
         &self,
@@ -425,11 +428,46 @@ impl<V: Vfs + Clone> Database<V> {
         source_limits: FnxSourceLimits,
         sealing: SealedLimits,
     ) -> Result<SealedGraphView, FnxSealedReadError<ReadError, Cancel>> {
+        let mut root_limits = RootReadLimits::default();
+        root_limits.max_incidences = root_limits.max_incidences.max(sealing.max_incidences);
+        self.prism_sealed_projection_with_source_limits(
+            cx,
+            as_of,
+            selection,
+            spec,
+            limits,
+            source_limits,
+            sealing,
+            root_limits,
+        )
+        .await
+    }
+
+    /// Prepare a selected-relation projection with independent ceilings for
+    /// the complete raw root and its retained image. Unrelated relations and
+    /// invisible source history consume `root_limits`; only the selected
+    /// relation's compacted output consumes `sealing`. Full-root validation
+    /// remains mandatory before a scoped image can be returned.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prism_sealed_projection_with_source_limits(
+        &self,
+        cx: &QueryCx,
+        as_of: Option<CommitSeq>,
+        selection: FnxSelection,
+        spec: ProjectionSpec,
+        limits: ProjectionLimits,
+        source_limits: FnxSourceLimits,
+        sealing: SealedLimits,
+        root_limits: RootReadLimits,
+    ) -> Result<SealedGraphView, FnxSealedReadError<ReadError, Cancel>> {
         cx.with_restriction_async(async {
             cx.checkpoint().map_err(Error::Cancelled)?;
             let view = self.read_session().map_err(Error::Read)?;
             let as_of = as_of.unwrap_or(view.frontier());
             view.check_sealed_request(cx, as_of, selection)?;
+            let relation = selection.relation.ok_or(SealedReadError::Projection(
+                SealedProjectionError::RelationRequired,
+            ))?;
             // Refuse vertex admission before the potentially expensive seal.
             let mut control = source_control(cx, source_limits);
             let mut staging_bytes = 0usize;
@@ -443,7 +481,14 @@ impl<V: Vfs + Clone> Database<V> {
             )?;
             let partition = self
                 .store
-                .seal_partition(cx, view.partition_root(), as_of, sealing)
+                .seal_relation_with_source_limits(
+                    cx,
+                    view.partition_root(),
+                    as_of,
+                    relation,
+                    sealing,
+                    root_limits,
+                )
                 .await
                 .map_err(SealedReadError::Seal)?;
             view.check_sealed_source(&partition, as_of)?;
