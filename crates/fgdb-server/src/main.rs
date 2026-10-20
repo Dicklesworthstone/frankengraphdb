@@ -4,7 +4,6 @@
 // read futures, past the default recursion limit (a future hard error).
 #![recursion_limit = "256"]
 #![forbid(unsafe_code)]
-#![recursion_limit = "256"]
 
 use asupersync::Budget;
 use asupersync::Cx;
