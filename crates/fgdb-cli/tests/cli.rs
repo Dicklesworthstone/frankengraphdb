@@ -502,6 +502,20 @@ fn library_writes_are_read_by_cli_processes_with_catalog_reflection() {
     );
 }
 
+/// An unbuffered spill read of a WITH pipeline: the typed refusal that names
+/// the missing pull execution, before any columns, with no scratch left.
+#[track_caller]
+fn not_pulled(output: &Output, scratch: &Path) {
+    refused(output, 3, "query");
+    assert!(
+        terminal(output).contains("has no supported pull execution"),
+        "{}",
+        terminal(output)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("\"event\":\"columns\""));
+    assert_eq!(std::fs::read_dir(scratch).unwrap().count(), 0);
+}
+
 #[test]
 fn spilled_carried_properties_match_resident_rows_and_keep_pinned_history() {
     let fixture = Fixture::new("spill-carried-properties");
@@ -561,6 +575,13 @@ fn spilled_carried_properties_match_resident_rows_and_keep_pinned_history() {
                     options.extend_from_slice(&["--buffered", "--buffer-memory-bytes", "8388608"]);
                 }
                 let actual = command("query", &options, text);
+                if !buffered {
+                    // Without --buffered, spill runs native vertex and
+                    // fixed-edge scans only (robot schema spilling.profile):
+                    // a WITH stage refuses before columns, leaving no scratch.
+                    not_pulled(&actual, &directory);
+                    continue;
+                }
                 assert_eq!(succeeded(&actual, "rows"), *seq, "{phase}: {text}");
                 assert_eq!(
                     rows(&actual),
@@ -584,7 +605,12 @@ fn spilled_carried_properties_match_resident_rows_and_keep_pinned_history() {
                 options.push("--buffered");
             }
             let failed = command("query", &options, &text);
+            if !buffered {
+                not_pulled(&failed, &directory);
+                continue;
+            }
             refused(&failed, 3, "query");
+            assert!(terminal(&failed).contains("DivisionByZero"), "{text}");
             let stdout = String::from_utf8(failed.stdout).unwrap();
             for event in ["columns", "row", "result"] {
                 assert!(!stdout.contains(&format!("\"event\":\"{event}\"")));
