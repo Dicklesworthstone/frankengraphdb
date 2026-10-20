@@ -430,10 +430,12 @@ fn expression<'g, E, C>(
             for value in values {
                 computed.push(expression(value, input, column, control)?.into_owned(control)?);
             }
-            for value in computed {
+            // Charge every slot before pushing any, so a refused charge
+            // leaves the outer scope as it was.
+            for _ in &computed {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                input.locals.push(value);
             }
+            input.locals.extend(computed);
             let value = expression(body, input, column, control);
             // Restore the outer scope before propagating any failure.
             input.locals.truncate(depth);
