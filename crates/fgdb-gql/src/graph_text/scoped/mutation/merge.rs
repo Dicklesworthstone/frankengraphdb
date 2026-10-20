@@ -2087,7 +2087,7 @@ impl PreparedGraphVertexMergeRowsText {
                         // (fgdb-0s2pq): the rows are the ordinary read of the
                         // UNWIND stages and the MATCH, correlated as an
                         // `UNWIND ... MATCH ... CREATE` reads them.
-                        let (source, schema) = parser.insertion_graph_row_prefix(
+                        let (source, schema) = parser.write_graph_row_prefix(
                             statement,
                             declarations,
                             resolve.time_zones(),

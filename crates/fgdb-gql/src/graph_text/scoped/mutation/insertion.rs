@@ -219,6 +219,24 @@ impl<'a> Parser<'a> {
         Ok((source, schema))
     }
 
+    /// The same `UNWIND ... MATCH ...` read before a SET/REMOVE/DELETE or a
+    /// vertex MERGE (fgdb-0s2pq). The MATCH vertices' hidden reads stay in
+    /// the row, as write_row_prefix keeps them, so the write's values and its
+    /// RETURN read a vertex's properties: `SET n.p = 1 RETURN n.id`.
+    pub(super) fn write_graph_row_prefix(
+        &mut self,
+        statement: &'a str,
+        declarations: &[(&str, GqlParameterType)],
+        zones: Option<crate::GqlTimeZones>,
+    ) -> Result<GraphRowPrefix<'a>, crate::GraphSetTextError> {
+        *self = Self::new_with_parameter_types(statement, declarations)?.with_zones(zones);
+        self.write_prefix = true;
+        let prefix = self.leading_aggregate_prefix(statement);
+        self.write_prefix = false;
+        let (source, schema, _) = prefix?;
+        Ok((source, schema))
+    }
+
     /// Resolve the combined row (imports, then projected MATCH fields) while
     /// using the ordinary scalar compiler. The graph child is evaluated once;
     /// these are projection slots, not deferred reads of the created graph.

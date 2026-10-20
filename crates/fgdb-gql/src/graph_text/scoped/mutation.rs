@@ -890,7 +890,7 @@ impl PreparedGraphMutationText {
         // read an `UNWIND ... MATCH ... CREATE` takes, as a WITH row.
         let unwound = if parser.is_word("UNWIND") {
             let (source, schema) =
-                parser.insertion_graph_row_prefix(statement, declarations, resolve.time_zones())?;
+                parser.write_graph_row_prefix(statement, declarations, resolve.time_zones())?;
             parser.write_row_scope = true;
             Some((source, schema))
         } else {
