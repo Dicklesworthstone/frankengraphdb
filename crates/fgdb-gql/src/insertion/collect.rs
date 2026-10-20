@@ -521,7 +521,7 @@ fn execute_erased<E, A, C>(
                 None => relation.execute_with_source(policy.query, source, &mut checkpoint),
                 Some(rows) => relation.execute_with_source(
                     policy.query,
-                    crate::set_ops::WithOwnedRows {
+                    &mut crate::set_ops::WithOwnedRows {
                         source,
                         rows: Some(rows),
                     },

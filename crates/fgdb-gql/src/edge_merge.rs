@@ -432,7 +432,7 @@ impl PreparedGraphEdgeMerge {
                 Some(rows) => relation.execute_with_source(
                     policy,
                     &mut crate::set_ops::WithOwnedRows {
-                        source: patterns,
+                        source: &mut patterns,
                         rows: Some(rows),
                     },
                     checkpoint,

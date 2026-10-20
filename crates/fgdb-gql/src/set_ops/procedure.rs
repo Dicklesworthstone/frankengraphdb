@@ -491,12 +491,13 @@ where
 /// A source plus the rows of the previous write of the same statement, for a
 /// chained write's input (`CREATE (a) WITH a CREATE (b)`): its relation has
 /// one `SetNode::Owned` leaf, and those rows are already charged.
-pub(crate) struct WithOwnedRows<S> {
-    pub(crate) source: S,
+/// The source is a trait object, as the type-erased collectors hold it.
+pub(crate) struct WithOwnedRows<'s, E, C> {
+    pub(crate) source: &'s mut dyn GraphSetSource<E, C>,
     pub(crate) rows: Option<Vec<GraphValueRow>>,
 }
 
-impl<E, C, S: GraphSetSource<E, C>> GraphSetSource<E, C> for WithOwnedRows<S> {
+impl<E, C> GraphSetSource<E, C> for WithOwnedRows<'_, E, C> {
     fn pattern(
         &mut self,
         pattern: &PreparedGraphPattern<GraphValueRow>,
