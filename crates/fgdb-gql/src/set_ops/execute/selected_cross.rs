@@ -11,6 +11,7 @@ use crate::algebra::{IntegerComparison, MAX_PATTERN_PREDICATES};
 
 pub(super) mod factors;
 mod maintained;
+mod range;
 
 type Key = (usize, usize);
 
@@ -53,11 +54,42 @@ pub(super) fn columns<E>(
     Ok(Some(columns))
 }
 
-/// Prove necessary equalities, not a replacement Boolean expression. A TRUE
+/// Prove a necessary atom, not a replacement Boolean expression. A TRUE
 /// conjunction requires both arms; a TRUE disjunction requires either arm.
 /// Therefore proof bits combine with OR for AND and AND for OR. NOT discards
 /// the proof, including double negation; that conservative choice cannot turn
 /// UNKNOWN into a match. Stack shape is owned by the checked predicate.
+fn requires_atom<E>(
+    code: &[GraphSetPredicateOp],
+    matches: impl Fn(&GraphSetPredicateOp) -> bool,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<bool, E> {
+    let mut stack = [false; MAX_PATTERN_PREDICATES];
+    let mut depth = 0;
+    for op in code {
+        control(GlaExecutionEvent::Work)?;
+        match op {
+            GraphSetPredicateOp::Not => stack[depth - 1] = false,
+            GraphSetPredicateOp::And | GraphSetPredicateOp::Or => {
+                let right = stack[depth - 1];
+                depth -= 1;
+                let left = &mut stack[depth - 1];
+                *left = if matches!(op, GraphSetPredicateOp::And) {
+                    *left || right
+                } else {
+                    *left && right
+                };
+            }
+            _ => {
+                stack[depth] = matches(op);
+                depth += 1;
+            }
+        }
+    }
+    debug_assert_eq!(depth, 1);
+    Ok(stack[0])
+}
+
 fn required_keys<E>(
     width: usize,
     code: &[GraphSetPredicateOp],
@@ -78,30 +110,7 @@ fn required_keys<E>(
         if duplicate {
             continue;
         }
-        let mut stack = [false; MAX_PATTERN_PREDICATES];
-        let mut depth = 0;
-        for op in code {
-            control(GlaExecutionEvent::Work)?;
-            match op {
-                GraphSetPredicateOp::Not => stack[depth - 1] = false,
-                GraphSetPredicateOp::And | GraphSetPredicateOp::Or => {
-                    let right = stack[depth - 1];
-                    depth -= 1;
-                    let left = &mut stack[depth - 1];
-                    *left = if matches!(op, GraphSetPredicateOp::And) {
-                        *left || right
-                    } else {
-                        *left && right
-                    };
-                }
-                _ => {
-                    stack[depth] = equality(op, width, columns) == Some(key);
-                    depth += 1;
-                }
-            }
-        }
-        debug_assert_eq!(depth, 1);
-        if stack[0] {
+        if requires_atom(code, |op| equality(op, width, columns) == Some(key), control)? {
             control(GlaExecutionEvent::ScratchEntry)?;
             keys.push(key);
         }
@@ -302,8 +311,10 @@ impl Index {
 /// The consumer is invoked only for TRUE pairs, in the original left-major
 /// sequence. Inputs remain resident; the index is O(right occurrences), with
 /// no key/payload clone. For fixed predicate/key width, index work is
-/// O(R log R + L log R + matching-key candidates), not O(L*R). A theta predicate
-/// without a proved key still scans L*R candidates but never materializes them.
+/// O(R log R + L log R + matching-key candidates), not O(L*R). Without an
+/// equality key, a necessary scalar inequality can use range probes instead.
+/// Range candidates are restored to original right-ordinal order before the
+/// complete predicate runs. Other theta shapes still scan L*R candidates.
 /// Comparison payload costs and every seek/sort operation are cancellable.
 pub(super) fn visit<E, C>(
     left: &[GraphValueRow],
@@ -351,13 +362,32 @@ pub(super) fn visit_with_context<E, Context>(
     let index = Index::build(first.len(), right, code, columns, &mut |value| {
         event(context, value)
     })?;
+    // Fixed priority: equality first, then one proved necessary inequality.
+    // No observed-cardinality choice and no retry after a refused index build.
+    let range_index = if index.keys.is_empty() {
+        range::Index::build(first.len(), right, code, columns, &mut |value| {
+            event(context, value)
+        })?
+    } else {
+        None
+    };
+    let mut candidates = Vec::new();
     let mut hint = 0;
     for row in left {
         event(context, GlaExecutionEvent::Work)?;
-        let range = index.range(row, right, &mut hint, &mut |value| event(context, value))?;
+        let range = if let Some(probe) = &range_index {
+            probe.select(row, right, &mut candidates, &mut |value| event(context, value))?;
+            0..candidates.len()
+        } else {
+            index.range(row, right, &mut hint, &mut |value| event(context, value))?
+        };
         for at in range {
             event(context, GlaExecutionEvent::Work)?;
-            let other = index.row(right, at);
+            let other = if range_index.is_some() {
+                &right[candidates[at]]
+            } else {
+                index.row(right, at)
+            };
             if GraphSetPredicateOp::evaluate_projected_pair_with_control(
                 code,
                 row,
