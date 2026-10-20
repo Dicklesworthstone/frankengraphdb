@@ -976,14 +976,14 @@ fn a_parameter_unwind_match_heads_a_chain_of_merges() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-/// fgdb-0s2pq: an UNWIND-led MATCH mutation that returns rows, `UNWIND $rows
-/// AS row MATCH (n {id: row.id}) SET n.p = row.p RETURN ...`. The MATCH reads
-/// the UNWIND rows as a read does, the mutation runs once over that relation
-/// as over a WITH row, and RETURN reads each row's vertex after the write. A
-/// row whose id matches nothing has no row; a vertex no row names keeps its
-/// value.
+/// fgdb-0s2pq: an UNWIND-led MATCH mutation, `UNWIND $rows AS row MATCH (n
+/// {id: row.id}) SET n.p = row.p RETURN ...`, and the RETURN-less form over a
+/// literal list. The MATCH reads the UNWIND rows as a read does, the mutation
+/// runs once over that relation as over a WITH row, and RETURN reads each
+/// row's vertex after the write. A row whose id matches nothing has no row; a
+/// vertex no row names keeps its value.
 #[test]
-fn a_parameter_unwind_match_mutation_returns_its_rows() {
+fn an_unwind_match_mutation_reads_the_unwound_rows() {
     let ((), report) = run_async_under_lab(0x7363_6107, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -1057,6 +1057,15 @@ fn a_parameter_unwind_match_mutation_returns_its_rows() {
         for expected in [vec![int(1), int(10)], vec![int(3), int(30)]] {
             assert!(returned.contains(&expected), "{returned:?}");
         }
+        let QueryResult::Write { .. } = run(
+            &mut db,
+            "UNWIND [2] AS i MATCH (n:Entity {id: i}) SET n.p = i * 100",
+            &GqlParameters::new(),
+        )
+        .await
+        else {
+            panic!("a RETURN-less write reports its program receipt")
+        };
         assert_eq!(
             values(
                 db.query(
@@ -1070,7 +1079,7 @@ fn a_parameter_unwind_match_mutation_returns_its_rows() {
             ),
             [
                 vec![int(1), int(10)],
-                vec![int(2), int(0)],
+                vec![int(2), int(200)],
                 vec![int(3), int(30)],
             ]
         );

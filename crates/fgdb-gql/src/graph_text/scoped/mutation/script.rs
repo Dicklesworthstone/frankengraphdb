@@ -203,7 +203,8 @@ fn classify(
     declarations: &[(&str, GqlParameterType)],
 ) -> Result<Kind, GraphPatternTextError> {
     let mut parser = Parser::new_with_parameter_types(text, declarations)?;
-    if parser.is_word("UNWIND") || parser.is_word("WITH") {
+    let unwind_led = parser.is_word("UNWIND");
+    if unwind_led || parser.is_word("WITH") {
         let (_, imports) = parser.insertion_unwind_prefix().map_err(|source| {
             let kind = match source.kind {
                 crate::GraphSetTextErrorKind::Pattern(kind) => kind,
@@ -213,10 +214,19 @@ fn classify(
         })?;
         // Use the insertion compiler's exact imported scope and correlation
         // rules during whole-script preflight, before any catalog callbacks.
-        // Do not route row-fed SET/MERGE through an unrelated compiler.
-        parser.insertion_match_prefix(&imports)?;
+        // A row-fed MERGE stays with its own owners.
+        let matched = parser.insertion_match_prefix(&imports)?;
         return if parser.is_word("CREATE") || parser.is_word("INSERT") {
             Ok(Kind::Insert)
+        } else if unwind_led
+            && matched
+            && ["SET", "REMOVE", "DETACH", "DELETE"]
+                .iter()
+                .any(|word| parser.is_word(word))
+        {
+            // UNWIND ... MATCH ... SET/REMOVE/DELETE: the mutation compiler
+            // reads the rows of the UNWIND stages and the MATCH (fgdb-0s2pq).
+            Ok(Kind::Mutation)
         } else {
             Err(error(
                 parser.current.at,
