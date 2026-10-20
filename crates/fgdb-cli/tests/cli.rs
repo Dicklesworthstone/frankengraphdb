@@ -386,9 +386,7 @@ fn query_refuses_a_write_statement_without_mutating_or_echoing_it() {
 fn a_write_return_reads_collected_element_properties_only_as_a_typed_refusal() {
     let fixture = Fixture::new("write-collect");
     succeeded(&fixture.robot("create", &[]), "created");
-    let run = |operation: &str, text: &str| {
-        fixture.robot(operation, &["--property", "q=2", text])
-    };
+    let run = |operation: &str, text: &str| fixture.robot(operation, &["--property", "q=2", text]);
     succeeded(
         &run("write", "CREATE (:Person {id: 1}), (:Person {id: 2})"),
         "written",
@@ -432,6 +430,78 @@ fn a_write_return_reads_collected_element_properties_only_as_a_typed_refusal() {
         .collect();
     qs.sort();
     assert_eq!(qs, ["3", "6"]);
+}
+
+/// fgdb-dn9q3: `WHERE n.id IN $ids` with a list argument selects exactly
+/// the listed vertices in a pattern WHERE, as its WITH spelling does, and
+/// drives SET and DETACH DELETE the same way. NOT IN selects the rest.
+#[test]
+fn a_list_argument_selects_in_a_pattern_where_for_reads_and_writes() {
+    let fixture = Fixture::new("in-list-argument");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let run = |operation: &str, text: &str| {
+        fixture.robot(
+            operation,
+            &["--property", "hit=2", "--param", "ids=json:[1, 3]", text],
+        )
+    };
+    succeeded(
+        &fixture.robot(
+            "write",
+            &["CREATE (:Person {id: 1}), (:Person {id: 2}), (:Person {id: 3}), (:Person {id: 4})"],
+        ),
+        "written",
+    );
+    let id = |value: i64| {
+        format!(r#"{{"v":1,"event":"row","cells":[{{"type":"int","value":"{value}"}}]}}"#)
+    };
+    let count = |value: u64| {
+        format!(r#"{{"v":1,"event":"row","cells":[{{"type":"count","value":"{value}"}}]}}"#)
+    };
+    let selected = run(
+        "query",
+        "MATCH (n:Person) WHERE n.id IN $ids RETURN n.id AS id ORDER BY id",
+    );
+    succeeded(&selected, "rows");
+    assert_eq!(rows(&selected), [id(1), id(3)]);
+    let spelled = run(
+        "query",
+        "MATCH (n:Person) WITH n WHERE n.id IN $ids RETURN n.id AS id ORDER BY id",
+    );
+    succeeded(&spelled, "rows");
+    assert_eq!(rows(&spelled), rows(&selected));
+    let rest = run(
+        "query",
+        "MATCH (n:Person) WHERE NOT n.id IN $ids RETURN count(n) AS c",
+    );
+    succeeded(&rest, "rows");
+    assert_eq!(rows(&rest), [count(2)]);
+    succeeded(
+        &run(
+            "write",
+            "MATCH (n:Person) WHERE n.id IN $ids SET n.hit = true",
+        ),
+        "written",
+    );
+    let hit = run(
+        "query",
+        "MATCH (n:Person) WHERE n.hit = true RETURN n.id AS id ORDER BY id",
+    );
+    succeeded(&hit, "rows");
+    assert_eq!(rows(&hit), [id(1), id(3)]);
+    succeeded(
+        &run(
+            "write",
+            "MATCH (n:Person) WHERE n.id IN $ids DETACH DELETE n",
+        ),
+        "written",
+    );
+    let left = run(
+        "query",
+        "MATCH (n:Person) WHERE NOT n.id IN $ids RETURN n.id AS id ORDER BY id",
+    );
+    succeeded(&left, "rows");
+    assert_eq!(rows(&left), [id(2), id(4)]);
 }
 
 #[test]
