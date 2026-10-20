@@ -746,12 +746,15 @@ fn distinct_uses_the_whole_typed_row_not_just_order_keys_or_scalar_spellings() {
             .await
             .unwrap();
         use fgdb_gql::algebra::GraphValue;
+        // openCypher order across types (String < Boolean < Number), which
+        // eager sorting used and spill uses since e27e7cf3. Five distinct
+        // typed rows either way.
         let expected: Vec<_> = [
             (CanonicalScalar::Null, 0),
+            (CanonicalScalar::ucs_basic_text("1").unwrap(), 0),
             (CanonicalScalar::Bool(true), 0),
             (CanonicalScalar::Int(1), 0),
             (CanonicalScalar::Int(1), 1),
-            (CanonicalScalar::ucs_basic_text("1").unwrap(), 0),
         ]
         .into_iter()
         .map(|(p, q)| {
