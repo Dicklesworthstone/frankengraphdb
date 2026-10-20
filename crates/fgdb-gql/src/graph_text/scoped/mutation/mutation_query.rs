@@ -1106,12 +1106,13 @@ pub(super) fn statement_body<'s>(
 }
 
 impl PreparedGraphMutationQueryText {
-    /// Classify write text with native token framing: a MATCH-led statement
-    /// with a top-level `SET x.`/`SET x:`/`SET x +=`, `REMOVE x`, `DELETE x`
-    /// or `DETACH DELETE x` clause followed by a top-level RETURN. A CREATE,
-    /// INSERT or MERGE clause, or a second statement, is not this shape.
-    /// Quoted values, property keys and aliases never become clause words.
-    /// This validates nothing and resolves no symbol; prepare owns that.
+    /// Classify write text with native token framing: a MATCH-led (or
+    /// UNWIND-led, fgdb-0s2pq) statement with a top-level `SET x.`/`SET
+    /// x:`/`SET x +=`, `REMOVE x`, `DELETE x` or `DETACH DELETE x` clause
+    /// followed by a top-level RETURN. A CREATE, INSERT or MERGE clause, or a
+    /// second statement, is not this shape. Quoted values, property keys and
+    /// aliases never become clause words. This validates nothing and resolves
+    /// no symbol; prepare owns that.
     pub fn has_return_clause(statement: &str) -> Result<bool, GraphMutationTextError> {
         if statement.len() > crate::MAX_GRAPH_WRITE_SCRIPT_BYTES {
             return Err(error(
@@ -1126,7 +1127,7 @@ impl PreparedGraphMutationQueryText {
             tokens: 0,
         };
         let first = script::next_script_token(&mut lexer)?;
-        if !matches!(first.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH") || word.eq_ignore_ascii_case("OPTIONAL"))
+        if !matches!(first.kind, TokenKind::Word(word) if ["MATCH", "OPTIONAL", "UNWIND"].iter().any(|lead| word.eq_ignore_ascii_case(lead)))
         {
             return Ok(false);
         }
@@ -1257,6 +1258,23 @@ mod framing_tests {
             ("OPTIONAL MATCH (n) SET n.p = 1 RETURN n", true),
             ("MATCH (n) SET (n).p = 1 RETURN n", true),
             ("MATCH ()-[r]->() SET (r).p = 1 RETURN r", true),
+            // An UNWIND-led MATCH mutation (fgdb-0s2pq).
+            (
+                "UNWIND $rows AS row MATCH (n {id: row.id}) SET n.p = row.p RETURN n.p",
+                true,
+            ),
+            (
+                "UNWIND [1, 2] AS i MATCH (n {id: i}) REMOVE n.p RETURN n",
+                true,
+            ),
+            (
+                "UNWIND $rows AS row MATCH (n {id: row.id}) SET n.p = row.p",
+                false,
+            ),
+            (
+                "UNWIND $rows AS row MERGE (n {id: row.id}) SET n.p = row.p RETURN n",
+                false,
+            ),
             ("MATCH (n) SET (n).p = 1", false),
             ("MATCH (n) SET (n + 1) RETURN n", false),
             ("MATCH (n) DELETE n", false),

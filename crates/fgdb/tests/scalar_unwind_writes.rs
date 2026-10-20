@@ -976,6 +976,110 @@ fn a_parameter_unwind_match_heads_a_chain_of_merges() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-0s2pq: an UNWIND-led MATCH mutation that returns rows, `UNWIND $rows
+/// AS row MATCH (n {id: row.id}) SET n.p = row.p RETURN ...`. The MATCH reads
+/// the UNWIND rows as a read does, the mutation runs once over that relation
+/// as over a WITH row, and RETURN reads each row's vertex after the write. A
+/// row whose id matches nothing has no row; a vertex no row names keeps its
+/// value.
+#[test]
+fn a_parameter_unwind_match_mutation_returns_its_rows() {
+    let ((), report) = run_async_under_lab(0x7363_6107, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let issued = AtomicU64::new(0);
+        let run = async |db: &mut Database<MemVfs>, statement: &str, input: &GqlParameters| {
+            let mut txn = db.begin(&txcx).unwrap();
+            let result = txn
+                .query_write(
+                    db,
+                    &cx,
+                    statement,
+                    input,
+                    symbols,
+                    R,
+                    policy(100, 10),
+                    |request| {
+                        let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                        })
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            txn.finish(db, &commit).await.unwrap();
+            result
+        };
+        let values = |result: QueryResult| {
+            let QueryResult::Rows { rows, .. } = result else {
+                panic!("expected rows")
+            };
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| match cell {
+                            QueryValue::Value(value) => value,
+                            other => panic!("{other:?}"),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        run(
+            &mut db,
+            "CREATE (:Entity {id: 1, p: 0}), (:Entity {id: 2, p: 0}), (:Entity {id: 3, p: 0})",
+            &GqlParameters::new(),
+        )
+        .await;
+        let input = args(vec![
+            object(vec![("id", int(1)), ("p", int(10))]),
+            object(vec![("id", int(3)), ("p", int(30))]),
+            object(vec![("id", int(4)), ("p", int(40))]),
+        ]);
+        let returned = values(
+            run(
+                &mut db,
+                "UNWIND $rows AS row MATCH (n:Entity {id: row.id}) SET n.p = row.p \
+                 RETURN n.id AS id, n.p AS p",
+                &input,
+            )
+            .await,
+        );
+        assert_eq!(returned.len(), 2, "{returned:?}");
+        for expected in [vec![int(1), int(10)], vec![int(3), int(30)]] {
+            assert!(returned.contains(&expected), "{returned:?}");
+        }
+        assert_eq!(
+            values(
+                db.query(
+                    &cx,
+                    "MATCH (n:Entity) RETURN n.id AS id, n.p AS p ORDER BY id",
+                    &GqlParameters::new(),
+                    symbols,
+                    GqlQueryPolicy::new(10_000, 10_000, 10_000_000, 10_000_000),
+                )
+                .unwrap()
+            ),
+            [
+                vec![int(1), int(10)],
+                vec![int(2), int(0)],
+                vec![int(3), int(30)],
+            ]
+        );
+        assert_eq!(issued.load(Ordering::Relaxed), 3);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn keyed_edge_unwind_admits_only_endpoint_unions_and_pair_edges() {
     let ((), report) = run_async_under_lab(0x7363_6110, |root| async move {

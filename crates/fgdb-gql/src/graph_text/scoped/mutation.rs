@@ -885,17 +885,31 @@ impl PreparedGraphMutationText {
     ) -> Result<(Self, Option<MutationReturnTemplate>), GraphMutationTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
-        let optional_root = parser.parse_mutation_match_prefix()?;
+        // UNWIND ... MATCH ... SET/REMOVE/DELETE (fgdb-0s2pq): the write reads
+        // the rows of the UNWIND stages and the MATCH they correlate, the
+        // read an `UNWIND ... MATCH ... CREATE` takes, as a WITH row.
+        let unwound = if parser.is_word("UNWIND") {
+            let (source, schema) =
+                parser.insertion_graph_row_prefix(statement, declarations, resolve.time_zones())?;
+            parser.write_row_scope = true;
+            Some((source, schema))
+        } else {
+            None
+        };
+        let optional_root = unwound.is_none() && parser.parse_mutation_match_prefix()?;
         // MATCH ... WITH ... SET/REMOVE/DELETE (fgdb-sl4ym): the write reads
         // the read pipeline's row through its last WITH stage, and only it.
-        let row_prefix = if !optional_root && parser.is_word("WITH") {
+        let row_prefix = if unwound.is_none() && !optional_root && parser.is_word("WITH") {
             let prefix = parser.write_row_prefix()?;
             parser.write_row_scope = true;
             Some(prefix)
         } else {
             None
         };
-        let row = row_prefix.as_ref().map(|(_, _, schema)| schema.clone());
+        let row = match (&unwound, &row_prefix) {
+            (Some((_, schema)), _) | (None, Some((_, _, schema))) => Some(schema.clone()),
+            (None, None) => None,
+        };
         let (mut projections, parsed_actions) = parser.mutation_actions(row.as_deref())?;
         let returning = if returning {
             let scope = mutation_query::ReturnScope {
@@ -923,7 +937,7 @@ impl PreparedGraphMutationText {
         if let Some(returning) = &returning {
             returning.admit(&parser.syntax.parameters)?;
         }
-        if let Some((head, stages, _)) = row_prefix {
+        if unwound.is_some() || row_prefix.is_some() {
             if !projections.is_empty() {
                 return Err(error(
                     statement.len(),
@@ -931,7 +945,29 @@ impl PreparedGraphMutationText {
                 )
                 .into());
             }
-            let read = parser.finish_write_row_prefix(statement, head, stages)?;
+            let read = match (unwound, row_prefix) {
+                // The actions and RETURN may add parameters and element keys
+                // after the read boundary; the read binds the complete table.
+                (Some((mut source, _)), _) => {
+                    source
+                        .syntax
+                        .parameters
+                        .clone_from(&parser.syntax.parameters);
+                    source
+                        .syntax
+                        .parameter_offsets
+                        .clone_from(&parser.syntax.parameter_offsets);
+                    source
+                        .syntax
+                        .element_keys
+                        .extend(parser.syntax.element_keys.iter().cloned());
+                    source
+                }
+                (None, Some((head, stages, _))) => {
+                    parser.finish_write_row_prefix(statement, head, stages)?
+                }
+                (None, None) => unreachable!("one row source was checked above"),
+            };
             let mut row = read.resolve(crate::graph_text::LentResolver(&mut resolve))?;
             let metadata = row.selection.as_ref().is_some_and(|selection| {
                 selection.columns.iter().any(|column| {
