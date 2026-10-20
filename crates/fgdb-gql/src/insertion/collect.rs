@@ -475,6 +475,7 @@ pub(super) fn execute<E, A, C>(
         policy,
         bindings,
         property_catalog,
+        owned,
         &mut source,
         &mut allocate,
         &mut checkpoint,
@@ -484,11 +485,13 @@ pub(super) fn execute<E, A, C>(
 /// A selection source behind a trait object.
 type ErasedSource<'a, E, C> = &'a mut dyn GraphSetSource<E, C>;
 
+#[allow(clippy::too_many_arguments)]
 fn execute_erased<E, A, C>(
     insertion: &PreparedGraphInsert,
     policy: GraphInsertPolicy,
     bindings: Option<&[GraphInsertBinding]>,
     property_catalog: Option<&crate::ReverseSymbolCatalog>,
+    owned: Option<Vec<GraphValueRow>>,
     source: ErasedSource<'_, E, C>,
     mut allocate: &mut dyn FnMut(GraphInsertRequest) -> Result<ElementId, A>,
     mut checkpoint: &mut dyn FnMut() -> Result<(), C>,

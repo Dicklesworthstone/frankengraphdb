@@ -265,7 +265,8 @@ fn validate(
             return Err(GraphEdgeUpsertBuildError::DuplicateProperty { branch });
         }
         let properties = match &action.value {
-            GraphEdgeUpsertValue::Literal(_) => continue,
+            // A constant, literal or stored (fgdb-k3nub), reads no input.
+            GraphEdgeUpsertValue::Literal(_) | GraphEdgeUpsertValue::Stored(_) => continue,
             GraphEdgeUpsertValue::Expression { properties, .. }
             | GraphEdgeUpsertValue::Composite { properties, .. } => properties,
         };
@@ -293,7 +294,9 @@ fn validate(
                     ),
                     Ok(crate::GraphSetColumnType::Scalar | crate::GraphSetColumnType::Any)
                 ),
-                GraphEdgeUpsertValue::Literal(_) => unreachable!("literal skipped above"),
+                GraphEdgeUpsertValue::Literal(_) | GraphEdgeUpsertValue::Stored(_) => {
+                    unreachable!("constants skipped above")
+                }
             };
             if !valid {
                 return Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {

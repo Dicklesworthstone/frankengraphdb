@@ -3,7 +3,7 @@
 use super::*;
 use crate::mutation_text::{EdgeMergeReturnTemplate, EdgeMergeTextInput, WriteReturnGroupTemplate};
 use crate::set_text::{
-    BoundSetTextInput, ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
+    BoundSetTextInput, ReadPageNumber, ReadProjectionTemplate, ReadStageTemplate,
 };
 use crate::{
     GraphEdgeMergeBinding, GraphEdgeMergeTextError, GraphEdgeMergeTextErrorKind,

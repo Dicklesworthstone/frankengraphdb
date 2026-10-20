@@ -25,8 +25,8 @@ pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
-pub(crate) use procedure::{BorrowedSource, DynPatterns, DynProcedures, PatternSource};
 pub(crate) use procedure::WithOwnedRows;
+pub(crate) use procedure::{BorrowedSource, DynPatterns, DynProcedures, PatternSource};
 pub use procedure::{
     GraphPatternFactorExecution, GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection,
     ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
