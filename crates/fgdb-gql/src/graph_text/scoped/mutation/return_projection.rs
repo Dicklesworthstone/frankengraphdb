@@ -2208,13 +2208,18 @@ impl<'a> Parser<'a> {
         {
             self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
         } else if let Some(resolve) = resolve.as_mut() {
-            let operand = if resolve.whole() {
-                self.resolved_predicate(&mut |parser| resolve.leaf(parser))
+            // Element and map entries (`x.p` of a comprehension element over
+            // COLLECT, an imported `row.key`) take let slots, as the element
+            // filter's do (fgdb-1c29d, fgdb-694ga, fgdb-0s2pq).
+            let base = core::mem::replace(&mut self.let_base, depth);
+            let parsed = if resolve.whole() {
+                self.resolved_predicate_with_lets(&mut |parser| resolve.leaf(parser))
             } else {
                 self.resolved_expression(&mut |parser| resolve.leaf(parser))
-            }
-            .map_err(expression_error)?;
-            self.read_value_template(operand, at)?
+            };
+            self.let_base = base;
+            let (operand, slots) = parsed.map_err(expression_error)?;
+            self.scalar_let_value(operand, slots, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
             // `n IS NULL` is a scalar predicate over the element, which the
             // scalar compiler reads (element_null_operand).

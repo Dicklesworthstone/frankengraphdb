@@ -866,11 +866,17 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// One operand over resolved leaves, with its own let sink for element
+    /// and map entries (`x.p`, `row.key`).
     pub(super) fn resolved_expression(
         &mut self,
         resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
-    ) -> Result<Operand, GraphMutationTextError> {
-        self.checked_expression(&mut ExpressionColumns::Resolved(resolve), false)
+    ) -> Result<(Operand, Vec<ReadValueTemplate>), GraphMutationTextError> {
+        self.checked_expression_scoped(
+            &mut ExpressionColumns::Resolved(resolve),
+            ExpressionBoundary::Operand,
+            true,
+        )
     }
 
     fn checked_expression(
@@ -1867,6 +1873,15 @@ impl<'a> Parser<'a> {
             ExpressionColumns::Graph(columns) => self.mutation_operand(columns)?,
             ExpressionColumns::Row(schema) => self.row_operand(schema)?,
             ExpressionColumns::Resolved(resolve) => match resolve(self)? {
+                // `.key` after a resolved value reads its entry through a let
+                // slot, as a row scope's row_entry_slot does: an imported
+                // map's `row.key` beside MATCH reads (fgdb-0s2pq).
+                Some(column) if self.lets.is_some() => {
+                    match self.map_entries(ReadValueTemplate::Column(column))? {
+                        ReadValueTemplate::Column(column) => Operand::Column(column),
+                        entry => return self.let_slot(program, entry, at),
+                    }
+                }
                 Some(column) => Operand::Column(column),
                 None => self.row_operand(&[])?,
             },
