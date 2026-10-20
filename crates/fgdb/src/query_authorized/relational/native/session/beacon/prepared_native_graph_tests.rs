@@ -67,10 +67,15 @@ fn options() -> Options {
     options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean));
     options
 }
-fn parameters(seeds: &[VId], eligible: &[VId]) -> GqlParameters {
-    GqlParameters::new()
-        .with_int64("x", 0)
-        .unwrap()
+/// `$x` only for a statement whose CALL reads it (the vector lane): binding
+/// refuses an argument the statement never declares.
+fn parameters(vector: bool, seeds: &[VId], eligible: &[VId]) -> GqlParameters {
+    let parameters = if vector {
+        GqlParameters::new().with_int64("x", 0).unwrap()
+    } else {
+        GqlParameters::new()
+    };
+    parameters
         .with_list(
             "seeds",
             seeds.iter().copied().map(GraphValue::Vertex).collect(),
@@ -214,7 +219,7 @@ fn native_graph_calls_reuse_every_modality_and_rebind_full_width_seeds() {
         for (v, t) in [(true, true), (true, false), (false, true), (false, false)] {
             for ann in [false, true] {
                 for direction in ["out", "in", "both"] {
-                    let params = parameters(&[VId(0), VId(0), VId(90)], &[VId(90), HIGH, HIGH]);
+                    let params = parameters(v, &[VId(0), VId(0), VId(90)], &[VId(90), HIGH, HIGH]);
                     let prepared = session
                         .prepare(&c.query(), &statement(v, t, ann, direction), &params)
                         .unwrap();
@@ -235,7 +240,7 @@ fn native_graph_calls_reuse_every_modality_and_rebind_full_width_seeds() {
                                     &c.query(),
                                     &index,
                                     &prepared,
-                                    &parameters(&[HIGH], &[])
+                                    &parameters(v, &[HIGH], &[])
                                 )
                                 .unwrap()
                         )
@@ -251,7 +256,7 @@ fn native_graph_calls_reuse_every_modality_and_rebind_full_width_seeds() {
                                         &c.query(),
                                         &index,
                                         &prepared,
-                                        &parameters(&[HIGH], &[VId(0)])
+                                        &parameters(v, &[HIGH], &[VId(0)])
                                     )
                                     .unwrap()
                             ),
@@ -262,7 +267,7 @@ fn native_graph_calls_reuse_every_modality_and_rebind_full_width_seeds() {
                 }
             }
         }
-        let params = parameters(&[VId(0)], &[VId(1)]);
+        let params = parameters(false, &[VId(0)], &[VId(1)]);
         let prepared = session
             .prepare(&c.query(), &statement(false, false, false, "out"), &params)
             .unwrap();
@@ -309,7 +314,7 @@ fn graph_and_return_values_keep_the_prepared_history_without_lending_transit_aut
         let index = session
             .prepare_beacon_index(&c.query(), &historical)
             .unwrap();
-        let params = parameters(&[VId(0)], &[HIGH]);
+        let params = parameters(true, &[VId(0)], &[HIGH]);
         let prepared = session
             .prepare(&c.query(), &statement(true, true, false, "out"), &params)
             .unwrap();
@@ -361,7 +366,7 @@ fn graph_call_sources_and_set_siblings_share_exact_record_and_signed_node_admiss
         let c = PurposeContexts::narrow_runtime_root(&root);
         let db = database(&c.commit(), true).await;
         let authority = authority();
-        let params = parameters(&[VId(0)], &[HIGH]);
+        let params = parameters(true, &[VId(0)], &[HIGH]);
         let text = statement(true, true, false, "out");
         for nodes in [7, 8] {
             let mut grant = grant();
@@ -416,7 +421,12 @@ fn graph_call_sources_and_set_siblings_share_exact_record_and_signed_node_admiss
                 GqlQueryPolicy::new(15, 16, 1_000_000, 100_000);
             assert!(
                 session
-                    .execute_beacon_index(&c.query(), &index, &both, &parameters(&[VId(0)], &[]))
+                    .execute_beacon_index(
+                        &c.query(),
+                        &index,
+                        &both,
+                        &parameters(true, &[VId(0)], &[])
+                    )
                     .is_err()
             );
             assert!(!session.is_closed());
@@ -465,7 +475,7 @@ fn native_work_and_scratch_thresholds_ignore_hidden_and_disconnected_incidence()
             let index = session
                 .prepare_beacon_index(&c.query(), &options())
                 .unwrap();
-            let params = parameters(&[VId(0)], &[HIGH]);
+            let params = parameters(true, &[VId(0)], &[HIGH]);
             let prepared = session
                 .prepare(&c.query(), &statement(true, true, false, "out"), &params)
                 .unwrap();
@@ -533,7 +543,7 @@ fn graph_call_cancellation_and_late_errors_never_publish_a_prefix_or_poison_reus
             .unwrap();
         for mixed in [false, true] {
             for eligible in [vec![HIGH], vec![]] {
-                let params = parameters(&[VId(0)], &eligible);
+                let params = parameters(mixed, &[VId(0)], &eligible);
                 let prepared = session
                     .prepare(&c.query(), &statement(mixed, mixed, false, "out"), &params)
                     .unwrap();
@@ -570,7 +580,7 @@ fn graph_call_cancellation_and_late_errors_never_publish_a_prefix_or_poison_reus
                 }
             }
         }
-        let params = parameters(&[VId(0)], &[HIGH]);
+        let params = parameters(true, &[VId(0)], &[HIGH]);
         let bad = session
             .prepare(
                 &c.query(),
@@ -649,7 +659,7 @@ fn final_clock_gate_can_expire_graph_reuse_even_after_a_complete_empty_answer() 
             let index = session
                 .prepare_beacon_index(&c.query(), &options())
                 .unwrap();
-            let params = parameters(&[VId(0)], &eligible);
+            let params = parameters(true, &[VId(0)], &eligible);
             let prepared = session
                 .prepare(&c.query(), &statement(true, true, false, "out"), &params)
                 .unwrap();
