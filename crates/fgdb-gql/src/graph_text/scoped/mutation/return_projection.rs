@@ -1722,6 +1722,25 @@ impl<'a> Parser<'a> {
     /// or `>=`, as in `[1, 0] >= [1]`. The scalar compiler reads such a
     /// comparison whole in the value language; it never compares composites.
     pub(super) fn starts_composite_comparison(&self) -> Result<bool, GraphPatternTextError> {
+        // A list- or map-typed parameter compared whole (`$rows = [1]`), as
+        // its literal is and as `[1] = $rows` already was. `$rows[0]` and
+        // `$map.key` keep their element and entry reads.
+        if let TokenKind::Parameter(name) = self.current.kind {
+            if !matches!(
+                self.parameter_types.get(name),
+                Some(crate::GqlParameterType::List | crate::GqlParameterType::Map)
+            ) {
+                return Ok(false);
+            }
+            let mut lexer = self.lexer.clone();
+            return Ok(match lexer.next()?.kind {
+                TokenKind::Punct(b'=') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
+                TokenKind::Punct(b'<' | b'>') => true,
+                TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
+                TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
+                _ => false,
+            });
+        }
         let list = self.is_punct(b'[');
         if !(self.is_punct(b'{') || (list && !self.starts_let_operand()?)) {
             return Ok(false);
