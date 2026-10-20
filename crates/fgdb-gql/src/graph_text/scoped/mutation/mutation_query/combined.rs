@@ -260,11 +260,12 @@ impl<'a> Parser<'a> {
             (Some(column), kind)
         };
         self.punct(b')', "one aggregate argument")?;
+        // A stored property may contain a number, NULL or a composite value.
+        // Admit the domain just as WITH aggregation does; the native reducer
+        // still checks each actual value, including inputs behind LIMIT 0.
         if matches!(function, Function::SumInt | Function::AverageInt)
-            && !matches!(
-                input_kind,
-                GraphSetColumnType::Scalar | GraphSetColumnType::Any
-            )
+            && !input_kind.is_scalar_like()
+            && input_kind != GraphSetColumnType::Any
         {
             return Err(error(
                 at,

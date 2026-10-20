@@ -6,6 +6,9 @@
 //! the resulting sequential program in the SAME transaction. In particular,
 //! repeated MERGE keys see earlier creates without rerunning the source MATCH.
 
+mod execution;
+pub use execution::{GraphQueryWriteExecution, GraphQueryWriteExecutionError};
+
 use crate::algebra::{GraphValue, GraphValueRow};
 use crate::{
     BoundGraphWriteScriptBatch, GqlParameterError, GqlParameterType, GqlParameterValue,

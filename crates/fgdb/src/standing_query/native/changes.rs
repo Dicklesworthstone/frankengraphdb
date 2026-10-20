@@ -64,6 +64,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// A refusal releases no partial bag and cannot fence the maintained view.
     /// Logical entry/payload events are not byte-accurate allocator bounds;
     /// B-tree key comparisons retain the existing Z-set cost contract.
+    /// Projection consolidates immediately: beyond the maintained source,
+    /// retain current nonzero native support plus one projected tuple, not a
+    /// second vector of all source keys. Cumulative scratch is not refunded
+    /// when a key cancels. This does not make the maintained state spillable.
     pub fn standing_native_bag(
         &self,
         cx: &QueryCx,
@@ -168,7 +172,10 @@ fn collect_bag<Row: Ord>(
     meter: &mut Meter<'_>,
     mut project: impl FnMut(&Row, &mut Meter<'_>) -> Result<Vec<QueryValue>, StandingQueryFailure>,
 ) -> Result<ZSet<Vec<QueryValue>>, StandingQueryFailure> {
-    let mut updates = Vec::new();
+    // RETURN slots may merge many private keys into one public tuple. Keep
+    // only the current native support, in the same source-key addition order
+    // as from_updates, without retaining every projected copy until the end.
+    let mut rows = ZSet::new();
     for (row, weight) in source.iter() {
         meter.charge(ZSetEvent::Work)?;
         if weight.is_zero() || (!signed && weight < &ZWeight::ZERO) {
@@ -184,14 +191,15 @@ fn collect_bag<Row: Ord>(
         let weight = weight
             .checked_clone(LIMBS)
             .map_err(|_| StandingQueryFailure::Arithmetic)?;
-        meter.charge(ZSetEvent::ScratchEntry)?;
-        updates.push((cells, weight));
+        rows.accumulate(cells, weight, LIMBS, &mut |event| meter.charge(event))
+            .map_err(zset_error)?;
     }
     // RETURN slots may permute, repeat or omit cells. Consolidate the delivered
     // identity before quota admission: opposite images must cancel even with a
     // zero changed-row allowance. Negative tuples are never thresholded away.
-    let rows =
-        ZSet::from_updates(updates, LIMBS, &mut |event| meter.charge(event)).map_err(zset_error)?;
+    // The relation is private until all projections, exact additions, final
+    // quota admission and the completion checkpoint succeed. A refusal drops
+    // it without changing the source, subscription receipt or replay history.
     if meter
         .policy
         .rows
@@ -206,3 +214,238 @@ fn collect_bag<Row: Ord>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod online_tests {
+    use super::*;
+
+    type Bag = ZSet<Vec<QueryValue>>;
+
+    fn source(count: u32, weight: impl Fn(u32) -> ZWeight) -> ZSet<u32> {
+        ZSet::from_updates(
+            (0..count).map(|key| (key, weight(key))),
+            LIMBS,
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap()
+    }
+
+    fn wide(rows: u64) -> GqlQueryPolicy {
+        GqlQueryPolicy::new(0, rows, u64::MAX, u64::MAX)
+    }
+
+    fn run(
+        source: &ZSet<u32>,
+        signed: bool,
+        policy: GqlQueryPolicy,
+        mut checkpoint: impl FnMut() -> Result<(), StandingQueryFailure>,
+        project: impl FnMut(&u32, &mut Meter<'_>) -> Result<Vec<QueryValue>, StandingQueryFailure>,
+    ) -> (Result<Bag, StandingQueryFailure>, StandingQueryStats) {
+        let mut meter = Meter {
+            policy,
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
+        let result = collect_bag(source, signed, 1, &mut meter, project);
+        (result, meter.stats)
+    }
+
+    fn one(_: &u32, _: &mut Meter<'_>) -> Result<Vec<QueryValue>, StandingQueryFailure> {
+        // Deliberately unmetered fixture projection to isolate the collector's
+        // own staging cost. Real row/group projection controls remain unchanged.
+        Ok(vec![QueryValue::Integer(7)])
+    }
+
+    #[test]
+    fn exhausted_consolidation_work_stops_before_the_next_projection() {
+        let source = source(4, |_| ZWeight::ONE);
+        let mut projected = Vec::new();
+        let (result, stats) = run(
+            &source,
+            false,
+            GqlQueryPolicy::new(0, 1, 6, u64::MAX),
+            || Ok(()),
+            |key, meter| {
+                projected.push(*key);
+                one(key, meter)
+            },
+        );
+        assert_eq!(result, Err(StandingQueryFailure::WorkBudget));
+        assert_eq!(stats.work_units, 7);
+        assert_eq!(projected, [0, 1]);
+        // The deferred implementation projected key 2 before any consolidation
+        // consumed its work, despite not being able to finish key 1.
+    }
+
+    #[test]
+    fn collapsing_private_keys_spend_no_occurrence_vector_reservations() {
+        let n = 16_384_u32;
+        let source = source(n, |_| ZWeight::ONE);
+        // Work is 3 for the first key and 4 for each colliding key. Scratch
+        // reserves each projected tuple and exactly one retained output key.
+        let work = 4 * u64::from(n) - 1;
+        let scratch = u64::from(n) + 1;
+        let exact = GqlQueryPolicy::new(0, 1, work, scratch);
+        let (result, stats) = run(&source, false, exact, || Ok(()), one);
+        let result = result.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.iter().next().unwrap().1.to_i128(), Some(i128::from(n)));
+        assert_eq!(stats.work_units, work);
+        assert_eq!(stats.scratch_entries, scratch);
+        for (policy, error) in [
+            (
+                GqlQueryPolicy::new(0, 1, work - 1, scratch),
+                StandingQueryFailure::WorkBudget,
+            ),
+            (
+                GqlQueryPolicy::new(0, 1, work, scratch - 1),
+                StandingQueryFailure::ScratchBudget,
+            ),
+            (
+                GqlQueryPolicy::new(0, 0, work, scratch),
+                StandingQueryFailure::ResultBudget,
+            ),
+        ] {
+            assert_eq!(run(&source, false, policy, || Ok(()), one).0, Err(error));
+        }
+    }
+
+    #[test]
+    fn cancellation_and_reappearance_keep_cumulative_scratch_and_final_only_row_quota() {
+        let counts = [3, -3, 1, -1];
+        let source = source(4, |key| ZWeight::from_i128(counts[key as usize]));
+        let (result, stats) = run(&source, true, wide(0), || Ok(()), one);
+        assert!(result.unwrap().is_empty());
+        assert_eq!(stats.work_units, 14);
+        assert_eq!(stats.scratch_entries, 6); // four tuple copies, two new keys
+        assert_eq!(
+            run(&source, true, GqlQueryPolicy::new(0, 0, 14, 5), || Ok(()), one).0,
+            Err(StandingQueryFailure::ScratchBudget)
+        );
+    }
+
+    #[test]
+    fn exact_promoted_weights_survive_collisions_and_full_cancellation() {
+        let positive = source(2, |_| ZWeight::from_i128(i128::MAX));
+        let result = run(&positive, false, wide(1), || Ok(()), one).0.unwrap();
+        let expected = ZWeight::from_i128(i128::MAX)
+            .checked_add(&ZWeight::from_i128(i128::MAX), LIMBS)
+            .unwrap();
+        assert!(expected.to_i128().is_none());
+        assert_eq!(result.iter().next().unwrap().1, &expected);
+        let signed = source(4, |key| {
+            ZWeight::from_i128(if key < 2 { i128::MAX } else { -i128::MAX })
+        });
+        assert!(
+            run(&signed, true, wide(0), || Ok(()), one)
+                .0
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn late_shape_and_negative_baseline_refusals_never_release_a_partial_bag() {
+        let source = source(4, |_| ZWeight::ONE);
+        let (result, _) = run(
+            &source,
+            false,
+            wide(1),
+            || Ok(()),
+            |key, meter| {
+                if *key == 3 {
+                    Ok(Vec::new())
+                } else {
+                    one(key, meter)
+                }
+            },
+        );
+        assert_eq!(result, Err(StandingQueryFailure::InvalidDelta));
+        assert_eq!(
+            run(&source, false, wide(1), || Ok(()), one).0.unwrap().len(),
+            1
+        );
+
+        let negative = self::source(2, |key| {
+            ZWeight::from_i128(if key == 0 { 1 } else { -1 })
+        });
+        let mut projected = Vec::new();
+        let (result, _) = run(
+            &negative,
+            false,
+            wide(0),
+            || Ok(()),
+            |key, meter| {
+                projected.push(*key);
+                one(key, meter)
+            },
+        );
+        assert_eq!(result, Err(StandingQueryFailure::InvalidDelta));
+        assert_eq!(projected, [0]); // invalid input is not laundered by cancellation
+    }
+
+    #[test]
+    fn every_collision_checkpoint_and_unwind_preserves_source_and_retry() {
+        let counts = [2, -1, -1, 3];
+        let source = source(4, |key| ZWeight::from_i128(counts[key as usize]));
+        let original = source
+            .checked_clone(LIMBS, &mut |_| Ok::<_, ()>(()))
+            .unwrap();
+        let mut calls = 0;
+        let expected = run(
+            &source,
+            true,
+            wide(1),
+            || {
+                calls += 1;
+                Ok(())
+            },
+            one,
+        )
+        .0;
+        assert_eq!(
+            expected.as_ref().unwrap().iter().next().unwrap().1.to_i128(),
+            Some(3)
+        );
+        for stop in 1..=calls {
+            let mut seen = 0;
+            let result = run(
+                &source,
+                true,
+                wide(1),
+                || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(StandingQueryFailure::Interrupted)
+                    } else {
+                        Ok(())
+                    }
+                },
+                one,
+            )
+            .0;
+            assert_eq!(result, Err(StandingQueryFailure::Interrupted));
+            assert_eq!(seen, stop);
+            let mut seen = 0;
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = run(
+                        &source,
+                        true,
+                        wide(1),
+                        || {
+                            seen += 1;
+                            assert_ne!(seen, stop, "injected collector unwind");
+                            Ok(())
+                        },
+                        one,
+                    );
+                }))
+                .is_err()
+            );
+            assert_eq!(seen, stop);
+            assert_eq!(source, original);
+            assert_eq!(run(&source, true, wide(1), || Ok(()), one).0, expected);
+        }
+    }
+}
