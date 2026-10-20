@@ -1103,9 +1103,9 @@ pub(super) fn statement_body<'s>(
 
 impl PreparedGraphMutationQueryText {
     /// Classify write text with native token framing: a MATCH-led statement
-    /// with a top-level `SET x.`/`SET x:`/`SET x +=`, `REMOVE x`, `DELETE x`
-    /// or `DETACH DELETE x` clause followed by a top-level RETURN. A CREATE,
-    /// INSERT or MERGE clause, or a second statement, is not this shape.
+    /// with a top-level SET, REMOVE, DELETE or DETACH DELETE clause followed
+    /// by RETURN. SET/REMOVE also admit the parser's `(name).property` target.
+    /// A CREATE, INSERT or MERGE clause, or a second statement, keeps its owner.
     /// Quoted values, property keys and aliases never become clause words.
     /// This validates nothing and resolves no symbol; prepare owns that.
     pub fn has_return_clause(statement: &str) -> Result<bool, GraphMutationTextError> {
@@ -1151,9 +1151,22 @@ impl PreparedGraphMutationQueryText {
                             return Ok(false);
                         }
                         let target = matches!(next, TokenKind::Word(_));
-                        if (clause("SET") || clause("REMOVE"))
-                            && target
-                            && matches!(after, TokenKind::Punct(b'.' | b':' | b'+' | b'='))
+                        // Match parenthesized_property_target's exact prefix,
+                        // not every parenthesized expression after a keyword.
+                        let property_action = (clause("SET") || clause("REMOVE"))
+                            && (target
+                                && matches!(after, TokenKind::Punct(b'.' | b':' | b'+' | b'='))
+                                || matches!(next, TokenKind::Punct(b'('))
+                                    && matches!(after, TokenKind::Word(_))
+                                    && matches!(
+                                        script::next_script_token(&mut lookahead)?.kind,
+                                        TokenKind::Punct(b')')
+                                    )
+                                    && matches!(
+                                        script::next_script_token(&mut lookahead)?.kind,
+                                        TokenKind::Punct(b'.')
+                                    ));
+                        if property_action
                             || clause("DETACH")
                                 && matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("DELETE"))
                             || clause("DELETE") && target
@@ -1234,6 +1247,25 @@ mod framing_tests {
             ("MATCH (n) SET n = {p: 1} RETURN n", true),
             ("MATCH (n) WITH n SET n.p = 1 RETURN n", true),
             ("MATCH (n) REMOVE n.p RETURN n", true),
+            ("MATCH (n) SET (n).p = 1 RETURN n.p", true),
+            ("MATCH (n) REMOVE (n).p RETURN n.p", true),
+            ("MATCH ()-[r:R]->() SET (r).p = 1 RETURN r.p", true),
+            ("MATCH ()-[r:R]->() REMOVE (r).p RETURN r", true),
+            ("MATCH (n) WITH n AS kept SET (kept).p = 1 RETURN kept", true),
+            ("OPTIONAL MATCH (n) SET (n).p = 1 RETURN n", true),
+            (
+                "mAtCh (n) sEt /* target */ ( /* name */ n ).p = 1 RETURN n.p",
+                true,
+            ),
+            ("MATCH (n) SET (n).p = 1", false),
+            ("MATCH (n) REMOVE (n).p", false),
+            ("MATCH (n) SET (n) RETURN n", false),
+            ("MATCH (n) SET ((n)).p = 1 RETURN n", false),
+            ("MATCH (n) RETURN 'SET (n).p = 1 RETURN n'", false),
+            ("MATCH (n) /* REMOVE (n).p */ RETURN n", false),
+            ("MATCH (n) RETURN (n).SET", false),
+            ("MATCH (n) SET (n).p = 1 CREATE (m) RETURN m", false),
+            ("MATCH (n) SET (n).p = 1; MATCH (m) RETURN m", false),
             ("MATCH (n) DETACH DELETE n RETURN n", true),
             ("MATCH (n) DELETE n RETURN 42 AS num", true),
             ("MATCH ()-[r]->() DELETE r RETURN type(r)", true),
