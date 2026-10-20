@@ -1,4 +1,4 @@
-//! Keyed residual ON joins with bounded, per-occurrence witness searches.
+//! Residual ON joins with bounded, per-occurrence candidate-group searches.
 use super::*;
 use fgdb_strata::tiered::memory::spill::PagedSpillWriter;
 
@@ -48,6 +48,7 @@ fn uncached_position(input: &MergeInput) -> MergeInput {
 #[allow(clippy::too_many_arguments)]
 fn compare(
     plan: &SpillSetJoinPlan,
+    keys: &[(usize, usize)],
     pass: Pass,
     outer: &GraphValueRow,
     peer: &GraphValueRow,
@@ -57,7 +58,7 @@ fn compare(
 ) -> Result<Ordering> {
     let (left, right) = pass.pair(outer, peer);
     let order = plan
-        .compare_keys_with_control(left, right, &mut |value| {
+        .compare_probe_keys_with_control(left, right, keys, &mut |value| {
             staged::native_event(cx, policy, evaluator, value)
         })
         .map_err(failure)?;
@@ -65,6 +66,64 @@ fn compare(
         Pass::Left => order,
         Pass::RightAbsence => order.reverse(),
     })
+}
+
+// Explicit typed keys retain the old sorter. Inferred ON keys instead use
+// the existing language-order sorter: its numeric ties are a SUPERSET of ON
+// equality, so every candidate still runs the complete native predicate.
+// Neither output values nor the declared RowJoinSpec are normalized/rebound.
+#[allow(clippy::too_many_arguments)]
+async fn order_probe_keys<A, B>(
+    plan: &SpillSetJoinPlan,
+    keys: &[(usize, usize)],
+    side: usize,
+    input: &NativeResultSpool,
+    source: &mut SpillFile<A>,
+    destination: &mut SpillFile<B>,
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    work: &mut Work<'_>,
+) -> Result<NativeResultSpool>
+where
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+{
+    if !plan.keys().is_empty() {
+        return order_keys(
+            plan, side, input, source, destination, run_rows, max_runs, page_bytes, work,
+        )
+        .await;
+    }
+    let mut order =
+        ChargedVec::<GraphValueOrder>::new(destination.memory_pool(), work.cx, keys.len())?;
+    for &(left, right) in keys {
+        work.charge(1)?;
+        let column = if side == 0 { left } else { right };
+        work.charge(order.values.len())?;
+        if !order.values.iter().any(|key| key.column == column) {
+            // Direct compare_orderability places NULL last. This distinction
+            // matters for lexicographic composite keys even though a NULL
+            // itself is never a witness and is skipped by the outer sweep.
+            order.values.push(GraphValueOrder::ascending(column));
+        }
+    }
+    let (sorted, used) = input
+        .sort_query_continuing(
+            work.cx,
+            source,
+            destination,
+            &order.values,
+            true,
+            run_rows,
+            max_runs,
+            page_bytes,
+            work.limit,
+            work.used,
+        )
+        .await?;
+    work.used = used;
+    Ok(sorted)
 }
 
 #[derive(Default)]
@@ -124,6 +183,7 @@ impl Output {
 #[allow(clippy::too_many_arguments)]
 async fn sweep<A, B, C>(
     plan: &SpillSetJoinPlan,
+    keys: &[(usize, usize)],
     pass: Pass,
     outer: &NativeResultSpool,
     peer: &NativeResultSpool,
@@ -169,16 +229,25 @@ where
     )
     .await?
     {
-        // NULL keys can never match. Do not replay a large all-NULL group or
-        // evaluate its ON program, but still drain both physical inputs.
+        // Necessary NULL equalities can never be TRUE. Composite Any cells
+        // likewise cannot satisfy this predicate IR's equality. Keep them as
+        // original unmatched occurrences, without replaying a useless group.
+        // Explicit typed keys retain their original (NULL-only) exclusion.
         let mut nonnull = true;
-        for &(left, right) in plan.keys() {
+        for &(left, right) in keys {
             staged::native_event(cx, policy, evaluator, GlaExecutionEvent::Work)?;
             let column = match pass {
                 Pass::Left => left,
                 Pass::RightAbsence => right,
             };
-            if row.row.values()[column].is_null() {
+            let value = &row.row.values()[column];
+            if value.is_null()
+                || (plan.keys().is_empty()
+                    && !matches!(
+                        value,
+                        GraphValue::Scalar(_) | GraphValue::Vertex(_) | GraphValue::Edge(_)
+                    ))
+            {
                 nonnull = false;
                 break;
             }
@@ -186,7 +255,7 @@ where
         let mut found = false;
         if nonnull {
             while let Some(peer_row) = head.as_ref() {
-                match compare(plan, pass, &row.row, &peer_row.row, cx, policy, evaluator)? {
+                match compare(plan, keys, pass, &row.row, &peer_row.row, cx, policy, evaluator)? {
                     Ordering::Less => break,
                     Ordering::Greater => {
                         drop(head.take());
@@ -232,6 +301,7 @@ where
                             {
                                 match compare(
                                     plan,
+                                    keys,
                                     pass,
                                     &row.row,
                                     &candidate.row,
@@ -309,7 +379,7 @@ where
 }
 
 // Children have already completed and validated. Reuse their original native
-// matcher/projection and the ordinary key sorter; no new scalar semantics,
+// matcher/projection and ordinary typed/query sorters; no new scalar semantics,
 // group materialization, witness bitmap, scratch owner or retry strategy.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute<A, B, C>(
@@ -336,8 +406,39 @@ where
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
-    let left = order_keys(
+    let pool = scratch.memory_pool().clone();
+    let mut key_charge = pool.reserve(work.cx, 0).map_err(SpillError::Memory)?;
+    let inferred = if plan.keys().is_empty() {
+        plan.probe_keys_with_control(&mut |value| {
+            event(work.cx, policy, &mut evaluator, &mut key_charge, value)
+        })
+        .map_err(failure)?
+    } else {
+        Vec::new()
+    };
+    // ScratchEntry admitted every push before allocation. Retain the actual
+    // vector capacity (not just its length) through all awaited uses; the
+    // tuple drops the metadata before releasing its affine byte reservation.
+    codec::retain_reservation(
+        &mut key_charge,
+        inferred
+            .capacity()
+            .checked_mul(size_of::<(usize, usize)>())
+            .ok_or(SpillError::SizeOverflow)?,
+        work.cx,
+    )?;
+    let inferred = (inferred, key_charge);
+    let keys = if plan.keys().is_empty() {
+        inferred.0.as_slice()
+    } else {
+        plan.keys()
+    };
+    if keys.is_empty() {
+        return Err(SpillError::InvalidRun.into());
+    }
+    let left = order_probe_keys(
         plan,
+        keys,
         0,
         left,
         destination,
@@ -348,8 +449,9 @@ where
         work,
     )
     .await?;
-    let right = order_keys(
+    let right = order_probe_keys(
         plan,
+        keys,
         1,
         right,
         destination,
@@ -360,11 +462,11 @@ where
         work,
     )
     .await?;
-    let pool = scratch.memory_pool().clone();
     let mut output = Output::default();
     let mut writer = destination.paged_writer(work.cx, page_bytes)?;
     sweep(
         plan,
+        keys,
         Pass::Left,
         &left,
         &right,
@@ -389,6 +491,7 @@ where
         // or output run. All allowances and the output cap remain cumulative.
         sweep(
             plan,
+            keys,
             Pass::RightAbsence,
             &right,
             &left,
