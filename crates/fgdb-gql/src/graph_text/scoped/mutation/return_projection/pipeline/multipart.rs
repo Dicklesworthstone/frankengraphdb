@@ -387,13 +387,14 @@ impl<'a> Parser<'a> {
                         {
                             return Ok(Vec::new());
                         }
-                    } else if matches!(previous, TokenKind::Punct(b'('))
-                        && matches!(next, TokenKind::Punct(b')' | b':' | b'{'))
+                    } else if (matches!(previous, TokenKind::Punct(b'('))
+                        && matches!(next, TokenKind::Punct(b')' | b':' | b'{')))
+                        || (matches!(previous, TokenKind::Punct(b'[' | b'('))
+                            && matches!(next, TokenKind::Word(next)
+                                if next.eq_ignore_ascii_case("IN")))
                     {
-                        excluded.push(word);
-                    } else if matches!(previous, TokenKind::Punct(b'[' | b'('))
-                        && matches!(next, TokenKind::Word(next) if next.eq_ignore_ascii_case("IN"))
-                    {
+                        // A later part's own binding, `(m)`, `(m:L)` or
+                        // `(m {..})`, or a local `[x IN` / `(x IN`.
                         excluded.push(word);
                     } else if matches!(next, TokenKind::Punct(b'.'))
                         && incoming.iter().any(|(name, kind)| {
