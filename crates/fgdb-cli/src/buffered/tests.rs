@@ -735,6 +735,16 @@ fn buffered_external_values_preserve_native_rows_and_complete_group_output_contr
             ),
             ("RETURN 42 AS answer LIMIT 0", 2),
             ("RETURN COUNT(*) AS rows LIMIT 0", 2),
+            // A collected list unwound again is a values relation, no
+            // longer a refused descendant.
+            (
+                "UNWIND [1,2] AS x WITH COLLECT(x) AS xs UNWIND xs AS x RETURN x LIMIT 0",
+                2,
+            ),
+            (
+                "UNWIND [2,1,2] AS x WITH COLLECT(x) AS xs UNWIND xs AS x RETURN x ORDER BY x",
+                2,
+            ),
         ] {
             let mut options = spill_options(&directory, text);
             options.budget.records = Some(0);
@@ -925,7 +935,6 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
         for text in [
             "MATCH (n),(m) RETURN n.p+m.p AS value LIMIT 0",
             "MATCH (n) RETURN {value:n.p} AS value UNION ALL MATCH (m),(z) RETURN {value:m.p} AS value LIMIT 0",
-            "UNWIND [1,2] AS x WITH COLLECT(x) AS xs UNWIND xs AS x RETURN x LIMIT 0",
         ] {
             let options = spill_options(&directory, text);
             let native = PreparedNativeRead::prepare(text, &options.params, &options).unwrap();
