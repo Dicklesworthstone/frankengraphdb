@@ -320,12 +320,16 @@ where
         Some(&mut work),
     )
     .await?;
+    // The bound terminal operator owns its comparison law. A synthesized
+    // canonical key vector can equal an explicit ASC NULLS FIRST vector;
+    // never infer language ordering from that vector or from observed rows.
     let (sorted, used) = input
-        .sort_continuing(
+        .sort_query_continuing(
             cx,
             destination,
             scratch,
             tail.order(),
+            tail.has_explicit_order(),
             run_rows,
             max_runs,
             page_bytes,
