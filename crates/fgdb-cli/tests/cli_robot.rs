@@ -3965,7 +3965,9 @@ fn search_lanes_equal_the_library_and_pin_history() {
             "--max-hops",
             "2",
         ],
-        vec!["--expand-from", &a, "--max-hops", "1"],
+        // Seeds plus a hop bound alone are graph-only search, a positive law
+        // in search_graph_only.rs; seeds without a hop bound stay refused.
+        vec!["--expand-from", &a],
         vec![
             "--text",
             "red",

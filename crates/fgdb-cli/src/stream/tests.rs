@@ -311,8 +311,10 @@ fn supported_projection_and_pipeline_streams_do_not_weaken_real_refusals() {
             .unwrap();
         db.write(&contexts.commit(), batch(1, 4)).await.unwrap();
 
+        // A projected row stream keeps its leading vertex identity, which
+        // carries the canonical order; a pipeline aggregate streams its groups.
         for text in [
-            "MATCH (n) RETURN n.p AS p",
+            "MATCH (n) RETURN n, n.p AS p",
             "MATCH (n) WITH n.p AS p RETURN COUNT(*) AS total",
         ] {
             let opts = options(text);
@@ -331,7 +333,10 @@ fn supported_projection_and_pipeline_streams_do_not_weaken_real_refusals() {
             assert!(streamed.contains("\"event\":\"result\""), "{text}");
         }
 
+        // Without a leading identity, canonical order would need a sort: the
+        // stream profile refuses instead of collecting.
         for text in [
+            "MATCH (n) RETURN n.p AS p",
             "MATCH (n) RETURN n UNION ALL MATCH (m) RETURN m",
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 2 RETURN n AS id LIMIT 0",
         ] {

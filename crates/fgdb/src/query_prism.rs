@@ -73,6 +73,22 @@ impl core::error::Error for ProcedureError {
         }
     }
 }
+impl ProcedureError {
+    /// Whether the statement alone fixes this refusal: no registered
+    /// signature binds it, or its projection has a graph kind the procedure
+    /// refuses, which the binder checks before any source is scanned.
+    #[must_use]
+    pub fn is_statement_refusal(&self) -> bool {
+        match self {
+            Self::Bind(_) => true,
+            Self::Read(error) => matches!(
+                **error,
+                FnxReadError::Execution(fgdb_prism::FnxExecutionError::GraphKind { .. })
+            ),
+            Self::ResultDomain | Self::Search(_) => false,
+        }
+    }
+}
 
 /// Prism as the procedure host of a native set read: bind the call through
 /// the same typed resolution as `call_fnx`, then run its explicit projection
