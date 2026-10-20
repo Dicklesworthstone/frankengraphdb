@@ -636,6 +636,23 @@ fn kernel_bulk_work_preserves_crossed_allowance_refusals_and_control_prefixes() 
         clock_reads: usize,
     }
 
+    /// An interruption's Debug text carries the runtime's process-wide
+    /// correlation counter, which no two runs share; every other field of
+    /// the outcome is compared as printed.
+    fn outcome(debug: String) -> String {
+        const KEY: &str = "correlation_id: Some(";
+        let mut out = String::with_capacity(debug.len());
+        let mut rest = debug.as_str();
+        while let Some(at) = rest.find(KEY) {
+            out.push_str(&rest[..at]);
+            out.push_str("correlation_id: _");
+            let tail = &rest[at + KEY.len()..];
+            rest = tail.find(')').map_or("", |end| &tail[end + 1..]);
+        }
+        out.push_str(rest);
+        out
+    }
+
     struct ObservedUsage<'a> {
         inner: UsageObserver<'a>,
         largest_run: usize,
@@ -706,7 +723,7 @@ fn kernel_bulk_work_preserves_crossed_allowance_refusals_and_control_prefixes() 
             }
             (
                 Footprint {
-                    outcome: format!("{result:?}"),
+                    outcome: outcome(format!("{result:?}")),
                     signed: execution.permit.usage(),
                     native: *observer.inner.usage,
                     deferred: execution.deferred,
