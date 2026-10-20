@@ -419,10 +419,29 @@ fn expression<'g, E, C>(
                 truth.map_or(CanonicalScalar::Null, CanonicalScalar::Bool),
             )))
         }
-        // A let slot is a row-scope compiler form the aggregate reader never
-        // emits, and aggregate outputs number no rows, so rand() has no key
-        // here: a hand-built plan with either is a typed failure.
-        GraphSetValue::Let { .. } | GraphSetValue::Random { .. } => {
+        // An element entry inside a scalar expression over an aggregate
+        // (`[x IN COLLECT(n) | x.p * 10]`) reads x.p through a let slot
+        // (fgdb-694ga). As in the row evaluator, every value reads the
+        // enclosing scope; the body then reads them as the innermost locals,
+        // the last value nearest.
+        GraphSetValue::Let { values, body } => {
+            let depth = input.locals.len();
+            let mut computed = Vec::with_capacity(values.len());
+            for value in values {
+                computed.push(expression(value, input, column, control)?.into_owned(control)?);
+            }
+            for value in computed {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                input.locals.push(value);
+            }
+            let value = expression(body, input, column, control);
+            // Restore the outer scope before propagating any failure.
+            input.locals.truncate(depth);
+            value?
+        }
+        // Aggregate outputs number no rows, so rand() has no key here: a
+        // hand-built plan with it is a typed failure.
+        GraphSetValue::Random { .. } => {
             return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands));
         }
         GraphSetValue::Local(offset) => {

@@ -276,6 +276,29 @@ fn post_group_collected_elements_keep_duplicates_full_identities_and_first_occur
 }
 
 #[test]
+fn post_group_element_entries_inside_scalar_expressions_read_through_let_slots() {
+    // `item.value` as an operand (arithmetic, a filter) is a let slot, not
+    // the bare entry a lone `| item.value` body collapses to (fgdb-694ga).
+    let query = prepare_output(
+        "RETURN [item IN COLLECT(node) | item.value * 10] AS scaled, \
+         [item IN COLLECT(node) WHERE item.value > 2 | item.value] AS high, \
+         [item IN COLLECT(node) WHERE item.value > 2] AS high_nodes, \
+         [item IN COLLECT(node) | item.value + item.value] AS doubled",
+    );
+    let result = run(&query, policy()).unwrap();
+    assert_eq!(result.rows.result_rows, 1);
+    assert_eq!(
+        result.value[0].values(),
+        &[
+            scalar_list(&[Some(20), Some(20), Some(70)]),
+            scalar_list(&[Some(7)]),
+            GraphAggregateValue::Value(GraphValue::List([HIGH].map(GraphValue::Vertex).into())),
+            scalar_list(&[Some(4), Some(4), Some(14)]),
+        ]
+    );
+}
+
+#[test]
 fn post_group_missing_properties_are_null_and_unavailable_readers_keep_the_typed_error() {
     for suffix in ["", " LIMIT 0"] {
         let query = prepare_output(&format!(
