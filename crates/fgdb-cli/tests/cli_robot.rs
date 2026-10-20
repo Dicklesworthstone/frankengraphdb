@@ -2069,7 +2069,9 @@ fn cli_pinned_timestamp_round_trips_through_subprocess_recovery() {
         // relational stage, not only the database read and final rendering.
         for (query, expected, seq) in [
             (
-                "MATCH (p:Person) WITH p.born AS born RETURN [born] AS value ORDER BY value DESC LIMIT 1".to_owned(),
+                // Ascending: a list holding NULL sorts after [timestamp], as
+                // eager sorting has always done and spill does since e27e7cf3.
+                "MATCH (p:Person) WITH p.born AS born RETURN [born] AS value ORDER BY value ASC LIMIT 1".to_owned(),
                 format!(r#"[[{{"type":"list","value":[{expected_cell}]}}]]"#),
                 advanced,
             ),

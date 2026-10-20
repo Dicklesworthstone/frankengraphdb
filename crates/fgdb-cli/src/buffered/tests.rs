@@ -1102,9 +1102,13 @@ fn buffered_external_admission_limits_and_late_expressions_never_publish_partial
                 "UNWIND [] AS item MATCH (n) RETURN item,n LIMIT 0",
                 Some(("--max-snapshot-records", "0")),
             ),
+            // The MATCH is correlated per UNWIND row since a61ef1dc, so the
+            // occurrences are the 3 inputs plus their 3 matches (6), not the
+            // 9-row cross product. 5 refuses only because the matches are
+            // charged beyond the inputs.
             (
                 "UNWIND [2,3,11] AS wanted MATCH (n {p:wanted}) RETURN n LIMIT 0",
-                Some(("--max-spill-rows", "8")),
+                Some(("--max-spill-rows", "5")),
             ),
             (
                 "UNWIND [1,2] AS item MATCH (n) RETURN item+n.p AS value ORDER BY value",

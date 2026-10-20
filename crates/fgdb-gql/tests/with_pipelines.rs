@@ -998,9 +998,10 @@ fn a_with_where_reads_properties_of_projected_vertices_through_hidden_boundary_c
 /// after a page, and a terminal RETURN. `WITH n ... RETURN n.p` equals the
 /// same query with `n.p` projected as an explicit WITH column, or read before
 /// the WITH, and an unaliased `n.p` is named `p` as in a graph RETURN. Each
-/// UNION arm owns its own scope. A later stage, a later MATCH part, and the
-/// private names stay out of scope, including a later row that happens to
-/// have the boundary row's width.
+/// UNION arm owns its own scope. A later stage and the private names stay out
+/// of scope, including a later row that happens to have the boundary row's
+/// width. A required later MATCH part re-matches the carried vertex instead
+/// (fgdb-dhcfo).
 #[test]
 fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
     let values = [1, 2, 2, 3, 4].map(CanonicalScalar::Int);
@@ -1079,7 +1080,6 @@ fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
         "MATCH (n) WITH n RETURN n.p, n.p",
         "MATCH (n) WITH n WITH n RETURN n.p",
         "MATCH (n) WITH n UNWIND [1] AS x RETURN n.p",
-        "MATCH (n) WITH n AS kept MATCH (m) RETURN kept.p AS v",
         // Two columns again after the second WITH, as the boundary row had
         // (n plus the hidden n.p): the hidden read must not resolve to `a`.
         "MATCH (n) WITH n ORDER BY n.p WITH n, 1 AS a RETURN n.p",
@@ -1089,6 +1089,13 @@ fn a_with_scope_reads_carried_properties_in_its_pages_and_terminal_return() {
             "{text}"
         );
     }
+    // fgdb-dhcfo: a required later MATCH part re-matches the carried vertex
+    // by identity, so `kept.p` reads that vertex's own value. The rows equal
+    // the two-pattern MATCH.
+    assert_eq!(
+        rows("MATCH (n) WITH n AS kept MATCH (m) RETURN kept.p AS v ORDER BY v"),
+        rows("MATCH (n), (m) RETURN n.p AS v ORDER BY v")
+    );
 }
 
 /// openCypher (TCK WithWhere7 [1], WithOrderBy2 [21], TriadicSelection1):
