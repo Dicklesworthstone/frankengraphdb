@@ -267,7 +267,12 @@ fn wide_ranges_bound_setup_and_examine_one_identity_per_cooperative_step() {
     for count in [128, 4096] {
         let mut rows = vec![row(VId(0), 1, CanonicalScalar::Bool(false))];
         rows.extend((0..count).map(|at| row(VId(at + 1), 1, CanonicalScalar::Int(at as i64))));
-        let patches = vec![patch(rows)];
+        // One patch holds at most MAX_PATCH_ROWS rows (a format ceiling), so
+        // the history spans as many patches as it needs.
+        let patches: Vec<_> = rows
+            .chunks(fgdb_strata::vertex::MAX_PATCH_ROWS as usize)
+            .map(|chunk| patch(chunk.to_vec()))
+            .collect();
         let index = PropertyEqualityIndex::build(&patches);
         let mut source = RangeCandidates::new(bounds(&constraints));
         let mut work = 0;

@@ -73,13 +73,16 @@ fn numeric_history_and_other_properties_do_not_disable_selective_prefixes() {
         1,
         CanonicalScalar::bytes(vec![1]).unwrap(),
     ));
-    let patches = vec![
-        resolved_patch(rows),
-        resolved_patch(vec![
-            row(VId(0), 2, text("Ab now")),
-            row(VId(3000), 99, text("Ab future")),
-        ]),
-    ];
+    // One patch holds at most MAX_PATCH_ROWS rows (a format ceiling), so the
+    // history spans as many patches as it needs, then the newer one.
+    let mut patches: Vec<_> = rows
+        .chunks(fgdb_strata::vertex::MAX_PATCH_ROWS as usize)
+        .map(|chunk| resolved_patch(chunk.to_vec()))
+        .collect();
+    patches.push(resolved_patch(vec![
+        row(VId(0), 2, text("Ab now")),
+        row(VId(3000), 99, text("Ab future")),
+    ]));
     let index = PropertyEqualityIndex::build(&patches);
     let expected: Vec<_> = patches
         .iter()
