@@ -377,6 +377,63 @@ fn query_refuses_a_write_statement_without_mutating_or_echoing_it() {
     assert!(rows(&count)[0].contains("\"type\":\"count\",\"value\":\"0\""));
 }
 
+/// fgdb-694ga: in a write RETURN, `[x IN collect(n) | x.q]` names post-write
+/// values that no element reader there serves. It is a typed query error
+/// that publishes nothing, never the pre-write snapshot's NULL. The same
+/// write returning `collect(n.q)` sees its own assignments, and a read
+/// answers the element form.
+#[test]
+fn a_write_return_reads_collected_element_properties_only_as_a_typed_refusal() {
+    let fixture = Fixture::new("write-collect");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let run = |operation: &str, text: &str| {
+        fixture.robot(operation, &["--property", "q=2", text])
+    };
+    succeeded(
+        &run("write", "CREATE (:Person {id: 1}), (:Person {id: 2})"),
+        "written",
+    );
+    let before = directory_bytes(&fixture.db());
+    refused(
+        &run(
+            "write",
+            "MATCH (n:Person) SET n.q = n.id * 3 RETURN [x IN collect(n) | x.q] AS qs",
+        ),
+        3,
+        "query",
+    );
+    assert_eq!(directory_bytes(&fixture.db()), before);
+    let unchanged = run("query", "MATCH (n:Person) RETURN n.q AS q");
+    succeeded(&unchanged, "rows");
+    assert_eq!(
+        rows(&unchanged),
+        [r#"{"v":1,"event":"row","cells":[{"type":"null"}]}"#; 2]
+    );
+    let read = run(
+        "query",
+        "MATCH (n:Person) WITH n ORDER BY n.id RETURN [x IN collect(n) | x.id] AS ids",
+    );
+    succeeded(&read, "rows");
+    assert_eq!(
+        rows(&read),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"list","value":[{"type":"int","value":"1"},{"type":"int","value":"2"}]}]}"#
+        ]
+    );
+    let written = run(
+        "write",
+        "MATCH (n:Person) SET n.q = n.id * 3 RETURN collect(n.q) AS qs",
+    );
+    succeeded(&written, "written");
+    let mut qs: Vec<_> = rows(&written)[0]
+        .split("\"value\":\"")
+        .skip(1)
+        .map(|cell| cell[..cell.find('"').unwrap()].to_owned())
+        .collect();
+    qs.sort();
+    assert_eq!(qs, ["3", "6"]);
+}
+
 #[test]
 fn query_does_not_silently_create_a_missing_database() {
     let fixture = Fixture::new("missing");
