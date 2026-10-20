@@ -9,6 +9,7 @@
 use super::*;
 use crate::algebra::{IntegerComparison, MAX_PATTERN_PREDICATES};
 
+pub(super) mod factors;
 mod maintained;
 
 type Key = (usize, usize);
@@ -434,21 +435,30 @@ pub(super) fn copy_pair<E>(
     columns: Option<&[usize]>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<GraphValueRow, E> {
+    if let Some(columns) = columns {
+        copy_cells(
+            columns.iter().map(|&column| {
+                if column < left.len() {
+                    &left.values()[column]
+                } else {
+                    &right.values()[column - left.len()]
+                }
+            }),
+            control,
+        )
+    } else {
+        copy_cells(left.values().iter().chain(right.values()), control)
+    }
+}
+
+fn copy_cells<'a, E>(
+    cells: impl IntoIterator<Item = &'a GraphValue>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<GraphValueRow, E> {
     control(GlaExecutionEvent::ScratchEntry)?;
     let mut values = Vec::new();
-    if let Some(columns) = columns {
-        for &column in columns {
-            let value = if column < left.len() {
-                &left.values()[column]
-            } else {
-                &right.values()[column - left.len()]
-            };
-            values.push(projection::copy_value(value, control)?);
-        }
-    } else {
-        for value in left.values().iter().chain(right.values()) {
-            values.push(projection::copy_value(value, control)?);
-        }
+    for value in cells {
+        values.push(projection::copy_value(value, control)?);
     }
     Ok(GraphValueRow::from_owned_values(values))
 }

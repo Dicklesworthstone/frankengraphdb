@@ -14,7 +14,7 @@ use crate::algebra::{GraphValueRow, MAX_PATTERN_VERTICES, PreparedGraphPattern};
 use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphIntegerError, GraphMutationValue, GraphSetColumnType, GraphSetExecutionError,
-    GraphSetProjection, GraphSetValue, PreparedGraphSet,
+    GraphSetProjection, GraphSetSource, GraphSetValue, PreparedGraphSet,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
@@ -600,6 +600,19 @@ impl PreparedGraphInsert {
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
+        self.execute_governed_with_source(policy, source, allocate, checkpoint)
+    }
+
+    /// The same atomic collector with an explicit graph source owner. The host
+    /// may supply checked factors of one admitted pattern; ordinary closures
+    /// continue to use [`Self::execute_governed`] with identical semantics.
+    pub fn execute_governed_with_source<E, A, C>(
+        &self,
+        policy: GraphInsertPolicy,
+        source: impl GraphSetSource<E, C>,
+        allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
         collect::execute(self, policy, None, None, source, allocate, checkpoint)
             .map(|(batch, _)| batch)
     }
@@ -609,10 +622,7 @@ impl PreparedGraphInsert {
         policy: GraphInsertPolicy,
         bindings: &[crate::insertion_query::GraphInsertBinding],
         property_catalog: Option<&crate::ReverseSymbolCatalog>,
-        source: impl FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        source: impl GraphSetSource<E, C>,
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> ReturningInsert<E, A, C> {

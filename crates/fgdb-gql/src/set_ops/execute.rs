@@ -100,7 +100,21 @@ impl<Checkpoint> Meter<Checkpoint> {
         execution: &GqlQueryExecution<GraphValueRow>,
         operand: usize,
     ) -> SetResult<(), E, C> {
-        if u64::try_from(execution.value.len()).ok() != Some(execution.rows.result_rows) {
+        self.absorb_statistics(
+            execution.rows,
+            execution.evaluator,
+            u64::try_from(execution.value.len()).ok(),
+            operand,
+        )
+    }
+    fn absorb_statistics<E, C>(
+        &mut self,
+        rows: GqlExecutionStats,
+        evaluator: GlaExecutionStats,
+        retained: Option<u64>,
+        operand: usize,
+    ) -> SetResult<(), E, C> {
+        if retained != Some(rows.result_rows) {
             return Err(GqlQueryError::Source(
                 GraphSetExecutionError::InvalidSourceStatistics { operand },
             ));
@@ -108,7 +122,7 @@ impl<Checkpoint> Meter<Checkpoint> {
         let snapshot_records = self
             .rows
             .snapshot_records
-            .checked_add(execution.rows.snapshot_records)
+            .checked_add(rows.snapshot_records)
             .ok_or_else(|| {
                 GqlQueryError::Source(GraphSetExecutionError::AccountingOverflow {
                     dimension: GqlBudgetDimension::SnapshotRecords,
@@ -120,13 +134,13 @@ impl<Checkpoint> Meter<Checkpoint> {
             .map_err(GqlQueryError::Rows)?;
         let work_units = evaluator_sum(
             self.evaluator.work_units,
-            execution.evaluator.work_units,
+            evaluator.work_units,
             self.policy.evaluator.max_work_units,
             GlaLimitDimension::WorkUnits,
         )?;
         let scratch_entries = evaluator_sum(
             self.evaluator.scratch_entries,
-            execution.evaluator.scratch_entries,
+            evaluator.scratch_entries,
             self.policy.evaluator.max_scratch_entries,
             GlaLimitDimension::ScratchEntries,
         )?;
@@ -227,15 +241,21 @@ where
     if page::supports(query) {
         return page::collect(query, source, meter, operand);
     }
-    let rows = if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+    let rows = if let Some(inputs @ (left, right, code, projection)) = query.filtered_cross_inputs()
+    {
         // Admit and finish both original children once, even if the left bag
         // is empty. Do not allocate rejected Cartesian candidate rows.
         let left = run(left, source, meter, operand)?;
-        let right = run(right, source, meter, operand)?;
-        let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
-        selected_cross::collect(&left, &right, code, columns.as_deref(), &mut |event| {
-            meter.event(event)
-        })?
+        if let Some(rows) = selected_cross::factors::collect(&left, inputs, source, meter, operand)?
+        {
+            rows
+        } else {
+            let right = run(right, source, meter, operand)?;
+            let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
+            selected_cross::collect(&left, &right, code, columns.as_deref(), &mut |event| {
+                meter.event(event)
+            })?
+        }
     } else {
         run_node(query, source, meter, operand)?
     };
@@ -294,14 +314,26 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.absorb(&execution, at)?;
-    for row in &execution.value {
+    finish_source_rows(execution.value, &query.types, at, meter)
+}
+
+fn finish_source_rows<E, C, Checkpoint>(
+    mut rows: Vec<GraphValueRow>,
+    types: &[GraphSetColumnType],
+    at: usize,
+    meter: &mut Meter<Checkpoint>,
+) -> SetResult<Vec<GraphValueRow>, E, C>
+where
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    for row in &rows {
         meter.event(GlaExecutionEvent::ScratchEntry)?;
-        if row.len() != query.types.len() {
+        if row.len() != types.len() {
             return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
                 operand: at,
             }));
         }
-        for (value, kind) in row.values().iter().zip(&query.types) {
+        for (value, kind) in row.values().iter().zip(types) {
             meter.event(GlaExecutionEvent::Work)?;
             if !kind.accepts(value) {
                 return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
@@ -310,7 +342,6 @@ where
             }
         }
     }
-    let mut rows = execution.value;
     merge::sort(
         &mut rows,
         &mut |event| meter.event(event),

@@ -857,6 +857,55 @@ impl AdmissionUsage {
     }
 }
 
+/// Evaluate the physical factors of one already admitted original source.
+/// Source records are reported once. Admission, both evaluators and retained
+/// rows share one work/scratch allowance, even when either factor is empty.
+/// The caller retains the original admission and witnesses until both succeed.
+pub(crate) fn execute_pattern_factors<E, C>(
+    request: &fgdb_gql::PreparedGraphPatternFactors<'_>,
+    snapshot_records: u64,
+    policy: fgdb_gql::GqlQueryPolicy,
+    mut usage: AdmissionUsage,
+    mut evaluate: impl FnMut(
+        &PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryError<E, C>,
+    >,
+) -> Result<fgdb_gql::GraphPatternFactorExecution, fgdb_gql::GqlQueryError<E, C>> {
+    let mut value = [Vec::new(), Vec::new()];
+    let mut result_rows = 0_u64;
+    for (factor, rows) in request.factors().iter().zip(&mut value) {
+        let result = evaluate(factor, usage.remaining(policy));
+        let execution = usage.finish(policy, result)?;
+        debug_assert_eq!(execution.rows.snapshot_records, snapshot_records);
+        debug_assert_eq!(execution.rows.result_rows, execution.value.len() as u64);
+        // Both vectors coexist in this address space; their row count fits u64.
+        result_rows = result_rows
+            .checked_add(execution.value.len() as u64)
+            .expect("retained factor rows fit u64");
+        usage.work_units = execution.evaluator.work_units;
+        usage.scratch_entries = execution.evaluator.scratch_entries;
+        *rows = execution.value;
+    }
+    policy
+        .rows
+        .check(fgdb_gql::GqlBudgetDimension::ResultRows, result_rows)
+        .map_err(fgdb_gql::GqlQueryError::Rows)?;
+    Ok(fgdb_gql::GraphPatternFactorExecution {
+        value,
+        rows: fgdb_gql::GqlExecutionStats {
+            snapshot_records,
+            result_rows,
+        },
+        evaluator: fgdb_gql::GlaExecutionStats {
+            work_units: usage.work_units,
+            scratch_entries: usage.scratch_entries,
+        },
+    })
+}
+
 #[cfg(test)]
 mod admission_meter_tests {
     use super::*;
