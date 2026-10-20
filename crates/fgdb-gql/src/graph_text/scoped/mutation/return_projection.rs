@@ -1917,7 +1917,11 @@ impl<'a> Parser<'a> {
         &self,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<bool, GraphPatternTextError> {
-        if !list_operand_at(self.current, &self.lexer, row)? {
+        // A map literal or a name's subscript or slice is a whole result too
+        // (case_has_list routes its CASE here): the value reader reads it.
+        if !list_operand_at(self.current, &self.lexer, row)?
+            && !composite_result_at(self.current, &self.lexer)?
+        {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();
