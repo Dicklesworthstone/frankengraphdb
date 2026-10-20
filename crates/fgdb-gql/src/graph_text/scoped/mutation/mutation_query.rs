@@ -522,7 +522,8 @@ impl<'a> ParsedMutationReturn<'a> {
         {
             return Ok(None);
         }
-        let Some(index) = row.iter().position(|(name, _)| name.text == word) else {
+        let visible = parser.visible_width(row);
+        let Some(index) = row[..visible].iter().position(|(name, _)| name.text == word) else {
             return Ok(None);
         };
         let kind = row[index].1;
@@ -795,6 +796,13 @@ impl<'a> Parser<'a> {
             output = items.output;
             spellings = items.spellings;
         }
+        // Pages address the completed projection, not its incoming WITH row.
+        // Equal widths do not make those two column spaces interchangeable.
+        let input_boundary = if row.is_some() {
+            self.boundary_reads.take()
+        } else {
+            None
+        };
         if let Some(ReadStageTemplate::Page {
             order,
             offset,
@@ -807,7 +815,10 @@ impl<'a> Parser<'a> {
             returning.count = count;
         }
         if head {
-            let tail = self.write_tail(&mut returning, columns, scope, output)?;
+            if row.is_some() {
+                self.boundary_reads = input_boundary;
+            }
+            let tail = self.write_tail(&mut returning, columns, scope, output, row)?;
             returning.tail = Some(tail);
         }
         Ok(returning)
@@ -817,16 +828,19 @@ impl<'a> Parser<'a> {
     /// carries its post-write properties through the WITH's WHERE/pages,
     /// terminal RETURN or first UNWIND expression. Hidden grouping keys are
     /// functions of kept identities; no summary becomes an element binding.
-    /// UNWIND drops hidden cells, retaining visible items and its own output.
+    /// A row-fed write uses its admitted incoming field slots, never graph
+    /// projection indices or a fresh read. UNWIND drops the hidden cells.
     fn write_tail(
         &mut self,
         returning: &mut ParsedMutationReturn<'a>,
         columns: &mut Vec<Projection<'a>>,
         scope: ReturnScope,
         mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<Vec<ReadStageTemplate>, GraphMutationTextError> {
         let visible = schema.len();
         let mut reads = Vec::new();
+        let input_boundary = self.boundary_reads.take();
         for (alias, key) in self.write_tail_reads(&schema)? {
             let Some(at) = schema[..visible]
                 .iter()
@@ -845,14 +859,58 @@ impl<'a> Parser<'a> {
             else {
                 continue;
             };
-            let variable = columns[input].variable;
-            let column = returning.map_input(
-                self,
-                columns,
-                scope,
-                variable,
-                ReturnMapInput::Property(key),
-            )?;
+            let column = if let Some(row) = row {
+                let &(source, kind) = row.get(input).ok_or_else(|| {
+                    error(key.at, GraphPatternTextErrorKind::UnknownVariable)
+                })?;
+                if kind == GraphSetColumnType::Edge && scope.deleting {
+                    return Err(error(
+                        key.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "a vertex property after DETACH DELETE, which may cascade to edges",
+                        ),
+                    )
+                    .into());
+                }
+                let current = input_boundary
+                    .as_ref()
+                    .filter(|boundary| boundary.width == row.len() && input < boundary.visible)
+                    .and_then(|boundary| {
+                        boundary.reads.iter().find_map(|&(name, field, column)| {
+                            (name == source.text && field.text == key.text && column < row.len())
+                                .then_some(column)
+                        })
+                    })
+                    .ok_or_else(|| {
+                        error(
+                            key.at,
+                            GraphPatternTextErrorKind::Expected(
+                                "a property carried by the incoming WITH row",
+                            ),
+                        )
+                    })?;
+                returning.column(
+                    Binding::Property {
+                        target: input,
+                        key,
+                        current,
+                    },
+                    key,
+                    GraphSetColumnType::Stored,
+                )?
+            } else {
+                let variable = columns
+                    .get(input)
+                    .ok_or_else(|| error(key.at, GraphPatternTextErrorKind::UnknownVariable))?
+                    .variable;
+                returning.map_input(
+                    self,
+                    columns,
+                    scope,
+                    variable,
+                    ReturnMapInput::Property(key),
+                )?
+            };
             let column = match &mut returning.grouping {
                 Some(group) => group.hoist_property(&mut returning.projection, column, key.at)?,
                 None => column,
@@ -1069,7 +1127,7 @@ pub(super) fn push_tail_read<'a>(
 }
 
 /// Single-statement framing on the script lexer: one terminal semicolon is
-/// accepted, and a second statement refuses (naming `shape`) before any
+/// accepted, and a second statement, refuses (naming `shape`) before any
 /// catalog callback.
 pub(super) fn statement_body<'s>(
     statement: &'s str,
