@@ -33,6 +33,16 @@ fn relation(text: &str) -> PreparedGraphSet {
         .into()
 }
 
+/// A relation whose RETURN computes a column (`0 AS value`, `r.missing AS
+/// value`): the graph-text RETURN projects only bindings and properties, so
+/// these go through the set compiler, whose RETURN keeps every occurrence.
+fn computed(text: &str) -> PreparedGraphSet {
+    PreparedGraphSetText::prepare(text, resolve)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+}
+
 // Literal nested-loop oracle: no production matcher, key comparator, or join
 // projector decides witness truth, multiplicity, or outer null extensions.
 fn oracle(
@@ -212,10 +222,10 @@ fn filtered_merge_distinguishes_duplicate_products_null_keys_and_unknown_on() {
             for unknown in [false, true] {
                 let key = if null_key { "missing" } else { "p" };
                 let value = if unknown { "r.missing" } else { "1" };
-                let left = relation(&format!(
+                let left = computed(&format!(
                     "MATCH (a)-[r:R]->(b) RETURN a.{key} AS k,0 AS value"
                 ));
-                let right = relation(&format!(
+                let right = computed(&format!(
                     "MATCH (a)-[r:R]->(b) RETURN b.{key} AS k,{value} AS value"
                 ));
                 let key = |k| (!null_key).then_some(k);
@@ -497,7 +507,9 @@ fn filtered_merge_selective_keys_avoid_all_pairs_when_on_rejects_every_candidate
         let mut view = view(&contexts.commit(), &vfs, &pool).await;
         let values = (0..32).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
         let input = PreparedGraphSetText::prepare(
-            &format!("UNWIND [{values}] AS n RETURN n AS k,n AS value"),
+            // An UNWIND column is Any, never an equality key; `n * 1` is a
+            // Scalar column with the same values.
+            &format!("UNWIND [{values}] AS n RETURN n * 1 AS k,n * 1 AS value"),
             resolve,
         )
         .unwrap()

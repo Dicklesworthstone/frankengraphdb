@@ -152,7 +152,10 @@ const CALL: &str = "CALL hybrid.search(text => 'graph', text_property => 'body',
     RETURN node, score, vector_rank, text_rank, graph_rank, graph_hops, vector_distance, text_score";
 
 fn prepare(statement: &str, parameters: &GqlParameters) -> PreparedGraphSet {
-    PreparedGraphSetText::prepare(statement, symbols)
+    // $eligible is a List: prepare with the arguments' own types, or the
+    // untyped parameter defaults to Int64 and binding refuses the List.
+    let declarations: Vec<_> = parameters.parameter_types().collect();
+    PreparedGraphSetText::prepare_with_parameter_types(statement, &declarations, symbols)
         .unwrap()
         .bind_parameters(parameters)
         .unwrap()
