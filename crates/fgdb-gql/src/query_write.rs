@@ -7,6 +7,7 @@
 //! repeated MERGE keys see earlier creates without rerunning the source MATCH.
 
 mod execution;
+mod values;
 pub use execution::{GraphQueryWriteExecution, GraphQueryWriteExecutionError};
 
 use crate::algebra::{GraphValue, GraphValueRow};
@@ -23,7 +24,11 @@ use fgdb_types::CanonicalScalar;
 pub enum GraphQueryWriteBuildError {
     MissingColumn { parameter: usize },
     NonScalarColumn { parameter: usize, column: usize },
-    NonScalarParameter { parameter: usize },
+    CollectionColumn {
+        parameter: usize,
+        column: usize,
+        expected: GqlParameterType,
+    },
 }
 impl core::fmt::Display for GraphQueryWriteBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -45,6 +50,11 @@ pub enum GraphQueryWriteBindError<C = Infallible> {
     TooManyStatements { limit: usize, observed: u128 },
     RowShape { row: usize },
     NonScalar { row: usize, column: usize },
+    CollectionValue {
+        row: usize,
+        column: usize,
+        expected: GqlParameterType,
+    },
     InvalidValue { row: usize, column: usize },
     Parameter {
         row: usize,
@@ -64,6 +74,9 @@ impl<C: core::fmt::Display> core::fmt::Display for GraphQueryWriteBindError<C> {
             Self::RowShape { row } => write!(f, "query-fed write row {row} has the wrong width"),
             Self::NonScalar { row, column } => {
                 write!(f, "query-fed write row {row}, column {column} is not scalar")
+            }
+            Self::CollectionValue { row, column, expected } => {
+                write!(f, "query-fed write row {row}, column {column} is not {expected:?} or null")
             }
             Self::InvalidValue { row, column } => {
                 write!(f, "query-fed write row {row}, column {column} exceeds value bounds")
@@ -95,10 +108,11 @@ impl<C: core::error::Error + 'static> core::error::Error for GraphQueryWriteBind
 /// A read query followed by a write script once per source occurrence.
 ///
 /// Each script parameter must name a source projection. Extra source columns
-/// are allowed and are not copied into arguments. Scalar, Stored and Any
-/// columns may supply scalar parameters; concrete element/collection domains
-/// refuse during preparation, including when the eventual source is empty.
-/// Containers in an open domain refuse at binding, never coerce to scalars.
+/// are allowed and are not copied into arguments. Scalar, list and map arguments
+/// retain their native parameter domains. Concrete incompatible source domains
+/// refuse even for empty sources; Stored and Any columns are checked per row.
+/// Collection parameters admit canonical null under the native nullable law,
+/// never substitute an empty container, and never coerce a scalar or identity.
 /// A global argument can be carried by projecting a bound read parameter.
 ///
 /// This is an embedded composition contract, not a new native text grammar.
@@ -127,19 +141,20 @@ impl PreparedGraphQueryWrite {
     ) -> Result<Self, GraphQueryWriteBuildError> {
         let mut columns = Vec::with_capacity(script.parameter_schema().len());
         for (parameter, spec) in script.parameter_schema().iter().enumerate() {
-            if matches!(spec.parameter_type, GqlParameterType::List | GqlParameterType::Map) {
-                return Err(GraphQueryWriteBuildError::NonScalarParameter { parameter });
-            }
             let column = source
                 .columns()
                 .iter()
                 .position(|name| name == &spec.name)
                 .ok_or(GraphQueryWriteBuildError::MissingColumn { parameter })?;
-            if !matches!(
-                source.column_types()[column],
-                GraphSetColumnType::Scalar | GraphSetColumnType::Stored | GraphSetColumnType::Any
-            ) {
-                return Err(GraphQueryWriteBuildError::NonScalarColumn { parameter, column });
+            if !values::accepts_column(spec.parameter_type, source.column_types()[column]) {
+                return Err(match spec.parameter_type {
+                    GqlParameterType::List | GqlParameterType::Map => {
+                        GraphQueryWriteBuildError::CollectionColumn {
+                            parameter, column, expected: spec.parameter_type,
+                        }
+                    }
+                    _ => GraphQueryWriteBuildError::NonScalarColumn { parameter, column },
+                });
             }
             columns.push(column);
         }
@@ -175,9 +190,11 @@ impl PreparedGraphQueryWrite {
     }
 
     /// Count admission precedes allocation and row traversal. Callbacks precede
-    /// retained argument vectors, maps and scalar payloads, each native binding
-    /// boundary, and final release. The total argument transcript is capped at
-    /// the same 4 MiB as UNWIND, including repeated values and names.
+    /// retained argument vectors, maps, payloads and each collection-copy event,
+    /// each native binding boundary, and final release. Before copying a cell,
+    /// its native encoded size and the complete argument prefix are admitted.
+    /// The same 4 MiB transcript ceiling as UNWIND includes names and repeats;
+    /// native scalar/list/map bounds remain independently effective.
     ///
     /// The caller must supply rows from source() under one pinned read, not
     /// execute the source again between records. This binder itself does no
@@ -212,17 +229,15 @@ impl PreparedGraphQueryWrite {
             }
             let mut values = GqlParameters::new();
             for (&column, spec) in self.columns.iter().zip(self.script.parameter_schema()) {
-                let cell = &input.values()[column];
-                let GraphValue::Scalar(value) = cell else {
-                    return Err(GraphQueryWriteBindError::NonScalar { row, column });
-                };
-                let bytes = cell.canonical_byte_len()
-                    .map_err(|_| GraphQueryWriteBindError::InvalidValue { row, column })?;
-                let entries = 1 + (bytes as u64)
-                    .div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES as u64);
-                retain(Some(row), entries)?;
-                let parameter = scalar_parameter(value, spec.parameter_type)
-                    .map_err(|source| GraphQueryWriteBindError::Parameter { row, column, source })?;
+                let parameter = values::bind_cell(
+                    &input.values()[column],
+                    spec.parameter_type,
+                    &spec.name,
+                    row,
+                    column,
+                    transcript_bytes + values.canonical_byte_len() as u128,
+                    &mut |entries| retain(Some(row), entries),
+                )?;
                 values.insert(spec.name.clone(), parameter)
                     .map_err(|source| GraphQueryWriteBindError::Parameter { row, column, source })?;
             }
