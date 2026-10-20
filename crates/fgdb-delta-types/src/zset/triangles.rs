@@ -362,6 +362,21 @@ impl<V: Ord> TriangleUpdate<'_, V> {
     pub fn total(&self) -> &ZWeight {
         &self.total
     }
+
+    /// Old and prepared presence for each normalized changed unordered pair.
+    /// This includes self-loops and multiplicity-only replacements whose two
+    /// presence bits are equal. Consumers can maintain exact distinct degrees
+    /// without a second edge-support table or a scan of retained adjacency.
+    /// The iterator allocates nothing; callers meter each inspected record.
+    pub fn edge_presence_updates(&self) -> impl Iterator<Item = (&(V, V), bool, bool)> {
+        self.weights.iter().map(|(edge, next)| {
+            (
+                edge,
+                self.owner.edges.weight(edge).is_some(),
+                !next.is_zero(),
+            )
+        })
+    }
 }
 impl<V: Ord + Clone> TriangleUpdate<'_, V> {
     pub fn commit(self) -> ZSet<(V, V, V)> {

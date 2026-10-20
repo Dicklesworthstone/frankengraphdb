@@ -1,6 +1,8 @@
-//! Native per-vertex triangle counts over the existing committed topology and
-//! exact DISTINCT triangle derivative. Only vertex counters and native rows
-//! are retained here; the typed triangle-triple API keeps its separate profile.
+//! Native per-vertex triangle counts and clustering coefficients over the
+//! existing committed topology and exact DISTINCT triangle derivative. Only
+//! vertex counters and native rows are retained here; the typed triangle-triple
+//! API keeps its separate profile. Distinct degrees use the same authoritative
+//! prepared edge support, including multiplicity-only and opposite-edge ticks.
 //! Bootstrap still owns the kernel's transient complete triangle derivative.
 
 use super::*;
@@ -9,7 +11,7 @@ use fgdb_delta_types::zset::committed::CommittedEdgeInput;
 use fgdb_delta_types::zset::triangles::{IncrementalTriangles, TriangleError, TriangleQuantifier};
 use fgdb_delta_types::{LimbLimit, ZWeight};
 use fgdb_gql::algebra::GraphValue;
-use fgdb_types::CanonicalScalar;
+use fgdb_types::{CanonicalF64, CanonicalScalar};
 use std::collections::BTreeMap;
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
@@ -17,8 +19,44 @@ type Pair = (VId, VId);
 type Triple = (VId, VId, VId);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Output {
+    Triangles,
+    Clustering,
+}
+
+impl Output {
+    fn value(self, counters: Counters) -> Result<CanonicalScalar, StandingQueryFailure> {
+        match self {
+            Self::Triangles => Ok(CanonicalScalar::Int(
+                i64::try_from(counters.triangles).map_err(|_| StandingQueryFailure::Arithmetic)?,
+            )),
+            Self::Clustering => {
+                // Preserve Prism's exact-count profile: widen both integer
+                // products before converting each once, then perform one
+                // division. In particular, do not multiply a rounded ratio.
+                let score = if counters.triangles == 0 || counters.degree < 2 {
+                    0.0
+                } else {
+                    let degree = u128::from(counters.degree);
+                    let denominator = degree
+                        .checked_mul(degree - 1)
+                        .ok_or(StandingQueryFailure::Arithmetic)?;
+                    let numerator = u128::from(counters.triangles) * 2;
+                    if numerator > denominator {
+                        return Err(StandingQueryFailure::InvalidDelta);
+                    }
+                    numerator as f64 / denominator as f64
+                };
+                Ok(CanonicalScalar::Float(CanonicalF64::new(score)))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Counters {
-    triangles: i64,
+    triangles: u64,
+    degree: u64,
     // Physical selected-edge incidence, including both ends of self-loops.
     // This is liveness support, not the projected simple-graph degree.
     incidences: i128,
@@ -27,6 +65,7 @@ struct Counters {
 #[derive(Debug, PartialEq, Eq)]
 struct Counts {
     vertices: BTreeMap<VId, Counters>,
+    output: Output,
     columns: [String; 2],
     rows: ZSet<GraphValueRow>,
     last_delta: Option<ZSet<GraphValueRow>>,
@@ -35,6 +74,7 @@ struct Counts {
 struct Change {
     live: bool,
     triangles: i128,
+    degree: i128,
     incidences: i128,
     next: Option<Counters>,
 }
@@ -54,6 +94,7 @@ fn changed<'a>(
         entry.insert(Change {
             live: old.is_some(),
             triangles: old.map_or(0, |value| i128::from(value.triangles)),
+            degree: old.map_or(0, |value| i128::from(value.degree)),
             incidences: old.map_or(0, |value| value.incidences),
             next: None,
         });
@@ -65,31 +106,40 @@ fn changed<'a>(
 
 fn row(
     vertex: VId,
-    triangles: i64,
+    value: CanonicalScalar,
     meter: &mut Meter<'_>,
 ) -> Result<GraphValueRow, StandingQueryFailure> {
     meter.units(ZSetEvent::ScratchEntry, 3)?;
     Ok(GraphValueRow::from_owned_values(vec![
         GraphValue::Vertex(vertex),
-        GraphValue::Scalar(CanonicalScalar::Int(triangles)),
+        GraphValue::Scalar(value),
     ]))
 }
 
 impl Counts {
-    fn new(meter: &mut Meter<'_>) -> Result<Self, StandingQueryFailure> {
+    fn new(output: Output, meter: &mut Meter<'_>) -> Result<Self, StandingQueryFailure> {
         meter.units(ZSetEvent::ScratchEntry, 8)?;
         Ok(Self {
             vertices: BTreeMap::new(),
-            columns: ["vertex".into(), "triangles".into()],
+            output,
+            columns: [
+                "vertex".into(),
+                match output {
+                    Output::Triangles => "triangles",
+                    Output::Clustering => "score",
+                }
+                .into(),
+            ],
             rows: ZSet::new(),
             last_delta: None,
         })
     }
 
-    fn prepare(
+    fn prepare<'a>(
         &mut self,
         vertices: &ZSet<VId>,
         edges: &ZSet<Pair>,
+        support: impl Iterator<Item = (&'a Pair, bool, bool)>,
         triangles: &ZSet<Triple>,
         meter: &mut Meter<'_>,
     ) -> Result<CountsUpdate<'_>, StandingQueryFailure> {
@@ -117,6 +167,20 @@ impl Counts {
                     .ok_or(StandingQueryFailure::Arithmetic)?;
             }
         }
+        for ((source, target), old, next) in support {
+            meter.charge(ZSetEvent::Work)?;
+            if source == target || old == next {
+                continue;
+            }
+            let weight = if next { 1 } else { -1 };
+            for vertex in [*source, *target] {
+                let change = changed(&mut changes, &self.vertices, vertex, meter)?;
+                change.degree = change
+                    .degree
+                    .checked_add(weight)
+                    .ok_or(StandingQueryFailure::Arithmetic)?;
+            }
+        }
         for ((a, b, c), weight) in triangles.iter() {
             meter.charge(ZSetEvent::Work)?;
             if !(a < b && b < c) {
@@ -140,10 +204,12 @@ impl Counts {
             // Include the eventual fixed-size map publication under this
             // preparation allowance; commit performs no recoverable work.
             meter.units(ZSetEvent::Work, 2)?;
-            if change.incidences < 0 || change.triangles < 0 {
+            if change.incidences < 0 || change.triangles < 0 || change.degree < 0 {
                 return Err(StandingQueryFailure::InvalidDelta);
             }
-            if !change.live && (change.incidences != 0 || change.triangles != 0) {
+            if !change.live
+                && (change.incidences != 0 || change.triangles != 0 || change.degree != 0)
+            {
                 // Selected-edge endpoints and incomplete selected-edge
                 // cascades refuse, including vertices with zero triangles.
                 return Err(StandingQueryFailure::InvalidDelta);
@@ -151,7 +217,9 @@ impl Counts {
             let old = self.vertices.get(vertex);
             change.next = if change.live {
                 Some(Counters {
-                    triangles: i64::try_from(change.triangles)
+                    triangles: u64::try_from(change.triangles)
+                        .map_err(|_| StandingQueryFailure::Arithmetic)?,
+                    degree: u64::try_from(change.degree)
                         .map_err(|_| StandingQueryFailure::Arithmetic)?,
                     incidences: change.incidences,
                 })
@@ -171,11 +239,16 @@ impl Counts {
                 }
                 _ => {}
             }
-            if old.map(|value| value.triangles) == change.next.map(|value| value.triangles) {
+            let old_value = old.map(|value| self.output.value(*value)).transpose()?;
+            let next_value = change
+                .next
+                .map(|value| self.output.value(value))
+                .transpose()?;
+            if old_value == next_value {
                 continue;
             }
-            if let Some(old) = old {
-                let old_row = row(*vertex, old.triangles, meter)?;
+            if let Some(old) = old_value {
+                let old_row = row(*vertex, old, meter)?;
                 if self.rows.weight(&old_row) != Some(&ZWeight::ONE) {
                     return Err(StandingQueryFailure::InvalidDelta);
                 }
@@ -185,8 +258,8 @@ impl Counts {
                     })
                     .map_err(zset_error)?;
             }
-            if let Some(next) = change.next {
-                let next_row = row(*vertex, next.triangles, meter)?;
+            if let Some(next) = next_value {
+                let next_row = row(*vertex, next, meter)?;
                 if self.rows.weight(&next_row).is_some() {
                     return Err(StandingQueryFailure::InvalidDelta);
                 }
@@ -270,6 +343,10 @@ fn triangle_error(error: TriangleError<StandingQueryFailure>) -> StandingQueryFa
 }
 
 impl State {
+    pub(super) fn output(&self) -> Output {
+        self.counts.output
+    }
+
     pub(super) fn columns(&self) -> &[String] {
         &self.counts.columns
     }
@@ -302,9 +379,13 @@ impl State {
             .triangles
             .prepare(&edges, LIMBS, &mut |event| meter.charge(event))
             .map_err(triangle_error)?;
-        let counts = self
-            .counts
-            .prepare(&vertices, &edges, triangles.delta(), meter)?;
+        let counts = self.counts.prepare(
+            &vertices,
+            &edges,
+            triangles.edge_presence_updates(),
+            triangles.delta(),
+            meter,
+        )?;
         (meter.checkpoint)()?;
         let _ = triangles.commit();
         counts.commit();
@@ -315,6 +396,7 @@ impl State {
     fn from_snapshot(
         snapshot: &crate::Snapshot,
         relation: RelationId,
+        output: Output,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
         let components::TopologyInput {
@@ -326,8 +408,14 @@ impl State {
         let pending = triangles
             .prepare(&edges, LIMBS, &mut |event| meter.charge(event))
             .map_err(triangle_error)?;
-        let mut counts = Counts::new(meter)?;
-        let sink = counts.prepare(&vertices, &edges, pending.delta(), meter)?;
+        let mut counts = Counts::new(output, meter)?;
+        let sink = counts.prepare(
+            &vertices,
+            &edges,
+            pending.edge_presence_updates(),
+            pending.delta(),
+            meter,
+        )?;
         (meter.checkpoint)()?;
         let _ = pending.commit();
         sink.commit();
@@ -350,6 +438,7 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         cx: &QueryCx,
         relation: RelationId,
+        output: Output,
         policy: GqlQueryPolicy,
     ) -> Result<State, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
@@ -364,7 +453,7 @@ impl<V: Vfs + Clone> Database<V> {
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            State::from_snapshot(&self.snapshot, relation, &mut meter)
+            State::from_snapshot(&self.snapshot, relation, output, &mut meter)
                 .map_err(StandingQueryError::Maintenance)
         })
     }

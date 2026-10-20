@@ -543,3 +543,213 @@ fn component_subscription_scope_and_projection_refusals_precede_registration() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn clustering_subscription_replays_degree_only_scores_empty_ticks_and_canonical_pages() {
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::{EId, VId};
+
+    let ((), report) = run_async_under_lab(0x79a0_03d1, |root| async move {
+        let (mut server, token, _) = served(&root, "subscription-clustering").await;
+        Arc::get_mut(server.databases.get_mut("test").unwrap())
+            .unwrap()
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Relation, "R", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let wide = 1_u128 << 100;
+        let mut seed = vertex(1);
+        for id in [2, 3, wide] {
+            seed.create_vertex(VId(id), vec![], vec![]);
+        }
+        for (eid, a, b) in [(1, 1, 2), (2, 2, 3), (3, 3, 1), (4, wide, wide)] {
+            seed.add_edge(EId(eid), VId(a), VId(b), vec![]);
+        }
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), seed)
+            .await
+            .unwrap();
+        let statement = request(
+            "SUBSCRIBE TO CALL fnx.clustering_coefficient(\
+             {relations:['R'],parallel:'collapse',self_loops:'keep'}) \
+             YIELD score AS local,vertex AS member RETURN local,member SKIP 1 LIMIT 3",
+        );
+        let mut subscription = success(subscribe(&root, db, &token, &statement).await);
+        assert_eq!(subscription.columns, ["local", "member"]);
+        let row = |vertex, score| vec![WireValue::Float(score), WireValue::Vertex(vertex)];
+        let initial = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert!(initial.batch.is_snapshot());
+        // The CALL is canonically sorted in score,member order before RETURN.
+        // Its zero-score wide isolate is skipped; all three triangle vertices remain.
+        assert_eq!(
+            initial.entries,
+            vec![(1, row(1, 1.0)), (1, row(2, 1.0)), (1, row(3, 1.0))]
+        );
+
+        let mut expected = Vec::new();
+        for tick in 0..4 {
+            let mut change = fgdb::WriteBatch::new(RelationId(1));
+            match tick {
+                0 => {
+                    change.add_edge(EId(5), VId(1), VId(wide), vec![]);
+                }
+                1 => {
+                    change.add_edge(EId(6), VId(wide), VId(1), vec![]);
+                }
+                2 => {
+                    change.delete_edge(EId(5));
+                }
+                _ => {
+                    change.delete_vertex(VId(wide));
+                }
+            }
+            let at = db
+                .db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), change)
+                .await
+                .unwrap();
+            expected.push(at);
+        }
+        let repeat = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert!(Arc::ptr_eq(&repeat.batch, &initial.batch));
+        assert_eq!(repeat.entries, initial.entries);
+        subscription
+            .consumer
+            .acknowledge(initial.batch.receipt())
+            .unwrap();
+        let mut after = initial.batch.frontier();
+        for (tick, at) in expected.into_iter().enumerate() {
+            let frame = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+            assert_eq!(
+                (frame.batch.from(), frame.batch.frontier()),
+                (Some(after), at)
+            );
+            match tick {
+                0 => {
+                    assert_eq!(
+                        frame.entries,
+                        vec![(1, row(1, 1.0 / 3.0)), (-1, row(1, 1.0))]
+                    );
+                    let WireValue::Float(score) = frame.entries[0].1[0] else {
+                        panic!("wire score");
+                    };
+                    assert_eq!(score.to_bits(), (1.0_f64 / 3.0).to_bits());
+                }
+                1 | 2 => assert!(
+                    frame.entries.is_empty(),
+                    "remaining physical support preserves the degree"
+                ),
+                _ => {
+                    // Removing the wide isolate's lifetime also removes the
+                    // first canonical row; vertex 1 now falls outside the page.
+                    assert_eq!(frame.entries, vec![(-1, row(1, 1.0 / 3.0))]);
+                }
+            }
+            subscription
+                .consumer
+                .acknowledge(frame.batch.receipt())
+                .unwrap();
+            after = at;
+        }
+        assert!(success(poll(&root, db, &token, &mut subscription).await).is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn clustering_subscription_refuses_hidden_topology_before_registration_or_delivery() {
+    use fgdb_delta_types::{LabelId, RelationId};
+    use fgdb_types::{EId, VId};
+    use fgdb_warden::Scope;
+
+    let ((), report) = run_async_under_lab(0x79a0_03d2, |root| async move {
+        let (mut server, token, _) = served(&root, "subscription-clustering-scope").await;
+        let served = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+        served
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Relation, "R", 1)
+            .unwrap();
+        served
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Label, "L", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let statement = request(
+            "SUBSCRIBE TO CALL fnx.clustering_coefficient(\
+             {relations:['R'],parallel:'collapse',self_loops:'drop'}) YIELD vertex,score",
+        );
+        let scoped = [
+            token
+                .attenuate(Restriction::Labels(Scope::only([LabelId(1)])))
+                .unwrap(),
+            token
+                .attenuate(Restriction::Relations(Scope::only([RelationId(1)])))
+                .unwrap(),
+            token
+                .attenuate(Restriction::Properties(Scope::only([])))
+                .unwrap(),
+        ];
+        for hidden in [false, true] {
+            if hidden {
+                let mut seed = vertex(1);
+                for id in [2, 3] {
+                    seed.create_vertex(VId(id), vec![], vec![]);
+                }
+                for (id, a, b) in [(1, 1, 2), (2, 2, 3), (3, 3, 1)] {
+                    seed.add_edge(EId(id), VId(a), VId(b), vec![]);
+                }
+                db.db
+                    .write(&root)
+                    .await
+                    .unwrap()
+                    .write(&contexts.commit(), seed)
+                    .await
+                    .unwrap();
+            }
+            for token in &scoped {
+                refused(
+                    subscribe(&root, db, token, &statement).await,
+                    ErrorCode::PermissionDenied,
+                );
+                assert_eq!(db.subscriptions.load(Ordering::Acquire), 0);
+            }
+        }
+        for text in [
+            "SUBSCRIBE TO CALL fnx.clustering_coefficient({relations:['R'],self_loops:'drop'}) YIELD vertex,score",
+            "SUBSCRIBE TO CALL fnx.clustering_coefficient({relations:['R'],parallel:'collapse',self_loops:'reject'}) YIELD vertex,score",
+            "SUBSCRIBE TO CALL fnx.clustering_coefficient({relations:['R'],parallel:'collapse',labels:['L'],self_loops:'drop'}) YIELD vertex,score",
+            "SUBSCRIBE TO CALL fnx.clustering_coefficient({relations:['R'],parallel:'collapse',direction:'directed',self_loops:'drop'}) YIELD vertex,score LIMIT 0",
+            "SUBSCRIBE TO CALL fnx.directed_clustering_coefficient({relations:['R'],parallel:'collapse',self_loops:'drop'}) YIELD vertex,score LIMIT 0",
+        ] {
+            refused(
+                subscribe(&root, db, &token, &request(text)).await,
+                ErrorCode::Statement,
+            );
+            assert_eq!(db.subscriptions.load(Ordering::Acquire), 0);
+        }
+        let mut subscription = success(subscribe(&root, db, &token, &statement).await);
+        for token in &scoped {
+            refused(
+                poll(&root, db, token, &mut subscription).await,
+                ErrorCode::PermissionDenied,
+            );
+        }
+        let initial = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert!(initial.batch.is_snapshot());
+        assert_eq!(
+            initial.entries,
+            [1, 2, 3]
+                .map(|vertex| (1, vec![WireValue::Vertex(vertex), WireValue::Float(1.0)]))
+                .to_vec()
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
