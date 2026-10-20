@@ -2065,7 +2065,9 @@ impl PreparedGraphVertexMergeRowsText {
         // stages and the WITH stages after them (`WITH 42 AS v MERGE ...`);
         // `matched` its MATCH prefix (a WITH head, or every MATCH binding as
         // `WITH *` carries them) and the row stages after it.
+        // `unwound_match` is a first write's `UNWIND ... MATCH ...` read.
         let mut matched = None;
+        let mut unwound_match = None;
         let (mut parser, row, owned, leading) = match from {
             Some(from) => {
                 let (_, types) = from.owned_columns();
@@ -2080,12 +2082,26 @@ impl PreparedGraphVertexMergeRowsText {
                     } else {
                         (Vec::new(), Vec::new())
                     };
-                    let (stages, schema) = if parser.is_word("WITH") {
-                        parser.leading_row_stages(schema)?
+                    if parser.is_word("MATCH") {
+                        // `UNWIND $rows AS row MATCH (y {k: row.k}) MERGE ...`
+                        // (fgdb-0s2pq): the rows are the ordinary read of the
+                        // UNWIND stages and the MATCH, correlated as an
+                        // `UNWIND ... MATCH ... CREATE` reads them.
+                        let (source, schema) = parser.insertion_graph_row_prefix(
+                            statement,
+                            declarations,
+                            resolve.time_zones(),
+                        )?;
+                        unwound_match = Some(source);
+                        (parser, schema, None, None)
                     } else {
-                        (Vec::new(), schema)
-                    };
-                    (parser, schema, None, Some((unwound, stages)))
+                        let (stages, schema) = if parser.is_word("WITH") {
+                            parser.leading_row_stages(schema)?
+                        } else {
+                            (Vec::new(), schema)
+                        };
+                        (parser, schema, None, Some((unwound, stages)))
+                    }
                 } else if parser.is_word("MATCH") {
                     parser.parse_match_prefix()?;
                     let (head, stages, schema) = if parser.is_word("WITH") {
@@ -2282,7 +2298,25 @@ impl PreparedGraphVertexMergeRowsText {
                     read.resolve(crate::graph_text::LentResolver(&mut *resolve))?,
                 ))
             }
-            (None, None, None) => VertexMergeRowsTextInput::Unit,
+            (None, None, None) => match unwound_match {
+                // The MERGE and its tail may add parameters and element keys
+                // after the read boundary; the read binds the complete table.
+                Some(mut source) => {
+                    source.syntax.parameters.clone_from(&parameters);
+                    source
+                        .syntax
+                        .parameter_offsets
+                        .clone_from(&parameter_offsets);
+                    source
+                        .syntax
+                        .element_keys
+                        .extend(parser.syntax.element_keys.iter().cloned());
+                    VertexMergeRowsTextInput::Relation(Box::new(
+                        source.resolve(crate::graph_text::LentResolver(&mut *resolve))?,
+                    ))
+                }
+                None => VertexMergeRowsTextInput::Unit,
+            },
         };
         Ok((
             Self {

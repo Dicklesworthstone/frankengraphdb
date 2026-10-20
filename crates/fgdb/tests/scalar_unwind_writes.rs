@@ -868,6 +868,114 @@ fn a_parameter_unwind_merge_returns_its_rows() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-0s2pq (TCK Unwind1 [6]): the ingest idiom that looks one vertex up
+/// per row, merges another and links them, `UNWIND $rows AS row MATCH (y
+/// {p: row.year}) MERGE (e {id: row.id}) MERGE (y)<-[:R]-(e) RETURN ...`.
+/// The MATCH reads the UNWIND rows as a read does; the chain then merges per
+/// row. Two rows name year 2000, so it gains two incoming edges, and a rerun
+/// merges onto the same graph without a new identity.
+#[test]
+fn a_parameter_unwind_match_heads_a_chain_of_merges() {
+    let ((), report) = run_async_under_lab(0x7363_6106, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let rows = args(vec![
+            object(vec![("year", int(2000)), ("id", int(1))]),
+            object(vec![("year", int(2001)), ("id", int(2))]),
+            object(vec![("year", int(2000)), ("id", int(3))]),
+        ]);
+        let issued = AtomicU64::new(0);
+        let run = async |db: &mut Database<MemVfs>, statement: &str, input: &GqlParameters| {
+            let mut txn = db.begin(&txcx).unwrap();
+            let result = txn
+                .query_write(
+                    db,
+                    &cx,
+                    statement,
+                    input,
+                    symbols,
+                    R,
+                    GraphWriteProgramPolicy::new(
+                        GqlQueryPolicy::new(10_000, 10_000, 10_000_000, 10_000_000),
+                        100,
+                        10,
+                        10,
+                    ),
+                    |request| {
+                        let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                        })
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            txn.finish(db, &commit).await.unwrap();
+            result
+        };
+        let values = |result: QueryResult| {
+            let QueryResult::Rows { rows, .. } = result else {
+                panic!("expected rows")
+            };
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| match cell {
+                            QueryValue::Value(value) => value,
+                            other => panic!("{other:?}"),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        run(
+            &mut db,
+            "CREATE (:Entity {p: 2000}), (:Entity {p: 2001})",
+            &GqlParameters::new(),
+        )
+        .await;
+        let text = "UNWIND $rows AS row MATCH (y:Entity {p: row.year}) \
+                    MERGE (e:Entity {id: row.id}) MERGE (y)<-[:R]-(e) RETURN e.id AS x ORDER BY x";
+        for _ in 0..2 {
+            assert_eq!(
+                values(run(&mut db, text, &rows).await),
+                [vec![int(1)], vec![int(2)], vec![int(3)]]
+            );
+            // Two years, three events; e1 and e3 point at 2000, e2 at 2001.
+            assert_eq!(db.vertices().unwrap().len(), 5);
+            assert_eq!(db.edges().unwrap().len(), 3);
+            assert_eq!(
+                values(
+                    db.query(
+                        &cx,
+                        "MATCH (e)-[:R]->(y) RETURN e.id AS event, y.p AS year ORDER BY event",
+                        &GqlParameters::new(),
+                        symbols,
+                        GqlQueryPolicy::new(10_000, 10_000, 10_000_000, 10_000_000),
+                    )
+                    .unwrap()
+                ),
+                [
+                    vec![int(1), int(2000)],
+                    vec![int(2), int(2001)],
+                    vec![int(3), int(2000)],
+                ]
+            );
+        }
+        // Two years, then three events and three edges; none on the rerun.
+        assert_eq!(issued.load(Ordering::Relaxed), 8);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn keyed_edge_unwind_admits_only_endpoint_unions_and_pair_edges() {
     let ((), report) = run_async_under_lab(0x7363_6110, |root| async move {

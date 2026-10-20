@@ -51,6 +51,9 @@ impl PreparedGraphWriteChainText {
         // `UNWIND $rows`: one MERGE after it is the batch writer's, but a
         // vertex MERGE another write follows heads a chain (fgdb-0s2pq).
         let mut parameter_unwound = false;
+        // A MATCH after `UNWIND $rows`: the batch writer lowers no vertex
+        // MERGE over its bindings, so one heads a chain.
+        let mut parameter_matched = false;
         let mut depth = 0_usize;
         let mut previous: Option<TokenKind<'_>> = None;
         loop {
@@ -94,6 +97,8 @@ impl PreparedGraphWriteChainText {
                         unwound = true;
                     } else if previous.is_none() && word.eq_ignore_ascii_case("MATCH") {
                         matched = true;
+                    } else if clause && parameter_unwound && word.eq_ignore_ascii_case("MATCH") {
+                        parameter_matched = true;
                     } else if clause && word.eq_ignore_ascii_case("MERGE") && pattern()? {
                         if written || merged {
                             return Ok(true);
@@ -121,6 +126,9 @@ impl PreparedGraphWriteChainText {
                                 script::next_script_token(&mut lookahead)?.kind,
                                 TokenKind::Punct(b'-' | b'<')
                             );
+                            if parameter_matched && vertex {
+                                return Ok(true);
+                            }
                             if previous.is_some() && !parameter_unwound && (vertex || !matched) {
                                 // A vertex MERGE after the leading UNWIND or
                                 // MATCH; a relationship MERGE after UNWIND is
@@ -194,7 +202,12 @@ impl PreparedGraphWriteChainText {
                         } else if first && word.eq_ignore_ascii_case("WITH") {
                             // A leading source-free WITH is a row prefix.
                             unwound = true;
-                        } else if first && word.eq_ignore_ascii_case("MATCH") {
+                        } else if (first || (unwound && !matched))
+                            && word.eq_ignore_ascii_case("MATCH")
+                        {
+                            // A MATCH after the leading UNWIND stages reads
+                            // their rows (`UNWIND $rows AS row MATCH (y {k:
+                            // row.k}) MERGE ...`), as a leading MATCH does.
                             matched = true;
                         } else if ["CREATE", "INSERT"]
                             .iter()
@@ -614,6 +627,12 @@ mod tests {
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) ON CREATE SET n.name = row.name \
              RETURN n.id AS id, n.name AS name",
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) SET n.name = row.name RETURN n",
+            // A vertex MERGE over the bindings of a MATCH after the UNWIND
+            // (TCK Unwind1 [6]), over a parameter or a literal list.
+            "UNWIND $events AS event MATCH (y:Year {year: event.year}) \
+             MERGE (e:Event {id: event.id}) MERGE (y)<-[:IN]-(e) RETURN e.id AS x ORDER BY x",
+            "UNWIND $events AS event MATCH (y:Year {year: event.year}) MERGE (e:Event {id: event.id})",
+            "UNWIND [1, 2] AS v MATCH (y:Year {year: v}) MERGE (e:Event {id: v})",
         ] {
             assert!(
                 PreparedGraphWriteChainText::is_chain(text).unwrap(),
