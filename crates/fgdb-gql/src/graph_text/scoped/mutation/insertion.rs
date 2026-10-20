@@ -174,7 +174,8 @@ impl<'a> Parser<'a> {
         inputs: &mut Vec<Projection<'a>>,
         imports: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ReadValueTemplate, crate::GraphSetTextError> {
-        self.read_resolved_value(
+        let entries = core::mem::replace(&mut self.resolved_entries, true);
+        let value = self.read_resolved_value(
             &mut |parser| {
                 // After WITH, `a.key` of an element the row carries is that
                 // row's hidden read (fgdb-sl4ym).
@@ -201,7 +202,9 @@ impl<'a> Parser<'a> {
                 Ok(None)
             },
             0,
-        )
+        );
+        self.resolved_entries = entries;
+        value
     }
 
     fn insertion_input_types(

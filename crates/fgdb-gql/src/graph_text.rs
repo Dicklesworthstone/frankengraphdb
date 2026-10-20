@@ -694,6 +694,10 @@ struct Parser<'a> {
     /// Other read/write owners must not silently accept an unexecuted predicate.
     read_comparisons: Option<Vec<boolean::RowComparison<'a>>>,
     boundary_reads: Option<BoundaryReads<'a>>,
+    /// A resolved leaf followed by `.key` reads that entry (an imported
+    /// map's `row.key` beside MATCH reads, fgdb-0s2pq). Only the insertion
+    /// value compiler enables it.
+    resolved_entries: bool,
     /// List-comprehension element bindings in scope, innermost last
     /// (fgdb-20foe). An element name shadows every row or graph name.
     elements: Vec<&'a str>,
@@ -805,6 +809,7 @@ impl<'a> Parser<'a> {
             read_row_fields: Vec::new(),
             read_comparisons: None,
             boundary_reads: None,
+            resolved_entries: false,
             elements: Vec::new(),
             lets: None,
             let_base: 0,

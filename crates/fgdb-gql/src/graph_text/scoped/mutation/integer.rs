@@ -1888,8 +1888,9 @@ impl<'a> Parser<'a> {
             ExpressionColumns::Resolved(resolve) => match resolve(self)? {
                 // `.key` after a resolved value reads its entry through a let
                 // slot, as a row scope's row_entry_slot does: an imported
-                // map's `row.key` beside MATCH reads (fgdb-0s2pq).
-                Some(column) if self.lets.is_some() => {
+                // map's `row.key` beside MATCH reads (fgdb-0s2pq). Other
+                // resolver scopes keep their own entry rules.
+                Some(column) if self.lets.is_some() && self.resolved_entries => {
                     match self.map_entries(ReadValueTemplate::Column(column))? {
                         ReadValueTemplate::Column(column) => Operand::Column(column),
                         entry => return self.let_slot(program, entry, at),
