@@ -6,6 +6,8 @@ use crate::tiered::edge_scan::{
     BufferedEdgeDirection, BufferedEdgeScan, BufferedEdgeScanEvent, EdgeScanWork,
 };
 
+mod retained;
+
 pub(crate) use super::block_directory::Candidates as BufferedIncidenceBlocks;
 
 pub(crate) type BufferedBlockImage = (Vec<AdjacencyEntry>, Option<BlockProps>);
@@ -204,7 +206,11 @@ impl<V: Vfs> BufferedPartition<V> {
             })
             .await?;
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-        Ok(BufferedValue::from_reserved(image, charge))
+        // Decoder temporaries are gone. Retain the immutable block image's
+        // ownership, not a full decoder workspace throughout the traversal.
+        retained::block(BufferedValue::from_reserved(image, charge), &mut || {
+            work.step(cx, observe)
+        })
     }
 
     // Endpoint resolution shares the edge cursor's allowance. Its immutable
@@ -271,6 +277,11 @@ impl<V: Vfs> BufferedPartition<V> {
             }
         }
         work.step(cx, observe)?;
-        Ok(result.filter(|row| row.visible_at(as_of)))
+        // All historical replacements and patch temporaries have finished.
+        // Shrinking earlier would under-admit a later, larger replacement.
+        result
+            .filter(|row| row.visible_at(as_of))
+            .map(|row| retained::vertex(row, &mut || work.step(cx, observe)))
+            .transpose()
     }
 }

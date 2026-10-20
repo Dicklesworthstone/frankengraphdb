@@ -386,7 +386,11 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         self.work.step(cx, observe)?;
         let row = winner
             .filter(|(row, _)| row.entry.visible_at(self.as_of))
-            .map(|(row, charge)| BufferedValue::from_reserved(row, charge));
+            .map(|(row, charge)| {
+                BufferedValue::from_reserved(row, charge)
+                    .retain_scan_edge(&mut || self.work.step(cx, observe))
+            })
+            .transpose()?;
         Ok(Some(BufferedEdgeCandidate {
             eid: first.eid,
             row,
