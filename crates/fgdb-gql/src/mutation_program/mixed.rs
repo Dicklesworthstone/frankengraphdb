@@ -717,7 +717,7 @@ impl MixedMeter {
             .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?;
         self.common.absorb(
             statement,
-            input.target_columns().len() as u128,
+            input.target_columns().len(),
             GraphMutationStats {
                 selection: stats.selection,
                 evaluator: stats.evaluator,

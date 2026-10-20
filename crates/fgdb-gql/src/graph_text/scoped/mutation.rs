@@ -1139,8 +1139,11 @@ impl PreparedGraphMutationText {
                     | GraphMutationAction::SetLabel { target, .. },
                 ) => *target,
                 MutationActionTemplate::Bound(
-                    GraphMutationAction::DetachDelete { .. } | GraphMutationAction::Delete { .. },
-                ) => return false,
+                    GraphMutationAction::DetachDelete { .. }
+                    | GraphMutationAction::Delete { .. }
+                    | GraphMutationAction::DeleteValue { .. },
+                )
+                | MutationActionTemplate::DeleteValue { .. } => return false,
             };
             self.selection
                 .columns
