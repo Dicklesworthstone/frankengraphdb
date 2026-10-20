@@ -1386,7 +1386,12 @@ mod independent_edges {
                             source,
                             R,
                             target,
-                            vec![(P, CanonicalScalar::Int(record as i64))],
+                            vec![(
+                                P,
+                                fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(
+                                    record as i64,
+                                )),
+                            )],
                         ),
                     );
                 }

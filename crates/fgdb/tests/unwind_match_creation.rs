@@ -158,7 +158,13 @@ fn bulk_endpoint_factors_share_one_admission_below_the_cartesian_work_bound() {
                 (edge.entry.src, edge.entry.dst),
                 (vertex(source), vertex(destination)),
             );
-            assert_eq!(edge.props, vec![(Q, CanonicalScalar::Int(weight))]);
+            assert_eq!(
+                edge.props,
+                vec![(
+                    Q,
+                    fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(weight))
+                )]
+            );
         }
         assert!(db.edges().unwrap().is_empty());
         transaction

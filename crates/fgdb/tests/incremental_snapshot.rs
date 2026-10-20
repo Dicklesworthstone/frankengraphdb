@@ -428,7 +428,10 @@ fn appended_snapshots_preserve_pinned_history_across_compaction_and_reopen() {
     assert!(reopened.edge(self_loop).unwrap().is_none());
     assert_eq!(
         reopened.edge(forward).unwrap().unwrap().props,
-        vec![(property, CanonicalScalar::Int(11))]
+        vec![(
+            property,
+            fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(11))
+        )]
     );
 }
 
@@ -505,7 +508,10 @@ fn failed_append_publications_recover_one_authoritative_suffix() {
                     .unwrap()
                     .unwrap()
                     .props,
-                vec![(property, CanonicalScalar::Int(sequence as i64))],
+                vec![(
+                    property,
+                    fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(sequence as i64))
+                )],
                 "{stage:?}: sequence {sequence}"
             );
         }
