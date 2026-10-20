@@ -3,10 +3,83 @@
 //! DISTINCT/window and expression-failure precedence survive composition.
 
 use super::*;
+use crate::{BufferedEdge, BufferedReadView, BufferedValue, VertexRow};
+use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
-use fgdb_gql::spill_set::{AsyncSpillSetPlan, SpillSetRowError, SpillSetStage, SpillSetValuesPlan};
+use fgdb_gql::spill_set::{
+    AsyncSpillElementSource, AsyncSpillSetPlan, SpillSetRowError, SpillSetStage, SpillSetValuesPlan,
+};
 use fgdb_gql::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded};
-use fgdb_types::CanonicalScalarResolver;
+use fgdb_types::{CanonicalScalar, CanonicalScalarResolver};
+
+// A property lends its scalar while owning the authenticated cold record and
+// that record's byte grant. The evaluator reserves its destination copy before
+// cloning; neither a property table nor an uncharged scalar crosses the seam.
+enum PinnedProperty {
+    Vertex(BufferedValue<VertexRow>, usize),
+    Edge(BufferedValue<BufferedEdge>, usize),
+}
+
+impl std::borrow::Borrow<CanonicalScalar> for PinnedProperty {
+    fn borrow(&self) -> &CanonicalScalar {
+        match self {
+            Self::Vertex(record, at) => &record.props[*at].1,
+            Self::Edge(record, at) => &record.props[*at].1,
+        }
+    }
+}
+
+struct ElementSource<'v, 'q, V: Vfs> {
+    view: &'v mut BufferedReadView<V>,
+    cx: &'q QueryCx,
+    as_of: CommitSeq,
+}
+
+impl<V: Vfs + Clone> AsyncSpillElementSource for ElementSource<'_, '_, V> {
+    type Error = NativeSpoolError;
+    type Property = PinnedProperty;
+
+    async fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<PinnedProperty>>> {
+        let cx = self.cx;
+        let as_of = self.as_of;
+        let view = &mut *self.view;
+        let read = async move {
+            match element {
+                ElementId::Vertex(vid) => {
+                    let record = view
+                        .vertex_at(cx, vid, as_of)
+                        .await
+                        .map_err(|error| NativeSpoolError::BufferedRead(Box::new(error)))?;
+                    Ok(record.and_then(|record| {
+                        record
+                            .props
+                            .binary_search_by_key(&key, |(key, _)| *key)
+                            .ok()
+                            .map(|at| PinnedProperty::Vertex(record, at))
+                    }))
+                }
+                ElementId::Edge(eid) => {
+                    let record = view
+                        .edge_at(cx, eid, as_of)
+                        .await
+                        .map_err(|error| NativeSpoolError::BufferedRead(Box::new(error)))?;
+                    Ok(record.and_then(|record| {
+                        record
+                            .props
+                            .binary_search_by_key(&key, |(key, _)| *key)
+                            .ok()
+                            .map(|at| PinnedProperty::Edge(record, at))
+                    }))
+                }
+            }
+        };
+        Some(cx.with_restriction_async(read).await)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Limits {
@@ -183,9 +256,10 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute<A, B>(
+pub(super) async fn execute<V, A, B>(
     plan: AsyncSpillSetPlan,
     mut input: NativeResultSpool,
+    view: &mut BufferedReadView<V>,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
@@ -200,6 +274,7 @@ pub(super) async fn execute<A, B>(
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
 ) -> Result<(NativeResultSpool, u64)>
 where
+    V: Vfs + Clone,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
@@ -219,6 +294,11 @@ where
         limit: max_sort_work,
     };
     let mut evaluator = input.evaluator_stats();
+    let mut elements = ElementSource {
+        view,
+        cx,
+        as_of: input.snapshot_seq(),
+    };
     let mut in_destination = true;
     for (ordinal, stage) in plan.stages().iter().enumerate() {
         let budget = if ordinal + 1 == plan.stages().len() {
@@ -238,6 +318,7 @@ where
                 &mut evaluator,
                 &mut work,
                 resolver,
+                &mut elements,
             )
             .await?
         } else {
@@ -252,6 +333,7 @@ where
                 &mut evaluator,
                 &mut work,
                 resolver,
+                &mut elements,
             )
             .await?
         };
@@ -270,7 +352,7 @@ where
 // This function always leaves its result in destination. Both files append;
 // no handle is overwritten, recycled or selected by retrying a failed phase.
 #[allow(clippy::too_many_arguments)]
-async fn run_stage<A, B>(
+async fn run_stage<A, B, S>(
     input: NativeResultSpool,
     stage: &SpillSetStage,
     source: &mut SpillFile<A>,
@@ -281,10 +363,12 @@ async fn run_stage<A, B>(
     evaluator: &mut GlaExecutionStats,
     work: &mut Work<'_>,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+    elements: &mut S,
 ) -> Result<NativeResultSpool>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    S: AsyncSpillElementSource<Error = NativeSpoolError>,
 {
     let transformed = transform(
         &input,
@@ -296,6 +380,7 @@ where
         evaluator,
         work,
         resolver,
+        elements,
     )
     .await?;
     if let Some(requested) = stage.order()
@@ -376,7 +461,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn transform<A, B>(
+async fn transform<A, B, S>(
     input: &NativeResultSpool,
     stage: &SpillSetStage,
     source: &mut SpillFile<A>,
@@ -386,10 +471,12 @@ async fn transform<A, B>(
     evaluator: &mut GlaExecutionStats,
     work: &mut Work<'_>,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+    elements: &mut S,
 ) -> Result<NativeResultSpool>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    S: AsyncSpillElementSource<Error = NativeSpoolError>,
 {
     if input.encoded_columns != stage.input_types().len() {
         return Err(SpillError::InvalidRun.into());
@@ -417,14 +504,24 @@ where
         let retained = codec::row_memory(&row, work)?;
         codec::retain_reservation(&mut charge, retained, work.cx)?;
         let cursor = stage
-            .start(row, row_index, &mut |event| {
-                native_event(work.cx, policy, evaluator, event)?;
-                if event == GlaExecutionEvent::ScratchEntry {
-                    let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
-                    charge.grow(work.cx, bytes).map_err(SpillError::Memory)?;
-                }
-                Ok(())
-            })
+            .start_with_async_elements(
+                row,
+                row_index,
+                &mut |event| {
+                    native_event(work.cx, policy, evaluator, event)?;
+                    if event == GlaExecutionEvent::ScratchEntry {
+                        let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+                        charge.grow(work.cx, bytes).map_err(SpillError::Memory)?;
+                    }
+                    Ok(())
+                },
+                elements,
+                &|bytes| {
+                    pool.reserve(work.cx, bytes)
+                        .map_err(|error| NativeSpoolError::Spill(SpillError::Memory(error)))
+                },
+            )
+            .await
             .map_err(|error| match error {
                 SpillSetRowError::Control(error) => error,
                 SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),

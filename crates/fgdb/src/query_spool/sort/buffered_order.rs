@@ -357,6 +357,7 @@ impl PreparedBufferedOrder {
                     super::staged::execute(
                         plan,
                         input,
+                        view,
                         cx,
                         policy,
                         scratch,
