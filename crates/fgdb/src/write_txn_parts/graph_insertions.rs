@@ -280,7 +280,12 @@ impl WriteTxn {
                             .execute_governed_over(
                                 rows.take(),
                                 allowance,
-                                |pattern, allowance| {
+                                // Typed: a closure behind `impl GraphSetSource`
+                                // gets no signature from the bound.
+                                |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                                    fgdb_gql::algebra::GraphValueRow,
+                                >,
+                                 allowance: fgdb_gql::GqlQueryPolicy| {
                                     workspace.txn.execute_graph_pattern_governed(
                                         database, cx, pattern, allowance,
                                     )
@@ -308,7 +313,12 @@ impl WriteTxn {
                             .execute_governed_over(
                                 rows.take(),
                                 allowance,
-                                |pattern, allowance| {
+                                // Typed: a closure behind `impl GraphSetSource`
+                                // gets no signature from the bound.
+                                |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                                    fgdb_gql::algebra::GraphValueRow,
+                                >,
+                                 allowance: fgdb_gql::GqlQueryPolicy| {
                                     workspace.txn.execute_graph_pattern_governed(
                                         database, cx, pattern, allowance,
                                     )
