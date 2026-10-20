@@ -59,9 +59,11 @@ fn field_path(
             return Err(syntax(offset, "at most 64 row-field selectors"));
         }
         if is_punct(tokens.get(next), b'.') {
+            // The lexer gives a reserved word after `.` its delimited token
+            // (fgdb-7jja3); as a map key it is an ordinary field name.
             let Some((
                 Token {
-                    kind: TokenKind::Word(name),
+                    kind: TokenKind::Word(name) | TokenKind::DelimitedKeyword(name),
                     ..
                 },
                 last,

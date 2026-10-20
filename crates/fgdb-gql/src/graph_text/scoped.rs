@@ -748,7 +748,7 @@ impl<'a> Parser<'a> {
         }
         [
             "RETURN", "WITH", "MATCH", "OPTIONAL", "UNWIND", "ORDER", "SKIP", "LIMIT", "UNION",
-            "CALL", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "FOREACH",
+            "CALL", "CREATE", "INSERT", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "FOREACH",
         ]
         .iter()
         .any(|clause| word.eq_ignore_ascii_case(clause))
