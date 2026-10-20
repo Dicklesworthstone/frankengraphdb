@@ -301,8 +301,10 @@ struct Name<'a> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TokenKind<'a> {
     Word(&'a str),
-    // Keep reserved delimited map keys distinct from grammar words. Other
-    // identifier/operand positions retain their existing explicit refusal.
+    // A name that is never a grammar word: a delimited keyword spelling, or
+    // a reserved word where only a schema name can stand (`n.order`,
+    // `:Order`, `{limit: 1}`). Schema-name positions admit it; variable,
+    // alias and operand positions retain their explicit refusal.
     DelimitedKeyword(&'a str),
     Digits(&'a str),
     Parameter(&'a str),
@@ -470,6 +472,8 @@ impl<'a> Lexer<'a> {
             return Ok(Token {
                 kind: if parameter {
                     TokenKind::Parameter(name)
+                } else if self.names_schema(at, name) {
+                    TokenKind::DelimitedKeyword(name)
                 } else {
                     TokenKind::Word(name)
                 },
@@ -511,7 +515,42 @@ impl<'a> Lexer<'a> {
         }
         Err(error(at, GraphPatternTextErrorKind::InvalidToken))
     }
+
+    /// Whether the reserved word `word` at `at` (the lexer just past it)
+    /// stands where openCypher reads any SchemaName: directly after `.` or
+    /// `:` unless it opens a call (`{k: all(...)}`), or directly before a map
+    /// entry's `:`. No grammar word follows `.` or `:` or precedes `:`, so
+    /// such a spelling is a property key, label or type, and its delimited
+    /// token keeps every clause lookahead from reading `n.limit` as LIMIT.
+    fn names_schema(&self, at: usize, word: &str) -> bool {
+        if !RESERVED_NAMES
+            .iter()
+            .any(|reserved| word.eq_ignore_ascii_case(reserved))
+        {
+            return false;
+        }
+        let bytes = self.text.as_bytes();
+        let before = bytes[..at]
+            .iter()
+            .rev()
+            .find(|byte| !byte.is_ascii_whitespace());
+        let after = bytes[self.at..]
+            .iter()
+            .find(|byte| !byte.is_ascii_whitespace());
+        match before {
+            Some(b'.') => true,
+            Some(b':') => after != Some(&b'('),
+            _ => after == Some(&b':'),
+        }
+    }
 }
+
+/// The words no variable, alias or function name may spell undelimited:
+/// each starts or continues a clause wherever an operand may end.
+const RESERVED_NAMES: &[&str] = &[
+    "MATCH", "WHERE", "RETURN", "ALL", "DISTINCT", "AS", "AND", "OR", "SKIP", "LIMIT", "OPTIONAL",
+    "ORDER", "BY",
+];
 
 #[derive(Clone)]
 pub(crate) enum Number {
@@ -604,6 +643,9 @@ struct Column<'a> {
     property: Option<Name<'a>>,
     path: Option<GraphPathFunction>,
     alias: Name<'a>,
+    /// The scope index of the pattern comprehension whose list this column
+    /// is (fgdb-7nwox).
+    collect: Option<usize>,
 }
 struct Syntax<'a> {
     match_mode: GraphMatchMode,
@@ -617,6 +659,9 @@ struct Syntax<'a> {
     /// p = (a)-->(b)`), in clause order. Each is exported like the clause's
     /// vertices, and is NULL where an OPTIONAL clause has no witness.
     scope_paths: Vec<Name<'a>>,
+    /// The `scope_paths` a clause captured for its only variable-length
+    /// relationship (`MATCH (a)-[r*2]->()`): a bare name is the edge list.
+    scope_edge_paths: Vec<&'a str>,
     root_variables: usize,
     labels: Vec<(Name<'a>, Name<'a>)>,
     edges: Vec<Edge<'a>>,
@@ -648,7 +693,11 @@ impl<'a> Syntax<'a> {
                 GraphPathFunction::Value
             })
         } else if self.scope_paths.iter().any(|path| path.text == name) {
-            Some(GraphPathFunction::Value)
+            Some(if self.scope_edge_paths.contains(&name) {
+                GraphPathFunction::Edges
+            } else {
+                GraphPathFunction::Value
+            })
         } else if self.visible_edge(name).is_some() {
             Some(GraphPathFunction::Edge)
         } else {
@@ -693,6 +742,10 @@ struct Parser<'a> {
     /// Enabled only while a multipart graph part can lower its WHERE to ON.
     /// Other read/write owners must not silently accept an unexecuted predicate.
     read_comparisons: Option<Vec<boolean::RowComparison<'a>>>,
+    /// The types of the leading columns a column resolver addresses, while
+    /// one runs over a known row (a write's WITH row), so a map column's
+    /// `m.key` reads its entry. `None` keeps resolved columns untyped.
+    resolved_column_types: Option<Vec<crate::GraphSetColumnType>>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// A resolved leaf followed by `.key` reads that entry (an imported
     /// map's `row.key` beside MATCH reads, fgdb-0s2pq). Read scopes enable it
@@ -724,6 +777,10 @@ struct Parser<'a> {
     /// An aggregate function's argument is being read. openCypher refuses a
     /// non-constant rand() there (Return6 [15], NonConstantExpression).
     aggregate_argument: bool,
+    /// The value reader asks the resolver for a percentile's collected
+    /// argument (fgdb-qbaex): a resolver that registers a hidden collect of
+    /// the expression here clears it, and one that leaves it set refuses.
+    percentile_leaf: bool,
     /// A HAVING operand is being resolved: an `IS [NOT] NULL` after a group
     /// key belongs to the HAVING test, not to the key expression.
     having_operand: bool,
@@ -733,6 +790,10 @@ struct Parser<'a> {
     /// The read composition entry lets a root MATCH WHERE that needs the
     /// value language run as a row filter after the match (fgdb-1c29d).
     defer_where: bool,
+    /// An OPTIONAL MATCH continuation is being read: a later clause-level
+    /// MATCH or OPTIONAL MATCH ends it at an implicit `WITH *`, the boundary
+    /// openCypher's clause-by-clause left joins already draw.
+    optional_part: bool,
     /// The lexer and token at that WHERE keyword, once it was deferred.
     deferred_where: Option<(Lexer<'a>, Token<'a>)>,
     /// A write clause after WITH is being read (fgdb-sl4ym): its scope is
@@ -741,6 +802,11 @@ struct Parser<'a> {
     /// The WITH stages before a write are being read: the hidden reads of
     /// the elements the row carries stay in it, for the write and RETURN.
     write_prefix: bool,
+    /// A write's WITH tail may end at the next write of a chained statement
+    /// (`CREATE (a) WITH a CREATE (b)`) instead of a RETURN.
+    chain_write: bool,
+    /// The row such a tail ended with, for the next write to read.
+    chained_row: Option<Vec<(Name<'a>, crate::GraphSetColumnType)>>,
 }
 
 /// A WITH's row width and its repeatable items as (source start, source
@@ -810,6 +876,7 @@ impl<'a> Parser<'a> {
             read_correlations: Vec::new(),
             read_row_fields: Vec::new(),
             read_comparisons: None,
+            resolved_column_types: None,
             boundary_reads: None,
             resolved_entries: false,
             elements: Vec::new(),
@@ -819,18 +886,23 @@ impl<'a> Parser<'a> {
             projected_sources: None,
             random_sites: 0,
             aggregate_argument: false,
+            percentile_leaf: false,
             having_operand: false,
             zones: None,
             defer_where: false,
+            optional_part: false,
             deferred_where: None,
             write_row_scope: false,
             write_prefix: false,
+            chain_write: false,
+            chained_row: None,
             syntax: Syntax {
                 match_mode: GraphMatchMode::DifferentEdges,
                 variables: Vec::new(),
                 path: None,
                 path_edges: false,
                 scope_paths: Vec::new(),
+                scope_edge_paths: Vec::new(),
                 root_variables: 0,
                 labels: Vec::new(),
                 edges: Vec::new(),
@@ -943,12 +1015,9 @@ impl<'a> Parser<'a> {
                 GraphPatternTextErrorKind::Expected("identifier"),
             ));
         };
-        if [
-            "MATCH", "WHERE", "RETURN", "ALL", "DISTINCT", "AS", "AND", "OR", "SKIP", "LIMIT",
-            "OPTIONAL", "ORDER", "BY",
-        ]
-        .iter()
-        .any(|word| text.eq_ignore_ascii_case(word))
+        if RESERVED_NAMES
+            .iter()
+            .any(|word| text.eq_ignore_ascii_case(word))
         {
             return Err(error(
                 self.current.at,
@@ -979,10 +1048,11 @@ impl<'a> Parser<'a> {
         }
         Ok(())
     }
-    /// A map key is an identifier position without clause/function dispatch.
-    /// Admit a reserved spelling only when its original token was delimited;
-    /// plain names still follow the existing identifier and namespace checks.
-    fn map_key(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+    /// A label, relationship type, property key or map key: openCypher's
+    /// SchemaName, which any keyword may spell (`:Order`, `n.limit`,
+    /// ``{`match`: 1}``). It has no clause or function dispatch, so it admits
+    /// the delimited token; plain names follow the identifier checks.
+    fn schema_name(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         let TokenKind::DelimitedKeyword(text) = self.current.kind else {
             return self.name();
         };
@@ -1200,7 +1270,7 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_PREDICATES,
                 PatternLimitDimension::Predicates,
             )?;
-            let label = self.name()?;
+            let label = self.schema_name()?;
             self.syntax.labels.push((name, label));
             self.predicates += 1;
         }
@@ -1229,7 +1299,7 @@ impl<'a> Parser<'a> {
                 MAX_PATTERN_PREDICATES,
                 crate::algebra::PatternLimitDimension::Predicates,
             )?;
-            let key = self.name()?;
+            let key = self.schema_name()?;
             if keys.contains(&key.text) {
                 return Err(error(
                     key.at,
@@ -1407,6 +1477,7 @@ impl<'a> Parser<'a> {
                         property: None,
                         path: None,
                         alias: name,
+                        collect: None,
                     }),
             );
             let paths: Vec<_> = (self.syntax.path.iter())
@@ -1425,6 +1496,7 @@ impl<'a> Parser<'a> {
                     property: None,
                     path,
                     alias: name,
+                    collect: None,
                 });
             }
             let edges: Vec<_> = self
@@ -1443,6 +1515,7 @@ impl<'a> Parser<'a> {
                     property: None,
                     path: Some(GraphPathFunction::Edge),
                     alias: name,
+                    collect: None,
                 });
             }
         } else {
@@ -1483,7 +1556,7 @@ impl<'a> Parser<'a> {
                 } else if self.syntax.visible_edge(expression.text).is_some() {
                     let property = if self.take(b'.')? {
                         self.require_property_variable(expression)?;
-                        Some(self.name()?)
+                        Some(self.schema_name()?)
                     } else {
                         None
                     };
@@ -1501,7 +1574,7 @@ impl<'a> Parser<'a> {
                         ));
                     }
                     let property = if self.take(b'.')? {
-                        Some(self.name()?)
+                        Some(self.schema_name()?)
                     } else {
                         None
                     };
@@ -1531,6 +1604,7 @@ impl<'a> Parser<'a> {
                     property,
                     path,
                     alias,
+                    collect: None,
                 });
                 if !self.take(b',')? {
                     break;
@@ -1664,6 +1738,11 @@ impl<'a> Parser<'a> {
                 GraphPatternTextErrorKind::Expected("end of statement"),
             ));
         }
+        // A chain step parses with the statement's declarations, which other
+        // steps may read; the chain checks them once, over every step.
+        if self.chain_write {
+            return Ok(());
+        }
         self.check_parameter_declarations()
     }
 }
@@ -1689,9 +1768,14 @@ struct BoundColumn {
     variable: String,
     key: Option<PropertyKeyId>,
     path: Option<GraphPathFunction>,
+    /// A pattern comprehension's list: its Collect clause (fgdb-7nwox).
+    collect: Option<usize>,
 }
 impl BoundColumn {
     fn declaration(&self) -> GraphColumn<'_> {
+        if let Some(clause) = self.collect {
+            return GraphColumn::collection(&self.alias, clause);
+        }
         if self.path == Some(GraphPathFunction::Edge)
             && let Some(key) = self.key
         {
@@ -1737,6 +1821,41 @@ impl core::fmt::Debug for PreparedGraphText {
             .field("definition", &"[REDACTED]")
             .finish()
     }
+}
+
+/// Each declared parameter's admitted argument, in declaration order. A
+/// missing or mistyped argument refuses at its first use, and an argument no
+/// parameter names refuses at `end`.
+fn checked_parameter_values(
+    parameters: &[GqlParameterSpec],
+    offsets: &[usize],
+    end: usize,
+    arguments: &GqlParameters,
+) -> Result<Vec<GqlParameterValue>, GraphPatternTextError> {
+    // Signed client integers for SKIP/LIMIT parameters (fgdb-3dnpu).
+    let admitted = arguments.admit_unsigned(parameters);
+    let arguments: &GqlParameters = &admitted;
+    let mut values = Vec::new();
+    for (index, spec) in parameters.iter().enumerate() {
+        let at = offsets[index];
+        let value = arguments
+            .get(&spec.name)
+            .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
+        if !spec.parameter_type.accepts(value.parameter_type()) {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::ParameterTypeMismatch {
+                    expected: spec.parameter_type,
+                    found: value.parameter_type(),
+                },
+            ));
+        }
+        values.push(value);
+    }
+    if arguments.len() != values.len() {
+        return Err(error(end, GraphPatternTextErrorKind::UnexpectedArguments));
+    }
+    Ok(values)
 }
 
 impl PreparedGraphText {
@@ -1885,6 +2004,7 @@ impl PreparedGraphText {
                 } else {
                     column.path
                 },
+                collect: column.collect,
             });
         }
         // Compile the actual scope topology for structural validation. Do not
@@ -1996,6 +2116,16 @@ impl PreparedGraphText {
         }
         fn append_scope(bytes: &mut Vec<u8>, scope: &BoundScope) {
             bytes.push(scope.kind_tag());
+            // A Collect scope's element follows its tag (fgdb-7nwox).
+            if scope.kind_tag() == 4 {
+                match scope.element() {
+                    Some(element) => {
+                        bytes.push(1);
+                        append_name(bytes, element);
+                    }
+                    None => bytes.push(0),
+                }
+            }
             bytes.extend_from_slice(&scope.builder().canonical_template_bytes());
             bytes.extend_from_slice(&(scope.filters().len() as u64).to_be_bytes());
             for filter in scope.filters() {
@@ -2023,9 +2153,14 @@ impl PreparedGraphText {
                     bytes.extend_from_slice(&key.0.to_be_bytes());
                 }
             }
-            match column.path {
-                None => bytes.push(0),
-                Some(function) => {
+            // A collected list is its clause, in the path slot's tag 2.
+            match (column.path, column.collect) {
+                (_, Some(clause)) => {
+                    bytes.push(2);
+                    bytes.extend_from_slice(&(clause as u64).to_be_bytes());
+                }
+                (None, None) => bytes.push(0),
+                (Some(function), None) => {
                     bytes.push(1);
                     bytes.push(function as u8);
                 }
@@ -2101,33 +2236,12 @@ impl PreparedGraphText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<Vec<GqlParameterValue>, GraphPatternTextError> {
-        // Signed client integers for SKIP/LIMIT parameters (fgdb-3dnpu).
-        let admitted = arguments.admit_unsigned(&self.parameters);
-        let arguments: &GqlParameters = &admitted;
-        let mut values = Vec::new();
-        for (index, spec) in self.parameters.iter().enumerate() {
-            let at = self.parameter_offsets[index];
-            let value = arguments
-                .get(&spec.name)
-                .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
-            if !spec.parameter_type.accepts(value.parameter_type()) {
-                return Err(error(
-                    at,
-                    GraphPatternTextErrorKind::ParameterTypeMismatch {
-                        expected: spec.parameter_type,
-                        found: value.parameter_type(),
-                    },
-                ));
-            }
-            values.push(value);
-        }
-        if arguments.len() != values.len() {
-            return Err(error(
-                self.statement.len(),
-                GraphPatternTextErrorKind::UnexpectedArguments,
-            ));
-        }
-        Ok(values)
+        checked_parameter_values(
+            &self.parameters,
+            &self.parameter_offsets,
+            self.statement.len(),
+            arguments,
+        )
     }
 
     fn bind_values(

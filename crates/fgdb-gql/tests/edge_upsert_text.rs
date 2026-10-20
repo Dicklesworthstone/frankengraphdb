@@ -280,6 +280,11 @@ fn evaluate(
     use fgdb_gql::algebra::GraphValue;
     match value {
         GraphEdgeUpsertValue::Literal(value) => value.value().clone(),
+        // A constant List (fgdb-k3nub); these statements assign no List.
+        GraphEdgeUpsertValue::Stored(value) => value
+            .as_scalar()
+            .cloned()
+            .expect("these laws assign scalars"),
         GraphEdgeUpsertValue::Expression { properties, value } => {
             let input = properties
                 .iter()

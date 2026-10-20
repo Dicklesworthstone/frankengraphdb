@@ -32,6 +32,9 @@ struct Projection<'a> {
     variable: Name<'a>,
     property: Option<Name<'a>>,
     path: Option<GraphPathFunction>,
+    /// The scope index of the pattern comprehension whose list this input
+    /// is (fgdb-7nwox); it then reads no variable.
+    collect: Option<usize>,
 }
 enum Operand {
     Column(usize),
@@ -66,6 +69,13 @@ enum ActionKind<'a> {
     Delete {
         detach: bool,
     },
+    /// DELETE after WITH of a value the row computes (TCK Delete5): its
+    /// action has no target column.
+    RowDelete {
+        value: crate::set_text::ReadValueTemplate,
+        detach: bool,
+        at: usize,
+    },
 }
 struct Action<'a> {
     target: usize,
@@ -87,6 +97,9 @@ fn action_templates<'a>(
             }
             ActionKind::Delete { detach: false } => {
                 MutationActionTemplate::Bound(GraphMutationAction::Delete { target })
+            }
+            ActionKind::RowDelete { value, detach, at } => {
+                MutationActionTemplate::DeleteValue { value, detach, at }
             }
             ActionKind::Label { label, present } => {
                 let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)? else {
@@ -221,6 +234,29 @@ fn scalar(
 }
 
 impl<'a> Parser<'a> {
+    /// Whether a DELETE target after WITH names, bare, a carried vertex or,
+    /// without DETACH, a carried relationship (fgdb-sl4ym). Anything else is
+    /// a value of the row (TCK Delete5).
+    fn row_element_target(
+        &self,
+        row: &[(Name<'a>, crate::GraphSetColumnType)],
+        detach: bool,
+    ) -> Result<bool, GraphPatternTextError> {
+        use crate::GraphSetColumnType::{Edge, Vertex};
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        if matches!(
+            self.lexer.clone().next()?.kind,
+            TokenKind::Punct(b'.' | b'[' | b'(')
+        ) {
+            return Ok(false);
+        }
+        Ok(row.iter().any(|(name, kind)| {
+            name.text == word && (*kind == Vertex || (!detach && *kind == Edge))
+        }))
+    }
+
     fn mutation_projection(
         &self,
         columns: &mut Vec<Projection<'a>>,
@@ -234,6 +270,7 @@ impl<'a> Parser<'a> {
                 variable,
                 property,
                 path,
+                collect: None,
             },
         )
     }
@@ -250,6 +287,7 @@ impl<'a> Parser<'a> {
             column.variable.text == projection.variable.text
                 && column.property.map(|key| key.text) == projection.property.map(|key| key.text)
                 && column.path == projection.path
+                && column.collect == projection.collect
         }) {
             return Ok(at);
         }
@@ -280,7 +318,7 @@ impl<'a> Parser<'a> {
         if matches!(self.current.kind, TokenKind::Word(_)) && self.property_dot_follows()? {
             let variable = self.property_variable()?;
             self.punct(b'.', ".")?;
-            let key = self.name()?;
+            let key = self.schema_name()?;
             return self
                 .mutation_projection(columns, variable, Some(key))
                 .map(Operand::Column);
@@ -321,6 +359,7 @@ impl<'a> Parser<'a> {
                         variable,
                         property: None,
                         path: Some(function),
+                        collect: None,
                     },
                 )
                 .map(Operand::Column);
@@ -443,6 +482,25 @@ impl<'a> Parser<'a> {
             deletion_mode = Some((deleting, detach));
             loop {
                 self.mutation_action_capacity(actions.len())?;
+                // After WITH, a DELETE of anything but a carried vertex, or
+                // without DETACH a carried relationship, named bare deletes a
+                // value of the row: `friends[$i]`, `map.key`, a carried path
+                // (TCK Delete5).
+                if deleting
+                    && let Some(row) = row
+                    && !self.row_element_target(row, detach)?
+                {
+                    let at = self.current.at;
+                    let value = self.insertion_source_value(&mut columns, row)?;
+                    actions.push(Action {
+                        target: 0,
+                        kind: ActionKind::RowDelete { value, detach, at },
+                    });
+                    if !self.take(b',')? {
+                        break;
+                    }
+                    continue;
+                }
                 // DETACH DELETE names a vertex. A plain DELETE, like SET and
                 // REMOVE, names a vertex or one fixed-length relationship.
                 // openCypher's property target is an atom, so `SET (n).name`
@@ -507,7 +565,7 @@ impl<'a> Parser<'a> {
                     // `n:A:B` sets or removes each label, one action apiece
                     // in the statement's action allowance (openCypher Set3,
                     // Remove2).
-                    let mut label = self.name()?;
+                    let mut label = self.schema_name()?;
                     while self.take(b':')? {
                         actions.push(Action {
                             target,
@@ -517,7 +575,7 @@ impl<'a> Parser<'a> {
                             },
                         });
                         self.mutation_action_capacity(actions.len())?;
-                        label = self.name()?;
+                        label = self.schema_name()?;
                     }
                     ActionKind::Label {
                         label,
@@ -525,7 +583,7 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     self.punct(b'.', "property or label mutation")?;
-                    let key = self.name()?;
+                    let key = self.schema_name()?;
                     match row {
                         Some(row) if setting => {
                             self.punct(b'=', "=")?;
@@ -533,15 +591,25 @@ impl<'a> Parser<'a> {
                             let value = self.insertion_source_value(&mut columns, row)?;
                             ActionKind::RowProperty { key, value, at }
                         }
-                        _ => {
-                            let value = if setting {
-                                self.punct(b'=', "=")?;
-                                Some(self.mutation_assignment(&mut columns)?)
+                        _ if setting => {
+                            self.punct(b'=', "=")?;
+                            if self.set_value_is_list()? {
+                                // A list value (`[1, 2]`, `n.tags + ['x']`)
+                                // reads in the value language over the MATCH
+                                // columns, a `+` chain through the list sum,
+                                // and is written as the stored List it is
+                                // (fgdb-k3nub).
+                                let at = self.current.at;
+                                let value = self.read_graph_value(&mut columns, 0)?;
+                                ActionKind::RowProperty { key, value, at }
                             } else {
-                                None
-                            };
-                            ActionKind::Property { key, value }
+                                ActionKind::Property {
+                                    key,
+                                    value: Some(self.mutation_assignment(&mut columns)?),
+                                }
+                            }
                         }
+                        _ => ActionKind::Property { key, value: None },
                     }
                 };
                 actions.push(Action { target, kind });
@@ -551,6 +619,44 @@ impl<'a> Parser<'a> {
             }
         }
         Ok((columns, actions))
+    }
+
+    /// A MERGE branch's constant list value (fgdb-k3nub), evaluated once
+    /// when the statement binds: the stored value it writes, by CREATE's rule
+    /// (to_written_property). `None` refuses a map at any depth, a graph
+    /// element, or a value past the event budget or the stored bounds.
+    /// Binding is not a budgeted query, so a literal like range(1, 100000000)
+    /// refuses here instead of allocating.
+    fn constant_written_value(
+        template: &crate::set_text::ReadValueTemplate,
+        values: &[crate::GqlParameterValue],
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphSetTextError> {
+        const CONSTANT_LIST_EVENTS: u32 = 1 << 20;
+        let value = return_projection::bind_read_value(template, values)?;
+        let row = crate::algebra::GraphValueRow::from_owned_values(Vec::new());
+        let mut remaining = CONSTANT_LIST_EVENTS;
+        Ok(crate::set_ops::evaluate_value(&value, &row, 0, &mut |_| {
+            remaining = remaining.checked_sub(1).ok_or(())?;
+            Ok::<_, ()>(())
+        })
+        .ok()
+        .and_then(|value| value.to_written_property()))
+    }
+
+    /// Whether a SET value here is a list (fgdb-k3nub), read in the value
+    /// language and written as a stored List: a list operand or a `+` chain
+    /// with one (list_operand_here, list_chain_follows), or a parameter the
+    /// statement declares as a List (`SET n.tags = $tags`).
+    fn set_value_is_list(&self) -> Result<bool, GraphPatternTextError> {
+        if let TokenKind::Parameter(name) = self.current.kind
+            && matches!(
+                self.parameter_types.get(name),
+                Some(crate::GqlParameterType::List)
+            )
+        {
+            return Ok(true);
+        }
+        Ok(self.list_operand_here(None)? || self.list_chain_follows(None)?)
     }
 
     /// `SET n = {k: v, ...}` (openCypher replace, Set4): the listed
@@ -571,13 +677,14 @@ impl<'a> Parser<'a> {
                 variable,
                 property: None,
                 path: Some(GraphPathFunction::Properties),
+                collect: None,
             },
         )?;
         let mut keep: Vec<Name<'a>> = Vec::new();
         if !self.take(b'}')? {
             loop {
                 self.mutation_action_capacity(actions.len())?;
-                let key = self.name()?;
+                let key = self.schema_name()?;
                 if keep.iter().any(|old| old.text == key.text) {
                     return Err(error(
                         key.at,
@@ -656,7 +763,7 @@ impl<'a> Parser<'a> {
         let mut keys = std::collections::BTreeSet::new();
         loop {
             self.mutation_action_capacity(actions.len())?;
-            let key = self.name()?;
+            let key = self.schema_name()?;
             if !keys.insert(key.text) {
                 return Err(error(
                     key.at,
@@ -666,21 +773,24 @@ impl<'a> Parser<'a> {
             }
             self.punct(b':', ":")?;
             let at = self.current.at;
-            let kind = match row {
-                Some(row) => {
-                    let value = self.insertion_source_value(columns, row)?;
-                    ActionKind::RowProperty { key, value, at }
-                }
-                None => ActionKind::Property {
+            // An entry's list value is a stored List, as in `SET n.p = [..]`.
+            let listed = row.is_none() && self.set_value_is_list()?;
+            let kind = if let Some(row) = row {
+                let value = self.insertion_source_value(columns, row)?;
+                ActionKind::RowProperty { key, value, at }
+            } else if listed {
+                let value = self.read_graph_value(columns, 0)?;
+                ActionKind::RowProperty { key, value, at }
+            } else {
+                ActionKind::Property {
                     key,
                     value: Some(self.mutation_assignment(columns)?),
-                },
+                }
             };
-            // A field's map construction is never a written property, and the
-            // scalar SET build refuses a list literal: refuse either here,
-            // before any catalog access. The WITH-row path writes stored Lists
-            // (fgdb-k3nub). A subscripted or computed value stays a per-row
-            // check.
+            // A field's map construction is never a written property: refuse
+            // it here, before any catalog access. A list field is a stored
+            // List (fgdb-k3nub). A subscripted or computed value stays a
+            // per-row check.
             let map = |value: &ReadValueTemplate| {
                 matches!(
                     value,
@@ -690,7 +800,7 @@ impl<'a> Parser<'a> {
             let refused = match &kind {
                 ActionKind::Property {
                     value: Some(value), ..
-                } => map(value) || matches!(value, ReadValueTemplate::List(_)),
+                } => map(value),
                 ActionKind::RowProperty { value, .. } => map(value),
                 _ => false,
             };
@@ -938,6 +1048,7 @@ impl PreparedGraphMutationText {
                 variable: projection.variable.text.to_owned(),
                 key,
                 path: projection.path,
+                collect: None,
             });
         }
         let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
@@ -1063,8 +1174,10 @@ impl PreparedGraphMutationText {
                     MutationActionTemplate::Bound(
                         GraphMutationAction::SetLabel { .. }
                         | GraphMutationAction::DetachDelete { .. }
-                        | GraphMutationAction::Delete { .. },
-                    ) => return false,
+                        | GraphMutationAction::Delete { .. }
+                        | GraphMutationAction::DeleteValue { .. },
+                    )
+                    | MutationActionTemplate::DeleteValue { .. } => return false,
                 };
                 if key != read {
                     return false;
@@ -1094,12 +1207,16 @@ impl PreparedGraphMutationText {
         // A cascade can remove another row's edge or independent anchor, so
         // a larger MATCH needs a frozen selection even without property SET.
         // The ordinary compiler forbids mixing deletion and updates.
+        // A row-computed element (`DELETE friends[$i]`, fgdb-cpny9) is a
+        // deletion too.
         if self.actions.iter().all(|action| {
             matches!(
                 action,
                 MutationActionTemplate::Bound(
-                    GraphMutationAction::DetachDelete { .. } | GraphMutationAction::Delete { .. }
-                )
+                    GraphMutationAction::DetachDelete { .. }
+                        | GraphMutationAction::Delete { .. }
+                        | GraphMutationAction::DeleteValue { .. }
+                ) | MutationActionTemplate::DeleteValue { .. }
             )
         }) {
             return self.selection.deletion_feeds_later_match();
@@ -1183,6 +1300,17 @@ impl PreparedGraphMutationText {
                         })?,
                     ),
                 },
+                MutationActionTemplate::DeleteValue { value, detach, at } => {
+                    GraphMutationAction::DeleteValue {
+                        value: return_projection::bind_read_value(value, &values).map_err(
+                            |error| GraphMutationTextError {
+                                offset: *at,
+                                ..GraphMutationTextError::from(error)
+                            },
+                        )?,
+                        detach: *detach,
+                    }
+                }
             });
         }
         if let Some(row) = &self.row {
@@ -1213,6 +1341,81 @@ impl PreparedGraphMutationText {
             .map_err(|error| build_error(at, GraphMutationBuildError::RelationalInput(error)))?;
         PreparedGraphMutation::prepare_relation(input, self.relation, actions)
             .map_err(|error| build_error(at, error))
+    }
+}
+
+/// Where the next write of a chain starts, and the row it reads: the previous
+/// write's WITH tail output, whose hidden boundary reads stay resolvable.
+/// `parameters` are the types the statement gave its parameters so far, so a
+/// parameter keeps one type across the chain (fgdb-cpny9).
+pub(crate) struct ChainContinuation<'a> {
+    at: usize,
+    row: Vec<(Name<'a>, crate::GraphSetColumnType)>,
+    boundary: Option<BoundaryReads<'a>>,
+    parameters: Vec<GqlParameterSpec>,
+}
+
+impl<'a> ChainContinuation<'a> {
+    /// The row the next write reads, as owned-leaf columns.
+    fn owned_columns(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
+        self.row
+            .iter()
+            .map(|(name, kind)| (name.text.to_owned(), *kind))
+            .unzip()
+    }
+}
+
+impl<'a> Parser<'a> {
+    /// At `MERGE`: whether its pattern is a relationship, `(a)-` or `(a)<-`,
+    /// read with native tokens and without consuming the parser's own.
+    pub(super) fn at_relationship_merge(&self) -> Result<bool, GraphPatternTextError> {
+        if !self.is_word("MERGE") {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
+            && matches!(lexer.next()?.kind, TokenKind::Word(_))
+            && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
+            && matches!(lexer.next()?.kind, TokenKind::Punct(b'-' | b'<')))
+    }
+
+    /// The next write of a chain this slice compiles: a CREATE, or a vertex
+    /// or relationship MERGE over the carried row.
+    pub(super) fn at_chained_write(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(self.is_word("CREATE")
+            || (self.is_word("MERGE")
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))))
+    }
+
+    /// The continuation a chained WITH tail left, at the next write.
+    fn continuation(&mut self) -> Option<ChainContinuation<'a>> {
+        let row = self.chained_row.take()?;
+        Some(ChainContinuation {
+            at: self.current.at,
+            row,
+            boundary: self.boundary_reads.take(),
+            parameters: self.syntax.parameters.clone(),
+        })
+    }
+
+    /// Start a later write of a chain at its own clause, in the scope the
+    /// previous write's tail left: its hidden reads and parameter types.
+    fn resume_after(
+        mut self,
+        boundary: Option<BoundaryReads<'a>>,
+        parameters: &[GqlParameterSpec],
+        at: usize,
+    ) -> Result<Self, GraphPatternTextError> {
+        for spec in parameters {
+            self.parameter_types
+                .entry(spec.name.clone())
+                .or_insert(spec.parameter_type);
+        }
+        self.lexer.at = at;
+        self.lexer.tokens = 0;
+        self.current = self.lexer.next()?;
+        self.boundary_reads = boundary;
+        Ok(self)
     }
 }
 
@@ -1294,6 +1497,7 @@ mod graph_function_tests {
                             variable: path,
                             property: None,
                             path: Some(function),
+                            collect: None,
                         },
                     )
                     .unwrap(),
@@ -1390,6 +1594,7 @@ mod graph_function_tests {
         checkpoint: impl FnMut() -> Result<(), ()>,
     ) -> Result<crate::GraphMutationBatch, crate::GqlQueryError<crate::GraphMutationError<()>, ()>>
     {
+        // Property sources hand stored values (fgdb-k3nub).
         let values: Vec<fgdb_types::CanonicalPropertyValue> =
             values.iter().cloned().map(Into::into).collect();
         mutation.execute_governed(
@@ -1455,7 +1660,7 @@ mod graph_function_tests {
                     &[crate::GraphMutationIntent::Property {
                         vertex: fgdb_types::VId(1),
                         key: PropertyKeyId(1),
-                        value: Some(expected.clone()),
+                        value: Some(expected.clone().into()),
                     }],
                     "{text}"
                 );
@@ -1483,7 +1688,7 @@ mod graph_function_tests {
         .unwrap();
         let [
             crate::GraphMutationIntent::Property {
-                value: Some(CanonicalScalar::Date(date)),
+                value: Some(fgdb_types::CanonicalPropertyValue::Scalar(CanonicalScalar::Date(date))),
                 ..
             },
         ] = batch.intents()
@@ -1525,7 +1730,7 @@ mod graph_function_tests {
                 &[crate::GraphMutationIntent::Property {
                     vertex: fgdb_types::VId(1),
                     key: PropertyKeyId(1),
-                    value: Some(CanonicalScalar::Int(7 + extra)),
+                    value: Some(CanonicalScalar::Int(7 + extra).into()),
                 }]
             );
         }

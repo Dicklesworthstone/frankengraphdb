@@ -318,6 +318,7 @@ impl ProgramMeter {
             remainder(D::Effects),
         )
     }
+    /// `row_effects` bounds the effects one selected row may propose.
     fn absorb<E, C>(
         &mut self,
         statement: usize,

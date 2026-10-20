@@ -463,6 +463,7 @@ pub(super) fn execute<E, A, C>(
     policy: GraphInsertPolicy,
     bindings: Option<&[GraphInsertBinding]>,
     property_catalog: Option<&crate::ReverseSymbolCatalog>,
+    owned: Option<Vec<GraphValueRow>>,
     mut source: impl GraphSetSource<E, C>,
     mut allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
@@ -474,6 +475,7 @@ pub(super) fn execute<E, A, C>(
         policy,
         bindings,
         property_catalog,
+        owned,
         &mut source,
         &mut allocate,
         &mut checkpoint,
@@ -483,16 +485,25 @@ pub(super) fn execute<E, A, C>(
 /// A selection source behind a trait object.
 type ErasedSource<'a, E, C> = &'a mut dyn GraphSetSource<E, C>;
 
+#[allow(clippy::too_many_arguments)]
 fn execute_erased<E, A, C>(
     insertion: &PreparedGraphInsert,
     policy: GraphInsertPolicy,
     bindings: Option<&[GraphInsertBinding]>,
     property_catalog: Option<&crate::ReverseSymbolCatalog>,
+    owned: Option<Vec<GraphValueRow>>,
     source: ErasedSource<'_, E, C>,
     mut allocate: &mut dyn FnMut(GraphInsertRequest) -> Result<ElementId, A>,
     mut checkpoint: &mut dyn FnMut() -> Result<(), C>,
 ) -> ResultOf<(GraphInsertBatch, Vec<GraphValueRow>), E, A, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
+    // A chained CREATE reads the previous write's rows through its relation's
+    // one owned leaf; an input with no such leaf refuses them, never drops them.
+    if owned.is_some() && !matches!(&insertion.input, Input::Relation(_)) {
+        return Err(GqlQueryError::Source(GraphInsertError::InputRelation(
+            GraphSetExecutionError::OwnedRowsUnavailable,
+        )));
+    }
     let (selected_rows, selection, evaluator) = match &insertion.input {
         Input::Pattern(pattern) => {
             let selected = source
@@ -506,9 +517,18 @@ fn execute_erased<E, A, C>(
             (selected.value, selected.rows, selected.evaluator)
         }
         Input::Relation(relation) => {
-            let selected = relation
-                .execute_with_source(policy.query, source, &mut checkpoint)
-                .map_err(|error| error.map_source(GraphInsertError::InputRelation))?;
+            let selected = match owned {
+                None => relation.execute_with_source(policy.query, source, &mut checkpoint),
+                Some(rows) => relation.execute_with_source(
+                    policy.query,
+                    &mut crate::set_ops::WithOwnedRows {
+                        source,
+                        rows: Some(rows),
+                    },
+                    &mut checkpoint,
+                ),
+            }
+            .map_err(|error| error.map_source(GraphInsertError::InputRelation))?;
             (selected.value, selected.rows, selected.evaluator)
         }
         Input::Unit => (

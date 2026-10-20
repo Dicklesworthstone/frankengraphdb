@@ -219,10 +219,10 @@ impl WriteTxn {
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             match intent {
                 GraphMutationIntent::Property { vertex, key, value } => {
-                    batch.set_vertex_property(vertex, key, value);
+                    batch.set_vertex_property_value(vertex, key, value);
                 }
                 GraphMutationIntent::EdgeProperty { edge, key, value } => {
-                    batch.set_edge_property(edge, key, value);
+                    batch.set_edge_property_value(edge, key, value);
                 }
                 GraphMutationIntent::Label {
                     vertex,

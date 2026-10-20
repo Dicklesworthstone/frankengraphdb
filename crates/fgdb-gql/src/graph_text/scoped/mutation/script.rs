@@ -256,6 +256,12 @@ fn classify(
             };
             error(source.offset, kind)
         })?;
+        // A relationship MERGE over the row (fgdb-cpny9) has no branch clause
+        // here: ON MATCH/ON CREATE or SET after it keep their refusal.
+        let merge_at = statement.span.start + parser.current.at;
+        let plain_merge = !statement.last_on.is_some_and(|at| at > merge_at)
+            && !statement.last_set.is_some_and(|at| at > merge_at)
+            && parser.at_relationship_merge()?;
         return if parser.is_word("CREATE") || parser.is_word("INSERT") {
             Ok(Kind::Insert)
         } else if ["SET", "REMOVE", "DETACH", "DELETE"]
@@ -263,11 +269,13 @@ fn classify(
             .any(|word| parser.is_word(word))
         {
             Ok(Kind::Mutation)
+        } else if plain_merge {
+            Ok(Kind::EdgeMerge)
         } else {
             Err(error(
                 parser.current.at,
                 GraphPatternTextErrorKind::Expected(
-                    "CREATE, SET, REMOVE or DELETE after MATCH ... WITH",
+                    "CREATE, SET, REMOVE, DELETE or a relationship MERGE after MATCH ... WITH",
                 ),
             ))
         };
@@ -276,7 +284,18 @@ fn classify(
         return Ok(Kind::Insert);
     }
     if matched && parser.is_word("DELETE") {
-        return Ok(Kind::Delete);
+        // DELETE p of a matched path is the mutation compiler's, which
+        // expands each path into its elements (TCK Delete3).
+        let mut lexer = parser.lexer.clone();
+        loop {
+            match lexer.next()?.kind {
+                TokenKind::Word(word) if parser.syntax.names_path(word) => {
+                    return Ok(Kind::Mutation);
+                }
+                TokenKind::End => return Ok(Kind::Delete),
+                _ => {}
+            }
+        }
     }
     if matched && (parser.is_word("SET") || parser.is_word("REMOVE") || parser.is_word("DETACH")) {
         return Ok(Kind::Mutation);

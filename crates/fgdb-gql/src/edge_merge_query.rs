@@ -32,6 +32,10 @@ pub enum GraphEdgeMergeBinding {
     Endpoint { start: bool },
     /// A property of that endpoint vertex. A missing field reads NULL.
     EndpointProperty { start: bool, key: PropertyKeyId },
+    /// A property, after the statement, of the vertex or relationship in a
+    /// selection column: a carried element of a chain's row (fgdb-cpny9). A
+    /// missing field or a NULL column reads NULL.
+    InputProperty { column: usize, key: PropertyKeyId },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,18 +133,26 @@ impl PreparedGraphEdgeMergeQuery {
                 observed: bindings.len(),
             });
         }
-        let selection = merge.selection().value_columns();
+        let selection = merge.input_column_types();
         let mut input_types = Vec::with_capacity(bindings.len());
         for (at, binding) in bindings.iter().enumerate() {
             input_types.push(match *binding {
                 GraphEdgeMergeBinding::Input(column) => selection
                     .get(column)
-                    .map(GraphSetColumnType::from)
+                    .copied()
                     .ok_or(GraphEdgeMergeQueryBuildError::Binding { binding: at })?,
                 GraphEdgeMergeBinding::Edge => GraphSetColumnType::Edge,
                 GraphEdgeMergeBinding::Endpoint { .. } => GraphSetColumnType::Vertex,
                 GraphEdgeMergeBinding::Property(_)
                 | GraphEdgeMergeBinding::EndpointProperty { .. } => GraphSetColumnType::Stored,
+                GraphEdgeMergeBinding::InputProperty { column, .. } => {
+                    match selection.get(column) {
+                        Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge) => {
+                            GraphSetColumnType::Stored
+                        }
+                        _ => return Err(GraphEdgeMergeQueryBuildError::Binding { binding: at }),
+                    }
+                }
             });
         }
         let grouping = grouping
@@ -269,7 +281,8 @@ impl PreparedGraphEdgeMergeQuery {
                 let admitted = match binding {
                     GraphEdgeMergeBinding::Input(_)
                     | GraphEdgeMergeBinding::Property(_)
-                    | GraphEdgeMergeBinding::EndpointProperty { .. } => kind.accepts(value),
+                    | GraphEdgeMergeBinding::EndpointProperty { .. }
+                    | GraphEdgeMergeBinding::InputProperty { .. } => kind.accepts(value),
                     GraphEdgeMergeBinding::Edge => matches!(value, GraphValue::Edge(_)),
                     GraphEdgeMergeBinding::Endpoint { .. } => {
                         matches!(value, GraphValue::Vertex(_))
@@ -343,6 +356,11 @@ impl PreparedGraphEdgeMergeQuery {
                 GraphEdgeMergeBinding::EndpointProperty { start, key } => {
                     bytes.push(4);
                     bytes.push(u8::from(start));
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                }
+                GraphEdgeMergeBinding::InputProperty { column, key } => {
+                    bytes.push(5);
+                    bytes.extend_from_slice(&(column as u64).to_be_bytes());
                     bytes.extend_from_slice(&key.0.to_be_bytes());
                 }
             }

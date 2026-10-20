@@ -303,6 +303,11 @@ fn malformed_complete_map_inputs_refuse_before_grouping_or_limit_zero() {
             ));
         }
         assert!(project(query, vec![map(vec![])]).value.is_empty());
+        assert!(
+            project(query, vec![map(vec![("p", list(vec![int(1)]))])])
+                .value
+                .is_empty()
+        );
         assert!(matches!(
             query.project_governed::<(), ()>(
                 vec![],

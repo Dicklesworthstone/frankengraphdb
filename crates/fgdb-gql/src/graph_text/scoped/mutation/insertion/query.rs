@@ -238,7 +238,7 @@ impl<'a> ParsedReturn<'a> {
             let mut lookahead = parser.lexer.clone();
             if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
                 let key = lookahead.next()?;
-                if let TokenKind::Word(text) = key.kind
+                if let TokenKind::Word(text) | TokenKind::DelimitedKeyword(text) = key.kind
                     && let Some(column) = parser.boundary_read(source.len())?
                 {
                     let name = Name { text, at: key.at };
@@ -260,7 +260,7 @@ impl<'a> ParsedReturn<'a> {
         }
         let name = parser.name()?;
         let input = if parser.take(b'.')? {
-            ReturnMapInput::Property(parser.name()?)
+            ReturnMapInput::Property(parser.schema_name()?)
         } else {
             ReturnMapInput::Identity
         };
@@ -351,6 +351,7 @@ impl<'a> ParsedReturn<'a> {
                         variable: name,
                         property: None,
                         path: Some(GraphPathFunction::Properties),
+                        collect: None,
                     },
                 )?
             } else {
@@ -480,14 +481,19 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         // A WITH after the CREATE heads a row pipeline over the created
         // occurrences (openCypher Create6 "... WITH n WHERE ... RETURN").
-        let head = self.take_word("WITH")?;
+        // In a chain, a next write directly after it (`CREATE (a), (b) MERGE
+        // (a)-[:R]->(b)`) reads every binding, as `WITH *` would.
+        let implicit = self.chain_write && self.at_chained_write()?;
+        let head = implicit || self.take_word("WITH")?;
         if !head {
             self.word("RETURN")?;
         }
-        let quantifier = if self.take_word("DISTINCT")? {
+        let quantifier = if !implicit && self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
-            self.take_all_quantifier()?;
+            if !implicit {
+                self.take_all_quantifier()?;
+            }
             GraphSetQuantifier::All
         };
         let mut returning = ParsedReturn {
@@ -504,7 +510,7 @@ impl<'a> Parser<'a> {
         let mut output: Vec<(Name<'a>, GraphSetColumnType)> = Vec::new();
         // The source spelling of every non-star output, for ORDER BY.
         let mut spellings = Vec::new();
-        if self.take(b'*')? {
+        if implicit || self.take(b'*')? {
             // A WITH row's hidden reads are never columns of `*`.
             let visible = self.visible_width(source);
             for (index, &(name, kind)) in source[..visible].iter().enumerate() {
@@ -572,6 +578,23 @@ impl<'a> Parser<'a> {
                     });
                     output.push((name, GraphSetColumnType::Edge));
                 }
+            }
+            if output.is_empty() && head && !syntax.vertices.is_empty() {
+                // A WITH head (or a chain's implicit `WITH *`) over anonymous
+                // patterns only (`MATCH () CREATE () WITH * CREATE ()`) still
+                // carries one row per occurrence: an anonymous column of the
+                // first created vertex, which no name addresses (fgdb-cpny9).
+                let name = Name {
+                    text: Self::anonymous_name(0),
+                    at,
+                };
+                let column =
+                    returning.column(Binding::Vertex(0), name, GraphSetColumnType::Vertex)?;
+                returning.projection.push(ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                output.push((name, GraphSetColumnType::Vertex));
             }
             if output.is_empty() {
                 return Err(expected(
@@ -731,7 +754,7 @@ impl InsertReturnTemplate {
 /// Single-statement framing uses the script lexer, so separators inside quoted
 /// strings are values. One terminal semicolon is accepted, further statements
 /// refuse before catalog resolution or parameter binding.
-fn statement_body(statement: &str) -> Result<&str, GraphInsertTextError> {
+pub(super) fn statement_body(statement: &str) -> Result<&str, GraphInsertTextError> {
     if statement.len() > MAX_GRAPH_TEXT_BYTES {
         return Err(error(
             MAX_GRAPH_TEXT_BYTES,

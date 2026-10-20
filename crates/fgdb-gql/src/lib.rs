@@ -68,6 +68,7 @@ mod vertex_merge;
 mod vertex_upsert;
 mod vertex_upsert_text;
 mod walk;
+mod write_chain;
 mod write_query;
 mod write_receipt;
 mod write_script;
@@ -90,6 +91,10 @@ pub use cheapest_path_text::{
 pub use pipeline_aggregate_text::{
     GraphPipelineAggregateTextError, GraphPipelineAggregateTextErrorKind,
     PreparedGraphPipelineAggregateText,
+};
+pub use write_chain::{
+    GraphWriteChainError, GraphWriteChainStep, GraphWriteChainTextError, PreparedGraphWriteChain,
+    PreparedGraphWriteChainText,
 };
 pub use write_script::{
     BoundGraphWriteScriptBatch, GraphWriteScriptBatchBindError, GraphWriteScriptBatchError,
@@ -239,7 +244,10 @@ pub use temporal_text::{
 pub use trail::GraphTrailCursor;
 pub use vertex_merge::{
     GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
-    GraphVertexMergePolicy, GraphVertexMergeStats, PreparedGraphVertexMerge,
+    GraphVertexMergePolicy, GraphVertexMergeRowAction, GraphVertexMergeRowActions,
+    GraphVertexMergeRowComputed, GraphVertexMergeRowInput, GraphVertexMergeRowsBinding,
+    GraphVertexMergeRowsQueryBuildError, GraphVertexMergeRowsQueryError, GraphVertexMergeStats,
+    PreparedGraphVertexMerge, PreparedGraphVertexMergeRows, PreparedGraphVertexMergeRowsQuery,
 };
 pub use vertex_upsert::{
     GraphVertexReturnBinding, GraphVertexUpsertAction, GraphVertexUpsertBranch,

@@ -25,6 +25,7 @@ pub(crate) mod spill;
 pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
+pub(crate) use procedure::WithOwnedRows;
 pub(crate) use procedure::{BorrowedSource, DynPatterns, DynProcedures, PatternSource};
 pub use procedure::{
     GraphPatternFactorExecution, GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection,
@@ -89,7 +90,7 @@ impl From<&ValueProjection> for GraphSetColumnType {
             ValueProjection::Vertex { .. } => Self::Vertex,
             ValueProjection::Property { .. } | ValueProjection::EdgeProperty { .. } => Self::Stored,
             ValueProjection::Type { .. } => Self::Scalar,
-            ValueProjection::Labels { .. } => Self::List,
+            ValueProjection::Labels { .. } | ValueProjection::Collected { .. } => Self::List,
             ValueProjection::Properties { .. } | ValueProjection::EdgeProperties { .. } => {
                 Self::Any
             }

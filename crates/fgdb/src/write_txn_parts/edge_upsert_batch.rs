@@ -147,14 +147,14 @@ impl WriteTxn {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             let workspace = MutationProgramWorkspace::new(self);
+            // A batch upsert's MERGE has its MATCH prefix; a row input is the
+            // chained-write path's.
+            let Some(pattern) = upsert.merge().selection() else {
+                return Err(edge_upsert_batch_invalid());
+            };
             let selected = workspace
                 .txn
-                .execute_graph_pattern_governed(
-                    database,
-                    cx,
-                    upsert.merge().selection(),
-                    policy.merge.query,
-                )
+                .execute_graph_pattern_governed(database, cx, pattern, policy.merge.query)
                 .map_err(|error| {
                     error.map_source(|error| {
                         GraphEdgeUpsertError::Merge(GraphEdgeMergeError::Source(error))
@@ -204,7 +204,7 @@ impl WriteTxn {
                     collect_edge_merge_output::<EdgeUpsertOccurrences, WriteTxnError, A, _>(
                         upsert.merge(),
                         merge_policy,
-                        |_, _| {
+                        |_| {
                             Ok(GqlQueryExecution {
                                 value: vec![row],
                                 rows: GqlExecutionStats {

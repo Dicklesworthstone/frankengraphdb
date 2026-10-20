@@ -465,6 +465,7 @@ impl<'a> ParsedMutationReturn<'a> {
                                 variable,
                                 property: None,
                                 path: Some(GraphPathFunction::Labels),
+                                collect: None,
                             },
                         )?;
                         return self
@@ -500,7 +501,7 @@ impl<'a> ParsedMutationReturn<'a> {
             let column = parser.mutation_projection(columns, name, None)?;
             return self.column(Binding::Input(column), name, kind).map(Some);
         }
-        let key = parser.name()?;
+        let key = parser.schema_name()?;
         self.map_input(parser, columns, scope, name, ReturnMapInput::Property(key))
             .map(Some)
     }
@@ -530,7 +531,7 @@ impl<'a> ParsedMutationReturn<'a> {
             let mut lookahead = parser.lexer.clone();
             if matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
                 let token = lookahead.next()?;
-                if let TokenKind::Word(text) = token.kind
+                if let TokenKind::Word(text) | TokenKind::DelimitedKeyword(text) = token.kind
                     && let Some(current) = parser.boundary_read(row.len())?
                 {
                     let key = Name { text, at: token.at };
@@ -627,6 +628,7 @@ impl<'a> ParsedMutationReturn<'a> {
                         variable: name,
                         property: None,
                         path: Some(GraphPathFunction::Properties),
+                        collect: None,
                     },
                 )?;
                 self.column(
@@ -929,6 +931,8 @@ impl<'a> Parser<'a> {
                     // cells. Nothing after its AS may request another one.
                     unwind = true;
                 }
+                // `ON MATCH` is a later MERGE's clause, not a new MATCH: its
+                // right-hand sides read the carried row too (fgdb-cpny9).
                 TokenKind::Word(word)
                     if !unwind
                         && depth == 0
@@ -938,7 +942,7 @@ impl<'a> Parser<'a> {
                 {
                     break;
                 }
-                TokenKind::Word(key) if after_dot => {
+                TokenKind::Word(key) | TokenKind::DelimitedKeyword(key) if after_dot => {
                     if let Some(Token {
                         kind: TokenKind::Word(alias),
                         at,
@@ -1151,9 +1155,22 @@ impl PreparedGraphMutationQueryText {
                             return Ok(false);
                         }
                         let target = matches!(next, TokenKind::Word(_));
+                        // `SET (n).name`: a parenthesized variable is the same
+                        // property target (Set1 [3], [4]).
+                        let parenthesized = matches!(next, TokenKind::Punct(b'('))
+                            && matches!(after, TokenKind::Word(_))
+                            && matches!(
+                                script::next_script_token(&mut lookahead)?.kind,
+                                TokenKind::Punct(b')')
+                            )
+                            && matches!(
+                                script::next_script_token(&mut lookahead)?.kind,
+                                TokenKind::Punct(b'.')
+                            );
                         if (clause("SET") || clause("REMOVE"))
-                            && target
-                            && matches!(after, TokenKind::Punct(b'.' | b':' | b'+' | b'='))
+                            && (parenthesized
+                                || target
+                                    && matches!(after, TokenKind::Punct(b'.' | b':' | b'+' | b'=')))
                             || clause("DETACH")
                                 && matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("DELETE"))
                             || clause("DELETE") && target
@@ -1238,6 +1255,10 @@ mod framing_tests {
             ("MATCH (n) DELETE n RETURN 42 AS num", true),
             ("MATCH ()-[r]->() DELETE r RETURN type(r)", true),
             ("OPTIONAL MATCH (n) SET n.p = 1 RETURN n", true),
+            ("MATCH (n) SET (n).p = 1 RETURN n", true),
+            ("MATCH ()-[r]->() SET (r).p = 1 RETURN r", true),
+            ("MATCH (n) SET (n).p = 1", false),
+            ("MATCH (n) SET (n + 1) RETURN n", false),
             ("MATCH (n) DELETE n", false),
             ("MATCH (n) WHERE n.delete = 1 RETURN n.p AS delete", false),
             ("MATCH (n) SET n.p = 1", false),

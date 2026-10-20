@@ -488,6 +488,43 @@ where
     }
 }
 
+/// A source plus the rows of the previous write of the same statement, for a
+/// chained write's input (`CREATE (a) WITH a CREATE (b)`): its relation has
+/// one `SetNode::Owned` leaf, and those rows are already charged.
+/// The source is a trait object, as the type-erased collectors hold it.
+pub(crate) struct WithOwnedRows<'s, E, C> {
+    pub(crate) source: &'s mut dyn GraphSetSource<E, C>,
+    pub(crate) rows: Option<Vec<GraphValueRow>>,
+}
+
+impl<E, C> GraphSetSource<E, C> for WithOwnedRows<'_, E, C> {
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+        self.source.pattern(pattern, policy)
+    }
+    fn procedure(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.procedure(call, arguments, policy)
+    }
+    fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
+        self.rows.take()
+    }
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+        self.source.element_property(element, key)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

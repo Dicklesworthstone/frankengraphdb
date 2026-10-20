@@ -52,11 +52,12 @@ fn execute(
 /// openCypher: a named variable-length relationship `[r*m..n]` is the list of
 /// relationships it matched (TCK Match4 [1], [6], Match9 [2] to [4]). When it
 /// is its pattern's only edge, that list is the edge list of the one path the
-/// pattern matches, in traversal order.
+/// pattern matches, in traversal order. That holds in a later required or
+/// OPTIONAL MATCH too, where an OPTIONAL row without a witness reads NULL.
 #[test]
 fn a_lone_named_variable_length_relationship_is_its_edge_list() {
     use fgdb_gql::algebra::GraphValue;
-    use fgdb_types::{EId, VId};
+    use fgdb_types::{CanonicalScalar, EId, VId};
     let edges = [
         (EId(91), VId(1), RelationId(1), VId(2)),
         (EId(92), VId(2), RelationId(1), VId(3)),
@@ -78,6 +79,14 @@ fn a_lone_named_variable_length_relationship_is_its_edge_list() {
         (
             "MATCH (a)-[r:R*2..2]-(b) RETURN r",
             vec![list(&[91, 92]), list(&[92, 91])],
+        ),
+        (
+            "MATCH (a)-[:R]->(m) MATCH (m)-[r:R*1..2]->(b) RETURN r",
+            vec![list(&[92])],
+        ),
+        (
+            "MATCH (a)-[:R]->(m) OPTIONAL MATCH (m)-[r:R*1..2]->(b) RETURN r",
+            vec![list(&[92]), GraphValue::Scalar(CanonicalScalar::Null)],
         ),
     ] {
         let found: Vec<_> = execute(text, &edges)

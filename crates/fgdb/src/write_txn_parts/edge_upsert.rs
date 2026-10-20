@@ -84,7 +84,18 @@ fn edge_upsert_actions<E, A, C>(
                                 _ => GlaExecutionEvent::Work,
                             })
                         })?;
-                        value.value().clone()
+                        CanonicalPropertyValue::Scalar(value.value().clone())
+                    }
+                    // A constant List (fgdb-k3nub), admitted element by
+                    // element before the copy.
+                    GraphEdgeUpsertValue::Stored(value) => {
+                        point_payload_admission(value, &mut |event| {
+                            control(match event {
+                                SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                                _ => GlaExecutionEvent::Work,
+                            })
+                        })?;
+                        value.clone()
                     }
                     GraphEdgeUpsertValue::Expression { properties, .. }
                     | GraphEdgeUpsertValue::Composite { properties, .. } => {
@@ -117,10 +128,10 @@ fn edge_upsert_actions<E, A, C>(
                                 GraphEdgeUpsertError::NonScalarValue { clause, action },
                             ));
                         };
-                        value
+                        CanonicalPropertyValue::Scalar(value)
                     }
                 };
-                batch.set_edge_property(edge, definition.key, Some(value));
+                batch.set_edge_property_value(edge, definition.key, Some(value));
             }
             // All right-hand sides have succeeded before the first write of
             // this clause. The next clause must observe this native staging.

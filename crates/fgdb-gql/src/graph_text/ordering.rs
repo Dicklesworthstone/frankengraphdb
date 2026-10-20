@@ -32,9 +32,35 @@ impl Parser<'_> {
                 None
             };
             let property = if function.is_none() && self.take(b'.')? {
-                Some(self.name()?)
+                Some(self.schema_name()?)
             } else {
                 None
+            };
+            // `RETURN n AS m ORDER BY m.p`: a property of an alias that
+            // projects an element bare is that element's property. A name
+            // that is itself a binding keeps meaning the binding.
+            let name = match property {
+                Some(_)
+                    if function.is_none()
+                        && self.syntax.bare_path_function(name.text).is_none()
+                        && !self
+                            .syntax
+                            .variables
+                            .iter()
+                            .any(|variable| variable.text == name.text) =>
+                {
+                    self.syntax
+                        .columns
+                        .iter()
+                        .find(|column| {
+                            column.alias.text == name.text
+                                && column.property.is_none()
+                                && column.collect.is_none()
+                                && matches!(column.path, None | Some(GraphPathFunction::Edge))
+                        })
+                        .map_or(name, |column| column.variable)
+                }
+                _ => name,
             };
             let resolved = if let Some((variable, function)) = function {
                 self.syntax.columns.iter().position(|column| {
@@ -95,6 +121,7 @@ impl Parser<'_> {
                     variable,
                     property: None,
                     path: Some(function),
+                    collect: None,
                 });
                 if self.syntax.visible_columns.is_none() {
                     self.syntax.visible_columns = Some(width);
@@ -116,6 +143,7 @@ impl Parser<'_> {
                     variable: name,
                     property: Some(property),
                     path: None,
+                    collect: None,
                 });
                 // Multiple hidden keys must all sit in the hidden tail; the
                 // visible prefix is the width BEFORE the first appended cell.
@@ -153,6 +181,7 @@ impl Parser<'_> {
                     variable: name,
                     property: None,
                     path,
+                    collect: None,
                 });
                 if self.syntax.visible_columns.is_none() {
                     self.syntax.visible_columns = Some(width);
@@ -221,6 +250,7 @@ mod hidden_alias_tests {
             property: None,
             path: None,
             alias: name("n"),
+            collect: None,
         });
         parser
     }
@@ -283,6 +313,7 @@ mod hidden_alias_tests {
             property: Some(name("p")),
             path: None,
             alias: name("rank"),
+            collect: None,
         });
         parser.parse_row_ordering().unwrap();
         assert_eq!(parser.syntax.visible_columns, Some(2));
@@ -302,6 +333,7 @@ mod hidden_alias_tests {
             property: Some(name("rank")),
             path: None,
             alias: name("rank"),
+            collect: None,
         });
         let error = parser.parse_row_ordering().unwrap_err();
         assert_eq!(error.offset, text.rfind("rank").unwrap());

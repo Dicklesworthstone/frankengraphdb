@@ -49,6 +49,53 @@ impl<V: Vfs + Clone> Database<V> {
         Ok((stats, returning, completion))
     }
 
+    /// Execute a chained write (`CREATE (a) WITH a CREATE (b) [RETURN ...]`)
+    /// and publish all of its steps through one ordinary transaction
+    /// completion. Every step stages before commit; rows escape only after
+    /// finish succeeds, and a failing step publishes none of the others.
+    pub async fn execute_graph_write_chain_autocommit_governed<A>(
+        &mut self,
+        txcx: &TxnCx,
+        query_cx: &fgdb_types::QueryCx,
+        commit_cx: &CommitCx,
+        chain: &fgdb_gql::PreparedGraphWriteChain,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+        allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        (
+            fgdb_gql::insertion::GraphInsertStats,
+            fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+            fgdb_gql::GraphWriteProgramReceipt,
+            EmbeddedTxnCompletion,
+        ),
+        TxnGqlError<fgdb_gql::GraphWriteChainError<WriteTxnError, A>>,
+    > {
+        use fgdb_gql::insertion::GraphInsertError;
+        use fgdb_gql::{GqlQueryError, GraphInsertQueryError, GraphWriteChainError};
+        let infrastructure = |error| {
+            GqlQueryError::Source(GraphWriteChainError::Insert(
+                GraphInsertQueryError::Insertion(GraphInsertError::Source(error)),
+            ))
+        };
+        let mut transaction = self
+            .begin(txcx)
+            .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
+        let (stats, returning, receipt) = match transaction
+            .execute_graph_write_chain_governed(self, query_cx, chain, policy, allocate)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
+        };
+        let completion = transaction
+            .finish(self, commit_cx)
+            .await
+            .map_err(infrastructure)?;
+        Ok((stats, returning, receipt, completion))
+    }
+
     /// CREATE/INSERT RETURN autocommit using the owning database's identity
     /// reservations. Returned rows are released only after the ordinary commit
     /// or read-close completion; a failed RETURN cannot publish any creations.

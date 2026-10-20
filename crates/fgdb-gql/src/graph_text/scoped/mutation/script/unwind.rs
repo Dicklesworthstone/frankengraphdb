@@ -126,7 +126,121 @@ fn fresh_parameter(reserved: &mut BTreeSet<String>, cursor: &mut usize) -> Optio
     None
 }
 
-// Do not intercept the existing native UNWIND [MATCH] CREATE/INSERT pipeline.
+/// `MATCH (a {..}), (b {..}) [WHERE ..] CREATE (a)-[:R {..}]->(b), ...`: no
+/// relationship read before the CREATE and no new vertex in it (fgdb-0s2pq).
+/// One row's relationships then cannot change what a later row's vertex-only
+/// MATCH binds, so openCypher's clause-at-a-time result is the row-by-row
+/// one, and each row's keyed MATCH is an index lookup instead of the native
+/// pipeline's whole-table join. Lexical and conservative: any `)` followed by
+/// `-` or `<` before the CREATE, OPTIONAL, EXISTS, a path binding, a node
+/// pattern with a label, map or unbound name in the CREATE, or anything after
+/// its patterns keeps the native UNWIND CREATE compiler.
+fn edge_only_create(tokens: &[(Token<'_>, usize)], create: usize) -> bool {
+    let Some(start) = tokens[..create]
+        .iter()
+        .position(|(token, _)| is_word(token, "MATCH"))
+    else {
+        return false;
+    };
+    if tokens[..create]
+        .iter()
+        .any(|(token, _)| is_word(token, "OPTIONAL") || is_word(token, "EXISTS"))
+    {
+        return false;
+    }
+    // Paren, bracket and brace depths; a node pattern opens at all zero.
+    let (mut parens, mut brackets, mut braces) = (0usize, 0usize, 0usize);
+    let mut pattern = true;
+    let mut bound = BTreeSet::new();
+    for index in start..create {
+        let (token, _) = &tokens[index];
+        let top = parens == 0 && brackets == 0 && braces == 0;
+        match token.kind {
+            TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("EXISTS") || word.eq_ignore_ascii_case("OPTIONAL") =>
+            {
+                return false;
+            }
+            TokenKind::Word(word) if top => {
+                if word.eq_ignore_ascii_case("MATCH") {
+                    pattern = true;
+                } else if word.eq_ignore_ascii_case("WHERE") {
+                    pattern = false;
+                } else if pattern {
+                    return false;
+                }
+            }
+            TokenKind::Punct(b')')
+                if is_punct(tokens.get(index + 1), b'-')
+                    || is_punct(tokens.get(index + 1), b'<') =>
+            {
+                return false;
+            }
+            TokenKind::Punct(b'(') if top && pattern => {
+                if let Some((
+                    Token {
+                        kind: TokenKind::Word(name),
+                        ..
+                    },
+                    _,
+                )) = tokens.get(index + 1)
+                {
+                    bound.insert(*name);
+                }
+            }
+            TokenKind::Punct(b'=') if top && pattern => return false,
+            _ => {}
+        }
+        match token.kind {
+            TokenKind::Punct(b'(') => parens += 1,
+            TokenKind::Punct(b')') => parens = parens.saturating_sub(1),
+            TokenKind::Punct(b'[') => brackets += 1,
+            TokenKind::Punct(b']') => brackets = brackets.saturating_sub(1),
+            TokenKind::Punct(b'{') => braces += 1,
+            TokenKind::Punct(b'}') => braces = braces.saturating_sub(1),
+            _ => {}
+        }
+    }
+    if parens != 0 || brackets != 0 || braces != 0 {
+        return false;
+    }
+    let mut index = create + 1;
+    while let Some((token, _)) = tokens.get(index) {
+        let top = parens == 0 && brackets == 0 && braces == 0;
+        if top {
+            match token.kind {
+                // Each node is a bare variable the MATCH binds: `(a)`.
+                TokenKind::Punct(b'(') => {
+                    let named = matches!(
+                        tokens.get(index + 1),
+                        Some((Token { kind: TokenKind::Word(name), .. }, _)) if bound.contains(name)
+                    );
+                    if !named || !is_punct(tokens.get(index + 2), b')') {
+                        return false;
+                    }
+                    index += 3;
+                    continue;
+                }
+                TokenKind::Punct(b'-' | b'<' | b'>' | b',' | b'[') => {}
+                _ => return false,
+            }
+        }
+        match token.kind {
+            TokenKind::Punct(b'[') => brackets += 1,
+            TokenKind::Punct(b']') => brackets = brackets.saturating_sub(1),
+            TokenKind::Punct(b'{') => braces += 1,
+            TokenKind::Punct(b'}') => braces = braces.saturating_sub(1),
+            TokenKind::Punct(b'(') => parens += 1,
+            TokenKind::Punct(b')') => parens = parens.saturating_sub(1),
+            _ => {}
+        }
+        index += 1;
+    }
+    parens == 0 && brackets == 0 && braces == 0
+}
+
+// Do not intercept the existing native UNWIND [MATCH] CREATE/INSERT pipeline,
+// except its edge-only CREATE after a vertex-only MATCH (edge_only_create).
 // Property names and pattern-local labels are not clause keywords.
 fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
     let mut depth = 0usize;
@@ -142,7 +256,7 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
             let next = tokens.get(index + 1);
             let target = next.is_some_and(|(token, _)| matches!(token.kind, TokenKind::Word(_)));
             if (is_word(token, "CREATE") || is_word(token, "INSERT")) && is_punct(next, b'(') {
-                return false;
+                return is_word(token, "CREATE") && edge_only_create(tokens, index);
             }
             if is_word(token, "MERGE") && is_punct(next, b'(')
                 || (is_word(token, "SET") || is_word(token, "REMOVE"))

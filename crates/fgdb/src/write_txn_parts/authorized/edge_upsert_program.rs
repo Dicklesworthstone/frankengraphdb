@@ -104,13 +104,18 @@ fn apply_all<V: Vfs + Clone, Clock: FnMut() -> u64>(
         return Err(staging(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
     cx.with_restriction(|| {
+        // An edge-upsert program's MERGE has its MATCH prefix; a row input is
+        // the chained-write path's, never this one's.
+        let Some(pattern) = input.merge().selection() else {
+            return Err(invalid());
+        };
         let selected = {
             let controls = RefCell::new(&mut *execution);
             selection::select_overlay(
                 transaction,
                 database,
                 cx,
-                input.merge().selection(),
+                pattern,
                 scope,
                 policy.merge.query,
                 &controls,

@@ -348,10 +348,46 @@ impl<'a> Parser<'a> {
                         parser.advance()?;
                         column
                     } else {
+                        // `RETURN r AS rel ORDER BY rel.id`: a property of an
+                        // alias that projects a graph element of this part
+                        // bare is that element's property (With3 [1]). A
+                        // name that is itself a binding keeps meaning it.
+                        let bound = parser
+                            .visible_graph_bindings()
+                            .any(|name| name.text == word);
+                        let aliased = if !bound && matches!(next.kind, TokenKind::Punct(b'.')) {
+                            head.outputs[..visible].iter().find_map(|(name, value)| {
+                                let ReadValueTemplate::Column(index) = value else {
+                                    return None;
+                                };
+                                if name.text != word {
+                                    return None;
+                                }
+                                let Some(source) = index.checked_sub(offset) else {
+                                    // A carried element this part matched
+                                    // again by identity (`WITH r MATCH ()-[r]->()`).
+                                    let (carried, kind) = incoming[*index];
+                                    return matches!(
+                                        kind,
+                                        GraphSetColumnType::Vertex | GraphSetColumnType::Edge
+                                    )
+                                    .then(|| {
+                                        parser
+                                            .visible_graph_bindings()
+                                            .find(|binding| binding.text == carried.text)
+                                    })
+                                    .flatten();
+                                };
+                                let input = head.inputs[source];
+                                (input.property.is_none()
+                                    && matches!(input.path, None | Some(GraphPathFunction::Edge)))
+                                .then_some(input.variable)
+                            })
+                        } else {
+                            None
+                        };
                         if matches!(next.kind, TokenKind::Punct(b'('))
-                            || !parser
-                                .visible_graph_bindings()
-                                .any(|name| name.text == word)
+                            || (!bound && aliased.is_none())
                         {
                             return Ok(None);
                         }
@@ -366,10 +402,16 @@ impl<'a> Parser<'a> {
                                 ),
                             ));
                         }
-                        let variable = parser.any_variable()?;
+                        let variable = match aliased {
+                            Some(variable) => {
+                                parser.advance()?;
+                                variable
+                            }
+                            None => parser.any_variable()?,
+                        };
                         let property = if parser.take(b'.')? {
                             parser.require_property_variable(variable)?;
-                            Some(parser.name()?)
+                            Some(parser.schema_name()?)
                         } else {
                             None
                         };

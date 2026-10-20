@@ -296,7 +296,7 @@ impl<'a> Parser<'a> {
                     MAX_PATTERN_PREDICATES,
                     crate::algebra::PatternLimitDimension::Predicates,
                 )?;
-                parsed.labels.push((variable, self.name()?));
+                parsed.labels.push((variable, self.schema_name()?));
                 self.predicates += 1;
             }
             return Ok(());
@@ -366,8 +366,12 @@ impl<'a> Parser<'a> {
             let row = |word: &str| {
                 (self.read_row_bindings.iter()).position(|binding| binding.text == word)
             };
+            // Inside a later required MATCH the variables are that clause's
+            // own, all of them candidates; the root count is the outer one.
+            let roots = (self.syntax.variables.get(..self.syntax.root_variables))
+                .unwrap_or(&self.syntax.variables);
             let element = |word: &str| {
-                (self.syntax.variables[..self.syntax.root_variables].iter())
+                (roots.iter())
                     .copied()
                     .find(|variable| variable.text == word)
                     .or_else(|| {
@@ -408,7 +412,7 @@ impl<'a> Parser<'a> {
             [
                 TokenKind::Word(_),
                 TokenKind::Punct(b'.'),
-                TokenKind::Word(_),
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_),
                 TokenKind::Punct(b'='),
                 TokenKind::Word(name),
             ] => (row(name), true),
@@ -417,7 +421,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b'='),
                 TokenKind::Word(_),
                 TokenKind::Punct(b'.'),
-                TokenKind::Word(_),
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_),
             ] => (row(name), false),
             _ => (None, false),
         };
@@ -435,7 +439,7 @@ impl<'a> Parser<'a> {
         }
         let variable = self.property_variable()?;
         self.punct(b'.', ".")?;
-        let key = self.name()?;
+        let key = self.schema_name()?;
         if property_first {
             self.punct(b'=', "=")?;
             self.advance()?;
@@ -468,6 +472,7 @@ impl<'a> Parser<'a> {
         let mut arithmetic = false;
         let mut operand_end = false;
         let mut after_dot = false;
+        let mut previous = None;
         let property_compound = self.starts_compound_property_predicate()?;
         // A comparison chain (`a.p < b.q = c.r`) needs the scalar compiler;
         // `<=`, `<>`, `>=` and `!=` each count once.
@@ -528,14 +533,13 @@ impl<'a> Parser<'a> {
                     {
                         return Ok(true);
                     }
+                    // The atom ends at AND/OR or at any clause keyword: a
+                    // following `CREATE (a)-[:R]->(b)` is not arithmetic.
                     if depth == 0
                         && !after_dot
-                        && [
-                            "AND", "OR", "RETURN", "SET", "REMOVE", "WITH", "MATCH", "OPTIONAL",
-                            "CREATE", "INSERT", "DELETE", "DETACH", "MERGE",
-                        ]
-                        .iter()
-                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                        && (word.eq_ignore_ascii_case("AND")
+                            || word.eq_ignore_ascii_case("OR")
+                            || Self::ends_where(word, previous))
                     {
                         break;
                     }
@@ -558,6 +562,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Digits(_)
                 | TokenKind::Parameter(_)
                 | TokenKind::Quoted(_)
+                | TokenKind::DelimitedKeyword(_)
                 | TokenKind::Punct(b')' | b']') => true,
                 TokenKind::Word(word) => {
                     after_dot
@@ -569,6 +574,7 @@ impl<'a> Parser<'a> {
             };
             after_dot = matches!(token.kind, TokenKind::Punct(b'.'));
             comparing = matches!(token.kind, TokenKind::Punct(b'<' | b'>' | b'=' | b'!'));
+            previous = Some(token.kind);
             token = lexer.next()?;
         }
         Ok(arithmetic)
@@ -583,7 +589,10 @@ impl<'a> Parser<'a> {
         }
         let mut lexer = self.lexer.clone();
         if !matches!(lexer.next()?.kind, TokenKind::Punct(b'.'))
-            || !matches!(lexer.next()?.kind, TokenKind::Word(_))
+            || !matches!(
+                lexer.next()?.kind,
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+            )
         {
             return Ok(false);
         }
@@ -641,7 +650,7 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         let variable = self.property_variable()?;
         self.punct(b'.', ".")?;
-        let key = self.name()?;
+        let key = self.schema_name()?;
         let negate = self.take_word("NOT")?;
         parsed.extended = true;
         if self.take_word("IN")? {

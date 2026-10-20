@@ -40,7 +40,8 @@ pub(in crate::graph_text) const BOUNDARY_READ_NAMES: [&str; 16] = [
 /// WITH's hidden reads can resolve. The scope ends at a later WITH or UNWIND
 /// stage, another MATCH, a CALL, or a set operator. The WITH's own WHERE, its
 /// pages and a terminal RETURN are inside the scope. `WITH` after STARTS/ENDS
-/// is a text predicate, not a new clause.
+/// is a text predicate, not a new clause, and `MATCH` after ON is a MERGE's
+/// ON MATCH SET clause, whose right-hand sides read the row (fgdb-cpny9).
 pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
     word: &str,
     previous: Option<TokenKind<'_>>,
@@ -48,6 +49,11 @@ pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
     if word.eq_ignore_ascii_case("WITH") {
         return !matches!(previous, Some(TokenKind::Word(previous))
             if previous.eq_ignore_ascii_case("STARTS") || previous.eq_ignore_ascii_case("ENDS"));
+    }
+    if word.eq_ignore_ascii_case("MATCH")
+        && matches!(previous, Some(TokenKind::Word(previous)) if previous.eq_ignore_ascii_case("ON"))
+    {
+        return false;
     }
     [
         "MATCH",
@@ -60,6 +66,107 @@ pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
     ]
     .iter()
     .any(|clause| word.eq_ignore_ascii_case(clause))
+}
+
+/// The aliases of `carried` a later plain WITH projects under their own
+/// names (`WITH a, b AS b, a.p AS x` keeps `a` and `b`; `WITH *` keeps all),
+/// read from the token after its WITH. A grouping WITH keeps none: its rows
+/// are groups, and its own graph head owns their reads (fgdb-ezgeq).
+fn later_with_keeps<'a>(
+    mut lexer: Lexer<'a>,
+    carried: &[&'a str],
+) -> Result<Vec<&'a str>, GraphPatternTextError> {
+    const ENDS: [&str; 19] = [
+        "WHERE",
+        "ORDER",
+        "SKIP",
+        "LIMIT",
+        "RETURN",
+        "WITH",
+        "MATCH",
+        "OPTIONAL",
+        "UNWIND",
+        "UNION",
+        "EXCEPT",
+        "INTERSECT",
+        "CALL",
+        "CREATE",
+        "MERGE",
+        "SET",
+        "DELETE",
+        "DETACH",
+        "REMOVE",
+    ];
+    let mut kept: Vec<&'a str> = Vec::new();
+    let mut item: Vec<TokenKind<'a>> = Vec::new();
+    let mut depth = 0_usize;
+    let mut first = true;
+    loop {
+        let token = lexer.next()?;
+        let previous = item.last().copied();
+        if let TokenKind::Word(word) = token.kind
+            && !matches!(previous, Some(TokenKind::Punct(b'.')))
+            && super::with_aggregate::function(word).is_some()
+            && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            return Ok(Vec::new());
+        }
+        let ends = match token.kind {
+            TokenKind::End => true,
+            TokenKind::Punct(b'(' | b'[' | b'{') => {
+                depth += 1;
+                false
+            }
+            TokenKind::Punct(b')' | b']' | b'}') => match depth.checked_sub(1) {
+                Some(outer) => {
+                    depth = outer;
+                    false
+                }
+                None => true,
+            },
+            TokenKind::Word(word) => {
+                depth == 0
+                    && ENDS.iter().any(|clause| word.eq_ignore_ascii_case(clause))
+                    && !matches!(previous, Some(TokenKind::Word(previous))
+                        if previous.eq_ignore_ascii_case("STARTS")
+                            || previous.eq_ignore_ascii_case("ENDS"))
+            }
+            _ => false,
+        };
+        if ends || (depth == 0 && matches!(token.kind, TokenKind::Punct(b','))) {
+            let names: &[&'a str] = match item.as_slice() {
+                [TokenKind::Punct(b'*')] => carried,
+                [TokenKind::Word(name)] => core::slice::from_ref(name),
+                [
+                    TokenKind::Word(name),
+                    TokenKind::Word(r#as),
+                    TokenKind::Word(alias),
+                ] if r#as.eq_ignore_ascii_case("AS") && name == alias => {
+                    core::slice::from_ref(name)
+                }
+                _ => &[],
+            };
+            for &name in names {
+                if carried.contains(&name) && !kept.contains(&name) {
+                    kept.push(name);
+                }
+            }
+            if ends {
+                return Ok(kept);
+            }
+            item.clear();
+            continue;
+        }
+        if first
+            && let TokenKind::Word(word) = token.kind
+            && (word.eq_ignore_ascii_case("DISTINCT") || word.eq_ignore_ascii_case("ALL"))
+        {
+            first = false;
+            continue;
+        }
+        first = false;
+        item.push(token.kind);
+    }
 }
 
 /// The MATCH vertex a boundary output projects unchanged, if any.
@@ -126,7 +233,9 @@ pub(super) fn property_map_source<'a>(
 
 /// A complete native metadata call over one named graph binding. Map
 /// functions are deliberately excluded: their arguments may be ordinary
-/// map-valued rows, and must not be inferred to be vertices.
+/// map-valued rows, and must not be inferred to be vertices. A literal NULL
+/// argument is no binding: the scalar compiler answers `labels(null)` and
+/// its siblings with NULL (TCK Graph3 [7], Graph4 [3]).
 pub(super) fn metadata_source<'a>(
     word: &'a str,
     at: usize,
@@ -151,6 +260,7 @@ pub(super) fn metadata_source<'a>(
     }
     let argument = lookahead.next()?;
     if let TokenKind::Word(text) = argument.kind
+        && !text.eq_ignore_ascii_case("NULL")
         && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
     {
         return Ok(Some((
@@ -257,9 +367,12 @@ impl<'a> Parser<'a> {
     /// private name. The hidden columns are projected away before a later
     /// stage or another MATCH part can see them, and `*` never does. A
     /// property or metadata value is a function of its graph identity, so
-    /// hidden columns never change DISTINCT or multiplicity. Reads in later
-    /// stages or through computed or
-    /// carried values stay refused as before; a page after the RETURN belongs
+    /// hidden columns never change DISTINCT or multiplicity. A later plain
+    /// WITH that projects the element under its own name extends the scope
+    /// through its items, WHERE and pages to the next stage, and its row
+    /// carries the hidden columns (carry_boundary_reads). Reads past a stage
+    /// that drops, renames or groups the element, or through computed values,
+    /// stay refused as before; a page after the RETURN belongs
     /// to the set parser, which addresses the RETURN's own columns. `offset`
     /// is where this head's graph inputs start in its column space.
     pub(super) fn hoist_boundary_reads(
@@ -276,13 +389,31 @@ impl<'a> Parser<'a> {
         // the head projects, never a binding a plain WITH drops.
         let mut unwind = matches!(self.current.kind, TokenKind::Word(word)
             if word.eq_ignore_ascii_case("UNWIND"));
+        // A later plain WITH that projects a carried element under its own
+        // name keeps that element's reads in scope (MATCH (a) WITH a WITH a
+        // RETURN a.p); row_pipeline_prefix carries their hidden columns
+        // through it. `carried` is the aliases every such WITH kept so far
+        // (`None` before the first); `pending` is a WITH's set, applied once
+        // its own items, which still read the incoming row, end.
+        let mut carried: Option<Vec<&'a str>> = None;
+        let mut pending: Option<Vec<&'a str>> = None;
         // Otherwise the token after the projection list is not scanned. If it
-        // already ends the scope (a second WITH, MATCH ...), there is none.
+        // already ends the scope (MATCH ..., or a WITH that keeps no carried
+        // element), there is none.
         if let TokenKind::Word(word) = self.current.kind
             && !unwind
             && ends_boundary_scope(word, None)
         {
-            return Ok(());
+            let incoming: Vec<&'a str> = head.outputs.iter().map(|(name, _)| name.text).collect();
+            let kept = if word.eq_ignore_ascii_case("WITH") {
+                later_with_keeps(self.lexer.clone(), &incoming)?
+            } else {
+                Vec::new()
+            };
+            if kept.is_empty() {
+                return Ok(());
+            }
+            pending = Some(kept);
         }
         let visible = head.outputs.len();
         let mut reads = Vec::new();
@@ -291,7 +422,7 @@ impl<'a> Parser<'a> {
         // Those reads are hidden columns too, but scoped to that part.
         let mut scoped: Vec<(&'a str, Option<&'a str>, usize)> = Vec::new();
         let mut binders: Vec<&'a str> = Vec::new();
-        let mut before_return = head.plain && !unwind;
+        let mut before_return = head.plain && !unwind && pending.is_none();
         let mut functions = Vec::new();
         let mut lexer = self.lexer.clone();
         // The three tokens before the current one, oldest first.
@@ -300,6 +431,16 @@ impl<'a> Parser<'a> {
         loop {
             let token = lexer.next()?;
             let after_dot = matches!(window[2], Some(TokenKind::Punct(b'.')));
+            if let TokenKind::Word(word) = token.kind
+                && depth == 0
+                && !after_dot
+                && ["WHERE", "ORDER", "SKIP", "LIMIT", "RETURN", "WITH"]
+                    .iter()
+                    .any(|clause| word.eq_ignore_ascii_case(clause))
+                && let Some(kept) = pending.take()
+            {
+                carried = Some(kept);
+            }
             match token.kind {
                 TokenKind::End => break,
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
@@ -324,6 +465,28 @@ impl<'a> Parser<'a> {
                 {
                     unwind = true;
                     before_return = false;
+                }
+                TokenKind::Word(word)
+                    if !unwind
+                        && depth == 0
+                        && !after_dot
+                        && word.eq_ignore_ascii_case("WITH")
+                        && ends_boundary_scope(word, window[2]) =>
+                {
+                    let incoming: Vec<&'a str> = carried.clone().unwrap_or_else(|| {
+                        head.outputs[..visible]
+                            .iter()
+                            .map(|(name, _)| name.text)
+                            .collect()
+                    });
+                    let kept = later_with_keeps(lexer.clone(), &incoming)?;
+                    if kept.is_empty() {
+                        break;
+                    }
+                    // The dropped MATCH bindings the first WITH's own WHERE
+                    // and pages read are out of scope from here on.
+                    before_return = false;
+                    pending = Some(kept);
                 }
                 TokenKind::Word(word)
                     if depth == 0 && !after_dot && ends_boundary_scope(word, window[2]) =>
@@ -359,7 +522,10 @@ impl<'a> Parser<'a> {
                             scoped.push((word, None, column));
                         }
                     }
+                    let kept =
+                        |alias: &str| carried.as_ref().is_none_or(|kept| kept.contains(&alias));
                     if let Some((source, function)) = metadata_source(word, token.at, &lexer)?
+                        && kept(source.text)
                         && let Some(variable) =
                             boundary_metadata_binding(head, offset, source.text, function)
                         && !functions
@@ -381,6 +547,7 @@ impl<'a> Parser<'a> {
                                 variable,
                                 property: None,
                                 path: Some(function),
+                                collect: None,
                             },
                         )?;
                         head.outputs.push((
@@ -393,6 +560,7 @@ impl<'a> Parser<'a> {
                         functions.push((source.text, function, head.outputs.len() - 1));
                     }
                     if let Some(source) = property_map_source(word, token.at, &lexer)?
+                        && kept(source.text)
                         && let Some(variable) = boundary_binding(head, offset, source.text)
                         && !reads.iter().any(|&(alias, key, _): &(_, Name<'_>, _)| {
                             alias == source.text && key.text == "*"
@@ -428,9 +596,10 @@ impl<'a> Parser<'a> {
                         ));
                     }
                 }
-                TokenKind::Word(property) if after_dot => {
+                TokenKind::Word(property) | TokenKind::DelimitedKeyword(property) if after_dot => {
                     let chained = matches!(window[0], Some(TokenKind::Punct(b'.')));
                     if let (Some(TokenKind::Word(alias)), false) = (window[1], chained)
+                        && carried.as_ref().is_none_or(|kept| kept.contains(&alias))
                         && let Some(variable) = boundary_binding(head, offset, alias)
                         && !reads.iter().any(|&(read, key, _): &(_, Name<'_>, _)| {
                             read == alias && key.text == property
@@ -544,7 +713,9 @@ impl<'a> Parser<'a> {
             self.advance()?;
             return Ok(Some(column));
         }
-        let TokenKind::Word(property) = lookahead.next()?.kind else {
+        let (TokenKind::Word(property) | TokenKind::DelimitedKeyword(property)) =
+            lookahead.next()?.kind
+        else {
             return Ok(None);
         };
         let Some(column) = (boundary.reads.iter())
@@ -662,6 +833,75 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// After a plain WITH over a boundary row: the hidden reads of each
+    /// carried element it projects as a bare item under its own name stay
+    /// hidden columns, after its items, and become the new row's boundary
+    /// reads. Any other read ends here. A property or metadata value is a
+    /// function of its element, so a hidden column never changes DISTINCT.
+    #[allow(clippy::type_complexity)]
+    fn carry_boundary_reads(
+        &mut self,
+        (visible, reads, functions): (
+            usize,
+            Vec<(&'a str, Name<'a>, usize)>,
+            Vec<(&'a str, GraphPathFunction, usize)>,
+        ),
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        projection: &mut Vec<ReadProjectionTemplate>,
+        next_schema: &mut RowSchema<'a>,
+    ) {
+        let kept: Vec<&'a str> = (schema[..visible].iter().enumerate())
+            .filter(|&(index, (name, _))| {
+                projection.iter().any(|item| {
+                    item.name == name.text
+                        && matches!(item.value, ReadValueTemplate::Column(column) if column == index)
+                })
+            })
+            .map(|(_, (name, _))| name.text)
+            .collect();
+        let width = next_schema.len();
+        // A hidden name an item already took cannot be carried.
+        let free = |column: usize| {
+            next_schema[..width]
+                .iter()
+                .all(|(name, _)| name.text != schema[column].0.text)
+        };
+        let carried: Vec<bool> = (0..schema.len()).map(free).collect();
+        let mut moved: Vec<(usize, usize)> = Vec::new();
+        let mut carry = |column: usize| {
+            if let Some(&(_, to)) = moved.iter().find(|&&(from, _)| from == column) {
+                return to;
+            }
+            let to = next_schema.len();
+            projection.push(ReadProjectionTemplate {
+                name: schema[column].0.text.to_owned(),
+                value: ReadValueTemplate::Column(column),
+            });
+            next_schema.push(schema[column]);
+            moved.push((column, to));
+            to
+        };
+        let reads: Vec<_> = (reads.into_iter())
+            .filter(|&(alias, _, column)| kept.contains(&alias) && carried[column])
+            .map(|(alias, key, column)| (alias, key, carry(column)))
+            .collect();
+        let functions: Vec<_> = (functions.into_iter())
+            .filter(|&(alias, _, column)| kept.contains(&alias) && carried[column])
+            .map(|(alias, function, column)| (alias, function, carry(column)))
+            .collect();
+        if reads.is_empty() && functions.is_empty() {
+            return;
+        }
+        self.boundary_reads = Some(BoundaryReads {
+            visible: width,
+            width: next_schema.len(),
+            reads,
+            functions,
+            grouped: Vec::new(),
+            scoped: Vec::new(),
+        });
+    }
+
     /// The columns a name or `*` may resolve to: all of `schema`, minus any
     /// hidden boundary reads this row carries (their private names never
     /// resolve by text).
@@ -697,6 +937,12 @@ impl<'a> Parser<'a> {
         aggregate_return: bool,
     ) -> Result<Vec<ReadStageTemplate>, GraphSetTextError> {
         let (mut stages, schema, mut depth) = self.row_pipeline_prefix(schema)?;
+        // A write tail that meets the next write of a chain ends here: that
+        // write reads this row, hidden boundary reads included.
+        if self.chain_write && self.at_chained_write()? {
+            self.chained_row = Some(schema);
+            return Ok(stages);
+        }
         if aggregate_return && self.return_has_aggregate()? {
             let (stage, schema) = self.return_aggregate_stage(&schema)?;
             append_stage(&mut stages, stage, &mut depth)?;
@@ -823,8 +1069,13 @@ impl<'a> Parser<'a> {
             if !self.is_word("WITH") {
                 // A terminal RETURN, plain or aggregate, resolves the hidden
                 // reads; the next MATCH part or the end must not see them.
-                // A write after WITH reads them too (fgdb-sl4ym).
-                if !self.is_word("RETURN") && !self.write_prefix {
+                // A write after WITH reads them too (fgdb-sl4ym), and so does
+                // the next write of a chain (fgdb-cpny9), which takes this
+                // row with its hidden reads as its continuation.
+                if !self.is_word("RETURN")
+                    && !self.write_prefix
+                    && !(self.chain_write && self.at_chained_write()?)
+                {
                     self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
                 }
                 break;
@@ -835,7 +1086,22 @@ impl<'a> Parser<'a> {
                 schema = next_schema;
                 continue;
             }
-            self.drop_boundary_reads(&mut schema, &mut stages, &mut depth, at)?;
+            // A plain WITH reads the carried hidden reads itself, and keeps
+            // those of each element it projects under its own name, so a
+            // later stage or the RETURN reads `a.p` through them (MATCH (a)
+            // WITH a WITH a RETURN a.p, TCK WithOrderBy4 [7]).
+            let boundary = self
+                .boundary_reads
+                .take()
+                .filter(|boundary| boundary.width == schema.len());
+            let carried = boundary.as_ref().map(|boundary| {
+                (
+                    boundary.visible,
+                    boundary.reads.clone(),
+                    boundary.functions.clone(),
+                )
+            });
+            self.boundary_reads = boundary;
             self.word("WITH")?;
             let distinct = self.take_word("DISTINCT")?;
             if !distinct {
@@ -846,7 +1112,11 @@ impl<'a> Parser<'a> {
             } else {
                 GraphSetQuantifier::All
             };
-            let (projection, next_schema) = self.row_projection(&schema, false)?;
+            let (mut projection, mut next_schema) = self.row_projection(&schema, false)?;
+            self.boundary_reads = None;
+            if let Some(carried) = carried {
+                self.carry_boundary_reads(carried, &schema, &mut projection, &mut next_schema);
+            }
             append_stage(
                 &mut stages,
                 ReadStageTemplate::Project {
@@ -1237,7 +1507,9 @@ impl<'a> Parser<'a> {
         if !matches!(lookahead.next()?.kind, TokenKind::Punct(b'.')) {
             return Ok(None);
         }
-        let TokenKind::Word(property) = lookahead.next()?.kind else {
+        let (TokenKind::Word(property) | TokenKind::DelimitedKeyword(property)) =
+            lookahead.next()?.kind
+        else {
             return Ok(None);
         };
         let Some(column) = sources.iter().position(|source| {

@@ -42,7 +42,7 @@ impl<'a> ReturnLeaves<'a> for ParsedEdgeReturn<'a> {
         }
         let source = parser.name()?;
         let input = if parser.take(b'.')? {
-            ReturnMapInput::Property(parser.name()?)
+            ReturnMapInput::Property(parser.schema_name()?)
         } else {
             ReturnMapInput::Identity
         };
@@ -434,7 +434,7 @@ impl PreparedGraphEdgeUpsertQueryText {
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphEdgeUpsertQuery, GraphEdgeUpsertTextError> {
         let upsert = self.upsert.bind_parameters(arguments)?;
-        let values = self.upsert.merge.selection.checked_arguments(arguments)?;
+        let values = self.upsert.merge.input.checked_arguments(arguments)?;
         self.returning.bind(upsert, &values)
     }
 }

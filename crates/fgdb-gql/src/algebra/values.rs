@@ -355,6 +355,12 @@ pub enum GraphColumn<'a> {
         variable: &'a str,
         function: GraphPathFunction,
     },
+    /// The list a pattern comprehension's Collect clause gathers per row
+    /// (fgdb-7nwox): `clause` indexes the clause sequence.
+    Collection {
+        name: &'a str,
+        clause: usize,
+    },
 }
 
 impl<'a> GraphColumn<'a> {
@@ -390,15 +396,22 @@ impl<'a> GraphColumn<'a> {
     }
 
     #[must_use]
+    pub const fn collection(name: &'a str, clause: usize) -> Self {
+        Self::Collection { name, clause }
+    }
+
+    #[must_use]
     pub const fn name(self) -> &'a str {
         match self {
             Self::Vertex { name, .. }
             | Self::Property { name, .. }
             | Self::EdgeProperty { name, .. }
-            | Self::Path { name, .. } => name,
+            | Self::Path { name, .. }
+            | Self::Collection { name, .. } => name,
         }
     }
 
+    /// The binding a column reads; a collection reads no outer binding.
     #[allow(dead_code)]
     pub(super) const fn variable(self) -> &'a str {
         match self {
@@ -406,6 +419,7 @@ impl<'a> GraphColumn<'a> {
             | Self::Property { variable, .. }
             | Self::EdgeProperty { variable, .. }
             | Self::Path { variable, .. } => variable,
+            Self::Collection { .. } => "",
         }
     }
 }
@@ -447,6 +461,10 @@ pub enum ValueProjection {
     },
     EdgeProperties {
         capture: u32,
+    },
+    /// The list a Collect group gathered for this occurrence (fgdb-7nwox).
+    Collected {
+        group: u32,
     },
 }
 
@@ -1374,13 +1392,14 @@ pub(super) fn collect_values<'a, E: From<crate::GraphIntegerError>>(
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
-    collect_values_with_paths(columns, bindings, &[], projected, property, control)
+    collect_values_with_paths(columns, bindings, &[], &[], projected, property, control)
 }
 
 pub(super) fn collect_values_with_paths<'a, E: From<crate::GraphIntegerError>>(
     columns: &[ValueProjection],
     bindings: &[Option<VId>],
     paths: &[Option<GraphPath>],
+    collected: &[Option<GraphValue>],
     projected: &mut ProjectedRows<GraphValueRow>,
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -1389,6 +1408,7 @@ pub(super) fn collect_values_with_paths<'a, E: From<crate::GraphIntegerError>>(
         columns,
         bindings,
         paths,
+        collected,
         projected,
         property,
         &mut |_, _| panic!("edge properties require an explicit edge property source"),
@@ -1403,6 +1423,7 @@ pub(super) fn collect_values_with_element_properties<'a, E: From<crate::GraphInt
     columns: &[ValueProjection],
     bindings: &[Option<VId>],
     paths: &[Option<GraphPath>],
+    collected: &[Option<GraphValue>],
     projected: &mut ProjectedRows<GraphValueRow>,
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
@@ -1414,6 +1435,7 @@ pub(super) fn collect_values_with_element_properties<'a, E: From<crate::GraphInt
         columns,
         bindings,
         paths,
+        collected,
         projected,
         property,
         edge_property,
@@ -1449,6 +1471,7 @@ pub(super) fn collect_values_with_element_maps<'a, E: From<crate::GraphIntegerEr
     columns: &[ValueProjection],
     bindings: &[Option<VId>],
     paths: &[Option<GraphPath>],
+    collected: &[Option<GraphValue>],
     projected: &mut ProjectedRows<GraphValueRow>,
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
     edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
@@ -1594,6 +1617,27 @@ pub(super) fn collect_values_with_element_maps<'a, E: From<crate::GraphIntegerEr
                     (_, Some(GraphValue::Edge(value))) => ValueRef::Edge(*value),
                     _ => ValueRef::Scalar(&null),
                 }
+            }
+            // The list this occurrence's Collect group published (fgdb-7nwox).
+            // An executor that collects none, or a list past one value's
+            // bounds, refuses; neither is ever read as NULL or truncated.
+            ValueProjection::Collected { group } => {
+                let refused = |kind| {
+                    E::from(crate::GraphIntegerError {
+                        instruction: 0,
+                        kind,
+                    })
+                };
+                let list = collected
+                    .get(*group as usize)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| {
+                        refused(crate::GraphIntegerErrorKind::CollectionSourceRequired)
+                    })?;
+                if !list.validate_bounds() {
+                    return Err(refused(crate::GraphIntegerErrorKind::CollectionBounds));
+                }
+                value_ref(list)
             }
         };
         for _ in 0..key[at].payload_units() {

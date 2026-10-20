@@ -319,7 +319,7 @@ impl<'a> Parser<'a> {
             [
                 TokenKind::Word(_),
                 TokenKind::Punct(b'.'),
-                TokenKind::Word(_),
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_),
             ] => true,
             [
                 TokenKind::Word(_),

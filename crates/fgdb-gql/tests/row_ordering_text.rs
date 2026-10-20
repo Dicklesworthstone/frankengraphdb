@@ -348,6 +348,11 @@ fn distinct_elements_order_by_their_own_unprojected_property() {
             "MATCH (x) RETURN DISTINCT x AS owner ORDER BY x.score",
             [VId(0), VId(3), VId(1), VId(2)],
         ),
+        // A property of the alias is the element's property.
+        (
+            "MATCH (x) RETURN DISTINCT x AS owner ORDER BY owner.score",
+            [VId(0), VId(3), VId(1), VId(2)],
+        ),
     ] {
         let rows = text(statement)
             .plan()

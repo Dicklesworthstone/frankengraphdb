@@ -80,7 +80,7 @@ impl<'a> Parser<'a> {
                     GraphPatternTextErrorKind::Expected("bounded imported row field path"),
                 ));
             }
-            let key = self.map_key()?;
+            let key = self.schema_name()?;
             value = self.map_get(value, key.text);
             depth += 1;
         }

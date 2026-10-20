@@ -216,6 +216,9 @@ pub enum QueryWriteError<A> {
     /// match, retaining native action, result and completion errors.
     EdgeUpsertText(GraphEdgeUpsertTextError),
     EdgeUpsert(GqlQueryError<GraphEdgeUpsertQueryError<WriteTxnError, A>, Cancel>),
+    /// A chained write (fgdb-cpny9): the failing step's own family error.
+    ChainText(GraphWriteChainTextError),
+    Chain(GqlQueryError<GraphWriteChainError<WriteTxnError, A>, Cancel>),
 }
 impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -233,6 +236,8 @@ impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
             Self::EdgeMerge(e) => e.fmt(f),
             Self::EdgeUpsertText(e) => e.fmt(f),
             Self::EdgeUpsert(e) => e.fmt(f),
+            Self::ChainText(e) => e.fmt(f),
+            Self::Chain(e) => e.fmt(f),
         }
     }
 }
@@ -252,6 +257,8 @@ impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> 
             Self::EdgeMerge(error) => Some(error),
             Self::EdgeUpsertText(error) => Some(error),
             Self::EdgeUpsert(error) => Some(error),
+            Self::ChainText(error) => Some(error),
+            Self::Chain(error) => Some(error),
         }
     }
 }
@@ -291,6 +298,24 @@ fn prepare_insert_return(
 ) -> Result<PreparedGraphInsertQuery, GraphInsertTextError> {
     let declarations = write_return_declarations(params);
     PreparedGraphInsertQueryText::prepare_with_parameter_types(
+        text,
+        relation,
+        &declarations,
+        resolver,
+    )?
+    .bind_parameters(params)
+}
+
+/// `CREATE ... WITH ... CREATE ... [RETURN ...]` (fgdb-cpny9): every step is
+/// prepared and bound before any executes.
+fn prepare_write_chain(
+    text: &str,
+    params: &GqlParameters,
+    resolver: impl GraphSymbolResolver,
+    relation: RelationId,
+) -> Result<PreparedGraphWriteChain, GraphWriteChainTextError> {
+    let declarations = write_return_declarations(params);
+    PreparedGraphWriteChainText::prepare_with_parameter_types(
         text,
         relation,
         &declarations,
@@ -471,6 +496,37 @@ impl<V: Vfs + Clone> Database<V> {
         budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
+        // A chain claims its text before CREATE RETURN, whose classifier
+        // would otherwise see the final RETURN of a multi-write statement.
+        if PreparedGraphWriteChainText::is_chain(text).map_err(QueryWriteError::InsertText)? {
+            let chain = prepare_write_chain(text, params, resolver, relation)
+                .map_err(QueryWriteError::ChainText)?;
+            let columns = chain.columns().to_vec();
+            let (_, rows, receipt, completion) = self
+                .execute_graph_write_chain_autocommit_governed(
+                    txcx,
+                    cx,
+                    commit_cx,
+                    &chain,
+                    budget.insertion_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .await
+                .map_err(QueryWriteError::Chain)?;
+            return Ok(if chain.returns_rows() {
+                values(columns, rows.value)
+            } else {
+                QueryResult::Write {
+                    receipt,
+                    completion: Some(completion),
+                }
+            });
+        }
         if PreparedGraphInsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::InsertText)?
         {
@@ -633,6 +689,33 @@ impl WriteTxn {
         budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
+        if PreparedGraphWriteChainText::is_chain(text).map_err(QueryWriteError::InsertText)? {
+            let chain = prepare_write_chain(text, params, resolver, relation)
+                .map_err(QueryWriteError::ChainText)?;
+            let columns = chain.columns().to_vec();
+            let (_, rows, receipt) = self
+                .execute_graph_write_chain_governed(
+                    database,
+                    cx,
+                    &chain,
+                    budget.insertion_policy(),
+                    |request| {
+                        allocate(GraphWriteIdentityRequest {
+                            statement: 0,
+                            request,
+                        })
+                    },
+                )
+                .map_err(QueryWriteError::Chain)?;
+            return Ok(if chain.returns_rows() {
+                values(columns, rows.value)
+            } else {
+                QueryResult::Write {
+                    receipt,
+                    completion: None,
+                }
+            });
+        }
         if PreparedGraphInsertQueryText::has_return_clause(text)
             .map_err(QueryWriteError::InsertText)?
         {

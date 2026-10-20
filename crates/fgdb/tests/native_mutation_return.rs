@@ -142,6 +142,14 @@ fn writes_after_with_target_the_row_and_return_its_captured_values() {
             rows(carried, &["id", "p"]),
             vec![vec![int(104), int(4)], vec![int(107), int(7)]]
         );
+        // A map column of the row reads its entry in the write.
+        let mapped = write(
+            &mut db,
+            "MATCH (n:L) WITH n, {k: n.p * 2} AS m SET n.id = m.k RETURN n.id AS id ORDER BY id",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(mapped, &["id"]), vec![vec![int(8)], vec![int(14)]]);
         // A plain WITH may order and page the rows the write then reads.
         assert!(matches!(
             write(
@@ -228,11 +236,12 @@ fn deleting_a_path_deletes_its_elements() {
         };
         let path = "p = (a:L {id: 1})-[:R]->()-[:R]->(c:L {id: 3})";
         let frontier = db.frontier().unwrap();
-        // Node 2 keeps edge 12, so a plain DELETE of the path is refused.
+        // Node 2 keeps edge 12, so a plain DELETE of the path is refused when
+        // it executes, not as a name the statement does not know.
+        let refused = write(&mut db, &format!("MATCH {path} DELETE p")).await;
         assert!(
-            write(&mut db, &format!("MATCH {path} DELETE p"))
-                .await
-                .is_err()
+            matches!(refused, Err(QueryWriteError::Execute(_))),
+            "{refused:?}"
         );
         assert_eq!(db.frontier().unwrap(), frontier);
         write(
@@ -252,6 +261,120 @@ fn deleting_a_path_deletes_its_elements() {
             db.edges().unwrap().is_empty(),
             "every edge left with node 2"
         );
+        // Node 4 lost its only edge with node 2, so a plain DELETE of its
+        // one-node path deletes it.
+        write(&mut db, "MATCH p = (:L {id: 4}) DELETE p")
+            .await
+            .unwrap();
+        assert_eq!(db.vertex(VId(4)).unwrap(), None);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// TCK Delete5: after WITH, DELETE and DETACH DELETE take a value the row
+/// computes - a list element, a map entry, a path in a nested map. Each case
+/// runs on its own graph. A value that is not an element refuses when it
+/// runs, a scalar row column refuses at preparation, and neither commits.
+#[test]
+fn deletes_after_with_take_elements_the_row_computes() {
+    let ((), report) = run_async_under_lab(0xa071_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let write = async |db: &mut Database<_>, text: &str, parameters: &GqlParameters| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                parameters,
+                symbols,
+                R,
+                policy(100, 100, 0),
+                no_allocate,
+            )
+            .await
+        };
+        let empty = GqlParameters::new();
+        // Vertices 1..=n labeled L with ids, and R edges by (eid, from, to).
+        let graph = |vertices: u128, edges: &[(u128, u128, u128)]| {
+            let mut batch = WriteBatch::new(R);
+            for id in 1..=vertices {
+                batch.create_vertex(
+                    VId(id),
+                    vec![L],
+                    vec![(ID, CanonicalScalar::Int(id as i64))],
+                );
+            }
+            for &(eid, from, to) in edges {
+                batch.add_edge(fgdb_types::EId(eid), VId(from), VId(to), vec![]);
+            }
+            batch
+        };
+        let star = [(10, 1, 2), (11, 1, 3), (12, 1, 4)];
+        let live = |db: &Database<_>, ids: core::ops::RangeInclusive<u128>| {
+            ids.filter(|&id| db.vertex(VId(id)).unwrap().is_some())
+                .count()
+        };
+        // DETACH DELETE of one relationship of a collected list (Delete5 [2]).
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph(4, &star)).await.unwrap();
+        let one = GqlParameters::new().with_int64("i", 1).unwrap();
+        write(
+            &mut db,
+            "MATCH (:L {id: 1})-[r:R]->() WITH collect(r) AS rs DETACH DELETE rs[$i]",
+            &one,
+        )
+        .await
+        .unwrap();
+        assert_eq!((live(&db, 1..=4), db.edges().unwrap().len()), (4, 2));
+        // DETACH DELETE of one collected node takes its edge (Delete5 [1]).
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph(4, &star)).await.unwrap();
+        write(
+            &mut db,
+            "MATCH (:L {id: 1})-[:R]->(n) WITH collect(n) AS ns DETACH DELETE ns[0]",
+            &empty,
+        )
+        .await
+        .unwrap();
+        assert_eq!((live(&db, 1..=4), db.edges().unwrap().len()), (3, 2));
+        // A plain DELETE of isolated nodes held in a map (Delete5 [3]).
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph(2, &[])).await.unwrap();
+        write(
+            &mut db,
+            "MATCH (n:L) WITH {key: n} AS m DELETE m.key",
+            &empty,
+        )
+        .await
+        .unwrap();
+        assert_eq!(live(&db, 1..=2), 0);
+        // Paths in a nested map: both paths of a two-cycle, plain (Delete5 [7]).
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, graph(2, &[(10, 1, 2), (11, 2, 1)]))
+            .await
+            .unwrap();
+        let frontier = db.frontier().unwrap();
+        let at_run = write(&mut db, "MATCH (n:L) WITH [1, 2] AS l DELETE l[0]", &empty).await;
+        assert!(
+            matches!(at_run, Err(QueryWriteError::Execute(_))),
+            "{at_run:?}"
+        );
+        let scalar = write(&mut db, "MATCH (n:L) WITH n.id AS x DELETE x", &empty).await;
+        assert!(scalar.is_err(), "{scalar:?}");
+        assert_eq!(db.frontier().unwrap(), frontier);
+        write(
+            &mut db,
+            "MATCH p = (:L)-[:R]->(:L) WITH {key: {key: collect(p)}} AS m \
+             DELETE m.key.key[0], m.key.key[1]",
+            &empty,
+        )
+        .await
+        .unwrap();
+        assert_eq!((live(&db, 1..=2), db.edges().unwrap().len()), (0, 0));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

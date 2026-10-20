@@ -218,6 +218,7 @@ fn observe<Row: GlaIdentityOutput>(
     let project = |operator: &GlaOperator,
                    bindings: &[Option<VId>],
                    _paths: &[Option<crate::algebra::GraphPath>],
+                   _collected: &[Option<crate::algebra::GraphValue>],
                    projected: &mut crate::algebra_exec::ProjectedRows<Row>,
                    control: &mut _| {
         Row::collect(operator, bindings, projected, control)?;

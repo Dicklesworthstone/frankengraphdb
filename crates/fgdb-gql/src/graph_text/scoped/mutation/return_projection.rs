@@ -311,12 +311,13 @@ fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
 
 /// Whether a value can statically hold a map, so `.key` may read it
 /// (fgdb-2jw3z). A row column qualifies only when its type is dynamic
-/// (`schema` is the row scope). A graph property-map projection is identified
-/// separately by the parser, without admitting an arbitrary graph identity.
+/// (`column_type` reads the row scope's, or a resolver's known row). A graph
+/// property-map projection is identified separately by the parser, without
+/// admitting an arbitrary graph identity.
 fn map_capable(
     value: &ReadValueTemplate,
     key: &str,
-    schema: Option<&[(Name<'_>, GraphSetColumnType)]>,
+    column_type: &dyn Fn(usize) -> Option<GraphSetColumnType>,
     parameters: &[GqlParameterSpec],
 ) -> bool {
     match value {
@@ -331,17 +332,13 @@ fn map_capable(
         // A scalar column (a stored property, say) may hold a temporal value,
         // so it reads that value's fields. Any other key could only be NULL
         // or an error, and stays refused here.
-        ReadValueTemplate::Column(at) => {
-            schema
-                .and_then(|schema| schema.get(*at))
-                .is_some_and(|(_, kind)| match kind {
-                    GraphSetColumnType::Any => true,
-                    GraphSetColumnType::Scalar | GraphSetColumnType::Stored => {
-                        crate::set_ops::temporal_field_name(key)
-                    }
-                    _ => false,
-                })
-        }
+        ReadValueTemplate::Column(at) => column_type(*at).is_some_and(|kind| match kind {
+            GraphSetColumnType::Any => true,
+            GraphSetColumnType::Scalar | GraphSetColumnType::Stored => {
+                crate::set_ops::temporal_field_name(key)
+            }
+            _ => false,
+        }),
         ReadValueTemplate::Parameter { index, .. } => {
             parameters[*index].parameter_type == GqlParameterType::Map
         }
@@ -378,6 +375,10 @@ impl<'a> GraphProjectionHead<'a> {
             .map(|input| {
                 if input.property.is_some() {
                     return GraphSetColumnType::Stored;
+                }
+                // A pattern comprehension's collected list (fgdb-7nwox).
+                if input.collect.is_some() {
+                    return GraphSetColumnType::List;
                 }
                 match input.path {
                     Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
@@ -507,6 +508,7 @@ impl<'a> Parser<'a> {
                 variable: source,
                 property: None,
                 path: Some(GraphPathFunction::Properties),
+                collect: None,
             },
         )
     }
@@ -857,6 +859,7 @@ impl<'a> Parser<'a> {
                 property: source.property,
                 path: source.path,
                 alias: source.variable,
+                collect: source.collect,
             })
             .collect();
         let projection = Some(projection);
@@ -1027,7 +1030,7 @@ impl<'a> Parser<'a> {
                     if graph {
                         let variable = parser.any_variable()?;
                         let property = if parser.take(b'.')? {
-                            Some(parser.name()?)
+                            Some(parser.schema_name()?)
                         } else {
                             None
                         };
@@ -1198,13 +1201,73 @@ impl<'a> Parser<'a> {
         ),
         GraphSetTextError,
     > {
-        let mut head = self.graph_projection_head()?;
+        let head = self.graph_projection_head()?;
         if !head.with {
             return Err(GraphSetTextError {
                 offset: self.current.at,
                 kind: GraphSetTextErrorKind::Expected("WITH before the write clause"),
             });
         }
+        self.write_row_after_head(head)
+    }
+
+    /// The read part of `MATCH ... MERGE (v ...)` without WITH (fgdb-cpny9):
+    /// the write reads every MATCH binding, as `WITH *` would carry them,
+    /// through any later UNWIND or WITH stages.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn implicit_write_row_prefix(
+        &mut self,
+    ) -> Result<
+        (
+            GraphProjectionHead<'a>,
+            Vec<ReadStageTemplate>,
+            Vec<(Name<'a>, GraphSetColumnType)>,
+        ),
+        GraphSetTextError,
+    > {
+        let mut head = self.implicit_with_head()?;
+        if head.outputs.is_empty()
+            && let Some(&variable) = self.syntax.variables.first()
+        {
+            // `MATCH () MERGE ...`: no binding has a name, yet the write runs
+            // once per MATCH row. Carry the anonymous vertex, which no name
+            // addresses.
+            let index = self.mutation_projection(&mut head.inputs, variable, None)?;
+            head.outputs
+                .push((variable, ReadValueTemplate::Column(index)));
+        }
+        self.write_row_after_head(head)
+    }
+
+    /// Source-free WITH stages (and any WHERE, page or UNWIND among them) a
+    /// statement's first write follows: `WITH 42 AS v MERGE ...`, `UNWIND
+    /// [1] AS x WITH x WHERE x > 0 MERGE ...` (fgdb-cpny9). `schema` is the
+    /// leading UNWINDs' row, or empty.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn leading_row_stages(
+        &mut self,
+        schema: Vec<(Name<'a>, GraphSetColumnType)>,
+    ) -> Result<(Vec<ReadStageTemplate>, Vec<(Name<'a>, GraphSetColumnType)>), GraphSetTextError>
+    {
+        self.write_prefix = true;
+        let prefix = self.row_pipeline_prefix(schema);
+        self.write_prefix = false;
+        let (stages, schema, _) = prefix?;
+        Ok((stages, schema))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn write_row_after_head(
+        &mut self,
+        mut head: GraphProjectionHead<'a>,
+    ) -> Result<
+        (
+            GraphProjectionHead<'a>,
+            Vec<ReadStageTemplate>,
+            Vec<(Name<'a>, GraphSetColumnType)>,
+        ),
+        GraphSetTextError,
+    > {
         self.hoist_boundary_reads(&mut head, 0)?;
         let schema = head.schema(&self.syntax.parameters);
         // A carried element's hidden reads stay in the row: the write's
@@ -1258,6 +1321,7 @@ impl<'a> Parser<'a> {
                         property: source.property,
                         path: source.path,
                         alias,
+                        collect: source.collect,
                     }
                 })
                 .collect();
@@ -1284,6 +1348,7 @@ impl<'a> Parser<'a> {
                 property: source.property,
                 path: source.path,
                 alias: source.variable,
+                collect: source.collect,
             })
             .collect();
         let mut projection = Vec::new();
@@ -1399,7 +1464,7 @@ impl<'a> Parser<'a> {
                         self.punct(b',', ", or }")?;
                         continue;
                     }
-                    let key = self.map_key()?;
+                    let key = self.schema_name()?;
                     let value = if let Some(columns) = columns.as_deref_mut() {
                         ReadValueTemplate::Column(self.mutation_projection(
                             columns,
@@ -1420,7 +1485,7 @@ impl<'a> Parser<'a> {
                     };
                     (key.text.into(), value)
                 } else {
-                    let key = self.map_key()?;
+                    let key = self.schema_name()?;
                     if self.take(b':')? {
                         let value = self.read_recursive_value(
                             columns.as_deref_mut(),
@@ -1716,9 +1781,12 @@ impl<'a> Parser<'a> {
                 return Ok(true);
             }
         }
+        // An element subscript `n['p']` reads in the scalar compiler when an
+        // operator follows it, as it does on an operator's right (Graph7).
+        let subscript = self.element_subscript_follows()?;
         let size = self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
-        if !size && !self.starts_let_operand()? {
+        if !subscript && !size && !self.starts_let_operand()? {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();
@@ -1962,6 +2030,18 @@ impl<'a> Parser<'a> {
         };
         let mut value = if scalar {
             self.read_scalar_value(inputs.as_deref_mut(), schema, at, depth, false)?
+        } else if self.starts_pattern_comprehension()? {
+            // `[(n)-->(m) | m.p]` (fgdb-7nwox) reads the MATCH bindings of a
+            // graph projection; a row or aggregate scope has none to correlate.
+            let Some(inputs) = inputs.as_deref_mut().filter(|_| resolve.is_none()) else {
+                return Err(GraphSetTextError {
+                    offset: at,
+                    kind: GraphSetTextErrorKind::Expected(
+                        "a pattern comprehension over the MATCH bindings of a RETURN",
+                    ),
+                });
+            };
+            self.pattern_comprehension(inputs, schema, resolve, depth)?
         } else if comprehension {
             // openCypher `[x IN list WHERE p | e]` (fgdb-20foe).
             self.advance()?;
@@ -2021,7 +2101,7 @@ impl<'a> Parser<'a> {
                         crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
                         crate::algebra::PatternLimitDimension::Columns,
                     )?;
-                    let key = self.map_key()?;
+                    let key = self.schema_name()?;
                     self.punct(b':', ":")?;
                     let value = self.read_recursive_value(
                         inputs.as_deref_mut(),
@@ -2254,6 +2334,43 @@ impl<'a> Parser<'a> {
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{'))
         {
             self.map_projection(inputs.as_deref_mut(), schema, resolve, depth, at)?
+        } else if resolve.is_some()
+            && (self.is_word("PERCENTILEDISC") || self.is_word("PERCENTILECONT"))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            // percentileDisc(x, p): the resolver collects x as a hidden
+            // aggregate, and p reads after aggregation (fgdb-qbaex).
+            let function = if self.is_word("PERCENTILEDISC") {
+                crate::GraphValueFunction::PercentileDisc
+            } else {
+                crate::GraphValueFunction::PercentileCont
+            };
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            self.percentile_leaf = true;
+            let collected = match resolve.as_mut() {
+                Some(resolve) => resolve.leaf(self)?,
+                None => None,
+            };
+            let (false, Some(collected)) = (core::mem::take(&mut self.percentile_leaf), collected)
+            else {
+                return Err(GraphSetTextError {
+                    offset: at,
+                    kind: GraphSetTextErrorKind::Expected(
+                        "percentileDisc or percentileCont as an aggregating RETURN item",
+                    ),
+                });
+            };
+            self.punct(b',', ",")?;
+            let p = self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            self.punct(b')', ")")?;
+            ReadValueTemplate::Function {
+                function,
+                argument: Box::new(ReadValueTemplate::List(vec![
+                    ReadValueTemplate::Column(collected),
+                    p,
+                ])),
+            }
         } else if let Some(resolve) = resolve.as_mut() {
             // Element and map entries (`x.p` of a comprehension element over
             // COLLECT, an imported `row.key`) take let slots, as the element
@@ -2293,6 +2410,7 @@ impl<'a> Parser<'a> {
                         variable,
                         property: None,
                         path: Some(GraphPathFunction::Properties),
+                        collect: None,
                     },
                 )?)
             } else if bare {
@@ -2326,12 +2444,21 @@ impl<'a> Parser<'a> {
                     || map_capable(
                         &value,
                         key,
-                        (inputs.is_none() && resolve.is_none()).then_some(schema),
+                        &|at| {
+                            if inputs.is_none() && resolve.is_none() {
+                                schema.get(at).map(|(_, kind)| *kind)
+                            } else {
+                                // A resolver over a known row (a write's
+                                // WITH row) states its column types.
+                                (self.resolved_column_types.as_ref())
+                                    .and_then(|types| types.get(at).copied())
+                            }
+                        },
                         &self.syntax.parameters,
                     ))
             {
                 self.advance()?;
-                let key = self.map_key()?;
+                let key = self.schema_name()?;
                 value = self.map_get(value, key.text);
                 graph_map = false;
                 continue;
@@ -2722,6 +2849,155 @@ impl<'a> Parser<'a> {
         .map(|(_, kind)| kind);
         Ok(kind)
     }
+
+    /// Whether a pattern comprehension starts here (fgdb-7nwox): `[`, an
+    /// optional `name =`, then a node pattern a relationship follows. A bare
+    /// `--` must reach a node or an arrow head, so `[(x) - -1]` stays
+    /// arithmetic.
+    fn starts_pattern_comprehension(&self) -> Result<bool, GraphPatternTextError> {
+        if !self.is_punct(b'[') {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        let mut first = lexer.next()?;
+        if matches!(first.kind, TokenKind::Word(_)) {
+            if !matches!(lexer.next()?.kind, TokenKind::Punct(b'=')) {
+                return Ok(false);
+            }
+            first = lexer.next()?;
+        }
+        let mut after = lexer.clone();
+        if !crate::graph_text::scoped::pattern_predicate_follows(first.kind, &mut lexer)? {
+            return Ok(false);
+        }
+        skip_group(&mut after)?;
+        if matches!(
+            (after.next()?.kind, after.next()?.kind),
+            (TokenKind::Punct(b'-'), TokenKind::Punct(b'-'))
+        ) {
+            return Ok(matches!(after.next()?.kind, TokenKind::Punct(b'(' | b'>')));
+        }
+        Ok(true)
+    }
+
+    /// The local of Collect scope `scope` that the projection after `|`
+    /// reads: its path, or a vertex or relationship the pattern introduces.
+    /// None when it reads no local (each witness then collects NULL); more
+    /// than one refuses, since one element per witness carries one value.
+    fn comprehension_element(
+        &self,
+        scope: usize,
+    ) -> Result<Option<Name<'a>>, GraphPatternTextError> {
+        let body = &self.syntax.scopes[scope].body;
+        let local = |word: &str| {
+            !word.starts_with(Self::ANONYMOUS_PREFIX)
+                && !self.syntax.variables.iter().any(|outer| outer.text == word)
+                && (body.variables.iter().any(|name| name.text == word)
+                    || body
+                        .edges
+                        .iter()
+                        .any(|edge| edge.variable.is_some_and(|name| name.text == word))
+                    || body.filters.iter().any(
+                        |filter| matches!(filter, Filter::PathCapture(path) if path.text == word),
+                    ))
+        };
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut depth = 0_usize;
+        let mut after_dot = false;
+        let mut element: Option<Name<'a>> = None;
+        loop {
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b']') if depth == 0 => break,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word) if !after_dot && local(word) => {
+                    if element.is_some_and(|seen| seen.text != word) {
+                        return Err(error(
+                            token.at,
+                            GraphPatternTextErrorKind::Expected(
+                                "a pattern comprehension projection that reads one local of its pattern",
+                            ),
+                        ));
+                    }
+                    element = Some(Name {
+                        text: word,
+                        at: token.at,
+                    });
+                }
+                _ => {}
+            }
+            after_dot = matches!(token.kind, TokenKind::Punct(b'.'));
+            token = lexer.next()?;
+        }
+        Ok(element)
+    }
+
+    /// openCypher pattern comprehension (fgdb-7nwox) over the MATCH bindings
+    /// of a graph projection: `[p = (n)-->(m) WHERE pred | expr]`. The
+    /// pattern is a Collect scope, which gathers one element per witness, in
+    /// enumeration order, into a list column: the local `expr` reads, or NULL
+    /// when it reads none. The list then maps through `expr` with that
+    /// element bound to its name, so `[p = (n)-->() | p]` is the column
+    /// itself. An empty match is the empty list, never NULL.
+    fn pattern_comprehension(
+        &mut self,
+        inputs: &mut Vec<Projection<'a>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let at = self.current.at;
+        self.advance()?;
+        let scope = self.syntax.scopes.len();
+        self.scope(ScopeKind::Collect, ScopeForm::Comprehension)?;
+        // The comprehension is gathered once per row, but a list
+        // comprehension, quantifier or reduce local varies within the row:
+        // `[x IN nodes(p) | size([(x)-->() | 1])]` would read the row's x
+        // for every element. Refuse it typed (TCK Pattern2 [7]).
+        let body = &self.syntax.scopes[scope].body;
+        if let Some(local) = (body.variables.iter())
+            .chain(&body.captures)
+            .chain(body.edges.iter().filter_map(|edge| edge.variable.as_ref()))
+            .find(|name| {
+                (self.elements.iter()).any(|element| !element.is_empty() && *element == name.text)
+            })
+        {
+            return Err(GraphSetTextError {
+                offset: local.at,
+                kind: GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
+                    "a pattern comprehension that reads no enclosing comprehension local",
+                )),
+            });
+        }
+        let element = self.comprehension_element(scope)?;
+        self.syntax.scopes[scope].element = element;
+        let column = self.projection_slot(
+            inputs,
+            Projection {
+                variable: Name { text: "", at },
+                property: None,
+                path: None,
+                collect: Some(scope),
+            },
+        )?;
+        self.punct(b'|', "| and the projection of a pattern comprehension")?;
+        self.elements.push(element.map_or("", |name| name.text));
+        let map = self.read_recursive_value(Some(inputs), schema, resolve, depth + 1);
+        self.elements.pop();
+        let map = map?;
+        self.punct(b']', "]")?;
+        Ok(if matches!(map, ReadValueTemplate::Local(0)) {
+            ReadValueTemplate::Column(column)
+        } else {
+            ReadValueTemplate::Comprehension {
+                list: Box::new(ReadValueTemplate::Column(column)),
+                filter: None,
+                map: Some(Box::new(map)),
+            }
+        })
+    }
 }
 
 impl BoundSetTextInput {
@@ -2811,7 +3087,11 @@ impl BoundSetTextInput {
         &self,
         values: &[GqlParameterValue],
     ) -> Result<PreparedGraphSet, GraphSetTextError> {
-        let mut input = if self.leading.is_empty() && !self.singleton {
+        let mut input = if let Some((columns, types)) = self.owned.as_deref() {
+            // A chained write reads the previous write's rows, filled by the
+            // executing host; there is no graph source to bind.
+            PreparedGraphSet::owned(columns.clone(), types.clone())
+        } else if self.leading.is_empty() && !self.singleton {
             self.selection
                 .as_ref()
                 .expect("graph source")

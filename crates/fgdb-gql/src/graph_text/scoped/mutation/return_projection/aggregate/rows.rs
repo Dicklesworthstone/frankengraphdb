@@ -56,14 +56,36 @@ pub(super) fn prefix<'a>(
         ));
     }
     if parser.is_word("MATCH") {
-        parser.parse_match_prefix()?;
-        if !parser.is_word("WITH") && !parser.is_word("UNWIND") {
-            return Err(expected(
-                parser.current.at,
-                "WITH or UNWIND before a pipeline aggregate RETURN",
-            ));
-        }
-        let mut head = parser.graph_projection_head()?;
+        // MATCH ... WHERE <over values> RETURN count(*) is MATCH ... WITH *
+        // WHERE ... RETURN count(*) (fgdb-1c29d), as for a plain RETURN: the
+        // row pipeline reads the predicate after an implicit boundary that
+        // projects every visible binding.
+        parser.defer_where = true;
+        let prefix = parser.parse_match_prefix();
+        parser.defer_where = false;
+        prefix?;
+        let mut head = if let Some((lexer, at_where)) = parser.deferred_where.take() {
+            if !parser.syntax.scopes.is_empty()
+                || !(parser.is_word("RETURN") || parser.is_word("WITH"))
+            {
+                return Err(expected(
+                    parser.current.at,
+                    "RETURN or WITH right after a MATCH WHERE over values",
+                ));
+            }
+            let head = parser.implicit_with_head()?;
+            parser.lexer = lexer;
+            parser.current = at_where;
+            head
+        } else {
+            if !parser.is_word("WITH") && !parser.is_word("UNWIND") {
+                return Err(expected(
+                    parser.current.at,
+                    "WITH or UNWIND before a pipeline aggregate RETURN",
+                ));
+            }
+            parser.graph_projection_head()?
+        };
         // `WITH n WHERE n.p > 1 RETURN n.q, count(*)`: the WITH's WHERE and
         // pages and the aggregate RETURN read carried properties.
         parser.hoist_boundary_reads(&mut head, 0)?;

@@ -107,12 +107,22 @@ impl GraphPatternBuilder {
         offset: u64,
         count: Option<u64>,
     ) -> Result<PreparedGraphPattern<GraphValueRow>, PatternBuildError> {
+        // A collection reads a Collect clause, and this pattern has none.
+        if columns
+            .iter()
+            .any(|column| matches!(column, GraphColumn::Collection { .. }))
+        {
+            return Err(PatternBuildError::UnknownVariable);
+        }
         let variables = self.checked_value_columns(columns)?;
         let (mut operators, slots) = self.compile()?;
         let projection = columns
             .iter()
             .zip(variables)
             .map(|(column, variable)| match column {
+                GraphColumn::Collection { .. } => ValueProjection::Collected {
+                    group: variable as u32,
+                },
                 GraphColumn::Vertex { .. } => ValueProjection::Vertex {
                     slot: slots[variable],
                 },

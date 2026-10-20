@@ -706,6 +706,79 @@ fn a_late_scalar_execution_failure_restores_the_outer_prefix_and_original_record
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-0s2pq: chained writes over a parameter UNWIND, the bulk ingest idiom
+/// `UNWIND $rows AS row MERGE (a {id: row.a}) MERGE (b {id: row.b}) MERGE
+/// (a)-[:R]->(b)`, run as one chain over the parameter's rows; a single MERGE
+/// stays the batch writer's. A rerun merges onto the same graph.
+#[test]
+fn a_parameter_unwind_heads_a_chain_of_merges() {
+    let ((), report) = run_async_under_lab(0x7363_6104, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let input = args(vec![
+            object(vec![("a", int(1)), ("b", int(2))]),
+            object(vec![("a", int(2)), ("b", int(3))]),
+        ]);
+        let issued = AtomicU64::new(0);
+        for _ in 0..2 {
+            let mut txn = db.begin(&txcx).unwrap();
+            let result = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    "UNWIND $rows AS row MERGE (a:Entity {id: row.a}) \
+                     MERGE (b:Entity {id: row.b}) MERGE (a)-[:R]->(b)",
+                    &input,
+                    symbols,
+                    R,
+                    GraphWriteProgramPolicy::new(
+                        GqlQueryPolicy::new(10_000, 10_000, 10_000_000, 10_000_000),
+                        100,
+                        10,
+                        10,
+                    ),
+                    |request| {
+                        let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => {
+                                ElementId::Edge(fgdb_types::EId(next))
+                            }
+                        })
+                    },
+                )
+                .unwrap();
+            assert!(matches!(result, QueryResult::Write { .. }));
+            txn.finish(&mut db, &commit).await.unwrap();
+            // Ids 1, 2 and 3 once each, and the pairs 1->2 and 2->3.
+            let vertices = db.vertices().unwrap();
+            assert_eq!(vertices.len(), 3);
+            assert_eq!(db.edges().unwrap().len(), 2);
+            let ids: Vec<_> = vertices
+                .iter()
+                .flat_map(|vertex| vertex.props.iter())
+                .filter(|(key, _)| *key == ID)
+                .map(|(_, value)| value.clone())
+                .collect();
+            for id in 1..=3 {
+                let id: fgdb_types::CanonicalPropertyValue = CanonicalScalar::Int(id).into();
+                assert!(ids.contains(&id), "vertex id {id:?}");
+            }
+        }
+        // Five identities: three vertices and two edges, none on the rerun.
+        assert_eq!(issued.load(Ordering::Relaxed), 5);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn keyed_edge_unwind_admits_only_endpoint_unions_and_pair_edges() {
     let ((), report) = run_async_under_lab(0x7363_6110, |root| async move {
@@ -1214,6 +1287,93 @@ fn failed_unwind_and_savepoint_rollback_retain_noop_preparation_conflicts() {
             }
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// The edge-load idiom runs row by row (fgdb-0s2pq): each row's keyed MATCH
+/// is an index lookup of its two endpoints, so over 600 vertices a batch of
+/// pairs creates its relationships under a 100-record snapshot allowance that
+/// one whole-table join of the vertices would exceed. Rows whose keys match
+/// nothing create nothing, as in the native pipeline.
+#[test]
+fn a_keyed_edge_load_batch_reads_only_its_endpoints() {
+    let ((), report) = run_async_under_lab(0x7363_6106, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let issued = AtomicU64::new(0);
+        let allocate = |request: GraphWriteIdentityRequest| {
+            let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+            Ok::<_, Infallible>(match request.request {
+                GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                GraphInsertRequest::Edge { .. } => ElementId::Edge(fgdb_types::EId(next)),
+            })
+        };
+        db.query_write(
+            &contexts.txn(),
+            &cx,
+            &commit,
+            "UNWIND range(1, 600) AS i CREATE (:Entity {id: i})",
+            &GqlParameters::new(),
+            symbols,
+            R,
+            policy(10_000, 1_000),
+            allocate,
+        )
+        .await
+        .unwrap();
+        let narrow = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(100, 10_000, 10_000_000, 10_000_000),
+            100,
+            0,
+            10,
+        );
+        let pairs = args(vec![
+            object(vec![("a", int(5)), ("b", int(77))]),
+            object(vec![("a", int(77)), ("b", int(300))]),
+            object(vec![("a", int(9_999)), ("b", int(5))]),
+        ]);
+        db.query_write(
+            &contexts.txn(),
+            &cx,
+            &commit,
+            "UNWIND $rows AS row MATCH (a:Entity {id: row.a}), (b:Entity {id: row.b}) \
+             CREATE (a)-[:R]->(b)",
+            &pairs,
+            symbols,
+            R,
+            narrow,
+            allocate,
+        )
+        .await
+        .unwrap();
+        let id_of = |vid: VId| -> fgdb_types::CanonicalPropertyValue {
+            let vertex = db.vertex(vid).unwrap().unwrap();
+            vertex
+                .props
+                .iter()
+                .find(|(key, _)| *key == ID)
+                .map(|(_, value)| value.clone())
+                .unwrap()
+        };
+        let mut found: Vec<_> = db
+            .edges()
+            .unwrap()
+            .into_iter()
+            .map(|edge| (id_of(edge.entry.src), id_of(edge.entry.dst)))
+            .collect();
+        found.sort();
+        let stored = |value: i64| -> fgdb_types::CanonicalPropertyValue {
+            CanonicalScalar::Int(value).into()
+        };
+        assert_eq!(found, [(stored(5), stored(77)), (stored(77), stored(300))]);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

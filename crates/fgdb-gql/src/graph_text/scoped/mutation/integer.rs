@@ -645,7 +645,10 @@ impl<'a> Parser<'a> {
             TokenKind::Word(_) => {
                 let mut token = lexer.next()?;
                 while matches!(token.kind, TokenKind::Punct(b'.')) {
-                    if !matches!(lexer.next()?.kind, TokenKind::Word(_)) {
+                    if !matches!(
+                        lexer.next()?.kind,
+                        TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+                    ) {
                         return Ok(false);
                     }
                     token = lexer.next()?;
@@ -862,7 +865,7 @@ impl<'a> Parser<'a> {
             )
         {
             self.advance()?;
-            let key = self.map_key()?;
+            let key = self.schema_name()?;
             value = self.map_get(value, key.text);
         }
         Ok(value)
@@ -1856,7 +1859,7 @@ impl<'a> Parser<'a> {
                         },
                     ));
                 }
-                keys.push(self.name()?.text.into());
+                keys.push(self.schema_name()?.text.into());
             }
             return emit(
                 program,
@@ -2081,11 +2084,12 @@ impl<'a> Parser<'a> {
                 variable,
                 property: None,
                 path: Some(function),
+                collect: None,
             },
         )?;
         let mut first = true;
         while self.take(b':')? {
-            let label = self.name()?;
+            let label = self.schema_name()?;
             let name = CanonicalScalar::ucs_basic_text(label.text)
                 .ok()
                 .and_then(|text| GqlScalarParameter::new(text).ok())

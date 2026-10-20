@@ -23,6 +23,14 @@ pub enum GraphWriteStepReceipt {
     VertexMerge {
         outcome: GraphVertexMergeOutcome,
     },
+    /// A vertex MERGE over input rows (a chained write, fgdb-cpny9): one
+    /// outcome per distinct property tuple and vertex, tuples in first-row
+    /// order and each tuple's vertices in identity order. `created` retains
+    /// exactly the Created IDs in that order.
+    VertexMergeRows {
+        outcomes: Vec<GraphVertexMergeOutcome>,
+        created: Vec<VId>,
+    },
     VertexUpsert {
         outcome: GraphVertexMergeOutcome,
     },
@@ -73,6 +81,7 @@ impl GraphWriteStepReceipt {
             Self::Mutation { targets, .. } | Self::Delete { targets, .. } => Some(targets),
             Self::Insert { .. }
             | Self::VertexMerge { .. }
+            | Self::VertexMergeRows { .. }
             | Self::VertexUpsert { .. }
             | Self::VertexMergeBatch { .. }
             | Self::VertexUpsertBatch { .. }
@@ -115,6 +124,7 @@ impl GraphWriteStepReceipt {
     pub fn created_vertices(&self) -> Option<&[VId]> {
         match self {
             Self::Insert { vertices, .. } => Some(vertices),
+            Self::VertexMergeRows { created, .. } => Some(created),
             Self::VertexMerge {
                 outcome: GraphVertexMergeOutcome::Created(vertex),
             }
@@ -154,6 +164,7 @@ impl GraphWriteStepReceipt {
             Self::EdgeMerge { .. } | Self::EdgeUpsert { .. } => Some(&[]),
             Self::Mutation { .. }
             | Self::VertexMerge { .. }
+            | Self::VertexMergeRows { .. }
             | Self::VertexUpsert { .. }
             | Self::VertexMergeBatch { .. }
             | Self::VertexUpsertBatch { .. }
@@ -161,12 +172,14 @@ impl GraphWriteStepReceipt {
         }
     }
 
+    /// A row-wise vertex MERGE returns None; inspect `merged_vertices`.
     #[must_use]
     pub const fn merged_vertex(&self) -> Option<GraphVertexMergeOutcome> {
         match self {
             Self::VertexMerge { outcome } | Self::VertexUpsert { outcome } => Some(*outcome),
             Self::Mutation { .. }
             | Self::Insert { .. }
+            | Self::VertexMergeRows { .. }
             | Self::VertexMergeBatch { .. }
             | Self::VertexUpsertBatch { .. }
             | Self::EdgeMerge { .. }
@@ -179,13 +192,14 @@ impl GraphWriteStepReceipt {
 
     /// Complete bulk vertex results; a multiple-match receipt never silently
     /// selects one identity through `merged_vertex`. Singular receipts keep
-    /// that accessor, including their one possible creation.
+    /// that accessor, including their one possible creation. A vertex MERGE
+    /// over input rows (fgdb-cpny9) reports its tuple and vertex outcomes.
     #[must_use]
     pub fn merged_vertices(&self) -> Option<&[GraphVertexMergeOutcome]> {
         match self {
-            Self::VertexMergeBatch { outcomes } | Self::VertexUpsertBatch { outcomes } => {
-                Some(outcomes)
-            }
+            Self::VertexMergeBatch { outcomes }
+            | Self::VertexUpsertBatch { outcomes }
+            | Self::VertexMergeRows { outcomes, .. } => Some(outcomes),
             _ => None,
         }
     }
@@ -200,6 +214,7 @@ impl GraphWriteStepReceipt {
             Self::Mutation { .. }
             | Self::Insert { .. }
             | Self::VertexMerge { .. }
+            | Self::VertexMergeRows { .. }
             | Self::VertexUpsert { .. }
             | Self::VertexMergeBatch { .. }
             | Self::VertexUpsertBatch { .. }
@@ -241,6 +256,12 @@ impl core::fmt::Debug for GraphWriteStepReceipt {
             Self::VertexMerge { outcome } => f
                 .debug_struct("VertexMerge")
                 .field("outcome", outcome)
+                .finish(),
+            Self::VertexMergeRows { outcomes, created } => f
+                .debug_struct("VertexMergeRows")
+                .field("outcomes", &outcomes.len())
+                .field("created", &created.len())
+                .field("identities", &"[REDACTED]")
                 .finish(),
             Self::VertexUpsert { outcome } => f
                 .debug_struct("VertexUpsert")

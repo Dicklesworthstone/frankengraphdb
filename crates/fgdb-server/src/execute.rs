@@ -565,6 +565,13 @@ impl Returning {
         let refusal = |error: &dyn core::fmt::Display| {
             Refusal::new(ErrorCode::Statement, format!("statement: {error}"))
         };
+        // A chained write (fgdb-cpny9) has no authorized executor yet: refuse
+        // it whole rather than let a classifier claim a prefix of it.
+        if fgdb_gql::PreparedGraphWriteChainText::is_chain(text).map_err(|e| refusal(&e))? {
+            return Err(refusal(
+                &"a chained write (CREATE ... WITH ... CREATE) is not served under a capability",
+            ));
+        }
         if PreparedGraphInsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
             let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
                 text,

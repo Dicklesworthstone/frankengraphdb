@@ -10,7 +10,16 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 #[derive(Clone)]
 pub(crate) enum VertexUpsertValueTemplate {
     Bound(GqlScalarParameter),
-    Parameter { index: usize, at: usize },
+    Parameter {
+        index: usize,
+        at: usize,
+    },
+    /// A constant list value (`['a', 'b']`, `$tags`), read in the value
+    /// language and evaluated when the statement binds (fgdb-k3nub).
+    Composite {
+        value: crate::set_text::ReadValueTemplate,
+        at: usize,
+    },
 }
 
 #[derive(Clone)]

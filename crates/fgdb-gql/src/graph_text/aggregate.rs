@@ -563,6 +563,7 @@ impl PreparedGraphAggregateText {
                 property: group.property,
                 path: group.path,
                 alias,
+                collect: None,
             });
         }
         let keys = (0..groups.len()).collect();
@@ -597,6 +598,7 @@ impl PreparedGraphAggregateText {
                         property: expression.property,
                         path: expression.path,
                         alias: item.alias,
+                        collect: None,
                     });
                     at
                 });
@@ -656,6 +658,7 @@ impl PreparedGraphAggregateText {
                     property: expression.property,
                     path: expression.path,
                     alias,
+                    collect: None,
                 });
                 at
             });
@@ -714,6 +717,7 @@ impl PreparedGraphAggregateText {
                         at: variable.at,
                     },
                     path,
+                    collect: None,
                 })
                 .collect();
             Some(projection)
@@ -730,6 +734,7 @@ impl PreparedGraphAggregateText {
                     text: "__count_source",
                     at: variable.at,
                 },
+                collect: None,
             });
         }
         let offset = core::mem::replace(
@@ -1279,10 +1284,21 @@ impl<'a> Parser<'a> {
                 continued = true;
             }
             let next = lexer.next()?;
+            // A percentile is an aggregate that the value reader applies
+            // after aggregation (fgdb-qbaex), never a direct call.
             if let TokenKind::Word(word) = token.kind
                 && matches!(next.kind, TokenKind::Punct(b'('))
                 && [
-                    "COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX", "COLLECT",
+                    "COUNT",
+                    "SUM",
+                    "SUM_INT",
+                    "AVG",
+                    "AVG_INT",
+                    "MIN",
+                    "MAX",
+                    "COLLECT",
+                    "PERCENTILEDISC",
+                    "PERCENTILECONT",
                 ]
                 .iter()
                 .any(|name| word.eq_ignore_ascii_case(name))
@@ -1323,7 +1339,17 @@ impl<'a> Parser<'a> {
                     {
                         return Ok(None);
                     }
-                    let leaf = if parser.starts_aggregate_call()? {
+                    let leaf = if core::mem::take(&mut parser.percentile_leaf) {
+                        // A percentile's first argument is a hidden collect,
+                        // which the value reader applies the percentile to
+                        // (fgdb-qbaex).
+                        let at = parser.current.at;
+                        OutputLeaf::Aggregate(HiddenSummary {
+                            expression: Some(parser.aggregate_argument_expression(computed)?),
+                            function: GraphAggregateFunction::Collect,
+                            at,
+                        })
+                    } else if parser.starts_aggregate_call()? {
                         let name = parser.name()?;
                         parser.punct(b'(', "(")?;
                         // Arguments use the input compiler, which cannot resolve an
@@ -1377,7 +1403,7 @@ impl<'a> Parser<'a> {
                     {
                         let variable = parser.variable()?;
                         let property = if parser.take(b'.')? {
-                            Some(parser.name()?)
+                            Some(parser.schema_name()?)
                         } else {
                             None
                         };
@@ -1528,25 +1554,36 @@ impl<'a> Parser<'a> {
                 }
                 (function, false) => function,
             };
-            // rand() anywhere in the argument is a non-constant expression
-            // (Return6 [15]). This reader's own grammar would otherwise read
-            // `rand(` as a path function, so look for it first.
-            if self.argument_calls_random()? {
-                return Err(error(
-                    self.current.at,
-                    GraphPatternTextErrorKind::Expected(
-                        "a deterministic aggregate argument: rand() inside an aggregate is a non-constant expression",
-                    ),
-                ));
-            }
-            // The call's own argument, not a grouping key.
-            let outer = core::mem::replace(&mut self.aggregate_argument, true);
-            let argument = self.aggregate_expression(computed);
-            self.aggregate_argument = outer;
-            (Some(argument?), function)
+            (
+                Some(self.aggregate_argument_expression(computed)?),
+                function,
+            )
         };
         self.punct(b')', ")")?;
         Ok(result)
+    }
+
+    /// An aggregate call's own argument, not a grouping key. A percentile's
+    /// first argument reads here too, up to its comma (fgdb-qbaex).
+    fn aggregate_argument_expression(
+        &mut self,
+        computed: &mut ComputedInputs<'a>,
+    ) -> Result<Expression<'a>, GraphPatternTextError> {
+        // rand() anywhere in the argument is a non-constant expression
+        // (Return6 [15]). This reader's own grammar would otherwise read
+        // `rand(` as a path function, so look for it first.
+        if self.argument_calls_random()? {
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "a deterministic aggregate argument: rand() inside an aggregate is a non-constant expression",
+                ),
+            ));
+        }
+        let outer = core::mem::replace(&mut self.aggregate_argument, true);
+        let argument = self.aggregate_expression(computed);
+        self.aggregate_argument = outer;
+        argument
     }
 
     /// Resolve public aliases and expressions. Explicit aggregate calls first

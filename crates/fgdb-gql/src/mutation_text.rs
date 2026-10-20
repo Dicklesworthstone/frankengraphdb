@@ -94,6 +94,13 @@ pub(crate) enum MutationActionTemplate {
         value: crate::set_text::ReadValueTemplate,
         at: usize,
     },
+    /// DELETE or DETACH DELETE of a value the WITH row computes (TCK
+    /// Delete5): `friends[$i]`, `map.key`.
+    DeleteValue {
+        value: crate::set_text::ReadValueTemplate,
+        detach: bool,
+        at: usize,
+    },
 }
 
 /// MATCH [WALK] ... SET / REMOVE / DETACH DELETE, with one parameter schema and
@@ -352,6 +359,91 @@ pub(crate) enum VertexMergeValueTemplate {
     Parameter { index: usize, at: usize },
 }
 
+/// A map value of a vertex MERGE step (fgdb-cpny9): a literal or parameter,
+/// a column of the row the step runs over, or a value computed from that
+/// row (`prop.login`, `y + 1`) by the shared value compiler.
+#[derive(Clone)]
+pub(crate) enum VertexMergeRowValueTemplate {
+    Value(VertexMergeValueTemplate),
+    Column(usize),
+    Computed {
+        value: Box<crate::set_text::ReadValueTemplate>,
+        at: usize,
+    },
+}
+
+/// The rows a vertex MERGE step reads (fgdb-cpny9).
+#[derive(Clone)]
+pub(crate) enum VertexMergeRowsTextInput {
+    /// The one empty row of a statement whose first write is this MERGE.
+    Unit,
+    /// The previous write's rows, of these column types.
+    Owned(Vec<crate::GraphSetColumnType>),
+    /// A statement's leading UNWIND.
+    Relation(Box<crate::set_text::BoundSetTextInput>),
+}
+
+/// The RETURN of a vertex MERGE step, resolved (fgdb-cpny9).
+#[derive(Clone)]
+pub(crate) struct VertexMergeRowsReturnTemplate {
+    pub(crate) bindings: Vec<crate::GraphVertexMergeRowsBinding>,
+    pub(crate) projection: Vec<ReadProjectionTemplate>,
+    pub(crate) grouping: Option<WriteReturnGroupTemplate>,
+    pub(crate) quantifier: crate::GraphSetQuantifier,
+    pub(crate) order: Vec<GraphValueOrder>,
+    pub(crate) offset: ReadPageNumber,
+    pub(crate) count: Option<ReadPageNumber>,
+    pub(crate) at: usize,
+}
+
+/// A vertex MERGE step of a chained write (fgdb-cpny9), resolved: each map
+/// value is a literal, a parameter or a column of the row it runs over.
+#[derive(Clone)]
+pub(crate) struct PreparedGraphVertexMergeRowsText {
+    pub(crate) relation: RelationId,
+    pub(crate) labels: Vec<LabelId>,
+    pub(crate) properties: Vec<(PropertyKeyId, VertexMergeRowValueTemplate)>,
+    pub(crate) input: VertexMergeRowsTextInput,
+    /// Leading row columns the output keeps (the visible ones).
+    pub(crate) keep: usize,
+    /// The RETURN of the statement's last write, if any.
+    pub(crate) returning: Option<VertexMergeRowsReturnTemplate>,
+    /// ON MATCH, ON CREATE and trailing SET clauses, if any.
+    pub(crate) actions: Option<Box<VertexMergeRowActionTemplates>>,
+    pub(crate) parameters: Vec<crate::GqlParameterSpec>,
+    pub(crate) parameter_offsets: Vec<usize>,
+    pub(crate) end: usize,
+}
+
+/// One ON/SET assignment of a vertex MERGE step, resolved (fgdb-cpny9).
+#[derive(Clone)]
+pub(crate) enum VertexMergeRowActionTemplate {
+    /// A constant property, constant List or label assignment.
+    Vertex(crate::vertex_upsert_text::VertexUpsertActionTemplate),
+    /// `v.key = expression` over the merged vertex's properties and the row.
+    Expression {
+        key: PropertyKeyId,
+        inputs: Vec<crate::GraphVertexMergeRowInput>,
+        program: Vec<MutationIntegerTemplateOp>,
+        at: usize,
+    },
+    /// `v.key = value` whose right-hand side reads the row and not the
+    /// merged vertex, by the shared value compiler.
+    Value {
+        key: PropertyKeyId,
+        value: Box<crate::set_text::ReadValueTemplate>,
+        at: usize,
+    },
+}
+
+/// The ON/SET clauses of a vertex MERGE step, resolved (fgdb-cpny9).
+#[derive(Clone, Default)]
+pub(crate) struct VertexMergeRowActionTemplates {
+    pub(crate) on_match: Vec<VertexMergeRowActionTemplate>,
+    pub(crate) on_create: Vec<VertexMergeRowActionTemplate>,
+    pub(crate) after: Vec<VertexMergeRowActionTemplate>,
+}
+
 /// Native bounded `MERGE (n[:Label...] {key:value,...})`. The same property
 /// values drive exact-equality MATCH predicates and the single-vertex creation
 /// template. This profile intentionally excludes relationship patterns and
@@ -383,12 +475,47 @@ pub enum GraphVertexMergeTextErrorKind {
     Query(GraphPatternTextErrorKind),
     InsertBuild(GraphInsertBuildError),
     MergeBuild(GraphVertexMergeBuildError),
+    /// A leading UNWIND, or a RETURN expression, page or projection name of
+    /// a vertex MERGE step (fgdb-cpny9).
+    Relation(crate::GraphSetTextErrorKind),
+    ReturnBuild(crate::GraphVertexMergeRowsQueryBuildError),
+    /// An ON/SET clause of a vertex MERGE step (fgdb-cpny9).
+    Action(Box<crate::GraphVertexUpsertTextErrorKind>),
+}
+impl From<crate::GraphVertexUpsertTextError> for GraphVertexMergeTextError {
+    fn from(error: crate::GraphVertexUpsertTextError) -> Self {
+        let kind = match error.kind {
+            crate::GraphVertexUpsertTextErrorKind::Query(kind) => {
+                GraphVertexMergeTextErrorKind::Query(kind)
+            }
+            crate::GraphVertexUpsertTextErrorKind::Merge(kind) => kind,
+            kind => GraphVertexMergeTextErrorKind::Action(Box::new(kind)),
+        };
+        Self {
+            offset: error.offset,
+            kind,
+        }
+    }
 }
 impl From<GraphPatternTextError> for GraphVertexMergeTextError {
     fn from(error: GraphPatternTextError) -> Self {
         Self {
             offset: error.offset,
             kind: GraphVertexMergeTextErrorKind::Query(error.kind),
+        }
+    }
+}
+impl From<crate::GraphSetTextError> for GraphVertexMergeTextError {
+    fn from(error: crate::GraphSetTextError) -> Self {
+        let kind = match error.kind {
+            crate::GraphSetTextErrorKind::Pattern(kind) => {
+                GraphVertexMergeTextErrorKind::Query(kind)
+            }
+            kind => GraphVertexMergeTextErrorKind::Relation(kind),
+        };
+        Self {
+            offset: error.offset,
+            kind,
         }
     }
 }
@@ -403,13 +530,26 @@ impl core::fmt::Display for GraphVertexMergeTextError {
 }
 impl core::error::Error for GraphVertexMergeTextError {}
 
+/// Where a relationship MERGE's endpoint rows come from (fgdb-cpny9).
+#[derive(Clone)]
+pub(crate) enum EdgeMergeTextInput {
+    /// `MATCH ... MERGE`: the MERGE's own MATCH prefix.
+    Match(Box<PreparedGraphText>),
+    /// `MATCH ... WITH ... MERGE`, or a chained write's owned rows: the row
+    /// relation whose vertex columns are the endpoints.
+    Row {
+        statement: String,
+        input: Box<crate::set_text::BoundSetTextInput>,
+    },
+}
+
 /// Native `MATCH ... MERGE (a)-[r:R {k: v}]->(b)` over already-bound
 /// endpoint variables, its reverse arrow, or an undirected `-[:R]-`. The
 /// property map's values are the MERGE's exact-equality predicates and its
 /// creation fields (fgdb-at06q).
 #[derive(Clone)]
 pub struct PreparedGraphEdgeMergeText {
-    pub(crate) selection: PreparedGraphText,
+    pub(crate) input: EdgeMergeTextInput,
     pub(crate) relation: RelationId,
     pub(crate) source: usize,
     pub(crate) destination: usize,

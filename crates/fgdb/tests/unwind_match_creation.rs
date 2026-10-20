@@ -422,6 +422,183 @@ fn bulk_connect_script_observes_staged_sources_and_reopens_at_one_frontier() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// The bulk relationship-ingest idiom: `UNWIND $pairs AS row MATCH (a {p:
+/// row.from}), (b {p: row.to}) CREATE (a)-[:R]->(b)`. A map field of the
+/// imported row correlates a MATCH property as a bare imported value does,
+/// in a node map or as a WHERE equality either way round; a row whose field
+/// matches nothing creates nothing. A read correlates the same way.
+#[test]
+fn a_later_required_match_correlates_with_the_imported_row() {
+    // `MATCH (a {..}) MATCH (b {..})` is the inner join `MATCH (a {..}),
+    // (b {..})` makes (fgdb-0s2pq): the later clause reads the row too.
+    let ((), report) = run_async_under_lab(0xb01c_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let cx = contexts.query();
+        let pair = |from: i64, to: i64| {
+            GraphValue::map(vec![("from".into(), int(from)), ("to".into(), int(to))]).unwrap()
+        };
+        let parameters = GqlParameters::new()
+            .with_list("pairs", vec![pair(1, 2), pair(2, 3), pair(9, 1)])
+            .unwrap();
+        let mut found = Vec::new();
+        for text in [
+            "UNWIND $pairs AS row MATCH (a:Source {p: row.from}), (b:Source {p: row.to}) \
+             CREATE (a)-[:R]->(b)",
+            "UNWIND $pairs AS row MATCH (a:Source {p: row.from}) MATCH (b:Source {p: row.to}) \
+             CREATE (a)-[:R]->(b)",
+            "UNWIND $pairs AS row MATCH (a:Source) WHERE a.p = row.from \
+             MATCH (b:Source) WHERE b.p = row.to CREATE (a)-[:R]->(b)",
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            for statement in [
+                program(
+                    "UNWIND [1, 2, 3] AS value CREATE (:Source {p: value})",
+                    &GqlParameters::new(),
+                ),
+                program(text, &parameters),
+            ] {
+                db.execute_graph_write_program_autocommit_engine_governed(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &statement,
+                    GraphWriteProgramPolicy::new(policy(), 1_000, 16, 16),
+                )
+                .await
+                .unwrap();
+            }
+            let fgdb::QueryResult::Rows { rows, .. } = db
+                .query(
+                    &cx,
+                    "MATCH (a:Source)-[:R]->(b) RETURN a.p AS a, b.p AS b ORDER BY a",
+                    &GqlParameters::new(),
+                    symbols,
+                    policy(),
+                )
+                .unwrap()
+            else {
+                unreachable!("a read answers rows")
+            };
+            found.push(rows);
+        }
+        let value = |value: i64| fgdb::QueryValue::Value(int(value));
+        let expected = [vec![value(1), value(2)], vec![value(2), value(3)]];
+        for rows in &found {
+            assert_eq!(rows, &expected);
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn map_fields_of_imported_rows_correlate_matched_endpoints() {
+    let ((), report) = run_async_under_lab(0xb01c_0005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let pair = |from: i64, to: i64, w: i64| {
+            GraphValue::map(vec![
+                ("from".into(), int(from)),
+                ("to".into(), int(to)),
+                ("w".into(), int(w)),
+            ])
+            .unwrap()
+        };
+        let parameters = GqlParameters::new()
+            .with_list("pairs", vec![pair(1, 2, 7), pair(2, 3, 8), pair(9, 1, 0)])
+            .unwrap();
+        let run = async |db: &mut Database<MemVfs>, text: &str, parameters: &GqlParameters| {
+            db.execute_graph_write_program_autocommit_engine_governed(
+                &txcx,
+                &cx,
+                &commit,
+                &program(text, parameters),
+                GraphWriteProgramPolicy::new(policy(), 1_000, 16, 16),
+            )
+            .await
+            .unwrap();
+        };
+        run(
+            &mut db,
+            "UNWIND [1, 2, 3] AS value CREATE (:Source {p: value})",
+            &GqlParameters::new(),
+        )
+        .await;
+        run(
+            &mut db,
+            "UNWIND $pairs AS row MATCH (a:Source {p: row.from}), (b:Source {p: row.to}) \
+             CREATE (a)-[:R {p: row.w}]->(b)",
+            &parameters,
+        )
+        .await;
+        run(
+            &mut db,
+            "UNWIND $pairs AS row MATCH (a:Source), (b:Source) \
+             WHERE a.p = row.from AND row.to = b.p CREATE (b)-[:R {q: row.w}]->(a)",
+            &parameters,
+        )
+        .await;
+        // (source p, destination p, edge properties) of every edge.
+        let p_of = |vertex| {
+            let props = db.vertex(vertex).unwrap().unwrap().props;
+            props
+                .iter()
+                .find(|(key, _)| *key == P)
+                .map(|(_, value)| value.clone())
+                .unwrap()
+        };
+        let found: Vec<_> = db
+            .edges()
+            .unwrap()
+            .into_iter()
+            .map(|edge| (p_of(edge.entry.src), p_of(edge.entry.dst), edge.props))
+            .collect();
+        let stored = |value: i64| -> fgdb_types::CanonicalPropertyValue {
+            CanonicalScalar::Int(value).into()
+        };
+        let expected = [
+            (stored(1), stored(2), vec![(P, stored(7))]),
+            (stored(2), stored(3), vec![(P, stored(8))]),
+            (stored(2), stored(1), vec![(Q, stored(7))]),
+            (stored(3), stored(2), vec![(Q, stored(8))]),
+        ];
+        assert_eq!(found.len(), expected.len());
+        for edge in &expected {
+            assert!(
+                found.contains(edge),
+                "missing edge {:?}",
+                (edge.0.clone(), edge.1.clone())
+            );
+        }
+        let fgdb::QueryResult::Rows { rows, .. } = db
+            .query(
+                &cx,
+                "UNWIND $pairs AS row MATCH (a:Source {p: row.from}) \
+                 RETURN a.p AS p, row.w AS w ORDER BY p",
+                &parameters,
+                symbols,
+                policy(),
+            )
+            .unwrap()
+        else {
+            unreachable!("a read answers rows")
+        };
+        let value = |value: i64| fgdb::QueryValue::Value(int(value));
+        assert_eq!(rows, [vec![value(1), value(7)], vec![value(2), value(8)]]);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn a_late_script_failure_preserves_only_the_outer_transaction_prefix() {
     let ((), report) = run_async_under_lab(0xb01c_0002, |root| async move {

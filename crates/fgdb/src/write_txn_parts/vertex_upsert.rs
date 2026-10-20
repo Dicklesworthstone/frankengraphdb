@@ -345,6 +345,17 @@ fn vertex_upsert_actions<E, A, C>(
                     })?;
                     batch.set_vertex_property(outcome.vertex(), *key, Some(value.value().clone()));
                 }
+                // A constant List (fgdb-k3nub), admitted element by element
+                // before the copy.
+                GraphVertexUpsertAction::SetStored { key, value } => {
+                    point_payload_admission(value, &mut |event| {
+                        control(match event {
+                            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                            _ => GlaExecutionEvent::Work,
+                        })
+                    })?;
+                    batch.set_vertex_property_value(outcome.vertex(), *key, Some(value.clone()));
+                }
                 GraphVertexUpsertAction::SetExpression {
                     key,
                     properties,
