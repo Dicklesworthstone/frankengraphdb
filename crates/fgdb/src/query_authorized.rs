@@ -21,7 +21,10 @@ use crate::{Database, GqlError, ReadError, Snapshot, VertexRow};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GlaOutput, GlaPlan, GraphValue, PreparedGraphPattern, VertexPredicate};
-use fgdb_gql::{GovernedCheckpoint, GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
+use fgdb_gql::{
+    GovernedCheckpoint, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GraphPatternFactorExecution, PreparedGraphPatternFactors,
+};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, ExecutionPermit, PlannerPredicates, ReadAccess};
 use std::cell::{Cell, RefCell};
@@ -1253,7 +1256,18 @@ fn execute_tables<Row: GlaOutput>(
     usage: AdmissionUsage,
     checkpoint: impl GovernedCheckpoint<QueryError>,
 ) -> Governed<Row> {
-    let result = pattern.plan().execute_governed_with_element_maps(
+    let result = evaluate_tables(&tables, pattern, scope, usage.remaining(policy), checkpoint);
+    usage.finish(policy, result)
+}
+
+fn evaluate_tables<Row: GlaOutput>(
+    tables: &Tables<'_>,
+    pattern: &PreparedGraphPattern<Row>,
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    checkpoint: impl GovernedCheckpoint<QueryError>,
+) -> Governed<Row> {
+    pattern.plan().execute_governed_with_element_maps(
         tables.records,
         tables.vertices.iter().map(|&(vid, _)| vid),
         tables.edges.iter().map(|(edge, _)| *edge),
@@ -1264,10 +1278,28 @@ fn execute_tables<Row: GlaOutput>(
         |eid| Ok(tables.types.get(&eid)),
         |vid| Ok(tables.property_maps.vertices.get(&vid)),
         |eid| Ok(tables.property_maps.edges.get(&eid)),
-        usage.remaining(policy),
+        policy,
         checkpoint,
-    );
-    usage.finish(policy, result)
+    )
+}
+
+// Both factors borrow the same already masked tables and original metadata.
+// Neither signed node admission nor hidden history is replayed per factor.
+fn execute_factor_tables(
+    tables: Tables<'_>,
+    request: &PreparedGraphPatternFactors<'_>,
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    usage: AdmissionUsage,
+    mut checkpoint: impl FnMut() -> Result<(), QueryError>,
+) -> Result<GraphPatternFactorExecution, Fault> {
+    crate::gql_exec::execute_pattern_factors(
+        request,
+        tables.records,
+        policy,
+        usage,
+        |factor, allowance| evaluate_tables(&tables, factor, scope, allowance, &mut checkpoint),
+    )
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -1301,6 +1333,40 @@ impl<V: Vfs + Clone> Database<V> {
                 &mut poll,
                 &mut checkpoint,
             )
+        })
+    }
+
+    /// Physical factors of one authenticated write selection. The original
+    /// plan owns admission, masking, metadata and the signed node allowance.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn select_factors_for_authorized_insert(
+        &self,
+        cx: &QueryCx,
+        request: &PreparedGraphPatternFactors<'_>,
+        scope: &PlannerPredicates,
+        policy: GqlQueryPolicy,
+        mut node: impl FnMut() -> Result<(), QueryError>,
+        mut poll: impl FnMut() -> Result<(), QueryError>,
+        mut checkpoint: impl FnMut() -> Result<(), QueryError>,
+    ) -> Result<GraphPatternFactorExecution, Fault> {
+        checkpoint().map_err(GqlQueryError::Interrupted)?;
+        self.ensure_readable().map_err(GqlQueryError::Source)?;
+        cx.with_restriction(|| {
+            let mut usage = AdmissionUsage::default();
+            let tables = Tables::admit(
+                &self.snapshot,
+                request.original().plan(),
+                self.snapshot.frontier,
+                false,
+                scope,
+                || node().map_err(GqlQueryError::Interrupted),
+                &mut || poll().map_err(GqlQueryError::Interrupted),
+                &mut |event| {
+                    checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    usage.observe::<ReadError, QueryError>(policy, event)
+                },
+            )?;
+            execute_factor_tables(tables, request, scope, policy, usage, &mut checkpoint)
         })
     }
 
