@@ -4,8 +4,8 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    Database, DatabaseKeys, MemVfs, QueryResult, QueryWriteError, WriteBatch, WriteError,
-    WriteTxnError,
+    Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, QueryWriteError, WriteBatch,
+    WriteError, WriteTxnError,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
@@ -774,6 +774,95 @@ fn a_parameter_unwind_heads_a_chain_of_merges() {
         }
         // Five identities: three vertices and two edges, none on the rerun.
         assert_eq!(issued.load(Ordering::Relaxed), 5);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-0s2pq: a bulk upsert that returns rows, `UNWIND $rows AS row MERGE
+/// (n {id: row.id}) [ON CREATE SET ...] RETURN ...`. The batch writer has no
+/// RETURN, so the chain runs it over the parameter's rows, as it runs the
+/// literal-list spelling. Expected rows follow openCypher clause order: each
+/// row merges in turn, so the second id-2 row matches the vertex the first
+/// one created, and RETURN reads every row's vertex after the statement.
+#[test]
+fn a_parameter_unwind_merge_returns_its_rows() {
+    let ((), report) = run_async_under_lab(0x7363_6105, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let input = args(vec![
+            object(vec![("id", int(1)), ("name", text("a"))]),
+            object(vec![("id", int(2)), ("name", text("b"))]),
+            object(vec![("id", int(2)), ("name", text("c"))]),
+        ]);
+        let issued = AtomicU64::new(0);
+        let run = async |db: &mut Database<MemVfs>, statement: &str| {
+            let mut txn = db.begin(&txcx).unwrap();
+            let result = txn
+                .query_write(
+                    db,
+                    &cx,
+                    statement,
+                    &input,
+                    symbols,
+                    R,
+                    policy(100, 10),
+                    |request| {
+                        let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                        })
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            txn.finish(db, &commit).await.unwrap();
+            let QueryResult::Rows { rows, .. } = result else {
+                panic!("{statement}: a write RETURN returns rows")
+            };
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| match cell {
+                            QueryValue::Value(value) => value,
+                            other => panic!("{statement}: {other:?}"),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let created = run(
+            &mut db,
+            "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) \
+             ON CREATE SET n.name = row.name RETURN n.id AS id, n.name AS name",
+        )
+        .await;
+        assert_eq!(
+            created,
+            [
+                vec![int(1), text("a")],
+                vec![int(2), text("b")],
+                vec![int(2), text("b")],
+            ]
+        );
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(issued.load(Ordering::Relaxed), 2);
+        // A rerun matches all three rows and creates nothing.
+        let counted = run(
+            &mut db,
+            "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) RETURN count(*) AS c",
+        )
+        .await;
+        assert_eq!(counted, [vec![int(3)]]);
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(issued.load(Ordering::Relaxed), 2);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

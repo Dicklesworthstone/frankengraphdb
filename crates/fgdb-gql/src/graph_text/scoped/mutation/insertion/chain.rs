@@ -133,6 +133,15 @@ impl PreparedGraphWriteChainText {
                             // follows.
                             merged = vertex || matched;
                         }
+                    } else if clause
+                        && parameter_unwound
+                        && merged
+                        && word.eq_ignore_ascii_case("RETURN")
+                    {
+                        // The batch writer has no RETURN: a vertex MERGE over
+                        // `UNWIND $rows` that returns rows is the chain's, as
+                        // over a literal UNWIND (fgdb-0s2pq).
+                        return Ok(true);
                     }
                     // A first MERGE's ON/SET clauses stay with it: a lone
                     // MERGE with them is the unique upsert's statement, and
@@ -599,6 +608,12 @@ mod tests {
             "UNWIND $pairs AS row MERGE (a:N {id: row.a}) MERGE (b:N {id: row.b}) \
              MERGE (a)-[:S]->(b)",
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) CREATE (n)-[:R]->(:M)",
+            // A RETURN after one vertex MERGE over a parameter UNWIND, with
+            // or without its ON/SET clauses: the batch writer has no RETURN.
+            "UNWIND $rows AS row MERGE (n:N {id: row.id}) RETURN count(*) AS c",
+            "UNWIND $rows AS row MERGE (n:N {id: row.id}) ON CREATE SET n.name = row.name \
+             RETURN n.id AS id, n.name AS name",
+            "UNWIND $rows AS row MERGE (n:N {id: row.id}) SET n.name = row.name RETURN n",
         ] {
             assert!(
                 PreparedGraphWriteChainText::is_chain(text).unwrap(),
@@ -628,6 +643,9 @@ mod tests {
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id})",
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.name = row.name",
             "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b)",
+            "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b) \
+             RETURN count(*) AS c",
+            "UNWIND $rows AS row MERGE (n:Entity {p: 'RETURN'})",
             "UNWIND [1] AS x MERGE (a)-[:R]->(b)",
             "MERGE (a:A) ON CREATE SET a.p = 1",
             "MERGE (a:A) ON CREATE SET a.p = 1 ON MATCH SET a.q = 2 RETURN a",
