@@ -665,9 +665,9 @@ impl<'a> Parser<'a> {
                 .into());
             }
             self.punct(b':', ":")?;
+            let at = self.current.at;
             let kind = match row {
                 Some(row) => {
-                    let at = self.current.at;
                     let value = self.insertion_source_value(columns, row)?;
                     ActionKind::RowProperty { key, value, at }
                 }
@@ -676,6 +676,31 @@ impl<'a> Parser<'a> {
                     value: Some(self.mutation_assignment(columns)?),
                 },
             };
+            // A field's map construction is never a written property, and the
+            // scalar SET build refuses a list literal: refuse either here,
+            // before any catalog access. The WITH-row path writes stored Lists
+            // (fgdb-k3nub). A subscripted or computed value stays a per-row
+            // check.
+            let map = |value: &ReadValueTemplate| {
+                matches!(
+                    value,
+                    ReadValueTemplate::MapLiteral { .. } | ReadValueTemplate::MapOverlay { .. }
+                )
+            };
+            let refused = match &kind {
+                ActionKind::Property {
+                    value: Some(value), ..
+                } => map(value) || matches!(value, ReadValueTemplate::List(_)),
+                ActionKind::RowProperty { value, .. } => map(value),
+                _ => false,
+            };
+            if refused {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("a scalar value in SET += map"),
+                )
+                .into());
+            }
             actions.push(Action { target, kind });
             if self.take(b'}')? {
                 break;

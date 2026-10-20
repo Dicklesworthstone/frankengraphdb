@@ -276,12 +276,13 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
 
 #[test]
 fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() {
+    // `SET n = {map}` replaces every property of n (7761ea35, TCK Set4).
+    assert!(PreparedGraphMutationText::prepare("MATCH (a) SET a = {p: 1}", R, symbols).is_ok());
     for text in [
         "MATCH (a) SET a += {}",
         "MATCH (a) SET a.p=1,a += {}",
         "MATCH (a) SET a += $map",
         "MATCH (a) SET a += a.p",
-        "MATCH (a) SET a = {p: 1}",
         "MATCH (a) REMOVE a += {p: 1}",
         "MATCH (a) SET a + {p: 1}",
         "MATCH (a) SET a += {p 1}",
