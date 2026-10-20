@@ -1012,6 +1012,32 @@ impl PreparedGraphMutationText {
         })
     }
 
+    /// Only vertex field updates can use the frozen UNWIND input contract.
+    /// Inspect resolved target columns, never aliases or current graph data.
+    pub(crate) fn is_vertex_update_only(&self) -> bool {
+        self.actions.iter().all(|action| {
+            let target = match action {
+                MutationActionTemplate::ParameterProperty { target, .. }
+                | MutationActionTemplate::IntegerProperty { target, .. }
+                | MutationActionTemplate::CompositeProperty { target, .. }
+                | MutationActionTemplate::ValueProperty { target, .. }
+                | MutationActionTemplate::Bound(
+                    GraphMutationAction::SetProperty { target, .. }
+                    | GraphMutationAction::RemoveProperty { target, .. }
+                    | GraphMutationAction::ClearProperties { target, .. }
+                    | GraphMutationAction::SetLabel { target, .. },
+                ) => *target,
+                MutationActionTemplate::Bound(
+                    GraphMutationAction::DetachDelete { .. } | GraphMutationAction::Delete { .. },
+                ) => return false,
+            };
+            self.selection
+                .columns
+                .get(target)
+                .is_some_and(|column| column.key.is_none() && column.path.is_none())
+        })
+    }
+
     /// Whether sequential input-row execution could change a later row's
     /// MATCH. This is a conservative definition check, independent of current
     /// data and argument values, not a proof that aliases identify different

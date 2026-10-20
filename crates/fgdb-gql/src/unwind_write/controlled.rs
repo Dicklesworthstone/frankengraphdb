@@ -275,6 +275,7 @@ impl GraphUnwindWriteText {
         control(GraphUnwindBindEvent::Definition(&prepared))
             .map_err(GraphUnwindBindError::Interrupted)?;
 
+        let mut freeze_vertex_update_input = false;
         if rows.len() > 1 {
             // Inspect the resolved definition, not source spelling or current
             // graph contents. The definition callback still owns authorization
@@ -294,6 +295,13 @@ impl GraphUnwindWriteText {
                     | GraphWriteTemplateStatement::EdgeUpsert(_) => false,
                 };
                 if feeds_later_match {
+                    if prepared.statements().len() == 1
+                        && matches!(input, GraphWriteTemplateStatement::Mutation(mutation)
+                            if mutation.is_vertex_update_only())
+                    {
+                        freeze_vertex_update_input = true;
+                        continue;
+                    }
                     return Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement }.into());
                 }
             }
@@ -310,7 +318,7 @@ impl GraphUnwindWriteText {
         }
 
         let mut before_allocation = true;
-        prepared
+        let bound = prepared
             .bind_parameter_sets_controlled(&sets, limit, |at| {
                 let units = if at.is_none() && before_allocation {
                     before_allocation = false;
@@ -332,7 +340,16 @@ impl GraphUnwindWriteText {
                 GraphWriteScriptBatchBindError::Interrupted { source, .. } => {
                     GraphUnwindBindError::Interrupted(source)
                 }
-            })
+            })?;
+        if freeze_vertex_update_input {
+            // Recheck the resolved executable profile before issuing provenance;
+            // a future binder extension must not widen this staging contract.
+            bound
+                .freeze_vertex_update_input()
+                .ok_or_else(|| GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 }.into())
+        } else {
+            Ok(bound)
+        }
     }
 }
 

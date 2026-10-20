@@ -13,6 +13,9 @@ use fgdb_warden::PlannerPredicates;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
+#[path = "frozen_updates.rs"]
+mod frozen_updates;
+pub(super) use frozen_updates::apply_frozen_program;
 #[path = "mutation_program.rs"]
 mod program;
 pub use program::{AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession};
@@ -360,7 +363,41 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
 ) -> Result<(GraphMutationStats, Vec<VId>, Vec<EId>), Fault> {
-    let proposal = cx.with_restriction(|| {
+    let proposal = select_proposal(
+        transaction,
+        database,
+        cx,
+        mutation,
+        policy,
+        scope,
+        execution,
+    )?;
+    stage_proposal(
+        transaction,
+        database,
+        cx,
+        mutation,
+        proposal,
+        policy,
+        scope,
+        execution,
+        returning,
+    )
+}
+
+// Frozen UNWIND input uses the very same masked source and native collector,
+// retaining its proposals until every row has observed the entry overlay.
+#[allow(clippy::too_many_arguments)]
+fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    mutation: &PreparedGraphMutation,
+    policy: GraphMutationPolicy,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<fgdb_gql::GraphMutationBatch, Fault> {
+    cx.with_restriction(|| {
         // These sequential callback borrows end before staging and
         // before any await. No RefCell or query result escapes.
         let execution = RefCell::new(&mut *execution);
@@ -382,18 +419,7 @@ pub(super) fn apply<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 execution.borrow_mut().checkpoint()
             },
         )
-    })?;
-    stage_proposal(
-        transaction,
-        database,
-        cx,
-        mutation,
-        proposal,
-        policy,
-        scope,
-        execution,
-        returning,
-    )
+    })
 }
 
 // Both mutation surfaces authorize the same original intents. The projected

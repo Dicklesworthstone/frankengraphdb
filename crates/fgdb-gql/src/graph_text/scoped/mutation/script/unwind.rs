@@ -150,6 +150,10 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
                     && b".:+"
                         .iter()
                         .any(|byte| is_punct(tokens.get(index + 2), *byte))
+                || is_word(token, "SET")
+                    && target
+                    && is_punct(tokens.get(index + 2), b'=')
+                    && is_punct(tokens.get(index + 3), b'{')
                 || is_word(token, "DETACH")
                     && next.is_some_and(|(token, _)| is_word(token, "DELETE"))
                 || is_word(token, "DELETE")

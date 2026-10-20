@@ -95,7 +95,7 @@ fn staged(result: QueryResult, statements: usize) {
 }
 
 #[test]
-fn rekey_label_and_cascade_feedback_refuse_before_staging_while_disjoint_updates_commit() {
+fn rekey_and_label_feedback_freeze_while_cascades_refuse_and_disjoint_updates_commit() {
     let ((), report) = run_async_under_lab(0x7363_6122, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -124,15 +124,60 @@ fn rekey_label_and_cascade_feedback_refuse_before_staging_while_disjoint_updates
         let mut prefix = WriteBatch::new(R);
         prefix.create_vertex(VId(99), vec![], vec![]);
         txn.write(&mut db, prefix).unwrap();
+        txn.savepoint(&db, "entry").unwrap();
         let digest = txn.staged_effect_digest().unwrap();
         for replacements in [[2, 3], [2, 1]] {
             let input = args(vec![
                 object(vec![("a", int(1)), ("b", int(replacements[0]))]),
                 object(vec![("a", int(2)), ("b", int(replacements[1]))]),
             ]);
+            for remove_label in [false, true] {
+                let tail = if remove_label {
+                    "MATCH (n:Entity {id:row.a}) REMOVE n:Entity"
+                } else {
+                    "MATCH (n:Entity {id:row.a}) SET n.id=row.b"
+                };
+                staged(
+                    txn.query_write(
+                        &mut db,
+                        &cx,
+                        &format!("UNWIND $rows AS row {tail}"),
+                        &input,
+                        symbols,
+                        R,
+                        policy(20, 0),
+                        no_allocation,
+                    )
+                    .unwrap(),
+                    2,
+                );
+                for (index, replacement) in replacements.into_iter().enumerate() {
+                    let id = index as u128 + 1;
+                    let vertex = txn.vertex(&db, VId(id)).unwrap().unwrap();
+                    assert_eq!(
+                        vertex.labels,
+                        if remove_label { vec![] } else { vec![ENTITY] }
+                    );
+                    assert_eq!(
+                        vertex.props,
+                        [
+                            (
+                                ID,
+                                CanonicalScalar::Int(if remove_label {
+                                    id as i64
+                                } else {
+                                    replacement
+                                })
+                                .into()
+                            ),
+                            (P, CanonicalScalar::Int(10).into()),
+                        ]
+                    );
+                }
+                txn.rollback_to_savepoint(&db, "entry").unwrap();
+                assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            }
             for tail in [
-                "MATCH (n:Entity {id:row.a}) SET n.id=row.b",
-                "MATCH (n:Entity {id:row.a}) REMOVE n:Entity",
                 "MATCH (n:Entity {id:row.a})-[:R]->(m) DETACH DELETE n",
                 "MATCH (n:Entity {id:row.a}), (anchor:Entity {id:1}) DETACH DELETE n",
             ] {
